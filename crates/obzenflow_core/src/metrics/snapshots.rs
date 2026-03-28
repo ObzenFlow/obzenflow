@@ -158,6 +158,12 @@ pub struct AppMetricsSnapshot {
     /// Total time spent blocked waiting for downstream credits by stage (seconds; monotonic) (FLOWIP-086k).
     pub backpressure_wait_seconds_total: HashMap<StageId, f64>,
 
+    /// Edge liveness state per edge (upstream, downstream) (FLOWIP-063e).
+    ///
+    /// This is a transition-derived gauge from `SystemEventType::EdgeLiveness`:
+    /// 1=Healthy, 0.5=Idle, 0.25=Suspect, 0=Stalled.
+    pub edge_liveness_state: HashMap<(StageId, StageId), f64>,
+
     /// Contract verification metrics per edge (upstream/downstream)
     pub contract_metrics: ContractMetricsSnapshot,
 
@@ -241,10 +247,28 @@ pub struct InfraMetricsSnapshot {
     /// Stage-level infrastructure metrics
     pub stage_metrics: HashMap<StageId, StageInfraMetrics>,
 
+    /// Continuous liveness metrics derived from the in-memory heartbeat snapshots store (FLOWIP-063e).
+    pub liveness_metrics: LivenessMetricsSnapshot,
+
     /// HTTP ingestion telemetry observed directly from `FlowApplication`-owned ingress handles.
     ///
     /// Keyed by `base_path` (e.g., "/api/ingest").
     pub ingestion_metrics: HashMap<String, crate::event::ingestion::IngestionTelemetrySnapshot>,
+}
+
+/// Snapshot of continuous heartbeat-derived liveness metrics (FLOWIP-063e).
+///
+/// These values are wall-clock based and are not derived from journal events.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct LivenessMetricsSnapshot {
+    /// Stage handler blocked time (seconds). 0 when not processing.
+    pub stage_handler_blocked_seconds: HashMap<StageId, f64>,
+
+    /// Stage activity state code: 0=polling, 1=processing, 2=draining, 3=completed.
+    pub stage_activity_state: HashMap<StageId, f64>,
+
+    /// Edge idle time (seconds) per edge (upstream, downstream).
+    pub edge_idle_seconds: HashMap<(StageId, StageId), f64>,
 }
 
 /// Aggregated AI chunk planning metrics per stage.
@@ -461,6 +485,7 @@ impl Default for AppMetricsSnapshot {
             backpressure_min_reader_seq: HashMap::new(),
             backpressure_writer_seq: HashMap::new(),
             backpressure_wait_seconds_total: HashMap::new(),
+            edge_liveness_state: HashMap::new(),
             contract_metrics: ContractMetricsSnapshot::default(),
             http_surface_metrics: Vec::new(),
             http_pull_metrics: HashMap::new(),
@@ -482,6 +507,7 @@ impl Default for InfraMetricsSnapshot {
             timestamp: chrono::Utc::now(),
             journal_metrics: JournalMetricsSnapshot::default(),
             stage_metrics: HashMap::new(),
+            liveness_metrics: LivenessMetricsSnapshot::default(),
             ingestion_metrics: HashMap::new(),
         }
     }

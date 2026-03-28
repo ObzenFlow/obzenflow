@@ -5,6 +5,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+use crate::event::types::SeqNo;
 use crate::web::HttpMethod;
 
 /// HTTP pull telemetry snapshot emitted via `MetricsLifecycle::Custom` wide events (FLOWIP-084e).
@@ -103,7 +104,7 @@ pub struct AiChunkingSnapshot {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HttpSurfaceMetricsSnapshot {
     /// Monotonic sequence number for snapshots emitted by a given writer.
-    pub seq: u64,
+    pub seq: SeqNo,
 
     /// Per-route totals (monotonic, since process start).
     pub routes: Vec<HttpSurfaceRouteMetricsSnapshot>,

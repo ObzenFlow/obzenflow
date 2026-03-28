@@ -4,6 +4,7 @@
 
 use crate::messaging::PollResult;
 use crate::stages::common::handlers::JoinHandler;
+use crate::stages::common::heartbeat::HeartbeatProcessingGuard;
 use crate::stages::common::supervision::error_routing::route_to_error_journal;
 use crate::supervised_base::EventLoopDirective;
 use obzenflow_core::event::vector_clock::CausalOrderingService;
@@ -23,6 +24,10 @@ pub(super) async fn dispatch_draining<
     state: &JoinState<H>,
     ctx: &mut JoinContext<H>,
 ) -> Result<EventLoopDirective<JoinEvent<H>>, Box<dyn std::error::Error + Send + Sync>> {
+    if let Some(heartbeat) = &ctx.heartbeat {
+        heartbeat.state.mark_draining();
+    }
+
     if ctx.reference_mode == JoinReferenceMode::Live {
         return dispatch_draining_live(sup, ctx).await;
     }
@@ -61,19 +66,38 @@ pub(super) async fn dispatch_draining<
 
                 if !envelope.event.is_control() {
                     let event = envelope.event.clone();
+                    let event_id = event.id;
                     let reference_stage_id = ctx.reference_stage_id;
                     let writer_id = ctx.writer_id.ok_or("No writer ID available")?;
+                    if let Some(heartbeat) = &ctx.heartbeat {
+                        if event.is_data() {
+                            heartbeat
+                                .state
+                                .record_data_read(reference_stage_id, event_id);
+                        }
+                    }
+                    let heartbeat_state = ctx.heartbeat.as_ref().map(|h| h.state.clone());
 
                     ctx.instrumentation
                         .in_flight_count
                         .fetch_add(1, Ordering::Relaxed);
                     let start = Instant::now();
+                    let _processing = heartbeat_state.as_ref().map(|state| {
+                        HeartbeatProcessingGuard::new(
+                            state.clone(),
+                            Some(reference_stage_id),
+                            event_id,
+                        )
+                    });
                     let result = ctx.handler.process_event(
                         &mut ctx.handler_state,
                         event,
                         reference_stage_id,
                         writer_id,
                     );
+                    if let Some(state) = &heartbeat_state {
+                        state.record_last_consumed(event_id);
+                    }
                     let duration = start.elapsed();
                     ctx.instrumentation
                         .in_flight_count
@@ -163,6 +187,8 @@ pub(super) async fn dispatch_draining<
 
                 if !envelope.event.is_control() {
                     let writer_id = ctx.writer_id.ok_or("No writer ID available")?;
+                    let event = envelope.event.clone();
+                    let event_id = event.id;
                     let source_id = envelope
                         .event
                         .writer_id
@@ -176,6 +202,16 @@ pub(super) async fn dispatch_draining<
                         })
                         .unwrap_or(ctx.reference_stage_id);
 
+                    let upstream_stage = subscription
+                        .last_delivered_upstream_stage()
+                        .unwrap_or(source_id);
+                    if let Some(heartbeat) = &ctx.heartbeat {
+                        if event.is_data() {
+                            heartbeat.state.record_data_read(upstream_stage, event_id);
+                        }
+                    }
+                    let heartbeat_state = ctx.heartbeat.as_ref().map(|h| h.state.clone());
+
                     let mut merged_parent = envelope.clone();
                     CausalOrderingService::update_with_parent(
                         &mut merged_parent.vector_clock,
@@ -186,12 +222,18 @@ pub(super) async fn dispatch_draining<
                         .in_flight_count
                         .fetch_add(1, Ordering::Relaxed);
                     let start = Instant::now();
+                    let _processing = heartbeat_state.as_ref().map(|state| {
+                        HeartbeatProcessingGuard::new(state.clone(), Some(upstream_stage), event_id)
+                    });
                     let result = ctx.handler.process_event(
                         &mut ctx.handler_state,
-                        envelope.event.clone(),
+                        event,
                         source_id,
                         writer_id,
                     );
+                    if let Some(state) = &heartbeat_state {
+                        state.record_last_consumed(event_id);
+                    }
                     let duration = start.elapsed();
                     ctx.instrumentation
                         .in_flight_count

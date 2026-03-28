@@ -9,6 +9,7 @@ use std::sync::Arc;
 use crate::metrics::instrumentation::StageInstrumentation;
 use crate::stages::common::control_strategies::{ControlEventStrategy, JonestownStrategy};
 use crate::stages::common::handlers::StatefulHandler;
+use crate::stages::common::heartbeat::{spawn_heartbeat, HeartbeatConfig, HeartbeatState};
 use crate::stages::resources_builder::StageResources;
 use crate::supervised_base::{
     BuilderError, ChannelBuilder, HandleBuilder, HandlerSupervisedExt,
@@ -26,6 +27,7 @@ pub struct StatefulBuilder<H: StatefulHandler + Clone + std::fmt::Debug + Send +
     config: StatefulConfig,
     resources: StageResources,
     instrumentation: Option<Arc<StageInstrumentation>>,
+    heartbeat_config: HeartbeatConfig,
 }
 
 impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StatefulBuilder<H> {
@@ -36,6 +38,7 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> State
             config,
             resources,
             instrumentation: None,
+            heartbeat_config: HeartbeatConfig::default(),
         }
     }
 
@@ -48,6 +51,11 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> State
     /// Set a custom control strategy (defaults to JonestownStrategy)
     pub fn with_control_strategy(mut self, strategy: Arc<dyn ControlEventStrategy>) -> Self {
         self.config.control_strategy = Some(strategy);
+        self
+    }
+
+    pub fn with_heartbeat(mut self, heartbeat_config: HeartbeatConfig) -> Self {
+        self.heartbeat_config = heartbeat_config;
         self
     }
 }
@@ -74,6 +82,22 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Super
         let instrumentation = self
             .instrumentation
             .unwrap_or_else(|| Arc::new(StageInstrumentation::new()));
+
+        let heartbeat_config = self.heartbeat_config.clone();
+        let heartbeat = if self.resources.replay_archive.is_some() || !heartbeat_config.enabled {
+            None
+        } else {
+            let heartbeat_state = HeartbeatState::new(self.resources.upstream_stages.clone());
+            Some(spawn_heartbeat(
+                self.config.stage_id,
+                self.config.stage_name.clone(),
+                self.resources.system_journal.clone(),
+                self.resources.liveness_snapshots.clone(),
+                heartbeat_state,
+                heartbeat_config,
+                /* is_replay */ false,
+            ))
+        };
 
         // Create context with subscription factory from resources
         let handler = self.handler;
@@ -113,6 +137,7 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Super
                     std::time::Duration::from_millis(1),
                     std::time::Duration::from_millis(50),
                 ),
+            heartbeat,
         };
 
         // Create supervisor (private - not exposed)

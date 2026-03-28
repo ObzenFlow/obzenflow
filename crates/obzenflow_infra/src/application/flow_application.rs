@@ -27,6 +27,7 @@ use obzenflow_core::TypedPayload;
 use obzenflow_dsl::FlowDefinition;
 use obzenflow_runtime::bootstrap::{install_bootstrap_config, try_install_bootstrap_config};
 use obzenflow_runtime::prelude::FlowHandle;
+use obzenflow_runtime::stages::LivenessSnapshots;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -624,14 +625,18 @@ impl FlowApplication {
                 .collect();
 
             if let Some(exporter) = flow_handle.metrics_exporter() {
-                if !ingress_telemetry.is_empty() {
-                    Self::publish_ingestion_infra_snapshot(&exporter, &ingress_telemetry);
-                    managed_tasks.push(Self::spawn_ingestion_metrics_collector(
-                        exporter,
-                        ingress_telemetry.clone(),
-                        ingestion_metrics_interval,
-                    ));
-                }
+                let liveness_snapshots = flow_handle.liveness_snapshots();
+                Self::publish_infra_snapshot(
+                    &exporter,
+                    &ingress_telemetry,
+                    liveness_snapshots.as_ref(),
+                );
+                managed_tasks.push(Self::spawn_infra_metrics_collector(
+                    exporter,
+                    ingress_telemetry.clone(),
+                    liveness_snapshots,
+                    ingestion_metrics_interval,
+                ));
             }
 
             #[cfg(feature = "warp-server")]
@@ -1042,8 +1047,9 @@ impl FlowApplication {
         .await;
     }
 
-    fn build_ingestion_infra_snapshot(
+    fn build_infra_snapshot(
         telemetry_handles: &[Arc<IngestionTelemetry>],
+        liveness_snapshots: Option<&LivenessSnapshots>,
     ) -> InfraMetricsSnapshot {
         let mut snapshot = InfraMetricsSnapshot::default();
         for telemetry in telemetry_handles {
@@ -1051,29 +1057,70 @@ impl FlowApplication {
                 .ingestion_metrics
                 .insert(telemetry.base_path().to_string(), telemetry.snapshot());
         }
+
+        if let Some(liveness_snapshots) = liveness_snapshots {
+            liveness_snapshots.with_read(|guard| {
+                for (stage_id, stage) in guard.iter() {
+                    snapshot
+                        .liveness_metrics
+                        .stage_handler_blocked_seconds
+                        .insert(
+                            *stage_id,
+                            stage
+                                .handler_blocked_ms
+                                .map(|ms| ms.0 as f64 / 1000.0)
+                                .unwrap_or(0.0),
+                        );
+
+                    let activity_state = match &stage.activity {
+                        obzenflow_core::event::system_event::StageActivity::Polling => 0.0,
+                        obzenflow_core::event::system_event::StageActivity::Processing {
+                            ..
+                        } => 1.0,
+                        obzenflow_core::event::system_event::StageActivity::Draining => 2.0,
+                        obzenflow_core::event::system_event::StageActivity::Completed => 3.0,
+                    };
+                    snapshot
+                        .liveness_metrics
+                        .stage_activity_state
+                        .insert(*stage_id, activity_state);
+
+                    for edge in &stage.edges {
+                        snapshot
+                            .liveness_metrics
+                            .edge_idle_seconds
+                            .insert((edge.upstream, edge.reader), edge.idle_ms.0 as f64 / 1000.0);
+                    }
+                }
+            });
+        }
+
         snapshot
     }
 
-    fn publish_ingestion_infra_snapshot(
+    fn publish_infra_snapshot(
         exporter: &Arc<dyn MetricsExporter>,
         telemetry_handles: &[Arc<IngestionTelemetry>],
+        liveness_snapshots: Option<&LivenessSnapshots>,
     ) {
-        let snapshot = Self::build_ingestion_infra_snapshot(telemetry_handles);
+        let snapshot = Self::build_infra_snapshot(telemetry_handles, liveness_snapshots);
         if let Err(err) = exporter.update_infra_metrics(snapshot) {
             tracing::warn!("Failed to export ingress infrastructure metrics: {}", err);
         }
     }
 
-    fn spawn_ingestion_metrics_collector(
+    fn spawn_infra_metrics_collector(
         exporter: Arc<dyn MetricsExporter>,
         telemetry_handles: Vec<Arc<IngestionTelemetry>>,
+        liveness_snapshots: Option<LivenessSnapshots>,
         interval: Duration,
     ) -> JoinHandle<()> {
         tokio::spawn(async move {
             let mut ticker = tokio::time::interval(interval);
             loop {
                 ticker.tick().await;
-                let snapshot = Self::build_ingestion_infra_snapshot(&telemetry_handles);
+                let snapshot =
+                    Self::build_infra_snapshot(&telemetry_handles, liveness_snapshots.as_ref());
                 if let Err(err) = exporter.update_infra_metrics(snapshot) {
                     tracing::warn!("Failed to export ingress infrastructure metrics: {}", err);
                 }

@@ -1358,6 +1358,62 @@ impl PrometheusExporter {
             writeln!(output)?;
         }
 
+        // Edge liveness (FLOWIP-063e)
+        if !snapshot.edge_liveness_state.is_empty() {
+            writeln!(
+                output,
+                "# HELP obzenflow_edge_liveness_state Edge liveness state per edge (upstream->downstream)"
+            )?;
+            writeln!(output, "# TYPE obzenflow_edge_liveness_state gauge")?;
+
+            for ((upstream, downstream), value) in &snapshot.edge_liveness_state {
+                let upstream_id = upstream.to_string();
+                let downstream_id = downstream.to_string();
+
+                let upstream_meta = snapshot.stage_metadata.get(upstream);
+                let downstream_meta = snapshot.stage_metadata.get(downstream);
+
+                let flow_name = upstream_meta
+                    .map(|m| m.flow_name.as_str())
+                    .or_else(|| downstream_meta.map(|m| m.flow_name.as_str()))
+                    .unwrap_or("unknown");
+                let flow_id = upstream_meta
+                    .and_then(|m| m.flow_id)
+                    .or_else(|| downstream_meta.and_then(|m| m.flow_id));
+
+                let upstream_name = upstream_meta.map(|m| m.name.as_str()).unwrap_or("unknown");
+                let downstream_name = downstream_meta
+                    .map(|m| m.name.as_str())
+                    .unwrap_or("unknown");
+
+                if let Some(flow_id) = flow_id {
+                    writeln!(
+                        output,
+                        "obzenflow_edge_liveness_state{{flow=\"{}\",flow_id=\"{}\",upstream_stage_id=\"{}\",downstream_stage_id=\"{}\",upstream=\"{}\",downstream=\"{}\"}} {}",
+                        escape_label(flow_name),
+                        escape_label(&flow_id.to_string()),
+                        escape_label(&upstream_id),
+                        escape_label(&downstream_id),
+                        escape_label(upstream_name),
+                        escape_label(downstream_name),
+                        value
+                    )?;
+                } else {
+                    writeln!(
+                        output,
+                        "obzenflow_edge_liveness_state{{flow=\"{}\",upstream_stage_id=\"{}\",downstream_stage_id=\"{}\",upstream=\"{}\",downstream=\"{}\"}} {}",
+                        escape_label(flow_name),
+                        escape_label(&upstream_id),
+                        escape_label(&downstream_id),
+                        escape_label(upstream_name),
+                        escape_label(downstream_name),
+                        value
+                    )?;
+                }
+            }
+            writeln!(output)?;
+        }
+
         // Contract metrics (FLOWIP-059a)
         if !snapshot.contract_metrics.results_total.is_empty() {
             writeln!(
@@ -2237,6 +2293,66 @@ impl PrometheusExporter {
             writeln!(output)?;
         }
 
+        // Continuous liveness metrics (FLOWIP-063e)
+        if !snapshot
+            .liveness_metrics
+            .stage_handler_blocked_seconds
+            .is_empty()
+        {
+            writeln!(
+                output,
+                "# HELP obzenflow_stage_handler_blocked_seconds Wall-clock time the handler has been blocked (seconds)"
+            )?;
+            writeln!(
+                output,
+                "# TYPE obzenflow_stage_handler_blocked_seconds gauge"
+            )?;
+            for (stage_id, seconds) in &snapshot.liveness_metrics.stage_handler_blocked_seconds {
+                writeln!(
+                    output,
+                    "obzenflow_stage_handler_blocked_seconds{{stage=\"{}\"}} {}",
+                    escape_label(&stage_id.to_string()),
+                    seconds
+                )?;
+            }
+            writeln!(output)?;
+        }
+
+        if !snapshot.liveness_metrics.stage_activity_state.is_empty() {
+            writeln!(
+                output,
+                "# HELP obzenflow_stage_activity_state Stage activity state code (0=polling,1=processing,2=draining,3=completed)"
+            )?;
+            writeln!(output, "# TYPE obzenflow_stage_activity_state gauge")?;
+            for (stage_id, state) in &snapshot.liveness_metrics.stage_activity_state {
+                writeln!(
+                    output,
+                    "obzenflow_stage_activity_state{{stage=\"{}\"}} {}",
+                    escape_label(&stage_id.to_string()),
+                    state
+                )?;
+            }
+            writeln!(output)?;
+        }
+
+        if !snapshot.liveness_metrics.edge_idle_seconds.is_empty() {
+            writeln!(
+                output,
+                "# HELP obzenflow_edge_idle_seconds Time since last observed progress on an edge (seconds)"
+            )?;
+            writeln!(output, "# TYPE obzenflow_edge_idle_seconds gauge")?;
+            for ((upstream, downstream), seconds) in &snapshot.liveness_metrics.edge_idle_seconds {
+                writeln!(
+                    output,
+                    "obzenflow_edge_idle_seconds{{upstream_stage_id=\"{}\",downstream_stage_id=\"{}\"}} {}",
+                    escape_label(&upstream.to_string()),
+                    escape_label(&downstream.to_string()),
+                    seconds
+                )?;
+            }
+            writeln!(output)?;
+        }
+
         self.render_ingestion_metrics(output, &snapshot.ingestion_metrics)?;
 
         Ok(())
@@ -2637,6 +2753,50 @@ mod tests {
         )));
         assert!(output.contains(&format!(
             "http_ingestion_channel_depth{{base_path=\"{base_path}\"}} 12"
+        )));
+    }
+
+    #[test]
+    fn test_liveness_metrics_rendered() {
+        let exporter = PrometheusExporter::new();
+
+        let upstream = StageId::new();
+        let downstream = StageId::new();
+
+        let mut snapshot = InfraMetricsSnapshot::default();
+        snapshot
+            .liveness_metrics
+            .stage_handler_blocked_seconds
+            .insert(downstream, 12.5);
+        snapshot
+            .liveness_metrics
+            .stage_activity_state
+            .insert(downstream, 1.0);
+        snapshot
+            .liveness_metrics
+            .edge_idle_seconds
+            .insert((upstream, downstream), 3.25);
+
+        exporter.update_infra_metrics(snapshot).unwrap();
+        let output = exporter.render_metrics().unwrap();
+
+        assert!(output.contains("# TYPE obzenflow_stage_handler_blocked_seconds gauge"));
+        assert!(output.contains(&format!(
+            "obzenflow_stage_handler_blocked_seconds{{stage=\"{}\"}} 12.5",
+            escape_label(&downstream.to_string())
+        )));
+
+        assert!(output.contains("# TYPE obzenflow_stage_activity_state gauge"));
+        assert!(output.contains(&format!(
+            "obzenflow_stage_activity_state{{stage=\"{}\"}} 1",
+            escape_label(&downstream.to_string())
+        )));
+
+        assert!(output.contains("# TYPE obzenflow_edge_idle_seconds gauge"));
+        assert!(output.contains(&format!(
+            "obzenflow_edge_idle_seconds{{upstream_stage_id=\"{}\",downstream_stage_id=\"{}\"}} 3.25",
+            escape_label(&upstream.to_string()),
+            escape_label(&downstream.to_string())
         )));
     }
 

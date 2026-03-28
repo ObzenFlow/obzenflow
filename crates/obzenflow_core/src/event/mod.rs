@@ -33,8 +33,8 @@ pub use chain_event::{
 pub use event_envelope::EventEnvelope;
 pub use journal_event::JournalEvent;
 pub use system_event::{
-    MetricsCoordinationEvent, PipelineLifecycleEvent, ReplayLifecycleEvent, StageLifecycleEvent,
-    SystemEvent, SystemEventFactory, SystemEventType,
+    EdgeLivenessState, MetricsCoordinationEvent, PipelineLifecycleEvent, ReplayLifecycleEvent,
+    StageActivity, StageLifecycleEvent, SystemEvent, SystemEventFactory, SystemEventType,
 };
 pub use types::{CorrelationId, EventId, JournalWriterId, WriterId};
 

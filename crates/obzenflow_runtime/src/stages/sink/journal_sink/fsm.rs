@@ -14,6 +14,7 @@ use crate::messaging::UpstreamSubscription;
 use crate::metrics::instrumentation::StageInstrumentation;
 use crate::stages::common::control_strategies::ControlEventStrategy;
 use crate::stages::common::handlers::SinkHandler;
+use crate::stages::common::heartbeat::HeartbeatHandle;
 use crate::stages::common::supervision::lifecycle_actions;
 use crate::stages::resources_builder::BoundSubscriptionFactory;
 use obzenflow_core::event::context::causality_context::CausalityContext;
@@ -328,6 +329,9 @@ pub struct JournalSinkContext<H: SinkHandler> {
 
     /// Backpressure readers keyed by upstream stage ID (FLOWIP-086k).
     pub backpressure_readers: HashMap<StageId, BackpressureReader>,
+
+    /// Optional per-stage heartbeat task (FLOWIP-063e).
+    pub(crate) heartbeat: Option<HeartbeatHandle>,
 }
 
 impl<H: SinkHandler + 'static> FsmContext for JournalSinkContext<H> {}
@@ -393,6 +397,10 @@ impl<H: SinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAction<H> 
             }
 
             JournalSinkAction::SendCompletion => {
+                if let Some(heartbeat) = &ctx.heartbeat {
+                    heartbeat.state.mark_completed();
+                }
+
                 lifecycle_actions::send_completion_best_effort(
                     "Sink",
                     ctx.stage_id,
@@ -537,6 +545,10 @@ impl<H: SinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAction<H> 
             }
 
             JournalSinkAction::Cleanup => {
+                if let Some(heartbeat) = ctx.heartbeat.take() {
+                    heartbeat.cancel();
+                }
+
                 let stage_name = ctx.stage_name.clone();
                 lifecycle_actions::cleanup_with_result("Sink", &stage_name, || async {
                     tracing::trace!(

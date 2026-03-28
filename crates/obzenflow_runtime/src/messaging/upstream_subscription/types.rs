@@ -179,6 +179,7 @@ pub struct ReaderProgress {
     /// Stall detection
     pub stalled_since: Option<Instant>,
     pub consecutive_stall_checks: u32,
+    pub last_stall_emitted_instant: Option<Instant>,
 
     /// Contract status
     pub final_emitted: bool,
@@ -205,6 +206,7 @@ impl ReaderProgress {
             last_contract_result_seq: SeqNo(0),
             stalled_since: None,
             consecutive_stall_checks: 0,
+            last_stall_emitted_instant: None,
             final_emitted: false,
             contract_violated: false,
         }
@@ -311,8 +313,8 @@ impl Default for ContractConfig {
         Self {
             progress_min_events: Count(1),
             progress_max_interval: DurationMs(1000),
-            stall_threshold: DurationMs(2000),
-            stall_cooloff: DurationMs(0),
+            stall_threshold: DurationMs(30000),
+            stall_cooloff: DurationMs(30000),
             stall_checks_before_emit: 3,
         }
     }

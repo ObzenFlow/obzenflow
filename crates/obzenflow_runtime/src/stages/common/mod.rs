@@ -9,10 +9,15 @@ pub mod control_strategies;
 pub(crate) mod cycle_guard;
 pub mod handler_error;
 pub mod handlers;
+pub(crate) mod heartbeat;
 pub mod middleware_mirror;
 pub mod source_handle;
 pub mod stage_handle;
 pub(crate) mod supervision;
+
+pub use heartbeat::new_liveness_snapshots;
+pub use heartbeat::HeartbeatConfig;
+pub use heartbeat::LivenessSnapshots;
 
 // Re-export handler traits for convenience
 pub use handlers::{

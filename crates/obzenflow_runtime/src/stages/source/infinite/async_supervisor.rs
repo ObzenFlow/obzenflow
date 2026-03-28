@@ -350,6 +350,7 @@ impl<H: AsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
                     &mut ctx.pending_outputs,
                     &stage_flow_context,
                     self.stage_id,
+                    None,
                     &ctx.data_journal,
                     &ctx.error_journal,
                     &ctx.system_journal,

@@ -711,6 +711,18 @@ where
             if progress.consecutive_stall_checks >= tracker.config.stall_checks_before_emit
                 && progress.stalled_since.is_none()
             {
+                if tracker.config.stall_cooloff.0 > 0 {
+                    if let Some(last_emitted) = progress.last_stall_emitted_instant {
+                        let cooloff_elapsed = now.duration_since(last_emitted).as_millis() as u64;
+                        if cooloff_elapsed < tracker.config.stall_cooloff.0 {
+                            if !matches!(status, ContractStatus::Violated { .. }) {
+                                *status = ContractStatus::Stalled(progress.stage_id);
+                            }
+                            return;
+                        }
+                    }
+                }
+
                 let stall_since_candidate = Some(last);
                 let stalled_duration = DurationMs(elapsed);
 
@@ -753,6 +765,7 @@ where
 
                 if stalled_append_ok {
                     progress.stalled_since = stall_since_candidate;
+                    progress.last_stall_emitted_instant = Some(now);
                 }
             }
         } else {

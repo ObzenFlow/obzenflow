@@ -2866,7 +2866,7 @@ fn map_system_event_to_sse(
             }
 
             if let Some(payload) =
-                middleware_state.project_middleware_event(*stage_id, origin.seq, middleware)
+                middleware_state.project_middleware_event(*stage_id, origin.seq.0, middleware)
             {
                 if let Some(payload_obj) = payload.as_object() {
                     for (key, value) in payload_obj {
@@ -2964,6 +2964,41 @@ fn map_system_event_to_sse(
                     .data(data.to_string()),
             )
         }
+        SystemEventType::EdgeLiveness {
+            upstream,
+            reader,
+            state,
+            idle_ms,
+            last_reader_seq,
+            last_event_id,
+        } => {
+            let mut data = json!({
+                "system_event_type": "edge_liveness",
+                "upstream_stage_id": upstream.to_string(),
+                "reader_stage_id": reader.to_string(),
+                "state": state,
+                "idle_ms": idle_ms,
+                "timestamp_ms": event.timestamp,
+            });
+
+            if let Some(seq) = last_reader_seq {
+                data["last_reader_seq"] = serde_json::json!(seq);
+            }
+            if let Some(event_id) = last_event_id {
+                data["last_event_id"] = serde_json::json!(event_id.to_string());
+            }
+            if let Some(vc) = &vector_clock_value {
+                data["vector_clock"] = vc.clone();
+            }
+
+            Some(
+                SseEvent::default()
+                    .id(id_str)
+                    .event("edge_liveness")
+                    .data(data.to_string()),
+            )
+        }
+        SystemEventType::StageHeartbeat { .. } => None,
         SystemEventType::MetricsCoordination(metrics_event) => match metrics_event {
             obzenflow_core::event::system_event::MetricsCoordinationEvent::Exported {
                 watermark,
@@ -3333,7 +3368,7 @@ impl MiddlewareSseState {
             flow_name.as_deref(),
             None,
         );
-        self.apply_middleware_event(*stage_id, origin.seq, middleware);
+        self.apply_middleware_event(*stage_id, origin.seq.0, middleware);
     }
 
     fn observe_middleware_metadata(

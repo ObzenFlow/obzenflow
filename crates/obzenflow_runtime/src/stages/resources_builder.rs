@@ -14,6 +14,7 @@ use crate::id_conversions::StageIdExt;
 use crate::message_bus::FsmMessageBus;
 use crate::messaging::upstream_subscription::{ContractsWiring, UpstreamSubscription};
 use crate::replay::ReplayArchive;
+use crate::stages::LivenessSnapshots;
 use obzenflow_core::event::SystemEvent;
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{ChainEvent, FlowId, StageId, SystemId};
@@ -177,6 +178,12 @@ pub struct StageResources {
     /// Used by cycle entry points to evaluate SCC quiescence (FLOWIP-051n).
     pub backpressure_registry: Arc<BackpressureRegistry>,
 
+    /// Flow-scoped stage liveness snapshots (FLOWIP-063e).
+    ///
+    /// Heartbeat tasks update this on every tick, and the infra snapshot path
+    /// exports it via `/metrics`.
+    pub liveness_snapshots: LivenessSnapshots,
+
     /// Optional replay archive injection (FLOWIP-095a). Sources use this to
     /// read archived journals instead of calling external systems.
     pub replay_archive: Option<Arc<dyn ReplayArchive>>,
@@ -240,6 +247,8 @@ impl StageResourcesBuilder {
             self.topology.as_ref(),
             &backpressure_plan,
         ));
+
+        let liveness_snapshots = LivenessSnapshots::new();
 
         // Build stage resources for each stage
         let mut stage_resources = HashMap::new();
@@ -408,6 +417,7 @@ impl StageResourcesBuilder {
                 backpressure_writer,
                 backpressure_readers,
                 backpressure_registry: backpressure_registry.clone(),
+                liveness_snapshots: liveness_snapshots.clone(),
                 replay_archive: self.replay_archive.clone(),
             };
 
@@ -431,6 +441,7 @@ impl StageResourcesBuilder {
             pipeline_system_id: self.pipeline_system_id,
             system_journal: self.system_journal,
             backpressure_registry,
+            liveness_snapshots,
             stage_journals: all_stage_journals,
             error_journals: all_error_journals,
             stage_resources,
@@ -452,6 +463,9 @@ pub struct StageResourcesSet {
 
     /// Flow-scoped backpressure registry for observability (FLOWIP-086k).
     pub backpressure_registry: Arc<BackpressureRegistry>,
+
+    /// Flow-scoped stage liveness snapshots for observability (FLOWIP-063e).
+    pub liveness_snapshots: LivenessSnapshots,
 
     /// All stage journals (for metrics aggregator to read)
     pub stage_journals: Vec<(StageId, Arc<dyn Journal<ChainEvent>>)>,

@@ -4,6 +4,7 @@
 
 use crate::messaging::PollResult;
 use crate::stages::common::handlers::JoinHandler;
+use crate::stages::common::heartbeat::HeartbeatProcessingGuard;
 use crate::stages::common::supervision::backpressure_drain::{drain_one_pending, DrainOutcome};
 use crate::stages::common::supervision::control_resolution::{
     resolve_control_event, resolve_forward_control_event, ControlResolution,
@@ -187,10 +188,18 @@ async fn poll_live_reference<H: JoinHandler + Clone + std::fmt::Debug + Send + S
                 }
                 obzenflow_core::event::ChainEventContent::Data { .. } => {
                     let event = envelope.event.clone();
+                    let event_id = event.id;
                     let source_id = ctx.reference_stage_id;
                     let writer_id = ctx.writer_id.ok_or("No writer ID available")?;
+                    if let Some(heartbeat) = &ctx.heartbeat {
+                        heartbeat.state.record_data_read(source_id, event_id);
+                    }
+                    let heartbeat_state = ctx.heartbeat.as_ref().map(|h| h.state.clone());
 
                     if matches!(event.processing_info.status, ProcessingStatus::Error { .. }) {
+                        if let Some(state) = &heartbeat_state {
+                            state.record_last_consumed(event_id);
+                        }
                         write_stage_outputs_and_ack(
                             subscription,
                             ctx,
@@ -214,12 +223,18 @@ async fn poll_live_reference<H: JoinHandler + Clone + std::fmt::Debug + Send + S
                         .in_flight_count
                         .fetch_add(1, Ordering::Relaxed);
                     let start = Instant::now();
+                    let _processing = heartbeat_state.as_ref().map(|state| {
+                        HeartbeatProcessingGuard::new(state.clone(), Some(source_id), event_id)
+                    });
                     let result = ctx.handler.process_event(
                         &mut ctx.handler_state,
                         event.clone(),
                         source_id,
                         writer_id,
                     );
+                    if let Some(state) = &heartbeat_state {
+                        state.record_last_consumed(event_id);
+                    }
                     let duration = start.elapsed();
                     ctx.instrumentation
                         .in_flight_count
@@ -416,8 +431,17 @@ async fn poll_live_stream<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync
                         .ok_or("Event writer is not a stage")?;
                     let writer_id = ctx.writer_id.ok_or("No writer ID available")?;
                     let event = envelope.event.clone();
+                    let event_id = event.id;
+
+                    if let Some(heartbeat) = &ctx.heartbeat {
+                        heartbeat.state.record_data_read(source_id, event_id);
+                    }
+                    let heartbeat_state = ctx.heartbeat.as_ref().map(|h| h.state.clone());
 
                     if matches!(event.processing_info.status, ProcessingStatus::Error { .. }) {
+                        if let Some(state) = &heartbeat_state {
+                            state.record_last_consumed(event_id);
+                        }
                         write_stage_outputs_and_ack(
                             subscription,
                             ctx,
@@ -447,12 +471,18 @@ async fn poll_live_stream<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync
                         .in_flight_count
                         .fetch_add(1, Ordering::Relaxed);
                     let start = Instant::now();
+                    let _processing = heartbeat_state.as_ref().map(|state| {
+                        HeartbeatProcessingGuard::new(state.clone(), Some(source_id), event_id)
+                    });
                     let result = ctx.handler.process_event(
                         &mut ctx.handler_state,
                         event.clone(),
                         source_id,
                         writer_id,
                     );
+                    if let Some(state) = &heartbeat_state {
+                        state.record_last_consumed(event_id);
+                    }
                     let duration = start.elapsed();
                     ctx.instrumentation
                         .in_flight_count
@@ -563,6 +593,7 @@ async fn write_stage_outputs_and_ack<H: JoinHandler>(
             event,
             &flow_context,
             ctx.stage_id,
+            ctx.heartbeat.as_ref().map(|h| h.state.clone()),
             &ctx.data_journal,
             &ctx.system_journal,
             pending_parent,

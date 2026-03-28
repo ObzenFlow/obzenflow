@@ -10,6 +10,7 @@
 use crate::backpressure::BackpressureWriter;
 use crate::metrics::instrumentation::StageInstrumentation;
 use crate::stages::common::backpressure_activity_pulse::BackpressureActivityPulse;
+use crate::stages::common::heartbeat::HeartbeatState;
 use crate::stages::common::supervision::backpressure_drain::{
     drain_one_pending, drain_one_pending_resolve, DrainAttempt, DrainOutcome,
 };
@@ -71,6 +72,7 @@ pub(crate) async fn drain_pending_outputs_sync(
     pending_outputs: &mut VecDeque<ChainEvent>,
     stage_flow_context: &FlowContext,
     stage_id: StageId,
+    heartbeat_state: Option<Arc<HeartbeatState>>,
     data_journal: &Arc<dyn Journal<ChainEvent>>,
     error_journal: &Arc<dyn Journal<ChainEvent>>,
     system_journal: &Arc<dyn Journal<SystemEvent>>,
@@ -96,6 +98,7 @@ pub(crate) async fn drain_pending_outputs_sync(
             pending,
             stage_flow_context,
             stage_id,
+            heartbeat_state.clone(),
             data_journal,
             system_journal,
             None,
@@ -120,6 +123,7 @@ pub(crate) async fn drain_pending_outputs_async<E>(
     pending_outputs: &mut VecDeque<ChainEvent>,
     stage_flow_context: &FlowContext,
     stage_id: StageId,
+    heartbeat_state: Option<Arc<HeartbeatState>>,
     data_journal: &Arc<dyn Journal<ChainEvent>>,
     error_journal: &Arc<dyn Journal<ChainEvent>>,
     system_journal: &Arc<dyn Journal<SystemEvent>>,
@@ -152,6 +156,7 @@ where
             pending,
             stage_flow_context,
             stage_id,
+            heartbeat_state.clone(),
             data_journal,
             system_journal,
             None,
@@ -366,6 +371,7 @@ mod tests {
                 &mut pending_outputs,
                 &stage_flow_context,
                 s,
+                None,
                 &data_journal,
                 &error_journal,
                 &system_journal,

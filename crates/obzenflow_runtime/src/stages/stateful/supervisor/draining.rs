@@ -6,6 +6,7 @@
 
 use crate::metrics::instrumentation::process_with_instrumentation_no_count;
 use crate::stages::common::handlers::StatefulHandler;
+use crate::stages::common::heartbeat::HeartbeatProcessingGuard;
 use crate::stages::common::supervision::backpressure_drain::{drain_one_pending, DrainOutcome};
 use crate::stages::common::supervision::error_routing::route_to_error_journal;
 use crate::stages::common::supervision::flow_context_factory::make_flow_context;
@@ -28,6 +29,10 @@ pub(super) async fn dispatch_draining<
     state: &StatefulState<H>,
     ctx: &mut StatefulContext<H>,
 ) -> Result<EventLoopDirective<StatefulEvent<H>>, Box<dyn std::error::Error + Send + Sync>> {
+    if let Some(heartbeat) = &ctx.heartbeat {
+        heartbeat.state.mark_draining();
+    }
+
     let flow_id = ctx.flow_id.to_string();
     let flow_context = make_flow_context(
         &ctx.flow_name,
@@ -47,6 +52,7 @@ pub(super) async fn dispatch_draining<
             pending,
             &flow_context,
             sup.stage_id,
+            ctx.heartbeat.as_ref().map(|h| h.state.clone()),
             &ctx.data_journal,
             &ctx.system_journal,
             ctx.last_consumed_envelope.as_ref(),
@@ -111,14 +117,31 @@ pub(super) async fn dispatch_draining<
                 if !envelope.event.is_control() {
                     // Accumulate data events during draining, synchronously.
                     let event = envelope.event.clone();
+                    let event_id = event.id;
                     let upstream_stage = subscription.last_delivered_upstream_stage();
                     let mut handler = (*ctx.handler).clone();
+
+                    if let (Some(heartbeat), Some(upstream)) = (&ctx.heartbeat, upstream_stage) {
+                        if event.is_data() {
+                            heartbeat.state.record_data_read(upstream, event_id);
+                        }
+                    }
+                    let heartbeat_state = ctx.heartbeat.as_ref().map(|h| h.state.clone());
 
                     ctx.instrumentation
                         .in_flight_count
                         .fetch_add(1, Ordering::Relaxed);
                     let start = Instant::now();
+
+                    let _processing = heartbeat_state.as_ref().map(|state| {
+                        HeartbeatProcessingGuard::new(state.clone(), upstream_stage, event_id)
+                    });
+
                     handler.accumulate(&mut ctx.current_state, event);
+
+                    if let Some(state) = &heartbeat_state {
+                        state.record_last_consumed(event_id);
+                    }
                     let duration = start.elapsed();
                     ctx.instrumentation
                         .in_flight_count

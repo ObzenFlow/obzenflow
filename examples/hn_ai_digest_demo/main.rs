@@ -37,7 +37,7 @@
 //! `HN_LIVE=1 cargo run -p obzenflow --example hn_ai_digest_demo --features "http-pull ai"`
 //!
 //! Optional env vars (HN fetch):
-//! - `HN_MAX_STORIES=30` (default 30)
+//! - `HN_MAX_STORIES=60` (default 60)
 //! - `HN_LIVE=1` (default 0)
 //! - `HN_POLL_TIMEOUT_SECS=120` (default 120)
 //! - `HN_SOURCE_RATE_LIMIT=10.0` (default 10.0 events/sec)

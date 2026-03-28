@@ -231,6 +231,10 @@ pub(super) async fn dispatch_running(
                         Ok(EventLoopDirective::Continue)
                     }
                 }
+                obzenflow_core::event::SystemEventType::StageHeartbeat { .. }
+                | obzenflow_core::event::SystemEventType::EdgeLiveness { .. } => {
+                    Ok(EventLoopDirective::Continue)
+                }
                 _ => Ok(EventLoopDirective::Continue),
             }
         }

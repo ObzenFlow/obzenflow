@@ -3,7 +3,10 @@
 // https://obzenflow.dev
 
 use crate::event::payloads::delivery_payload::DeliveryResult;
-use crate::event::{types::SeqNo, ChainEvent, ChainEventContent, EventId};
+use crate::event::{
+    types::{Count, JournalIndex, SeqNo},
+    ChainEvent, ChainEventContent, EventId,
+};
 use crate::id::StageId;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -62,8 +65,8 @@ pub enum ViolationCause {
     },
     /// Stateful accounting did not balance.
     AccountingMismatch {
-        inputs_observed: u64,
-        accounted_for: u64,
+        inputs_observed: Count,
+        accounted_for: Count,
     },
     /// Mid-flight divergence detection predicate fired.
     Divergence {
@@ -98,7 +101,7 @@ impl ViolationCause {
 /// A single hash mismatch between write/read sides.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HashMismatch {
-    pub index: u64,
+    pub index: JournalIndex,
     pub writer_event_id: Option<EventId>,
     pub reader_event_id: Option<EventId>,
 }

@@ -158,6 +158,10 @@ pub(super) async fn dispatch_draining(
                         PipelineEvent::AllStagesCompleted,
                     ))
                 }
+                obzenflow_core::event::SystemEventType::StageHeartbeat { .. }
+                | obzenflow_core::event::SystemEventType::EdgeLiveness { .. } => {
+                    Ok(EventLoopDirective::Continue)
+                }
                 _ => {
                     // Log other events.
                     tracing::debug!("Received event during drain: {:?}", event.event);

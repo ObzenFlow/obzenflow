@@ -29,6 +29,7 @@ use crate::messaging::UpstreamSubscription;
 use crate::metrics::instrumentation::StageInstrumentation;
 use crate::stages::common::backpressure_activity_pulse::BackpressureActivityPulse;
 use crate::stages::common::handlers::JoinHandler;
+use crate::stages::common::heartbeat::HeartbeatHandle;
 use crate::stages::common::supervision::lifecycle_actions;
 use crate::stages::resources_builder::BoundSubscriptionFactory;
 use crate::supervised_base::idle_backoff::IdleBackoff;
@@ -392,6 +393,9 @@ pub struct JoinContext<H: JoinHandler> {
 
     /// Backoff for blocked output writes (1ms → … → 50ms cap).
     pub(crate) backpressure_backoff: IdleBackoff,
+
+    /// Optional per-stage heartbeat task (FLOWIP-063e).
+    pub(crate) heartbeat: Option<HeartbeatHandle>,
 }
 
 impl<H: JoinHandler + 'static> FsmContext for JoinContext<H> {}
@@ -617,6 +621,10 @@ impl<H: JoinHandler + Send + Sync + 'static> FsmAction for JoinAction<H> {
             }
 
             JoinAction::SendCompletion => {
+                if let Some(heartbeat) = &ctx.heartbeat {
+                    heartbeat.state.mark_completed();
+                }
+
                 lifecycle_actions::send_completion_best_effort(
                     "Join",
                     ctx.stage_id,
@@ -646,8 +654,10 @@ impl<H: JoinHandler + Send + Sync + 'static> FsmAction for JoinAction<H> {
             }
 
             JoinAction::Cleanup => {
-                // Cleanup is now minimal since we don't use background tasks
-                // Just clear subscriptions
+                if let Some(heartbeat) = ctx.heartbeat.take() {
+                    heartbeat.cancel();
+                }
+
                 let stage_name = ctx.stage_name.clone();
                 lifecycle_actions::cleanup_best_effort("Join", &stage_name, || async {
                     ctx.reference_subscription = None;

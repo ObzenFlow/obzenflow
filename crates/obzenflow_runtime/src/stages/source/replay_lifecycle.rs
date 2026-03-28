@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
+use obzenflow_core::event::types::{Count, DurationMs};
 use obzenflow_core::event::{ReplayLifecycleEvent, SystemEvent, SystemEventType, WriterId};
 use obzenflow_core::journal::Journal;
 use obzenflow_core::StageId;
@@ -38,9 +39,9 @@ impl ReplayCompletionGuard {
         let completed_event = SystemEvent::new(
             WriterId::from(stage_id),
             SystemEventType::ReplayLifecycle(ReplayLifecycleEvent::Completed {
-                replayed_count,
-                skipped_count,
-                duration_ms,
+                replayed_count: Count(replayed_count),
+                skipped_count: Count(skipped_count),
+                duration_ms: DurationMs(duration_ms),
             }),
         );
 

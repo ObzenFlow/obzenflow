@@ -27,26 +27,13 @@ pub async fn spawn_mock_hn_server() -> Result<MockHnServer> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let addr = listener.local_addr()?;
 
-    let items: HashMap<u64, String> = HashMap::from([
-        (
-            100_u64,
-            r#"{"id":100,"type":"story","by":"alice","time":123,"title":"Hello HN","url":"https://example.com/hello","score":10,"descendants":2}"#
-                .to_string(),
-        ),
-        (
-            101_u64,
-            r#"{"id":101,"type":"story","by":"bob","time":124,"title":"Unicode: café 漢字","url":"https://example.com/unicode","score":42,"descendants":7}"#
-                .to_string(),
-        ),
-        // Simulate a deleted item (HN returns `null`).
-        (102_u64, "null".to_string()),
-    ]);
-
-    let topstories = "[100,101,102]";
+    let (items, topstories) = build_mock_hn_payloads();
     let items = Arc::new(items);
+    let topstories: Arc<str> = Arc::from(topstories);
 
     let task = tokio::spawn({
         let items = items.clone();
+        let topstories = topstories.clone();
         async move {
             loop {
                 let (socket, _) = match listener.accept().await {
@@ -55,8 +42,9 @@ pub async fn spawn_mock_hn_server() -> Result<MockHnServer> {
                 };
 
                 let items = items.clone();
+                let topstories = topstories.clone();
                 tokio::spawn(async move {
-                    if let Err(err) = handle_connection(socket, &items, topstories).await {
+                    if let Err(err) = handle_connection(socket, &items, topstories.as_ref()).await {
                         tracing::debug!(?err, "mock HN server connection failed");
                     }
                 });
@@ -65,6 +53,64 @@ pub async fn spawn_mock_hn_server() -> Result<MockHnServer> {
     });
 
     Ok(MockHnServer { addr, _task: task })
+}
+
+fn build_mock_hn_payloads() -> (HashMap<u64, String>, String) {
+    const MOCK_TOPSTORIES: usize = 64;
+    const DELETED_EVERY_NTH: usize = 11;
+    const TOPICS: [&str; 10] = [
+        "Rust",
+        "AI",
+        "Databases",
+        "Security",
+        "Browsers",
+        "Linux",
+        "Compilers",
+        "Startups",
+        "Robotics",
+        "Distributed Systems",
+    ];
+    const VERBS: [&str; 8] = [
+        "tooling update",
+        "benchmark",
+        "postmortem",
+        "deep dive",
+        "launch",
+        "migration guide",
+        "research note",
+        "case study",
+    ];
+
+    let mut items = HashMap::with_capacity(MOCK_TOPSTORIES);
+    let mut topstories = Vec::with_capacity(MOCK_TOPSTORIES);
+
+    for offset in 0..MOCK_TOPSTORIES {
+        let id = 100_u64 + offset as u64;
+        topstories.push(id.to_string());
+
+        if (offset + 1) % DELETED_EVERY_NTH == 0 {
+            items.insert(id, "null".to_string());
+            continue;
+        }
+
+        let topic = TOPICS[offset % TOPICS.len()];
+        let verb = VERBS[offset % VERBS.len()];
+        let time = 1_774_600_000_u64 + offset as u64;
+        let score = 180_u64.saturating_sub((offset as u64) * 2);
+        let descendants = (offset % 29) as u64;
+        let author = format!("author{}", (offset % 17) + 1);
+        let title = format!("{topic}: {verb} #{id}");
+        let url = format!("https://example.com/hn/{id}");
+
+        items.insert(
+            id,
+            format!(
+                r#"{{"id":{id},"type":"story","by":"{author}","time":{time},"title":"{title}","url":"{url}","score":{score},"descendants":{descendants}}}"#
+            ),
+        );
+    }
+
+    (items, format!("[{}]", topstories.join(",")))
 }
 
 async fn handle_connection(
@@ -134,4 +180,25 @@ fn extract_item_id(path: &str) -> Option<u64> {
     let suffix = path.strip_prefix("/v0/item/")?;
     let id_str = suffix.strip_suffix(".json")?;
     id_str.parse().ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_mock_hn_payloads;
+
+    #[test]
+    fn mock_fixture_exposes_realistic_story_volume() {
+        let (items, topstories) = build_mock_hn_payloads();
+
+        assert_eq!(items.len(), 64);
+
+        let listed_ids = topstories.trim_matches(['[', ']']).split(',').count();
+        assert_eq!(listed_ids, 64);
+
+        let valid_in_first_sixty = (100_u64..160_u64)
+            .filter(|id| items.get(id).is_some_and(|body| body != "null"))
+            .count();
+
+        assert_eq!(valid_in_first_sixty, 55);
+    }
 }

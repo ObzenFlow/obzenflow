@@ -11,6 +11,7 @@
 use obzenflow_core::event::observability::{
     HttpSurfaceMetricsSnapshot, HttpSurfaceRouteMetricsSnapshot,
 };
+use obzenflow_core::event::types::SeqNo;
 use obzenflow_core::event::{SystemEvent, SystemEventType, WriterId};
 use obzenflow_core::id::SystemId;
 use obzenflow_core::journal::Journal;
@@ -258,7 +259,7 @@ impl HttpSurfaceMetricsEmitter {
 
         let seq = self.state.snapshot_seq.fetch_add(1, Ordering::Relaxed) + 1;
         let snapshot = HttpSurfaceMetricsSnapshot {
-            seq,
+            seq: SeqNo(seq),
             routes: self.state.collector.snapshot_routes(),
         };
 

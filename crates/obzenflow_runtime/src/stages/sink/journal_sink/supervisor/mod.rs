@@ -357,6 +357,9 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
             JournalSinkState::Flushing => {
                 // Wait for flush to complete
                 // The actual flush happens in the action
+                if let Some(heartbeat) = &ctx.heartbeat {
+                    heartbeat.state.mark_draining();
+                }
                 tracing::info!(
                     target: "flowip-080o",
                     stage_name = %ctx.stage_name,
@@ -376,6 +379,9 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
             JournalSinkState::Draining => {
                 // Move to drained state; completion + cleanup are handled
                 // by the FSM transition (BeginDrain) rather than here.
+                if let Some(heartbeat) = &ctx.heartbeat {
+                    heartbeat.state.mark_draining();
+                }
                 tracing::info!(
                     target: "flowip-080o",
                     stage_name = %ctx.stage_name,

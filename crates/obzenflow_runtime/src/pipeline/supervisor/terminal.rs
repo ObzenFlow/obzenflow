@@ -4,7 +4,7 @@
 
 use super::{BoxError, PipelineContext, PipelineEvent, PipelineSupervisor};
 use crate::supervised_base::EventLoopDirective;
-use obzenflow_core::event::types::ViolationCause;
+use obzenflow_core::event::types::{DurationMs, ViolationCause};
 
 pub(super) async fn dispatch_drained(
     supervisor: &mut PipelineSupervisor,
@@ -40,7 +40,7 @@ pub(super) async fn dispatch_drained(
         let reason = context.stop_intent.reason_label();
         let cancelled = system_event_factory.pipeline_cancelled(
             reason.clone(),
-            duration_ms,
+            DurationMs(duration_ms),
             Some(metrics.clone()),
             Some(ViolationCause::Other(reason.clone())),
         );
@@ -59,7 +59,7 @@ pub(super) async fn dispatch_drained(
             );
         }
     } else if context.flow_start_time.is_some() {
-        let completed = system_event_factory.pipeline_completed(duration_ms, metrics);
+        let completed = system_event_factory.pipeline_completed(DurationMs(duration_ms), metrics);
 
         if let Err(e) = supervisor.system_journal.append(completed, None).await {
             tracing::error!(
@@ -118,7 +118,7 @@ pub(super) async fn dispatch_failed(
             .unwrap_or_else(|| reason.to_string());
         let cancelled = system_event_factory.pipeline_cancelled(
             reason_label.clone(),
-            duration_ms,
+            DurationMs(duration_ms),
             metrics,
             Some(ViolationCause::Other(reason_label.clone())),
         );
@@ -141,7 +141,7 @@ pub(super) async fn dispatch_failed(
     } else {
         let failed = system_event_factory.pipeline_failed(
             reason.to_string(),
-            duration_ms,
+            DurationMs(duration_ms),
             metrics,
             failure_cause.clone(),
         );

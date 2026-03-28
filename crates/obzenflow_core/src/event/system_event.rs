@@ -6,7 +6,7 @@
 
 use crate::event::observability::HttpSurfaceMetricsSnapshot;
 use crate::event::payloads::observability_payload::MiddlewareLifecycle;
-use crate::event::types::{EventId, WriterId};
+use crate::event::types::{Count, DurationMs, EventId, SeqNo, WriterId};
 use crate::event::vector_clock::VectorClock;
 use crate::id::{StageId, SystemId};
 use crate::journal::{ArchiveStatus, StatusDerivation};
@@ -18,7 +18,7 @@ use std::path::PathBuf;
 pub struct MiddlewareEventOrigin {
     pub event_id: EventId,
     pub writer_key: String,
-    pub seq: u64,
+    pub seq: SeqNo,
 }
 
 /// System orchestration event with metadata (written to control journal)
@@ -61,6 +61,44 @@ pub enum SystemEventType {
     /// Metrics subsystem coordination
     #[serde(rename = "metrics_coordination")]
     MetricsCoordination(MetricsCoordinationEvent),
+
+    /// Periodic heartbeat from a stage supervisor.
+    ///
+    /// FLOWIP-063e: Under the resolved design, this is retained for future use
+    /// (e.g. broadcast SSE) but is not journalled in v1.
+    #[serde(rename = "stage_heartbeat")]
+    StageHeartbeat {
+        stage_id: StageId,
+        stage_name: String,
+        /// Monotonically increasing counter per stage, so consumers can detect gaps.
+        heartbeat_seq: SeqNo,
+        /// What the supervisor is currently doing.
+        activity: StageActivity,
+        /// Last event the handler consumed (if any).
+        last_consumed_event_id: Option<EventId>,
+        /// Last event the stage emitted (if any).
+        last_output_event_id: Option<EventId>,
+        /// Wall-clock duration the handler has been blocked (if currently processing).
+        handler_blocked_ms: Option<DurationMs>,
+    },
+
+    /// Per-edge liveness verdict derived from heartbeats and/or stall detection.
+    ///
+    /// FLOWIP-063e: non-gating, system journal only.
+    #[serde(rename = "edge_liveness")]
+    EdgeLiveness {
+        upstream: StageId,
+        reader: StageId,
+        state: EdgeLivenessState,
+        /// Milliseconds since last observed progress on this edge.
+        idle_ms: DurationMs,
+        /// Reader sequence observed on this edge (if known).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        last_reader_seq: Option<SeqNo>,
+        /// Last event ID observed on this edge (if known).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        last_event_id: Option<EventId>,
+    },
 
     /// Middleware lifecycle events mirrored into `system.log` (FLOWIP-059c).
     ///
@@ -226,7 +264,7 @@ pub enum PipelineLifecycleEvent {
     StopRequested {
         mode: String,
         #[serde(skip_serializing_if = "Option::is_none")]
-        timeout_ms: Option<u64>,
+        timeout_ms: Option<DurationMs>,
     },
     Draining {
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -238,12 +276,12 @@ pub enum PipelineLifecycleEvent {
     },
     Drained,
     Completed {
-        duration_ms: u64,
+        duration_ms: DurationMs,
         metrics: FlowLifecycleMetricsSnapshot,
     },
     Failed {
         reason: String,
-        duration_ms: u64,
+        duration_ms: DurationMs,
         #[serde(skip_serializing_if = "Option::is_none")]
         metrics: Option<FlowLifecycleMetricsSnapshot>,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -255,7 +293,7 @@ pub enum PipelineLifecycleEvent {
     /// should not be treated as an unexpected error by UIs.
     Cancelled {
         reason: String,
-        duration_ms: u64,
+        duration_ms: DurationMs,
         #[serde(skip_serializing_if = "Option::is_none")]
         metrics: Option<FlowLifecycleMetricsSnapshot>,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -275,9 +313,9 @@ pub enum ReplayLifecycleEvent {
         source_stages: Vec<String>,
     },
     Completed {
-        replayed_count: u64,
-        skipped_count: u64,
-        duration_ms: u64,
+        replayed_count: Count,
+        skipped_count: Count,
+        duration_ms: DurationMs,
     },
 }
 
@@ -289,6 +327,37 @@ pub enum MetricsCoordinationEvent {
     Drained,
     Shutdown,
     Exported { watermark: VectorClock },
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum StageActivity {
+    /// Supervisor is polling for events (dispatch loop is running normally).
+    Polling,
+    /// Handler is processing an event.
+    Processing {
+        event_id: EventId,
+        elapsed_ms: DurationMs,
+    },
+    /// Stage is draining.
+    Draining,
+    /// Stage has completed.
+    Completed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EdgeLivenessState {
+    /// Edge is healthy: data is flowing or the edge is idle within expected bounds.
+    Healthy,
+    /// Edge is idle: no data observed recently, but the stage is alive.
+    Idle,
+    /// Edge is suspect: no data and no heartbeat response within the warning threshold.
+    Suspect,
+    /// Edge appears stalled: handler may be hung or upstream may be down.
+    Stalled,
+    /// Edge has recovered from a previous non-healthy state.
+    Recovered,
 }
 
 impl SystemEvent {
@@ -549,7 +618,11 @@ impl SystemEventFactory {
         )
     }
 
-    pub fn pipeline_stop_requested(&self, mode: String, timeout_ms: Option<u64>) -> SystemEvent {
+    pub fn pipeline_stop_requested(
+        &self,
+        mode: String,
+        timeout_ms: Option<DurationMs>,
+    ) -> SystemEvent {
         SystemEvent::new(
             self.writer_id,
             SystemEventType::PipelineLifecycle(PipelineLifecycleEvent::StopRequested {
@@ -584,7 +657,7 @@ impl SystemEventFactory {
 
     pub fn pipeline_completed(
         &self,
-        duration_ms: u64,
+        duration_ms: DurationMs,
         metrics: FlowLifecycleMetricsSnapshot,
     ) -> SystemEvent {
         SystemEvent::new(
@@ -599,7 +672,7 @@ impl SystemEventFactory {
     pub fn pipeline_failed(
         &self,
         reason: String,
-        duration_ms: u64,
+        duration_ms: DurationMs,
         metrics: Option<FlowLifecycleMetricsSnapshot>,
         failure_cause: Option<crate::event::types::ViolationCause>,
     ) -> SystemEvent {
@@ -617,7 +690,7 @@ impl SystemEventFactory {
     pub fn pipeline_cancelled(
         &self,
         reason: String,
-        duration_ms: u64,
+        duration_ms: DurationMs,
         metrics: Option<FlowLifecycleMetricsSnapshot>,
         failure_cause: Option<crate::event::types::ViolationCause>,
     ) -> SystemEvent {
@@ -712,6 +785,8 @@ impl JournalEvent for SystemEvent {
                 MetricsCoordinationEvent::Shutdown => "system.metrics.shutdown",
                 MetricsCoordinationEvent::Exported { .. } => "system.metrics.exported",
             },
+            SystemEventType::StageHeartbeat { .. } => "system.stage.heartbeat",
+            SystemEventType::EdgeLiveness { .. } => "system.edge.liveness",
             SystemEventType::MiddlewareLifecycle { .. } => "system.middleware.lifecycle",
             SystemEventType::ContractStatus { pass, .. } => {
                 if *pass {
