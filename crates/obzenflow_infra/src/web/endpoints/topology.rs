@@ -162,8 +162,15 @@ pub enum OpenPolicyType {
 pub struct RateLimiterApiInfo {
     /// Maximum tokens per second
     pub tokens_per_sec: f64,
-    /// Burst capacity (max tokens in bucket)
+    /// Effective burst capacity used by runtime admission
     pub burst_capacity: f64,
+    /// Raw configured burst capacity, if the user set one explicitly
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub configured_burst_capacity: Option<f64>,
+    /// Tokens consumed per admitted event
+    pub cost_per_event: f64,
+    /// Effective event-rate limit after weighting (`tokens_per_sec / cost_per_event`)
+    pub limit_rate: f64,
 }
 
 /// Retry policy configuration (structural only)
@@ -552,8 +559,102 @@ mod tests {
         StageSubgraphMembership, SubgraphInternalEdge, TopologySubgraphInfo,
     };
     use obzenflow_runtime::id_conversions::StageIdExt;
+    use obzenflow_runtime::pipeline::MiddlewareStackConfig;
     use obzenflow_topology::TopologyBuilder;
     use std::collections::HashMap;
+
+    #[tokio::test]
+    async fn topology_endpoint_exports_weighted_rate_limiter_config() {
+        let mut builder = TopologyBuilder::new();
+        let stage = builder.add_stage(Some("rate_limited".to_string()));
+        builder.reset_current();
+        let sink = builder.add_stage(Some("sink".to_string()));
+        builder.reset_current();
+        builder.add_edge(stage, sink);
+
+        let topology = Arc::new(
+            builder
+                .build_unchecked()
+                .expect("topology should build with structural validation"),
+        );
+
+        let core_stage_id = StageId::from_ulid(stage.ulid());
+        let sink_stage_id = StageId::from_ulid(sink.ulid());
+
+        let mut stages_metadata: HashMap<StageId, StageMetadata> = HashMap::new();
+        stages_metadata.insert(
+            core_stage_id,
+            StageMetadata {
+                stage_type: StageType::Transform,
+                status: StageStatus::Running,
+            },
+        );
+        stages_metadata.insert(
+            sink_stage_id,
+            StageMetadata {
+                stage_type: StageType::Sink,
+                status: StageStatus::Running,
+            },
+        );
+
+        let mut middleware_stacks = HashMap::new();
+        middleware_stacks.insert(
+            core_stage_id,
+            MiddlewareStackConfig {
+                stack: vec!["rate_limiter".to_string()],
+                circuit_breaker: None,
+                rate_limiter: Some(serde_json::json!({
+                    "tokens_per_sec": 2.0,
+                    "burst_capacity": 5.0,
+                    "cost_per_event": 5.0,
+                    "limit_rate": 0.4,
+                })),
+                retry: None,
+                backpressure: None,
+            },
+        );
+
+        let endpoint = TopologyHttpEndpoint::new(
+            topology,
+            Arc::new(stages_metadata),
+            "test_flow".to_string(),
+            Some(Arc::new(middleware_stacks)),
+            None,
+            None,
+            None,
+            None,
+        );
+
+        let response = endpoint
+            .handle(Request::new(HttpMethod::Get, "/api/topology".to_string()))
+            .await
+            .expect("endpoint should handle request");
+        let response = match response {
+            ManagedResponse::Unary(resp) => resp,
+            ManagedResponse::Sse(_) => panic!("expected unary response"),
+        };
+
+        assert_eq!(response.status, 200);
+
+        let parsed: FlowTopologyResponse =
+            serde_json::from_slice(&response.body).expect("response should be valid JSON");
+        let stage = parsed
+            .stages
+            .iter()
+            .find(|stage| stage.name == "rate_limited")
+            .expect("stage should be present");
+        let rate_limiter = stage
+            .middleware
+            .as_ref()
+            .and_then(|middleware| middleware.rate_limiter.as_ref())
+            .expect("rate limiter config should be present");
+
+        assert_eq!(rate_limiter.tokens_per_sec, 2.0);
+        assert_eq!(rate_limiter.burst_capacity, 5.0);
+        assert_eq!(rate_limiter.configured_burst_capacity, None);
+        assert_eq!(rate_limiter.cost_per_event, 5.0);
+        assert!((rate_limiter.limit_rate - 0.4).abs() < f64::EPSILON);
+    }
 
     #[tokio::test]
     async fn topology_endpoint_exports_subgraphs_schema_v0_4() {
