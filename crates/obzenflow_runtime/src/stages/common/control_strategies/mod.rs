@@ -18,5 +18,5 @@ pub(crate) mod dispatch;
 mod strategies;
 pub use strategies::{
     BackoffStrategy, CircuitBreakerEofStrategy, CompositeStrategy, JonestownStrategy,
-    RetryStrategy, WindowingStrategy,
+    WindowingStrategy,
 };

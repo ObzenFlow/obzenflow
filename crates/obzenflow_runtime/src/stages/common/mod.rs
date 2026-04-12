@@ -32,5 +32,5 @@ pub use handler_error::HandlerError;
 // Re-export control strategies
 pub use control_strategies::{
     BackoffStrategy, CompositeStrategy, ControlEventAction, ControlEventStrategy,
-    JonestownStrategy, ProcessingContext, RetryStrategy, WindowingStrategy,
+    JonestownStrategy, ProcessingContext, WindowingStrategy,
 };

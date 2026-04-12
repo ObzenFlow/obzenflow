@@ -72,7 +72,7 @@ pub use ai_map_reduce::CollectByInput;
 // Re-export control strategies for convenience
 pub use crate::stages::common::control_strategies::{
     BackoffStrategy, CompositeStrategy, ControlEventAction, ControlEventStrategy,
-    JonestownStrategy, RetryStrategy, WindowingStrategy,
+    JonestownStrategy, WindowingStrategy,
 };
 
 // Note: StatefulSupervisor is NOT exported! It's an implementation detail.

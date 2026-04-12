@@ -36,8 +36,6 @@ pub(crate) enum ControlResolution {
     Suppress,
     /// Delay by the given duration, then forward.
     Delay(std::time::Duration),
-    /// Buffer the event for retry; do not forward yet.
-    Retry,
     /// Skip the event entirely (dangerous, used by control strategies).
     Skip,
 }
@@ -63,7 +61,6 @@ pub(crate) fn resolve_control_event(
 
     match action {
         ControlEventAction::Delay(duration) => ControlResolution::Delay(duration),
-        ControlEventAction::Retry => ControlResolution::Retry,
         ControlEventAction::Skip => ControlResolution::Skip,
         ControlEventAction::Forward => resolve_forward_control_event(
             signal,

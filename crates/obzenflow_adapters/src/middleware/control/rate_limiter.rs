@@ -19,9 +19,6 @@ use obzenflow_core::event::payloads::observability_payload::{
 };
 use obzenflow_core::{StageId, WriterId};
 use obzenflow_runtime::pipeline::config::StageConfig;
-use obzenflow_runtime::stages::common::control_strategies::{
-    ControlEventStrategy, WindowingStrategy,
-};
 use serde_json::json;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -34,6 +31,52 @@ const DEFAULT_COST_PER_EVENT: f64 = 1.0;
 const MODE_ENTER_THRESHOLD_PCT: f64 = 100.0;
 const MODE_EXIT_THRESHOLD_PCT: f64 = 80.0;
 const MODE_EXIT_HOLD_WINDOWS: u8 = 2;
+
+fn effective_capacity(
+    events_per_second: f64,
+    burst_capacity: Option<f64>,
+    cost_per_event: f64,
+) -> f64 {
+    burst_capacity.unwrap_or_else(|| events_per_second.max(cost_per_event).max(1.0))
+}
+
+fn effective_limit_rate(events_per_second: f64, cost_per_event: f64) -> f64 {
+    events_per_second / cost_per_event
+}
+
+fn validate_rate_limiter_config_values(
+    events_per_second: f64,
+    burst_capacity: Option<f64>,
+    cost_per_event: f64,
+) -> Result<(), String> {
+    if !events_per_second.is_finite() || events_per_second <= 0.0 {
+        return Err(format!(
+            "rate_limiter events_per_second must be finite and > 0, got {events_per_second}"
+        ));
+    }
+
+    if !cost_per_event.is_finite() || cost_per_event <= 0.0 {
+        return Err(format!(
+            "rate_limiter cost_per_event must be finite and > 0, got {cost_per_event}"
+        ));
+    }
+
+    if let Some(explicit_burst) = burst_capacity {
+        if !explicit_burst.is_finite() || explicit_burst <= 0.0 {
+            return Err(format!(
+                "rate_limiter burst_capacity must be finite and > 0, got {explicit_burst}"
+            ));
+        }
+
+        if explicit_burst < cost_per_event {
+            return Err(format!(
+                "rate_limiter burst_capacity ({explicit_burst}) must be >= cost_per_event ({cost_per_event})"
+            ));
+        }
+    }
+
+    Ok(())
+}
 
 /// Token bucket rate limiter implementation
 #[derive(Debug)]
@@ -182,6 +225,7 @@ impl TokenBucket {
 /// Rate limiting middleware using token bucket algorithm with blocking
 pub struct RateLimiterMiddleware {
     bucket: Arc<Mutex<TokenBucket>>,
+    events_per_second: f64,
     /// Cost per event (default 1.0)
     cost_per_event: f64,
     limit_rate: f64,
@@ -202,8 +246,10 @@ impl RateLimiterMiddleware {
         cost_per_event: f64,
         control_middleware: std::sync::Arc<super::ControlMiddlewareAggregator>,
     ) -> Self {
-        // For very low rates, ensure we have at least 1 token capacity
-        let capacity = burst_capacity.unwrap_or(events_per_second.max(1.0));
+        validate_rate_limiter_config_values(events_per_second, burst_capacity, cost_per_event)
+            .unwrap_or_else(|err| panic!("Invalid rate limiter configuration: {err}"));
+
+        let capacity = effective_capacity(events_per_second, burst_capacity, cost_per_event);
         let bucket = TokenBucket::new(capacity, events_per_second);
 
         info!(
@@ -217,44 +263,34 @@ impl RateLimiterMiddleware {
         let stats = Arc::new(Mutex::new(RateLimiterStats::default()));
         let bucket = Arc::new(Mutex::new(bucket));
 
-        let limit_rate = if cost_per_event > 0.0 {
-            events_per_second / cost_per_event
-        } else {
-            0.0
-        };
+        let limit_rate = effective_limit_rate(events_per_second, cost_per_event);
 
         let snapshotter: std::sync::Arc<RateLimiterSnapshotter> = Arc::new({
             let stats = stats.clone();
             let bucket = bucket.clone();
             move || {
-                let stats_snapshot = stats.lock().ok();
-                let bucket_snapshot = bucket.lock().ok();
+                let mut metrics = RateLimiterMetrics::default();
 
-                match (stats_snapshot, bucket_snapshot) {
-                    (Some(s), Some(b)) => RateLimiterMetrics {
-                        events_total: s.events_total,
-                        delayed_total: s.delayed_total,
-                        tokens_consumed_total: s.tokens_consumed_total,
-                        delay_seconds_total: s.delay_seconds_total,
-                        bucket_tokens: b.tokens,
-                        bucket_capacity: b.capacity,
-                    },
-                    (Some(s), None) => RateLimiterMetrics {
-                        events_total: s.events_total,
-                        delayed_total: s.delayed_total,
-                        tokens_consumed_total: s.tokens_consumed_total,
-                        delay_seconds_total: s.delay_seconds_total,
-                        bucket_tokens: 0.0,
-                        bucket_capacity: 0.0,
-                    },
-                    _ => RateLimiterMetrics::default(),
+                if let Ok(stats) = stats.lock() {
+                    metrics.events_total = stats.events_total;
+                    metrics.delayed_total = stats.delayed_total;
+                    metrics.tokens_consumed_total = stats.tokens_consumed_total;
+                    metrics.delay_seconds_total = stats.delay_seconds_total;
                 }
+
+                if let Ok(mut bucket) = bucket.lock() {
+                    metrics.bucket_tokens = bucket.available_tokens();
+                    metrics.bucket_capacity = bucket.capacity;
+                }
+
+                metrics
             }
         });
         control_middleware.register_rate_limiter(stage_id, snapshotter);
 
         Self {
             bucket,
+            events_per_second,
             cost_per_event,
             limit_rate,
             stats,
@@ -300,7 +336,6 @@ impl RateLimiterMiddleware {
     /// Check if we should emit a summary and do so if needed
     fn maybe_emit_summary(&self, ctx: &mut MiddlewareContext) {
         let mut stats = self.stats.lock().unwrap();
-        let bucket = self.bucket.lock().unwrap();
 
         // Emit summary every 10 seconds or every 1000 processed events.
         //
@@ -322,8 +357,8 @@ impl RateLimiterMiddleware {
                 0.0
             };
 
-            let utilization_pct = if bucket.refill_rate > 0.0 {
-                (consumption_rate_tokens_per_s / bucket.refill_rate) * 100.0
+            let utilization_pct = if self.events_per_second > 0.0 {
+                (consumption_rate_tokens_per_s / self.events_per_second) * 100.0
             } else {
                 0.0
             };
@@ -422,144 +457,146 @@ impl Middleware for RateLimiterMiddleware {
         // Blocking loop - wait until we have tokens
         let mut delayed_this_event = false;
         loop {
-            let mut bucket = self.bucket.lock().unwrap();
-
-            if bucket.try_consume(self.cost_per_event) {
-                // Track successful consumption
-                if let Ok(mut stats) = self.stats.lock() {
-                    stats.events_total += 1;
-                    stats.tokens_consumed_total += self.cost_per_event;
-                    stats.events_window += 1;
-                    stats.tokens_consumed_window += self.cost_per_event;
-                }
-
-                let available = bucket.available_tokens();
-                debug!(
-                    event_id = %event_id,
-                    event_type = %event_type,
-                    available_tokens = available,
-                    cost = self.cost_per_event,
-                    "Rate limit passed - processing event immediately"
-                );
-
-                // We have tokens, allow the event
-                ctx.emit_event(
-                    "rate_limiter",
-                    "event_allowed",
-                    json!({
-                        "event_id": event_id.to_string(),
-                        "available_tokens": bucket.available_tokens(),
-                    }),
-                );
-
-                drop(bucket); // Release lock before returning
-                return MiddlewareAction::Continue;
+            enum AdmissionAttempt {
+                Allowed {
+                    available_tokens: f64,
+                },
+                Blocked {
+                    wait_time: Duration,
+                    available_tokens: f64,
+                },
             }
 
-            // No tokens available - calculate wait time
-            let wait_time = bucket
-                .time_until_available(self.cost_per_event)
-                .unwrap_or(Duration::from_millis(10));
-
-            let available = bucket.available_tokens();
-            info!(
-                event_id = %event_id,
-                event_type = %event_type,
-                wait_ms = wait_time.as_millis(),
-                available_tokens = available,
-                needed_tokens = self.cost_per_event,
-                "Rate limited - blocking for {:?}",
-                wait_time
-            );
-
-            // Track this as a delayed request
-            if !delayed_this_event {
-                delayed_this_event = true;
-                if let Ok(mut stats) = self.stats.lock() {
-                    stats.delayed_total += 1;
-                    stats.delayed_window += 1;
-                    stats.pulse_delayed_events += 1;
+            let attempt = {
+                let mut bucket = self.bucket.lock().unwrap();
+                if bucket.try_consume(self.cost_per_event) {
+                    AdmissionAttempt::Allowed {
+                        available_tokens: bucket.available_tokens(),
+                    }
+                } else {
+                    AdmissionAttempt::Blocked {
+                        wait_time: bucket
+                            .time_until_available(self.cost_per_event)
+                            .unwrap_or(Duration::from_millis(10)),
+                        available_tokens: bucket.available_tokens(),
+                    }
                 }
+            };
 
-                // Emit a durable delayed event so downstream observers (e.g. MetricsAggregator)
-                // can count delays without per-execution tracing.
-                let (current_rate, limit_rate) = {
-                    let limit_rate = if self.cost_per_event > 0.0 {
-                        bucket.refill_rate / self.cost_per_event
-                    } else {
-                        0.0
-                    };
+            match attempt {
+                AdmissionAttempt::Allowed { available_tokens } => {
+                    if let Ok(mut stats) = self.stats.lock() {
+                        stats.events_total += 1;
+                        stats.tokens_consumed_total += self.cost_per_event;
+                        stats.events_window += 1;
+                        stats.tokens_consumed_window += self.cost_per_event;
+                    }
 
-                    let current_rate = if let Ok(stats) = self.stats.lock() {
-                        let elapsed_s = stats.last_summary.elapsed().as_secs_f64();
-                        if elapsed_s > 0.0 && self.cost_per_event > 0.0 {
-                            (stats.tokens_consumed_window / elapsed_s) / self.cost_per_event
+                    debug!(
+                        event_id = %event_id,
+                        event_type = %event_type,
+                        available_tokens,
+                        cost = self.cost_per_event,
+                        "Rate limit passed - processing event immediately"
+                    );
+
+                    ctx.emit_event(
+                        "rate_limiter",
+                        "event_allowed",
+                        json!({
+                            "event_id": event_id.to_string(),
+                            "available_tokens": available_tokens,
+                        }),
+                    );
+
+                    return MiddlewareAction::Continue;
+                }
+                AdmissionAttempt::Blocked {
+                    wait_time,
+                    available_tokens,
+                } => {
+                    info!(
+                        event_id = %event_id,
+                        event_type = %event_type,
+                        wait_ms = wait_time.as_millis(),
+                        available_tokens,
+                        needed_tokens = self.cost_per_event,
+                        "Rate limited - blocking for {:?}",
+                        wait_time
+                    );
+
+                    if !delayed_this_event {
+                        delayed_this_event = true;
+                        if let Ok(mut stats) = self.stats.lock() {
+                            stats.delayed_total += 1;
+                            stats.delayed_window += 1;
+                            stats.pulse_delayed_events += 1;
+                        }
+
+                        let current_rate = if let Ok(stats) = self.stats.lock() {
+                            let elapsed_s = stats.last_summary.elapsed().as_secs_f64();
+                            if elapsed_s > 0.0 {
+                                stats.tokens_consumed_window / elapsed_s / self.cost_per_event
+                            } else {
+                                0.0
+                            }
                         } else {
                             0.0
-                        }
+                        };
+
+                        ctx.write_control_event(ChainEventFactory::observability_event(
+                            self.writer_id,
+                            ObservabilityPayload::Middleware(MiddlewareLifecycle::RateLimiter(
+                                RateLimiterEvent::Delayed {
+                                    delay_ms: wait_time.as_millis() as u64,
+                                    current_rate,
+                                    limit_rate: self.limit_rate,
+                                },
+                            )),
+                        ));
+                    }
+
+                    ctx.emit_event(
+                        "rate_limiter",
+                        "event_blocked",
+                        json!({
+                            "event_id": event_id.to_string(),
+                            "wait_time_ms": wait_time.as_millis(),
+                            "available_tokens": available_tokens,
+                        }),
+                    );
+
+                    // Block until tokens should be available
+                    // For longer waits, use block_in_place to avoid blocking tokio worker threads
+                    let wait_start = Instant::now();
+                    if wait_time > Duration::from_millis(1) {
+                        trace!(event_id = %event_id, "Using block_in_place for wait > 1ms");
+                        tokio::task::block_in_place(|| {
+                            std::thread::sleep(wait_time);
+                        });
                     } else {
-                        0.0
-                    };
+                        // For very short waits, just yield to scheduler
+                        trace!(event_id = %event_id, "Using yield_now for wait <= 1ms");
+                        std::thread::yield_now();
+                    }
+                    let waited = wait_start.elapsed();
+                    if delayed_this_event {
+                        if let Ok(mut stats) = self.stats.lock() {
+                            stats.delay_seconds_total += waited.as_secs_f64();
+                            let waited_ms = waited.as_millis() as u64;
+                            stats.pulse_delay_ms_total =
+                                stats.pulse_delay_ms_total.saturating_add(waited_ms);
+                            stats.pulse_delay_ms_max = stats.pulse_delay_ms_max.max(waited_ms);
+                        }
+                    }
 
-                    (current_rate, limit_rate)
-                };
-
-                ctx.write_control_event(ChainEventFactory::observability_event(
-                    self.writer_id,
-                    ObservabilityPayload::Middleware(MiddlewareLifecycle::RateLimiter(
-                        RateLimiterEvent::Delayed {
-                            delay_ms: wait_time.as_millis() as u64,
-                            current_rate,
-                            limit_rate,
-                        },
-                    )),
-                ));
-            }
-
-            ctx.emit_event(
-                "rate_limiter",
-                "event_blocked",
-                json!({
-                    "event_id": event_id.to_string(),
-                    "wait_time_ms": wait_time.as_millis(),
-                    "available_tokens": bucket.available_tokens(),
-                }),
-            );
-
-            // Release lock before sleeping
-            drop(bucket);
-
-            // Block until tokens should be available
-            // For longer waits, use block_in_place to avoid blocking tokio worker threads
-            let wait_start = Instant::now();
-            if wait_time > Duration::from_millis(1) {
-                trace!(event_id = %event_id, "Using block_in_place for wait > 1ms");
-                tokio::task::block_in_place(|| {
-                    std::thread::sleep(wait_time);
-                });
-            } else {
-                // For very short waits, just yield to scheduler
-                trace!(event_id = %event_id, "Using yield_now for wait <= 1ms");
-                std::thread::yield_now();
-            }
-            let waited = wait_start.elapsed();
-            if delayed_this_event {
-                if let Ok(mut stats) = self.stats.lock() {
-                    stats.delay_seconds_total += waited.as_secs_f64();
-                    let waited_ms = waited.as_millis() as u64;
-                    stats.pulse_delay_ms_total =
-                        stats.pulse_delay_ms_total.saturating_add(waited_ms);
-                    stats.pulse_delay_ms_max = stats.pulse_delay_ms_max.max(waited_ms);
+                    debug!(
+                        event_id = %event_id,
+                        event_type = %event_type,
+                        "Rate limit released - attempting to process event"
+                    );
                 }
             }
-
-            debug!(
-                event_id = %event_id,
-                event_type = %event_type,
-                "Rate limit released - attempting to process event"
-            );
-
-            // Loop back to try again
         }
     }
 
@@ -658,6 +695,23 @@ impl RateLimiterFactory {
     pub fn with_cost(self, cost: f64) -> Self {
         self.with_cost_per_event(cost)
     }
+
+    fn validate_values(&self) -> Result<(), String> {
+        validate_rate_limiter_config_values(
+            self.events_per_second,
+            self.burst_capacity,
+            self.cost_per_event,
+        )
+    }
+
+    fn effective_capacity(&self) -> Result<f64, String> {
+        self.validate_values()?;
+        Ok(effective_capacity(
+            self.events_per_second,
+            self.burst_capacity,
+            self.cost_per_event,
+        ))
+    }
 }
 
 impl From<RateLimiterBuilder> for RateLimiterFactory {
@@ -676,6 +730,9 @@ impl MiddlewareFactory for RateLimiterFactory {
         config: &StageConfig,
         control_middleware: std::sync::Arc<super::ControlMiddlewareAggregator>,
     ) -> Box<dyn Middleware> {
+        self.validate_values()
+            .unwrap_or_else(|err| panic!("Invalid rate limiter configuration: {err}"));
+
         Box::new(RateLimiterMiddleware::new(
             config.stage_id,
             self.events_per_second,
@@ -689,15 +746,17 @@ impl MiddlewareFactory for RateLimiterFactory {
         "rate_limiter"
     }
 
-    fn create_control_strategy(&self) -> Option<Box<dyn ControlEventStrategy>> {
-        // Need delay strategy to ensure we can flush delayed events before EOF
-        // Calculate max delay based on burst capacity and rate
-        let capacity = self.burst_capacity.unwrap_or(self.events_per_second);
-        let max_drain_time = capacity / self.events_per_second;
-
-        Some(Box::new(WindowingStrategy::new(Duration::from_secs_f64(
-            max_drain_time,
-        ))))
+    fn validate_configuration(
+        &self,
+        stage_type: StageType,
+        stage_name: &str,
+    ) -> Result<(), String> {
+        self.validate_values().map_err(|err| {
+            format!(
+                "Invalid rate_limiter configuration for stage '{}' ({stage_type}): {err}",
+                stage_name
+            )
+        })
     }
 
     fn supported_stage_types(&self) -> &[StageType] {
@@ -717,10 +776,17 @@ impl MiddlewareFactory for RateLimiterFactory {
     }
 
     fn config_snapshot(&self) -> Option<serde_json::Value> {
-        Some(serde_json::json!({
+        let burst_capacity = self.effective_capacity().ok()?;
+        let mut snapshot = serde_json::json!({
             "tokens_per_sec": self.events_per_second,
-            "burst_capacity": self.burst_capacity.unwrap_or(self.events_per_second),
-        }))
+            "burst_capacity": burst_capacity,
+            "cost_per_event": self.cost_per_event,
+            "limit_rate": effective_limit_rate(self.events_per_second, self.cost_per_event),
+        });
+        if let Some(configured_burst_capacity) = self.burst_capacity {
+            snapshot["configured_burst_capacity"] = serde_json::json!(configured_burst_capacity);
+        }
+        Some(snapshot)
     }
 }
 
@@ -740,6 +806,7 @@ pub fn rate_limit_with_burst(events_per_second: f64, burst: f64) -> Box<dyn Midd
 mod tests {
     use super::*;
     use crate::middleware::control::ControlMiddlewareAggregator;
+    use obzenflow_core::control_middleware::ControlMiddlewareProvider;
     use obzenflow_core::event::chain_event::ChainEventContent;
     use obzenflow_core::event::{ChainEventFactory, WriterId};
 
@@ -864,15 +931,14 @@ mod tests {
     }
 
     #[test]
-    fn test_rate_limiter_strategy_requirement() {
+    fn test_rate_limiter_does_not_export_control_strategy() {
         let factory = RateLimiterFactory::new(100.0).with_burst(500.0);
 
         let strategy = factory.create_control_strategy();
         assert!(
-            strategy.is_some(),
-            "Expected windowing strategy for rate limiter"
+            strategy.is_none(),
+            "Rate limiter should not export a fake EOF/windowing strategy"
         );
-        // Can't easily test the window duration without exposing internals
     }
 
     #[test]
@@ -895,6 +961,8 @@ mod tests {
             Some(json!({
                 "tokens_per_sec": 25.0,
                 "burst_capacity": 25.0,
+                "cost_per_event": 1.0,
+                "limit_rate": 25.0,
             }))
         );
         assert_eq!(
@@ -902,8 +970,223 @@ mod tests {
             Some(json!({
                 "tokens_per_sec": 25.0,
                 "burst_capacity": 50.0,
+                "configured_burst_capacity": 50.0,
+                "cost_per_event": 1.0,
+                "limit_rate": 25.0,
             }))
         );
+    }
+
+    #[test]
+    fn test_rate_limiter_rejects_zero_rate() {
+        let err = RateLimiterFactory::new(0.0)
+            .validate_configuration(StageType::Transform, "test_stage")
+            .expect_err("zero rate should be rejected");
+        assert!(err.contains("events_per_second"));
+    }
+
+    #[test]
+    fn test_rate_limiter_rejects_negative_rate() {
+        let err = RateLimiterFactory::new(-1.0)
+            .validate_configuration(StageType::Transform, "test_stage")
+            .expect_err("negative rate should be rejected");
+        assert!(err.contains("events_per_second"));
+    }
+
+    #[test]
+    fn test_rate_limiter_rejects_zero_cost() {
+        let err = RateLimiterFactory::new(10.0)
+            .with_cost_per_event(0.0)
+            .validate_configuration(StageType::Transform, "test_stage")
+            .expect_err("zero cost should be rejected");
+        assert!(err.contains("cost_per_event"));
+    }
+
+    #[test]
+    fn test_rate_limiter_rejects_non_finite_values() {
+        let inf_err = RateLimiterFactory::new(f64::INFINITY)
+            .validate_configuration(StageType::Transform, "test_stage")
+            .expect_err("infinite rate should be rejected");
+        assert!(inf_err.contains("events_per_second"));
+
+        let nan_err = RateLimiterFactory::new(10.0)
+            .with_cost_per_event(f64::NAN)
+            .validate_configuration(StageType::Transform, "test_stage")
+            .expect_err("NaN cost should be rejected");
+        assert!(nan_err.contains("cost_per_event"));
+    }
+
+    #[test]
+    fn test_rate_limiter_default_effective_capacity_is_at_least_one_weighted_event() {
+        let middleware = RateLimiterMiddleware::new(
+            StageId::new(),
+            2.0,
+            None,
+            5.0,
+            Arc::new(ControlMiddlewareAggregator::new()),
+        );
+
+        let bucket = middleware.bucket.lock().unwrap();
+        assert!((bucket.capacity - 5.0).abs() < f64::EPSILON);
+        assert!((bucket.tokens - 5.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_rate_limiter_rejects_explicit_burst_smaller_than_cost() {
+        let err = RateLimiterFactory::new(10.0)
+            .with_burst(2.0)
+            .with_cost_per_event(5.0)
+            .validate_configuration(StageType::Transform, "test_stage")
+            .expect_err("burst smaller than cost should be rejected");
+        assert!(err.contains("burst_capacity"));
+        assert!(err.contains("cost_per_event"));
+    }
+
+    #[test]
+    fn test_rate_limiter_config_snapshot_uses_effective_capacity_for_low_rates() {
+        let snapshot = RateLimiterFactory::new(0.5)
+            .config_snapshot()
+            .expect("valid low-rate config should expose a snapshot");
+        assert_eq!(snapshot["burst_capacity"], json!(1.0));
+        assert_eq!(snapshot["cost_per_event"], json!(1.0));
+        assert_eq!(snapshot["limit_rate"], json!(0.5));
+        assert!(snapshot.get("configured_burst_capacity").is_none());
+    }
+
+    #[test]
+    fn test_rate_limiter_config_snapshot_exposes_weighted_effective_fields() {
+        let snapshot = RateLimiterFactory::new(2.0)
+            .with_cost_per_event(5.0)
+            .config_snapshot()
+            .expect("valid weighted config should expose a snapshot");
+        assert_eq!(snapshot["tokens_per_sec"], json!(2.0));
+        assert_eq!(snapshot["burst_capacity"], json!(5.0));
+        assert_eq!(snapshot["cost_per_event"], json!(5.0));
+        assert_eq!(snapshot["limit_rate"], json!(0.4));
+    }
+
+    #[test]
+    fn test_rate_limiter_limit_rate_matches_weighted_config() {
+        let middleware = RateLimiterMiddleware::new(
+            StageId::new(),
+            10.0,
+            Some(20.0),
+            2.0,
+            Arc::new(ControlMiddlewareAggregator::new()),
+        );
+
+        assert!((middleware.limit_rate - 5.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_rate_limiter_pre_handle_does_not_hold_bucket_while_waiting_on_stats() {
+        let middleware = Arc::new(RateLimiterMiddleware::new(
+            StageId::new(),
+            10.0,
+            Some(10.0),
+            1.0,
+            Arc::new(ControlMiddlewareAggregator::new()),
+        ));
+        let stats_guard = middleware.stats.lock().unwrap();
+        let middleware_for_thread = middleware.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+
+        let handle = std::thread::spawn(move || {
+            let event = ChainEventFactory::data_event(
+                WriterId::from(StageId::new()),
+                "test.event",
+                json!({}),
+            );
+            let mut ctx = MiddlewareContext::new();
+            let action = middleware_for_thread.pre_handle(&event, &mut ctx);
+            tx.send(action).unwrap();
+        });
+
+        std::thread::sleep(Duration::from_millis(25));
+
+        let bucket = middleware
+            .bucket
+            .try_lock()
+            .expect("pre_handle should not hold bucket while blocked on stats");
+        assert!(
+            bucket.tokens < bucket.capacity,
+            "expected pre_handle to consume tokens before blocking on stats"
+        );
+        drop(bucket);
+
+        drop(stats_guard);
+
+        let action = rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("pre_handle should complete once stats lock is released");
+        assert!(matches!(action, MiddlewareAction::Continue));
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn test_rate_limiter_snapshotter_does_not_hold_stats_while_waiting_on_bucket() {
+        let control = Arc::new(ControlMiddlewareAggregator::new());
+        let stage_id = StageId::new();
+        let middleware = RateLimiterMiddleware::new(stage_id, 10.0, Some(10.0), 1.0, control.clone());
+        let snapshotter = control
+            .rate_limiter_snapshotter(&stage_id)
+            .expect("rate limiter snapshotter should be registered");
+        let bucket_guard = middleware.bucket.lock().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+
+        let handle = std::thread::spawn(move || {
+            tx.send(snapshotter()).unwrap();
+        });
+
+        std::thread::sleep(Duration::from_millis(25));
+
+        let stats_guard = middleware
+            .stats
+            .try_lock()
+            .expect("snapshotter should not hold stats while waiting on bucket");
+        drop(stats_guard);
+
+        drop(bucket_guard);
+
+        let metrics = rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("snapshotter should complete once bucket lock is released");
+        assert!((metrics.bucket_capacity - 10.0).abs() < f64::EPSILON);
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn test_rate_limiter_summary_does_not_require_bucket_lock() {
+        let middleware = Arc::new(RateLimiterMiddleware::new(
+            StageId::new(),
+            10.0,
+            Some(10.0),
+            1.0,
+            Arc::new(ControlMiddlewareAggregator::new()),
+        ));
+        {
+            let mut stats = middleware.stats.lock().unwrap();
+            stats.events_window = 1;
+            stats.last_summary = Instant::now() - Duration::from_secs(11);
+        }
+
+        let bucket_guard = middleware.bucket.lock().unwrap();
+        let middleware_for_thread = middleware.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+
+        let handle = std::thread::spawn(move || {
+            let mut ctx = MiddlewareContext::new();
+            middleware_for_thread.maybe_emit_summary(&mut ctx);
+            tx.send(ctx.control_events.len()).unwrap();
+        });
+
+        let emitted = rx
+            .recv_timeout(Duration::from_millis(100))
+            .expect("summary emission should not block on bucket lock");
+        assert_eq!(emitted, 1);
+
+        drop(bucket_guard);
+        handle.join().unwrap();
     }
 
     #[test]

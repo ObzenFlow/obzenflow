@@ -168,13 +168,6 @@ async fn poll_live_reference<H: JoinHandler + Clone + std::fmt::Debug + Send + S
                         ControlResolution::Delay(_) => {
                             unreachable!("Delay is handled before executing the resolution")
                         }
-                        ControlResolution::Retry => {
-                            tracing::info!(
-                                stage_name = %ctx.stage_name,
-                                event_type = envelope.event.event_type(),
-                                "Retry requested for control event (not implemented) during Live (reference)"
-                            );
-                        }
                         ControlResolution::Skip => {
                             tracing::warn!(
                                 stage_name = %ctx.stage_name,
@@ -403,14 +396,6 @@ async fn poll_live_stream<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync
                         }
                         ControlResolution::Delay(_) => {
                             unreachable!("Delay is handled before executing the resolution")
-                        }
-                        ControlResolution::Retry => {
-                            tracing::info!(
-                                stage_name = %ctx.stage_name,
-                                event_type = envelope.event.event_type(),
-                                "Retry requested for control event (not implemented) during Live (stream)"
-                            );
-                            Some(EventLoopDirective::Continue)
                         }
                         ControlResolution::Skip => {
                             tracing::warn!(
