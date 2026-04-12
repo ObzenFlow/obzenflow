@@ -376,55 +376,6 @@ fn resolve_control_event_strategy_skip_prevents_cycle_guard_note() {
 }
 
 #[test]
-fn resolve_control_event_retry_does_not_note_cycle_guard() {
-    let upstream = StageId::new_const(1);
-
-    let eof = ChainEventFactory::eof_event(WriterId::from(upstream), true);
-    let envelope = EventEnvelope::new(JournalWriterId::new(), eof);
-    let signal = match &envelope.event.content {
-        obzenflow_core::event::ChainEventContent::FlowControl(payload) => payload,
-        _ => unreachable!(),
-    };
-
-    let strategy = FixedActionStrategy {
-        eof: ControlEventAction::Retry,
-        drain: ControlEventAction::Forward,
-        other: ControlEventAction::Forward,
-    };
-
-    let eof_outcome = EofOutcome {
-        stage_id: upstream,
-        stage_name: "u".to_string(),
-        reader_index: 0,
-        eof_count: 1,
-        total_readers: 1,
-        is_final: true,
-    };
-
-    let mut guard = CycleGuard::new(
-        MaxIterations::new(30),
-        SccId::from_ulid(Ulid::from(0u128)),
-        false,
-        "t",
-    );
-
-    let resolution = resolve_control_event(
-        signal,
-        &envelope,
-        &strategy,
-        None,
-        Some(&mut guard),
-        Some(&eof_outcome),
-        Some(upstream),
-        1,
-        true,
-    );
-
-    assert_eq!(resolution, ControlResolution::Retry);
-    assert!(!guard.has_seen_all_upstream_eofs(1));
-}
-
-#[test]
 fn resolve_control_event_delay_does_not_note_cycle_guard() {
     let upstream = StageId::new_const(1);
 

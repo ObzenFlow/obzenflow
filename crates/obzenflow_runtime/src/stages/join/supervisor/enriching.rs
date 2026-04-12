@@ -153,14 +153,6 @@ pub(super) async fn dispatch_enriching<
                         ControlResolution::Delay(_) => {
                             unreachable!("Delay is handled before executing the resolution")
                         }
-                        ControlResolution::Retry => {
-                            tracing::info!(
-                                stage_name = %ctx.stage_name,
-                                event_type = envelope.event.event_type(),
-                                "Retry requested for control event (not implemented) during Enriching"
-                            );
-                            EventLoopDirective::Continue
-                        }
                         ControlResolution::Skip => {
                             tracing::warn!(
                                 stage_name = %ctx.stage_name,

@@ -62,16 +62,13 @@ pub enum ControlEventAction {
     /// Supervisors implement this as: sleep for the requested duration, then forward.
     Delay(Duration),
 
-    /// Don't accept the control event yet, retry processing
-    Retry,
-
     /// Skip this control event (dangerous! use with extreme caution)
     Skip,
 }
 
 /// Mutable context passed to control event strategies
 pub struct ProcessingContext {
-    /// Number of times EOF has been attempted (for retry strategies)
+    /// Number of times EOF handling has been deferred by the current strategy.
     pub eof_attempts: usize,
 
     /// Whether we're currently in a delay period
@@ -80,7 +77,7 @@ pub struct ProcessingContext {
     /// Custom state that strategies can use
     pub custom_state: std::collections::HashMap<String, String>,
 
-    /// Buffered EOF event for retry scenarios
+    /// Buffered EOF event for control-flow coordination scenarios.
     pub buffered_eof: Option<EventEnvelope<ChainEvent>>,
 }
 
