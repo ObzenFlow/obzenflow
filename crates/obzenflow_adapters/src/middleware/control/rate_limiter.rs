@@ -806,6 +806,7 @@ pub fn rate_limit_with_burst(events_per_second: f64, burst: f64) -> Box<dyn Midd
 mod tests {
     use super::*;
     use crate::middleware::control::ControlMiddlewareAggregator;
+    use obzenflow_core::control_middleware::ControlMiddlewareProvider;
     use obzenflow_core::event::chain_event::ChainEventContent;
     use obzenflow_core::event::{ChainEventFactory, WriterId};
 
@@ -1075,6 +1076,117 @@ mod tests {
         );
 
         assert!((middleware.limit_rate - 5.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_rate_limiter_pre_handle_does_not_hold_bucket_while_waiting_on_stats() {
+        let middleware = Arc::new(RateLimiterMiddleware::new(
+            StageId::new(),
+            10.0,
+            Some(10.0),
+            1.0,
+            Arc::new(ControlMiddlewareAggregator::new()),
+        ));
+        let stats_guard = middleware.stats.lock().unwrap();
+        let middleware_for_thread = middleware.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+
+        let handle = std::thread::spawn(move || {
+            let event = ChainEventFactory::data_event(
+                WriterId::from(StageId::new()),
+                "test.event",
+                json!({}),
+            );
+            let mut ctx = MiddlewareContext::new();
+            let action = middleware_for_thread.pre_handle(&event, &mut ctx);
+            tx.send(action).unwrap();
+        });
+
+        std::thread::sleep(Duration::from_millis(25));
+
+        let bucket = middleware
+            .bucket
+            .try_lock()
+            .expect("pre_handle should not hold bucket while blocked on stats");
+        assert!(
+            bucket.tokens < bucket.capacity,
+            "expected pre_handle to consume tokens before blocking on stats"
+        );
+        drop(bucket);
+
+        drop(stats_guard);
+
+        let action = rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("pre_handle should complete once stats lock is released");
+        assert!(matches!(action, MiddlewareAction::Continue));
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn test_rate_limiter_snapshotter_does_not_hold_stats_while_waiting_on_bucket() {
+        let control = Arc::new(ControlMiddlewareAggregator::new());
+        let stage_id = StageId::new();
+        let middleware = RateLimiterMiddleware::new(stage_id, 10.0, Some(10.0), 1.0, control.clone());
+        let snapshotter = control
+            .rate_limiter_snapshotter(&stage_id)
+            .expect("rate limiter snapshotter should be registered");
+        let bucket_guard = middleware.bucket.lock().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+
+        let handle = std::thread::spawn(move || {
+            tx.send(snapshotter()).unwrap();
+        });
+
+        std::thread::sleep(Duration::from_millis(25));
+
+        let stats_guard = middleware
+            .stats
+            .try_lock()
+            .expect("snapshotter should not hold stats while waiting on bucket");
+        drop(stats_guard);
+
+        drop(bucket_guard);
+
+        let metrics = rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("snapshotter should complete once bucket lock is released");
+        assert!((metrics.bucket_capacity - 10.0).abs() < f64::EPSILON);
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn test_rate_limiter_summary_does_not_require_bucket_lock() {
+        let middleware = Arc::new(RateLimiterMiddleware::new(
+            StageId::new(),
+            10.0,
+            Some(10.0),
+            1.0,
+            Arc::new(ControlMiddlewareAggregator::new()),
+        ));
+        {
+            let mut stats = middleware.stats.lock().unwrap();
+            stats.events_window = 1;
+            stats.last_summary = Instant::now() - Duration::from_secs(11);
+        }
+
+        let bucket_guard = middleware.bucket.lock().unwrap();
+        let middleware_for_thread = middleware.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+
+        let handle = std::thread::spawn(move || {
+            let mut ctx = MiddlewareContext::new();
+            middleware_for_thread.maybe_emit_summary(&mut ctx);
+            tx.send(ctx.control_events.len()).unwrap();
+        });
+
+        let emitted = rx
+            .recv_timeout(Duration::from_millis(100))
+            .expect("summary emission should not block on bucket lock");
+        assert_eq!(emitted, 1);
+
+        drop(bucket_guard);
+        handle.join().unwrap();
     }
 
     #[test]

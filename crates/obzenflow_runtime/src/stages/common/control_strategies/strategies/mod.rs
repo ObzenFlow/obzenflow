@@ -13,5 +13,5 @@ mod windowing;
 pub use circuit_breaker_eof::CircuitBreakerEofStrategy;
 pub use composite::CompositeStrategy;
 pub use jonestown::JonestownStrategy;
-pub use retry::{BackoffStrategy, RetryStrategy};
+pub use retry::BackoffStrategy;
 pub use windowing::WindowingStrategy;
