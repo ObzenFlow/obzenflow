@@ -266,7 +266,7 @@ async fn rate_limiter_invalid_explicit_burst_fails_at_materialisation() {
         Err(err) => err.to_string(),
     };
     assert!(
-        err.contains("Failed to materialize middleware 'rate_limiter'"),
+        err.contains("Invalid configuration for middleware 'rate_limiter'"),
         "error: {err}"
     );
     assert!(err.contains("burst_capacity"), "error: {err}");

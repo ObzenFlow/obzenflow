@@ -35,6 +35,7 @@ use std::num::NonZeroU32;
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use thiserror::Error;
 
 type FailureClassifier = Arc<dyn Fn(&ChainEvent, &[ChainEvent]) -> bool + Send + Sync>;
 type FailureClassificationClassifier =
@@ -346,6 +347,12 @@ struct CircuitBreakerStats {
     requests_processed: u64,
     requests_rejected: u64,
     last_summary: Instant,
+}
+
+#[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
+enum CircuitBreakerThresholdError {
+    #[error("CircuitBreaker threshold must be in 1..=u32::MAX, got {threshold}")]
+    InvalidThreshold { threshold: usize },
 }
 
 impl Default for CircuitBreakerStats {
@@ -1799,15 +1806,13 @@ impl CircuitBreakerFactory {
         }
     }
 
-    fn validate_threshold(&self) -> Result<(), String> {
-        if self.threshold == 0 || self.threshold > u32::MAX as usize {
-            return Err(format!(
-                "CircuitBreaker threshold must be in 1..=u32::MAX, got {}",
-                self.threshold
-            ));
-        }
-
-        Ok(())
+    fn validated_threshold(&self) -> Result<NonZeroU32, CircuitBreakerThresholdError> {
+        u32::try_from(self.threshold)
+            .ok()
+            .and_then(NonZeroU32::new)
+            .ok_or(CircuitBreakerThresholdError::InvalidThreshold {
+                threshold: self.threshold,
+            })
     }
 
     /// Set the cooldown duration before attempting to close the circuit
@@ -2017,17 +2022,18 @@ impl MiddlewareFactory for CircuitBreakerFactory {
             }
         }
 
-        self.validate_threshold().map_err(|err| {
-            MiddlewareFactoryError::materialization_failed(self.name(), &config.name, err)
+        let validated_threshold = self.validated_threshold().map_err(|err| {
+            MiddlewareFactoryError::invalid_configuration(self.name(), &config.name, err)
         })?;
 
         // Determine failure mode; default to a consecutive-failure threshold
         // equal to `threshold` when not explicitly configured.
-        let failure_mode = self.failure_mode.clone().unwrap_or_else(|| {
-            let max_failures = NonZeroU32::new(self.threshold as u32)
-                .expect("CircuitBreaker threshold validity must be checked before materialisation");
-            CircuitBreakerFailureMode::Consecutive { max_failures }
-        });
+        let failure_mode =
+            self.failure_mode
+                .clone()
+                .unwrap_or_else(|| CircuitBreakerFailureMode::Consecutive {
+                    max_failures: validated_threshold,
+                });
 
         // If rate-based mode is enabled, allocate a simple sliding window
         // state for recent call outcomes.

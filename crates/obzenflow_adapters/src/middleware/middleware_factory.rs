@@ -12,15 +12,25 @@ use super::{Middleware, MiddlewareHints, MiddlewareSafety};
 use obzenflow_core::event::context::StageType;
 use obzenflow_runtime::pipeline::config::StageConfig;
 use obzenflow_runtime::stages::common::control_strategies::ControlEventStrategy;
+use std::error::Error as StdError;
 use std::sync::Arc;
 use thiserror::Error;
 
 use super::control::ControlMiddlewareAggregator;
 
+pub type MiddlewareFactorySource = Box<dyn StdError + Send + Sync + 'static>;
+
 #[derive(Debug, Error)]
 pub enum MiddlewareFactoryError {
-    #[error("Invalid configuration for middleware '{middleware}': {reason}")]
-    InvalidConfiguration { middleware: String, reason: String },
+    #[error(
+        "Invalid configuration for middleware '{middleware}' on stage '{stage_name}': {source}"
+    )]
+    InvalidConfiguration {
+        middleware: String,
+        stage_name: String,
+        #[source]
+        source: MiddlewareFactorySource,
+    },
 
     #[error("Middleware '{middleware}' does not support stage '{stage_name}' ({stage_type})")]
     UnsupportedStageType {
@@ -29,21 +39,27 @@ pub enum MiddlewareFactoryError {
         stage_name: String,
     },
 
-    #[error("Failed to materialize middleware '{middleware}' for stage '{stage_name}': {reason}")]
+    #[error("Failed to materialize middleware '{middleware}' for stage '{stage_name}': {source}")]
     MaterializationFailed {
         middleware: String,
         stage_name: String,
-        reason: String,
+        #[source]
+        source: MiddlewareFactorySource,
     },
 }
 
 pub type MiddlewareFactoryResult<T> = Result<T, MiddlewareFactoryError>;
 
 impl MiddlewareFactoryError {
-    pub fn invalid_configuration(middleware: impl Into<String>, reason: impl Into<String>) -> Self {
+    pub fn invalid_configuration(
+        middleware: impl Into<String>,
+        stage_name: impl Into<String>,
+        source: impl StdError + Send + Sync + 'static,
+    ) -> Self {
         Self::InvalidConfiguration {
             middleware: middleware.into(),
-            reason: reason.into(),
+            stage_name: stage_name.into(),
+            source: Box::new(source),
         }
     }
 
@@ -62,12 +78,12 @@ impl MiddlewareFactoryError {
     pub fn materialization_failed(
         middleware: impl Into<String>,
         stage_name: impl Into<String>,
-        reason: impl Into<String>,
+        source: impl StdError + Send + Sync + 'static,
     ) -> Self {
         Self::MaterializationFailed {
             middleware: middleware.into(),
             stage_name: stage_name.into(),
-            reason: reason.into(),
+            source: Box::new(source),
         }
     }
 }

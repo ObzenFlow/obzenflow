@@ -22,6 +22,7 @@ use obzenflow_runtime::pipeline::config::StageConfig;
 use serde_json::json;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use thiserror::Error;
 use tracing::{debug, info, trace};
 
 const ACTIVITY_PULSE_WINDOW_MS: u64 = 1000;
@@ -44,38 +45,74 @@ fn effective_limit_rate(events_per_second: f64, cost_per_event: f64) -> f64 {
     events_per_second / cost_per_event
 }
 
-fn validate_rate_limiter_config_values(
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ValidatedRateLimiterConfig {
+    events_per_second: f64,
+    configured_burst_capacity: Option<f64>,
+    burst_capacity: f64,
+    cost_per_event: f64,
+}
+
+impl ValidatedRateLimiterConfig {
+    fn limit_rate(self) -> f64 {
+        effective_limit_rate(self.events_per_second, self.cost_per_event)
+    }
+}
+
+#[derive(Debug, Error, Clone, Copy, PartialEq)]
+enum RateLimiterConfigError {
+    #[error("rate_limiter events_per_second must be finite and > 0, got {events_per_second}")]
+    InvalidEventsPerSecond { events_per_second: f64 },
+
+    #[error("rate_limiter cost_per_event must be finite and > 0, got {cost_per_event}")]
+    InvalidCostPerEvent { cost_per_event: f64 },
+
+    #[error("rate_limiter burst_capacity must be finite and > 0, got {burst_capacity}")]
+    InvalidBurstCapacity { burst_capacity: f64 },
+
+    #[error(
+        "rate_limiter burst_capacity ({burst_capacity}) must be >= cost_per_event ({cost_per_event})"
+    )]
+    BurstCapacityBelowCost {
+        burst_capacity: f64,
+        cost_per_event: f64,
+    },
+}
+
+fn validated_rate_limiter_config(
     events_per_second: f64,
     burst_capacity: Option<f64>,
     cost_per_event: f64,
-) -> Result<(), String> {
+) -> Result<ValidatedRateLimiterConfig, RateLimiterConfigError> {
     if !events_per_second.is_finite() || events_per_second <= 0.0 {
-        return Err(format!(
-            "rate_limiter events_per_second must be finite and > 0, got {events_per_second}"
-        ));
+        return Err(RateLimiterConfigError::InvalidEventsPerSecond { events_per_second });
     }
 
     if !cost_per_event.is_finite() || cost_per_event <= 0.0 {
-        return Err(format!(
-            "rate_limiter cost_per_event must be finite and > 0, got {cost_per_event}"
-        ));
+        return Err(RateLimiterConfigError::InvalidCostPerEvent { cost_per_event });
     }
 
     if let Some(explicit_burst) = burst_capacity {
         if !explicit_burst.is_finite() || explicit_burst <= 0.0 {
-            return Err(format!(
-                "rate_limiter burst_capacity must be finite and > 0, got {explicit_burst}"
-            ));
+            return Err(RateLimiterConfigError::InvalidBurstCapacity {
+                burst_capacity: explicit_burst,
+            });
         }
 
         if explicit_burst < cost_per_event {
-            return Err(format!(
-                "rate_limiter burst_capacity ({explicit_burst}) must be >= cost_per_event ({cost_per_event})"
-            ));
+            return Err(RateLimiterConfigError::BurstCapacityBelowCost {
+                burst_capacity: explicit_burst,
+                cost_per_event,
+            });
         }
     }
 
-    Ok(())
+    Ok(ValidatedRateLimiterConfig {
+        events_per_second,
+        configured_burst_capacity: burst_capacity,
+        burst_capacity: effective_capacity(events_per_second, burst_capacity, cost_per_event),
+        cost_per_event,
+    })
 }
 
 /// Token bucket rate limiter implementation
@@ -241,29 +278,23 @@ pub struct RateLimiterMiddleware {
 impl RateLimiterMiddleware {
     fn new(
         stage_id: StageId,
-        events_per_second: f64,
-        burst_capacity: Option<f64>,
-        cost_per_event: f64,
+        config: ValidatedRateLimiterConfig,
         control_middleware: std::sync::Arc<super::ControlMiddlewareAggregator>,
     ) -> Self {
-        validate_rate_limiter_config_values(events_per_second, burst_capacity, cost_per_event)
-            .unwrap_or_else(|err| panic!("Invalid rate limiter configuration: {err}"));
-
-        let capacity = effective_capacity(events_per_second, burst_capacity, cost_per_event);
-        let bucket = TokenBucket::new(capacity, events_per_second);
+        let bucket = TokenBucket::new(config.burst_capacity, config.events_per_second);
 
         info!(
-            events_per_second,
-            burst_capacity = capacity,
-            cost_per_event,
-            initial_tokens = capacity,
+            events_per_second = config.events_per_second,
+            burst_capacity = config.burst_capacity,
+            cost_per_event = config.cost_per_event,
+            initial_tokens = config.burst_capacity,
             "Created rate limiter middleware"
         );
 
         let stats = Arc::new(Mutex::new(RateLimiterStats::default()));
         let bucket = Arc::new(Mutex::new(bucket));
 
-        let limit_rate = effective_limit_rate(events_per_second, cost_per_event);
+        let limit_rate = config.limit_rate();
 
         let snapshotter: std::sync::Arc<RateLimiterSnapshotter> = Arc::new({
             let stats = stats.clone();
@@ -290,8 +321,8 @@ impl RateLimiterMiddleware {
 
         Self {
             bucket,
-            events_per_second,
-            cost_per_event,
+            events_per_second: config.events_per_second,
+            cost_per_event: config.cost_per_event,
             limit_rate,
             stats,
             writer_id: WriterId::from(stage_id),
@@ -696,21 +727,12 @@ impl RateLimiterFactory {
         self.with_cost_per_event(cost)
     }
 
-    fn validate_values(&self) -> Result<(), String> {
-        validate_rate_limiter_config_values(
+    fn validated_config(&self) -> Result<ValidatedRateLimiterConfig, RateLimiterConfigError> {
+        validated_rate_limiter_config(
             self.events_per_second,
             self.burst_capacity,
             self.cost_per_event,
         )
-    }
-
-    fn effective_capacity(&self) -> Result<f64, String> {
-        self.validate_values()?;
-        Ok(effective_capacity(
-            self.events_per_second,
-            self.burst_capacity,
-            self.cost_per_event,
-        ))
     }
 }
 
@@ -730,15 +752,13 @@ impl MiddlewareFactory for RateLimiterFactory {
         config: &StageConfig,
         control_middleware: std::sync::Arc<super::ControlMiddlewareAggregator>,
     ) -> crate::middleware::MiddlewareFactoryResult<Box<dyn Middleware>> {
-        self.validate_values().map_err(|err| {
-            MiddlewareFactoryError::materialization_failed(self.name(), &config.name, err)
+        let validated = self.validated_config().map_err(|err| {
+            MiddlewareFactoryError::invalid_configuration(self.name(), &config.name, err)
         })?;
 
         Ok(Box::new(RateLimiterMiddleware::new(
             config.stage_id,
-            self.events_per_second,
-            self.burst_capacity,
-            self.cost_per_event,
+            validated,
             control_middleware,
         )))
     }
@@ -764,14 +784,14 @@ impl MiddlewareFactory for RateLimiterFactory {
     }
 
     fn config_snapshot(&self) -> Option<serde_json::Value> {
-        let burst_capacity = self.effective_capacity().ok()?;
+        let validated = self.validated_config().ok()?;
         let mut snapshot = serde_json::json!({
-            "tokens_per_sec": self.events_per_second,
-            "burst_capacity": burst_capacity,
-            "cost_per_event": self.cost_per_event,
-            "limit_rate": effective_limit_rate(self.events_per_second, self.cost_per_event),
+            "tokens_per_sec": validated.events_per_second,
+            "burst_capacity": validated.burst_capacity,
+            "cost_per_event": validated.cost_per_event,
+            "limit_rate": validated.limit_rate(),
         });
-        if let Some(configured_burst_capacity) = self.burst_capacity {
+        if let Some(configured_burst_capacity) = validated.configured_burst_capacity {
             snapshot["configured_burst_capacity"] = serde_json::json!(configured_burst_capacity);
         }
         Some(snapshot)
@@ -820,6 +840,22 @@ mod tests {
         }
     }
 
+    fn test_middleware(
+        stage_id: StageId,
+        events_per_second: f64,
+        burst_capacity: Option<f64>,
+        cost_per_event: f64,
+    ) -> RateLimiterMiddleware {
+        let validated =
+            validated_rate_limiter_config(events_per_second, burst_capacity, cost_per_event)
+                .expect("test middleware configuration should be valid");
+        RateLimiterMiddleware::new(
+            stage_id,
+            validated,
+            Arc::new(ControlMiddlewareAggregator::new()),
+        )
+    }
+
     #[test]
     fn test_token_bucket_basic() {
         let mut bucket = TokenBucket::new(10.0, 5.0); // 10 capacity, 5/sec refill
@@ -850,13 +886,7 @@ mod tests {
     #[test]
     fn test_rate_limiter_allows_bursts() {
         // Create middleware directly (we only need a stage_id for writer attribution)
-        let middleware = RateLimiterMiddleware::new(
-            StageId::new(),
-            10.0,
-            Some(20.0),
-            1.0,
-            Arc::new(ControlMiddlewareAggregator::new()),
-        );
+        let middleware = test_middleware(StageId::new(), 10.0, Some(20.0), 1.0);
 
         let mut ctx = MiddlewareContext::new();
 
@@ -881,13 +911,7 @@ mod tests {
     #[test]
     fn test_rate_limiter_control_events_pass_through() {
         // Create middleware directly (we only need a stage_id for writer attribution)
-        let middleware = RateLimiterMiddleware::new(
-            StageId::new(),
-            1.0,
-            None,
-            1.0,
-            Arc::new(ControlMiddlewareAggregator::new()),
-        );
+        let middleware = test_middleware(StageId::new(), 1.0, None, 1.0);
 
         let mut ctx = MiddlewareContext::new();
 
@@ -908,13 +932,7 @@ mod tests {
 
     #[test]
     fn test_rate_limiter_lifecycle_events_pass_through() {
-        let middleware = RateLimiterMiddleware::new(
-            StageId::new(),
-            1.0,
-            None,
-            1.0,
-            Arc::new(ControlMiddlewareAggregator::new()),
-        );
+        let middleware = test_middleware(StageId::new(), 1.0, None, 1.0);
 
         let mut ctx = MiddlewareContext::new();
 
@@ -992,7 +1010,7 @@ mod tests {
         let err = materialize_err(RateLimiterFactory::new(0.0));
         assert!(matches!(
             err,
-            MiddlewareFactoryError::MaterializationFailed { .. }
+            MiddlewareFactoryError::InvalidConfiguration { .. }
         ));
         assert!(err.to_string().contains("events_per_second"));
     }
@@ -1002,7 +1020,7 @@ mod tests {
         let err = materialize_err(RateLimiterFactory::new(-1.0));
         assert!(matches!(
             err,
-            MiddlewareFactoryError::MaterializationFailed { .. }
+            MiddlewareFactoryError::InvalidConfiguration { .. }
         ));
         assert!(err.to_string().contains("events_per_second"));
     }
@@ -1012,7 +1030,7 @@ mod tests {
         let err = materialize_err(RateLimiterFactory::new(10.0).with_cost_per_event(0.0));
         assert!(matches!(
             err,
-            MiddlewareFactoryError::MaterializationFailed { .. }
+            MiddlewareFactoryError::InvalidConfiguration { .. }
         ));
         assert!(err.to_string().contains("cost_per_event"));
     }
@@ -1022,27 +1040,21 @@ mod tests {
         let inf_err = materialize_err(RateLimiterFactory::new(f64::INFINITY));
         assert!(matches!(
             inf_err,
-            MiddlewareFactoryError::MaterializationFailed { .. }
+            MiddlewareFactoryError::InvalidConfiguration { .. }
         ));
         assert!(inf_err.to_string().contains("events_per_second"));
 
         let nan_err = materialize_err(RateLimiterFactory::new(10.0).with_cost_per_event(f64::NAN));
         assert!(matches!(
             nan_err,
-            MiddlewareFactoryError::MaterializationFailed { .. }
+            MiddlewareFactoryError::InvalidConfiguration { .. }
         ));
         assert!(nan_err.to_string().contains("cost_per_event"));
     }
 
     #[test]
     fn test_rate_limiter_default_effective_capacity_is_at_least_one_weighted_event() {
-        let middleware = RateLimiterMiddleware::new(
-            StageId::new(),
-            2.0,
-            None,
-            5.0,
-            Arc::new(ControlMiddlewareAggregator::new()),
-        );
+        let middleware = test_middleware(StageId::new(), 2.0, None, 5.0);
 
         let bucket = middleware.bucket.lock().unwrap();
         assert!((bucket.capacity - 5.0).abs() < f64::EPSILON);
@@ -1058,7 +1070,7 @@ mod tests {
         );
         assert!(matches!(
             err,
-            MiddlewareFactoryError::MaterializationFailed { .. }
+            MiddlewareFactoryError::InvalidConfiguration { .. }
         ));
         assert!(err.to_string().contains("burst_capacity"));
         assert!(err.to_string().contains("cost_per_event"));
@@ -1089,26 +1101,14 @@ mod tests {
 
     #[test]
     fn test_rate_limiter_limit_rate_matches_weighted_config() {
-        let middleware = RateLimiterMiddleware::new(
-            StageId::new(),
-            10.0,
-            Some(20.0),
-            2.0,
-            Arc::new(ControlMiddlewareAggregator::new()),
-        );
+        let middleware = test_middleware(StageId::new(), 10.0, Some(20.0), 2.0);
 
         assert!((middleware.limit_rate - 5.0).abs() < 1e-6);
     }
 
     #[test]
     fn test_rate_limiter_pre_handle_does_not_hold_bucket_while_waiting_on_stats() {
-        let middleware = Arc::new(RateLimiterMiddleware::new(
-            StageId::new(),
-            10.0,
-            Some(10.0),
-            1.0,
-            Arc::new(ControlMiddlewareAggregator::new()),
-        ));
+        let middleware = Arc::new(test_middleware(StageId::new(), 10.0, Some(10.0), 1.0));
         let stats_guard = middleware.stats.lock().unwrap();
         let middleware_for_thread = middleware.clone();
         let (tx, rx) = std::sync::mpsc::channel();
@@ -1149,8 +1149,12 @@ mod tests {
     fn test_rate_limiter_snapshotter_does_not_hold_stats_while_waiting_on_bucket() {
         let control = Arc::new(ControlMiddlewareAggregator::new());
         let stage_id = StageId::new();
-        let middleware =
-            RateLimiterMiddleware::new(stage_id, 10.0, Some(10.0), 1.0, control.clone());
+        let middleware = RateLimiterMiddleware::new(
+            stage_id,
+            validated_rate_limiter_config(10.0, Some(10.0), 1.0)
+                .expect("snapshotter test configuration should be valid"),
+            control.clone(),
+        );
         let snapshotter = control
             .rate_limiter_snapshotter(&stage_id)
             .expect("rate limiter snapshotter should be registered");
@@ -1180,13 +1184,7 @@ mod tests {
 
     #[test]
     fn test_rate_limiter_summary_does_not_require_bucket_lock() {
-        let middleware = Arc::new(RateLimiterMiddleware::new(
-            StageId::new(),
-            10.0,
-            Some(10.0),
-            1.0,
-            Arc::new(ControlMiddlewareAggregator::new()),
-        ));
+        let middleware = Arc::new(test_middleware(StageId::new(), 10.0, Some(10.0), 1.0));
         {
             let mut stats = middleware.stats.lock().unwrap();
             stats.events_window = 1;
@@ -1214,13 +1212,7 @@ mod tests {
 
     #[test]
     fn test_rate_limiter_mode_hysteresis_transitions() {
-        let middleware = RateLimiterMiddleware::new(
-            StageId::new(),
-            100.0,
-            Some(1000.0),
-            1.0,
-            Arc::new(ControlMiddlewareAggregator::new()),
-        );
+        let middleware = test_middleware(StageId::new(), 100.0, Some(1000.0), 1.0);
 
         // ---- Window 1: utilization 120% -> Normal -> Limiting ----
         {
@@ -1314,13 +1306,7 @@ mod tests {
 
     #[test]
     fn test_rate_limiter_activity_pulse_emission() {
-        let middleware = RateLimiterMiddleware::new(
-            StageId::new(),
-            5.0,
-            Some(10.0),
-            1.0,
-            Arc::new(ControlMiddlewareAggregator::new()),
-        );
+        let middleware = test_middleware(StageId::new(), 5.0, Some(10.0), 1.0);
 
         {
             let mut stats = middleware.stats.lock().unwrap();
