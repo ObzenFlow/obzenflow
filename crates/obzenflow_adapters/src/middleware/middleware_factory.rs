@@ -13,8 +13,64 @@ use obzenflow_core::event::context::StageType;
 use obzenflow_runtime::pipeline::config::StageConfig;
 use obzenflow_runtime::stages::common::control_strategies::ControlEventStrategy;
 use std::sync::Arc;
+use thiserror::Error;
 
 use super::control::ControlMiddlewareAggregator;
+
+#[derive(Debug, Error)]
+pub enum MiddlewareFactoryError {
+    #[error("Invalid configuration for middleware '{middleware}': {reason}")]
+    InvalidConfiguration { middleware: String, reason: String },
+
+    #[error("Middleware '{middleware}' does not support stage '{stage_name}' ({stage_type})")]
+    UnsupportedStageType {
+        middleware: String,
+        stage_type: StageType,
+        stage_name: String,
+    },
+
+    #[error("Failed to materialize middleware '{middleware}' for stage '{stage_name}': {reason}")]
+    MaterializationFailed {
+        middleware: String,
+        stage_name: String,
+        reason: String,
+    },
+}
+
+pub type MiddlewareFactoryResult<T> = Result<T, MiddlewareFactoryError>;
+
+impl MiddlewareFactoryError {
+    pub fn invalid_configuration(middleware: impl Into<String>, reason: impl Into<String>) -> Self {
+        Self::InvalidConfiguration {
+            middleware: middleware.into(),
+            reason: reason.into(),
+        }
+    }
+
+    pub fn unsupported_stage_type(
+        middleware: impl Into<String>,
+        stage_type: StageType,
+        stage_name: impl Into<String>,
+    ) -> Self {
+        Self::UnsupportedStageType {
+            middleware: middleware.into(),
+            stage_type,
+            stage_name: stage_name.into(),
+        }
+    }
+
+    pub fn materialization_failed(
+        middleware: impl Into<String>,
+        stage_name: impl Into<String>,
+        reason: impl Into<String>,
+    ) -> Self {
+        Self::MaterializationFailed {
+            middleware: middleware.into(),
+            stage_name: stage_name.into(),
+            reason: reason.into(),
+        }
+    }
+}
 
 /// Factory that creates middleware with stage context.
 ///
@@ -36,9 +92,9 @@ use super::control::ControlMiddlewareAggregator;
 ///         &self,
 ///         _config: &StageConfig,
 ///         _control_middleware: Arc<ControlMiddlewareAggregator>,
-///     ) -> Box<dyn Middleware> {
+///     ) -> obzenflow_adapters::middleware::MiddlewareFactoryResult<Box<dyn Middleware>> {
 ///         // LoggingMiddleware::new() takes no arguments
-///         Box::new(LoggingMiddleware::new())
+///         Ok(Box::new(LoggingMiddleware::new()))
 ///     }
 ///     
 ///     fn name(&self) -> &str {
@@ -52,7 +108,7 @@ pub trait MiddlewareFactory: Send + Sync {
         &self,
         config: &StageConfig,
         control_middleware: Arc<ControlMiddlewareAggregator>,
-    ) -> Box<dyn Middleware>;
+    ) -> MiddlewareFactoryResult<Box<dyn Middleware>>;
 
     /// Get a descriptive name for this middleware type
     fn name(&self) -> &str;
@@ -66,7 +122,7 @@ pub trait MiddlewareFactory: Send + Sync {
         &self,
         _stage_type: StageType,
         _stage_name: &str,
-    ) -> Result<(), String> {
+    ) -> MiddlewareFactoryResult<()> {
         Ok(())
     }
 
@@ -127,7 +183,7 @@ impl<F: MiddlewareFactory + ?Sized> MiddlewareFactory for Box<F> {
         &self,
         config: &StageConfig,
         control_middleware: Arc<ControlMiddlewareAggregator>,
-    ) -> Box<dyn Middleware> {
+    ) -> MiddlewareFactoryResult<Box<dyn Middleware>> {
         (**self).create(config, control_middleware)
     }
 
@@ -139,7 +195,7 @@ impl<F: MiddlewareFactory + ?Sized> MiddlewareFactory for Box<F> {
         &self,
         stage_type: StageType,
         stage_name: &str,
-    ) -> Result<(), String> {
+    ) -> MiddlewareFactoryResult<()> {
         (**self).validate_configuration(stage_type, stage_name)
     }
 

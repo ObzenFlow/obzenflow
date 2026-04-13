@@ -1073,17 +1073,17 @@ macro_rules! build_typed_flow {
                 for factory in &flow_middleware {
                     factory
                         .validate_configuration(stage_type, descriptor.name())
-                        .map_err(|message| FlowBuildError::StageCreationFailed {
+                        .map_err(|source| FlowBuildError::StageCreationFailed {
                             stage_name: name.to_string(),
-                            message,
+                            source: source.into(),
                         })?;
                 }
                 for factory in descriptor.stage_middleware_factories() {
                     factory
                         .validate_configuration(stage_type, descriptor.name())
-                        .map_err(|message| FlowBuildError::StageCreationFailed {
+                        .map_err(|source| FlowBuildError::StageCreationFailed {
                             stage_name: name.to_string(),
-                            message,
+                            source: source.into(),
                         })?;
                 }
 
@@ -1150,9 +1150,9 @@ macro_rules! build_typed_flow {
                         control_middleware.clone(),
                     )
                     .await
-                    .map_err(|e| FlowBuildError::StageCreationFailed {
+                    .map_err(|source| FlowBuildError::StageCreationFailed {
                         stage_name: name.to_string(),
-                        message: e,
+                        source,
                     })?;
 
                 if stage_type.is_source() {

@@ -166,8 +166,8 @@ impl MiddlewareFactory for InjectFieldFactory {
         &self,
         _config: &StageConfig,
         _control_middleware: Arc<ControlMiddlewareAggregator>,
-    ) -> Box<dyn Middleware> {
-        Box::new(InjectFieldMiddleware)
+    ) -> obzenflow_adapters::middleware::MiddlewareFactoryResult<Box<dyn Middleware>> {
+        Ok(Box::new(InjectFieldMiddleware))
     }
 
     fn name(&self) -> &str {

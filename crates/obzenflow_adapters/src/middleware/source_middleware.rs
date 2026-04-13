@@ -1342,7 +1342,8 @@ mod tests {
         let rate_limiter = RateLimiterBuilder::new(20.0)
             .with_burst(1.0)
             .build()
-            .create(&config, Arc::new(ControlMiddlewareAggregator::new()));
+            .create(&config, Arc::new(ControlMiddlewareAggregator::new()))
+            .expect("rate limiter should materialize for async finite source test");
 
         let mut wrapped =
             MiddlewareAsyncFiniteSource::new(inner, writer_id).with_middleware(rate_limiter);

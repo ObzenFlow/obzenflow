@@ -26,8 +26,8 @@ impl MiddlewareFactory for BackpressureMiddlewareFactory {
         &self,
         _config: &StageConfig,
         _control_middleware: Arc<ControlMiddlewareAggregator>,
-    ) -> Box<dyn Middleware> {
-        Box::new(BackpressureMiddleware)
+    ) -> crate::middleware::MiddlewareFactoryResult<Box<dyn Middleware>> {
+        Ok(Box::new(BackpressureMiddleware))
     }
 
     fn name(&self) -> &str {

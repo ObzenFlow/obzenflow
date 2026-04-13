@@ -244,8 +244,8 @@ mod tests {
             _control_middleware: std::sync::Arc<
                 crate::middleware::control::ControlMiddlewareAggregator,
             >,
-        ) -> Box<dyn Middleware> {
-            Box::new(MockSkipControlMiddleware)
+        ) -> crate::middleware::MiddlewareFactoryResult<Box<dyn Middleware>> {
+            Ok(Box::new(MockSkipControlMiddleware))
         }
         fn name(&self) -> &str {
             "skip_control_events"
@@ -272,8 +272,8 @@ mod tests {
             _control_middleware: std::sync::Arc<
                 crate::middleware::control::ControlMiddlewareAggregator,
             >,
-        ) -> Box<dyn Middleware> {
-            Box::new(MockSkipControlMiddleware) // Reuse the middleware impl
+        ) -> crate::middleware::MiddlewareFactoryResult<Box<dyn Middleware>> {
+            Ok(Box::new(MockSkipControlMiddleware)) // Reuse the middleware impl
         }
         fn name(&self) -> &str {
             "infinite_retry"
@@ -337,7 +337,7 @@ mod tests {
                 _control_middleware: std::sync::Arc<
                     crate::middleware::control::ControlMiddlewareAggregator,
                 >,
-            ) -> Box<dyn Middleware> {
+            ) -> crate::middleware::MiddlewareFactoryResult<Box<dyn Middleware>> {
                 unimplemented!()
             }
             fn name(&self) -> &str {

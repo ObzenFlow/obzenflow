@@ -39,7 +39,7 @@ impl BackoffStrategy {
 
                 // Apply jitter if requested (prevents thundering herd)
                 let final_delay = if *jitter {
-                    let jitter_factor = 1.0 + (rand::random::<f64>() - 0.5) * 0.2; // ±10%
+                    let jitter_factor = 1.0 + (fastrand::f64() - 0.5) * 0.2; // ±10%
                     capped_delay * jitter_factor
                 } else {
                     capped_delay

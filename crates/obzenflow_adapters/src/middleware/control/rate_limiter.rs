@@ -9,7 +9,7 @@
 
 use crate::middleware::{
     ErrorAction, Middleware, MiddlewareAction, MiddlewareContext, MiddlewareFactory,
-    MiddlewareSafety,
+    MiddlewareFactoryError, MiddlewareSafety,
 };
 use obzenflow_core::control_middleware::{RateLimiterMetrics, RateLimiterSnapshotter};
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
@@ -729,17 +729,18 @@ impl MiddlewareFactory for RateLimiterFactory {
         &self,
         config: &StageConfig,
         control_middleware: std::sync::Arc<super::ControlMiddlewareAggregator>,
-    ) -> Box<dyn Middleware> {
-        self.validate_values()
-            .unwrap_or_else(|err| panic!("Invalid rate limiter configuration: {err}"));
+    ) -> crate::middleware::MiddlewareFactoryResult<Box<dyn Middleware>> {
+        self.validate_values().map_err(|err| {
+            MiddlewareFactoryError::materialization_failed(self.name(), &config.name, err)
+        })?;
 
-        Box::new(RateLimiterMiddleware::new(
+        Ok(Box::new(RateLimiterMiddleware::new(
             config.stage_id,
             self.events_per_second,
             self.burst_capacity,
             self.cost_per_event,
             control_middleware,
-        ))
+        )))
     }
 
     fn name(&self) -> &str {
@@ -750,11 +751,11 @@ impl MiddlewareFactory for RateLimiterFactory {
         &self,
         stage_type: StageType,
         stage_name: &str,
-    ) -> Result<(), String> {
+    ) -> crate::middleware::MiddlewareFactoryResult<()> {
         self.validate_values().map_err(|err| {
-            format!(
-                "Invalid rate_limiter configuration for stage '{}' ({stage_type}): {err}",
-                stage_name
+            MiddlewareFactoryError::invalid_configuration(
+                self.name(),
+                format!("stage '{stage_name}' ({stage_type}): {err}"),
             )
         })
     }
@@ -982,7 +983,11 @@ mod tests {
         let err = RateLimiterFactory::new(0.0)
             .validate_configuration(StageType::Transform, "test_stage")
             .expect_err("zero rate should be rejected");
-        assert!(err.contains("events_per_second"));
+        assert!(matches!(
+            err,
+            MiddlewareFactoryError::InvalidConfiguration { .. }
+        ));
+        assert!(err.to_string().contains("events_per_second"));
     }
 
     #[test]
@@ -990,7 +995,11 @@ mod tests {
         let err = RateLimiterFactory::new(-1.0)
             .validate_configuration(StageType::Transform, "test_stage")
             .expect_err("negative rate should be rejected");
-        assert!(err.contains("events_per_second"));
+        assert!(matches!(
+            err,
+            MiddlewareFactoryError::InvalidConfiguration { .. }
+        ));
+        assert!(err.to_string().contains("events_per_second"));
     }
 
     #[test]
@@ -999,7 +1008,11 @@ mod tests {
             .with_cost_per_event(0.0)
             .validate_configuration(StageType::Transform, "test_stage")
             .expect_err("zero cost should be rejected");
-        assert!(err.contains("cost_per_event"));
+        assert!(matches!(
+            err,
+            MiddlewareFactoryError::InvalidConfiguration { .. }
+        ));
+        assert!(err.to_string().contains("cost_per_event"));
     }
 
     #[test]
@@ -1007,13 +1020,21 @@ mod tests {
         let inf_err = RateLimiterFactory::new(f64::INFINITY)
             .validate_configuration(StageType::Transform, "test_stage")
             .expect_err("infinite rate should be rejected");
-        assert!(inf_err.contains("events_per_second"));
+        assert!(matches!(
+            inf_err,
+            MiddlewareFactoryError::InvalidConfiguration { .. }
+        ));
+        assert!(inf_err.to_string().contains("events_per_second"));
 
         let nan_err = RateLimiterFactory::new(10.0)
             .with_cost_per_event(f64::NAN)
             .validate_configuration(StageType::Transform, "test_stage")
             .expect_err("NaN cost should be rejected");
-        assert!(nan_err.contains("cost_per_event"));
+        assert!(matches!(
+            nan_err,
+            MiddlewareFactoryError::InvalidConfiguration { .. }
+        ));
+        assert!(nan_err.to_string().contains("cost_per_event"));
     }
 
     #[test]
@@ -1038,8 +1059,12 @@ mod tests {
             .with_cost_per_event(5.0)
             .validate_configuration(StageType::Transform, "test_stage")
             .expect_err("burst smaller than cost should be rejected");
-        assert!(err.contains("burst_capacity"));
-        assert!(err.contains("cost_per_event"));
+        assert!(matches!(
+            err,
+            MiddlewareFactoryError::InvalidConfiguration { .. }
+        ));
+        assert!(err.to_string().contains("burst_capacity"));
+        assert!(err.to_string().contains("cost_per_event"));
     }
 
     #[test]
@@ -1127,7 +1152,8 @@ mod tests {
     fn test_rate_limiter_snapshotter_does_not_hold_stats_while_waiting_on_bucket() {
         let control = Arc::new(ControlMiddlewareAggregator::new());
         let stage_id = StageId::new();
-        let middleware = RateLimiterMiddleware::new(stage_id, 10.0, Some(10.0), 1.0, control.clone());
+        let middleware =
+            RateLimiterMiddleware::new(stage_id, 10.0, Some(10.0), 1.0, control.clone());
         let snapshotter = control
             .rate_limiter_snapshotter(&stage_id)
             .expect("rate limiter snapshotter should be registered");

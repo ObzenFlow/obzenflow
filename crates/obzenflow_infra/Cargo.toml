@@ -48,7 +48,7 @@ reqwest = { workspace = true, optional = true }
 rustls-native-certs = { workspace = true, optional = true }
 
 # AI provider substrate (optional)
-rig_rs = { package = "rig-core", version = "0.30", default-features = false, optional = true }
+rig_rs = { package = "rig-core", version = "0.34", default-features = false, optional = true }
 tiktoken-rs = { version = "0.9", optional = true }
 
 [features]

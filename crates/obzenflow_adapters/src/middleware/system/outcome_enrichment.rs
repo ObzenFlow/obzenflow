@@ -158,8 +158,8 @@ impl MiddlewareFactory for OutcomeEnrichmentMiddlewareFactory {
         _control_middleware: std::sync::Arc<
             crate::middleware::control::ControlMiddlewareAggregator,
         >,
-    ) -> Box<dyn Middleware> {
-        Box::new(OutcomeEnrichmentMiddleware::new(&config.name))
+    ) -> crate::middleware::MiddlewareFactoryResult<Box<dyn Middleware>> {
+        Ok(Box::new(OutcomeEnrichmentMiddleware::new(&config.name)))
     }
 
     fn name(&self) -> &str {

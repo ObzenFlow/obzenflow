@@ -8,6 +8,7 @@
 //! descriptor that encapsulates both the handler and how to create its supervisor.
 
 use crate::dsl::typing::StageTypingMetadata;
+use crate::dsl::StageCreationResult;
 use crate::stage_handle_adapter::StageHandleAdapter;
 use async_trait::async_trait;
 use obzenflow_adapters::middleware::control::ControlMiddlewareAggregator;
@@ -157,7 +158,7 @@ pub trait StageDescriptor: Send + Sync {
         self: Box<Self>,
         config: StageConfig,
         resources: StageResources,
-    ) -> Result<BoxedStageHandle, String> {
+    ) -> StageCreationResult<BoxedStageHandle> {
         // Default implementation without flow middleware
         self.create_handle_with_flow_middleware(
             config,
@@ -175,7 +176,7 @@ pub trait StageDescriptor: Send + Sync {
         resources: StageResources,
         flow_middleware: Vec<Box<dyn MiddlewareFactory>>,
         control_middleware: Arc<ControlMiddlewareAggregator>,
-    ) -> Result<BoxedStageHandle, String>;
+    ) -> StageCreationResult<BoxedStageHandle>;
 
     /// Structural: return configured stage-level middleware names (for topology)
     ///
@@ -262,7 +263,7 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> S
         resources: StageResources,
         flow_middleware: Vec<Box<dyn MiddlewareFactory>>,
         control_middleware: Arc<ControlMiddlewareAggregator>,
-    ) -> Result<BoxedStageHandle, String> {
+    ) -> StageCreationResult<BoxedStageHandle> {
         let writer_id = WriterId::from(config.stage_id);
 
         // Create instrumentation configuration
@@ -304,10 +305,10 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> S
         for spec in resolved.middleware.into_iter() {
             if spec.factory.name() == "circuit_breaker" {
                 has_circuit_breaker = true;
-                user_middleware.push(spec.factory.create(&config, control_middleware.clone()));
+                user_middleware.push(spec.factory.create(&config, control_middleware.clone())?);
                 continue;
             }
-            user_middleware.push(spec.factory.create(&config, control_middleware.clone()));
+            user_middleware.push(spec.factory.create(&config, control_middleware.clone())?);
         }
         all_middleware.extend(user_middleware);
 
@@ -443,7 +444,7 @@ impl<H: AsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
         resources: StageResources,
         flow_middleware: Vec<Box<dyn MiddlewareFactory>>,
         control_middleware: Arc<ControlMiddlewareAggregator>,
-    ) -> Result<BoxedStageHandle, String> {
+    ) -> StageCreationResult<BoxedStageHandle> {
         let writer_id = WriterId::from(config.stage_id);
         let poll_timeout = self.poll_timeout;
 
@@ -478,10 +479,10 @@ impl<H: AsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
         for spec in resolved.middleware.into_iter() {
             if spec.factory.name() == "circuit_breaker" {
                 has_circuit_breaker = true;
-                user_middleware.push(spec.factory.create(&config, control_middleware.clone()));
+                user_middleware.push(spec.factory.create(&config, control_middleware.clone())?);
                 continue;
             }
-            user_middleware.push(spec.factory.create(&config, control_middleware.clone()));
+            user_middleware.push(spec.factory.create(&config, control_middleware.clone())?);
         }
         all_middleware.extend(user_middleware);
 
@@ -584,7 +585,7 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
         resources: StageResources,
         flow_middleware: Vec<Box<dyn MiddlewareFactory>>,
         control_middleware: Arc<ControlMiddlewareAggregator>,
-    ) -> Result<BoxedStageHandle, String> {
+    ) -> StageCreationResult<BoxedStageHandle> {
         let writer_id = WriterId::from(config.stage_id);
 
         // Create instrumentation configuration
@@ -626,10 +627,10 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
         for spec in resolved.middleware.into_iter() {
             if spec.factory.name() == "circuit_breaker" {
                 has_circuit_breaker = true;
-                user_middleware.push(spec.factory.create(&config, control_middleware.clone()));
+                user_middleware.push(spec.factory.create(&config, control_middleware.clone())?);
                 continue;
             }
-            user_middleware.push(spec.factory.create(&config, control_middleware.clone()));
+            user_middleware.push(spec.factory.create(&config, control_middleware.clone())?);
         }
         all_middleware.extend(user_middleware);
 
@@ -765,7 +766,7 @@ impl<H: AsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
         resources: StageResources,
         flow_middleware: Vec<Box<dyn MiddlewareFactory>>,
         control_middleware: Arc<ControlMiddlewareAggregator>,
-    ) -> Result<BoxedStageHandle, String> {
+    ) -> StageCreationResult<BoxedStageHandle> {
         let writer_id = WriterId::from(config.stage_id);
         let poll_timeout = self.poll_timeout;
 
@@ -798,10 +799,10 @@ impl<H: AsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
         for spec in resolved.middleware.into_iter() {
             if spec.factory.name() == "circuit_breaker" {
                 has_circuit_breaker = true;
-                user_middleware.push(spec.factory.create(&config, control_middleware.clone()));
+                user_middleware.push(spec.factory.create(&config, control_middleware.clone())?);
                 continue;
             }
-            user_middleware.push(spec.factory.create(&config, control_middleware.clone()));
+            user_middleware.push(spec.factory.create(&config, control_middleware.clone())?);
         }
         all_middleware.extend(user_middleware);
 
@@ -901,7 +902,7 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Stag
         resources: StageResources,
         flow_middleware: Vec<Box<dyn MiddlewareFactory>>,
         control_middleware: Arc<ControlMiddlewareAggregator>,
-    ) -> Result<BoxedStageHandle, String> {
+    ) -> StageCreationResult<BoxedStageHandle> {
         // Validate middleware safety
         for factory in &self.middleware {
             // Validate safety
@@ -951,7 +952,7 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Stag
             .middleware
             .into_iter()
             .map(|spec| spec.factory.create(&config, control_middleware.clone()))
-            .collect();
+            .collect::<Result<_, _>>()?;
         all_middleware.extend(user_middleware);
 
         instrumentation
@@ -1042,7 +1043,7 @@ impl<H: AsyncTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
         resources: StageResources,
         flow_middleware: Vec<Box<dyn MiddlewareFactory>>,
         control_middleware: Arc<ControlMiddlewareAggregator>,
-    ) -> Result<BoxedStageHandle, String> {
+    ) -> StageCreationResult<BoxedStageHandle> {
         // Validate middleware safety
         for factory in &self.middleware {
             let validation_result =
@@ -1090,7 +1091,7 @@ impl<H: AsyncTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
             .middleware
             .into_iter()
             .map(|spec| spec.factory.create(&config, control_middleware.clone()))
-            .collect();
+            .collect::<Result<_, _>>()?;
         all_middleware.extend(user_middleware);
 
         instrumentation
@@ -1182,7 +1183,7 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
         resources: StageResources,
         flow_middleware: Vec<Box<dyn MiddlewareFactory>>,
         control_middleware: Arc<ControlMiddlewareAggregator>,
-    ) -> Result<BoxedStageHandle, String> {
+    ) -> StageCreationResult<BoxedStageHandle> {
         // Validate middleware safety
         for factory in &self.middleware {
             // Validate safety
@@ -1231,7 +1232,7 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
             .middleware
             .into_iter()
             .map(|spec| spec.factory.create(&config, control_middleware.clone()))
-            .collect();
+            .collect::<Result<_, _>>()?;
         all_middleware.extend(user_middleware);
 
         instrumentation
@@ -1471,7 +1472,7 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Stage
         resources: StageResources,
         flow_middleware: Vec<Box<dyn MiddlewareFactory>>,
         control_middleware: Arc<ControlMiddlewareAggregator>,
-    ) -> Result<BoxedStageHandle, String> {
+    ) -> StageCreationResult<BoxedStageHandle> {
         // Validate middleware safety
         for factory in &self.middleware {
             let validation_result =
@@ -1519,7 +1520,7 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Stage
             .middleware
             .into_iter()
             .map(|spec| spec.factory.create(&config, control_middleware.clone()))
-            .collect();
+            .collect::<Result<_, _>>()?;
         all_middleware.extend(user_middleware);
 
         instrumentation
@@ -1651,7 +1652,7 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
         resources: StageResources,
         flow_middleware: Vec<Box<dyn MiddlewareFactory>>,
         control_middleware: Arc<ControlMiddlewareAggregator>,
-    ) -> Result<BoxedStageHandle, String> {
+    ) -> StageCreationResult<BoxedStageHandle> {
         // Validate middleware safety
         for factory in &self.middleware {
             let validation_result =
@@ -1699,7 +1700,7 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
             .middleware
             .into_iter()
             .map(|spec| spec.factory.create(&config, control_middleware.clone()))
-            .collect();
+            .collect::<Result<_, _>>()?;
         all_middleware.extend(user_middleware);
 
         instrumentation
@@ -1761,7 +1762,7 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
             if let Some((first, rest)) = resources.upstream_journals.split_first() {
                 (first.1.clone(), rest.to_vec())
             } else {
-                return Err("Join stage requires at least one upstream journal".to_string());
+                return Err("Join stage requires at least one upstream journal".into());
             };
 
         // Use the builder to create the handle

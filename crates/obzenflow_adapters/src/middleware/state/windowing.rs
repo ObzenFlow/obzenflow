@@ -268,7 +268,7 @@ impl MiddlewareFactory for WindowingMiddlewareFactory {
         _control_middleware: std::sync::Arc<
             crate::middleware::control::ControlMiddlewareAggregator,
         >,
-    ) -> Box<dyn Middleware> {
+    ) -> crate::middleware::MiddlewareFactoryResult<Box<dyn Middleware>> {
         let shared_window_start = if let Ok(mut pending) = self.pending_shared_state.lock() {
             if let Some(shared) = pending.pending_for_create.pop_front() {
                 shared
@@ -286,11 +286,11 @@ impl MiddlewareFactory for WindowingMiddlewareFactory {
             Arc::new(RwLock::new(None))
         };
 
-        Box::new(WindowingMiddleware::new(
+        Ok(Box::new(WindowingMiddleware::new(
             self.window_duration,
             shared_window_start,
             self.create_aggregation_fn(),
-        ))
+        )))
     }
 
     fn name(&self) -> &str {
@@ -431,6 +431,9 @@ mod tests {
             obzenflow_runtime::stages::common::control_strategies::ProcessingContext::new();
 
         let action = strategy.handle_eof(&envelope, &mut processing_ctx);
-        assert!(matches!(action, obzenflow_runtime::stages::common::control_strategies::ControlEventAction::Delay(_)));
+        assert!(matches!(
+            action,
+            obzenflow_runtime::stages::common::control_strategies::ControlEventAction::Delay(_)
+        ));
     }
 }

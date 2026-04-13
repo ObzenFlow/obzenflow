@@ -81,7 +81,6 @@ indexmap = "2"
 hdrhistogram = "7.5"
 
 # Randomness / system
-rand = "0.8"
 sysinfo = "0.29"
 
 # I/O and formats

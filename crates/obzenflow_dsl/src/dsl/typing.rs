@@ -5,6 +5,7 @@
 //! Types-first metadata and descriptor wrappers for the DSL layer.
 
 use crate::dsl::stage_descriptor::StageDescriptor;
+use crate::dsl::StageCreationResult;
 use async_trait::async_trait;
 use obzenflow_adapters::middleware::{control::ControlMiddlewareAggregator, MiddlewareFactory};
 use obzenflow_core::event::context::StageType;
@@ -834,7 +835,7 @@ impl StageDescriptor for TypedStageDescriptor {
         resources: StageResources,
         flow_middleware: Vec<Box<dyn MiddlewareFactory>>,
         control_middleware: Arc<ControlMiddlewareAggregator>,
-    ) -> Result<BoxedStageHandle, String> {
+    ) -> StageCreationResult<BoxedStageHandle> {
         self.inner
             .create_handle_with_flow_middleware(
                 config,

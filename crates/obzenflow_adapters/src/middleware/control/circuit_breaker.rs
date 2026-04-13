@@ -8,12 +8,15 @@
 //! cascading failures. It emits raw events that can be consumed by
 //! monitoring and SLI middleware.
 
-use crate::middleware::{Middleware, MiddlewareAction, MiddlewareContext, MiddlewareFactory};
+use crate::middleware::{
+    Middleware, MiddlewareAction, MiddlewareContext, MiddlewareFactory, MiddlewareFactoryError,
+};
 use obzenflow_core::control_middleware::{
     cb_state, CircuitBreakerContractMode, CircuitBreakerMetrics, CircuitBreakerSnapshotter,
     ControlMiddlewareProvider, NoControlMiddleware,
 };
 use obzenflow_core::event::chain_event::ChainEvent;
+use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::payloads::observability_payload::{
     CircuitBreakerEvent, MiddlewareLifecycle, ObservabilityPayload,
 };
@@ -1986,7 +1989,7 @@ impl MiddlewareFactory for CircuitBreakerFactory {
         &self,
         config: &StageConfig,
         control_middleware: std::sync::Arc<super::ControlMiddlewareAggregator>,
-    ) -> Box<dyn Middleware> {
+    ) -> crate::middleware::MiddlewareFactoryResult<Box<dyn Middleware>> {
         // Determine the effective contract mode for this stage. BreakerAware
         // without any fallback configured is unsafe because it could mask
         // genuine data loss. In that case we degrade to Strict semantics and
@@ -2004,15 +2007,22 @@ impl MiddlewareFactory for CircuitBreakerFactory {
             }
         }
 
+        if self.threshold == 0 || self.threshold > u32::MAX as usize {
+            return Err(MiddlewareFactoryError::materialization_failed(
+                self.name(),
+                &config.name,
+                format!(
+                    "CircuitBreaker threshold must be in 1..=u32::MAX, got {}",
+                    self.threshold
+                ),
+            ));
+        }
+
         // Determine failure mode; default to a consecutive-failure threshold
         // equal to `threshold` when not explicitly configured.
         let failure_mode = self.failure_mode.clone().unwrap_or_else(|| {
-            assert!(
-                self.threshold > 0 && self.threshold <= u32::MAX as usize,
-                "CircuitBreaker threshold must be in 1..=u32::MAX"
-            );
             let max_failures = NonZeroU32::new(self.threshold as u32)
-                .expect("CircuitBreaker threshold must be greater than zero");
+                .expect("CircuitBreaker threshold validity must be checked before materialisation");
             CircuitBreakerFailureMode::Consecutive { max_failures }
         });
 
@@ -2148,11 +2158,29 @@ impl MiddlewareFactory for CircuitBreakerFactory {
             has_fallback,
         );
 
-        Box::new(middleware)
+        Ok(Box::new(middleware))
     }
 
     fn name(&self) -> &str {
         "circuit_breaker"
+    }
+
+    fn validate_configuration(
+        &self,
+        _stage_type: StageType,
+        _stage_name: &str,
+    ) -> crate::middleware::MiddlewareFactoryResult<()> {
+        if self.threshold == 0 || self.threshold > u32::MAX as usize {
+            return Err(MiddlewareFactoryError::invalid_configuration(
+                self.name(),
+                format!(
+                    "CircuitBreaker threshold must be in 1..=u32::MAX, got {}",
+                    self.threshold
+                ),
+            ));
+        }
+
+        Ok(())
     }
 
     fn create_control_strategy(&self) -> Option<Box<dyn ControlEventStrategy>> {
@@ -2440,7 +2468,9 @@ mod tests {
             .create_control_strategy()
             .expect("expected circuit breaker control strategy");
 
-        let _middleware = factory.create(&config, control_middleware.clone());
+        let _middleware = factory
+            .create(&config, control_middleware.clone())
+            .expect("circuit breaker middleware should materialize");
 
         let state = control_middleware
             .circuit_breaker_state(&stage_id)
@@ -2464,7 +2494,9 @@ mod tests {
         };
 
         let factory_2 = CircuitBreakerFactory::new(3);
-        let _middleware_2 = factory_2.create(&config_2, control_middleware.clone());
+        let _middleware_2 = factory_2
+            .create(&config_2, control_middleware.clone())
+            .expect("second circuit breaker middleware should materialize");
         let strategy_2 = factory_2
             .create_control_strategy()
             .expect("expected circuit breaker control strategy");

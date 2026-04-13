@@ -102,7 +102,7 @@ mod system;
 // directly, and dashboards/query assets live outside the middleware API.
 
 // Core trait exports
-pub use middleware_factory::MiddlewareFactory;
+pub use middleware_factory::{MiddlewareFactory, MiddlewareFactoryError, MiddlewareFactoryResult};
 pub use middleware_safety::MiddlewareSafety;
 pub use middleware_trait::{ErrorAction, Middleware, MiddlewareAction};
 
