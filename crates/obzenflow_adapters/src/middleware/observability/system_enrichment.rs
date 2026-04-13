@@ -221,6 +221,14 @@ impl MiddlewareFactory for SystemEnrichmentMiddlewareFactory {
     fn name(&self) -> &str {
         "system_enrichment"
     }
+
+    fn validate_configuration(
+        &self,
+        _stage_type: StageType,
+        _stage_name: &str,
+    ) -> crate::middleware::MiddlewareFactoryResult<()> {
+        Ok(())
+    }
 }
 
 /// Convenience function to create a system enrichment middleware factory

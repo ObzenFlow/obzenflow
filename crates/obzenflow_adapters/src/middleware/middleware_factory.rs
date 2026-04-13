@@ -100,6 +100,14 @@ impl MiddlewareFactoryError {
 ///     fn name(&self) -> &str {
 ///         "logging"
 ///     }
+///
+///     fn validate_configuration(
+///         &self,
+///         _stage_type: obzenflow_core::event::context::StageType,
+///         _stage_name: &str,
+///     ) -> obzenflow_adapters::middleware::MiddlewareFactoryResult<()> {
+///         Ok(())
+///     }
 /// }
 /// ```
 pub trait MiddlewareFactory: Send + Sync {
@@ -120,11 +128,9 @@ pub trait MiddlewareFactory: Send + Sync {
     /// invalid for the given stage.
     fn validate_configuration(
         &self,
-        _stage_type: StageType,
-        _stage_name: &str,
-    ) -> MiddlewareFactoryResult<()> {
-        Ok(())
-    }
+        stage_type: StageType,
+        stage_name: &str,
+    ) -> MiddlewareFactoryResult<()>;
 
     /// Create a control event strategy if this middleware needs one
     ///

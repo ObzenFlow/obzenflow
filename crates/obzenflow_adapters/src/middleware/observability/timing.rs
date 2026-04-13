@@ -139,6 +139,14 @@ impl MiddlewareFactory for TimingMiddlewareFactory {
     fn name(&self) -> &str {
         "timing"
     }
+
+    fn validate_configuration(
+        &self,
+        _stage_type: obzenflow_core::event::context::StageType,
+        _stage_name: &str,
+    ) -> crate::middleware::MiddlewareFactoryResult<()> {
+        Ok(())
+    }
 }
 
 /// Convenience function to create a timing middleware factory

@@ -165,6 +165,14 @@ impl MiddlewareFactory for OutcomeEnrichmentMiddlewareFactory {
     fn name(&self) -> &str {
         "outcome_enrichment"
     }
+
+    fn validate_configuration(
+        &self,
+        _stage_type: obzenflow_core::event::context::StageType,
+        _stage_name: &str,
+    ) -> crate::middleware::MiddlewareFactoryResult<()> {
+        Ok(())
+    }
 }
 
 pub fn outcome_enrichment() -> Box<dyn MiddlewareFactory> {

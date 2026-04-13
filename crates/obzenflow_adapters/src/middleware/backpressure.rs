@@ -34,6 +34,14 @@ impl MiddlewareFactory for BackpressureMiddlewareFactory {
         "backpressure"
     }
 
+    fn validate_configuration(
+        &self,
+        _stage_type: StageType,
+        _stage_name: &str,
+    ) -> crate::middleware::MiddlewareFactoryResult<()> {
+        Ok(())
+    }
+
     fn supported_stage_types(&self) -> &[StageType] {
         &[
             StageType::FiniteSource,

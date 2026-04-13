@@ -1800,6 +1800,17 @@ impl CircuitBreakerFactory {
         }
     }
 
+    fn validate_threshold(&self) -> Result<(), String> {
+        if self.threshold == 0 || self.threshold > u32::MAX as usize {
+            return Err(format!(
+                "CircuitBreaker threshold must be in 1..=u32::MAX, got {}",
+                self.threshold
+            ));
+        }
+
+        Ok(())
+    }
+
     /// Set the cooldown duration before attempting to close the circuit
     pub fn with_cooldown(mut self, duration: Duration) -> Self {
         self.cooldown = duration;
@@ -2007,16 +2018,9 @@ impl MiddlewareFactory for CircuitBreakerFactory {
             }
         }
 
-        if self.threshold == 0 || self.threshold > u32::MAX as usize {
-            return Err(MiddlewareFactoryError::materialization_failed(
-                self.name(),
-                &config.name,
-                format!(
-                    "CircuitBreaker threshold must be in 1..=u32::MAX, got {}",
-                    self.threshold
-                ),
-            ));
-        }
+        self.validate_threshold().map_err(|err| {
+            MiddlewareFactoryError::materialization_failed(self.name(), &config.name, err)
+        })?;
 
         // Determine failure mode; default to a consecutive-failure threshold
         // equal to `threshold` when not explicitly configured.
@@ -2170,17 +2174,8 @@ impl MiddlewareFactory for CircuitBreakerFactory {
         _stage_type: StageType,
         _stage_name: &str,
     ) -> crate::middleware::MiddlewareFactoryResult<()> {
-        if self.threshold == 0 || self.threshold > u32::MAX as usize {
-            return Err(MiddlewareFactoryError::invalid_configuration(
-                self.name(),
-                format!(
-                    "CircuitBreaker threshold must be in 1..=u32::MAX, got {}",
-                    self.threshold
-                ),
-            ));
-        }
-
-        Ok(())
+        self.validate_threshold()
+            .map_err(|err| MiddlewareFactoryError::invalid_configuration(self.name(), err))
     }
 
     fn create_control_strategy(&self) -> Option<Box<dyn ControlEventStrategy>> {

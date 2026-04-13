@@ -46,6 +46,14 @@ mod tests {
         fn name(&self) -> &str {
             self.0
         }
+
+        fn validate_configuration(
+            &self,
+            _stage_type: obzenflow_core::event::context::StageType,
+            _stage_name: &str,
+        ) -> obzenflow_adapters::middleware::MiddlewareFactoryResult<()> {
+            Ok(())
+        }
     }
 
     #[derive(Debug, Clone)]

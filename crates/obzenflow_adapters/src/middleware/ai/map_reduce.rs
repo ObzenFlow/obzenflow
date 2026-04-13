@@ -303,6 +303,14 @@ where
     fn name(&self) -> &str {
         "ai_map_reduce.chunk_manifest"
     }
+
+    fn validate_configuration(
+        &self,
+        _stage_type: obzenflow_core::event::context::StageType,
+        _stage_name: &str,
+    ) -> crate::middleware::MiddlewareFactoryResult<()> {
+        Ok(())
+    }
 }
 
 // ============================================================================
@@ -519,6 +527,14 @@ where
 
     fn name(&self) -> &str {
         "ai_map_reduce.map_wrapper"
+    }
+
+    fn validate_configuration(
+        &self,
+        _stage_type: obzenflow_core::event::context::StageType,
+        _stage_name: &str,
+    ) -> crate::middleware::MiddlewareFactoryResult<()> {
+        Ok(())
     }
 }
 
