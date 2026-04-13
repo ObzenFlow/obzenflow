@@ -747,19 +747,6 @@ impl MiddlewareFactory for RateLimiterFactory {
         "rate_limiter"
     }
 
-    fn validate_configuration(
-        &self,
-        stage_type: StageType,
-        stage_name: &str,
-    ) -> crate::middleware::MiddlewareFactoryResult<()> {
-        self.validate_values().map_err(|err| {
-            MiddlewareFactoryError::invalid_configuration(
-                self.name(),
-                format!("stage '{stage_name}' ({stage_type}): {err}"),
-            )
-        })
-    }
-
     fn supported_stage_types(&self) -> &[StageType] {
         // Rate limiting makes sense for all stage types
         &[
@@ -810,6 +797,28 @@ mod tests {
     use obzenflow_core::control_middleware::ControlMiddlewareProvider;
     use obzenflow_core::event::chain_event::ChainEventContent;
     use obzenflow_core::event::{ChainEventFactory, WriterId};
+    use obzenflow_runtime::pipeline::config::StageConfig;
+
+    fn test_stage_config(name: &str) -> StageConfig {
+        StageConfig {
+            stage_id: StageId::new(),
+            name: name.to_string(),
+            flow_name: "test_flow".to_string(),
+            cycle_guard: None,
+        }
+    }
+
+    fn materialize_err(factory: RateLimiterFactory) -> MiddlewareFactoryError {
+        match factory.create(
+            &test_stage_config("test_stage"),
+            Arc::new(ControlMiddlewareAggregator::new()),
+        ) {
+            Ok(_) => {
+                panic!("invalid rate limiter configuration should fail during materialisation")
+            }
+            Err(err) => err,
+        }
+    }
 
     #[test]
     fn test_token_bucket_basic() {
@@ -980,59 +989,47 @@ mod tests {
 
     #[test]
     fn test_rate_limiter_rejects_zero_rate() {
-        let err = RateLimiterFactory::new(0.0)
-            .validate_configuration(StageType::Transform, "test_stage")
-            .expect_err("zero rate should be rejected");
+        let err = materialize_err(RateLimiterFactory::new(0.0));
         assert!(matches!(
             err,
-            MiddlewareFactoryError::InvalidConfiguration { .. }
+            MiddlewareFactoryError::MaterializationFailed { .. }
         ));
         assert!(err.to_string().contains("events_per_second"));
     }
 
     #[test]
     fn test_rate_limiter_rejects_negative_rate() {
-        let err = RateLimiterFactory::new(-1.0)
-            .validate_configuration(StageType::Transform, "test_stage")
-            .expect_err("negative rate should be rejected");
+        let err = materialize_err(RateLimiterFactory::new(-1.0));
         assert!(matches!(
             err,
-            MiddlewareFactoryError::InvalidConfiguration { .. }
+            MiddlewareFactoryError::MaterializationFailed { .. }
         ));
         assert!(err.to_string().contains("events_per_second"));
     }
 
     #[test]
     fn test_rate_limiter_rejects_zero_cost() {
-        let err = RateLimiterFactory::new(10.0)
-            .with_cost_per_event(0.0)
-            .validate_configuration(StageType::Transform, "test_stage")
-            .expect_err("zero cost should be rejected");
+        let err = materialize_err(RateLimiterFactory::new(10.0).with_cost_per_event(0.0));
         assert!(matches!(
             err,
-            MiddlewareFactoryError::InvalidConfiguration { .. }
+            MiddlewareFactoryError::MaterializationFailed { .. }
         ));
         assert!(err.to_string().contains("cost_per_event"));
     }
 
     #[test]
     fn test_rate_limiter_rejects_non_finite_values() {
-        let inf_err = RateLimiterFactory::new(f64::INFINITY)
-            .validate_configuration(StageType::Transform, "test_stage")
-            .expect_err("infinite rate should be rejected");
+        let inf_err = materialize_err(RateLimiterFactory::new(f64::INFINITY));
         assert!(matches!(
             inf_err,
-            MiddlewareFactoryError::InvalidConfiguration { .. }
+            MiddlewareFactoryError::MaterializationFailed { .. }
         ));
         assert!(inf_err.to_string().contains("events_per_second"));
 
-        let nan_err = RateLimiterFactory::new(10.0)
-            .with_cost_per_event(f64::NAN)
-            .validate_configuration(StageType::Transform, "test_stage")
-            .expect_err("NaN cost should be rejected");
+        let nan_err = materialize_err(RateLimiterFactory::new(10.0).with_cost_per_event(f64::NAN));
         assert!(matches!(
             nan_err,
-            MiddlewareFactoryError::InvalidConfiguration { .. }
+            MiddlewareFactoryError::MaterializationFailed { .. }
         ));
         assert!(nan_err.to_string().contains("cost_per_event"));
     }
@@ -1054,14 +1051,14 @@ mod tests {
 
     #[test]
     fn test_rate_limiter_rejects_explicit_burst_smaller_than_cost() {
-        let err = RateLimiterFactory::new(10.0)
-            .with_burst(2.0)
-            .with_cost_per_event(5.0)
-            .validate_configuration(StageType::Transform, "test_stage")
-            .expect_err("burst smaller than cost should be rejected");
+        let err = materialize_err(
+            RateLimiterFactory::new(10.0)
+                .with_burst(2.0)
+                .with_cost_per_event(5.0),
+        );
         assert!(matches!(
             err,
-            MiddlewareFactoryError::InvalidConfiguration { .. }
+            MiddlewareFactoryError::MaterializationFailed { .. }
         ));
         assert!(err.to_string().contains("burst_capacity"));
         assert!(err.to_string().contains("cost_per_event"));

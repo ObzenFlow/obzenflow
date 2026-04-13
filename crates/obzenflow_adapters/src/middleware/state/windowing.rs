@@ -302,14 +302,6 @@ impl MiddlewareFactory for WindowingMiddlewareFactory {
         }
     }
 
-    fn validate_configuration(
-        &self,
-        _stage_type: StageType,
-        _stage_name: &str,
-    ) -> crate::middleware::MiddlewareFactoryResult<()> {
-        Ok(())
-    }
-
     fn create_control_strategy(&self) -> Option<Box<dyn ControlEventStrategy>> {
         let shared_window_start = if let Ok(mut pending) = self.pending_shared_state.lock() {
             if let Some(shared) = pending.pending_for_strategy.pop_front() {

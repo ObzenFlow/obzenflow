@@ -173,14 +173,6 @@ impl MiddlewareFactory for InjectFieldFactory {
     fn name(&self) -> &str {
         "inject_field"
     }
-
-    fn validate_configuration(
-        &self,
-        _stage_type: obzenflow_core::event::context::StageType,
-        _stage_name: &str,
-    ) -> obzenflow_adapters::middleware::MiddlewareFactoryResult<()> {
-        Ok(())
-    }
 }
 
 #[tokio::test]

@@ -16,7 +16,6 @@ use obzenflow_core::control_middleware::{
     ControlMiddlewareProvider, NoControlMiddleware,
 };
 use obzenflow_core::event::chain_event::ChainEvent;
-use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::payloads::observability_payload::{
     CircuitBreakerEvent, MiddlewareLifecycle, ObservabilityPayload,
 };
@@ -2167,15 +2166,6 @@ impl MiddlewareFactory for CircuitBreakerFactory {
 
     fn name(&self) -> &str {
         "circuit_breaker"
-    }
-
-    fn validate_configuration(
-        &self,
-        _stage_type: StageType,
-        _stage_name: &str,
-    ) -> crate::middleware::MiddlewareFactoryResult<()> {
-        self.validate_threshold()
-            .map_err(|err| MiddlewareFactoryError::invalid_configuration(self.name(), err))
     }
 
     fn create_control_strategy(&self) -> Option<Box<dyn ControlEventStrategy>> {

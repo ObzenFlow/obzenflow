@@ -1070,23 +1070,6 @@ macro_rules! build_typed_flow {
                 // Flow-level middleware list (stage-local middleware is resolved later).
                 let flow_middleware = create_flow_middleware();
 
-                for factory in &flow_middleware {
-                    factory
-                        .validate_configuration(stage_type, descriptor.name())
-                        .map_err(|source| FlowBuildError::StageCreationFailed {
-                            stage_name: name.to_string(),
-                            source: source.into(),
-                        })?;
-                }
-                for factory in descriptor.stage_middleware_factories() {
-                    factory
-                        .validate_configuration(stage_type, descriptor.name())
-                        .map_err(|source| FlowBuildError::StageCreationFailed {
-                            stage_name: name.to_string(),
-                            source: source.into(),
-                        })?;
-                }
-
                 // Structural: compute final middleware stack config for this stage (FLOWIP-059)
                 let flow_names: Vec<String> = flow_middleware
                     .iter()

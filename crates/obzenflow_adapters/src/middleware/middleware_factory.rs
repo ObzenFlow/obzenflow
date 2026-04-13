@@ -100,14 +100,6 @@ impl MiddlewareFactoryError {
 ///     fn name(&self) -> &str {
 ///         "logging"
 ///     }
-///
-///     fn validate_configuration(
-///         &self,
-///         _stage_type: obzenflow_core::event::context::StageType,
-///         _stage_name: &str,
-///     ) -> obzenflow_adapters::middleware::MiddlewareFactoryResult<()> {
-///         Ok(())
-///     }
 /// }
 /// ```
 pub trait MiddlewareFactory: Send + Sync {
@@ -120,17 +112,6 @@ pub trait MiddlewareFactory: Send + Sync {
 
     /// Get a descriptive name for this middleware type
     fn name(&self) -> &str;
-
-    /// Validate static configuration before stage materialisation.
-    ///
-    /// This runs while the flow is being built, before `create()` is called.
-    /// Factories should return an actionable error when their configuration is
-    /// invalid for the given stage.
-    fn validate_configuration(
-        &self,
-        stage_type: StageType,
-        stage_name: &str,
-    ) -> MiddlewareFactoryResult<()>;
 
     /// Create a control event strategy if this middleware needs one
     ///
@@ -195,14 +176,6 @@ impl<F: MiddlewareFactory + ?Sized> MiddlewareFactory for Box<F> {
 
     fn name(&self) -> &str {
         (**self).name()
-    }
-
-    fn validate_configuration(
-        &self,
-        stage_type: StageType,
-        stage_name: &str,
-    ) -> MiddlewareFactoryResult<()> {
-        (**self).validate_configuration(stage_type, stage_name)
     }
 
     fn create_control_strategy(&self) -> Option<Box<dyn ControlEventStrategy>> {

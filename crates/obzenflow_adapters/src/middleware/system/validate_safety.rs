@@ -250,13 +250,6 @@ mod tests {
         fn name(&self) -> &str {
             "skip_control_events"
         }
-        fn validate_configuration(
-            &self,
-            _stage_type: StageType,
-            _stage_name: &str,
-        ) -> crate::middleware::MiddlewareFactoryResult<()> {
-            Ok(())
-        }
         fn supported_stage_types(&self) -> &[StageType] {
             &[StageType::Transform]
         }
@@ -284,13 +277,6 @@ mod tests {
         }
         fn name(&self) -> &str {
             "infinite_retry"
-        }
-        fn validate_configuration(
-            &self,
-            _stage_type: StageType,
-            _stage_name: &str,
-        ) -> crate::middleware::MiddlewareFactoryResult<()> {
-            Ok(())
         }
         fn supported_stage_types(&self) -> &[StageType] {
             &[StageType::Transform, StageType::Sink]
@@ -356,13 +342,6 @@ mod tests {
             }
             fn name(&self) -> &str {
                 "safe_middleware"
-            }
-            fn validate_configuration(
-                &self,
-                _stage_type: StageType,
-                _stage_name: &str,
-            ) -> crate::middleware::MiddlewareFactoryResult<()> {
-                Ok(())
             }
         }
 
