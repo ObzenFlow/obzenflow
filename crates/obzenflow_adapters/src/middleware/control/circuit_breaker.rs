@@ -2031,7 +2031,7 @@ impl MiddlewareFactory for CircuitBreakerFactory {
         let failure_mode =
             self.failure_mode
                 .clone()
-                .unwrap_or_else(|| CircuitBreakerFailureMode::Consecutive {
+                .unwrap_or(CircuitBreakerFailureMode::Consecutive {
                     max_failures: validated_threshold,
                 });
 
