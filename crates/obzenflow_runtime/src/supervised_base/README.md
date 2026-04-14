@@ -288,26 +288,27 @@ Supervisor acts on ControlResolution
     ├── Suppress:            drop signal, return Continue
     ├── BufferAtEntryPoint:  store signal for later release (cycle convergence)
     ├── Delay(d):            sleep(d), then forward
-    ├── Retry:               buffer signal, return Continue (retry next iteration)
     └── Skip:                drop signal, return Continue
 ```
 
 The key design point is that `resolve_control_event` is a pure function. It computes the decision without performing any I/O. The supervisor then executes the decision by writing to journals, sleeping, or returning the appropriate `EventLoopDirective`. This is the same "decide then act" separation that the run loop enforces for FSM transitions.
 
-### Concrete example: circuit breaker EOF coordination
+### Concrete example: shared-state windowing coordination
 
-The `CircuitBreakerEofStrategy` (in `stages/common/control_strategies/strategies/circuit_breaker_eof.rs`) reads the breaker's state from a shared `Arc<AtomicU8>`:
+`WindowingStrategy` reads the current window start from shared state paired with
+windowing middleware:
 
-- If the breaker is `HalfOpen`, return `Delay(half_open_delay)` to give the probe time to complete.
-- If the breaker is `Open`, return `Delay(open_delay)` to wait for the cooldown.
+- If a window is still active, return `Delay(remaining_window_time)`.
 - Otherwise, return `Forward`.
 
 The builder composes this with any other strategies the stage needs:
 
 ```rust
 let strategy = CompositeStrategy::new(vec![
-    Box::new(CircuitBreakerEofStrategy::new(breaker_state, open_delay, half_open_delay)),
-    Box::new(WindowingStrategy::new(window_config)),
+    Box::new(WindowingStrategy::with_shared_window_start(
+        window_duration,
+        shared_window_start,
+    )),
 ]);
 ```
 

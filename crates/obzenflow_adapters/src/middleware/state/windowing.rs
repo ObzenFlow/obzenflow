@@ -18,7 +18,8 @@ use obzenflow_runtime::stages::common::control_strategies::{
     ControlEventStrategy, WindowingStrategy,
 };
 use serde_json::json;
-use std::sync::{Arc, RwLock};
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 /// Windowing middleware that aggregates events over time windows
@@ -36,11 +37,12 @@ pub struct WindowingMiddleware {
 impl WindowingMiddleware {
     fn new(
         window_duration: Duration,
+        window_start: Arc<RwLock<Option<Instant>>>,
         aggregation_fn: Arc<dyn Fn(Vec<ChainEvent>) -> ChainEvent + Send + Sync>,
     ) -> Self {
         Self {
             window_duration,
-            window_start: Arc::new(RwLock::new(None)),
+            window_start,
             buffer: Arc::new(RwLock::new(Vec::new())),
             aggregation_fn,
         }
@@ -132,6 +134,13 @@ impl Middleware for WindowingMiddleware {
 pub struct WindowingMiddlewareFactory {
     window_duration: Duration,
     aggregation_type: AggregationType,
+    pending_shared_state: Mutex<PendingSharedWindowState>,
+}
+
+#[derive(Default)]
+struct PendingSharedWindowState {
+    pending_for_create: VecDeque<Arc<RwLock<Option<Instant>>>>,
+    pending_for_strategy: VecDeque<Arc<RwLock<Option<Instant>>>>,
 }
 
 #[derive(Clone)]
@@ -152,6 +161,7 @@ impl WindowingMiddlewareFactory {
         Self {
             window_duration,
             aggregation_type: AggregationType::Count,
+            pending_shared_state: Mutex::new(PendingSharedWindowState::default()),
         }
     }
 
@@ -160,6 +170,7 @@ impl WindowingMiddlewareFactory {
         Self {
             window_duration,
             aggregation_type: AggregationType::Sum(field),
+            pending_shared_state: Mutex::new(PendingSharedWindowState::default()),
         }
     }
 
@@ -171,6 +182,7 @@ impl WindowingMiddlewareFactory {
         Self {
             window_duration,
             aggregation_type: AggregationType::Custom(aggregation_fn),
+            pending_shared_state: Mutex::new(PendingSharedWindowState::default()),
         }
     }
 
@@ -256,11 +268,29 @@ impl MiddlewareFactory for WindowingMiddlewareFactory {
         _control_middleware: std::sync::Arc<
             crate::middleware::control::ControlMiddlewareAggregator,
         >,
-    ) -> Box<dyn Middleware> {
-        Box::new(WindowingMiddleware::new(
+    ) -> crate::middleware::MiddlewareFactoryResult<Box<dyn Middleware>> {
+        let shared_window_start = if let Ok(mut pending) = self.pending_shared_state.lock() {
+            if let Some(shared) = pending.pending_for_create.pop_front() {
+                shared
+            } else {
+                let shared = Arc::new(RwLock::new(None));
+                pending.pending_for_strategy.push_back(shared.clone());
+                debug_assert!(
+                    pending.pending_for_strategy.len() <= 1,
+                    "PendingSharedWindowState: multiple unpaired create() calls; \
+                     FIFO pairing with create_control_strategy() may be incorrect"
+                );
+                shared
+            }
+        } else {
+            Arc::new(RwLock::new(None))
+        };
+
+        Ok(Box::new(WindowingMiddleware::new(
             self.window_duration,
+            shared_window_start,
             self.create_aggregation_fn(),
-        ))
+        )))
     }
 
     fn name(&self) -> &str {
@@ -273,8 +303,27 @@ impl MiddlewareFactory for WindowingMiddlewareFactory {
     }
 
     fn create_control_strategy(&self) -> Option<Box<dyn ControlEventStrategy>> {
-        // Need windowing strategy to delay EOF until window completes
-        Some(Box::new(WindowingStrategy::new(self.window_duration)))
+        let shared_window_start = if let Ok(mut pending) = self.pending_shared_state.lock() {
+            if let Some(shared) = pending.pending_for_strategy.pop_front() {
+                shared
+            } else {
+                let shared = Arc::new(RwLock::new(None));
+                pending.pending_for_create.push_back(shared.clone());
+                debug_assert!(
+                    pending.pending_for_create.len() <= 1,
+                    "PendingSharedWindowState: multiple unpaired create_control_strategy() calls; \
+                     FIFO pairing with create() may be incorrect"
+                );
+                shared
+            }
+        } else {
+            Arc::new(RwLock::new(None))
+        };
+
+        Some(Box::new(WindowingStrategy::with_shared_window_start(
+            self.window_duration,
+            shared_window_start,
+        )))
     }
 
     fn supported_stage_types(&self) -> &[StageType] {
@@ -303,6 +352,7 @@ mod tests {
         // Create middleware directly without StageConfig
         let middleware = Box::new(WindowingMiddleware::new(
             Duration::from_millis(100),
+            Arc::new(RwLock::new(None)),
             factory.create_aggregation_fn(),
         ));
 
@@ -334,6 +384,7 @@ mod tests {
         // Create middleware directly without StageConfig
         let middleware = Box::new(WindowingMiddleware::new(
             Duration::from_secs(60),
+            Arc::new(RwLock::new(None)),
             factory.create_aggregation_fn(),
         ));
 
@@ -342,5 +393,47 @@ mod tests {
 
         let action = middleware.pre_handle(&eof, &mut ctx);
         assert!(matches!(action, MiddlewareAction::Continue));
+    }
+
+    #[test]
+    fn test_windowing_factory_pairs_strategy_with_shared_window_state() {
+        let factory = WindowingMiddlewareFactory::tumbling_count(Duration::from_millis(50));
+        let strategy = factory
+            .create_control_strategy()
+            .expect("Expected windowing strategy");
+        let middleware = WindowingMiddleware::new(
+            Duration::from_millis(50),
+            if let Ok(mut pending) = factory.pending_shared_state.lock() {
+                pending
+                    .pending_for_create
+                    .pop_front()
+                    .expect("expected shared state staged for create()")
+            } else {
+                panic!("pending_shared_state poisoned");
+            },
+            factory.create_aggregation_fn(),
+        );
+
+        let mut ctx = MiddlewareContext::new();
+        let event = ChainEventFactory::data_event(
+            WriterId::from(StageId::new()),
+            "test.event",
+            json!({"value": 42}),
+        );
+        let _ = middleware.pre_handle(&event, &mut ctx);
+
+        let eof = ChainEventFactory::eof_event(WriterId::from(StageId::new()), true);
+        let envelope = obzenflow_core::event::event_envelope::EventEnvelope::new(
+            obzenflow_core::JournalWriterId::new(),
+            eof,
+        );
+        let mut processing_ctx =
+            obzenflow_runtime::stages::common::control_strategies::ProcessingContext::new();
+
+        let action = strategy.handle_eof(&envelope, &mut processing_ctx);
+        assert!(matches!(
+            action,
+            obzenflow_runtime::stages::common::control_strategies::ControlEventAction::Delay(_)
+        ));
     }
 }

@@ -16,7 +16,4 @@ pub(crate) mod dispatch;
 
 // Concrete strategy implementations
 mod strategies;
-pub use strategies::{
-    BackoffStrategy, CircuitBreakerEofStrategy, CompositeStrategy, JonestownStrategy,
-    RetryStrategy, WindowingStrategy,
-};
+pub use strategies::{BackoffStrategy, CompositeStrategy, JonestownStrategy, WindowingStrategy};

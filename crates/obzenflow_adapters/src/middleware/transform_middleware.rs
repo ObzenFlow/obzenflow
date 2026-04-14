@@ -831,7 +831,9 @@ mod tests {
             cycle_guard: None,
         };
         let control = Arc::new(ControlMiddlewareAggregator::new());
-        let cb = factory.create(&config, control);
+        let cb = factory
+            .create(&config, control)
+            .expect("circuit breaker should materialize for async transform retry test");
 
         let wrapped = handler.middleware().with(cb).build();
 
@@ -878,7 +880,9 @@ mod tests {
             cycle_guard: None,
         };
         let control = Arc::new(ControlMiddlewareAggregator::new());
-        let cb = factory.create(&config, control);
+        let cb = factory
+            .create(&config, control)
+            .expect("circuit breaker should materialize for async transform exhaustion test");
 
         let wrapped = handler.middleware().with(cb).build();
 

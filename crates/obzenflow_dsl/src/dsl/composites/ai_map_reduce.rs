@@ -15,6 +15,7 @@ use crate::dsl::stage_descriptor::{
 use crate::dsl::typing::{
     wrap_typed_descriptor, BoundAsyncTransform, BoundTransform, StageTypingMetadata, TypeHint,
 };
+use crate::dsl::StageCreationResult;
 use obzenflow_adapters::middleware::ai::map_reduce::{
     AiMapReduceChunkManifestFactory, AiMapReduceMapFactory,
 };
@@ -643,10 +644,12 @@ where
         _control_middleware: Arc<
             obzenflow_adapters::middleware::control::ControlMiddlewareAggregator,
         >,
-    ) -> Result<obzenflow_runtime::stages::common::stage_handle::BoxedStageHandle, String> {
+    ) -> StageCreationResult<obzenflow_runtime::stages::common::stage_handle::BoxedStageHandle>
+    {
         Err(
             "ai::map_reduce composite descriptors must be lowered during flow! materialisation"
-                .to_string(),
+                .to_string()
+                .into(),
         )
     }
 }

@@ -193,6 +193,8 @@ impl ChatClient for RigChatClient {
             chat_history: OneOrMany::many(chat_history)
                 .expect("preamble_and_history validates non-empty chat history"),
             documents: vec![],
+            model: None,
+            output_schema: None,
             tools,
             temperature: req.params.temperature.map(|t| t as f64),
             max_tokens: req.params.max_tokens.map(|n| n as u64),
@@ -583,8 +585,10 @@ mod tests {
                 output_tokens: 2,
                 total_tokens: 3,
                 cached_input_tokens: 0,
+                cache_creation_input_tokens: 0,
             },
             raw_response: json!({"ok": true}),
+            message_id: None,
         };
 
         let out = map_chat_response(resp);

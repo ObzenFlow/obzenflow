@@ -132,8 +132,8 @@ impl MiddlewareFactory for TimingMiddlewareFactory {
         _control_middleware: std::sync::Arc<
             crate::middleware::control::ControlMiddlewareAggregator,
         >,
-    ) -> Box<dyn Middleware> {
-        Box::new(TimingMiddleware::new(&config.name))
+    ) -> crate::middleware::MiddlewareFactoryResult<Box<dyn Middleware>> {
+        Ok(Box::new(TimingMiddleware::new(&config.name)))
     }
 
     fn name(&self) -> &str {

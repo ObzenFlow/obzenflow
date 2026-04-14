@@ -2,25 +2,9 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Retry strategy for control events - used by circuit breakers and retry middleware
+//! Backoff helpers used by integrated retry implementations such as the circuit breaker.
 
-use super::super::{ControlEventAction, ControlEventStrategy, ProcessingContext};
-use obzenflow_core::event::event_envelope::EventEnvelope;
-use obzenflow_core::ChainEvent;
 use std::time::Duration;
-
-/// Strategy that retries processing before accepting EOF
-///
-/// This strategy is used by circuit breakers and retry middleware to prevent
-/// stage termination during recovery attempts. It gives the stage time to
-/// heal before accepting shutdown.
-pub struct RetryStrategy {
-    /// Maximum number of retry attempts before giving up
-    pub max_attempts: usize,
-
-    /// Backoff strategy for retries
-    pub backoff: BackoffStrategy,
-}
 
 /// Backoff strategies for retry delays
 #[derive(Debug, Clone)]
@@ -55,7 +39,7 @@ impl BackoffStrategy {
 
                 // Apply jitter if requested (prevents thundering herd)
                 let final_delay = if *jitter {
-                    let jitter_factor = 1.0 + (rand::random::<f64>() - 0.5) * 0.2; // ±10%
+                    let jitter_factor = 1.0 + (fastrand::f64() - 0.5) * 0.2; // ±10%
                     capped_delay * jitter_factor
                 } else {
                     capped_delay
@@ -63,39 +47,6 @@ impl BackoffStrategy {
 
                 Duration::from_millis(final_delay as u64)
             }
-        }
-    }
-}
-
-impl ControlEventStrategy for RetryStrategy {
-    fn handle_eof(
-        &self,
-        _envelope: &EventEnvelope<ChainEvent>,
-        ctx: &mut ProcessingContext,
-    ) -> ControlEventAction {
-        if ctx.eof_attempts < self.max_attempts {
-            // Still have attempts left
-            ctx.eof_attempts += 1;
-
-            // Calculate backoff delay
-            let delay = self.backoff.calculate_delay(ctx.eof_attempts - 1);
-
-            tracing::info!(
-                "Retry strategy: attempt {}/{}, delaying {}ms before retry",
-                ctx.eof_attempts,
-                self.max_attempts,
-                delay.as_millis()
-            );
-
-            // Return Retry to keep the stage alive
-            ControlEventAction::Retry
-        } else {
-            // Exhausted retries - give up and forward EOF
-            tracing::warn!(
-                "Retry strategy: exhausted {} attempts, forwarding EOF",
-                self.max_attempts
-            );
-            ControlEventAction::Forward
         }
     }
 }

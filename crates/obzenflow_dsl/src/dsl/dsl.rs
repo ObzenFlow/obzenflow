@@ -1133,9 +1133,9 @@ macro_rules! build_typed_flow {
                         control_middleware.clone(),
                     )
                     .await
-                    .map_err(|e| FlowBuildError::StageCreationFailed {
+                    .map_err(|source| FlowBuildError::StageCreationFailed {
                         stage_name: name.to_string(),
-                        message: e,
+                        source,
                     })?;
 
                 if stage_type.is_source() {

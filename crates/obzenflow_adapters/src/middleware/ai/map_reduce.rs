@@ -296,8 +296,8 @@ where
         &self,
         _config: &StageConfig,
         _control_middleware: Arc<crate::middleware::control::ControlMiddlewareAggregator>,
-    ) -> Box<dyn Middleware> {
-        Box::new(AiMapReduceChunkManifestMiddleware::<Chunk>::new())
+    ) -> crate::middleware::MiddlewareFactoryResult<Box<dyn Middleware>> {
+        Ok(Box::new(AiMapReduceChunkManifestMiddleware::<Chunk>::new()))
     }
 
     fn name(&self) -> &str {
@@ -513,8 +513,8 @@ where
         &self,
         _config: &StageConfig,
         _control_middleware: Arc<crate::middleware::control::ControlMiddlewareAggregator>,
-    ) -> Box<dyn Middleware> {
-        Box::new(AiMapReduceMapMiddleware::<Chunk, Partial>::new())
+    ) -> crate::middleware::MiddlewareFactoryResult<Box<dyn Middleware>> {
+        Ok(Box::new(AiMapReduceMapMiddleware::<Chunk, Partial>::new()))
     }
 
     fn name(&self) -> &str {
@@ -581,11 +581,13 @@ mod tests {
     fn mk_chunk_manifest_middleware() -> Box<dyn Middleware> {
         AiMapReduceChunkManifestFactory::<TestChunkEnvelope>::new()
             .create(&stage_config(), control_aggregator())
+            .expect("chunk manifest middleware should materialize in tests")
     }
 
     fn mk_map_middleware() -> Box<dyn Middleware> {
         AiMapReduceMapFactory::<TestChunkEnvelope, TestPartial>::new()
             .create(&stage_config(), control_aggregator())
+            .expect("map wrapper middleware should materialize in tests")
     }
 
     #[test]
@@ -593,7 +595,9 @@ mod tests {
         let factory = AiMapReduceChunkManifestFactory::<TestChunkEnvelope>::new();
         assert_eq!(factory.name(), "ai_map_reduce.chunk_manifest");
 
-        let middleware = factory.create(&stage_config(), control_aggregator());
+        let middleware = factory
+            .create(&stage_config(), control_aggregator())
+            .expect("chunk manifest factory should materialize middleware");
         assert_eq!(middleware.middleware_name(), "ai_map_reduce.chunk_manifest");
     }
 
@@ -741,7 +745,9 @@ mod tests {
         let factory = AiMapReduceMapFactory::<TestChunkEnvelope, TestPartial>::new();
         assert_eq!(factory.name(), "ai_map_reduce.map_wrapper");
 
-        let middleware = factory.create(&stage_config(), control_aggregator());
+        let middleware = factory
+            .create(&stage_config(), control_aggregator())
+            .expect("map wrapper factory should materialize middleware");
         assert_eq!(middleware.middleware_name(), "ai_map_reduce.map_wrapper");
     }
 

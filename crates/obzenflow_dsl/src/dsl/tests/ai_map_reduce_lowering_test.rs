@@ -39,8 +39,8 @@ mod tests {
             &self,
             _config: &StageConfig,
             _control_middleware: Arc<ControlMiddlewareAggregator>,
-        ) -> Box<dyn Middleware> {
-            Box::new(TestMiddleware(self.0))
+        ) -> obzenflow_adapters::middleware::MiddlewareFactoryResult<Box<dyn Middleware>> {
+            Ok(Box::new(TestMiddleware(self.0)))
         }
 
         fn name(&self) -> &str {

@@ -404,14 +404,6 @@ async fn dispatch_control_event<
         ControlResolution::Delay(_) => {
             unreachable!("Delay is handled before executing the resolution");
         }
-        ControlResolution::Retry => {
-            tracing::info!(
-                stage_name = %ctx.stage_name,
-                event_type = envelope.event.event_type(),
-                "Sink ignoring control event (Retry not implemented)"
-            );
-            Ok(EventLoopDirective::Continue)
-        }
         ControlResolution::Skip => {
             tracing::warn!(
                 stage_name = %ctx.stage_name,

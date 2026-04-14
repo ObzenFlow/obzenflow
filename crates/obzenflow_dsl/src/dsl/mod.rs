@@ -76,5 +76,5 @@ pub mod typing;
 mod tests;
 
 // Re-export all public items
-pub use error::FlowBuildError;
+pub use error::{FlowBuildError, StageCreationError, StageCreationResult};
 pub use flow_definition::FlowDefinition;

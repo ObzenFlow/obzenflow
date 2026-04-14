@@ -12,9 +12,81 @@ use super::{Middleware, MiddlewareHints, MiddlewareSafety};
 use obzenflow_core::event::context::StageType;
 use obzenflow_runtime::pipeline::config::StageConfig;
 use obzenflow_runtime::stages::common::control_strategies::ControlEventStrategy;
+use std::error::Error as StdError;
 use std::sync::Arc;
+use thiserror::Error;
 
 use super::control::ControlMiddlewareAggregator;
+
+pub type MiddlewareFactorySource = Box<dyn StdError + Send + Sync + 'static>;
+
+#[derive(Debug, Error)]
+pub enum MiddlewareFactoryError {
+    #[error(
+        "Invalid configuration for middleware '{middleware}' on stage '{stage_name}': {source}"
+    )]
+    InvalidConfiguration {
+        middleware: String,
+        stage_name: String,
+        #[source]
+        source: MiddlewareFactorySource,
+    },
+
+    #[error("Middleware '{middleware}' does not support stage '{stage_name}' ({stage_type})")]
+    UnsupportedStageType {
+        middleware: String,
+        stage_type: StageType,
+        stage_name: String,
+    },
+
+    #[error("Failed to materialize middleware '{middleware}' for stage '{stage_name}': {source}")]
+    MaterializationFailed {
+        middleware: String,
+        stage_name: String,
+        #[source]
+        source: MiddlewareFactorySource,
+    },
+}
+
+pub type MiddlewareFactoryResult<T> = Result<T, MiddlewareFactoryError>;
+
+impl MiddlewareFactoryError {
+    pub fn invalid_configuration(
+        middleware: impl Into<String>,
+        stage_name: impl Into<String>,
+        source: impl StdError + Send + Sync + 'static,
+    ) -> Self {
+        Self::InvalidConfiguration {
+            middleware: middleware.into(),
+            stage_name: stage_name.into(),
+            source: Box::new(source),
+        }
+    }
+
+    pub fn unsupported_stage_type(
+        middleware: impl Into<String>,
+        stage_type: StageType,
+        stage_name: impl Into<String>,
+    ) -> Self {
+        Self::UnsupportedStageType {
+            middleware: middleware.into(),
+            stage_type,
+            stage_name: stage_name.into(),
+        }
+    }
+
+    pub fn materialization_failed(
+        middleware: impl Into<String>,
+        stage_name: impl Into<String>,
+        source: impl StdError + Send + Sync + 'static,
+    ) -> Self {
+        Self::MaterializationFailed {
+            middleware: middleware.into(),
+            stage_name: stage_name.into(),
+            source: Box::new(source),
+        }
+    }
+}
 
 /// Factory that creates middleware with stage context.
 ///
@@ -36,9 +108,9 @@ use super::control::ControlMiddlewareAggregator;
 ///         &self,
 ///         _config: &StageConfig,
 ///         _control_middleware: Arc<ControlMiddlewareAggregator>,
-///     ) -> Box<dyn Middleware> {
+///     ) -> obzenflow_adapters::middleware::MiddlewareFactoryResult<Box<dyn Middleware>> {
 ///         // LoggingMiddleware::new() takes no arguments
-///         Box::new(LoggingMiddleware::new())
+///         Ok(Box::new(LoggingMiddleware::new()))
 ///     }
 ///     
 ///     fn name(&self) -> &str {
@@ -52,7 +124,7 @@ pub trait MiddlewareFactory: Send + Sync {
         &self,
         config: &StageConfig,
         control_middleware: Arc<ControlMiddlewareAggregator>,
-    ) -> Box<dyn Middleware>;
+    ) -> MiddlewareFactoryResult<Box<dyn Middleware>>;
 
     /// Get a descriptive name for this middleware type
     fn name(&self) -> &str;
@@ -60,8 +132,8 @@ pub trait MiddlewareFactory: Send + Sync {
     /// Create a control event strategy if this middleware needs one
     ///
     /// Most middleware don't need special control event handling and can
-    /// return None. Middleware that needs retry logic (like circuit breakers)
-    /// or delay logic (like windowing) should return their strategy.
+    /// return None. Middleware that needs delay or barrier logic (like
+    /// windowing) should return their strategy.
     fn create_control_strategy(&self) -> Option<Box<dyn ControlEventStrategy>> {
         None
     }
@@ -114,7 +186,7 @@ impl<F: MiddlewareFactory + ?Sized> MiddlewareFactory for Box<F> {
         &self,
         config: &StageConfig,
         control_middleware: Arc<ControlMiddlewareAggregator>,
-    ) -> Box<dyn Middleware> {
+    ) -> MiddlewareFactoryResult<Box<dyn Middleware>> {
         (**self).create(config, control_middleware)
     }
 

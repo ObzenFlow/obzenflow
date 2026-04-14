@@ -4,14 +4,12 @@
 
 //! Concrete implementations of control event handling strategies
 
-mod circuit_breaker_eof;
 mod composite;
 mod jonestown;
 mod retry;
 mod windowing;
 
-pub use circuit_breaker_eof::CircuitBreakerEofStrategy;
 pub use composite::CompositeStrategy;
 pub use jonestown::JonestownStrategy;
-pub use retry::{BackoffStrategy, RetryStrategy};
+pub use retry::BackoffStrategy;
 pub use windowing::WindowingStrategy;
