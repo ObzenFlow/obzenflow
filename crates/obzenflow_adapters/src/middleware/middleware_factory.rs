@@ -132,8 +132,8 @@ pub trait MiddlewareFactory: Send + Sync {
     /// Create a control event strategy if this middleware needs one
     ///
     /// Most middleware don't need special control event handling and can
-    /// return None. Middleware that needs retry logic (like circuit breakers)
-    /// or delay logic (like windowing) should return their strategy.
+    /// return None. Middleware that needs delay or barrier logic (like
+    /// windowing) should return their strategy.
     fn create_control_strategy(&self) -> Option<Box<dyn ControlEventStrategy>> {
         None
     }

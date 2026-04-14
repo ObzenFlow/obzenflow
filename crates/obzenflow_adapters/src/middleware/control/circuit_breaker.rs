@@ -24,13 +24,11 @@ use obzenflow_core::event::{ChainEventFactory, CircuitBreakerSummaryEventParams}
 use obzenflow_core::TypedPayload;
 use obzenflow_core::{StageId, WriterId};
 use obzenflow_runtime::pipeline::config::StageConfig;
-use obzenflow_runtime::stages::common::control_strategies::{
-    BackoffStrategy, CircuitBreakerEofStrategy, ControlEventStrategy,
-};
+use obzenflow_runtime::stages::common::control_strategies::BackoffStrategy;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::json;
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::num::NonZeroU32;
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -382,8 +380,8 @@ impl CircuitBreakerMiddleware {
     /// configure domain‑specific fallback behavior via the builder API
     /// without coupling handler logic to circuit breaker internals.
     ///
-    /// When `shared_state` is provided (e.g. from the factory's pending queue),
-    /// the middleware reuses that `Arc` instead of allocating a fresh one.
+    /// When `shared_state` is provided, the middleware reuses that `Arc`
+    /// instead of allocating a fresh one.
     pub fn with_cooldown_and_fallback(
         threshold: usize,
         cooldown: Duration,
@@ -1738,7 +1736,6 @@ impl CircuitBreakerBuilder {
         Box::new(CircuitBreakerFactory {
             threshold: self.threshold,
             cooldown: self.cooldown,
-            pending_shared_state: Mutex::new(PendingSharedState::default()),
             fallback: self.fallback,
             contract_mode: self.contract_mode,
             failure_classifier: self.failure_classifier,
@@ -1754,24 +1751,10 @@ impl CircuitBreakerBuilder {
     }
 }
 
-/// Queue-based pairing for `create()` / `create_control_strategy()` state sharing.
-///
-/// IMPORTANT(D7): This assumes FIFO call ordering — if the framework calls
-/// `create()` for stages [A, B] then `create_control_strategy()` for [B, A],
-/// the pairing will be wrong. The `create_control_strategy` trait method does
-/// not receive a stage identifier, so keyed pairing is not possible without a
-/// trait change. A debug assertion warns if queues grow beyond 1.
-#[derive(Default)]
-struct PendingSharedState {
-    pending_for_create: VecDeque<Arc<AtomicU8>>,
-    pending_for_strategy: VecDeque<Arc<AtomicU8>>,
-}
-
 /// Factory for creating circuit breaker middleware
 pub struct CircuitBreakerFactory {
     threshold: usize,
     cooldown: Duration,
-    pending_shared_state: Mutex<PendingSharedState>,
     fallback: Option<FallbackFn>,
     contract_mode: Option<CircuitBreakerContractMode>,
     failure_classifier: Option<FailureClassifier>,
@@ -1791,7 +1774,6 @@ impl CircuitBreakerFactory {
         Self {
             threshold,
             cooldown: Duration::from_secs(60),
-            pending_shared_state: Mutex::new(PendingSharedState::default()),
             fallback: None,
             contract_mode: None,
             failure_classifier: None,
@@ -2058,37 +2040,13 @@ impl MiddlewareFactory for CircuitBreakerFactory {
 
         let unknown_error_kind_policy = self.unknown_error_kind_policy;
 
-        // The EOF strategy and this middleware instance need to share a state handle,
-        // but `MiddlewareFactory::create_control_strategy()` is called independently
-        // from `create()`. We stage the shared state via a small queue so callers
-        // can invoke these in either order and still share a per-stage Arc.
-        let shared_state = if let Ok(mut pending) = self.pending_shared_state.lock() {
-            if let Some(state) = pending.pending_for_create.pop_front() {
-                state
-            } else {
-                let state = Arc::new(AtomicU8::new(cb_state::CLOSED));
-                pending.pending_for_strategy.push_back(state.clone());
-                debug_assert!(
-                    pending.pending_for_strategy.len() <= 1,
-                    "PendingSharedState: multiple unpaired create() calls; \
-                     FIFO pairing with create_control_strategy() may be incorrect"
-                );
-                state
-            }
-        } else {
-            Arc::new(AtomicU8::new(cb_state::CLOSED))
-        };
-
-        // Create middleware instance with the pre-allocated shared state so the
-        // constructor doesn't waste an allocation that `create()` immediately
-        // overwrites.
         let mut middleware = CircuitBreakerMiddleware::with_cooldown_and_fallback(
             self.threshold,
             self.cooldown,
             self.fallback.clone(),
             self.failure_classifier.clone(),
             Some(config.stage_id),
-            Some(shared_state),
+            None,
         );
         middleware.failure_mode = failure_mode;
         middleware.rate_window = rate_window;
@@ -2172,34 +2130,6 @@ impl MiddlewareFactory for CircuitBreakerFactory {
 
     fn name(&self) -> &str {
         "circuit_breaker"
-    }
-
-    fn create_control_strategy(&self) -> Option<Box<dyn ControlEventStrategy>> {
-        // Delay EOF/Drain briefly when the breaker is actively recovering so shutdown
-        // semantics remain graceful, but never delay indefinitely.
-        let open_delay = self.cooldown.min(Duration::from_secs(5));
-        let half_open_delay = Duration::from_secs(2);
-        let shared_state = if let Ok(mut pending) = self.pending_shared_state.lock() {
-            if let Some(state) = pending.pending_for_strategy.pop_front() {
-                state
-            } else {
-                let state = Arc::new(AtomicU8::new(cb_state::CLOSED));
-                pending.pending_for_create.push_back(state.clone());
-                debug_assert!(
-                    pending.pending_for_create.len() <= 1,
-                    "PendingSharedState: multiple unpaired create_control_strategy() calls; \
-                     FIFO pairing with create() may be incorrect"
-                );
-                state
-            }
-        } else {
-            Arc::new(AtomicU8::new(cb_state::CLOSED))
-        };
-        Some(Box::new(CircuitBreakerEofStrategy::new(
-            shared_state,
-            open_delay,
-            half_open_delay,
-        )))
     }
 
     fn config_snapshot(&self) -> Option<serde_json::Value> {
@@ -2435,18 +2365,12 @@ mod tests {
     }
 
     #[test]
-    fn factory_control_strategy_shares_state_with_created_middleware() {
+    fn factory_does_not_export_control_strategy() {
         use crate::middleware::control::ControlMiddlewareAggregator;
-        use obzenflow_core::event::event_envelope::EventEnvelope;
-        use obzenflow_core::event::JournalWriterId;
         use obzenflow_runtime::pipeline::config::StageConfig;
-        use obzenflow_runtime::stages::common::control_strategies::{
-            ControlEventAction, ProcessingContext,
-        };
 
         let control_middleware = Arc::new(ControlMiddlewareAggregator::new());
 
-        // Control strategy created first.
         let stage_id = StageId::new();
         let config = StageConfig {
             stage_id,
@@ -2455,57 +2379,23 @@ mod tests {
             cycle_guard: None,
         };
         let factory = CircuitBreakerFactory::new(3);
-        let strategy = factory
-            .create_control_strategy()
-            .expect("expected circuit breaker control strategy");
+        assert!(
+            factory.create_control_strategy().is_none(),
+            "circuit breaker should not export a control strategy before materialization"
+        );
 
         let _middleware = factory
             .create(&config, control_middleware.clone())
             .expect("circuit breaker middleware should materialize");
 
-        let state = control_middleware
+        assert!(
+            factory.create_control_strategy().is_none(),
+            "circuit breaker should not export a control strategy after materialization"
+        );
+
+        let _state = control_middleware
             .circuit_breaker_state(&stage_id)
             .expect("expected circuit breaker state registration");
-        state.store(cb_state::OPEN, Ordering::Relaxed);
-
-        let event = ChainEventFactory::data_event(WriterId::from(stage_id), "test", json!({}));
-        let envelope = EventEnvelope::new(JournalWriterId::new(), event);
-
-        let mut processing_ctx = ProcessingContext::new();
-        let action = strategy.handle_eof(&envelope, &mut processing_ctx);
-        assert!(matches!(action, ControlEventAction::Delay(d) if !d.is_zero()));
-
-        // Middleware created first.
-        let stage_id_2 = StageId::new();
-        let config_2 = StageConfig {
-            stage_id: stage_id_2,
-            name: "test_2".to_string(),
-            flow_name: "test_flow".to_string(),
-            cycle_guard: None,
-        };
-
-        let factory_2 = CircuitBreakerFactory::new(3);
-        let _middleware_2 = factory_2
-            .create(&config_2, control_middleware.clone())
-            .expect("second circuit breaker middleware should materialize");
-        let strategy_2 = factory_2
-            .create_control_strategy()
-            .expect("expected circuit breaker control strategy");
-
-        let state_2 = control_middleware
-            .circuit_breaker_state(&stage_id_2)
-            .expect("expected circuit breaker state registration");
-        state_2.store(cb_state::OPEN, Ordering::Relaxed);
-
-        let event_2 = ChainEventFactory::data_event(WriterId::from(stage_id_2), "test", json!({}));
-        let envelope_2 = EventEnvelope::new(JournalWriterId::new(), event_2);
-
-        let mut processing_ctx_2 = ProcessingContext::new();
-        let action_2 = strategy_2.handle_eof(&envelope_2, &mut processing_ctx_2);
-        assert!(matches!(
-            action_2,
-            ControlEventAction::Delay(d) if !d.is_zero()
-        ));
     }
 
     #[test]
