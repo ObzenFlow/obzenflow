@@ -10,7 +10,7 @@
 
 use async_trait::async_trait;
 use obzenflow_core::web::{HttpEndpoint, HttpMethod, ManagedResponse, Request, Response, WebError};
-use obzenflow_runtime::pipeline::FlowHandle;
+use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Duration;
@@ -56,6 +56,8 @@ pub enum FlowControlStatus {
 pub struct FlowControlResponse {
     pub status: FlowControlStatus,
     pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
 }
 
 /// HTTP endpoint that controls a single flow via FlowHandle.
@@ -67,6 +69,22 @@ impl FlowControlEndpoint {
     pub fn new(flow_handle: Arc<FlowHandle>) -> Self {
         Self { flow_handle }
     }
+}
+
+fn pipeline_state_label(state: &PipelineState) -> String {
+    match state {
+        PipelineState::Created => "created",
+        PipelineState::Materializing => "materializing",
+        PipelineState::Materialized => "materialized",
+        PipelineState::ReadyForRun => "readyforrun",
+        PipelineState::Running => "running",
+        PipelineState::SourceCompleted => "sourcecompleted",
+        PipelineState::AbortRequested { .. } => "abortrequested",
+        PipelineState::Draining => "draining",
+        PipelineState::Drained => "drained",
+        PipelineState::Failed { .. } => "failed",
+    }
+    .to_string()
 }
 
 #[async_trait]
@@ -87,6 +105,7 @@ impl HttpEndpoint for FlowControlEndpoint {
                 let resp = FlowControlResponse {
                     status: FlowControlStatus::Rejected,
                     message: format!("Invalid request body: {e}"),
+                    state: None,
                 };
                 return Response::new(400)
                     .with_json(&resp)
@@ -102,18 +121,41 @@ impl HttpEndpoint for FlowControlEndpoint {
             obzenflow_runtime::bootstrap::shutdown_timeout()
         }
 
-        let result = match req.action {
+        let action = req.action.clone();
+        let result = match action {
             FlowControlAction::Play => {
                 tracing::info!("FlowControlEndpoint: Play requested");
-                self.flow_handle.start().await
+                let state = self.flow_handle.current_state();
+                let state_label = pipeline_state_label(&state);
+                match state {
+                    PipelineState::ReadyForRun => self.flow_handle.start().await,
+                    PipelineState::Running => {
+                        return ok_json_response(FlowControlResponse {
+                            status: FlowControlStatus::Accepted,
+                            message: "Play accepted: already running".to_string(),
+                            state: Some(state_label),
+                        });
+                    }
+                    _ => {
+                        return ok_json_response(FlowControlResponse {
+                            status: FlowControlStatus::Rejected,
+                            message: format!(
+                                "Play rejected: pipeline is not ready for run (state={state_label})"
+                            ),
+                            state: Some(state_label),
+                        });
+                    }
+                }
             }
             FlowControlAction::Pause => {
                 // Pause semantics are not yet implemented at the FSM level.
                 // For now, explicitly reject with a descriptive message.
                 tracing::info!("FlowControlEndpoint: Pause requested but not supported");
+                let state = self.flow_handle.current_state();
                 return ok_json_response(FlowControlResponse {
                     status: FlowControlStatus::Rejected,
                     message: "Pause is not yet supported for this flow".to_string(),
+                    state: Some(pipeline_state_label(&state)),
                 });
             }
             FlowControlAction::Stop => {
@@ -155,13 +197,15 @@ impl HttpEndpoint for FlowControlEndpoint {
         match result {
             Ok(()) => ok_json_response(FlowControlResponse {
                 status: FlowControlStatus::Accepted,
-                message: format!("Action {:?} accepted", req.action),
+                message: format!("Action {:?} accepted", action),
+                state: Some(pipeline_state_label(&self.flow_handle.current_state())),
             }),
             Err(e) => {
-                tracing::error!("Flow control action {:?} failed: {}", req.action, e);
+                tracing::error!("Flow control action {:?} failed: {}", action, e);
                 ok_json_response(FlowControlResponse {
                     status: FlowControlStatus::Rejected,
-                    message: format!("Action {:?} failed: {}", req.action, e),
+                    message: format!("Action {:?} failed: {}", action, e),
+                    state: Some(pipeline_state_label(&self.flow_handle.current_state())),
                 })
             }
         }

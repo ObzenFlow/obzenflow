@@ -118,6 +118,7 @@ pub enum PipelineState {
     Created,
     Materializing,
     Materialized,
+    ReadyForRun,
     Running,
     SourceCompleted, // Source has finished, initiating Jonestown protocol
     AbortRequested {
@@ -138,6 +139,7 @@ impl StateVariant for PipelineState {
             PipelineState::Created => "Created",
             PipelineState::Materializing => "Materializing",
             PipelineState::Materialized => "Materialized",
+            PipelineState::ReadyForRun => "ReadyForRun",
             PipelineState::Running => "Running",
             PipelineState::SourceCompleted => "SourceCompleted",
             PipelineState::AbortRequested { .. } => "AbortRequested",
@@ -153,6 +155,7 @@ impl StateVariant for PipelineState {
 pub enum PipelineEvent {
     Materialize,
     MaterializationComplete,
+    StageReadinessComplete,
     Run,
     /// User-initiated stop request (distinct from natural source completion).
     StopRequested {
@@ -184,6 +187,7 @@ impl EventVariant for PipelineEvent {
         match self {
             PipelineEvent::Materialize => "Materialize",
             PipelineEvent::MaterializationComplete => "MaterializationComplete",
+            PipelineEvent::StageReadinessComplete => "StageReadinessComplete",
             PipelineEvent::Run => "Run",
             PipelineEvent::StopRequested { .. } => "StopRequested",
             PipelineEvent::Shutdown => "Shutdown",
@@ -1271,12 +1275,14 @@ pub fn build_pipeline_fsm_with_initial(initial: PipelineState) -> PipelineFsm {
 
             on PipelineEvent::Run => |_state: &PipelineState, _event: &PipelineEvent, _ctx: &mut PipelineContext| {
                 Box::pin(async move {
-                    tracing::error!("🚨 FATAL: Received Run event while in Created state!");
-                    tracing::error!(
-                        "🚨 This means pipeline supervisor never processed Materialize event"
+                    tracing::warn!(
+                        state = "created",
+                        "Run event received before pipeline materialised; ignoring"
                     );
-                    tracing::error!("🚨 Pipeline supervisor task likely never executed!");
-                    panic!("Run event received in Created state - pipeline supervisor not running");
+                    Ok(Transition {
+                        next_state: PipelineState::Created,
+                        actions: vec![],
+                    })
                 })
             };
         }
@@ -1347,21 +1353,112 @@ pub fn build_pipeline_fsm_with_initial(initial: PipelineState) -> PipelineFsm {
 
             on PipelineEvent::Run => |_state: &PipelineState, _event: &PipelineEvent, _ctx: &mut PipelineContext| {
                 Box::pin(async move {
-                    tracing::error!("🚨 FATAL: Received Run event while in Materializing state!");
-                    tracing::error!("🚨 Pipeline has not finished materialising yet");
-                    tracing::error!(
-                        "🚨 Check for race condition or missing MaterializationComplete"
+                    tracing::warn!(
+                        state = "materializing",
+                        "Run event received during materialisation; ignoring"
                     );
-                    panic!("Run event received in Materializing state - not ready yet");
+                    Ok(Transition {
+                        next_state: PipelineState::Materializing,
+                        actions: vec![],
+                    })
                 })
             };
         }
 
         state PipelineState::Materialized {
+            on PipelineEvent::StageReadinessComplete => |_state: &PipelineState, _event: &PipelineEvent, _ctx: &mut PipelineContext| {
+                Box::pin(async move {
+                    tracing::info!(
+                        "🔄 FSM: Materialized -> ReadyForRun (StageReadinessComplete event)"
+                    );
+                    Ok(Transition {
+                        next_state: PipelineState::ReadyForRun,
+                        actions: vec![],
+                    })
+                })
+            };
+
+            on PipelineEvent::Run => |_state: &PipelineState, _event: &PipelineEvent, _ctx: &mut PipelineContext| {
+                Box::pin(async move {
+                    tracing::warn!(
+                        state = "materialized",
+                        "Run event received before readiness barrier; ignoring"
+                    );
+                    Ok(Transition {
+                        next_state: PipelineState::Materialized,
+                        actions: vec![],
+                    })
+                })
+            };
+
+            on PipelineEvent::Error => |_state: &PipelineState, event: &PipelineEvent, ctx: &mut PipelineContext| {
+                let event = event.clone();
+                Box::pin(async move {
+                    if let PipelineEvent::Error { message } = event {
+                        if message == STOP_REASON_TIMEOUT {
+                            ctx.stop_intent.apply_request(
+                                FlowStopMode::Cancel,
+                                Some(STOP_REASON_TIMEOUT.to_string()),
+                            );
+                        }
+
+                        let failure_cause = if message == STOP_REASON_TIMEOUT {
+                            Some(obzenflow_core::event::types::ViolationCause::Other(
+                                STOP_REASON_TIMEOUT.into(),
+                            ))
+                        } else {
+                            None
+                        };
+
+                        Ok(Transition {
+                            next_state: PipelineState::Failed {
+                                reason: message,
+                                failure_cause,
+                            },
+                            actions: vec![PipelineAction::Cleanup],
+                        })
+                    } else {
+                        Err(obzenflow_fsm::FsmError::HandlerError(
+                            "Invalid event".to_string(),
+                        ))
+                    }
+                })
+            };
+
+            on PipelineEvent::StopRequested => |_state: &PipelineState, event: &PipelineEvent, ctx: &mut PipelineContext| {
+                let event = event.clone();
+                Box::pin(async move {
+                    let (mode, reason) = match event {
+                        PipelineEvent::StopRequested { mode, reason } => (mode, reason),
+                        _ => unreachable!("StopRequested handler received non-StopRequested event"),
+                    };
+
+                    let outcome = ctx.stop_intent.apply_request(mode.clone(), reason);
+                    let reason_label = match outcome {
+                        StopRequestOutcome::Applied { reason_label, .. } => reason_label,
+                        StopRequestOutcome::IgnoredAlreadyCancelled => ctx.stop_intent.reason_label(),
+                    };
+
+                    Ok(Transition {
+                        next_state: PipelineState::Failed {
+                            reason: reason_label.clone(),
+                            failure_cause: Some(obzenflow_core::event::types::ViolationCause::Other(reason_label.clone())),
+                        },
+                        actions: vec![
+                            PipelineAction::WritePipelineStopRequested { mode },
+                            PipelineAction::DrainMetrics,
+                            PipelineAction::Cleanup,
+                        ],
+                    })
+                })
+            };
+        }
+
+        state PipelineState::ReadyForRun {
             on PipelineEvent::Run => |_state: &PipelineState, _event: &PipelineEvent, _ctx: &mut PipelineContext| {
                 Box::pin(async move {
                     tracing::info!(
-                        "🔄 FSM: Materialized -> Running (Run event)"
+                        "🔄 FSM: ReadyForRun -> Running (Run event)"
                     );
                     Ok(Transition {
                         next_state: PipelineState::Running,
@@ -1434,6 +1531,19 @@ pub fn build_pipeline_fsm_with_initial(initial: PipelineState) -> PipelineFsm {
         }
 
         state PipelineState::Running {
+            on PipelineEvent::Run => |_state: &PipelineState, _event: &PipelineEvent, _ctx: &mut PipelineContext| {
+                Box::pin(async move {
+                    tracing::debug!(
+                        state = "running",
+                        "Duplicate Run received after start; treating as idempotent"
+                    );
+                    Ok(Transition {
+                        next_state: PipelineState::Running,
+                        actions: vec![],
+                    })
+                })
+            };
+
             on PipelineEvent::Abort => |_state: &PipelineState, event: &PipelineEvent, _ctx: &mut PipelineContext| {
                 let event = event.clone();
                 Box::pin(async move {
@@ -1580,6 +1690,19 @@ pub fn build_pipeline_fsm_with_initial(initial: PipelineState) -> PipelineFsm {
         }
 
         state PipelineState::SourceCompleted {
+            on PipelineEvent::Run => |_state: &PipelineState, _event: &PipelineEvent, _ctx: &mut PipelineContext| {
+                Box::pin(async move {
+                    tracing::debug!(
+                        state = "sourcecompleted",
+                        "Duplicate Run received after start; treating as idempotent"
+                    );
+                    Ok(Transition {
+                        next_state: PipelineState::SourceCompleted,
+                        actions: vec![],
+                    })
+                })
+            };
+
             on PipelineEvent::BeginDrain => |_state: &PipelineState, _event: &PipelineEvent, _ctx: &mut PipelineContext| {
                 Box::pin(async move {
                     Ok(Transition {
@@ -1650,6 +1773,19 @@ pub fn build_pipeline_fsm_with_initial(initial: PipelineState) -> PipelineFsm {
         }
 
         state PipelineState::Draining {
+            on PipelineEvent::Run => |_state: &PipelineState, _event: &PipelineEvent, _ctx: &mut PipelineContext| {
+                Box::pin(async move {
+                    tracing::debug!(
+                        state = "draining",
+                        "Duplicate Run received after start; treating as idempotent"
+                    );
+                    Ok(Transition {
+                        next_state: PipelineState::Draining,
+                        actions: vec![],
+                    })
+                })
+            };
+
             on PipelineEvent::Abort => |_state: &PipelineState, event: &PipelineEvent, _ctx: &mut PipelineContext| {
                 let event = event.clone();
                 Box::pin(async move {
@@ -1800,6 +1936,20 @@ pub fn build_pipeline_fsm_with_initial(initial: PipelineState) -> PipelineFsm {
         }
 
         state PipelineState::AbortRequested {
+            on PipelineEvent::Run => |state: &PipelineState, _event: &PipelineEvent, _ctx: &mut PipelineContext| {
+                let state = state.clone();
+                Box::pin(async move {
+                    tracing::debug!(
+                        state = "abortrequested",
+                        "Duplicate Run received after start; treating as idempotent"
+                    );
+                    Ok(Transition {
+                        next_state: state,
+                        actions: vec![],
+                    })
+                })
+            };
+
             on PipelineEvent::Error => |state: &PipelineState, event: &PipelineEvent, _ctx: &mut PipelineContext| {
                 let event = event.clone();
                 let state = state.clone();

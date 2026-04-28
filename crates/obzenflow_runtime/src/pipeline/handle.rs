@@ -148,35 +148,118 @@ impl FlowHandle {
         }
     }
 
+    /// Wait until the pipeline is ready to accept `Run`.
+    ///
+    /// Returns successfully when the pipeline reaches `ReadyForRun`, or when
+    /// `Running` is already observed. Returns an error if the pipeline reaches a
+    /// terminal, aborting, or post-source state before it is ready.
+    pub async fn wait_for_ready(&self) -> Result<(), FlowError> {
+        let mut state_rx = self.state_receiver();
+
+        loop {
+            let state = state_rx.borrow().clone();
+            match state {
+                PipelineState::ReadyForRun | PipelineState::Running => return Ok(()),
+                PipelineState::Failed { reason, .. } => {
+                    return Err(FlowError::ExecutionFailed(Box::new(io::Error::other(
+                        reason,
+                    ))));
+                }
+                PipelineState::AbortRequested { reason, .. } => {
+                    return Err(FlowError::ExecutionFailed(Box::new(io::Error::other(
+                        format!("{reason:?}"),
+                    ))));
+                }
+                PipelineState::SourceCompleted => {
+                    return Err(FlowError::ExecutionFailed(Box::new(io::Error::other(
+                        "Pipeline source completed before it became ready for run",
+                    ))));
+                }
+                PipelineState::Draining => {
+                    return Err(FlowError::ExecutionFailed(Box::new(io::Error::other(
+                        "Pipeline entered draining before it became ready for run",
+                    ))));
+                }
+                PipelineState::Drained => {
+                    return Err(FlowError::ExecutionFailed(Box::new(io::Error::other(
+                        "Pipeline drained before it became ready for run",
+                    ))));
+                }
+                PipelineState::Created
+                | PipelineState::Materializing
+                | PipelineState::Materialized => {}
+            }
+
+            state_rx.changed().await.map_err(|_| {
+                FlowError::ExecutionFailed(Box::new(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "Pipeline state channel closed before readiness",
+                )))
+            })?;
+        }
+    }
+
     /// Start the pipeline without waiting for completion.
     ///
-    /// This sends the `Run` event into the FSM and returns immediately.
+    /// This waits until the pipeline reaches `ReadyForRun`, sends `Run` only
+    /// while still in that state, and returns immediately. If the pipeline is
+    /// already `Running`, this returns successfully without sending a duplicate
+    /// command.
     /// Intended for long-running/server flows where lifecycle is driven
     /// externally (e.g. via HTTP control API) rather than by awaiting
     /// `run()` to completion.
     pub async fn start(&self) -> Result<(), FlowError> {
+        self.wait_for_ready().await?;
         let current_state = self.current_state();
         tracing::debug!(
             "FlowHandle::start() - Current pipeline state: {:?}",
             current_state
         );
-        tracing::debug!("FlowHandle::start() - Sending PipelineEvent::Run to start flow");
-        self.send_event(PipelineEvent::Run).await
+        match current_state {
+            PipelineState::ReadyForRun => {
+                tracing::debug!("FlowHandle::start() - Sending PipelineEvent::Run to start flow");
+                self.send_event(PipelineEvent::Run).await
+            }
+            PipelineState::Running => {
+                tracing::debug!("FlowHandle::start() - Pipeline already running");
+                Ok(())
+            }
+            PipelineState::Failed { reason, .. } => Err(FlowError::ExecutionFailed(Box::new(
+                io::Error::other(reason),
+            ))),
+            PipelineState::AbortRequested { reason, .. } => Err(FlowError::ExecutionFailed(
+                Box::new(io::Error::other(format!("{reason:?}"))),
+            )),
+            PipelineState::SourceCompleted
+            | PipelineState::Draining
+            | PipelineState::Drained
+            | PipelineState::Created
+            | PipelineState::Materializing
+            | PipelineState::Materialized => Err(FlowError::ExecutionFailed(Box::new(
+                io::Error::other(format!(
+                    "Pipeline left readiness window before start command could be sent: {current_state:?}"
+                )),
+            ))),
+        }
     }
 
     /// Run the pipeline and wait for completion
-    /// This is the primary method users should call after creating a flow
+    ///
+    /// This waits for `ReadyForRun` before sending `Run`. If the pipeline is
+    /// already `Running`, it waits for completion without sending another `Run`.
+    /// This is the primary method users should call after creating a flow.
     pub async fn run(self) -> Result<(), FlowError> {
-        // Send the Run event to transition from Materialized to Running
-        // This will trigger NotifySourceStart action
+        self.wait_for_ready().await?;
         let current_state = self.current_state();
         tracing::debug!(
             "FlowHandle::run() - Current pipeline state: {:?}",
             current_state
         );
-        tracing::debug!("FlowHandle::run() - Sending PipelineEvent::Run to start flow");
-        self.send_event(PipelineEvent::Run).await?;
-        tracing::debug!("FlowHandle::run() - Run event sent, waiting for completion");
+        if matches!(current_state, PipelineState::ReadyForRun) {
+            tracing::debug!("FlowHandle::run() - Sending PipelineEvent::Run to start flow");
+            self.send_event(PipelineEvent::Run).await?;
+        }
+        tracing::debug!("FlowHandle::run() - Waiting for completion");
 
         // Capture state receiver before consuming self so we can inspect the terminal state
         let state_rx = self.state_receiver();
@@ -209,13 +292,16 @@ impl FlowHandle {
 
     /// Run the pipeline and wait for completion, returning the metrics exporter
     /// Use this when you need to access metrics after the flow completes
-    /// Typically used with finite sources (not infinite sources)
+    /// Typically used with finite sources (not infinite sources). This waits for
+    /// `ReadyForRun` before sending `Run`; if the pipeline is already `Running`,
+    /// it does not send a duplicate `Run`.
     pub async fn run_with_metrics(
         self,
     ) -> Result<Option<Arc<dyn obzenflow_core::metrics::MetricsExporter>>, FlowError> {
-        // Send the Run event to transition from Materialized to Running
-        // This will trigger NotifySourceStart action
-        self.send_event(PipelineEvent::Run).await?;
+        self.wait_for_ready().await?;
+        if matches!(self.current_state(), PipelineState::ReadyForRun) {
+            self.send_event(PipelineEvent::Run).await?;
+        }
 
         // Save metrics exporter before consuming self
         let metrics = self.metrics_exporter.clone();
@@ -342,6 +428,11 @@ impl FlowHandle {
     /// Get a receiver for watching state changes
     pub fn state_receiver(&self) -> tokio::sync::watch::Receiver<PipelineState> {
         self.handle.state_receiver()
+    }
+
+    /// Get the latest observed pipeline supervisor state.
+    pub fn current_state(&self) -> PipelineState {
+        self.handle.current_state()
     }
 
     /// Get the metrics exporter for concurrent access during flow execution

@@ -3,6 +3,7 @@
 // https://obzenflow.dev
 
 use async_trait::async_trait;
+use obzenflow_core::event::types::ViolationCause;
 use obzenflow_core::event::MetricsCoordinationEvent;
 use obzenflow_core::event::{
     ChainEvent, JournalEvent, JournalWriterId, SystemEvent, SystemEventType,
@@ -16,7 +17,9 @@ use obzenflow_core::metrics::{MetricsExporter, NoOpMetricsExporter};
 use obzenflow_core::{EventEnvelope, StageId};
 use obzenflow_fsm::FsmAction;
 use obzenflow_runtime::message_bus::FsmMessageBus;
-use obzenflow_runtime::pipeline::fsm::{FlowStopMode, PipelineContext};
+use obzenflow_runtime::pipeline::fsm::{
+    build_pipeline_fsm_with_initial, FlowStopMode, PipelineContext, PipelineEvent, PipelineState,
+};
 use obzenflow_runtime::pipeline::PipelineAction;
 use obzenflow_topology::TopologyBuilder;
 use std::collections::{HashMap, HashSet};
@@ -190,6 +193,149 @@ fn make_context(
         last_system_event_id_seen: None,
         stop_intent: Default::default(),
     }
+}
+
+fn make_fsm_context() -> PipelineContext {
+    let system_id = SystemId::new();
+    let system_journal: Arc<dyn Journal<SystemEvent>> =
+        Arc::new(MemoryJournal::with_owner(JournalOwner::system(system_id)));
+    make_context(system_id, system_journal, Vec::new(), None)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn materialized_readiness_complete_moves_to_ready_for_run() {
+    let mut ctx = make_fsm_context();
+    let mut fsm = build_pipeline_fsm_with_initial(PipelineState::Materialized);
+
+    let actions = fsm
+        .handle(PipelineEvent::StageReadinessComplete, &mut ctx)
+        .await
+        .expect("readiness transition should succeed");
+
+    assert!(actions.is_empty());
+    assert!(matches!(fsm.state(), PipelineState::ReadyForRun));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ready_for_run_run_starts_sources() {
+    let mut ctx = make_fsm_context();
+    let mut fsm = build_pipeline_fsm_with_initial(PipelineState::ReadyForRun);
+
+    let actions = fsm
+        .handle(PipelineEvent::Run, &mut ctx)
+        .await
+        .expect("run transition should succeed from ReadyForRun");
+
+    assert!(matches!(fsm.state(), PipelineState::Running));
+    assert!(
+        matches!(actions.as_slice(), [PipelineAction::NotifySourceStart]),
+        "ReadyForRun + Run must be the only transition that starts sources"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pre_ready_run_self_transitions_without_actions() {
+    for initial_state in [
+        PipelineState::Created,
+        PipelineState::Materializing,
+        PipelineState::Materialized,
+    ] {
+        let mut ctx = make_fsm_context();
+        let mut fsm = build_pipeline_fsm_with_initial(initial_state.clone());
+
+        let actions = fsm
+            .handle(PipelineEvent::Run, &mut ctx)
+            .await
+            .expect("pre-ready Run should not panic or become unhandled");
+
+        assert!(actions.is_empty());
+        assert_eq!(fsm.state(), &initial_state);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn duplicate_run_is_idempotent_after_sources_started() {
+    for initial_state in [
+        PipelineState::Running,
+        PipelineState::SourceCompleted,
+        PipelineState::Draining,
+    ] {
+        let mut ctx = make_fsm_context();
+        let mut fsm = build_pipeline_fsm_with_initial(initial_state.clone());
+
+        let actions = fsm
+            .handle(PipelineEvent::Run, &mut ctx)
+            .await
+            .expect("post-start duplicate Run should be idempotent");
+
+        assert!(actions.is_empty());
+        assert_eq!(fsm.state(), &initial_state);
+    }
+
+    let reason = ViolationCause::Other("abort_reason".to_string());
+    let upstream = Some(StageId::new());
+    let initial_state = PipelineState::AbortRequested {
+        reason: reason.clone(),
+        upstream,
+    };
+    let mut ctx = make_fsm_context();
+    let mut fsm = build_pipeline_fsm_with_initial(initial_state.clone());
+
+    let actions = fsm
+        .handle(PipelineEvent::Run, &mut ctx)
+        .await
+        .expect("AbortRequested duplicate Run should be idempotent");
+
+    assert!(actions.is_empty());
+    assert_eq!(fsm.state(), &initial_state);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ready_for_run_error_and_stop_transition_to_failed() {
+    let mut ctx = make_fsm_context();
+    let mut fsm = build_pipeline_fsm_with_initial(PipelineState::ReadyForRun);
+
+    let actions = fsm
+        .handle(
+            PipelineEvent::Error {
+                message: "readiness fault".to_string(),
+            },
+            &mut ctx,
+        )
+        .await
+        .expect("ReadyForRun + Error should transition through failure path");
+
+    assert!(matches!(
+        fsm.state(),
+        PipelineState::Failed { reason, .. } if reason == "readiness fault"
+    ));
+    assert!(matches!(actions.as_slice(), [PipelineAction::Cleanup]));
+
+    let mut ctx = make_fsm_context();
+    let mut fsm = build_pipeline_fsm_with_initial(PipelineState::ReadyForRun);
+    let actions = fsm
+        .handle(
+            PipelineEvent::StopRequested {
+                mode: FlowStopMode::Cancel,
+                reason: Some("operator_stop".to_string()),
+            },
+            &mut ctx,
+        )
+        .await
+        .expect("ReadyForRun + StopRequested should transition through stop path");
+
+    assert!(matches!(
+        fsm.state(),
+        PipelineState::Failed { reason, .. } if reason == "operator_stop"
+    ));
+    assert!(matches!(
+        actions.as_slice(),
+        [
+            PipelineAction::WritePipelineStopRequested { .. },
+            PipelineAction::DrainMetrics,
+            PipelineAction::Cleanup
+        ]
+    ));
 }
 
 #[tokio::test(flavor = "multi_thread")]

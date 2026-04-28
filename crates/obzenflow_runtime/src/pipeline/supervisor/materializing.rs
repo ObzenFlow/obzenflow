@@ -45,8 +45,10 @@ pub(super) async fn dispatch_materializing(
             "Materialization mismatch details"
         );
 
-        panic!(
-            "Stage count mismatch: {initialized_count} supervisors vs {expected_count} topology stages"
-        );
+        Ok(EventLoopDirective::Transition(PipelineEvent::Error {
+            message: format!(
+                "Stage count mismatch: {initialized_count} supervisors vs {expected_count} topology stages"
+            ),
+        }))
     }
 }

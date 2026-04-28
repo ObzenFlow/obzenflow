@@ -245,4 +245,20 @@ where
     fn event_for_action_error(&self, msg: String) -> Self::Event {
         self.inner.event_for_action_error(msg)
     }
+
+    async fn after_transition(
+        &mut self,
+        state: &Self::State,
+        context: &Self::Context,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        self.inner.after_transition(state, context).await?;
+
+        if self.last_state.as_ref() != Some(state) {
+            let new_state = state.clone();
+            let _ = self.state_watcher.update(new_state.clone());
+            self.last_state = Some(new_state);
+        }
+
+        Ok(())
+    }
 }
