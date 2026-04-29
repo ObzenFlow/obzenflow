@@ -71,6 +71,20 @@ impl MiddlewareStackConfig {
     }
 }
 
+/// Immediate outcome for externally requested pipeline start admission.
+#[derive(Debug, Clone, PartialEq)]
+pub enum FlowStartControlOutcome {
+    /// `Run` was accepted and sent while the pipeline was ready.
+    Started { state: PipelineState },
+    /// The pipeline was already running, so no duplicate `Run` was sent.
+    AlreadyRunning { state: PipelineState },
+    /// The pipeline cannot accept `Run` in the observed state.
+    Rejected {
+        state: PipelineState,
+        reason: &'static str,
+    },
+}
+
 /// Flow handle for external control - the public API returned by the DSL
 ///
 /// This is a wrapper that combines:
@@ -145,6 +159,28 @@ impl FlowHandle {
             subgraph_membership,
             subgraphs,
             liveness_snapshots,
+        }
+    }
+
+    /// Try to start the pipeline using only the currently observed state.
+    ///
+    /// This is intended for non-blocking control surfaces such as HTTP Play.
+    /// It does not wait for readiness. Callers that want blocking startup
+    /// semantics should use `start()`, `run()`, or `run_with_metrics()`.
+    pub async fn start_if_ready_now(&self) -> Result<FlowStartControlOutcome, FlowError> {
+        const NOT_READY_REASON: &str = "pipeline is not ready for run";
+
+        let state = self.current_state();
+        match state {
+            PipelineState::ReadyForRun => {
+                self.send_event(PipelineEvent::Run).await?;
+                Ok(FlowStartControlOutcome::Started { state })
+            }
+            PipelineState::Running => Ok(FlowStartControlOutcome::AlreadyRunning { state }),
+            _ => Ok(FlowStartControlOutcome::Rejected {
+                state,
+                reason: NOT_READY_REASON,
+            }),
         }
     }
 
@@ -580,9 +616,10 @@ impl SupervisorHandle for FlowHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::supervised_base::{ChannelBuilder, HandleBuilder};
+    use crate::supervised_base::{ChannelBuilder, EventReceiver, HandleBuilder};
     use obzenflow_core::event::types::ViolationCause;
     use std::error::Error;
+    use tokio::sync::mpsc::error::TryRecvError;
 
     fn empty_extras() -> FlowHandleExtras {
         FlowHandleExtras {
@@ -626,6 +663,113 @@ mod tests {
             .expect("standard handle should build");
 
         FlowHandle::new(handle, None, empty_extras())
+    }
+
+    fn flow_handle_for_start_admission(
+        initial_state: PipelineState,
+    ) -> (FlowHandle, EventReceiver<PipelineEvent>) {
+        let (event_sender, event_receiver, state_watcher) =
+            ChannelBuilder::<PipelineEvent, PipelineState>::new()
+                .with_event_buffer(4)
+                .build(initial_state);
+
+        let task = tokio::spawn(async { Ok::<(), Box<dyn std::error::Error + Send + Sync>>(()) });
+
+        let handle = HandleBuilder::new()
+            .with_event_sender(event_sender)
+            .with_state_watcher(state_watcher)
+            .with_supervisor_task(task)
+            .build_standard()
+            .expect("standard handle should build");
+
+        (
+            FlowHandle::new(handle, None, empty_extras()),
+            event_receiver,
+        )
+    }
+
+    #[tokio::test]
+    async fn start_if_ready_now_dispatches_run_in_ready_for_run() {
+        let (handle, mut event_receiver) =
+            flow_handle_for_start_admission(PipelineState::ReadyForRun);
+
+        let outcome = handle
+            .start_if_ready_now()
+            .await
+            .expect("ReadyForRun admission should succeed");
+
+        assert_eq!(
+            outcome,
+            FlowStartControlOutcome::Started {
+                state: PipelineState::ReadyForRun
+            }
+        );
+        assert!(
+            matches!(event_receiver.try_recv(), Ok(PipelineEvent::Run)),
+            "ReadyForRun admission should dispatch Run"
+        );
+    }
+
+    #[tokio::test]
+    async fn start_if_ready_now_accepts_running_without_dispatch() {
+        let (handle, mut event_receiver) = flow_handle_for_start_admission(PipelineState::Running);
+
+        let outcome = handle
+            .start_if_ready_now()
+            .await
+            .expect("Running admission should succeed");
+
+        assert_eq!(
+            outcome,
+            FlowStartControlOutcome::AlreadyRunning {
+                state: PipelineState::Running
+            }
+        );
+        assert!(
+            matches!(event_receiver.try_recv(), Err(TryRecvError::Empty)),
+            "Running admission must not dispatch duplicate Run"
+        );
+    }
+
+    #[tokio::test]
+    async fn start_if_ready_now_rejects_non_ready_states_without_dispatch() {
+        let cases = [
+            PipelineState::Created,
+            PipelineState::Materializing,
+            PipelineState::Materialized,
+            PipelineState::SourceCompleted,
+            PipelineState::AbortRequested {
+                reason: ViolationCause::Other("abort".to_string()),
+                upstream: None,
+            },
+            PipelineState::Draining,
+            PipelineState::Drained,
+            PipelineState::Failed {
+                reason: "failed".to_string(),
+                failure_cause: None,
+            },
+        ];
+
+        for state in cases {
+            let (handle, mut event_receiver) = flow_handle_for_start_admission(state.clone());
+
+            let outcome = handle
+                .start_if_ready_now()
+                .await
+                .expect("rejection should be reported as a control outcome");
+
+            assert_eq!(
+                outcome,
+                FlowStartControlOutcome::Rejected {
+                    state,
+                    reason: "pipeline is not ready for run"
+                }
+            );
+            assert!(
+                matches!(event_receiver.try_recv(), Err(TryRecvError::Empty)),
+                "rejected admission must not dispatch Run"
+            );
+        }
     }
 
     #[tokio::test]

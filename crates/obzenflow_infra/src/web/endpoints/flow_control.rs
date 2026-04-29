@@ -11,7 +11,7 @@
 use async_trait::async_trait;
 use obzenflow_core::web::{HttpEndpoint, HttpMethod, ManagedResponse, Request, Response, WebError};
 use obzenflow_runtime::errors::FlowError;
-use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
+use obzenflow_runtime::pipeline::{FlowHandle, FlowStartControlOutcome, PipelineState};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Duration;
@@ -80,7 +80,7 @@ impl FlowControlEndpoint {
 #[async_trait]
 trait FlowControlTarget: Send + Sync {
     fn current_state(&self) -> PipelineState;
-    async fn start(&self) -> Result<(), FlowError>;
+    async fn start_if_ready_now(&self) -> Result<FlowStartControlOutcome, FlowError>;
     async fn stop_cancel(&self) -> Result<(), FlowError>;
     async fn stop_graceful(&self, timeout: Duration) -> Result<(), FlowError>;
 }
@@ -91,8 +91,8 @@ impl FlowControlTarget for FlowHandle {
         self.current_state()
     }
 
-    async fn start(&self) -> Result<(), FlowError> {
-        self.start().await
+    async fn start_if_ready_now(&self) -> Result<FlowStartControlOutcome, FlowError> {
+        FlowHandle::start_if_ready_now(self).await
     }
 
     async fn stop_cancel(&self) -> Result<(), FlowError> {
@@ -158,27 +158,35 @@ impl HttpEndpoint for FlowControlEndpoint {
         let result = match action {
             FlowControlAction::Play => {
                 tracing::info!("FlowControlEndpoint: Play requested");
-                let state = self.flow_handle.current_state();
-                let state_label = pipeline_state_label(&state);
-                // Play is only start-actionable after the runtime has been
-                // materialized and every non-source stage has reported running.
-                // `Materialized` is still inside that readiness barrier.
-                match state {
-                    PipelineState::ReadyForRun => self.flow_handle.start().await,
-                    PipelineState::Running => {
+                match self.flow_handle.start_if_ready_now().await {
+                    Ok(FlowStartControlOutcome::Started { state }) => {
+                        return ok_json_response(FlowControlResponse {
+                            status: FlowControlStatus::Accepted,
+                            message: "Play accepted".to_string(),
+                            state: Some(pipeline_state_label(&state)),
+                        });
+                    }
+                    Ok(FlowStartControlOutcome::AlreadyRunning { state }) => {
                         return ok_json_response(FlowControlResponse {
                             status: FlowControlStatus::Accepted,
                             message: "Play accepted: already running".to_string(),
+                            state: Some(pipeline_state_label(&state)),
+                        });
+                    }
+                    Ok(FlowStartControlOutcome::Rejected { state, reason }) => {
+                        let state_label = pipeline_state_label(&state);
+                        return ok_json_response(FlowControlResponse {
+                            status: FlowControlStatus::Rejected,
+                            message: format!("Play rejected: {reason} (state={state_label})"),
                             state: Some(state_label),
                         });
                     }
-                    _ => {
+                    Err(e) => {
+                        tracing::error!("Flow control action {:?} failed: {}", action, e);
                         return ok_json_response(FlowControlResponse {
                             status: FlowControlStatus::Rejected,
-                            message: format!(
-                                "Play rejected: pipeline is not ready for run (state={state_label})"
-                            ),
-                            state: Some(state_label),
+                            message: format!("Action {:?} failed: {}", action, e),
+                            state: Some(pipeline_state_label(&self.flow_handle.current_state())),
                         });
                     }
                 }
@@ -268,16 +276,31 @@ mod tests {
 
     struct TestFlowTarget {
         state: Mutex<PipelineState>,
-        starts: AtomicUsize,
+        play_outcome: Mutex<FlowStartControlOutcome>,
+        play_calls: AtomicUsize,
         stop_cancels: AtomicUsize,
         stop_gracefuls: AtomicUsize,
     }
 
     impl TestFlowTarget {
         fn new(state: PipelineState) -> Arc<Self> {
+            Self::with_play_outcome(
+                state.clone(),
+                FlowStartControlOutcome::Rejected {
+                    state,
+                    reason: "pipeline is not ready for run",
+                },
+            )
+        }
+
+        fn with_play_outcome(
+            state: PipelineState,
+            play_outcome: FlowStartControlOutcome,
+        ) -> Arc<Self> {
             Arc::new(Self {
                 state: Mutex::new(state),
-                starts: AtomicUsize::new(0),
+                play_outcome: Mutex::new(play_outcome),
+                play_calls: AtomicUsize::new(0),
                 stop_cancels: AtomicUsize::new(0),
                 stop_gracefuls: AtomicUsize::new(0),
             })
@@ -290,9 +313,13 @@ mod tests {
             self.state.lock().expect("state lock poisoned").clone()
         }
 
-        async fn start(&self) -> Result<(), FlowError> {
-            self.starts.fetch_add(1, Ordering::Relaxed);
-            Ok(())
+        async fn start_if_ready_now(&self) -> Result<FlowStartControlOutcome, FlowError> {
+            self.play_calls.fetch_add(1, Ordering::Relaxed);
+            Ok(self
+                .play_outcome
+                .lock()
+                .expect("play outcome lock poisoned")
+                .clone())
         }
 
         async fn stop_cancel(&self) -> Result<(), FlowError> {
@@ -354,7 +381,13 @@ mod tests {
         ];
 
         for (state, expected_label) in cases {
-            let target = TestFlowTarget::new(state);
+            let target = TestFlowTarget::with_play_outcome(
+                state.clone(),
+                FlowStartControlOutcome::Rejected {
+                    state,
+                    reason: "pipeline is not ready for run",
+                },
+            );
             let endpoint = FlowControlEndpoint::new_for_target(target.clone());
 
             let (status, response) = post_control(&endpoint, "play").await;
@@ -362,25 +395,37 @@ mod tests {
             assert_eq!(status, 200);
             assert_eq!(response.status, FlowControlStatus::Rejected);
             assert_eq!(response.state.as_deref(), Some(expected_label));
-            assert_eq!(target.starts.load(Ordering::Relaxed), 0);
+            assert_eq!(target.play_calls.load(Ordering::Relaxed), 1);
         }
     }
 
     #[tokio::test]
-    async fn play_in_ready_for_run_dispatches_start() {
-        let target = TestFlowTarget::new(PipelineState::ReadyForRun);
+    async fn play_maps_started_runtime_outcome() {
+        let target = TestFlowTarget::with_play_outcome(
+            PipelineState::Materialized,
+            FlowStartControlOutcome::Started {
+                state: PipelineState::ReadyForRun,
+            },
+        );
         let endpoint = FlowControlEndpoint::new_for_target(target.clone());
 
         let (status, response) = post_control(&endpoint, "play").await;
 
         assert_eq!(status, 200);
         assert_eq!(response.status, FlowControlStatus::Accepted);
-        assert_eq!(target.starts.load(Ordering::Relaxed), 1);
+        assert_eq!(response.state.as_deref(), Some("readyforrun"));
+        assert_eq!(response.message, "Play accepted");
+        assert_eq!(target.play_calls.load(Ordering::Relaxed), 1);
     }
 
     #[tokio::test]
-    async fn play_in_running_is_idempotently_accepted_without_dispatch() {
-        let target = TestFlowTarget::new(PipelineState::Running);
+    async fn play_maps_already_running_runtime_outcome() {
+        let target = TestFlowTarget::with_play_outcome(
+            PipelineState::Materialized,
+            FlowStartControlOutcome::AlreadyRunning {
+                state: PipelineState::Running,
+            },
+        );
         let endpoint = FlowControlEndpoint::new_for_target(target.clone());
 
         let (status, response) = post_control(&endpoint, "play").await;
@@ -389,7 +434,7 @@ mod tests {
         assert_eq!(response.status, FlowControlStatus::Accepted);
         assert_eq!(response.state.as_deref(), Some("running"));
         assert!(response.message.contains("already running"));
-        assert_eq!(target.starts.load(Ordering::Relaxed), 0);
+        assert_eq!(target.play_calls.load(Ordering::Relaxed), 1);
     }
 
     #[tokio::test]
@@ -402,6 +447,6 @@ mod tests {
         assert_eq!(status, 200);
         assert_eq!(response.status, FlowControlStatus::Rejected);
         assert_eq!(response.state.as_deref(), Some("materialized"));
-        assert_eq!(target.starts.load(Ordering::Relaxed), 0);
+        assert_eq!(target.play_calls.load(Ordering::Relaxed), 0);
     }
 }

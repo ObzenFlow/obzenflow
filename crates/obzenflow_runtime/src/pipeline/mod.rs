@@ -17,6 +17,6 @@ pub mod supervisor;
 pub use builder::PipelineBuilder;
 pub use config::{ObserverConfig, StageConfig as PipelineStageConfig, StageHandlerType};
 pub use fsm::{PipelineAction, PipelineEvent, PipelineState};
-pub use handle::{FlowHandle, MiddlewareStackConfig};
+pub use handle::{FlowHandle, FlowStartControlOutcome, MiddlewareStackConfig};
 pub use join_metadata::JoinMetadata;
 pub use max_iterations::MaxIterations;
