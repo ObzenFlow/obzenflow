@@ -244,7 +244,7 @@ struct StartGate {
 }
 
 impl TestPipelineStageHandle {
-    fn new(id: StageId, name: impl Into<String>, stage_type: StageType) -> BoxedStageHandle {
+    fn boxed(id: StageId, name: impl Into<String>, stage_type: StageType) -> BoxedStageHandle {
         Box::new(Self {
             id,
             name: name.into(),
@@ -517,7 +517,7 @@ async fn materializing_stage_count_mismatch_transitions_to_failed_without_panic(
     let mut context = test_context(topology, system_id, system_journal.clone(), None);
     context.stage_supervisors.insert(
         sink_stage_id,
-        TestPipelineStageHandle::new(sink_stage_id, "sink", StageType::Sink),
+        TestPipelineStageHandle::boxed(sink_stage_id, "sink", StageType::Sink),
     );
 
     let (_sender, receiver, watcher) =
@@ -608,7 +608,7 @@ async fn running_state_is_published_after_source_start_actions_complete() {
     context.running_stages.insert(sink_stage_id);
     context.stage_supervisors.insert(
         sink_stage_id,
-        TestPipelineStageHandle::new(sink_stage_id, "sink", StageType::Sink),
+        TestPipelineStageHandle::boxed(sink_stage_id, "sink", StageType::Sink),
     );
 
     let (entered_tx, entered_rx) = oneshot::channel();
