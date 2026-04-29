@@ -112,15 +112,34 @@ pub fn build_pipeline_fsm() -> PipelineFsm {
     build_pipeline_fsm_with_initial(PipelineState::Created)
 }
 
-/// Pipeline states
+/// Pipeline states.
+///
+/// `Materialized` and `ReadyForRun` are intentionally separate. Materialized
+/// means the runtime objects exist and non-source stages have been told to
+/// start. ReadyForRun means those non-source stages have reported `Running`,
+/// so it is now safe for a `Run` command to start source stages.
 #[derive(Clone, Debug, PartialEq)]
 pub enum PipelineState {
+    /// Initial state before stage resources have been created.
     Created,
+    /// Stage resources, subscriptions, and runtime wiring are being created.
     Materializing,
+    /// Runtime wiring exists and non-source stages are starting.
+    ///
+    /// Sources must not start in this state. The materialized supervisor waits
+    /// here until every non-source stage has reported `Running`, then emits
+    /// `StageReadinessComplete` to enter `ReadyForRun`.
     Materialized,
+    /// All non-source stages have reported `Running`.
+    ///
+    /// This is the only pre-running state where `Run` is allowed to start
+    /// sources. In manual startup mode the pipeline waits here for external
+    /// Play/Run; in auto startup mode the supervisor immediately emits `Run`.
     ReadyForRun,
+    /// Source stages have been signalled to start.
     Running,
-    SourceCompleted, // Source has finished, initiating Jonestown protocol
+    /// Source stages have completed and the pipeline is moving toward drain.
+    SourceCompleted,
     AbortRequested {
         reason: obzenflow_core::event::types::ViolationCause,
         upstream: Option<StageId>,
@@ -155,6 +174,7 @@ impl StateVariant for PipelineState {
 pub enum PipelineEvent {
     Materialize,
     MaterializationComplete,
+    /// Non-source stage readiness barrier has completed.
     StageReadinessComplete,
     Run,
     /// User-initiated stop request (distinct from natural source completion).

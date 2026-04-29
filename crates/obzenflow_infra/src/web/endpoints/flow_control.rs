@@ -160,6 +160,9 @@ impl HttpEndpoint for FlowControlEndpoint {
                 tracing::info!("FlowControlEndpoint: Play requested");
                 let state = self.flow_handle.current_state();
                 let state_label = pipeline_state_label(&state);
+                // Play is only start-actionable after the runtime has been
+                // materialized and every non-source stage has reported running.
+                // `Materialized` is still inside that readiness barrier.
                 match state {
                     PipelineState::ReadyForRun => self.flow_handle.start().await,
                     PipelineState::Running => {

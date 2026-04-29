@@ -9,6 +9,12 @@ use crate::messaging::{PollResult, SubscriptionPoller};
 use crate::supervised_base::EventLoopDirective;
 use std::time::Duration;
 
+/// Drives the state after the readiness barrier has completed.
+///
+/// No source stage has been started yet when manual startup reaches this state.
+/// Manual mode waits for an external `Run`; auto mode emits `Run` immediately.
+/// The dispatcher keeps polling stage lifecycle events so a failure or
+/// cancellation before Play fails the pipeline instead of waiting indefinitely.
 pub(super) async fn dispatch_ready_for_run(
     supervisor: &mut PipelineSupervisor,
     context: &mut PipelineContext,

@@ -8,6 +8,12 @@ use crate::messaging::SubscriptionPoller;
 use crate::supervised_base::EventLoopDirective;
 use obzenflow_core::StageId;
 
+/// Drives the "built but not ready" phase of the pipeline lifecycle.
+///
+/// `Materialized` means stage resources exist and non-source stages have been
+/// asked to start. It does not mean source stages may run yet. This dispatcher
+/// waits until every non-source stage has reported `Running`, then emits
+/// `StageReadinessComplete` so the FSM can enter `ReadyForRun`.
 pub(super) async fn dispatch_materialized(
     _supervisor: &mut PipelineSupervisor,
     context: &mut PipelineContext,
