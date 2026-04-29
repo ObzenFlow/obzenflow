@@ -99,7 +99,7 @@ async fn measure_waiting_for_gun_cpu() -> anyhow::Result<f64> {
     let mut state_rx = handle.state_receiver();
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            if matches!(&*state_rx.borrow(), PipelineState::Materialized) {
+            if matches!(&*state_rx.borrow(), PipelineState::ReadyForRun) {
                 break;
             }
             if state_rx.changed().await.is_err() {
@@ -108,7 +108,7 @@ async fn measure_waiting_for_gun_cpu() -> anyhow::Result<f64> {
         }
     })
     .await
-    .map_err(|_| anyhow::anyhow!("Timed out waiting for pipeline to reach Materialized"))?;
+    .map_err(|_| anyhow::anyhow!("Timed out waiting for pipeline to reach ReadyForRun"))?;
 
     // Let it stabilize in the waiting state.
     tokio::time::sleep(Duration::from_millis(500)).await;

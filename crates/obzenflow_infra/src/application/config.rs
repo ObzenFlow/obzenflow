@@ -315,6 +315,20 @@ impl FlowConfig {
         Self::parse().resolve(builder_config_file, enable_autodiscovery)
     }
 
+    pub(crate) fn parse_and_resolve_from<I, T>(
+        args: I,
+        builder_config_file: Option<PathBuf>,
+        enable_autodiscovery: bool,
+    ) -> Result<ResolvedStartupConfig, ConfigError>
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<std::ffi::OsString> + Clone,
+    {
+        Self::try_parse_from(args)
+            .map_err(|err| ConfigError::global(err.to_string()))?
+            .resolve(builder_config_file, enable_autodiscovery)
+    }
+
     pub(crate) fn resolve(
         self,
         builder_config_file: Option<PathBuf>,

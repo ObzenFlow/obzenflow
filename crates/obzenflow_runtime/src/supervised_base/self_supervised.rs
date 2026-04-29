@@ -44,6 +44,18 @@ pub trait SelfSupervised: Supervisor + Sync {
     /// failure drives the FSM through an explicit failure path instead
     /// of terminating the task with an opaque error.
     fn event_for_action_error(&self, msg: String) -> Self::Event;
+
+    /// Hook called after a successful FSM transition and its actions complete.
+    ///
+    /// Supervisors that publish observer state can use this to avoid a one-loop
+    /// lag between the FSM state and external handles.
+    async fn after_transition(
+        &mut self,
+        _state: &Self::State,
+        _context: &Self::Context,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        Ok(())
+    }
 }
 
 /// Extension trait to add run functionality to any SelfSupervised type
@@ -132,6 +144,9 @@ pub trait SelfSupervisedExt: SelfSupervised {
                         })?;
                     }
 
+                    let new_state = machine.state().clone();
+                    self.after_transition(&new_state, &context).await?;
+
                     continue;
                 }
             };
@@ -176,6 +191,7 @@ pub trait SelfSupervisedExt: SelfSupervised {
                         iteration,
                         actions.len()
                     );
+                    let mut failure_transition_handled = false;
                     for (i, action) in actions.iter().enumerate() {
                         tracing::debug!(
                             supervisor = %supervisor_name,
@@ -228,6 +244,10 @@ pub trait SelfSupervisedExt: SelfSupervised {
                                 })?;
                             }
 
+                            let new_state = machine.state().clone();
+                            self.after_transition(&new_state, &context).await?;
+                            failure_transition_handled = true;
+
                             // After executing failure-handling actions, break out of the
                             // current action sequence. The next loop iteration will see
                             // the new FSM state (typically Failed/Drained) and perform
@@ -243,13 +263,17 @@ pub trait SelfSupervisedExt: SelfSupervised {
                             actions.len()
                         );
                     }
-                    tracing::debug!(
-                        supervisor = %supervisor_name,
-                        writer_id = ?supervisor_writer,
-                        "Loop iteration {}: Transition complete, new state: {:?}",
-                        iteration,
-                        machine.state()
-                    );
+                    if !failure_transition_handled {
+                        tracing::debug!(
+                            supervisor = %supervisor_name,
+                            writer_id = ?supervisor_writer,
+                            "Loop iteration {}: Transition complete, new state: {:?}",
+                            iteration,
+                            machine.state()
+                        );
+                        let new_state = machine.state().clone();
+                        self.after_transition(&new_state, &context).await?;
+                    }
                 }
 
                 EventLoopDirective::Terminate => {

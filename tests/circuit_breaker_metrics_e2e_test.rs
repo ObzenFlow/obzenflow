@@ -223,12 +223,20 @@ async fn test_circuit_breaker_metrics_end_to_end() -> Result<()> {
 
     println!("Running flow to trigger circuit breaker state transitions...");
 
-    // Run the flow and capture metrics exporter for inspection
+    // Keep a metrics exporter handle even if the strict source delivery contract
+    // aborts after the circuit breaker rejects downstream traffic.
     let metrics_exporter = flow_handle
-        .run_with_metrics()
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to run flow: {e:?}"))?
+        .metrics_exporter()
         .expect("Metrics should be enabled");
+    let run_result = flow_handle.run_with_metrics().await;
+    if let Err(e) = run_result {
+        let error = format!("{e:?}");
+        assert!(
+            error.contains("SeqDivergence") || error.contains("Pipeline abort requested"),
+            "unexpected circuit breaker flow failure: {error}"
+        );
+        println!("Flow aborted after breaker-induced delivery divergence, as expected: {error}");
+    }
 
     // Wait a bit to allow metrics aggregator to process events
     sleep(Duration::from_secs(5)).await;

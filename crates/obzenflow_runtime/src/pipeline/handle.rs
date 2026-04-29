@@ -71,6 +71,20 @@ impl MiddlewareStackConfig {
     }
 }
 
+/// Immediate outcome for externally requested pipeline start admission.
+#[derive(Debug, Clone, PartialEq)]
+pub enum FlowStartControlOutcome {
+    /// `Run` was accepted and sent while the pipeline was ready.
+    Started { state: PipelineState },
+    /// The pipeline was already running, so no duplicate `Run` was sent.
+    AlreadyRunning { state: PipelineState },
+    /// The pipeline cannot accept `Run` in the observed state.
+    Rejected {
+        state: PipelineState,
+        reason: &'static str,
+    },
+}
+
 /// Flow handle for external control - the public API returned by the DSL
 ///
 /// This is a wrapper that combines:
@@ -148,35 +162,144 @@ impl FlowHandle {
         }
     }
 
+    /// Try to start the pipeline using only the currently observed state.
+    ///
+    /// This is intended for non-blocking control surfaces such as HTTP Play.
+    /// It does not wait for readiness. Callers that want blocking startup
+    /// semantics should use `start()`, `run()`, or `run_with_metrics()`.
+    pub async fn start_if_ready_now(&self) -> Result<FlowStartControlOutcome, FlowError> {
+        const NOT_READY_REASON: &str = "pipeline is not ready for run";
+
+        let state = self.current_state();
+        match state {
+            PipelineState::ReadyForRun => {
+                self.send_event(PipelineEvent::Run).await?;
+                Ok(FlowStartControlOutcome::Started { state })
+            }
+            PipelineState::Running => Ok(FlowStartControlOutcome::AlreadyRunning { state }),
+            _ => Ok(FlowStartControlOutcome::Rejected {
+                state,
+                reason: NOT_READY_REASON,
+            }),
+        }
+    }
+
+    /// Wait until the pipeline is ready to accept `Run`.
+    ///
+    /// Returns successfully when the pipeline reaches `ReadyForRun`, or when
+    /// `Running` is already observed. Returns an error if the pipeline reaches a
+    /// terminal, aborting, or post-source state before it is ready.
+    pub async fn wait_for_ready(&self) -> Result<(), FlowError> {
+        let mut state_rx = self.state_receiver();
+
+        loop {
+            let state = state_rx.borrow().clone();
+            match state {
+                PipelineState::ReadyForRun | PipelineState::Running => return Ok(()),
+                PipelineState::Failed { reason, .. } => {
+                    return Err(FlowError::ExecutionFailed(Box::new(io::Error::other(
+                        reason,
+                    ))));
+                }
+                PipelineState::AbortRequested { reason, .. } => {
+                    return Err(FlowError::ExecutionFailed(Box::new(io::Error::other(
+                        format!("{reason:?}"),
+                    ))));
+                }
+                PipelineState::SourceCompleted => {
+                    return Err(FlowError::ExecutionFailed(Box::new(io::Error::other(
+                        "Pipeline source completed before it became ready for run",
+                    ))));
+                }
+                PipelineState::Draining => {
+                    return Err(FlowError::ExecutionFailed(Box::new(io::Error::other(
+                        "Pipeline entered draining before it became ready for run",
+                    ))));
+                }
+                PipelineState::Drained => {
+                    return Err(FlowError::ExecutionFailed(Box::new(io::Error::other(
+                        "Pipeline drained before it became ready for run",
+                    ))));
+                }
+                PipelineState::Created
+                | PipelineState::Materializing
+                | PipelineState::Materialized => {}
+            }
+
+            state_rx.changed().await.map_err(|_| {
+                FlowError::ExecutionFailed(Box::new(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "Pipeline state channel closed before readiness",
+                )))
+            })?;
+        }
+    }
+
     /// Start the pipeline without waiting for completion.
     ///
-    /// This sends the `Run` event into the FSM and returns immediately.
+    /// This waits until the pipeline reaches `ReadyForRun`, sends `Run` only
+    /// while still in that state, and returns immediately. If the pipeline is
+    /// already `Running`, this returns successfully without sending a duplicate
+    /// command.
+    ///
+    /// If a finite flow reaches a terminal state before the post-readiness state
+    /// check can send `Run`, this returns an error. Use `run()` or
+    /// `run_with_metrics()` for finite flows that should be driven to completion.
     /// Intended for long-running/server flows where lifecycle is driven
     /// externally (e.g. via HTTP control API) rather than by awaiting
     /// `run()` to completion.
     pub async fn start(&self) -> Result<(), FlowError> {
+        self.wait_for_ready().await?;
         let current_state = self.current_state();
         tracing::debug!(
             "FlowHandle::start() - Current pipeline state: {:?}",
             current_state
         );
-        tracing::debug!("FlowHandle::start() - Sending PipelineEvent::Run to start flow");
-        self.send_event(PipelineEvent::Run).await
+        match current_state {
+            PipelineState::ReadyForRun => {
+                tracing::debug!("FlowHandle::start() - Sending PipelineEvent::Run to start flow");
+                self.send_event(PipelineEvent::Run).await
+            }
+            PipelineState::Running => {
+                tracing::debug!("FlowHandle::start() - Pipeline already running");
+                Ok(())
+            }
+            PipelineState::Failed { reason, .. } => Err(FlowError::ExecutionFailed(Box::new(
+                io::Error::other(reason),
+            ))),
+            PipelineState::AbortRequested { reason, .. } => Err(FlowError::ExecutionFailed(
+                Box::new(io::Error::other(format!("{reason:?}"))),
+            )),
+            PipelineState::SourceCompleted
+            | PipelineState::Draining
+            | PipelineState::Drained
+            | PipelineState::Created
+            | PipelineState::Materializing
+            | PipelineState::Materialized => Err(FlowError::ExecutionFailed(Box::new(
+                io::Error::other(format!(
+                    "Pipeline left readiness window before start command could be sent: {current_state:?}"
+                )),
+            ))),
+        }
     }
 
     /// Run the pipeline and wait for completion
-    /// This is the primary method users should call after creating a flow
+    ///
+    /// This waits for `ReadyForRun` before sending `Run`. If the pipeline is
+    /// already `Running`, it waits for completion without sending another `Run`.
+    /// This is the primary method users should call after creating a flow.
     pub async fn run(self) -> Result<(), FlowError> {
-        // Send the Run event to transition from Materialized to Running
-        // This will trigger NotifySourceStart action
+        self.wait_for_ready().await?;
         let current_state = self.current_state();
         tracing::debug!(
             "FlowHandle::run() - Current pipeline state: {:?}",
             current_state
         );
-        tracing::debug!("FlowHandle::run() - Sending PipelineEvent::Run to start flow");
-        self.send_event(PipelineEvent::Run).await?;
-        tracing::debug!("FlowHandle::run() - Run event sent, waiting for completion");
+        if matches!(current_state, PipelineState::ReadyForRun) {
+            tracing::debug!("FlowHandle::run() - Sending PipelineEvent::Run to start flow");
+            self.send_event(PipelineEvent::Run).await?;
+        }
+        tracing::debug!("FlowHandle::run() - Waiting for completion");
 
         // Capture state receiver before consuming self so we can inspect the terminal state
         let state_rx = self.state_receiver();
@@ -209,13 +332,18 @@ impl FlowHandle {
 
     /// Run the pipeline and wait for completion, returning the metrics exporter
     /// Use this when you need to access metrics after the flow completes
-    /// Typically used with finite sources (not infinite sources)
+    /// Typically used with finite sources (not infinite sources). This waits for
+    /// `ReadyForRun` before sending `Run`; if the pipeline is already `Running`,
+    /// it does not send a duplicate `Run`.
     pub async fn run_with_metrics(
         self,
     ) -> Result<Option<Arc<dyn obzenflow_core::metrics::MetricsExporter>>, FlowError> {
-        // Send the Run event to transition from Materialized to Running
-        // This will trigger NotifySourceStart action
-        self.send_event(PipelineEvent::Run).await?;
+        self.wait_for_ready().await?;
+        if matches!(self.current_state(), PipelineState::ReadyForRun) {
+            self.send_event(PipelineEvent::Run).await?;
+        }
+
+        let state_rx = self.state_receiver();
 
         // Save metrics exporter before consuming self
         let metrics = self.metrics_exporter.clone();
@@ -223,6 +351,21 @@ impl FlowHandle {
 
         // Now wait for it to complete
         self.wait_for_completion().await?;
+
+        let final_state = state_rx.borrow().clone();
+        match final_state {
+            PipelineState::Failed { reason, .. } => {
+                return Err(FlowError::ExecutionFailed(Box::new(io::Error::other(
+                    reason,
+                ))));
+            }
+            PipelineState::AbortRequested { reason, .. } => {
+                return Err(FlowError::ExecutionFailed(Box::new(io::Error::other(
+                    format!("{reason:?}"),
+                ))));
+            }
+            _ => {}
+        }
 
         // Best-effort: wait for the metrics subsystem to complete its final export.
         //
@@ -342,6 +485,11 @@ impl FlowHandle {
     /// Get a receiver for watching state changes
     pub fn state_receiver(&self) -> tokio::sync::watch::Receiver<PipelineState> {
         self.handle.state_receiver()
+    }
+
+    /// Get the latest observed pipeline supervisor state.
+    pub fn current_state(&self) -> PipelineState {
+        self.handle.current_state()
     }
 
     /// Get the metrics exporter for concurrent access during flow execution
@@ -466,5 +614,259 @@ impl SupervisorHandle for FlowHandle {
                 )),
                 _ => FlowError::ExecutionFailed(Box::new(std::io::Error::other(e.to_string()))),
             })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::supervised_base::{ChannelBuilder, EventReceiver, HandleBuilder};
+    use obzenflow_core::event::types::ViolationCause;
+    use std::error::Error;
+    use tokio::sync::mpsc::error::TryRecvError;
+
+    fn empty_extras() -> FlowHandleExtras {
+        FlowHandleExtras {
+            topology: None,
+            flow_name: "test_flow".to_string(),
+            middleware_stacks: None,
+            contract_attachments: None,
+            join_metadata: None,
+            subgraph_membership: None,
+            subgraphs: None,
+            system_journal: None,
+            liveness_snapshots: None,
+        }
+    }
+
+    fn flow_handle_that_finishes_in(final_state: PipelineState) -> FlowHandle {
+        let (event_sender, mut event_receiver, state_watcher) =
+            ChannelBuilder::<PipelineEvent, PipelineState>::new()
+                .with_event_buffer(4)
+                .build(PipelineState::ReadyForRun);
+
+        let state_watcher_for_task = state_watcher.clone();
+        let task = tokio::spawn(async move {
+            match event_receiver.recv().await {
+                Some(PipelineEvent::Run) => {
+                    state_watcher_for_task
+                        .update(final_state)
+                        .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })?;
+                    Ok(())
+                }
+                Some(event) => Err(format!("unexpected event: {event:?}").into()),
+                None => Err("event channel closed before Run".into()),
+            }
+        });
+
+        let handle = HandleBuilder::new()
+            .with_event_sender(event_sender)
+            .with_state_watcher(state_watcher)
+            .with_supervisor_task(task)
+            .build_standard()
+            .expect("standard handle should build");
+
+        FlowHandle::new(handle, None, empty_extras())
+    }
+
+    fn flow_handle_for_start_admission(
+        initial_state: PipelineState,
+    ) -> (FlowHandle, EventReceiver<PipelineEvent>) {
+        let (event_sender, event_receiver, state_watcher) =
+            ChannelBuilder::<PipelineEvent, PipelineState>::new()
+                .with_event_buffer(4)
+                .build(initial_state);
+
+        let task = tokio::spawn(async { Ok::<(), Box<dyn std::error::Error + Send + Sync>>(()) });
+
+        let handle = HandleBuilder::new()
+            .with_event_sender(event_sender)
+            .with_state_watcher(state_watcher)
+            .with_supervisor_task(task)
+            .build_standard()
+            .expect("standard handle should build");
+
+        (
+            FlowHandle::new(handle, None, empty_extras()),
+            event_receiver,
+        )
+    }
+
+    #[tokio::test]
+    async fn start_if_ready_now_dispatches_run_in_ready_for_run() {
+        let (handle, mut event_receiver) =
+            flow_handle_for_start_admission(PipelineState::ReadyForRun);
+
+        let outcome = handle
+            .start_if_ready_now()
+            .await
+            .expect("ReadyForRun admission should succeed");
+
+        assert_eq!(
+            outcome,
+            FlowStartControlOutcome::Started {
+                state: PipelineState::ReadyForRun
+            }
+        );
+        assert!(
+            matches!(event_receiver.try_recv(), Ok(PipelineEvent::Run)),
+            "ReadyForRun admission should dispatch Run"
+        );
+    }
+
+    #[tokio::test]
+    async fn start_if_ready_now_accepts_running_without_dispatch() {
+        let (handle, mut event_receiver) = flow_handle_for_start_admission(PipelineState::Running);
+
+        let outcome = handle
+            .start_if_ready_now()
+            .await
+            .expect("Running admission should succeed");
+
+        assert_eq!(
+            outcome,
+            FlowStartControlOutcome::AlreadyRunning {
+                state: PipelineState::Running
+            }
+        );
+        assert!(
+            matches!(event_receiver.try_recv(), Err(TryRecvError::Empty)),
+            "Running admission must not dispatch duplicate Run"
+        );
+    }
+
+    #[tokio::test]
+    async fn start_if_ready_now_rejects_non_ready_states_without_dispatch() {
+        let cases = [
+            PipelineState::Created,
+            PipelineState::Materializing,
+            PipelineState::Materialized,
+            PipelineState::SourceCompleted,
+            PipelineState::AbortRequested {
+                reason: ViolationCause::Other("abort".to_string()),
+                upstream: None,
+            },
+            PipelineState::Draining,
+            PipelineState::Drained,
+            PipelineState::Failed {
+                reason: "failed".to_string(),
+                failure_cause: None,
+            },
+        ];
+
+        for state in cases {
+            let (handle, mut event_receiver) = flow_handle_for_start_admission(state.clone());
+
+            let outcome = handle
+                .start_if_ready_now()
+                .await
+                .expect("rejection should be reported as a control outcome");
+
+            assert_eq!(
+                outcome,
+                FlowStartControlOutcome::Rejected {
+                    state,
+                    reason: "pipeline is not ready for run"
+                }
+            );
+            assert!(
+                matches!(event_receiver.try_recv(), Err(TryRecvError::Empty)),
+                "rejected admission must not dispatch Run"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn wait_for_ready_returns_error_for_terminal_or_aborting_states() {
+        let cases = [
+            PipelineState::SourceCompleted,
+            PipelineState::AbortRequested {
+                reason: ViolationCause::Other("abort".to_string()),
+                upstream: None,
+            },
+            PipelineState::Draining,
+            PipelineState::Drained,
+            PipelineState::Failed {
+                reason: "failed".to_string(),
+                failure_cause: None,
+            },
+        ];
+
+        for state in cases {
+            let (handle, _event_receiver) = flow_handle_for_start_admission(state);
+
+            let result = handle.wait_for_ready().await;
+
+            assert!(result.is_err(), "terminal state must not satisfy readiness");
+        }
+    }
+
+    #[tokio::test]
+    async fn start_accepts_coalesced_running_without_dispatch() {
+        let (handle, mut event_receiver) = flow_handle_for_start_admission(PipelineState::Running);
+
+        handle
+            .start()
+            .await
+            .expect("Running should satisfy start without dispatching Run");
+
+        assert!(
+            matches!(event_receiver.try_recv(), Err(TryRecvError::Empty)),
+            "start must not dispatch duplicate Run after observing Running"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_with_metrics_returns_failed_terminal_state_as_error() {
+        let handle = flow_handle_that_finishes_in(PipelineState::Failed {
+            reason: "terminal failure".to_string(),
+            failure_cause: None,
+        });
+
+        let result = handle.run_with_metrics().await;
+        assert!(
+            result.is_err(),
+            "Failed terminal state must surface as an error"
+        );
+        let err = result.err().expect("error should be present");
+        let source = err.source().expect("source error should be present");
+
+        assert!(
+            source.to_string().contains("terminal failure"),
+            "unexpected source error: {source}"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_with_metrics_returns_abort_terminal_state_as_error() {
+        let handle = flow_handle_that_finishes_in(PipelineState::AbortRequested {
+            reason: ViolationCause::Other("abort requested".to_string()),
+            upstream: None,
+        });
+
+        let result = handle.run_with_metrics().await;
+        assert!(
+            result.is_err(),
+            "AbortRequested terminal state must surface as an error"
+        );
+        let err = result.err().expect("error should be present");
+        let source = err.source().expect("source error should be present");
+
+        assert!(
+            source.to_string().contains("abort requested"),
+            "unexpected source error: {source}"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_with_metrics_allows_successful_terminal_state() {
+        let handle = flow_handle_that_finishes_in(PipelineState::Drained);
+
+        let metrics = handle
+            .run_with_metrics()
+            .await
+            .expect("Drained terminal state should remain successful");
+
+        assert!(metrics.is_none());
     }
 }

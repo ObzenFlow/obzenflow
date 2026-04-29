@@ -15,6 +15,7 @@ mod created;
 mod draining;
 mod materialized;
 mod materializing;
+mod ready_for_run;
 mod running;
 mod source_completed;
 mod terminal;
@@ -180,6 +181,9 @@ impl SelfSupervised for PipelineSupervisor {
                 materializing::dispatch_materializing(self, context).await
             }
             PipelineState::Materialized => materialized::dispatch_materialized(self, context).await,
+            PipelineState::ReadyForRun => {
+                ready_for_run::dispatch_ready_for_run(self, context).await
+            }
             PipelineState::Running => running::dispatch_running(self, context).await,
             PipelineState::SourceCompleted => {
                 source_completed::dispatch_source_completed(self, context).await
