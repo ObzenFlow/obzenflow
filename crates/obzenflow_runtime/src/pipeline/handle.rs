@@ -241,6 +241,10 @@ impl FlowHandle {
     /// while still in that state, and returns immediately. If the pipeline is
     /// already `Running`, this returns successfully without sending a duplicate
     /// command.
+    ///
+    /// If a finite flow reaches a terminal state before the post-readiness state
+    /// check can send `Run`, this returns an error. Use `run()` or
+    /// `run_with_metrics()` for finite flows that should be driven to completion.
     /// Intended for long-running/server flows where lifecycle is driven
     /// externally (e.g. via HTTP control API) rather than by awaiting
     /// `run()` to completion.
@@ -770,6 +774,46 @@ mod tests {
                 "rejected admission must not dispatch Run"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn wait_for_ready_returns_error_for_terminal_or_aborting_states() {
+        let cases = [
+            PipelineState::SourceCompleted,
+            PipelineState::AbortRequested {
+                reason: ViolationCause::Other("abort".to_string()),
+                upstream: None,
+            },
+            PipelineState::Draining,
+            PipelineState::Drained,
+            PipelineState::Failed {
+                reason: "failed".to_string(),
+                failure_cause: None,
+            },
+        ];
+
+        for state in cases {
+            let (handle, _event_receiver) = flow_handle_for_start_admission(state);
+
+            let result = handle.wait_for_ready().await;
+
+            assert!(result.is_err(), "terminal state must not satisfy readiness");
+        }
+    }
+
+    #[tokio::test]
+    async fn start_accepts_coalesced_running_without_dispatch() {
+        let (handle, mut event_receiver) = flow_handle_for_start_admission(PipelineState::Running);
+
+        handle
+            .start()
+            .await
+            .expect("Running should satisfy start without dispatching Run");
+
+        assert!(
+            matches!(event_receiver.try_recv(), Err(TryRecvError::Empty)),
+            "start must not dispatch duplicate Run after observing Running"
+        );
     }
 
     #[tokio::test]

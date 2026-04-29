@@ -28,6 +28,7 @@ use obzenflow_dsl::FlowDefinition;
 use obzenflow_runtime::bootstrap::{install_bootstrap_config, try_install_bootstrap_config};
 use obzenflow_runtime::prelude::FlowHandle;
 use obzenflow_runtime::stages::LivenessSnapshots;
+use std::ffi::OsString;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -44,6 +45,9 @@ struct LaunchParams {
     extra_endpoints: Vec<Box<dyn HttpEndpoint>>,
     flow_handle_hooks: Vec<FlowHandleHook>,
     presentation: Option<Presentation>,
+    cli_args: Option<Vec<OsString>>,
+    #[cfg(test)]
+    test_shutdown_signal: Option<tokio::sync::oneshot::Receiver<ShutdownSignal>>,
 }
 
 impl LaunchParams {
@@ -55,12 +59,164 @@ impl LaunchParams {
     }
 }
 
+#[cfg(all(test, feature = "warp-server"))]
+mod tests {
+    use super::*;
+    use crate::journal::disk_journals;
+    use async_trait::async_trait;
+    use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
+    use obzenflow_core::ChainEvent;
+    use obzenflow_dsl::{flow, infinite_source, sink};
+    use obzenflow_runtime::pipeline::PipelineState;
+    use obzenflow_runtime::stages::common::handler_error::HandlerError;
+    use obzenflow_runtime::stages::common::handlers::{InfiniteSourceHandler, SinkHandler};
+    use obzenflow_runtime::stages::SourceError;
+    use std::net::TcpListener;
+    use std::sync::Mutex;
+    use tokio::sync::oneshot;
+
+    #[derive(Clone, Debug)]
+    struct IdleInfiniteSource;
+
+    impl InfiniteSourceHandler for IdleInfiniteSource {
+        fn next(&mut self) -> Result<Vec<ChainEvent>, SourceError> {
+            Ok(Vec::new())
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    struct NoopSink;
+
+    #[async_trait]
+    impl SinkHandler for NoopSink {
+        async fn consume(&mut self, _event: ChainEvent) -> Result<DeliveryPayload, HandlerError> {
+            Ok(DeliveryPayload::success(
+                "noop",
+                DeliveryMethod::Custom("test".to_string()),
+                None,
+            ))
+        }
+    }
+
+    fn available_local_port() -> u16 {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind ephemeral port");
+        listener.local_addr().expect("local addr").port()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn server_auto_mode_tolerates_application_start_and_supervisor_auto_run() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let journal_dir = tempdir.path().join("journals");
+        std::fs::create_dir_all(&journal_dir).expect("create journal root");
+        let config_path = tempdir.path().join("obzenflow.toml");
+        let port = available_local_port();
+        std::fs::write(
+            &config_path,
+            format!(
+                r#"
+[server]
+enabled = true
+host = "127.0.0.1"
+port = {port}
+startup_mode = "auto"
+
+[runtime]
+shutdown_timeout_secs = 2
+
+[metrics]
+enabled = false
+"#
+            ),
+        )
+        .expect("write test config");
+
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let shutdown_tx = Arc::new(Mutex::new(Some(shutdown_tx)));
+        let (running_tx, running_rx) = oneshot::channel();
+        let running_tx = Arc::new(Mutex::new(Some(running_tx)));
+
+        let hook_shutdown = Arc::clone(&shutdown_tx);
+        let hook_running = Arc::clone(&running_tx);
+        let hook = move |flow_handle: &Arc<FlowHandle>| {
+            let flow_handle = Arc::clone(flow_handle);
+            let hook_shutdown = Arc::clone(&hook_shutdown);
+            let hook_running = Arc::clone(&hook_running);
+            tokio::spawn(async move {
+                let mut states = flow_handle.state_receiver();
+                loop {
+                    if matches!(*states.borrow(), PipelineState::Running) {
+                        break;
+                    }
+                    if states.changed().await.is_err() {
+                        return;
+                    }
+                }
+
+                if let Some(tx) = hook_running.lock().expect("running lock poisoned").take() {
+                    let _ = tx.send(());
+                }
+                if let Some(tx) = hook_shutdown.lock().expect("shutdown lock poisoned").take() {
+                    let _ = tx.send(ShutdownSignal::Sigint);
+                }
+            })
+        };
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            FlowApplication::launch(
+                flow! {
+                    name: "server_auto_double_run_regression",
+                    journals: disk_journals(journal_dir),
+                    middleware: [],
+
+                    stages: {
+                        src = infinite_source!(IdleInfiniteSource);
+                        sink = sink!(NoopSink);
+                    },
+
+                    topology: {
+                        src |> sink;
+                    }
+                },
+                LaunchParams {
+                    enable_autodiscovery: false,
+                    flow_handle_hooks: vec![Box::new(hook)],
+                    cli_args: Some(vec![
+                        OsString::from("obzenflow"),
+                        OsString::from("--config"),
+                        config_path.into_os_string(),
+                    ]),
+                    test_shutdown_signal: Some(shutdown_rx),
+                    ..LaunchParams::default()
+                },
+            ),
+        )
+        .await
+        .expect("FlowApplication should not hang in server auto mode");
+
+        result.expect("server auto mode should shut down cleanly");
+        running_rx.await.expect("flow should reach Running");
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShutdownSignal {
+    Sigint,
+    Sigterm,
+}
+
 fn resolve_startup_config(
     builder_config_file: Option<PathBuf>,
     enable_autodiscovery: bool,
+    cli_args: Option<Vec<OsString>>,
 ) -> Result<ResolvedStartupConfig, ApplicationError> {
-    FlowConfig::parse_and_resolve(builder_config_file, enable_autodiscovery)
-        .map_err(|err| ApplicationError::InvalidConfiguration(err.to_string()))
+    let result = if let Some(cli_args) = cli_args {
+        FlowConfig::parse_and_resolve_from(cli_args, builder_config_file, enable_autodiscovery)
+    } else {
+        FlowConfig::parse_and_resolve(builder_config_file, enable_autodiscovery)
+    };
+
+    result.map_err(|err| ApplicationError::InvalidConfiguration(err.to_string()))
 }
 
 /// Configuration for log level filtering
@@ -122,6 +278,7 @@ pub struct FlowApplicationBuilder {
     web_endpoints: Vec<Box<dyn HttpEndpoint>>,
     flow_handle_hooks: Vec<FlowHandleHook>,
     presentation: Option<Presentation>,
+    cli_args: Option<Vec<OsString>>,
 }
 
 impl FlowApplicationBuilder {
@@ -170,6 +327,20 @@ impl FlowApplicationBuilder {
     /// still wins when both are present.
     pub fn with_config_file(mut self, path: impl Into<PathBuf>) -> Self {
         self.config_file = Some(path.into());
+        self
+    }
+
+    /// Use explicit application argv for config parsing instead of process argv.
+    ///
+    /// This is useful for embedded callers and tests where process argv belongs
+    /// to a host/test harness. The first item should be the binary name, matching
+    /// normal CLI parsing conventions.
+    pub fn with_cli_args<I, T>(mut self, args: I) -> Self
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<OsString>,
+    {
+        self.cli_args = Some(args.into_iter().map(Into::into).collect());
         self
     }
 
@@ -245,6 +416,7 @@ impl FlowApplicationBuilder {
             web_endpoints,
             flow_handle_hooks,
             presentation,
+            cli_args,
             ..
         } = self;
 
@@ -259,6 +431,9 @@ impl FlowApplicationBuilder {
                 extra_endpoints: web_endpoints,
                 flow_handle_hooks,
                 presentation,
+                cli_args,
+                #[cfg(test)]
+                test_shutdown_signal: None,
             },
         ))
     }
@@ -278,6 +453,7 @@ impl FlowApplicationBuilder {
             web_endpoints,
             flow_handle_hooks,
             presentation,
+            cli_args,
             ..
         } = self;
 
@@ -292,6 +468,9 @@ impl FlowApplicationBuilder {
                 extra_endpoints: web_endpoints,
                 flow_handle_hooks,
                 presentation,
+                cli_args,
+                #[cfg(test)]
+                test_shutdown_signal: None,
             },
         )
         .await
@@ -518,6 +697,9 @@ impl FlowApplication {
             extra_endpoints,
             flow_handle_hooks,
             presentation,
+            cli_args,
+            #[cfg(test)]
+            test_shutdown_signal,
         } = params;
 
         // Best-effort tracing initialization when the builder isn't used.
@@ -534,7 +716,7 @@ impl FlowApplication {
                 .try_init();
         }
 
-        let config = resolve_startup_config(builder_config_file, enable_autodiscovery)?;
+        let config = resolve_startup_config(builder_config_file, enable_autodiscovery, cli_args)?;
 
         let presentation_enabled = presentation.is_some();
 
@@ -794,12 +976,6 @@ impl FlowApplication {
                     );
                     tracing::info!("⏸️  Press Ctrl+C to cancel; send SIGTERM to graceful-stop...");
 
-                    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-                    enum ShutdownSignal {
-                        Sigint,
-                        Sigterm,
-                    }
-
                     #[cfg(unix)]
                     let mut sigterm_stream = match tokio::signal::unix::signal(
                         tokio::signal::unix::SignalKind::terminate(),
@@ -818,6 +994,32 @@ impl FlowApplication {
                     // Wait for first shutdown signal:
                     // - SIGINT (Ctrl+C) => Cancel
                     // - SIGTERM => GracefulStop(timeout=GRACE)
+                    #[cfg(test)]
+                    let first_signal = if let Some(test_shutdown_signal) = test_shutdown_signal {
+                        test_shutdown_signal.await.unwrap_or(ShutdownSignal::Sigint)
+                    } else {
+                        #[cfg(unix)]
+                        {
+                            tokio::select! {
+                                _ = tokio::signal::ctrl_c() => ShutdownSignal::Sigint,
+                                _ = sigterm_stream.recv() => ShutdownSignal::Sigterm,
+                            }
+                        }
+                        #[cfg(not(unix))]
+                        {
+                            if let Err(err) = tokio::signal::ctrl_c().await {
+                                break 'run (
+                                    Err(ApplicationError::from(err)),
+                                    Some(flow_name),
+                                    run_dir,
+                                    false,
+                                );
+                            }
+                            ShutdownSignal::Sigint
+                        }
+                    };
+
+                    #[cfg(not(test))]
                     let first_signal = {
                         #[cfg(unix)]
                         {

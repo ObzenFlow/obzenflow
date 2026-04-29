@@ -8,10 +8,12 @@ use crate::id_conversions::StageIdExt;
 use crate::message_bus::FsmMessageBus;
 use crate::messaging::SystemSubscription;
 use crate::pipeline::fsm::PipelineContext;
+use crate::stages::common::stage_handle::{BoxedStageHandle, StageError, StageEvent, StageHandle};
 use crate::supervised_base::{
     ChannelBuilder, EventSender, SelfSupervisedExt, SelfSupervisedWithExternalEvents, StateWatcher,
 };
 use async_trait::async_trait;
+use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::{JournalEvent, JournalWriterId, SystemEvent};
 use obzenflow_core::id::{FlowId, JournalId, SystemId};
 use obzenflow_core::journal::journal_error::JournalError;
@@ -21,7 +23,9 @@ use obzenflow_core::journal::Journal;
 use obzenflow_core::EventEnvelope;
 use obzenflow_topology::TopologyBuilder;
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
 struct MemoryJournal<T: JournalEvent> {
@@ -151,14 +155,20 @@ where
     }
 }
 
-fn source_sink_topology() -> (Arc<obzenflow_topology::Topology>, StageId) {
+fn source_sink_topology_with_source() -> (Arc<obzenflow_topology::Topology>, StageId, StageId) {
     let mut builder = TopologyBuilder::new();
-    let _source = builder.add_stage(Some("source".to_string()));
+    let source = builder.add_stage(Some("source".to_string()));
     let sink = builder.add_stage(Some("sink".to_string()));
     (
         Arc::new(builder.build_unchecked().expect("source/sink topology")),
+        StageId::from_topology_id(source),
         StageId::from_topology_id(sink),
     )
+}
+
+fn source_sink_topology() -> (Arc<obzenflow_topology::Topology>, StageId) {
+    let (topology, _source, sink) = source_sink_topology_with_source();
+    (topology, sink)
 }
 
 fn empty_topology() -> Arc<obzenflow_topology::Topology> {
@@ -217,6 +227,115 @@ fn test_context(
         flow_start_time: None,
         last_system_event_id_seen: None,
         stop_intent: Default::default(),
+    }
+}
+
+struct TestPipelineStageHandle {
+    id: StageId,
+    name: String,
+    stage_type: StageType,
+    start_gate: Option<StartGate>,
+}
+
+struct StartGate {
+    entered: Mutex<Option<oneshot::Sender<()>>>,
+    release: tokio::sync::Mutex<Option<oneshot::Receiver<()>>>,
+    count: Arc<AtomicUsize>,
+}
+
+impl TestPipelineStageHandle {
+    fn new(id: StageId, name: impl Into<String>, stage_type: StageType) -> BoxedStageHandle {
+        Box::new(Self {
+            id,
+            name: name.into(),
+            stage_type,
+            start_gate: None,
+        })
+    }
+
+    fn with_start_gate(
+        id: StageId,
+        name: impl Into<String>,
+        stage_type: StageType,
+        entered: oneshot::Sender<()>,
+        release: oneshot::Receiver<()>,
+        count: Arc<AtomicUsize>,
+    ) -> BoxedStageHandle {
+        Box::new(Self {
+            id,
+            name: name.into(),
+            stage_type,
+            start_gate: Some(StartGate {
+                entered: Mutex::new(Some(entered)),
+                release: tokio::sync::Mutex::new(Some(release)),
+                count,
+            }),
+        })
+    }
+}
+
+#[async_trait]
+impl StageHandle for TestPipelineStageHandle {
+    fn stage_id(&self) -> StageId {
+        self.id
+    }
+
+    fn stage_name(&self) -> &str {
+        &self.name
+    }
+
+    fn stage_type(&self) -> StageType {
+        self.stage_type
+    }
+
+    async fn initialize(&self) -> Result<(), StageError> {
+        Ok(())
+    }
+
+    async fn ready(&self) -> Result<(), StageError> {
+        Ok(())
+    }
+
+    async fn start(&self) -> Result<(), StageError> {
+        if let Some(gate) = &self.start_gate {
+            gate.count.fetch_add(1, Ordering::Relaxed);
+            if let Some(entered) = gate
+                .entered
+                .lock()
+                .expect("start gate lock poisoned")
+                .take()
+            {
+                let _ = entered.send(());
+            }
+            if let Some(release) = gate.release.lock().await.take() {
+                let _ = release.await;
+            }
+        }
+        Ok(())
+    }
+
+    async fn send_event(&self, _event: StageEvent) -> Result<(), StageError> {
+        Ok(())
+    }
+
+    async fn begin_drain(&self) -> Result<(), StageError> {
+        Ok(())
+    }
+
+    fn is_ready(&self) -> bool {
+        true
+    }
+
+    fn is_drained(&self) -> bool {
+        false
+    }
+
+    async fn force_shutdown(&self) -> Result<(), StageError> {
+        Ok(())
+    }
+
+    async fn wait_for_completion(&self) -> Result<(), StageError> {
+        Ok(())
     }
 }
 
@@ -386,6 +505,161 @@ async fn auto_ready_for_run_emits_run_and_reaches_running() {
         matches!(state, PipelineState::Running)
     })
     .await;
+
+    stop_and_join(&sender, task).await;
+}
+
+#[tokio::test]
+async fn materializing_stage_count_mismatch_transitions_to_failed_without_panic() {
+    let system_id = SystemId::new();
+    let system_journal = Arc::new(MemoryJournal::with_owner(JournalOwner::system(system_id)));
+    let (topology, sink_stage_id) = source_sink_topology();
+    let mut context = test_context(topology, system_id, system_journal.clone(), None);
+    context.stage_supervisors.insert(
+        sink_stage_id,
+        TestPipelineStageHandle::new(sink_stage_id, "sink", StageType::Sink),
+    );
+
+    let (_sender, receiver, watcher) =
+        ChannelBuilder::<PipelineEvent, PipelineState>::new().build(PipelineState::Materializing);
+    let mut state_rx = watcher.subscribe();
+    let task = spawn_supervisor_loop(
+        PipelineState::Materializing,
+        test_supervisor(system_id, system_journal),
+        context,
+        receiver,
+        watcher,
+    );
+
+    wait_for_state(&mut state_rx, "Failed", |state| {
+        matches!(
+            state,
+            PipelineState::Failed { reason, .. } if reason.contains("Stage count mismatch")
+        )
+    })
+    .await;
+
+    tokio::time::timeout(std::time::Duration::from_secs(2), task)
+        .await
+        .expect("supervisor should terminate after materialization failure")
+        .expect("supervisor task should join")
+        .expect("supervisor should return ok after failure transition");
+}
+
+#[tokio::test]
+async fn materialized_to_ready_for_run_publishes_post_transition_state() {
+    let _guard = install_bootstrap_config(BootstrapConfig {
+        startup_mode: StartupMode::Manual,
+        ..BootstrapConfig::default()
+    });
+    let system_id = SystemId::new();
+    let system_journal = Arc::new(MemoryJournal::with_owner(JournalOwner::system(system_id)));
+    let (topology, sink_stage_id) = source_sink_topology();
+    let subscription = empty_system_subscription(&system_journal).await;
+    let mut context = test_context(
+        topology,
+        system_id,
+        system_journal.clone(),
+        Some(subscription),
+    );
+    context.running_stages.insert(sink_stage_id);
+
+    let (sender, receiver, watcher) =
+        ChannelBuilder::<PipelineEvent, PipelineState>::new().build(PipelineState::Materialized);
+    let watcher_for_assertion = watcher.clone();
+    let mut state_rx = watcher.subscribe();
+    let task = spawn_supervisor_loop(
+        PipelineState::Materialized,
+        test_supervisor(system_id, system_journal),
+        context,
+        receiver,
+        watcher,
+    );
+
+    wait_for_state(&mut state_rx, "ReadyForRun", |state| {
+        matches!(state, PipelineState::ReadyForRun)
+    })
+    .await;
+
+    assert!(
+        matches!(watcher_for_assertion.current(), PipelineState::ReadyForRun),
+        "observer state should publish ReadyForRun immediately after the readiness transition"
+    );
+
+    stop_and_join(&sender, task).await;
+}
+
+#[tokio::test]
+async fn running_state_is_published_after_source_start_actions_complete() {
+    let _guard = install_bootstrap_config(BootstrapConfig {
+        startup_mode: StartupMode::Manual,
+        ..BootstrapConfig::default()
+    });
+    let system_id = SystemId::new();
+    let system_journal = Arc::new(MemoryJournal::with_owner(JournalOwner::system(system_id)));
+    let (topology, source_stage_id, sink_stage_id) = source_sink_topology_with_source();
+    let subscription = empty_system_subscription(&system_journal).await;
+    let mut context = test_context(
+        topology,
+        system_id,
+        system_journal.clone(),
+        Some(subscription),
+    );
+    context.running_stages.insert(sink_stage_id);
+    context.stage_supervisors.insert(
+        sink_stage_id,
+        TestPipelineStageHandle::new(sink_stage_id, "sink", StageType::Sink),
+    );
+
+    let (entered_tx, entered_rx) = oneshot::channel();
+    let (release_tx, release_rx) = oneshot::channel();
+    let source_start_count = Arc::new(AtomicUsize::new(0));
+    context.source_supervisors.insert(
+        source_stage_id,
+        TestPipelineStageHandle::with_start_gate(
+            source_stage_id,
+            "source",
+            StageType::FiniteSource,
+            entered_tx,
+            release_rx,
+            source_start_count.clone(),
+        ),
+    );
+
+    let (sender, receiver, watcher) =
+        ChannelBuilder::<PipelineEvent, PipelineState>::new().build(PipelineState::ReadyForRun);
+    let watcher_for_assertion = watcher.clone();
+    let mut state_rx = watcher.subscribe();
+    let task = spawn_supervisor_loop(
+        PipelineState::ReadyForRun,
+        test_supervisor(system_id, system_journal),
+        context,
+        receiver,
+        watcher,
+    );
+
+    sender
+        .send(PipelineEvent::Run)
+        .await
+        .expect("Run should send");
+    tokio::time::timeout(std::time::Duration::from_secs(2), entered_rx)
+        .await
+        .expect("source start action should begin")
+        .expect("source start gate should be signalled");
+
+    assert!(
+        matches!(watcher_for_assertion.current(), PipelineState::ReadyForRun),
+        "Running must not be published until NotifySourceStart completes"
+    );
+
+    release_tx
+        .send(())
+        .expect("source start action should still be waiting");
+    wait_for_state(&mut state_rx, "Running", |state| {
+        matches!(state, PipelineState::Running)
+    })
+    .await;
+    assert_eq!(source_start_count.load(Ordering::Relaxed), 1);
 
     stop_and_join(&sender, task).await;
 }
