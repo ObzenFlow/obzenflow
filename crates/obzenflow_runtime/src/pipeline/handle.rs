@@ -303,12 +303,29 @@ impl FlowHandle {
             self.send_event(PipelineEvent::Run).await?;
         }
 
+        let state_rx = self.state_receiver();
+
         // Save metrics exporter before consuming self
         let metrics = self.metrics_exporter.clone();
         let system_journal = self.system_journal.clone();
 
         // Now wait for it to complete
         self.wait_for_completion().await?;
+
+        let final_state = state_rx.borrow().clone();
+        match final_state {
+            PipelineState::Failed { reason, .. } => {
+                return Err(FlowError::ExecutionFailed(Box::new(io::Error::other(
+                    reason,
+                ))));
+            }
+            PipelineState::AbortRequested { reason, .. } => {
+                return Err(FlowError::ExecutionFailed(Box::new(io::Error::other(
+                    format!("{reason:?}"),
+                ))));
+            }
+            _ => {}
+        }
 
         // Best-effort: wait for the metrics subsystem to complete its final export.
         //
@@ -557,5 +574,111 @@ impl SupervisorHandle for FlowHandle {
                 )),
                 _ => FlowError::ExecutionFailed(Box::new(std::io::Error::other(e.to_string()))),
             })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::supervised_base::{ChannelBuilder, HandleBuilder};
+    use obzenflow_core::event::types::ViolationCause;
+    use std::error::Error;
+
+    fn empty_extras() -> FlowHandleExtras {
+        FlowHandleExtras {
+            topology: None,
+            flow_name: "test_flow".to_string(),
+            middleware_stacks: None,
+            contract_attachments: None,
+            join_metadata: None,
+            subgraph_membership: None,
+            subgraphs: None,
+            system_journal: None,
+            liveness_snapshots: None,
+        }
+    }
+
+    fn flow_handle_that_finishes_in(final_state: PipelineState) -> FlowHandle {
+        let (event_sender, mut event_receiver, state_watcher) =
+            ChannelBuilder::<PipelineEvent, PipelineState>::new()
+                .with_event_buffer(4)
+                .build(PipelineState::ReadyForRun);
+
+        let state_watcher_for_task = state_watcher.clone();
+        let task = tokio::spawn(async move {
+            match event_receiver.recv().await {
+                Some(PipelineEvent::Run) => {
+                    state_watcher_for_task
+                        .update(final_state)
+                        .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })?;
+                    Ok(())
+                }
+                Some(event) => Err(format!("unexpected event: {event:?}").into()),
+                None => Err("event channel closed before Run".into()),
+            }
+        });
+
+        let handle = HandleBuilder::new()
+            .with_event_sender(event_sender)
+            .with_state_watcher(state_watcher)
+            .with_supervisor_task(task)
+            .build_standard()
+            .expect("standard handle should build");
+
+        FlowHandle::new(handle, None, empty_extras())
+    }
+
+    #[tokio::test]
+    async fn run_with_metrics_returns_failed_terminal_state_as_error() {
+        let handle = flow_handle_that_finishes_in(PipelineState::Failed {
+            reason: "terminal failure".to_string(),
+            failure_cause: None,
+        });
+
+        let result = handle.run_with_metrics().await;
+        assert!(
+            result.is_err(),
+            "Failed terminal state must surface as an error"
+        );
+        let err = result.err().expect("error should be present");
+        let source = err.source().expect("source error should be present");
+
+        assert!(
+            source.to_string().contains("terminal failure"),
+            "unexpected source error: {source}"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_with_metrics_returns_abort_terminal_state_as_error() {
+        let handle = flow_handle_that_finishes_in(PipelineState::AbortRequested {
+            reason: ViolationCause::Other("abort requested".to_string()),
+            upstream: None,
+        });
+
+        let result = handle.run_with_metrics().await;
+        assert!(
+            result.is_err(),
+            "AbortRequested terminal state must surface as an error"
+        );
+        let err = result.err().expect("error should be present");
+        let source = err.source().expect("source error should be present");
+
+        assert!(
+            source.to_string().contains("abort requested"),
+            "unexpected source error: {source}"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_with_metrics_allows_successful_terminal_state() {
+        let handle = flow_handle_that_finishes_in(PipelineState::Drained);
+
+        let metrics = handle
+            .run_with_metrics()
+            .await
+            .expect("Drained terminal state should remain successful");
+
+        assert!(metrics.is_none());
     }
 }
