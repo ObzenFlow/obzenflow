@@ -12,7 +12,7 @@ use obzenflow_core::web::{HttpEndpoint, HttpMethod, ManagedResponse, Request, Re
 use obzenflow_core::StageId;
 use obzenflow_runtime::id_conversions::StageIdExt;
 use obzenflow_runtime::typing::{StageTypingInfo, TypeHintInfo};
-use obzenflow_topology::EdgeKind;
+use obzenflow_topology::{DirectedEdge, EdgeKind, StageType as TopologyStageType};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -245,6 +245,34 @@ pub struct EdgeApiInfo {
     /// Structural contract information attached to this edge
     #[serde(skip_serializing_if = "Option::is_none")]
     pub contracts: Option<Vec<ContractApiInfo>>,
+    /// Derived edge payload typing projection (FLOWIP-114b).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub typing: Option<EdgeTypingApiInfo>,
+}
+
+/// Edge payload typing projection exposed by the topology API (FLOWIP-114b).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EdgeTypingApiInfo {
+    pub role: EdgeTypingRoleApi,
+    pub label_source: EdgeTypingLabelSourceApi,
+    pub payload_type: TypeHintApiInfo,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EdgeTypingRoleApi {
+    Input,
+    Reference,
+    Stream,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EdgeTypingLabelSourceApi {
+    UpstreamOutputType,
+    DownstreamInputType,
+    DownstreamReferenceType,
+    DownstreamStreamType,
 }
 
 /// Contract configuration for an edge (structural only)
@@ -363,6 +391,22 @@ impl From<&TypeHintInfo> for TypeHintApiInfo {
             },
         }
     }
+}
+
+fn edge_typing_from_hint(
+    role: EdgeTypingRoleApi,
+    label_source: EdgeTypingLabelSourceApi,
+    payload_type: &TypeHintInfo,
+) -> Option<EdgeTypingApiInfo> {
+    if matches!(payload_type, TypeHintInfo::Unspecified) {
+        return None;
+    }
+
+    Some(EdgeTypingApiInfo {
+        role,
+        label_source,
+        payload_type: payload_type.into(),
+    })
 }
 
 fn display_name_for_type(name: &str) -> String {
@@ -600,6 +644,7 @@ impl TopologyHttpEndpoint {
                             .map(|name| ContractApiInfo { name, config: None })
                             .collect::<Vec<_>>()
                     });
+                let typing = self.derive_edge_typing(edge);
 
                 EdgeApiInfo {
                     from: edge.from.to_string(),
@@ -614,13 +659,14 @@ impl TopologyHttpEndpoint {
                     // by the metrics pipeline and remains unset here.
                     events_per_sec: None,
                     contracts,
+                    typing,
                 }
             })
             .collect();
 
         FlowTopologyResponse {
             flow_name: self.flow_name.clone(),
-            // FLOWIP-114b: Topology API schema version 0.5 includes stage typing.
+            // FLOWIP-114b: Topology API schema version 0.5 includes stage and edge typing.
             version: "0.5".to_string(),
             stages,
             edges,
@@ -667,6 +713,90 @@ impl TopologyHttpEndpoint {
                 .unwrap_or_default(),
         }
     }
+
+    fn derive_edge_typing(&self, edge: &DirectedEdge) -> Option<EdgeTypingApiInfo> {
+        if edge.kind != EdgeKind::Forward {
+            return None;
+        }
+
+        let from_core = StageId::from_ulid(edge.from.ulid());
+        let to_core = StageId::from_ulid(edge.to.ulid());
+
+        if self.is_join_stage(edge.to) {
+            return self.derive_join_edge_typing(from_core, to_core);
+        }
+
+        let stage_typing = self.stage_typing.as_ref()?;
+
+        if let Some(upstream_typing) = stage_typing.get(&from_core) {
+            if let Some(typing) = edge_typing_from_hint(
+                EdgeTypingRoleApi::Input,
+                EdgeTypingLabelSourceApi::UpstreamOutputType,
+                &upstream_typing.output_type,
+            ) {
+                return Some(typing);
+            }
+        }
+
+        if self.forward_upstream_count(edge.to) == 1 {
+            return stage_typing.get(&to_core).and_then(|downstream_typing| {
+                edge_typing_from_hint(
+                    EdgeTypingRoleApi::Input,
+                    EdgeTypingLabelSourceApi::DownstreamInputType,
+                    &downstream_typing.input_type,
+                )
+            });
+        }
+
+        None
+    }
+
+    fn derive_join_edge_typing(
+        &self,
+        from_core: StageId,
+        join_core: StageId,
+    ) -> Option<EdgeTypingApiInfo> {
+        let join_metadata = self
+            .join_metadata
+            .as_ref()
+            .and_then(|map| map.get(&join_core))?;
+        let join_typing = self
+            .stage_typing
+            .as_ref()
+            .and_then(|map| map.get(&join_core))?;
+
+        if join_metadata.catalog_source_ids.contains(&from_core) {
+            return edge_typing_from_hint(
+                EdgeTypingRoleApi::Reference,
+                EdgeTypingLabelSourceApi::DownstreamReferenceType,
+                &join_typing.reference_type,
+            );
+        }
+
+        if join_metadata.stream_source_ids.contains(&from_core) {
+            return edge_typing_from_hint(
+                EdgeTypingRoleApi::Stream,
+                EdgeTypingLabelSourceApi::DownstreamStreamType,
+                &join_typing.stream_type,
+            );
+        }
+
+        None
+    }
+
+    fn is_join_stage(&self, stage_id: obzenflow_topology::StageId) -> bool {
+        self.topology
+            .stage_info(stage_id)
+            .is_some_and(|info| info.stage_type == TopologyStageType::Join)
+    }
+
+    fn forward_upstream_count(&self, stage_id: obzenflow_topology::StageId) -> usize {
+        self.topology
+            .edges()
+            .iter()
+            .filter(|edge| edge.to == stage_id && edge.kind == EdgeKind::Forward)
+            .count()
+    }
 }
 
 #[async_trait]
@@ -710,9 +840,67 @@ mod tests {
         StageSubgraphMembership, SubgraphInternalEdge, TopologySubgraphInfo,
     };
     use obzenflow_runtime::id_conversions::StageIdExt;
+    use obzenflow_runtime::pipeline::JoinMetadata;
     use obzenflow_runtime::pipeline::MiddlewareStackConfig;
     use obzenflow_topology::TopologyBuilder;
     use std::collections::HashMap;
+
+    fn core_id(stage_id: obzenflow_topology::StageId) -> StageId {
+        StageId::from_ulid(stage_id.ulid())
+    }
+
+    fn exact(name: &str) -> TypeHintInfo {
+        TypeHintInfo::Exact {
+            name: name.to_string(),
+        }
+    }
+
+    fn stage_typing(
+        input_type: TypeHintInfo,
+        output_type: TypeHintInfo,
+        reference_type: TypeHintInfo,
+        stream_type: TypeHintInfo,
+    ) -> StageTypingInfo {
+        StageTypingInfo {
+            input_type,
+            output_type,
+            boundary_in_type: TypeHintInfo::Unspecified,
+            boundary_out_type: TypeHintInfo::Unspecified,
+            reference_type,
+            stream_type,
+            is_placeholder: false,
+            placeholder_message: None,
+        }
+    }
+
+    fn stage_metadata(ids: &[StageId]) -> HashMap<StageId, StageMetadata> {
+        ids.iter()
+            .copied()
+            .map(|id| {
+                (
+                    id,
+                    StageMetadata {
+                        stage_type: StageType::Transform,
+                        status: StageStatus::Running,
+                    },
+                )
+            })
+            .collect()
+    }
+
+    fn edge_between<'a>(
+        response: &'a FlowTopologyResponse,
+        from: obzenflow_topology::StageId,
+        to: obzenflow_topology::StageId,
+    ) -> &'a EdgeApiInfo {
+        let from = from.to_string();
+        let to = to.to_string();
+        response
+            .edges
+            .iter()
+            .find(|edge| edge.from == from && edge.to == to)
+            .expect("edge should be present")
+    }
 
     #[tokio::test]
     async fn topology_endpoint_exports_weighted_rate_limiter_config() {
@@ -916,6 +1104,409 @@ mod tests {
             .find(|stage| stage.name == "sink")
             .expect("sink stage should be present");
         assert!(sink_stage.typing.is_none());
+
+        let edge = edge_between(&parsed, stage, sink);
+        let edge_typing = edge
+            .typing
+            .as_ref()
+            .expect("ordinary forward edge should include typing");
+        assert_eq!(edge_typing.role, EdgeTypingRoleApi::Input);
+        assert_eq!(
+            edge_typing.label_source,
+            EdgeTypingLabelSourceApi::UpstreamOutputType
+        );
+        assert_eq!(edge_typing.payload_type.kind, TypeHintKindApi::Exact);
+        assert_eq!(
+            edge_typing.payload_type.name.as_deref(),
+            Some("product_catalog::domain::EnrichedOrder")
+        );
+        assert_eq!(
+            edge_typing.payload_type.display_name.as_deref(),
+            Some("Enriched Order")
+        );
+    }
+
+    #[tokio::test]
+    async fn topology_endpoint_exports_per_edge_typing_for_fan_in() {
+        let mut builder = TopologyBuilder::new();
+        let source_a = builder.add_stage(Some("source_a".to_string()));
+        builder.reset_current();
+        let source_b = builder.add_stage(Some("source_b".to_string()));
+        builder.reset_current();
+        let merge = builder.add_stage(Some("merge".to_string()));
+        builder.reset_current();
+        builder.add_edge(source_a, merge);
+        builder.add_edge(source_b, merge);
+
+        let topology = Arc::new(
+            builder
+                .build_unchecked()
+                .expect("topology should build with structural validation"),
+        );
+
+        let source_a_core = core_id(source_a);
+        let source_b_core = core_id(source_b);
+        let merge_core = core_id(merge);
+
+        let mut stage_typing_map = HashMap::new();
+        stage_typing_map.insert(
+            source_a_core,
+            stage_typing(
+                TypeHintInfo::Unspecified,
+                exact("Sku"),
+                TypeHintInfo::Unspecified,
+                TypeHintInfo::Unspecified,
+            ),
+        );
+        stage_typing_map.insert(
+            source_b_core,
+            stage_typing(
+                TypeHintInfo::Unspecified,
+                exact("Promotion"),
+                TypeHintInfo::Unspecified,
+                TypeHintInfo::Unspecified,
+            ),
+        );
+
+        let endpoint = TopologyHttpEndpoint::new(
+            topology,
+            Arc::new(stage_metadata(&[source_a_core, source_b_core, merge_core])),
+            "test_flow".to_string(),
+            None,
+            None,
+            None,
+            Some(Arc::new(stage_typing_map)),
+            None,
+            None,
+        );
+
+        let parsed = endpoint.build_response(IncludeFlags::default());
+
+        let source_a_edge = edge_between(&parsed, source_a, merge)
+            .typing
+            .as_ref()
+            .expect("source_a edge should include typing");
+        assert_eq!(source_a_edge.role, EdgeTypingRoleApi::Input);
+        assert_eq!(
+            source_a_edge.label_source,
+            EdgeTypingLabelSourceApi::UpstreamOutputType
+        );
+        assert_eq!(source_a_edge.payload_type.name.as_deref(), Some("Sku"));
+        assert_eq!(
+            source_a_edge.payload_type.display_name.as_deref(),
+            Some("Sku")
+        );
+
+        let source_b_edge = edge_between(&parsed, source_b, merge)
+            .typing
+            .as_ref()
+            .expect("source_b edge should include typing");
+        assert_eq!(source_b_edge.role, EdgeTypingRoleApi::Input);
+        assert_eq!(
+            source_b_edge.label_source,
+            EdgeTypingLabelSourceApi::UpstreamOutputType
+        );
+        assert_eq!(
+            source_b_edge.payload_type.name.as_deref(),
+            Some("Promotion")
+        );
+        assert_eq!(
+            source_b_edge.payload_type.display_name.as_deref(),
+            Some("Promotion")
+        );
+    }
+
+    #[tokio::test]
+    async fn topology_endpoint_can_fall_back_to_downstream_input_for_single_input_edges() {
+        let mut builder = TopologyBuilder::new();
+        let source = builder.add_stage(Some("source".to_string()));
+        builder.reset_current();
+        let transform = builder.add_stage(Some("transform".to_string()));
+        builder.reset_current();
+        builder.add_edge(source, transform);
+
+        let topology = Arc::new(
+            builder
+                .build_unchecked()
+                .expect("topology should build with structural validation"),
+        );
+
+        let source_core = core_id(source);
+        let transform_core = core_id(transform);
+
+        let mut stage_typing_map = HashMap::new();
+        stage_typing_map.insert(
+            transform_core,
+            stage_typing(
+                exact("ValidatedOrder"),
+                exact("EnrichedOrder"),
+                TypeHintInfo::Unspecified,
+                TypeHintInfo::Unspecified,
+            ),
+        );
+
+        let endpoint = TopologyHttpEndpoint::new(
+            topology,
+            Arc::new(stage_metadata(&[source_core, transform_core])),
+            "test_flow".to_string(),
+            None,
+            None,
+            None,
+            Some(Arc::new(stage_typing_map)),
+            None,
+            None,
+        );
+
+        let parsed = endpoint.build_response(IncludeFlags::default());
+        let edge_typing = edge_between(&parsed, source, transform)
+            .typing
+            .as_ref()
+            .expect("single-input edge should use downstream input typing");
+
+        assert_eq!(edge_typing.role, EdgeTypingRoleApi::Input);
+        assert_eq!(
+            edge_typing.label_source,
+            EdgeTypingLabelSourceApi::DownstreamInputType
+        );
+        assert_eq!(
+            edge_typing.payload_type.name.as_deref(),
+            Some("ValidatedOrder")
+        );
+        assert_eq!(
+            edge_typing.payload_type.display_name.as_deref(),
+            Some("Validated Order")
+        );
+    }
+
+    #[tokio::test]
+    async fn topology_endpoint_exports_join_edge_typing_from_downstream_join_contract() {
+        let mut builder = TopologyBuilder::new();
+        let catalog = builder.add_stage_with_id(
+            obzenflow_topology::StageId::from_bytes(1_u128.to_be_bytes()),
+            Some("catalog".to_string()),
+            TopologyStageType::FiniteSource,
+        );
+        builder.reset_current();
+        let stream = builder.add_stage_with_id(
+            obzenflow_topology::StageId::from_bytes(2_u128.to_be_bytes()),
+            Some("orders".to_string()),
+            TopologyStageType::FiniteSource,
+        );
+        builder.reset_current();
+        let join = builder.add_stage_with_id(
+            obzenflow_topology::StageId::from_bytes(3_u128.to_be_bytes()),
+            Some("promo_enriched".to_string()),
+            TopologyStageType::Join,
+        );
+        builder.reset_current();
+        builder.add_edge(catalog, join);
+        builder.add_edge(stream, join);
+
+        let topology = Arc::new(
+            builder
+                .build_unchecked()
+                .expect("topology should build with structural validation"),
+        );
+
+        let catalog_core = core_id(catalog);
+        let stream_core = core_id(stream);
+        let join_core = core_id(join);
+
+        let mut stage_typing_map = HashMap::new();
+        stage_typing_map.insert(
+            catalog_core,
+            stage_typing(
+                TypeHintInfo::Unspecified,
+                exact("CatalogOutputShouldNotDriveJoinEdge"),
+                TypeHintInfo::Unspecified,
+                TypeHintInfo::Unspecified,
+            ),
+        );
+        stage_typing_map.insert(
+            stream_core,
+            stage_typing(
+                TypeHintInfo::Unspecified,
+                exact("StreamOutputShouldNotDriveJoinEdge"),
+                TypeHintInfo::Unspecified,
+                TypeHintInfo::Unspecified,
+            ),
+        );
+        stage_typing_map.insert(
+            join_core,
+            stage_typing(
+                TypeHintInfo::Unspecified,
+                exact("EnrichedOrderWithPromo"),
+                exact("Promotion"),
+                exact("EnrichedOrder"),
+            ),
+        );
+
+        let mut join_metadata = HashMap::new();
+        join_metadata.insert(
+            join_core,
+            JoinMetadata {
+                catalog_source_ids: vec![catalog_core],
+                stream_source_ids: vec![stream_core],
+            },
+        );
+
+        let endpoint = TopologyHttpEndpoint::new(
+            topology,
+            Arc::new(stage_metadata(&[catalog_core, stream_core, join_core])),
+            "test_flow".to_string(),
+            None,
+            None,
+            Some(Arc::new(join_metadata)),
+            Some(Arc::new(stage_typing_map)),
+            None,
+            None,
+        );
+
+        let parsed = endpoint.build_response(IncludeFlags::default());
+
+        let catalog_edge = edge_between(&parsed, catalog, join)
+            .typing
+            .as_ref()
+            .expect("catalog edge should include reference typing");
+        assert_eq!(catalog_edge.role, EdgeTypingRoleApi::Reference);
+        assert_eq!(
+            catalog_edge.label_source,
+            EdgeTypingLabelSourceApi::DownstreamReferenceType
+        );
+        assert_eq!(catalog_edge.payload_type.name.as_deref(), Some("Promotion"));
+        assert_eq!(
+            catalog_edge.payload_type.display_name.as_deref(),
+            Some("Promotion")
+        );
+
+        let stream_edge = edge_between(&parsed, stream, join)
+            .typing
+            .as_ref()
+            .expect("stream edge should include stream typing");
+        assert_eq!(stream_edge.role, EdgeTypingRoleApi::Stream);
+        assert_eq!(
+            stream_edge.label_source,
+            EdgeTypingLabelSourceApi::DownstreamStreamType
+        );
+        assert_eq!(
+            stream_edge.payload_type.name.as_deref(),
+            Some("EnrichedOrder")
+        );
+        assert_eq!(
+            stream_edge.payload_type.display_name.as_deref(),
+            Some("Enriched Order")
+        );
+    }
+
+    #[tokio::test]
+    async fn topology_endpoint_omits_join_edge_typing_without_join_metadata() {
+        let mut builder = TopologyBuilder::new();
+        let upstream = builder.add_stage_with_id(
+            obzenflow_topology::StageId::from_bytes(11_u128.to_be_bytes()),
+            Some("catalog".to_string()),
+            TopologyStageType::FiniteSource,
+        );
+        builder.reset_current();
+        let join = builder.add_stage_with_id(
+            obzenflow_topology::StageId::from_bytes(12_u128.to_be_bytes()),
+            Some("join".to_string()),
+            TopologyStageType::Join,
+        );
+        builder.reset_current();
+        builder.add_edge(upstream, join);
+
+        let topology = Arc::new(
+            builder
+                .build_unchecked()
+                .expect("topology should build with structural validation"),
+        );
+
+        let upstream_core = core_id(upstream);
+        let join_core = core_id(join);
+
+        let mut stage_typing_map = HashMap::new();
+        stage_typing_map.insert(
+            upstream_core,
+            stage_typing(
+                TypeHintInfo::Unspecified,
+                exact("Promotion"),
+                TypeHintInfo::Unspecified,
+                TypeHintInfo::Unspecified,
+            ),
+        );
+        stage_typing_map.insert(
+            join_core,
+            stage_typing(
+                TypeHintInfo::Unspecified,
+                exact("EnrichedOrder"),
+                exact("Promotion"),
+                exact("ValidatedOrder"),
+            ),
+        );
+
+        let endpoint = TopologyHttpEndpoint::new(
+            topology,
+            Arc::new(stage_metadata(&[upstream_core, join_core])),
+            "test_flow".to_string(),
+            None,
+            None,
+            None,
+            Some(Arc::new(stage_typing_map)),
+            None,
+            None,
+        );
+
+        let parsed = endpoint.build_response(IncludeFlags::default());
+
+        assert!(edge_between(&parsed, upstream, join).typing.is_none());
+    }
+
+    #[tokio::test]
+    async fn topology_endpoint_omits_typing_for_backward_edges() {
+        let mut builder = TopologyBuilder::new();
+        let from = builder.add_stage(Some("retry_source".to_string()));
+        builder.reset_current();
+        let to = builder.add_stage(Some("retry_target".to_string()));
+        builder.reset_current();
+        builder.add_backward_edge(from, to);
+
+        let topology = Arc::new(
+            builder
+                .build_unchecked()
+                .expect("topology should build with structural validation"),
+        );
+
+        let from_core = core_id(from);
+        let to_core = core_id(to);
+
+        let mut stage_typing_map = HashMap::new();
+        stage_typing_map.insert(
+            from_core,
+            stage_typing(
+                TypeHintInfo::Unspecified,
+                exact("RetryPayload"),
+                TypeHintInfo::Unspecified,
+                TypeHintInfo::Unspecified,
+            ),
+        );
+
+        let endpoint = TopologyHttpEndpoint::new(
+            topology,
+            Arc::new(stage_metadata(&[from_core, to_core])),
+            "test_flow".to_string(),
+            None,
+            None,
+            None,
+            Some(Arc::new(stage_typing_map)),
+            None,
+            None,
+        );
+
+        let parsed = endpoint.build_response(IncludeFlags::default());
+        let edge = edge_between(&parsed, from, to);
+
+        assert_eq!(edge.kind, "backward");
+        assert!(edge.typing.is_none());
     }
 
     #[tokio::test]
