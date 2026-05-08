@@ -637,6 +637,10 @@ macro_rules! build_typed_flow {
             }
         }
 
+        // Collect stage typing metadata per stage for topology export (FLOWIP-114b).
+        let stage_typing_map =
+            $crate::dsl::typing::collect_stage_typing_info(&descriptors, &name_to_id);
+
         // Collect logical subgraph metadata (FLOWIP-086z-part-2).
         use obzenflow_core::topology::subgraphs::{StageSubgraphMembership, SubgraphInternalEdge, TopologySubgraphInfo};
         let mut subgraph_membership_map: HashMap<StageId, StageSubgraphMembership> =
@@ -1166,6 +1170,10 @@ macro_rules! build_typed_flow {
 
         if !join_metadata_map.is_empty() {
             builder = builder.with_join_metadata(join_metadata_map);
+        }
+
+        if !stage_typing_map.is_empty() {
+            builder = builder.with_stage_typing(stage_typing_map);
         }
 
         if !subgraph_membership_map.is_empty() || !subgraphs.is_empty() {

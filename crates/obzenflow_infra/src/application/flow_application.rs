@@ -1355,6 +1355,7 @@ impl FlowApplication {
         let middleware_stacks = _flow_handle.middleware_stacks();
         let contract_attachments = _flow_handle.contract_attachments();
         let join_metadata = _flow_handle.join_metadata();
+        let stage_typing = _flow_handle.stage_typing();
         let subgraph_membership = _flow_handle.subgraph_membership();
         let subgraphs = _flow_handle.subgraphs();
 
@@ -1365,6 +1366,7 @@ impl FlowApplication {
                 middleware_stacks,
                 contract_attachments,
                 join_metadata,
+                stage_typing,
                 subgraph_membership,
                 subgraphs,
                 metrics_exporter: metrics,

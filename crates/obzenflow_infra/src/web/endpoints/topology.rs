@@ -11,6 +11,7 @@ use async_trait::async_trait;
 use obzenflow_core::web::{HttpEndpoint, HttpMethod, ManagedResponse, Request, Response, WebError};
 use obzenflow_core::StageId;
 use obzenflow_runtime::id_conversions::StageIdExt;
+use obzenflow_runtime::typing::{StageTypingInfo, TypeHintInfo};
 use obzenflow_topology::EdgeKind;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -20,6 +21,7 @@ type MiddlewareStacks = Arc<std::collections::HashMap<StageId, MiddlewareStackCo
 type ContractAttachments = Arc<std::collections::HashMap<(StageId, StageId), Vec<String>>>;
 type JoinMetadataMap =
     Arc<std::collections::HashMap<StageId, obzenflow_runtime::pipeline::JoinMetadata>>;
+type StageTypingMap = Arc<std::collections::HashMap<StageId, StageTypingInfo>>;
 type StageSubgraphMembershipMap = Arc<
     std::collections::HashMap<
         StageId,
@@ -70,9 +72,45 @@ pub struct StageApiInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub join_metadata: Option<JoinMetadataApiInfo>,
 
+    /// Authoring-time stage typing contract (FLOWIP-114b).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub typing: Option<StageTypingApiInfo>,
+
     /// Logical subgraph membership for this stage (FLOWIP-086z-part-2).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub subgraph: Option<StageSubgraphApiInfo>,
+}
+
+/// Stage typing contract exposed by the topology API (FLOWIP-114b).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StageTypingApiInfo {
+    pub input_type: TypeHintApiInfo,
+    pub output_type: TypeHintApiInfo,
+    pub boundary_in_type: TypeHintApiInfo,
+    pub boundary_out_type: TypeHintApiInfo,
+    pub reference_type: TypeHintApiInfo,
+    pub stream_type: TypeHintApiInfo,
+    pub is_placeholder: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub placeholder_message: Option<String>,
+}
+
+/// Type hint exposed by the topology API (FLOWIP-114b).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TypeHintApiInfo {
+    pub kind: TypeHintKindApi,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TypeHintKindApi {
+    Unspecified,
+    Exact,
+    Mixed,
 }
 
 /// Stage-level membership facts for logical subgraphs (FLOWIP-086z-part-2).
@@ -232,6 +270,8 @@ pub struct TopologyHttpEndpoint {
     contract_attachments: Option<ContractAttachments>,
     /// Join metadata per stage (FLOWIP-082a)
     join_metadata: Option<JoinMetadataMap>,
+    /// Stage typing contracts per stage (FLOWIP-114b)
+    stage_typing: Option<StageTypingMap>,
     /// Per-stage logical subgraph membership (FLOWIP-086z-part-2)
     subgraph_membership: Option<StageSubgraphMembershipMap>,
     /// Subgraph registry (FLOWIP-086z-part-2)
@@ -288,6 +328,108 @@ impl StageStatus {
     }
 }
 
+impl From<&StageTypingInfo> for StageTypingApiInfo {
+    fn from(value: &StageTypingInfo) -> Self {
+        Self {
+            input_type: (&value.input_type).into(),
+            output_type: (&value.output_type).into(),
+            boundary_in_type: (&value.boundary_in_type).into(),
+            boundary_out_type: (&value.boundary_out_type).into(),
+            reference_type: (&value.reference_type).into(),
+            stream_type: (&value.stream_type).into(),
+            is_placeholder: value.is_placeholder,
+            placeholder_message: value.placeholder_message.clone(),
+        }
+    }
+}
+
+impl From<&TypeHintInfo> for TypeHintApiInfo {
+    fn from(value: &TypeHintInfo) -> Self {
+        match value {
+            TypeHintInfo::Unspecified => Self {
+                kind: TypeHintKindApi::Unspecified,
+                name: None,
+                display_name: None,
+            },
+            TypeHintInfo::Exact { name } => Self {
+                kind: TypeHintKindApi::Exact,
+                name: Some(name.clone()),
+                display_name: Some(display_name_for_type(name)),
+            },
+            TypeHintInfo::Mixed => Self {
+                kind: TypeHintKindApi::Mixed,
+                name: None,
+                display_name: None,
+            },
+        }
+    }
+}
+
+fn display_name_for_type(name: &str) -> String {
+    split_camel_case(&strip_rust_path_qualifiers(name))
+}
+
+fn strip_rust_path_qualifiers(name: &str) -> String {
+    let mut result = String::new();
+    let mut token = String::new();
+
+    for ch in name.trim().chars() {
+        if ch.is_ascii_alphanumeric() || ch == '_' || ch == ':' {
+            token.push(ch);
+        } else {
+            push_final_path_segment(&mut result, &token);
+            token.clear();
+            result.push(ch);
+        }
+    }
+    push_final_path_segment(&mut result, &token);
+
+    result
+}
+
+fn push_final_path_segment(result: &mut String, token: &str) {
+    if token.is_empty() {
+        return;
+    }
+
+    result.push_str(token.rsplit("::").next().unwrap_or(token));
+}
+
+fn split_camel_case(name: &str) -> String {
+    let chars: Vec<char> = name.chars().collect();
+    let mut result = String::with_capacity(name.len());
+
+    for (index, ch) in chars.iter().copied().enumerate() {
+        if ch == '_' {
+            if !result.ends_with(' ') {
+                result.push(' ');
+            }
+            continue;
+        }
+
+        if index > 0 && should_insert_type_word_space(&chars, index) && !result.ends_with(' ') {
+            result.push(' ');
+        }
+        result.push(ch);
+    }
+
+    result
+}
+
+fn should_insert_type_word_space(chars: &[char], index: usize) -> bool {
+    let previous = chars[index - 1];
+    let current = chars[index];
+    let next = chars.get(index + 1).copied();
+
+    if !current.is_ascii_uppercase() {
+        return false;
+    }
+
+    previous.is_ascii_lowercase()
+        || previous.is_ascii_digit()
+        || (previous.is_ascii_uppercase() && next.is_some_and(|ch| ch.is_ascii_lowercase()))
+}
+
 /// Flags for optional sections controlled via query params
 #[derive(Debug, Default, Clone, Copy)]
 struct IncludeFlags {
@@ -320,6 +462,7 @@ impl TopologyHttpEndpoint {
         middleware_stacks: Option<MiddlewareStacks>,
         contract_attachments: Option<ContractAttachments>,
         join_metadata: Option<JoinMetadataMap>,
+        stage_typing: Option<StageTypingMap>,
         subgraph_membership: Option<StageSubgraphMembershipMap>,
         subgraphs: Option<SubgraphRegistry>,
     ) -> Self {
@@ -330,6 +473,7 @@ impl TopologyHttpEndpoint {
             middleware_stacks,
             contract_attachments,
             join_metadata,
+            stage_typing,
             subgraph_membership,
             subgraphs,
         }
@@ -410,6 +554,12 @@ impl TopologyHttpEndpoint {
                         is_exit: membership.is_exit,
                     });
 
+                let typing = self
+                    .stage_typing
+                    .as_ref()
+                    .and_then(|map| map.get(&core_stage_id))
+                    .map(StageTypingApiInfo::from);
+
                 StageApiInfo {
                     stage_id: stage_info.id.to_string(),
                     name: stage_info.name.clone(),
@@ -424,6 +574,7 @@ impl TopologyHttpEndpoint {
                     is_cycle_member: Some(self.topology.is_in_cycle(stage_info.id)),
                     middleware,
                     join_metadata,
+                    typing,
                     subgraph,
                 }
             })
@@ -469,8 +620,8 @@ impl TopologyHttpEndpoint {
 
         FlowTopologyResponse {
             flow_name: self.flow_name.clone(),
-            // FLOWIP-086z-part-2: Topology API schema version 0.4 includes subgraphs.
-            version: "0.4".to_string(),
+            // FLOWIP-114b: Topology API schema version 0.5 includes stage typing.
+            version: "0.5".to_string(),
             stages,
             edges,
             subgraphs: self
@@ -623,6 +774,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         );
 
         let response = endpoint
@@ -657,7 +809,117 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn topology_endpoint_exports_subgraphs_schema_v0_4() {
+    async fn topology_endpoint_exports_stage_typing_schema_v0_5() {
+        let mut builder = TopologyBuilder::new();
+        let stage = builder.add_stage(Some("typed_stage".to_string()));
+        builder.reset_current();
+        let sink = builder.add_stage(Some("sink".to_string()));
+        builder.reset_current();
+        builder.add_edge(stage, sink);
+
+        let topology = Arc::new(
+            builder
+                .build_unchecked()
+                .expect("topology should build with structural validation"),
+        );
+
+        let core_stage_id = StageId::from_ulid(stage.ulid());
+        let sink_stage_id = StageId::from_ulid(sink.ulid());
+
+        let mut stages_metadata: HashMap<StageId, StageMetadata> = HashMap::new();
+        stages_metadata.insert(
+            core_stage_id,
+            StageMetadata {
+                stage_type: StageType::Transform,
+                status: StageStatus::Running,
+            },
+        );
+        stages_metadata.insert(
+            sink_stage_id,
+            StageMetadata {
+                stage_type: StageType::Sink,
+                status: StageStatus::Running,
+            },
+        );
+
+        let mut stage_typing = HashMap::new();
+        stage_typing.insert(
+            core_stage_id,
+            StageTypingInfo {
+                input_type: TypeHintInfo::Mixed,
+                output_type: TypeHintInfo::Exact {
+                    name: "product_catalog::domain::EnrichedOrder".to_string(),
+                },
+                boundary_in_type: TypeHintInfo::Unspecified,
+                boundary_out_type: TypeHintInfo::Unspecified,
+                reference_type: TypeHintInfo::Unspecified,
+                stream_type: TypeHintInfo::Unspecified,
+                is_placeholder: false,
+                placeholder_message: None,
+            },
+        );
+
+        let endpoint = TopologyHttpEndpoint::new(
+            topology,
+            Arc::new(stages_metadata),
+            "test_flow".to_string(),
+            None,
+            None,
+            None,
+            Some(Arc::new(stage_typing)),
+            None,
+            None,
+        );
+
+        let response = endpoint
+            .handle(
+                Request::new(HttpMethod::Get, "/api/topology".to_string())
+                    .with_query_param("include".to_string(), "middleware".to_string()),
+            )
+            .await
+            .expect("endpoint should handle request");
+        let response = match response {
+            ManagedResponse::Unary(resp) => resp,
+            ManagedResponse::Sse(_) => panic!("expected unary response"),
+        };
+
+        let parsed: FlowTopologyResponse =
+            serde_json::from_slice(&response.body).expect("response should be valid JSON");
+        assert_eq!(parsed.version, "0.5");
+
+        let typed_stage = parsed
+            .stages
+            .iter()
+            .find(|stage| stage.name == "typed_stage")
+            .expect("typed stage should be present");
+        let typing = typed_stage
+            .typing
+            .as_ref()
+            .expect("typed stage should include typing");
+
+        assert_eq!(typing.input_type.kind, TypeHintKindApi::Mixed);
+        assert_eq!(typing.input_type.name, None);
+        assert_eq!(typing.input_type.display_name, None);
+        assert_eq!(typing.output_type.kind, TypeHintKindApi::Exact);
+        assert_eq!(
+            typing.output_type.name.as_deref(),
+            Some("product_catalog::domain::EnrichedOrder")
+        );
+        assert_eq!(
+            typing.output_type.display_name.as_deref(),
+            Some("Enriched Order")
+        );
+
+        let sink_stage = parsed
+            .stages
+            .iter()
+            .find(|stage| stage.name == "sink")
+            .expect("sink stage should be present");
+        assert!(sink_stage.typing.is_none());
+    }
+
+    #[tokio::test]
+    async fn topology_endpoint_exports_subgraphs_schema_v0_5() {
         let mut builder = TopologyBuilder::new();
         let stage_a = builder.add_stage(Some("a".to_string()));
         builder.reset_current(); // avoid implicit chaining edges
@@ -728,6 +990,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             Some(Arc::new(membership)),
             Some(Arc::new(vec![subgraph])),
         );
@@ -745,7 +1008,7 @@ mod tests {
 
         let parsed: FlowTopologyResponse =
             serde_json::from_slice(&response.body).expect("response should be valid JSON");
-        assert_eq!(parsed.version, "0.4");
+        assert_eq!(parsed.version, "0.5");
         assert_eq!(parsed.subgraphs.len(), 1);
 
         let stage_a_id = stage_a.to_string();

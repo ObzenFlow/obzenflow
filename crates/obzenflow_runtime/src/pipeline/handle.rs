@@ -7,6 +7,7 @@ use crate::errors::FlowError;
 use crate::stages::common::stage_handle::STOP_REASON_TIMEOUT;
 use crate::stages::LivenessSnapshots;
 use crate::supervised_base::{HandleError, StandardHandle, SupervisorHandle};
+use crate::typing::StageTypingInfo;
 use obzenflow_core::event::SystemEvent;
 use obzenflow_core::journal::Journal;
 use obzenflow_core::StageId;
@@ -20,6 +21,7 @@ use std::time::Duration;
 type MiddlewareStacks = Arc<HashMap<StageId, MiddlewareStackConfig>>;
 type ContractAttachments = Arc<HashMap<(StageId, StageId), Vec<String>>>;
 type JoinMetadataMap = Arc<HashMap<StageId, crate::pipeline::JoinMetadata>>;
+type StageTypingMap = Arc<HashMap<StageId, StageTypingInfo>>;
 type StageSubgraphMembershipMap =
     Arc<HashMap<StageId, obzenflow_core::topology::subgraphs::StageSubgraphMembership>>;
 type SubgraphRegistry = Arc<Vec<obzenflow_core::topology::subgraphs::TopologySubgraphInfo>>;
@@ -30,6 +32,7 @@ pub(crate) struct FlowHandleExtras {
     pub middleware_stacks: Option<MiddlewareStacks>,
     pub contract_attachments: Option<ContractAttachments>,
     pub join_metadata: Option<JoinMetadataMap>,
+    pub stage_typing: Option<StageTypingMap>,
     pub subgraph_membership: Option<StageSubgraphMembershipMap>,
     pub subgraphs: Option<SubgraphRegistry>,
     pub system_journal: Option<Arc<dyn Journal<SystemEvent>>>,
@@ -115,6 +118,9 @@ pub struct FlowHandle {
     /// Join metadata per stage (catalog vs stream sources) for topology export (FLOWIP-082a)
     join_metadata: Option<JoinMetadataMap>,
 
+    /// Stage typing metadata per stage for topology export (FLOWIP-114b)
+    stage_typing: Option<StageTypingMap>,
+
     /// Per-stage membership in a logical subgraph (FLOWIP-086z-part-2)
     subgraph_membership: Option<StageSubgraphMembershipMap>,
 
@@ -141,6 +147,7 @@ impl FlowHandle {
             middleware_stacks,
             contract_attachments,
             join_metadata,
+            stage_typing,
             subgraph_membership,
             subgraphs,
             system_journal,
@@ -156,6 +163,7 @@ impl FlowHandle {
             contract_attachments,
             system_journal,
             join_metadata,
+            stage_typing,
             subgraph_membership,
             subgraphs,
             liveness_snapshots,
@@ -525,6 +533,11 @@ impl FlowHandle {
         self.join_metadata.clone()
     }
 
+    /// Get stage typing metadata per stage (for topology endpoint, FLOWIP-114b)
+    pub fn stage_typing(&self) -> Option<StageTypingMap> {
+        self.stage_typing.clone()
+    }
+
     /// Get per-stage subgraph membership (for topology endpoint, FLOWIP-086z-part-2)
     pub fn subgraph_membership(&self) -> Option<StageSubgraphMembershipMap> {
         self.subgraph_membership.clone()
@@ -632,6 +645,7 @@ mod tests {
             middleware_stacks: None,
             contract_attachments: None,
             join_metadata: None,
+            stage_typing: None,
             subgraph_membership: None,
             subgraphs: None,
             system_journal: None,

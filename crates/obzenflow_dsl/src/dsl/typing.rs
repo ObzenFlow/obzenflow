@@ -22,7 +22,8 @@ use obzenflow_runtime::stages::common::handlers::{
 use obzenflow_runtime::stages::common::stage_handle::BoxedStageHandle;
 use obzenflow_runtime::stages::StageResources;
 use obzenflow_runtime::typing::{
-    JoinTyping, SinkTyping, SourceTyping, StatefulTyping, TransformTyping,
+    JoinTyping, SinkTyping, SourceTyping, StageTypingInfo, StatefulTyping, TransformTyping,
+    TypeHintInfo,
 };
 use obzenflow_topology::{EdgeKind, Topology};
 use std::collections::HashMap;
@@ -42,6 +43,16 @@ pub enum TypeHint {
 impl TypeHint {
     pub fn exact(name: impl Into<String>) -> Self {
         Self::Exact(name.into())
+    }
+}
+
+impl From<&TypeHint> for TypeHintInfo {
+    fn from(value: &TypeHint) -> Self {
+        match value {
+            TypeHint::Unspecified => Self::Unspecified,
+            TypeHint::Exact(name) => Self::Exact { name: name.clone() },
+            TypeHint::Mixed => Self::Mixed,
+        }
     }
 }
 
@@ -130,6 +141,42 @@ impl StageTypingMetadata {
             placeholder_message: message,
         }
     }
+}
+
+impl From<&StageTypingMetadata> for StageTypingInfo {
+    fn from(value: &StageTypingMetadata) -> Self {
+        Self {
+            input_type: (&value.input_type).into(),
+            output_type: (&value.output_type).into(),
+            boundary_in_type: (&value.boundary_in_type).into(),
+            boundary_out_type: (&value.boundary_out_type).into(),
+            reference_type: (&value.reference_type).into(),
+            stream_type: (&value.stream_type).into(),
+            is_placeholder: value.is_placeholder,
+            placeholder_message: value.placeholder_message.clone(),
+        }
+    }
+}
+
+/// Collect runtime-owned stage typing metadata keyed by core stage ID.
+pub fn collect_stage_typing_info(
+    descriptors: &HashMap<String, Box<dyn StageDescriptor>>,
+    name_to_id: &HashMap<String, StageId>,
+) -> HashMap<StageId, StageTypingInfo> {
+    let mut stage_typing = HashMap::new();
+
+    for (name, descriptor) in descriptors {
+        let Some(stage_id) = name_to_id.get(name).copied() else {
+            continue;
+        };
+        let Some(metadata) = descriptor.typing_metadata() else {
+            continue;
+        };
+
+        stage_typing.insert(stage_id, metadata.into());
+    }
+
+    stage_typing
 }
 
 /// Which downstream input position was compared for an edge hint.

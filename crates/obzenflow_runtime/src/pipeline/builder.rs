@@ -22,6 +22,7 @@ use crate::{
         BuilderError, ChannelBuilder, HandleBuilder, SelfSupervisedExt,
         SelfSupervisedWithExternalEvents, SupervisorBuilder, SupervisorTaskBuilder,
     },
+    typing::StageTypingInfo,
 };
 use obzenflow_core::event::{ChainEvent, SystemEvent};
 use obzenflow_core::id::{FlowId, SystemId};
@@ -53,6 +54,7 @@ pub struct PipelineBuilder {
     middleware_stacks: Option<HashMap<StageId, MiddlewareStackConfig>>,
     contract_attachments: Option<HashMap<(StageId, StageId), Vec<String>>>,
     join_metadata: Option<HashMap<StageId, crate::pipeline::JoinMetadata>>,
+    stage_typing: Option<HashMap<StageId, StageTypingInfo>>,
     subgraph_membership: Option<HashMap<StageId, StageSubgraphMembership>>,
     subgraphs: Option<Vec<TopologySubgraphInfo>>,
     backpressure_registry: Option<Arc<BackpressureRegistry>>,
@@ -79,6 +81,7 @@ impl PipelineBuilder {
             middleware_stacks: None,
             contract_attachments: None,
             join_metadata: None,
+            stage_typing: None,
             subgraph_membership: None,
             subgraphs: None,
             backpressure_registry: None,
@@ -146,6 +149,12 @@ impl PipelineBuilder {
         join_metadata: HashMap<StageId, crate::pipeline::JoinMetadata>,
     ) -> Self {
         self.join_metadata = Some(join_metadata);
+        self
+    }
+
+    /// Attach stage typing metadata per stage for topology export (FLOWIP-114b).
+    pub fn with_stage_typing(mut self, stage_typing: HashMap<StageId, StageTypingInfo>) -> Self {
+        self.stage_typing = Some(stage_typing);
         self
     }
 
@@ -473,6 +482,9 @@ impl SupervisorBuilder for PipelineBuilder {
         let join_metadata = self
             .join_metadata
             .map(|map| Arc::new(map) as Arc<HashMap<StageId, crate::pipeline::JoinMetadata>>);
+        let stage_typing = self
+            .stage_typing
+            .map(|map| Arc::new(map) as Arc<HashMap<StageId, StageTypingInfo>>);
 
         let subgraph_membership = self
             .subgraph_membership
@@ -489,6 +501,7 @@ impl SupervisorBuilder for PipelineBuilder {
                 middleware_stacks,
                 contract_attachments,
                 join_metadata,
+                stage_typing,
                 subgraph_membership,
                 subgraphs,
                 system_journal: Some(self.system_journal.clone()),

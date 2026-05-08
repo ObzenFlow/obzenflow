@@ -18,7 +18,7 @@ mod tests {
         TransformHandler,
     };
     use obzenflow_runtime::typing::{
-        JoinTyping, SinkTyping, SourceTyping, StatefulTyping, TransformTyping,
+        JoinTyping, SinkTyping, SourceTyping, StatefulTyping, TransformTyping, TypeHintInfo,
     };
     use obzenflow_topology::{StageType as TopologyStageType, TopologyBuilder};
     use serde::{Deserialize, Serialize};
@@ -26,7 +26,9 @@ mod tests {
     use std::time::Duration;
 
     use crate::dsl::stage_descriptor::StageDescriptor;
-    use crate::dsl::typing::{collect_edge_warnings, EdgeInputRole, TypeHint};
+    use crate::dsl::typing::{
+        collect_edge_warnings, collect_stage_typing_info, EdgeInputRole, TypeHint,
+    };
 
     #[derive(Clone, Debug, Serialize, Deserialize)]
     struct InputEvent {
@@ -406,6 +408,70 @@ mod tests {
         assert_eq!(join_meta.stream_type, exact("StreamEvent"));
         assert_eq!(join_meta.output_type, exact("JoinedEvent"));
         assert!(!join_meta.is_placeholder);
+    }
+
+    #[test]
+    fn collect_stage_typing_info_exports_runtime_metadata_by_stage_id() {
+        let source_id = StageId::new();
+        let transform_id = StageId::new();
+        let join_id = StageId::new();
+
+        let mut descriptors: HashMap<String, Box<dyn StageDescriptor>> = HashMap::new();
+        descriptors.insert(
+            "source".to_string(),
+            crate::source!(name: "source", InputEvent => SyncExactSource),
+        );
+        descriptors.insert(
+            "transform".to_string(),
+            crate::transform!(name: "transform", mixed -> OutputEvent => MixedTransform),
+        );
+        descriptors.insert(
+            "join".to_string(),
+            crate::join!(
+                name: "join",
+                catalog reference: ReferenceEvent,
+                StreamEvent -> JoinedEvent => ExactJoin
+            ),
+        );
+
+        let mut name_to_id = HashMap::new();
+        name_to_id.insert("source".to_string(), source_id);
+        name_to_id.insert("transform".to_string(), transform_id);
+        name_to_id.insert("join".to_string(), join_id);
+
+        let stage_typing = collect_stage_typing_info(&descriptors, &name_to_id);
+
+        assert_eq!(stage_typing.len(), 3);
+        assert_eq!(
+            stage_typing.get(&source_id).unwrap().output_type,
+            TypeHintInfo::Exact {
+                name: "InputEvent".to_string()
+            }
+        );
+        assert_eq!(
+            stage_typing.get(&transform_id).unwrap().input_type,
+            TypeHintInfo::Mixed
+        );
+
+        let join_typing = stage_typing.get(&join_id).unwrap();
+        assert_eq!(
+            join_typing.reference_type,
+            TypeHintInfo::Exact {
+                name: "ReferenceEvent".to_string()
+            }
+        );
+        assert_eq!(
+            join_typing.stream_type,
+            TypeHintInfo::Exact {
+                name: "StreamEvent".to_string()
+            }
+        );
+        assert_eq!(
+            join_typing.output_type,
+            TypeHintInfo::Exact {
+                name: "JoinedEvent".to_string()
+            }
+        );
     }
 
     #[test]

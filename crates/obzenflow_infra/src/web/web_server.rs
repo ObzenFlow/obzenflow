@@ -23,6 +23,7 @@ pub type MiddlewareStacks =
     Arc<HashMap<StageId, obzenflow_runtime::pipeline::MiddlewareStackConfig>>;
 pub type ContractAttachments = Arc<HashMap<(StageId, StageId), Vec<String>>>;
 pub type JoinMetadataMap = Arc<HashMap<StageId, obzenflow_runtime::pipeline::JoinMetadata>>;
+pub type StageTypingMap = Arc<HashMap<StageId, obzenflow_runtime::typing::StageTypingInfo>>;
 pub type StageSubgraphMembershipMap =
     Arc<HashMap<StageId, obzenflow_core::topology::subgraphs::StageSubgraphMembership>>;
 pub type SubgraphRegistry = Arc<Vec<obzenflow_core::topology::subgraphs::TopologySubgraphInfo>>;
@@ -33,6 +34,7 @@ pub struct WebServerResources {
     pub middleware_stacks: Option<MiddlewareStacks>,
     pub contract_attachments: Option<ContractAttachments>,
     pub join_metadata: Option<JoinMetadataMap>,
+    pub stage_typing: Option<StageTypingMap>,
     pub subgraph_membership: Option<StageSubgraphMembershipMap>,
     pub subgraphs: Option<SubgraphRegistry>,
     pub metrics_exporter: Option<Arc<dyn MetricsExporter>>,
@@ -144,6 +146,7 @@ fn validate_extra_endpoints(extra_endpoints: &[Box<dyn HttpEndpoint>]) -> Result
 ///     middleware_stacks: None,
 ///     contract_attachments: None,
 ///     join_metadata: None,
+///     stage_typing: None,
 ///     subgraph_membership: None,
 ///     subgraphs: None,
 ///     metrics_exporter: Some(metrics_exporter),
@@ -175,6 +178,7 @@ pub async fn start_web_server_with_config(
         middleware_stacks,
         contract_attachments,
         join_metadata,
+        stage_typing,
         subgraph_membership,
         subgraphs,
         metrics_exporter,
@@ -235,6 +239,7 @@ pub async fn start_web_server_with_config(
         middleware_stacks,
         contract_attachments,
         join_metadata,
+        stage_typing,
         subgraph_membership,
         subgraphs,
     )))?;
