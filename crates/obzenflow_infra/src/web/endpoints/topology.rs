@@ -199,8 +199,8 @@ mod tests {
     use obzenflow_runtime::id_conversions::StageIdExt;
     use obzenflow_runtime::pipeline::MiddlewareStackConfig;
     use obzenflow_topology::{
-        DirectedEdge, EdgeKind, EdgeTypingLabelSource, EdgeTypingRole, JoinMetadataInfo,
-        StageInfo, StageSubgraphMembership, StageType as TopologyStageType, StageTypingInfo,
+        DirectedEdge, EdgeKind, EdgeTypingLabelSource, EdgeTypingRole, JoinMetadataInfo, StageInfo,
+        StageSubgraphMembership, StageType as TopologyStageType, StageTypingInfo,
         SubgraphInternalEdge, TopologyBuilder, TopologySubgraphInfo, TypeHintInfo,
     };
     use std::collections::HashMap;
@@ -323,8 +323,7 @@ mod tests {
                 .with_flow_name("test_flow"),
         );
 
-        let endpoint =
-            TopologyHttpEndpoint::new(topology, Arc::new(stages_metadata), None);
+        let endpoint = TopologyHttpEndpoint::new(topology, Arc::new(stages_metadata), None);
 
         let response = endpoint
             .handle(Request::new(HttpMethod::Get, "/api/topology".to_string()))
@@ -396,9 +395,7 @@ mod tests {
                 if s.id == typed_stage_id {
                     s.typing = Some(StageTypingInfo {
                         input_type: TypeHintInfo::Mixed,
-                        output_type: TypeHintInfo::exact(
-                            "product_catalog::domain::EnrichedOrder",
-                        ),
+                        output_type: TypeHintInfo::exact("product_catalog::domain::EnrichedOrder"),
                         boundary_in_type: TypeHintInfo::Unspecified,
                         boundary_out_type: TypeHintInfo::Unspecified,
                         reference_type: TypeHintInfo::Unspecified,
@@ -418,8 +415,7 @@ mod tests {
                 .derive_edge_typings(),
         );
 
-        let endpoint =
-            TopologyHttpEndpoint::new(topology, Arc::new(stages_metadata), None);
+        let endpoint = TopologyHttpEndpoint::new(topology, Arc::new(stages_metadata), None);
 
         let response = endpoint
             .handle(
@@ -966,8 +962,7 @@ mod tests {
                 .with_flow_name("test_flow"),
         );
 
-        let endpoint =
-            TopologyHttpEndpoint::new(topology, Arc::new(stages_metadata), None);
+        let endpoint = TopologyHttpEndpoint::new(topology, Arc::new(stages_metadata), None);
 
         let response = endpoint
             .handle(Request::new(HttpMethod::Get, "/api/topology".to_string()))
