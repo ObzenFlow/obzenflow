@@ -22,10 +22,9 @@ use obzenflow_runtime::stages::common::handlers::{
 use obzenflow_runtime::stages::common::stage_handle::BoxedStageHandle;
 use obzenflow_runtime::stages::StageResources;
 use obzenflow_runtime::typing::{
-    JoinTyping, SinkTyping, SourceTyping, StageTypingInfo, StatefulTyping, TransformTyping,
-    TypeHintInfo,
+    JoinTyping, SinkTyping, SourceTyping, StatefulTyping, TransformTyping,
 };
-use obzenflow_topology::{EdgeKind, Topology};
+use obzenflow_topology::{EdgeKind, StageTypingInfo, Topology, TypeHintInfo};
 use std::collections::HashMap;
 use std::fmt;
 use std::marker::PhantomData;

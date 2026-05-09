@@ -2,38 +2,15 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Authoring-time stage typing contracts.
+//! Authoring-time stage typing trait markers and assertion helpers.
 //!
-//! These traits do not affect runtime execution semantics. They are used by the
-//! DSL macros to validate that a handler's declared type shape matches the
-//! contract written at the stage-definition layer.
-
-use serde::{Deserialize, Serialize};
-
-/// Runtime-owned representation of a declared type position.
-///
-/// This is structural authoring metadata. It is built once with the flow and
-/// exposed to topology clients; it does not participate in event validation or
-/// handler dispatch.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum TypeHintInfo {
-    Unspecified,
-    Exact { name: String },
-    Mixed,
-}
-
-/// Runtime-owned stage typing contract for topology export.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct StageTypingInfo {
-    pub input_type: TypeHintInfo,
-    pub output_type: TypeHintInfo,
-    pub boundary_in_type: TypeHintInfo,
-    pub boundary_out_type: TypeHintInfo,
-    pub reference_type: TypeHintInfo,
-    pub stream_type: TypeHintInfo,
-    pub is_placeholder: bool,
-    pub placeholder_message: Option<String>,
-}
+//! These traits do not affect runtime execution semantics. They are used
+//! by the DSL macros to validate that a handler's declared type shape
+//! matches the contract written at the stage-definition layer.
+//!
+//! The serialisable data carriers (`TypeHintInfo`, `StageTypingInfo`) live
+//! in `obzenflow_topology` as canonical annotations on `StageInfo`; import
+//! them from there directly.
 
 /// Source stage typing contract.
 pub trait SourceTyping {

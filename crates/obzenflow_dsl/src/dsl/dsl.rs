@@ -589,9 +589,11 @@ macro_rules! build_typed_flow {
             Err(_) => MaxIterations::DEFAULT,
         };
 
-        // Collect join metadata per stage (FLOWIP-082a)
-        use obzenflow_runtime::pipeline::JoinMetadata;
-        let mut join_metadata_map: HashMap<StageId, JoinMetadata> = HashMap::new();
+        // Collect join metadata per stage (FLOWIP-082a). The canonical
+        // `JoinMetadataInfo` lives in `obzenflow-topology` and uses topology
+        // `StageId`s; we convert at this collection boundary.
+        use obzenflow_topology::JoinMetadataInfo;
+        let mut join_metadata_map: HashMap<StageId, JoinMetadataInfo> = HashMap::new();
         for stage in topology.stages() {
             if matches!(stage.stage_type, obzenflow_topology::StageType::Join) {
                 let join_topology_id = stage.id;
@@ -610,26 +612,22 @@ macro_rules! build_typed_flow {
                     })
                 {
                     if let Some(descriptor) = descriptors.get(descriptor_name) {
-                        // Reference stage id is stored on join descriptors after resolution
                         if let Some(ref_stage_id) = descriptor.reference_stage_id() {
-                            // Upstream stages of join in topology; convert to core IDs and
-                            // treat all except the reference as stream sources.
-                            let mut catalog_sources = vec![ref_stage_id];
+                            // Convert reference and stream upstream stages to topology IDs
+                            // for the canonical wire payload.
+                            let catalog_sources = vec![to_topology_id(ref_stage_id)];
                             let mut stream_sources = Vec::new();
                             for upstream in topology.upstream_stages(join_topology_id) {
                                 let core_upstream = StageId::from_ulid(upstream.ulid());
                                 if core_upstream == ref_stage_id {
                                     continue;
                                 }
-                                stream_sources.push(core_upstream);
+                                stream_sources.push(upstream);
                             }
 
                             join_metadata_map.insert(
                                 join_core_id,
-                                JoinMetadata {
-                                    catalog_source_ids: catalog_sources,
-                                    stream_source_ids: stream_sources,
-                                },
+                                JoinMetadataInfo::new(catalog_sources, stream_sources),
                             );
                         }
                     }
@@ -642,7 +640,11 @@ macro_rules! build_typed_flow {
             $crate::dsl::typing::collect_stage_typing_info(&descriptors, &name_to_id);
 
         // Collect logical subgraph metadata (FLOWIP-086z-part-2).
-        use obzenflow_core::topology::subgraphs::{StageSubgraphMembership, SubgraphInternalEdge, TopologySubgraphInfo};
+        // Canonical types live in `obzenflow-topology`; subgraph payload uses
+        // topology `StageId`s so we convert from core IDs at this boundary.
+        use obzenflow_topology::{
+            StageSubgraphMembership, SubgraphInternalEdge, TopologySubgraphInfo,
+        };
         let mut subgraph_membership_map: HashMap<StageId, StageSubgraphMembership> =
             HashMap::new();
         for (stage_name, membership) in lowering_artifacts.stage_subgraphs {
@@ -663,7 +665,7 @@ macro_rules! build_typed_flow {
                         "Lowering artifacts reference unknown stage '{name}'"
                     ))
                 })?;
-                member_stage_ids.push(id);
+                member_stage_ids.push(to_topology_id(id));
             }
 
             let mut internal_edges = Vec::with_capacity(spec.internal_edges.len());
@@ -681,8 +683,8 @@ macro_rules! build_typed_flow {
                     ))
                 })?;
                 internal_edges.push(SubgraphInternalEdge {
-                    from_stage_id,
-                    to_stage_id,
+                    from_stage_id: to_topology_id(from_stage_id),
+                    to_stage_id: to_topology_id(to_stage_id),
                     role: edge.role.clone(),
                 });
             }
@@ -694,7 +696,7 @@ macro_rules! build_typed_flow {
                         "Lowering artifacts reference unknown stage '{name}'"
                     ))
                 })?;
-                entry_stage_ids.push(id);
+                entry_stage_ids.push(to_topology_id(id));
             }
 
             let mut exit_stage_ids = Vec::with_capacity(spec.exit_stage_names.len());
@@ -704,7 +706,7 @@ macro_rules! build_typed_flow {
                         "Lowering artifacts reference unknown stage '{name}'"
                     ))
                 })?;
-                exit_stage_ids.push(id);
+                exit_stage_ids.push(to_topology_id(id));
             }
 
             subgraphs.push(TopologySubgraphInfo {
@@ -1150,11 +1152,92 @@ macro_rules! build_typed_flow {
             }
         }
 
+        // FLOWIP-114b: bake DSL-time annotations into the canonical Topology.
+        // Stage typing, join metadata, subgraph membership, and middleware
+        // configuration become annotation fields on the corresponding
+        // `StageInfo`; edge typing is then derived from the attached stage
+        // typings and join metadata. The resulting `Topology` is what the
+        // runtime carries through `FlowHandle::topology()` and what the
+        // `/api/topology` endpoint serialises.
+        let topology = {
+            use obzenflow_runtime::id_conversions::StageIdExt;
+
+            let mut middleware_decoded: HashMap<StageId, obzenflow_topology::MiddlewareInfo> =
+                HashMap::new();
+            for (id, config) in &middleware_stacks {
+                middleware_decoded.insert(
+                    *id,
+                    obzenflow_topology::MiddlewareInfo {
+                        stack: config.stack.clone(),
+                        circuit_breaker: config
+                            .circuit_breaker
+                            .as_ref()
+                            .and_then(|v| serde_json::from_value(v.clone()).ok()),
+                        rate_limiter: config
+                            .rate_limiter
+                            .as_ref()
+                            .and_then(|v| serde_json::from_value(v.clone()).ok()),
+                        retry: config
+                            .retry
+                            .as_ref()
+                            .and_then(|v| serde_json::from_value(v.clone()).ok()),
+                    },
+                );
+            }
+
+            let annotated_stages: Vec<obzenflow_topology::StageInfo> = topology
+                .stages()
+                .cloned()
+                .map(|mut s| {
+                    let core_id = StageId::from_ulid(s.id.ulid());
+                    if let Some(typing) = stage_typing_map.get(&core_id) {
+                        s.typing = Some(typing.clone());
+                    }
+                    if let Some(jm) = join_metadata_map.get(&core_id) {
+                        s.join_metadata = Some(jm.clone());
+                    }
+                    if let Some(sub) = subgraph_membership_map.get(&core_id) {
+                        s.subgraph = Some(sub.clone());
+                    }
+                    if let Some(mw) = middleware_decoded.get(&core_id) {
+                        s.middleware = Some(mw.clone());
+                    }
+                    s
+                })
+                .collect();
+
+            let annotated_edges: Vec<obzenflow_topology::DirectedEdge> =
+                topology.edges().to_vec();
+
+            Arc::new(
+                obzenflow_topology::Topology::new_unvalidated(annotated_stages, annotated_edges)
+                    .map_err(FlowBuildError::TopologyValidationFailed)?
+                    .with_flow_name($flow_name)
+                    .with_api_version("0.5")
+                    .with_subgraphs(subgraphs.clone())
+                    .populate_derived_stage_annotations()
+                    .derive_edge_typings(),
+            )
+        };
+
         // Create flow handle using builder pattern
         use $crate::prelude::{PipelineBuilder, FlowHandle};
         use obzenflow_runtime::supervised_base::SupervisorBuilder;
 
-        let mut builder = PipelineBuilder::new(
+        // FLOWIP-114b: stage_typing_map, join_metadata_map,
+        // subgraph_membership_map, subgraphs, and middleware_stacks have
+        // already been folded into the canonical `topology` above as
+        // `StageInfo`/`Topology` annotations, so PipelineBuilder no longer
+        // needs to thread them through.
+        let _ = (
+            &stage_typing_map,
+            &join_metadata_map,
+            &subgraph_membership_map,
+            &subgraphs,
+            &middleware_stacks,
+        );
+
+        let builder = PipelineBuilder::new(
                 topology.clone(),
                 stage_resources_set.system_journal.clone(),
                 stage_resources_set.flow_id.clone(),
@@ -1165,20 +1248,7 @@ macro_rules! build_typed_flow {
             .with_stage_journals(stage_resources_set.stage_journals.clone())
             .with_error_journals(stage_resources_set.error_journals.clone())
             .with_backpressure_registry(stage_resources_set.backpressure_registry.clone())
-            .with_liveness_snapshots(stage_resources_set.liveness_snapshots.clone())
-            .with_middleware_stacks(middleware_stacks);
-
-        if !join_metadata_map.is_empty() {
-            builder = builder.with_join_metadata(join_metadata_map);
-        }
-
-        if !stage_typing_map.is_empty() {
-            builder = builder.with_stage_typing(stage_typing_map);
-        }
-
-        if !subgraph_membership_map.is_empty() || !subgraphs.is_empty() {
-            builder = builder.with_subgraphs(subgraph_membership_map, subgraphs);
-        }
+            .with_liveness_snapshots(stage_resources_set.liveness_snapshots.clone());
 
         let builder = if let Some(exporter) = metrics_exporter {
             builder.with_metrics(exporter)

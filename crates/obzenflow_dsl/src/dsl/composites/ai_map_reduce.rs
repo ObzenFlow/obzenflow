@@ -20,12 +20,11 @@ use obzenflow_adapters::middleware::ai::map_reduce::{
     AiMapReduceChunkManifestFactory, AiMapReduceMapFactory,
 };
 use obzenflow_adapters::middleware::MiddlewareFactory;
-use obzenflow_core::topology::subgraphs::StageSubgraphMembership;
 use obzenflow_core::TypedPayload;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{AsyncTransformHandler, TransformHandler};
 use obzenflow_runtime::stages::stateful::CollectByInput;
-use obzenflow_topology::EdgeKind;
+use obzenflow_topology::{EdgeKind, StageSubgraphMembership};
 use std::any::type_name;
 use std::fmt;
 use std::marker::PhantomData;

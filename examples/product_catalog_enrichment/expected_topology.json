@@ -1,0 +1,788 @@
+{
+  "flow_name": "product_catalog_enrichment",
+  "api_version": "0.5",
+  "stages": [
+    {
+      "id": "01KR5DKJNM1X361WM2GX64Z5GG",
+      "name": "categories",
+      "stage_type": "finite_source",
+      "status": "pending",
+      "role": "producer",
+      "is_cycle_member": false,
+      "middleware": {
+        "stack": []
+      },
+      "typing": {
+        "input_type": {
+          "kind": "unspecified"
+        },
+        "output_type": {
+          "kind": "exact",
+          "name": "Category"
+        },
+        "boundary_in_type": {
+          "kind": "unspecified"
+        },
+        "boundary_out_type": {
+          "kind": "unspecified"
+        },
+        "reference_type": {
+          "kind": "unspecified"
+        },
+        "stream_type": {
+          "kind": "unspecified"
+        },
+        "is_placeholder": false
+      }
+    },
+    {
+      "id": "01KR5DKJNM2WNN6X3HP0DGYDTG",
+      "name": "payment_methods",
+      "stage_type": "finite_source",
+      "status": "pending",
+      "role": "producer",
+      "is_cycle_member": false,
+      "middleware": {
+        "stack": []
+      },
+      "typing": {
+        "input_type": {
+          "kind": "unspecified"
+        },
+        "output_type": {
+          "kind": "exact",
+          "name": "PaymentMethod"
+        },
+        "boundary_in_type": {
+          "kind": "unspecified"
+        },
+        "boundary_out_type": {
+          "kind": "unspecified"
+        },
+        "reference_type": {
+          "kind": "unspecified"
+        },
+        "stream_type": {
+          "kind": "unspecified"
+        },
+        "is_placeholder": false
+      }
+    },
+    {
+      "id": "01KR5DKJNM3H3YXDEPC84EAB1K",
+      "name": "orders",
+      "stage_type": "finite_source",
+      "status": "pending",
+      "role": "producer",
+      "is_cycle_member": false,
+      "middleware": {
+        "stack": []
+      },
+      "typing": {
+        "input_type": {
+          "kind": "unspecified"
+        },
+        "output_type": {
+          "kind": "exact",
+          "name": "OrderEvent"
+        },
+        "boundary_in_type": {
+          "kind": "unspecified"
+        },
+        "boundary_out_type": {
+          "kind": "unspecified"
+        },
+        "reference_type": {
+          "kind": "unspecified"
+        },
+        "stream_type": {
+          "kind": "unspecified"
+        },
+        "is_placeholder": false
+      }
+    },
+    {
+      "id": "01KR5DKJNM4PB9069WE67WFWXA",
+      "name": "sku_products",
+      "stage_type": "join",
+      "status": "pending",
+      "role": "processor",
+      "is_cycle_member": false,
+      "middleware": {
+        "stack": []
+      },
+      "join_metadata": {
+        "catalog_source_ids": [
+          "01KR5DKJNMMJW7J8F0F155CMKW"
+        ],
+        "stream_source_ids": [
+          "01KR5DKJNMQ9HXW9FR64RYN5R8"
+        ]
+      },
+      "typing": {
+        "input_type": {
+          "kind": "unspecified"
+        },
+        "output_type": {
+          "kind": "exact",
+          "name": "SKUWithProduct"
+        },
+        "boundary_in_type": {
+          "kind": "unspecified"
+        },
+        "boundary_out_type": {
+          "kind": "unspecified"
+        },
+        "reference_type": {
+          "kind": "exact",
+          "name": "Product"
+        },
+        "stream_type": {
+          "kind": "exact",
+          "name": "Sku"
+        },
+        "is_placeholder": false
+      }
+    },
+    {
+      "id": "01KR5DKJNM5HYGSEHRKWD6MVVA",
+      "name": "catalog_stats",
+      "stage_type": "stateful",
+      "status": "pending",
+      "role": "processor",
+      "is_cycle_member": false,
+      "middleware": {
+        "stack": []
+      },
+      "typing": {
+        "input_type": {
+          "kind": "exact",
+          "name": "EnrichedOrderWithPromo"
+        },
+        "output_type": {
+          "kind": "exact",
+          "name": "CatalogAnalyticsSummary"
+        },
+        "boundary_in_type": {
+          "kind": "unspecified"
+        },
+        "boundary_out_type": {
+          "kind": "unspecified"
+        },
+        "reference_type": {
+          "kind": "unspecified"
+        },
+        "stream_type": {
+          "kind": "unspecified"
+        },
+        "is_placeholder": false
+      }
+    },
+    {
+      "id": "01KR5DKJNMDNQH2HWJJXJZA8RG",
+      "name": "per_order_printer",
+      "stage_type": "sink",
+      "status": "pending",
+      "role": "consumer",
+      "is_cycle_member": false,
+      "middleware": {
+        "stack": [
+          "rate_limiter"
+        ],
+        "rate_limiter": {
+          "tokens_per_sec": 0.5,
+          "burst_capacity": 1.0,
+          "cost_per_event": 1.0,
+          "limit_rate": 0.5
+        }
+      },
+      "typing": {
+        "input_type": {
+          "kind": "exact",
+          "name": "EnrichedOrderWithPromo"
+        },
+        "output_type": {
+          "kind": "unspecified"
+        },
+        "boundary_in_type": {
+          "kind": "unspecified"
+        },
+        "boundary_out_type": {
+          "kind": "unspecified"
+        },
+        "reference_type": {
+          "kind": "unspecified"
+        },
+        "stream_type": {
+          "kind": "unspecified"
+        },
+        "is_placeholder": false
+      }
+    },
+    {
+      "id": "01KR5DKJNMEEFR5JN4AVMZN510",
+      "name": "payment_validated",
+      "stage_type": "join",
+      "status": "pending",
+      "role": "processor",
+      "is_cycle_member": false,
+      "middleware": {
+        "stack": []
+      },
+      "join_metadata": {
+        "catalog_source_ids": [
+          "01KR5DKJNM2WNN6X3HP0DGYDTG"
+        ],
+        "stream_source_ids": [
+          "01KR5DKJNM3H3YXDEPC84EAB1K"
+        ]
+      },
+      "typing": {
+        "input_type": {
+          "kind": "unspecified"
+        },
+        "output_type": {
+          "kind": "exact",
+          "name": "ValidatedOrder"
+        },
+        "boundary_in_type": {
+          "kind": "unspecified"
+        },
+        "boundary_out_type": {
+          "kind": "unspecified"
+        },
+        "reference_type": {
+          "kind": "exact",
+          "name": "PaymentMethod"
+        },
+        "stream_type": {
+          "kind": "exact",
+          "name": "OrderEvent"
+        },
+        "is_placeholder": false
+      }
+    },
+    {
+      "id": "01KR5DKJNMEX0CJV7B7EHR494J",
+      "name": "summary_printer",
+      "stage_type": "sink",
+      "status": "pending",
+      "role": "consumer",
+      "is_cycle_member": false,
+      "middleware": {
+        "stack": []
+      },
+      "typing": {
+        "input_type": {
+          "kind": "exact",
+          "name": "CatalogAnalyticsSummary"
+        },
+        "output_type": {
+          "kind": "unspecified"
+        },
+        "boundary_in_type": {
+          "kind": "unspecified"
+        },
+        "boundary_out_type": {
+          "kind": "unspecified"
+        },
+        "reference_type": {
+          "kind": "unspecified"
+        },
+        "stream_type": {
+          "kind": "unspecified"
+        },
+        "is_placeholder": false
+      }
+    },
+    {
+      "id": "01KR5DKJNMEXJQCJ9NPNVTP22X",
+      "name": "enriched_orders",
+      "stage_type": "join",
+      "status": "pending",
+      "role": "processor",
+      "is_cycle_member": false,
+      "middleware": {
+        "stack": []
+      },
+      "join_metadata": {
+        "catalog_source_ids": [
+          "01KR5DKJNMFTPVYKRXVAR086N2"
+        ],
+        "stream_source_ids": [
+          "01KR5DKJNMEEFR5JN4AVMZN510"
+        ]
+      },
+      "typing": {
+        "input_type": {
+          "kind": "unspecified"
+        },
+        "output_type": {
+          "kind": "exact",
+          "name": "EnrichedOrder"
+        },
+        "boundary_in_type": {
+          "kind": "unspecified"
+        },
+        "boundary_out_type": {
+          "kind": "unspecified"
+        },
+        "reference_type": {
+          "kind": "exact",
+          "name": "SKUFullDimension"
+        },
+        "stream_type": {
+          "kind": "exact",
+          "name": "ValidatedOrder"
+        },
+        "is_placeholder": false
+      }
+    },
+    {
+      "id": "01KR5DKJNMFTPVYKRXVAR086N2",
+      "name": "sku_full_dim",
+      "stage_type": "join",
+      "status": "pending",
+      "role": "processor",
+      "is_cycle_member": false,
+      "middleware": {
+        "stack": []
+      },
+      "join_metadata": {
+        "catalog_source_ids": [
+          "01KR5DKJNM1X361WM2GX64Z5GG"
+        ],
+        "stream_source_ids": [
+          "01KR5DKJNM4PB9069WE67WFWXA"
+        ]
+      },
+      "typing": {
+        "input_type": {
+          "kind": "unspecified"
+        },
+        "output_type": {
+          "kind": "exact",
+          "name": "SKUFullDimension"
+        },
+        "boundary_in_type": {
+          "kind": "unspecified"
+        },
+        "boundary_out_type": {
+          "kind": "unspecified"
+        },
+        "reference_type": {
+          "kind": "exact",
+          "name": "Category"
+        },
+        "stream_type": {
+          "kind": "exact",
+          "name": "SKUWithProduct"
+        },
+        "is_placeholder": false
+      }
+    },
+    {
+      "id": "01KR5DKJNMMJW7J8F0F155CMKW",
+      "name": "products",
+      "stage_type": "finite_source",
+      "status": "pending",
+      "role": "producer",
+      "is_cycle_member": false,
+      "middleware": {
+        "stack": []
+      },
+      "typing": {
+        "input_type": {
+          "kind": "unspecified"
+        },
+        "output_type": {
+          "kind": "exact",
+          "name": "Product"
+        },
+        "boundary_in_type": {
+          "kind": "unspecified"
+        },
+        "boundary_out_type": {
+          "kind": "unspecified"
+        },
+        "reference_type": {
+          "kind": "unspecified"
+        },
+        "stream_type": {
+          "kind": "unspecified"
+        },
+        "is_placeholder": false
+      }
+    },
+    {
+      "id": "01KR5DKJNMQ9HXW9FR64RYN5R8",
+      "name": "skus",
+      "stage_type": "finite_source",
+      "status": "pending",
+      "role": "producer",
+      "is_cycle_member": false,
+      "middleware": {
+        "stack": []
+      },
+      "typing": {
+        "input_type": {
+          "kind": "unspecified"
+        },
+        "output_type": {
+          "kind": "exact",
+          "name": "Sku"
+        },
+        "boundary_in_type": {
+          "kind": "unspecified"
+        },
+        "boundary_out_type": {
+          "kind": "unspecified"
+        },
+        "reference_type": {
+          "kind": "unspecified"
+        },
+        "stream_type": {
+          "kind": "unspecified"
+        },
+        "is_placeholder": false
+      }
+    },
+    {
+      "id": "01KR5DKJNMS0G2XSWZ7XMGS05P",
+      "name": "promotions",
+      "stage_type": "finite_source",
+      "status": "pending",
+      "role": "producer",
+      "is_cycle_member": false,
+      "middleware": {
+        "stack": []
+      },
+      "typing": {
+        "input_type": {
+          "kind": "unspecified"
+        },
+        "output_type": {
+          "kind": "exact",
+          "name": "Promotion"
+        },
+        "boundary_in_type": {
+          "kind": "unspecified"
+        },
+        "boundary_out_type": {
+          "kind": "unspecified"
+        },
+        "reference_type": {
+          "kind": "unspecified"
+        },
+        "stream_type": {
+          "kind": "unspecified"
+        },
+        "is_placeholder": false
+      }
+    },
+    {
+      "id": "01KR5DKJNMXAQQ2TG1B0KJQA6M",
+      "name": "promo_enriched",
+      "stage_type": "join",
+      "status": "pending",
+      "role": "processor",
+      "is_cycle_member": false,
+      "middleware": {
+        "stack": []
+      },
+      "join_metadata": {
+        "catalog_source_ids": [
+          "01KR5DKJNMS0G2XSWZ7XMGS05P"
+        ],
+        "stream_source_ids": [
+          "01KR5DKJNMEXJQCJ9NPNVTP22X"
+        ]
+      },
+      "typing": {
+        "input_type": {
+          "kind": "unspecified"
+        },
+        "output_type": {
+          "kind": "exact",
+          "name": "EnrichedOrderWithPromo"
+        },
+        "boundary_in_type": {
+          "kind": "unspecified"
+        },
+        "boundary_out_type": {
+          "kind": "unspecified"
+        },
+        "reference_type": {
+          "kind": "exact",
+          "name": "Promotion"
+        },
+        "stream_type": {
+          "kind": "exact",
+          "name": "EnrichedOrder"
+        },
+        "is_placeholder": false
+      }
+    }
+  ],
+  "edges": [
+    {
+      "from": "01KR5DKJNM1X361WM2GX64Z5GG",
+      "to": "01KR5DKJNMFTPVYKRXVAR086N2",
+      "kind": "forward",
+      "contracts": [
+        {
+          "name": "TransportContract"
+        },
+        {
+          "name": "SourceContract"
+        }
+      ],
+      "typing": {
+        "role": "reference",
+        "label_source": "downstream_reference_type",
+        "payload_type": {
+          "kind": "exact",
+          "name": "Category"
+        }
+      }
+    },
+    {
+      "from": "01KR5DKJNMS0G2XSWZ7XMGS05P",
+      "to": "01KR5DKJNMXAQQ2TG1B0KJQA6M",
+      "kind": "forward",
+      "contracts": [
+        {
+          "name": "TransportContract"
+        },
+        {
+          "name": "SourceContract"
+        }
+      ],
+      "typing": {
+        "role": "reference",
+        "label_source": "downstream_reference_type",
+        "payload_type": {
+          "kind": "exact",
+          "name": "Promotion"
+        }
+      }
+    },
+    {
+      "from": "01KR5DKJNM2WNN6X3HP0DGYDTG",
+      "to": "01KR5DKJNMEEFR5JN4AVMZN510",
+      "kind": "forward",
+      "contracts": [
+        {
+          "name": "TransportContract"
+        },
+        {
+          "name": "SourceContract"
+        }
+      ],
+      "typing": {
+        "role": "reference",
+        "label_source": "downstream_reference_type",
+        "payload_type": {
+          "kind": "exact",
+          "name": "PaymentMethod"
+        }
+      }
+    },
+    {
+      "from": "01KR5DKJNMFTPVYKRXVAR086N2",
+      "to": "01KR5DKJNMEXJQCJ9NPNVTP22X",
+      "kind": "forward",
+      "contracts": [
+        {
+          "name": "TransportContract"
+        }
+      ],
+      "typing": {
+        "role": "reference",
+        "label_source": "downstream_reference_type",
+        "payload_type": {
+          "kind": "exact",
+          "name": "SKUFullDimension"
+        }
+      }
+    },
+    {
+      "from": "01KR5DKJNMMJW7J8F0F155CMKW",
+      "to": "01KR5DKJNM4PB9069WE67WFWXA",
+      "kind": "forward",
+      "contracts": [
+        {
+          "name": "TransportContract"
+        },
+        {
+          "name": "SourceContract"
+        }
+      ],
+      "typing": {
+        "role": "reference",
+        "label_source": "downstream_reference_type",
+        "payload_type": {
+          "kind": "exact",
+          "name": "Product"
+        }
+      }
+    },
+    {
+      "from": "01KR5DKJNMQ9HXW9FR64RYN5R8",
+      "to": "01KR5DKJNM4PB9069WE67WFWXA",
+      "kind": "forward",
+      "contracts": [
+        {
+          "name": "TransportContract"
+        },
+        {
+          "name": "SourceContract"
+        }
+      ],
+      "typing": {
+        "role": "stream",
+        "label_source": "downstream_stream_type",
+        "payload_type": {
+          "kind": "exact",
+          "name": "Sku"
+        }
+      }
+    },
+    {
+      "from": "01KR5DKJNM4PB9069WE67WFWXA",
+      "to": "01KR5DKJNMFTPVYKRXVAR086N2",
+      "kind": "forward",
+      "contracts": [
+        {
+          "name": "TransportContract"
+        }
+      ],
+      "typing": {
+        "role": "stream",
+        "label_source": "downstream_stream_type",
+        "payload_type": {
+          "kind": "exact",
+          "name": "SKUWithProduct"
+        }
+      }
+    },
+    {
+      "from": "01KR5DKJNM3H3YXDEPC84EAB1K",
+      "to": "01KR5DKJNMEEFR5JN4AVMZN510",
+      "kind": "forward",
+      "contracts": [
+        {
+          "name": "TransportContract"
+        },
+        {
+          "name": "SourceContract"
+        }
+      ],
+      "typing": {
+        "role": "stream",
+        "label_source": "downstream_stream_type",
+        "payload_type": {
+          "kind": "exact",
+          "name": "OrderEvent"
+        }
+      }
+    },
+    {
+      "from": "01KR5DKJNMEEFR5JN4AVMZN510",
+      "to": "01KR5DKJNMEXJQCJ9NPNVTP22X",
+      "kind": "forward",
+      "contracts": [
+        {
+          "name": "TransportContract"
+        }
+      ],
+      "typing": {
+        "role": "stream",
+        "label_source": "downstream_stream_type",
+        "payload_type": {
+          "kind": "exact",
+          "name": "ValidatedOrder"
+        }
+      }
+    },
+    {
+      "from": "01KR5DKJNMEXJQCJ9NPNVTP22X",
+      "to": "01KR5DKJNMXAQQ2TG1B0KJQA6M",
+      "kind": "forward",
+      "contracts": [
+        {
+          "name": "TransportContract"
+        }
+      ],
+      "typing": {
+        "role": "stream",
+        "label_source": "downstream_stream_type",
+        "payload_type": {
+          "kind": "exact",
+          "name": "EnrichedOrder"
+        }
+      }
+    },
+    {
+      "from": "01KR5DKJNMXAQQ2TG1B0KJQA6M",
+      "to": "01KR5DKJNMDNQH2HWJJXJZA8RG",
+      "kind": "forward",
+      "contracts": [
+        {
+          "name": "TransportContract"
+        },
+        {
+          "name": "DeliveryContract"
+        }
+      ],
+      "typing": {
+        "role": "input",
+        "label_source": "upstream_output_type",
+        "payload_type": {
+          "kind": "exact",
+          "name": "EnrichedOrderWithPromo"
+        }
+      }
+    },
+    {
+      "from": "01KR5DKJNMXAQQ2TG1B0KJQA6M",
+      "to": "01KR5DKJNM5HYGSEHRKWD6MVVA",
+      "kind": "forward",
+      "contracts": [
+        {
+          "name": "TransportContract"
+        }
+      ],
+      "typing": {
+        "role": "input",
+        "label_source": "upstream_output_type",
+        "payload_type": {
+          "kind": "exact",
+          "name": "EnrichedOrderWithPromo"
+        }
+      }
+    },
+    {
+      "from": "01KR5DKJNM5HYGSEHRKWD6MVVA",
+      "to": "01KR5DKJNMEX0CJV7B7EHR494J",
+      "kind": "forward",
+      "contracts": [
+        {
+          "name": "TransportContract"
+        },
+        {
+          "name": "DeliveryContract"
+        }
+      ],
+      "typing": {
+        "role": "input",
+        "label_source": "upstream_output_type",
+        "payload_type": {
+          "kind": "exact",
+          "name": "CatalogAnalyticsSummary"
+        }
+      }
+    }
+  ],
+  "subgraphs": []
+}

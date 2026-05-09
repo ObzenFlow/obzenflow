@@ -12,8 +12,7 @@ pub mod ai_map_reduce;
 
 use crate::dsl::stage_descriptor::StageDescriptor;
 use crate::dsl::FlowBuildError;
-use obzenflow_core::topology::subgraphs::StageSubgraphMembership;
-use obzenflow_topology::EdgeKind;
+use obzenflow_topology::{EdgeKind, StageSubgraphMembership};
 use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone)]

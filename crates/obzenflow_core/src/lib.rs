@@ -15,7 +15,6 @@ pub mod id;
 pub mod journal;
 pub mod metrics;
 pub mod time;
-pub mod topology;
 pub mod web;
 
 // Re-export key types for convenience

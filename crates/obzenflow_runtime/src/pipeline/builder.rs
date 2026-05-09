@@ -9,7 +9,7 @@
 
 use super::{
     fsm::{PipelineContext, PipelineEvent, PipelineState},
-    handle::{FlowHandle, FlowHandleExtras, MiddlewareStackConfig},
+    handle::{FlowHandle, FlowHandleExtras},
     supervisor::PipelineSupervisor,
 };
 use crate::{
@@ -22,14 +22,12 @@ use crate::{
         BuilderError, ChannelBuilder, HandleBuilder, SelfSupervisedExt,
         SelfSupervisedWithExternalEvents, SupervisorBuilder, SupervisorTaskBuilder,
     },
-    typing::StageTypingInfo,
 };
 use obzenflow_core::event::{ChainEvent, SystemEvent};
 use obzenflow_core::id::{FlowId, SystemId};
 use obzenflow_core::journal::Journal;
 use obzenflow_core::journal::JournalStorageKind;
 use obzenflow_core::metrics::MetricsExporter;
-use obzenflow_core::topology::subgraphs::{StageSubgraphMembership, TopologySubgraphInfo};
 use obzenflow_core::StageId;
 use obzenflow_core::{DeliveryContract, SourceContract, TransportContract};
 use obzenflow_topology::Topology;
@@ -51,12 +49,7 @@ pub struct PipelineBuilder {
     stage_journals: Option<StageJournalList>,
     error_journals: Option<StageJournalList>,
     flow_name: Option<String>,
-    middleware_stacks: Option<HashMap<StageId, MiddlewareStackConfig>>,
     contract_attachments: Option<HashMap<(StageId, StageId), Vec<String>>>,
-    join_metadata: Option<HashMap<StageId, crate::pipeline::JoinMetadata>>,
-    stage_typing: Option<HashMap<StageId, StageTypingInfo>>,
-    subgraph_membership: Option<HashMap<StageId, StageSubgraphMembership>>,
-    subgraphs: Option<Vec<TopologySubgraphInfo>>,
     backpressure_registry: Option<Arc<BackpressureRegistry>>,
     liveness_snapshots: Option<LivenessSnapshots>,
 }
@@ -78,12 +71,7 @@ impl PipelineBuilder {
             stage_journals: None,
             error_journals: None,
             flow_name: None,
-            middleware_stacks: None,
             contract_attachments: None,
-            join_metadata: None,
-            stage_typing: None,
-            subgraph_membership: None,
-            subgraphs: None,
             backpressure_registry: None,
             liveness_snapshots: None,
         }
@@ -125,47 +113,20 @@ impl PipelineBuilder {
         self
     }
 
-    /// Attach structural middleware stacks per stage (for topology observability, FLOWIP-059)
-    pub fn with_middleware_stacks(
-        mut self,
-        stacks: HashMap<StageId, MiddlewareStackConfig>,
-    ) -> Self {
-        self.middleware_stacks = Some(stacks);
-        self
-    }
-
-    /// Attach structural contract names per edge (for topology observability)
+    /// Attach structural contract names per edge (for topology observability).
+    ///
+    /// Note: as of FLOWIP-114b, stage typing, join metadata, subgraph
+    /// membership, and middleware configuration are baked into the
+    /// canonical `Topology` at flow build time, so they are no longer
+    /// threaded through `PipelineBuilder` as side maps. Contracts remain a
+    /// side map because they are derived in `PipelineBuilder::build` from
+    /// the topology shape and are not yet baked into the canonical
+    /// `Topology`.
     pub fn with_contract_attachments(
         mut self,
         attachments: HashMap<(StageId, StageId), Vec<String>>,
     ) -> Self {
         self.contract_attachments = Some(attachments);
-        self
-    }
-
-    /// Attach join metadata per stage (for topology observability, FLOWIP-082a)
-    pub fn with_join_metadata(
-        mut self,
-        join_metadata: HashMap<StageId, crate::pipeline::JoinMetadata>,
-    ) -> Self {
-        self.join_metadata = Some(join_metadata);
-        self
-    }
-
-    /// Attach stage typing metadata per stage for topology export (FLOWIP-114b).
-    pub fn with_stage_typing(mut self, stage_typing: HashMap<StageId, StageTypingInfo>) -> Self {
-        self.stage_typing = Some(stage_typing);
-        self
-    }
-
-    /// Attach logical subgraph metadata for topology export (FLOWIP-086z-part-2).
-    pub fn with_subgraphs(
-        mut self,
-        membership: HashMap<StageId, StageSubgraphMembership>,
-        subgraphs: Vec<TopologySubgraphInfo>,
-    ) -> Self {
-        self.subgraph_membership = Some(membership);
-        self.subgraphs = Some(subgraphs);
         self
     }
 
@@ -469,41 +430,23 @@ impl SupervisorBuilder for PipelineBuilder {
             .build_standard()
             .map_err(|e| BuilderError::Other(e.to_string()))?;
 
-        // Wrap it in FlowHandle with pipeline-specific extras
-        // Clone topology for the handle (topology is Arc, so this is cheap)
+        // Wrap it in FlowHandle with pipeline-specific extras.
+        // Clone topology for the handle (topology is Arc, so this is cheap);
+        // it already carries the FLOWIP-114b annotation fields (typing,
+        // join_metadata, middleware, subgraph membership, subgraph
+        // registry).
         let topology = Some(self.topology.clone());
-        let middleware_stacks = self
-            .middleware_stacks
-            .map(|stacks| Arc::new(stacks) as Arc<HashMap<StageId, MiddlewareStackConfig>>);
         let contract_attachments = Some(
             Arc::new(contract_attachments_map) as Arc<HashMap<(StageId, StageId), Vec<String>>>
         );
 
-        let join_metadata = self
-            .join_metadata
-            .map(|map| Arc::new(map) as Arc<HashMap<StageId, crate::pipeline::JoinMetadata>>);
-        let stage_typing = self
-            .stage_typing
-            .map(|map| Arc::new(map) as Arc<HashMap<StageId, StageTypingInfo>>);
-
-        let subgraph_membership = self
-            .subgraph_membership
-            .map(|map| Arc::new(map) as Arc<HashMap<StageId, StageSubgraphMembership>>);
-        let subgraphs = self
-            .subgraphs
-            .map(|list| Arc::new(list) as Arc<Vec<TopologySubgraphInfo>>);
         Ok(FlowHandle::new(
             standard_handle,
             metrics_exporter,
             FlowHandleExtras {
                 topology,
                 flow_name,
-                middleware_stacks,
                 contract_attachments,
-                join_metadata,
-                stage_typing,
-                subgraph_membership,
-                subgraphs,
                 system_journal: Some(self.system_journal.clone()),
                 liveness_snapshots: self.liveness_snapshots.clone(),
             },

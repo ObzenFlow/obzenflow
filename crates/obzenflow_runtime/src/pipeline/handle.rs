@@ -7,7 +7,6 @@ use crate::errors::FlowError;
 use crate::stages::common::stage_handle::STOP_REASON_TIMEOUT;
 use crate::stages::LivenessSnapshots;
 use crate::supervised_base::{HandleError, StandardHandle, SupervisorHandle};
-use crate::typing::StageTypingInfo;
 use obzenflow_core::event::SystemEvent;
 use obzenflow_core::journal::Journal;
 use obzenflow_core::StageId;
@@ -18,23 +17,12 @@ use std::io;
 use std::sync::Arc;
 use std::time::Duration;
 
-type MiddlewareStacks = Arc<HashMap<StageId, MiddlewareStackConfig>>;
 type ContractAttachments = Arc<HashMap<(StageId, StageId), Vec<String>>>;
-type JoinMetadataMap = Arc<HashMap<StageId, crate::pipeline::JoinMetadata>>;
-type StageTypingMap = Arc<HashMap<StageId, StageTypingInfo>>;
-type StageSubgraphMembershipMap =
-    Arc<HashMap<StageId, obzenflow_core::topology::subgraphs::StageSubgraphMembership>>;
-type SubgraphRegistry = Arc<Vec<obzenflow_core::topology::subgraphs::TopologySubgraphInfo>>;
 
 pub(crate) struct FlowHandleExtras {
     pub topology: Option<Arc<Topology>>,
     pub flow_name: String,
-    pub middleware_stacks: Option<MiddlewareStacks>,
     pub contract_attachments: Option<ContractAttachments>,
-    pub join_metadata: Option<JoinMetadataMap>,
-    pub stage_typing: Option<StageTypingMap>,
-    pub subgraph_membership: Option<StageSubgraphMembershipMap>,
-    pub subgraphs: Option<SubgraphRegistry>,
     pub system_journal: Option<Arc<dyn Journal<SystemEvent>>>,
     pub liveness_snapshots: Option<LivenessSnapshots>,
 }
@@ -109,23 +97,14 @@ pub struct FlowHandle {
     /// User-specified flow name from flow! macro
     flow_name: String,
 
-    /// Structural middleware stacks per stage (for topology observability, FLOWIP-059)
-    middleware_stacks: Option<MiddlewareStacks>,
-
-    /// Structural contract names per edge (for topology observability)
+    /// Structural contract names per edge (for topology observability).
+    ///
+    /// As of FLOWIP-114b, the canonical `topology` carries stage typing,
+    /// join metadata, subgraph membership, and middleware annotations
+    /// directly. Contracts remain a side map because they are derived in
+    /// `PipelineBuilder::build` from the topology shape and are not yet
+    /// baked into the canonical `Topology`.
     contract_attachments: Option<ContractAttachments>,
-
-    /// Join metadata per stage (catalog vs stream sources) for topology export (FLOWIP-082a)
-    join_metadata: Option<JoinMetadataMap>,
-
-    /// Stage typing metadata per stage for topology export (FLOWIP-114b)
-    stage_typing: Option<StageTypingMap>,
-
-    /// Per-stage membership in a logical subgraph (FLOWIP-086z-part-2)
-    subgraph_membership: Option<StageSubgraphMembershipMap>,
-
-    /// Graph-level registry of logical subgraphs (FLOWIP-086z-part-2)
-    subgraphs: Option<SubgraphRegistry>,
 
     /// System journal for lifecycle events (for SSE / observability)
     system_journal: Option<Arc<dyn Journal<SystemEvent>>>,
@@ -144,12 +123,7 @@ impl FlowHandle {
         let FlowHandleExtras {
             topology,
             flow_name,
-            middleware_stacks,
             contract_attachments,
-            join_metadata,
-            stage_typing,
-            subgraph_membership,
-            subgraphs,
             system_journal,
             liveness_snapshots,
         } = extras;
@@ -159,13 +133,8 @@ impl FlowHandle {
             metrics_exporter,
             topology,
             flow_name,
-            middleware_stacks,
             contract_attachments,
             system_journal,
-            join_metadata,
-            stage_typing,
-            subgraph_membership,
-            subgraphs,
             liveness_snapshots,
         }
     }
@@ -518,34 +487,14 @@ impl FlowHandle {
         self.topology.clone()
     }
 
-    /// Get structural middleware stacks per stage (for topology endpoint, FLOWIP-059)
-    pub fn middleware_stacks(&self) -> Option<MiddlewareStacks> {
-        self.middleware_stacks.clone()
-    }
-
-    /// Get structural contract names per edge (for topology endpoint)
+    /// Get structural contract names per edge (for topology endpoint).
+    ///
+    /// FLOWIP-114b: middleware, join metadata, stage typing, and subgraph
+    /// membership are now annotation fields on `topology()`; pull them
+    /// from there. Contracts remain a side map because they are derived
+    /// in `PipelineBuilder::build` from topology shape.
     pub fn contract_attachments(&self) -> Option<ContractAttachments> {
         self.contract_attachments.clone()
-    }
-
-    /// Get join metadata per stage (for topology endpoint, FLOWIP-082a)
-    pub fn join_metadata(&self) -> Option<JoinMetadataMap> {
-        self.join_metadata.clone()
-    }
-
-    /// Get stage typing metadata per stage (for topology endpoint, FLOWIP-114b)
-    pub fn stage_typing(&self) -> Option<StageTypingMap> {
-        self.stage_typing.clone()
-    }
-
-    /// Get per-stage subgraph membership (for topology endpoint, FLOWIP-086z-part-2)
-    pub fn subgraph_membership(&self) -> Option<StageSubgraphMembershipMap> {
-        self.subgraph_membership.clone()
-    }
-
-    /// Get the logical subgraph registry (for topology endpoint, FLOWIP-086z-part-2)
-    pub fn subgraphs(&self) -> Option<SubgraphRegistry> {
-        self.subgraphs.clone()
     }
 
     /// Get the system journal for lifecycle events (if available)
@@ -642,12 +591,7 @@ mod tests {
         FlowHandleExtras {
             topology: None,
             flow_name: "test_flow".to_string(),
-            middleware_stacks: None,
             contract_attachments: None,
-            join_metadata: None,
-            stage_typing: None,
-            subgraph_membership: None,
-            subgraphs: None,
             system_journal: None,
             liveness_snapshots: None,
         }

@@ -143,13 +143,13 @@ fn build_flow() -> obzenflow_dsl::FlowDefinition {
         middleware: [],
 
         stages: {
-            categories = source!(categories_source());
-            products = source!(products_source());
-            skus = source!(skus_source());
-            promotions = source!(promotions_source());
-            payment_methods = source!(payment_methods_source());
+            categories = source!(Category => categories_source());
+            products = source!(Product => products_source());
+            skus = source!(Sku => skus_source());
+            promotions = source!(Promotion => promotions_source());
+            payment_methods = source!(PaymentMethod => payment_methods_source());
 
-            orders = source!(orders_source());
+            orders = source!(OrderEvent => orders_source());
 
             sku_products =
                 join!(catalog products: Product, Sku -> SKUWithProduct => sku_products_handler);
@@ -175,7 +175,7 @@ fn build_flow() -> obzenflow_dsl::FlowDefinition {
             );
 
             per_order_printer = sink!(
-                per_order_printer(),
+                EnrichedOrderWithPromo => per_order_printer(),
                 [RateLimiterBuilder::new(0.5).build()]
             );
 
@@ -196,7 +196,7 @@ fn build_flow() -> obzenflow_dsl::FlowDefinition {
                     .emit_on_eof()
             );
 
-            summary_printer = sink!(summary_printer());
+            summary_printer = sink!(CatalogAnalyticsSummary => summary_printer());
         },
 
         topology: {
@@ -214,10 +214,14 @@ fn build_flow() -> obzenflow_dsl::FlowDefinition {
 }
 
 #[cfg(not(test))]
+const CONFIG_FILE: &str = "examples/product_catalog_enrichment/obzenflow.toml";
+
+#[cfg(not(test))]
 pub fn run_example(presentation: Presentation) -> Result<()> {
     FlowApplication::builder()
         .with_log_level(LogLevel::Info)
         .with_presentation(presentation)
+        .with_config_file(CONFIG_FILE)
         .run_blocking(build_flow())?;
 
     Ok(())

@@ -18,9 +18,11 @@ mod tests {
         TransformHandler,
     };
     use obzenflow_runtime::typing::{
-        JoinTyping, SinkTyping, SourceTyping, StatefulTyping, TransformTyping, TypeHintInfo,
+        JoinTyping, SinkTyping, SourceTyping, StatefulTyping, TransformTyping,
     };
-    use obzenflow_topology::{StageType as TopologyStageType, TopologyBuilder};
+    use obzenflow_topology::{
+        StageType as TopologyStageType, TopologyBuilder, TypeHintInfo,
+    };
     use serde::{Deserialize, Serialize};
     use std::collections::HashMap;
     use std::time::Duration;

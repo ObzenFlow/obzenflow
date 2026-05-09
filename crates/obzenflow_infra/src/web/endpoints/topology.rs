@@ -10,331 +10,39 @@
 use async_trait::async_trait;
 use obzenflow_core::web::{HttpEndpoint, HttpMethod, ManagedResponse, Request, Response, WebError};
 use obzenflow_core::StageId;
-use obzenflow_runtime::id_conversions::StageIdExt;
-use obzenflow_runtime::typing::{StageTypingInfo, TypeHintInfo};
-use obzenflow_topology::{DirectedEdge, EdgeKind, StageType as TopologyStageType};
-use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 type StageMetadataMap = std::collections::HashMap<StageId, StageMetadata>;
-type MiddlewareStacks = Arc<std::collections::HashMap<StageId, MiddlewareStackConfig>>;
 type ContractAttachments = Arc<std::collections::HashMap<(StageId, StageId), Vec<String>>>;
-type JoinMetadataMap =
-    Arc<std::collections::HashMap<StageId, obzenflow_runtime::pipeline::JoinMetadata>>;
-type StageTypingMap = Arc<std::collections::HashMap<StageId, StageTypingInfo>>;
-type StageSubgraphMembershipMap = Arc<
-    std::collections::HashMap<
-        StageId,
-        obzenflow_core::topology::subgraphs::StageSubgraphMembership,
-    >,
->;
-type SubgraphRegistry = Arc<Vec<obzenflow_core::topology::subgraphs::TopologySubgraphInfo>>;
 
-/// JSON representation of flow topology for the API
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FlowTopologyResponse {
-    pub flow_name: String,
-    /// Topology API schema version (for clients to handle evolution)
-    pub version: String,
-    pub stages: Vec<StageApiInfo>,
-    pub edges: Vec<EdgeApiInfo>,
-    pub subgraphs: Vec<SubgraphApiInfo>,
-}
+// FLOWIP-114b: Wire DTOs (FlowTopologyResponse, StageApiInfo, EdgeApiInfo,
+// StageTypingApiInfo, TypeHintApiInfo, JoinMetadataApiInfo, MiddlewareApiInfo,
+// CircuitBreakerApiInfo, RateLimiterApiInfo, RetryApiInfo, EdgeTypingApiInfo,
+// ContractApiInfo, SubgraphApiInfo, StageSubgraphApiInfo, plus their *Api enum
+// counterparts) used to live here. They have been removed; the endpoint
+// serialises the canonical `obzenflow_topology::Topology` directly.
 
-/// Stage information for API response
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StageApiInfo {
-    pub stage_id: String,
-    pub name: String,
-    #[serde(rename = "type")]
-    pub stage_type: String,
-    pub status: String,
-    /// Semantic stage type from topology (finite_source, join, sink, ...)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub semantic_type: Option<String>,
-    /// Connection role derived from StageType (producer/processor/consumer)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub role: Option<String>,
-    /// Whether this stage participates in a cycle (SCC) in the topology graph.
-    ///
-    /// Derived from `obzenflow_topology::Topology::is_in_cycle`, which uses
-    /// Tarjan's algorithm during topology construction and caches membership
-    /// in a HashSet for O(1) lookup.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub is_cycle_member: Option<bool>,
-    /// Middleware observability info for this stage (FLOWIP-059).
-    ///
-    /// Currently a placeholder; populated once middleware introspection is wired.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub middleware: Option<MiddlewareApiInfo>,
-
-    /// Join-specific metadata (only present when semantic_type == "join")
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub join_metadata: Option<JoinMetadataApiInfo>,
-
-    /// Authoring-time stage typing contract (FLOWIP-114b).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub typing: Option<StageTypingApiInfo>,
-
-    /// Logical subgraph membership for this stage (FLOWIP-086z-part-2).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub subgraph: Option<StageSubgraphApiInfo>,
-}
-
-/// Stage typing contract exposed by the topology API (FLOWIP-114b).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct StageTypingApiInfo {
-    pub input_type: TypeHintApiInfo,
-    pub output_type: TypeHintApiInfo,
-    pub boundary_in_type: TypeHintApiInfo,
-    pub boundary_out_type: TypeHintApiInfo,
-    pub reference_type: TypeHintApiInfo,
-    pub stream_type: TypeHintApiInfo,
-    pub is_placeholder: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub placeholder_message: Option<String>,
-}
-
-/// Type hint exposed by the topology API (FLOWIP-114b).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TypeHintApiInfo {
-    pub kind: TypeHintKindApi,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub display_name: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TypeHintKindApi {
-    Unspecified,
-    Exact,
-    Mixed,
-}
-
-/// Stage-level membership facts for logical subgraphs (FLOWIP-086z-part-2).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StageSubgraphApiInfo {
-    pub subgraph_id: String,
-    pub kind: String,
-    pub binding: String,
-    pub role: String,
-    pub order: u16,
-    pub is_entry: bool,
-    pub is_exit: bool,
-}
-
-/// Graph-level registry entry describing one logical subgraph (FLOWIP-086z-part-2).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SubgraphApiInfo {
-    pub subgraph_id: String,
-    pub kind: String,
-    pub binding: String,
-    pub label: String,
-    pub member_stage_ids: Vec<String>,
-    pub internal_edges: Vec<SubgraphInternalEdgeApiInfo>,
-    pub entry_stage_ids: Vec<String>,
-    pub exit_stage_ids: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub parent_subgraph_id: Option<String>,
-    pub collapsible: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SubgraphInternalEdgeApiInfo {
-    pub from_stage_id: String,
-    pub to_stage_id: String,
-    pub role: String,
-}
-
-/// Join-specific metadata for a stage (FLOWIP-082a).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct JoinMetadataApiInfo {
-    /// Stage IDs (base32 ULID strings) whose outputs are catalog/reference inputs.
-    pub catalog_sources: Vec<String>,
-    /// Stage IDs (base32 ULID strings) whose outputs are stream inputs.
-    pub stream_sources: Vec<String>,
-}
-
-/// Middleware information for a stage
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MiddlewareApiInfo {
-    /// Ordered list of middleware names in the stack
-    pub stack: Vec<String>,
-    /// Circuit breaker configuration (static)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub circuit_breaker: Option<CircuitBreakerApiInfo>,
-    /// Rate limiter configuration (static)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub rate_limiter: Option<RateLimiterApiInfo>,
-    /// Retry configuration (static)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub retry: Option<RetryApiInfo>,
-}
-
-/// Circuit breaker configuration (structural only)
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CircuitBreakerApiInfo {
-    /// Number of failures before opening
-    pub threshold: usize,
-    /// Cooldown period before half-open (milliseconds)
-    pub cooldown_ms: u64,
-    /// Policy when circuit is open
-    pub open_policy: OpenPolicyType,
-    /// Whether a fallback handler is configured
-    pub has_fallback: bool,
-}
-
-/// Circuit breaker open policy type
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum OpenPolicyType {
-    EmitFallback,
-    FailFast,
-    Skip,
-}
-
-/// Rate limiter configuration (structural only)
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RateLimiterApiInfo {
-    /// Maximum tokens per second
-    pub tokens_per_sec: f64,
-    /// Effective burst capacity used by runtime admission
-    pub burst_capacity: f64,
-    /// Raw configured burst capacity, if the user set one explicitly
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub configured_burst_capacity: Option<f64>,
-    /// Tokens consumed per admitted event
-    pub cost_per_event: f64,
-    /// Effective event-rate limit after weighting (`tokens_per_sec / cost_per_event`)
-    pub limit_rate: f64,
-}
-
-/// Retry policy configuration (structural only)
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RetryApiInfo {
-    /// Maximum retry attempts (None = infinite)
-    pub max_attempts: Option<usize>,
-    /// Backoff strategy
-    pub backoff: BackoffType,
-    /// Base delay for backoff (milliseconds)
-    pub base_delay_ms: Option<u64>,
-}
-
-/// Retry backoff strategy
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum BackoffType {
-    Fixed,
-    Exponential,
-    None,
-}
-
-/// Edge information for API response
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EdgeApiInfo {
-    pub from: String,
-    pub to: String,
-    /// Edge operator semantics (`|>` vs `<|`)
-    pub kind: String,
-    /// Legacy field for edge throughput; always None.
-    /// All runtime metrics are exported via /metrics.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub events_per_sec: Option<f64>,
-    /// Structural contract information attached to this edge
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub contracts: Option<Vec<ContractApiInfo>>,
-    /// Derived edge payload typing projection (FLOWIP-114b).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub typing: Option<EdgeTypingApiInfo>,
-}
-
-/// Edge payload typing projection exposed by the topology API (FLOWIP-114b).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct EdgeTypingApiInfo {
-    pub role: EdgeTypingRoleApi,
-    pub label_source: EdgeTypingLabelSourceApi,
-    pub payload_type: TypeHintApiInfo,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum EdgeTypingRoleApi {
-    Input,
-    Reference,
-    Stream,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum EdgeTypingLabelSourceApi {
-    UpstreamOutputType,
-    DownstreamInputType,
-    DownstreamReferenceType,
-    DownstreamStreamType,
-}
-
-/// Contract configuration for an edge (structural only)
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ContractApiInfo {
-    /// Contract name (e.g. "TransportContract", "SourceContract")
-    pub name: String,
-    /// Optional serialized configuration for the contract
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub config: Option<serde_json::Value>,
-}
-
-/// Re-export MiddlewareStackConfig from runtime_services for the web layer
-pub use obzenflow_runtime::pipeline::MiddlewareStackConfig;
-
-/// HTTP endpoint that serves flow topology
+/// HTTP endpoint that serves flow topology.
+///
+/// As of FLOWIP-114b, the canonical `obzenflow_topology::Topology` carries
+/// stage typing, edge typing, join metadata, middleware, subgraph
+/// membership, the subgraph registry, role, and cycle membership directly.
+/// The endpoint serialises that `Topology` as the response body, overlaying
+/// only the two side maps that are not (yet) baked in:
+///
+/// - `stages_metadata` — runtime-tracked status per stage.
+/// - `contract_attachments` — derived in `PipelineBuilder::build` from
+///   topology shape, not at flow-build time.
 pub struct TopologyHttpEndpoint {
     topology: Arc<obzenflow_topology::Topology>,
     stages_metadata: Arc<StageMetadataMap>,
-    flow_name: String,
-    /// Structural middleware config per stage (FLOWIP-059)
-    middleware_stacks: Option<MiddlewareStacks>,
     contract_attachments: Option<ContractAttachments>,
-    /// Join metadata per stage (FLOWIP-082a)
-    join_metadata: Option<JoinMetadataMap>,
-    /// Stage typing contracts per stage (FLOWIP-114b)
-    stage_typing: Option<StageTypingMap>,
-    /// Per-stage logical subgraph membership (FLOWIP-086z-part-2)
-    subgraph_membership: Option<StageSubgraphMembershipMap>,
-    /// Subgraph registry (FLOWIP-086z-part-2)
-    subgraphs: Option<SubgraphRegistry>,
 }
 
-/// Additional metadata about stages (type and status)
+/// Runtime-tracked stage status.
 #[derive(Debug, Clone)]
 pub struct StageMetadata {
-    pub stage_type: StageType,
     pub status: StageStatus,
-}
-
-/// Stage types for visualization
-/// Note: Broadcast and Merge are implemented as Transform handlers in runtime,
-/// but tracked separately here for proper UI visualization
-#[derive(Debug, Clone)]
-pub enum StageType {
-    Source,    // Simplified - UI doesn't need to distinguish finite/infinite
-    Transform, // Regular transform operations
-    Sink,
-    Broadcast, // One-to-many distribution (implemented as Transform)
-    Merge,     // Many-to-one aggregation (implemented as Transform)
-}
-
-impl StageType {
-    fn as_str(&self) -> &str {
-        match self {
-            StageType::Source => "source",
-            StageType::Transform => "transform",
-            StageType::Sink => "sink",
-            StageType::Broadcast => "broadcast",
-            StageType::Merge => "merge",
-        }
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -345,133 +53,14 @@ pub enum StageStatus {
     Pending,
 }
 
-impl StageStatus {
-    fn as_str(&self) -> &str {
-        match self {
-            StageStatus::Running => "running",
-            StageStatus::Completed => "completed",
-            StageStatus::Failed => "failed",
-            StageStatus::Pending => "pending",
-        }
+/// Map the infra-internal stage status enum to the canonical `StageStatus`.
+fn canonical_stage_status(status: &StageStatus) -> obzenflow_topology::StageStatus {
+    match status {
+        StageStatus::Running => obzenflow_topology::StageStatus::Running,
+        StageStatus::Completed => obzenflow_topology::StageStatus::Completed,
+        StageStatus::Failed => obzenflow_topology::StageStatus::Failed,
+        StageStatus::Pending => obzenflow_topology::StageStatus::Pending,
     }
-}
-
-impl From<&StageTypingInfo> for StageTypingApiInfo {
-    fn from(value: &StageTypingInfo) -> Self {
-        Self {
-            input_type: (&value.input_type).into(),
-            output_type: (&value.output_type).into(),
-            boundary_in_type: (&value.boundary_in_type).into(),
-            boundary_out_type: (&value.boundary_out_type).into(),
-            reference_type: (&value.reference_type).into(),
-            stream_type: (&value.stream_type).into(),
-            is_placeholder: value.is_placeholder,
-            placeholder_message: value.placeholder_message.clone(),
-        }
-    }
-}
-
-impl From<&TypeHintInfo> for TypeHintApiInfo {
-    fn from(value: &TypeHintInfo) -> Self {
-        match value {
-            TypeHintInfo::Unspecified => Self {
-                kind: TypeHintKindApi::Unspecified,
-                name: None,
-                display_name: None,
-            },
-            TypeHintInfo::Exact { name } => Self {
-                kind: TypeHintKindApi::Exact,
-                name: Some(name.clone()),
-                display_name: Some(display_name_for_type(name)),
-            },
-            TypeHintInfo::Mixed => Self {
-                kind: TypeHintKindApi::Mixed,
-                name: None,
-                display_name: None,
-            },
-        }
-    }
-}
-
-fn edge_typing_from_hint(
-    role: EdgeTypingRoleApi,
-    label_source: EdgeTypingLabelSourceApi,
-    payload_type: &TypeHintInfo,
-) -> Option<EdgeTypingApiInfo> {
-    if matches!(payload_type, TypeHintInfo::Unspecified) {
-        return None;
-    }
-
-    Some(EdgeTypingApiInfo {
-        role,
-        label_source,
-        payload_type: payload_type.into(),
-    })
-}
-
-fn display_name_for_type(name: &str) -> String {
-    split_camel_case(&strip_rust_path_qualifiers(name))
-}
-
-fn strip_rust_path_qualifiers(name: &str) -> String {
-    let mut result = String::new();
-    let mut token = String::new();
-
-    for ch in name.trim().chars() {
-        if ch.is_ascii_alphanumeric() || ch == '_' || ch == ':' {
-            token.push(ch);
-        } else {
-            push_final_path_segment(&mut result, &token);
-            token.clear();
-            result.push(ch);
-        }
-    }
-    push_final_path_segment(&mut result, &token);
-
-    result
-}
-
-fn push_final_path_segment(result: &mut String, token: &str) {
-    if token.is_empty() {
-        return;
-    }
-
-    result.push_str(token.rsplit("::").next().unwrap_or(token));
-}
-
-fn split_camel_case(name: &str) -> String {
-    let chars: Vec<char> = name.chars().collect();
-    let mut result = String::with_capacity(name.len());
-
-    for (index, ch) in chars.iter().copied().enumerate() {
-        if ch == '_' {
-            if !result.ends_with(' ') {
-                result.push(' ');
-            }
-            continue;
-        }
-
-        if index > 0 && should_insert_type_word_space(&chars, index) && !result.ends_with(' ') {
-            result.push(' ');
-        }
-        result.push(ch);
-    }
-
-    result
-}
-
-fn should_insert_type_word_space(chars: &[char], index: usize) -> bool {
-    let previous = chars[index - 1];
-    let current = chars[index];
-    let next = chars.get(index + 1).copied();
-
-    if !current.is_ascii_uppercase() {
-        return false;
-    }
-
-    previous.is_ascii_lowercase()
-        || previous.is_ascii_digit()
-        || (previous.is_ascii_uppercase() && next.is_some_and(|ch| ch.is_ascii_lowercase()))
 }
 
 /// Flags for optional sections controlled via query params
@@ -497,305 +86,76 @@ fn parse_include_flags(_request: &Request) -> IncludeFlags {
 }
 
 impl TopologyHttpEndpoint {
-    /// Create a new topology endpoint
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         topology: Arc<obzenflow_topology::Topology>,
         stages_metadata: Arc<StageMetadataMap>,
-        flow_name: String,
-        middleware_stacks: Option<MiddlewareStacks>,
         contract_attachments: Option<ContractAttachments>,
-        join_metadata: Option<JoinMetadataMap>,
-        stage_typing: Option<StageTypingMap>,
-        subgraph_membership: Option<StageSubgraphMembershipMap>,
-        subgraphs: Option<SubgraphRegistry>,
     ) -> Self {
         Self {
             topology,
             stages_metadata,
-            flow_name,
-            middleware_stacks,
             contract_attachments,
-            join_metadata,
-            stage_typing,
-            subgraph_membership,
-            subgraphs,
         }
     }
 
-    /// Convert internal topology to API response format
-    fn build_response(&self, include: IncludeFlags) -> FlowTopologyResponse {
+    /// Produce the canonical `Topology` value to serve in the response body.
+    ///
+    /// The topology is cloned and overlaid with the two side facts that
+    /// are not yet baked into the canonical model: per-stage runtime status
+    /// from `stages_metadata`, and per-edge contract names from
+    /// `contract_attachments`.
+    fn build_response(&self, include: IncludeFlags) -> obzenflow_topology::Topology {
         let _ = (include.middleware, include.contracts);
-        let stages: Vec<StageApiInfo> = self
+
+        let stages: Vec<obzenflow_topology::StageInfo> = self
             .topology
             .stages()
             .map(|stage_info| {
-                // Convert topology StageId to core StageId for HashMap lookup
                 let core_stage_id = StageId::from_ulid(stage_info.id.ulid());
-                let metadata = self.stages_metadata.get(&core_stage_id);
-                let middleware =
-                    self.middleware_stacks
-                        .as_ref()
-                        .and_then(|stacks| stacks.get(&core_stage_id))
-                        .map(|config| {
-                            // Deserialize circuit breaker config from JSON snapshot
-                            let circuit_breaker = config.circuit_breaker.as_ref().and_then(|v| {
-                                serde_json::from_value::<CircuitBreakerApiInfo>(v.clone()).ok()
-                            });
-
-                            // Deserialize rate limiter config from JSON snapshot
-                            let rate_limiter = config.rate_limiter.as_ref().and_then(|v| {
-                                serde_json::from_value::<RateLimiterApiInfo>(v.clone()).ok()
-                            });
-
-                            // Deserialize retry config from JSON snapshot
-                            let retry = config.retry.as_ref().and_then(|v| {
-                                serde_json::from_value::<RetryApiInfo>(v.clone()).ok()
-                            });
-
-                            MiddlewareApiInfo {
-                                stack: config.stack.clone(),
-                                circuit_breaker,
-                                rate_limiter,
-                                retry,
-                            }
-                        });
-
-                let semantic_type_str = stage_info.stage_type.as_str().to_string();
-                let join_metadata = if semantic_type_str == "join" {
-                    self.join_metadata
-                        .as_ref()
-                        .and_then(|map| map.get(&core_stage_id))
-                        .map(|meta| JoinMetadataApiInfo {
-                            // Use topology StageId formatting so these
-                            // strings match the stage_id / edge ids.
-                            catalog_sources: meta
-                                .catalog_source_ids
-                                .iter()
-                                .map(|id| id.to_topology_id().to_string())
-                                .collect(),
-                            stream_sources: meta
-                                .stream_source_ids
-                                .iter()
-                                .map(|id| id.to_topology_id().to_string())
-                                .collect(),
-                        })
-                } else {
-                    None
-                };
-
-                let subgraph = self
-                    .subgraph_membership
-                    .as_ref()
-                    .and_then(|map| map.get(&core_stage_id))
-                    .map(|membership| StageSubgraphApiInfo {
-                        subgraph_id: membership.subgraph_id.clone(),
-                        kind: membership.kind.clone(),
-                        binding: membership.binding.clone(),
-                        role: membership.role.clone(),
-                        order: membership.order,
-                        is_entry: membership.is_entry,
-                        is_exit: membership.is_exit,
-                    });
-
-                let typing = self
-                    .stage_typing
-                    .as_ref()
-                    .and_then(|map| map.get(&core_stage_id))
-                    .map(StageTypingApiInfo::from);
-
-                StageApiInfo {
-                    stage_id: stage_info.id.to_string(),
-                    name: stage_info.name.clone(),
-                    stage_type: metadata
-                        .map(|m| m.stage_type.as_str().to_string())
-                        .unwrap_or_else(|| "unknown".to_string()),
-                    status: metadata
-                        .map(|m| m.status.as_str().to_string())
-                        .unwrap_or_else(|| "pending".to_string()),
-                    semantic_type: Some(semantic_type_str),
-                    role: Some(stage_info.stage_type.role().to_string()),
-                    is_cycle_member: Some(self.topology.is_in_cycle(stage_info.id)),
-                    middleware,
-                    join_metadata,
-                    typing,
-                    subgraph,
+                let mut info = stage_info.clone();
+                if let Some(meta) = self.stages_metadata.get(&core_stage_id) {
+                    info.status = Some(canonical_stage_status(&meta.status));
                 }
+                info
             })
             .collect();
 
-        let edges: Vec<EdgeApiInfo> = self
+        let edges: Vec<obzenflow_topology::DirectedEdge> = self
             .topology
             .edges()
             .iter()
             .map(|edge| {
-                // Convert topology IDs to core StageIds for lookup
                 let from_core = StageId::from_ulid(edge.from.ulid());
                 let to_core = StageId::from_ulid(edge.to.ulid());
-
-                let contracts = self
-                    .contract_attachments
-                    .as_ref()
-                    .and_then(|map| map.get(&(from_core, to_core)))
-                    .map(|names| {
-                        names
-                            .iter()
-                            .cloned()
-                            .map(|name| ContractApiInfo { name, config: None })
-                            .collect::<Vec<_>>()
-                    });
-                let typing = self.derive_edge_typing(edge);
-
-                EdgeApiInfo {
-                    from: edge.from.to_string(),
-                    to: edge.to.to_string(),
-                    // FLOWIP-059: Expose semantic kind labels instead of DSL operators.
-                    // API clients should see "forward" / "backward" to reconstruct EdgeKind.
-                    kind: match edge.kind {
-                        EdgeKind::Forward => "forward".to_string(),
-                        EdgeKind::Backward => "backward".to_string(),
-                    },
-                    // Topology endpoint remains structural; throughput is handled
-                    // by the metrics pipeline and remains unset here.
-                    events_per_sec: None,
-                    contracts,
-                    typing,
+                let mut e = edge.clone();
+                if let Some(map) = self.contract_attachments.as_ref() {
+                    if let Some(names) = map.get(&(from_core, to_core)) {
+                        e.contracts = Some(
+                            names
+                                .iter()
+                                .cloned()
+                                .map(obzenflow_topology::ContractInfo::new)
+                                .collect(),
+                        );
+                    }
                 }
+                e
             })
             .collect();
 
-        FlowTopologyResponse {
-            flow_name: self.flow_name.clone(),
-            // FLOWIP-114b: Topology API schema version 0.5 includes stage and edge typing.
-            version: "0.5".to_string(),
-            stages,
-            edges,
-            subgraphs: self
-                .subgraphs
-                .as_ref()
-                .map(|list| {
-                    list.iter()
-                        .cloned()
-                        .map(|info| SubgraphApiInfo {
-                            subgraph_id: info.subgraph_id,
-                            kind: info.kind,
-                            binding: info.binding,
-                            label: info.label,
-                            member_stage_ids: info
-                                .member_stage_ids
-                                .iter()
-                                .map(|id| id.to_topology_id().to_string())
-                                .collect(),
-                            internal_edges: info
-                                .internal_edges
-                                .iter()
-                                .map(|edge| SubgraphInternalEdgeApiInfo {
-                                    from_stage_id: edge.from_stage_id.to_topology_id().to_string(),
-                                    to_stage_id: edge.to_stage_id.to_topology_id().to_string(),
-                                    role: edge.role.clone(),
-                                })
-                                .collect(),
-                            entry_stage_ids: info
-                                .entry_stage_ids
-                                .iter()
-                                .map(|id| id.to_topology_id().to_string())
-                                .collect(),
-                            exit_stage_ids: info
-                                .exit_stage_ids
-                                .iter()
-                                .map(|id| id.to_topology_id().to_string())
-                                .collect(),
-                            parent_subgraph_id: info.parent_subgraph_id,
-                            collapsible: info.collapsible,
-                        })
-                        .collect()
-                })
-                .unwrap_or_default(),
+        // Reuse the canonical top-level annotations (flow_name,
+        // api_version, subgraphs registry) that were baked in at flow
+        // build time; rebuild via `new_unvalidated` so cycle/SCC caches
+        // stay consistent with any structural changes.
+        let subgraphs = self.topology.subgraphs().to_vec();
+        let mut topology = obzenflow_topology::Topology::new_unvalidated(stages, edges)
+            .expect("annotated topology rebuilds from a valid input topology")
+            .with_subgraphs(subgraphs)
+            .with_api_version("0.5");
+        if let Some(name) = self.topology.flow_name_annotation() {
+            topology = topology.with_flow_name(name);
         }
-    }
-
-    fn derive_edge_typing(&self, edge: &DirectedEdge) -> Option<EdgeTypingApiInfo> {
-        if edge.kind != EdgeKind::Forward {
-            return None;
-        }
-
-        let from_core = StageId::from_ulid(edge.from.ulid());
-        let to_core = StageId::from_ulid(edge.to.ulid());
-
-        if self.is_join_stage(edge.to) {
-            return self.derive_join_edge_typing(from_core, to_core);
-        }
-
-        let stage_typing = self.stage_typing.as_ref()?;
-
-        if let Some(upstream_typing) = stage_typing.get(&from_core) {
-            if let Some(typing) = edge_typing_from_hint(
-                EdgeTypingRoleApi::Input,
-                EdgeTypingLabelSourceApi::UpstreamOutputType,
-                &upstream_typing.output_type,
-            ) {
-                return Some(typing);
-            }
-        }
-
-        if self.forward_upstream_count(edge.to) == 1 {
-            return stage_typing.get(&to_core).and_then(|downstream_typing| {
-                edge_typing_from_hint(
-                    EdgeTypingRoleApi::Input,
-                    EdgeTypingLabelSourceApi::DownstreamInputType,
-                    &downstream_typing.input_type,
-                )
-            });
-        }
-
-        None
-    }
-
-    fn derive_join_edge_typing(
-        &self,
-        from_core: StageId,
-        join_core: StageId,
-    ) -> Option<EdgeTypingApiInfo> {
-        let join_metadata = self
-            .join_metadata
-            .as_ref()
-            .and_then(|map| map.get(&join_core))?;
-        let join_typing = self
-            .stage_typing
-            .as_ref()
-            .and_then(|map| map.get(&join_core))?;
-
-        if join_metadata.catalog_source_ids.contains(&from_core) {
-            return edge_typing_from_hint(
-                EdgeTypingRoleApi::Reference,
-                EdgeTypingLabelSourceApi::DownstreamReferenceType,
-                &join_typing.reference_type,
-            );
-        }
-
-        if join_metadata.stream_source_ids.contains(&from_core) {
-            return edge_typing_from_hint(
-                EdgeTypingRoleApi::Stream,
-                EdgeTypingLabelSourceApi::DownstreamStreamType,
-                &join_typing.stream_type,
-            );
-        }
-
-        None
-    }
-
-    fn is_join_stage(&self, stage_id: obzenflow_topology::StageId) -> bool {
-        self.topology
-            .stage_info(stage_id)
-            .is_some_and(|info| info.stage_type == TopologyStageType::Join)
-    }
-
-    fn forward_upstream_count(&self, stage_id: obzenflow_topology::StageId) -> usize {
-        self.topology
-            .edges()
-            .iter()
-            .filter(|edge| edge.to == stage_id && edge.kind == EdgeKind::Forward)
-            .count()
+        topology.populate_derived_stage_annotations()
     }
 }
 
@@ -836,13 +196,13 @@ impl HttpEndpoint for TopologyHttpEndpoint {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use obzenflow_core::topology::subgraphs::{
-        StageSubgraphMembership, SubgraphInternalEdge, TopologySubgraphInfo,
-    };
     use obzenflow_runtime::id_conversions::StageIdExt;
-    use obzenflow_runtime::pipeline::JoinMetadata;
     use obzenflow_runtime::pipeline::MiddlewareStackConfig;
-    use obzenflow_topology::TopologyBuilder;
+    use obzenflow_topology::{
+        DirectedEdge, EdgeKind, EdgeTypingLabelSource, EdgeTypingRole, JoinMetadataInfo,
+        StageInfo, StageSubgraphMembership, StageType as TopologyStageType, StageTypingInfo,
+        SubgraphInternalEdge, TopologyBuilder, TopologySubgraphInfo, TypeHintInfo,
+    };
     use std::collections::HashMap;
 
     fn core_id(stage_id: obzenflow_topology::StageId) -> StageId {
@@ -880,7 +240,6 @@ mod tests {
                 (
                     id,
                     StageMetadata {
-                        stage_type: StageType::Transform,
                         status: StageStatus::Running,
                     },
                 )
@@ -888,15 +247,13 @@ mod tests {
             .collect()
     }
 
-    fn edge_between<'a>(
-        response: &'a FlowTopologyResponse,
+    fn edge_between(
+        response: &obzenflow_topology::Topology,
         from: obzenflow_topology::StageId,
         to: obzenflow_topology::StageId,
-    ) -> &'a EdgeApiInfo {
-        let from = from.to_string();
-        let to = to.to_string();
+    ) -> &DirectedEdge {
         response
-            .edges
+            .edges()
             .iter()
             .find(|edge| edge.from == from && edge.to == to)
             .expect("edge should be present")
@@ -924,46 +281,50 @@ mod tests {
         stages_metadata.insert(
             core_stage_id,
             StageMetadata {
-                stage_type: StageType::Transform,
                 status: StageStatus::Running,
             },
         );
         stages_metadata.insert(
             sink_stage_id,
             StageMetadata {
-                stage_type: StageType::Sink,
                 status: StageStatus::Running,
             },
         );
 
-        let mut middleware_stacks = HashMap::new();
-        middleware_stacks.insert(
-            core_stage_id,
-            MiddlewareStackConfig {
-                stack: vec!["rate_limiter".to_string()],
-                circuit_breaker: None,
-                rate_limiter: Some(serde_json::json!({
-                    "tokens_per_sec": 2.0,
-                    "burst_capacity": 5.0,
-                    "cost_per_event": 5.0,
-                    "limit_rate": 0.4,
-                })),
-                retry: None,
-                backpressure: None,
-            },
+        // Bake the middleware annotation onto the stage in the canonical
+        // topology, then construct the endpoint with the simplified
+        // 3-arg signature.
+        let stage_topology_id = stage;
+        let stages: Vec<StageInfo> = topology
+            .stages()
+            .cloned()
+            .map(|mut s| {
+                if s.id == stage_topology_id {
+                    s.middleware = Some(obzenflow_topology::MiddlewareInfo {
+                        stack: vec!["rate_limiter".to_string()],
+                        circuit_breaker: None,
+                        rate_limiter: Some(obzenflow_topology::RateLimiterInfo {
+                            tokens_per_sec: 2.0,
+                            burst_capacity: 5.0,
+                            configured_burst_capacity: None,
+                            cost_per_event: 5.0,
+                            limit_rate: 0.4,
+                        }),
+                        retry: None,
+                    });
+                }
+                s
+            })
+            .collect();
+        let edges: Vec<DirectedEdge> = topology.edges().to_vec();
+        let topology = Arc::new(
+            obzenflow_topology::Topology::new_unvalidated(stages, edges)
+                .expect("rebuild")
+                .with_flow_name("test_flow"),
         );
 
-        let endpoint = TopologyHttpEndpoint::new(
-            topology,
-            Arc::new(stages_metadata),
-            "test_flow".to_string(),
-            Some(Arc::new(middleware_stacks)),
-            None,
-            None,
-            None,
-            None,
-            None,
-        );
+        let endpoint =
+            TopologyHttpEndpoint::new(topology, Arc::new(stages_metadata), None);
 
         let response = endpoint
             .handle(Request::new(HttpMethod::Get, "/api/topology".to_string()))
@@ -976,11 +337,10 @@ mod tests {
 
         assert_eq!(response.status, 200);
 
-        let parsed: FlowTopologyResponse =
+        let parsed: obzenflow_topology::Topology =
             serde_json::from_slice(&response.body).expect("response should be valid JSON");
         let stage = parsed
-            .stages
-            .iter()
+            .stages()
             .find(|stage| stage.name == "rate_limited")
             .expect("stage should be present");
         let rate_limiter = stage
@@ -1018,46 +378,48 @@ mod tests {
         stages_metadata.insert(
             core_stage_id,
             StageMetadata {
-                stage_type: StageType::Transform,
                 status: StageStatus::Running,
             },
         );
         stages_metadata.insert(
             sink_stage_id,
             StageMetadata {
-                stage_type: StageType::Sink,
                 status: StageStatus::Running,
             },
         );
 
-        let mut stage_typing = HashMap::new();
-        stage_typing.insert(
-            core_stage_id,
-            StageTypingInfo {
-                input_type: TypeHintInfo::Mixed,
-                output_type: TypeHintInfo::Exact {
-                    name: "product_catalog::domain::EnrichedOrder".to_string(),
-                },
-                boundary_in_type: TypeHintInfo::Unspecified,
-                boundary_out_type: TypeHintInfo::Unspecified,
-                reference_type: TypeHintInfo::Unspecified,
-                stream_type: TypeHintInfo::Unspecified,
-                is_placeholder: false,
-                placeholder_message: None,
-            },
+        let typed_stage_id = stage;
+        let stages: Vec<StageInfo> = topology
+            .stages()
+            .cloned()
+            .map(|mut s| {
+                if s.id == typed_stage_id {
+                    s.typing = Some(StageTypingInfo {
+                        input_type: TypeHintInfo::Mixed,
+                        output_type: TypeHintInfo::exact(
+                            "product_catalog::domain::EnrichedOrder",
+                        ),
+                        boundary_in_type: TypeHintInfo::Unspecified,
+                        boundary_out_type: TypeHintInfo::Unspecified,
+                        reference_type: TypeHintInfo::Unspecified,
+                        stream_type: TypeHintInfo::Unspecified,
+                        is_placeholder: false,
+                        placeholder_message: None,
+                    });
+                }
+                s
+            })
+            .collect();
+        let edges = topology.edges().to_vec();
+        let topology = Arc::new(
+            obzenflow_topology::Topology::new_unvalidated(stages, edges)
+                .expect("rebuild")
+                .with_flow_name("test_flow")
+                .derive_edge_typings(),
         );
 
-        let endpoint = TopologyHttpEndpoint::new(
-            topology,
-            Arc::new(stages_metadata),
-            "test_flow".to_string(),
-            None,
-            None,
-            None,
-            Some(Arc::new(stage_typing)),
-            None,
-            None,
-        );
+        let endpoint =
+            TopologyHttpEndpoint::new(topology, Arc::new(stages_metadata), None);
 
         let response = endpoint
             .handle(
@@ -1071,13 +433,12 @@ mod tests {
             ManagedResponse::Sse(_) => panic!("expected unary response"),
         };
 
-        let parsed: FlowTopologyResponse =
+        let parsed: obzenflow_topology::Topology =
             serde_json::from_slice(&response.body).expect("response should be valid JSON");
-        assert_eq!(parsed.version, "0.5");
+        assert_eq!(parsed.api_version(), Some("0.5"));
 
         let typed_stage = parsed
-            .stages
-            .iter()
+            .stages()
             .find(|stage| stage.name == "typed_stage")
             .expect("typed stage should be present");
         let typing = typed_stage
@@ -1085,22 +446,22 @@ mod tests {
             .as_ref()
             .expect("typed stage should include typing");
 
-        assert_eq!(typing.input_type.kind, TypeHintKindApi::Mixed);
-        assert_eq!(typing.input_type.name, None);
-        assert_eq!(typing.input_type.display_name, None);
-        assert_eq!(typing.output_type.kind, TypeHintKindApi::Exact);
+        assert!(matches!(typing.input_type, TypeHintInfo::Mixed));
+        assert_eq!(typing.input_type.display_name(), None);
+        assert!(matches!(typing.output_type, TypeHintInfo::Exact { .. }));
+        match &typing.output_type {
+            TypeHintInfo::Exact { name } => {
+                assert_eq!(name, "product_catalog::domain::EnrichedOrder");
+            }
+            _ => unreachable!(),
+        }
         assert_eq!(
-            typing.output_type.name.as_deref(),
-            Some("product_catalog::domain::EnrichedOrder")
-        );
-        assert_eq!(
-            typing.output_type.display_name.as_deref(),
+            typing.output_type.display_name().as_deref(),
             Some("Enriched Order")
         );
 
         let sink_stage = parsed
-            .stages
-            .iter()
+            .stages()
             .find(|stage| stage.name == "sink")
             .expect("sink stage should be present");
         assert!(sink_stage.typing.is_none());
@@ -1110,18 +471,19 @@ mod tests {
             .typing
             .as_ref()
             .expect("ordinary forward edge should include typing");
-        assert_eq!(edge_typing.role, EdgeTypingRoleApi::Input);
+        assert_eq!(edge_typing.role, EdgeTypingRole::Input);
         assert_eq!(
             edge_typing.label_source,
-            EdgeTypingLabelSourceApi::UpstreamOutputType
+            EdgeTypingLabelSource::UpstreamOutputType
         );
-        assert_eq!(edge_typing.payload_type.kind, TypeHintKindApi::Exact);
+        match &edge_typing.payload_type {
+            TypeHintInfo::Exact { name } => {
+                assert_eq!(name, "product_catalog::domain::EnrichedOrder");
+            }
+            _ => panic!("expected exact payload type"),
+        }
         assert_eq!(
-            edge_typing.payload_type.name.as_deref(),
-            Some("product_catalog::domain::EnrichedOrder")
-        );
-        assert_eq!(
-            edge_typing.payload_type.display_name.as_deref(),
+            edge_typing.payload_type.display_name().as_deref(),
             Some("Enriched Order")
         );
     }
@@ -1148,35 +510,38 @@ mod tests {
         let source_b_core = core_id(source_b);
         let merge_core = core_id(merge);
 
-        let mut stage_typing_map = HashMap::new();
-        stage_typing_map.insert(
-            source_a_core,
-            stage_typing(
-                TypeHintInfo::Unspecified,
-                exact("Sku"),
-                TypeHintInfo::Unspecified,
-                TypeHintInfo::Unspecified,
-            ),
-        );
-        stage_typing_map.insert(
-            source_b_core,
-            stage_typing(
-                TypeHintInfo::Unspecified,
-                exact("Promotion"),
-                TypeHintInfo::Unspecified,
-                TypeHintInfo::Unspecified,
-            ),
+        let stages: Vec<StageInfo> = topology
+            .stages()
+            .cloned()
+            .map(|mut s| {
+                if s.id == source_a {
+                    s.typing = Some(stage_typing(
+                        TypeHintInfo::Unspecified,
+                        exact("Sku"),
+                        TypeHintInfo::Unspecified,
+                        TypeHintInfo::Unspecified,
+                    ));
+                } else if s.id == source_b {
+                    s.typing = Some(stage_typing(
+                        TypeHintInfo::Unspecified,
+                        exact("Promotion"),
+                        TypeHintInfo::Unspecified,
+                        TypeHintInfo::Unspecified,
+                    ));
+                }
+                s
+            })
+            .collect();
+        let edges = topology.edges().to_vec();
+        let topology = Arc::new(
+            obzenflow_topology::Topology::new_unvalidated(stages, edges)
+                .expect("rebuild")
+                .derive_edge_typings(),
         );
 
         let endpoint = TopologyHttpEndpoint::new(
             topology,
             Arc::new(stage_metadata(&[source_a_core, source_b_core, merge_core])),
-            "test_flow".to_string(),
-            None,
-            None,
-            None,
-            Some(Arc::new(stage_typing_map)),
-            None,
             None,
         );
 
@@ -1186,14 +551,17 @@ mod tests {
             .typing
             .as_ref()
             .expect("source_a edge should include typing");
-        assert_eq!(source_a_edge.role, EdgeTypingRoleApi::Input);
+        assert_eq!(source_a_edge.role, EdgeTypingRole::Input);
         assert_eq!(
             source_a_edge.label_source,
-            EdgeTypingLabelSourceApi::UpstreamOutputType
+            EdgeTypingLabelSource::UpstreamOutputType
         );
-        assert_eq!(source_a_edge.payload_type.name.as_deref(), Some("Sku"));
+        match &source_a_edge.payload_type {
+            TypeHintInfo::Exact { name } => assert_eq!(name, "Sku"),
+            _ => panic!("expected exact payload type"),
+        }
         assert_eq!(
-            source_a_edge.payload_type.display_name.as_deref(),
+            source_a_edge.payload_type.display_name().as_deref(),
             Some("Sku")
         );
 
@@ -1201,17 +569,17 @@ mod tests {
             .typing
             .as_ref()
             .expect("source_b edge should include typing");
-        assert_eq!(source_b_edge.role, EdgeTypingRoleApi::Input);
+        assert_eq!(source_b_edge.role, EdgeTypingRole::Input);
         assert_eq!(
             source_b_edge.label_source,
-            EdgeTypingLabelSourceApi::UpstreamOutputType
+            EdgeTypingLabelSource::UpstreamOutputType
         );
+        match &source_b_edge.payload_type {
+            TypeHintInfo::Exact { name } => assert_eq!(name, "Promotion"),
+            _ => panic!("expected exact payload type"),
+        }
         assert_eq!(
-            source_b_edge.payload_type.name.as_deref(),
-            Some("Promotion")
-        );
-        assert_eq!(
-            source_b_edge.payload_type.display_name.as_deref(),
+            source_b_edge.payload_type.display_name().as_deref(),
             Some("Promotion")
         );
     }
@@ -1234,26 +602,31 @@ mod tests {
         let source_core = core_id(source);
         let transform_core = core_id(transform);
 
-        let mut stage_typing_map = HashMap::new();
-        stage_typing_map.insert(
-            transform_core,
-            stage_typing(
-                exact("ValidatedOrder"),
-                exact("EnrichedOrder"),
-                TypeHintInfo::Unspecified,
-                TypeHintInfo::Unspecified,
-            ),
+        let stages: Vec<StageInfo> = topology
+            .stages()
+            .cloned()
+            .map(|mut s| {
+                if s.id == transform {
+                    s.typing = Some(stage_typing(
+                        exact("ValidatedOrder"),
+                        exact("EnrichedOrder"),
+                        TypeHintInfo::Unspecified,
+                        TypeHintInfo::Unspecified,
+                    ));
+                }
+                s
+            })
+            .collect();
+        let edges = topology.edges().to_vec();
+        let topology = Arc::new(
+            obzenflow_topology::Topology::new_unvalidated(stages, edges)
+                .expect("rebuild")
+                .derive_edge_typings(),
         );
 
         let endpoint = TopologyHttpEndpoint::new(
             topology,
             Arc::new(stage_metadata(&[source_core, transform_core])),
-            "test_flow".to_string(),
-            None,
-            None,
-            None,
-            Some(Arc::new(stage_typing_map)),
-            None,
             None,
         );
 
@@ -1263,17 +636,17 @@ mod tests {
             .as_ref()
             .expect("single-input edge should use downstream input typing");
 
-        assert_eq!(edge_typing.role, EdgeTypingRoleApi::Input);
+        assert_eq!(edge_typing.role, EdgeTypingRole::Input);
         assert_eq!(
             edge_typing.label_source,
-            EdgeTypingLabelSourceApi::DownstreamInputType
+            EdgeTypingLabelSource::DownstreamInputType
         );
+        match &edge_typing.payload_type {
+            TypeHintInfo::Exact { name } => assert_eq!(name, "ValidatedOrder"),
+            _ => panic!("expected exact payload type"),
+        }
         assert_eq!(
-            edge_typing.payload_type.name.as_deref(),
-            Some("ValidatedOrder")
-        );
-        assert_eq!(
-            edge_typing.payload_type.display_name.as_deref(),
+            edge_typing.payload_type.display_name().as_deref(),
             Some("Validated Order")
         );
     }
@@ -1312,53 +685,46 @@ mod tests {
         let stream_core = core_id(stream);
         let join_core = core_id(join);
 
-        let mut stage_typing_map = HashMap::new();
-        stage_typing_map.insert(
-            catalog_core,
-            stage_typing(
-                TypeHintInfo::Unspecified,
-                exact("CatalogOutputShouldNotDriveJoinEdge"),
-                TypeHintInfo::Unspecified,
-                TypeHintInfo::Unspecified,
-            ),
-        );
-        stage_typing_map.insert(
-            stream_core,
-            stage_typing(
-                TypeHintInfo::Unspecified,
-                exact("StreamOutputShouldNotDriveJoinEdge"),
-                TypeHintInfo::Unspecified,
-                TypeHintInfo::Unspecified,
-            ),
-        );
-        stage_typing_map.insert(
-            join_core,
-            stage_typing(
-                TypeHintInfo::Unspecified,
-                exact("EnrichedOrderWithPromo"),
-                exact("Promotion"),
-                exact("EnrichedOrder"),
-            ),
-        );
-
-        let mut join_metadata = HashMap::new();
-        join_metadata.insert(
-            join_core,
-            JoinMetadata {
-                catalog_source_ids: vec![catalog_core],
-                stream_source_ids: vec![stream_core],
-            },
+        let stages: Vec<StageInfo> = topology
+            .stages()
+            .cloned()
+            .map(|mut s| {
+                if s.id == catalog {
+                    s.typing = Some(stage_typing(
+                        TypeHintInfo::Unspecified,
+                        exact("CatalogOutputShouldNotDriveJoinEdge"),
+                        TypeHintInfo::Unspecified,
+                        TypeHintInfo::Unspecified,
+                    ));
+                } else if s.id == stream {
+                    s.typing = Some(stage_typing(
+                        TypeHintInfo::Unspecified,
+                        exact("StreamOutputShouldNotDriveJoinEdge"),
+                        TypeHintInfo::Unspecified,
+                        TypeHintInfo::Unspecified,
+                    ));
+                } else if s.id == join {
+                    s.typing = Some(stage_typing(
+                        TypeHintInfo::Unspecified,
+                        exact("EnrichedOrderWithPromo"),
+                        exact("Promotion"),
+                        exact("EnrichedOrder"),
+                    ));
+                    s.join_metadata = Some(JoinMetadataInfo::new(vec![catalog], vec![stream]));
+                }
+                s
+            })
+            .collect();
+        let edges = topology.edges().to_vec();
+        let topology = Arc::new(
+            obzenflow_topology::Topology::new_unvalidated(stages, edges)
+                .expect("rebuild")
+                .derive_edge_typings(),
         );
 
         let endpoint = TopologyHttpEndpoint::new(
             topology,
             Arc::new(stage_metadata(&[catalog_core, stream_core, join_core])),
-            "test_flow".to_string(),
-            None,
-            None,
-            Some(Arc::new(join_metadata)),
-            Some(Arc::new(stage_typing_map)),
-            None,
             None,
         );
 
@@ -1368,14 +734,17 @@ mod tests {
             .typing
             .as_ref()
             .expect("catalog edge should include reference typing");
-        assert_eq!(catalog_edge.role, EdgeTypingRoleApi::Reference);
+        assert_eq!(catalog_edge.role, EdgeTypingRole::Reference);
         assert_eq!(
             catalog_edge.label_source,
-            EdgeTypingLabelSourceApi::DownstreamReferenceType
+            EdgeTypingLabelSource::DownstreamReferenceType
         );
-        assert_eq!(catalog_edge.payload_type.name.as_deref(), Some("Promotion"));
+        match &catalog_edge.payload_type {
+            TypeHintInfo::Exact { name } => assert_eq!(name, "Promotion"),
+            _ => panic!("expected exact payload type"),
+        }
         assert_eq!(
-            catalog_edge.payload_type.display_name.as_deref(),
+            catalog_edge.payload_type.display_name().as_deref(),
             Some("Promotion")
         );
 
@@ -1383,17 +752,17 @@ mod tests {
             .typing
             .as_ref()
             .expect("stream edge should include stream typing");
-        assert_eq!(stream_edge.role, EdgeTypingRoleApi::Stream);
+        assert_eq!(stream_edge.role, EdgeTypingRole::Stream);
         assert_eq!(
             stream_edge.label_source,
-            EdgeTypingLabelSourceApi::DownstreamStreamType
+            EdgeTypingLabelSource::DownstreamStreamType
         );
+        match &stream_edge.payload_type {
+            TypeHintInfo::Exact { name } => assert_eq!(name, "EnrichedOrder"),
+            _ => panic!("expected exact payload type"),
+        }
         assert_eq!(
-            stream_edge.payload_type.name.as_deref(),
-            Some("EnrichedOrder")
-        );
-        assert_eq!(
-            stream_edge.payload_type.display_name.as_deref(),
+            stream_edge.payload_type.display_name().as_deref(),
             Some("Enriched Order")
         );
     }
@@ -1424,35 +793,41 @@ mod tests {
         let upstream_core = core_id(upstream);
         let join_core = core_id(join);
 
-        let mut stage_typing_map = HashMap::new();
-        stage_typing_map.insert(
-            upstream_core,
-            stage_typing(
-                TypeHintInfo::Unspecified,
-                exact("Promotion"),
-                TypeHintInfo::Unspecified,
-                TypeHintInfo::Unspecified,
-            ),
-        );
-        stage_typing_map.insert(
-            join_core,
-            stage_typing(
-                TypeHintInfo::Unspecified,
-                exact("EnrichedOrder"),
-                exact("Promotion"),
-                exact("ValidatedOrder"),
-            ),
+        // No `join_metadata` on the join stage: the canonical
+        // `derive_edge_typings` rule omits typing on join inputs when
+        // catalog/stream classification is unavailable.
+        let stages: Vec<StageInfo> = topology
+            .stages()
+            .cloned()
+            .map(|mut s| {
+                if s.id == upstream {
+                    s.typing = Some(stage_typing(
+                        TypeHintInfo::Unspecified,
+                        exact("Promotion"),
+                        TypeHintInfo::Unspecified,
+                        TypeHintInfo::Unspecified,
+                    ));
+                } else if s.id == join {
+                    s.typing = Some(stage_typing(
+                        TypeHintInfo::Unspecified,
+                        exact("EnrichedOrder"),
+                        exact("Promotion"),
+                        exact("ValidatedOrder"),
+                    ));
+                }
+                s
+            })
+            .collect();
+        let edges = topology.edges().to_vec();
+        let topology = Arc::new(
+            obzenflow_topology::Topology::new_unvalidated(stages, edges)
+                .expect("rebuild")
+                .derive_edge_typings(),
         );
 
         let endpoint = TopologyHttpEndpoint::new(
             topology,
             Arc::new(stage_metadata(&[upstream_core, join_core])),
-            "test_flow".to_string(),
-            None,
-            None,
-            None,
-            Some(Arc::new(stage_typing_map)),
-            None,
             None,
         );
 
@@ -1479,33 +854,38 @@ mod tests {
         let from_core = core_id(from);
         let to_core = core_id(to);
 
-        let mut stage_typing_map = HashMap::new();
-        stage_typing_map.insert(
-            from_core,
-            stage_typing(
-                TypeHintInfo::Unspecified,
-                exact("RetryPayload"),
-                TypeHintInfo::Unspecified,
-                TypeHintInfo::Unspecified,
-            ),
+        let stages: Vec<StageInfo> = topology
+            .stages()
+            .cloned()
+            .map(|mut s| {
+                if s.id == from {
+                    s.typing = Some(stage_typing(
+                        TypeHintInfo::Unspecified,
+                        exact("RetryPayload"),
+                        TypeHintInfo::Unspecified,
+                        TypeHintInfo::Unspecified,
+                    ));
+                }
+                s
+            })
+            .collect();
+        let edges = topology.edges().to_vec();
+        let topology = Arc::new(
+            obzenflow_topology::Topology::new_unvalidated(stages, edges)
+                .expect("rebuild")
+                .derive_edge_typings(),
         );
 
         let endpoint = TopologyHttpEndpoint::new(
             topology,
             Arc::new(stage_metadata(&[from_core, to_core])),
-            "test_flow".to_string(),
-            None,
-            None,
-            None,
-            Some(Arc::new(stage_typing_map)),
-            None,
             None,
         );
 
         let parsed = endpoint.build_response(IncludeFlags::default());
         let edge = edge_between(&parsed, from, to);
 
-        assert_eq!(edge.kind, "backward");
+        assert_eq!(edge.kind, EdgeKind::Backward);
         assert!(edge.typing.is_none());
     }
 
@@ -1531,60 +911,63 @@ mod tests {
         stages_metadata.insert(
             a_core,
             StageMetadata {
-                stage_type: StageType::Transform,
                 status: StageStatus::Running,
             },
         );
         stages_metadata.insert(
             b_core,
             StageMetadata {
-                stage_type: StageType::Transform,
                 status: StageStatus::Running,
             },
         );
 
-        let mut membership: HashMap<StageId, StageSubgraphMembership> = HashMap::new();
-        membership.insert(
-            a_core,
-            StageSubgraphMembership {
-                subgraph_id: "ai_map_reduce:digest".to_string(),
-                kind: "ai_map_reduce".to_string(),
-                binding: "digest".to_string(),
-                role: "chunk".to_string(),
-                order: 0,
-                is_entry: true,
-                is_exit: false,
-            },
-        );
+        let membership = StageSubgraphMembership {
+            subgraph_id: "ai_map_reduce:digest".to_string(),
+            kind: "ai_map_reduce".to_string(),
+            binding: "digest".to_string(),
+            role: "chunk".to_string(),
+            order: 0,
+            is_entry: true,
+            is_exit: false,
+        };
 
         let subgraph = TopologySubgraphInfo {
             subgraph_id: "ai_map_reduce:digest".to_string(),
             kind: "ai_map_reduce".to_string(),
             binding: "digest".to_string(),
             label: "digest".to_string(),
-            member_stage_ids: vec![a_core, b_core],
+            member_stage_ids: vec![a_core.to_topology_id(), b_core.to_topology_id()],
             internal_edges: vec![SubgraphInternalEdge {
-                from_stage_id: a_core,
-                to_stage_id: b_core,
+                from_stage_id: a_core.to_topology_id(),
+                to_stage_id: b_core.to_topology_id(),
                 role: "data".to_string(),
             }],
-            entry_stage_ids: vec![a_core],
-            exit_stage_ids: vec![b_core],
+            entry_stage_ids: vec![a_core.to_topology_id()],
+            exit_stage_ids: vec![b_core.to_topology_id()],
             parent_subgraph_id: None,
             collapsible: true,
         };
 
-        let endpoint = TopologyHttpEndpoint::new(
-            topology,
-            Arc::new(stages_metadata),
-            "test_flow".to_string(),
-            None,
-            None,
-            None,
-            None,
-            Some(Arc::new(membership)),
-            Some(Arc::new(vec![subgraph])),
+        let stages: Vec<StageInfo> = topology
+            .stages()
+            .cloned()
+            .map(|mut s| {
+                if s.id == stage_a {
+                    s.subgraph = Some(membership.clone());
+                }
+                s
+            })
+            .collect();
+        let edges = topology.edges().to_vec();
+        let topology = Arc::new(
+            obzenflow_topology::Topology::new_unvalidated(stages, edges)
+                .expect("rebuild")
+                .with_subgraphs(vec![subgraph])
+                .with_flow_name("test_flow"),
         );
+
+        let endpoint =
+            TopologyHttpEndpoint::new(topology, Arc::new(stages_metadata), None);
 
         let response = endpoint
             .handle(Request::new(HttpMethod::Get, "/api/topology".to_string()))
@@ -1597,34 +980,23 @@ mod tests {
 
         assert_eq!(response.status, 200);
 
-        let parsed: FlowTopologyResponse =
+        let parsed: obzenflow_topology::Topology =
             serde_json::from_slice(&response.body).expect("response should be valid JSON");
-        assert_eq!(parsed.version, "0.5");
-        assert_eq!(parsed.subgraphs.len(), 1);
+        assert_eq!(parsed.api_version(), Some("0.5"));
+        assert_eq!(parsed.subgraphs().len(), 1);
 
-        let stage_a_id = stage_a.to_string();
-        let stage_b_id = stage_b.to_string();
+        let a_topology = a_core.to_topology_id();
+        let b_topology = b_core.to_topology_id();
 
-        let a_api = parsed
-            .stages
-            .iter()
-            .find(|s| s.stage_id == stage_a_id)
-            .expect("stage a present");
-        assert!(a_api.subgraph.is_some());
+        let a_info = parsed.stage_info(a_topology).expect("stage a present");
+        assert!(a_info.subgraph.is_some());
 
-        let b_api = parsed
-            .stages
-            .iter()
-            .find(|s| s.stage_id == stage_b_id)
-            .expect("stage b present");
-        assert!(b_api.subgraph.is_none());
+        let b_info = parsed.stage_info(b_topology).expect("stage b present");
+        assert!(b_info.subgraph.is_none());
 
-        let expected_members = vec![
-            a_core.to_topology_id().to_string(),
-            b_core.to_topology_id().to_string(),
-        ];
-        assert_eq!(parsed.subgraphs[0].member_stage_ids, expected_members);
-        assert_eq!(parsed.subgraphs[0].internal_edges.len(), 1);
-        assert_eq!(parsed.subgraphs[0].internal_edges[0].role, "data");
+        let expected_members = vec![a_topology, b_topology];
+        assert_eq!(parsed.subgraphs()[0].member_stage_ids, expected_members);
+        assert_eq!(parsed.subgraphs()[0].internal_edges.len(), 1);
+        assert_eq!(parsed.subgraphs()[0].internal_edges[0].role, "data");
     }
 }
