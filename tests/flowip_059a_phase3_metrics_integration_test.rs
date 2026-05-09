@@ -19,14 +19,13 @@ use obzenflow_core::metrics::MetricsExporter;
 use obzenflow_core::{StageId, WriterId};
 use obzenflow_dsl::{flow, sink, source, transform};
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime::pipeline::handle::MiddlewareStackConfig;
+use obzenflow_runtime::id_conversions::StageIdExt;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
     FiniteSourceHandler, SinkHandler, TransformHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use serde_json::json;
-use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use std::time::SystemTime;
@@ -251,13 +250,18 @@ async fn run_with_metrics_timeout(
 }
 
 fn stage_id_with_middleware(
-    stacks: &HashMap<StageId, MiddlewareStackConfig>,
+    topology: &obzenflow_topology::Topology,
     middleware_name: &str,
 ) -> Result<StageId> {
-    stacks
-        .iter()
-        .find(|(_, cfg)| cfg.stack.iter().any(|name| name == middleware_name))
-        .map(|(id, _)| *id)
+    topology
+        .stages()
+        .find(|stage| {
+            stage
+                .middleware
+                .as_ref()
+                .is_some_and(|m| m.stack.iter().any(|name| name == middleware_name))
+        })
+        .map(|stage| StageIdExt::from_topology_id(stage.id))
         .ok_or_else(|| anyhow!("no stage found with middleware '{middleware_name}'"))
 }
 
@@ -463,10 +467,10 @@ async fn flowip_059a_circuit_breaker_counters_are_exported_with_joinable_labels(
     .await
     .map_err(|e| anyhow!("Flow creation failed: {e:?}"))?;
 
-    let middleware_stacks = flow_handle
-        .middleware_stacks()
-        .expect("FlowHandle should expose middleware stacks for joinability");
-    let cb_stage_id = stage_id_with_middleware(&middleware_stacks, "circuit_breaker")?;
+    let topology = flow_handle
+        .topology()
+        .expect("FlowHandle should expose the canonical topology with middleware annotations");
+    let cb_stage_id = stage_id_with_middleware(&topology, "circuit_breaker")?;
 
     let exporter = run_with_metrics_timeout(flow_handle, timeout_flow).await?;
 
@@ -538,10 +542,10 @@ async fn flowip_059a_circuit_breaker_cumulative_metrics_are_exported_and_trippab
     .await
     .map_err(|e| anyhow!("Flow creation failed: {e:?}"))?;
 
-    let middleware_stacks = flow_handle
-        .middleware_stacks()
-        .expect("FlowHandle should expose middleware stacks for joinability");
-    let cb_stage_id = stage_id_with_middleware(&middleware_stacks, "circuit_breaker")?;
+    let topology = flow_handle
+        .topology()
+        .expect("FlowHandle should expose the canonical topology with middleware annotations");
+    let cb_stage_id = stage_id_with_middleware(&topology, "circuit_breaker")?;
 
     let exporter = run_with_metrics_timeout(flow_handle, timeout_flow).await?;
 
@@ -670,10 +674,10 @@ async fn flowip_059a_rate_limiter_metrics_are_exported_with_joinable_labels() ->
     .await
     .map_err(|e| anyhow!("Flow creation failed: {e:?}"))?;
 
-    let middleware_stacks = flow_handle
-        .middleware_stacks()
-        .expect("FlowHandle should expose middleware stacks for joinability");
-    let rl_stage_id = stage_id_with_middleware(&middleware_stacks, "rate_limiter")?;
+    let topology = flow_handle
+        .topology()
+        .expect("FlowHandle should expose the canonical topology with middleware annotations");
+    let rl_stage_id = stage_id_with_middleware(&topology, "rate_limiter")?;
 
     let exporter = run_with_metrics_timeout(flow_handle, timeout_flow).await?;
 
@@ -824,10 +828,10 @@ async fn flowip_059a2_circuit_breaker_requests_total_is_accurate_without_summari
     .await
     .map_err(|e| anyhow!("Flow creation failed: {e:?}"))?;
 
-    let middleware_stacks = flow_handle
-        .middleware_stacks()
-        .expect("FlowHandle should expose middleware stacks for joinability");
-    let cb_stage_id = stage_id_with_middleware(&middleware_stacks, "circuit_breaker")?;
+    let topology = flow_handle
+        .topology()
+        .expect("FlowHandle should expose the canonical topology with middleware annotations");
+    let cb_stage_id = stage_id_with_middleware(&topology, "circuit_breaker")?;
 
     let exporter = run_with_metrics_timeout(flow_handle, timeout_flow).await?;
 
@@ -894,10 +898,10 @@ async fn flowip_059a2_rate_limiter_events_total_is_accurate_without_summaries() 
     .await
     .map_err(|e| anyhow!("Flow creation failed: {e:?}"))?;
 
-    let middleware_stacks = flow_handle
-        .middleware_stacks()
-        .expect("FlowHandle should expose middleware stacks for joinability");
-    let rl_stage_id = stage_id_with_middleware(&middleware_stacks, "rate_limiter")?;
+    let topology = flow_handle
+        .topology()
+        .expect("FlowHandle should expose the canonical topology with middleware annotations");
+    let rl_stage_id = stage_id_with_middleware(&topology, "rate_limiter")?;
 
     let exporter = run_with_metrics_timeout(flow_handle, timeout_flow).await?;
 

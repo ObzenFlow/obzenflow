@@ -457,7 +457,7 @@ mod tests {
         }
         assert_eq!(
             typing.output_type.display_name().as_deref(),
-            Some("Enriched Order")
+            Some("EnrichedOrder")
         );
 
         let sink_stage = parsed
@@ -484,7 +484,7 @@ mod tests {
         }
         assert_eq!(
             edge_typing.payload_type.display_name().as_deref(),
-            Some("Enriched Order")
+            Some("EnrichedOrder")
         );
     }
 
@@ -647,7 +647,7 @@ mod tests {
         }
         assert_eq!(
             edge_typing.payload_type.display_name().as_deref(),
-            Some("Validated Order")
+            Some("ValidatedOrder")
         );
     }
 
@@ -763,7 +763,7 @@ mod tests {
         }
         assert_eq!(
             stream_edge.payload_type.display_name().as_deref(),
-            Some("Enriched Order")
+            Some("EnrichedOrder")
         );
     }
 
