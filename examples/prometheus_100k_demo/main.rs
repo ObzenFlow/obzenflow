@@ -24,24 +24,18 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
-use obzenflow::typed::{sources, stateful as typed_stateful};
+use obzenflow::typed::{sources, stateful as typed_stateful, transforms as typed_transforms};
 use obzenflow_adapters::middleware::RateLimiterBuilder;
-use obzenflow_core::{
-    event::chain_event::{ChainEvent, ChainEventFactory},
-    event::status::processing_status::ErrorKind,
-    TypedPayload,
-};
+use obzenflow_core::{event::chain_event::ChainEvent, TypedPayload};
 use obzenflow_dsl::{flow, sink, source, stateful, transform};
 use obzenflow_infra::application::{Banner, FlowApplication, LogLevel, Presentation};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::SinkHandler;
-// ✨ FLOWIP-080h: Import Map helper
-use obzenflow_runtime::stages::transform::Map;
-// ✨ FLOWIP-080j: Import ReduceTyped for type-safe accumulation
+use obzenflow_runtime::stages::transform::TryMapWithTyped;
+use obzenflow_runtime::typing::SinkTyping;
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 const CONFIG_FILE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/examples/prometheus_100k_demo/obzenflow.toml"
@@ -79,55 +73,32 @@ impl TypedPayload for ProcessedEvent {
     const SCHEMA_VERSION: u32 = 1;
 }
 
-/// Error event from failed processing
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ErrorEvent {
-    id: usize,
-    should_fail: bool,
-    batch: usize,
-    error: String,
-    error_code: u32,
-}
-
-impl TypedPayload for ErrorEvent {
-    const EVENT_TYPE: &'static str = "error.event";
-    const SCHEMA_VERSION: u32 = 1;
-}
-
 // ============================================================================
-// FLOWIP-080h: Map Helper for Error-Prone Transform
+// FLOWIP-114b: Typed transform helper for the error-prone stage
 // ============================================================================
 
-/// Transform that can fail on certain events (FLOWIP-080h & FLOWIP-082a)
+/// Transform that can fail on certain events.
 ///
-/// Replaces 38-line ErrorProneTransform struct with a Map helper
-fn error_prone_transform() -> Map<impl Fn(ChainEvent) -> ChainEvent + Send + Sync + Clone> {
-    Map::new(|event| {
-        let mut payload = event.payload();
-
-        // Check if this event should fail
-        if payload["should_fail"].as_bool().unwrap_or(false) {
-            // ✨ FLOWIP-082a: Return typed error event
-            payload["error"] = json!("Simulated processing error");
-            payload["error_code"] = json!(500);
-
-            event.derive_error_event(
-                ErrorEvent::versioned_event_type(),
-                payload,
-                "Simulated processing error",
-                ErrorKind::Domain,
-            )
+/// Returns `TryMapWithTyped<DataRequest, ProcessedEvent, _>`, which both
+/// satisfies `TransformTyping<Input = DataRequest, Output = ProcessedEvent>`
+/// for the typed `transform!` macro and routes failures to the error journal
+/// via the default `ErrorStrategy::ToErrorJournal`.
+fn error_prone_transform() -> TryMapWithTyped<
+    DataRequest,
+    ProcessedEvent,
+    impl Fn(DataRequest) -> Result<ProcessedEvent, String> + Send + Sync + Clone,
+> {
+    typed_transforms::try_map_with(|req: DataRequest| {
+        if req.should_fail {
+            Err("Simulated processing error".to_string())
         } else {
-            // ✨ FLOWIP-082a: Successful processing with typed event
-            payload["processed"] = json!(true);
-            payload["processing_stage"] = json!("error_prone_transform");
-
-            ChainEventFactory::derived_data_event(
-                event.writer_id,
-                &event,
-                ProcessedEvent::versioned_event_type(),
-                payload,
-            )
+            Ok(ProcessedEvent {
+                id: req.id,
+                should_fail: req.should_fail,
+                batch: req.batch,
+                processed: true,
+                processing_stage: "error_prone_transform".to_string(),
+            })
         }
     })
 }
@@ -156,6 +127,10 @@ impl CompletionSink {
     fn new() -> Self {
         Self
     }
+}
+
+impl SinkTyping for CompletionSink {
+    type Input = ProcessedEvent;
 }
 
 #[async_trait]
@@ -236,8 +211,11 @@ fn main() -> Result<()> {
                 );
 
                 // Error-prone transform (every 100th event fails)
-                // ✨ FLOWIP-080h: Using Map helper instead of ErrorProneTransform struct
-                error_processor = transform!(error_prone_transform());
+                // FLOWIP-114b: typed `In -> Out` form so the topology API carries
+                // input/output type contracts for this stage.
+                error_processor = transform!(DataRequest -> ProcessedEvent =>
+                    error_prone_transform()
+                );
 
                 // Fan-out branch 1: Type-safe event counter (FLOWIP-080j)
                 // Replaces 59-line EventCounter StatefulHandler with ReduceTyped!
@@ -278,8 +256,8 @@ fn main() -> Result<()> {
                     println!("=====================================");
                 });
 
-                // Fan-out branch 2: Completion sink
-                completion_sink = sink!(CompletionSink::new());
+                // Fan-out branch 2: Completion sink (typed input contract).
+                completion_sink = sink!(ProcessedEvent => CompletionSink::new());
             },
 
             topology: {

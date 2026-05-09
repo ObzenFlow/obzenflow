@@ -1,2 +1,13 @@
 [server]
 enabled = true
+# Manual: build the pipeline, expose endpoints, wait for the UI's Play.
+# Without this, --server runs the flow immediately and exits before the UI
+# can attach.
+startup_mode = "manual"
+
+[server.cors]
+# allow_any_origin: development/demo default so the Trunk-served UI on
+# 127.0.0.1:8080 can fetch /api/topology + /api/flow/events from the
+# obzenflow server on localhost:9090. Tighten to "allow_list" + populate
+# server.cors.allow_origins for production.
+mode = "allow_any_origin"

@@ -4,7 +4,8 @@
 //! `/api/topology` wire contract, the infra layer must not reintroduce
 //! any private mirror of that response. This test fails the build if any
 //! `struct FlowTopologyResponse`, `struct StageApiInfo`, or
-//! `struct EdgeApiInfo` definition shows up in this crate's source tree.
+//! `struct EdgeApiInfo` definition shows up in this crate's source tree
+//! or test tree.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -26,29 +27,34 @@ const FORBIDDEN_STRUCT_NAMES: &[&str] = &[
 #[test]
 fn no_topology_response_dto_is_redefined() {
     let crate_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let src_dir = crate_root.join("src");
     let mut violations: Vec<String> = Vec::new();
-    walk_rs_files(&src_dir, &mut |path, contents| {
-        for name in FORBIDDEN_STRUCT_NAMES {
-            for pattern in [
-                format!("struct {name} "),
-                format!("struct {name}{{"),
-                format!("struct {name}("),
-                format!("struct {name};"),
-                format!("struct {name}\n"),
-            ] {
-                if contents.contains(&pattern) {
-                    violations.push(format!(
-                        "{} redefines `{name}` — the canonical \
-                         obzenflow_topology::Topology is the wire contract \
-                         and infra-private mirrors must not be reintroduced \
-                         (FLOWIP-114b acceptance #6)",
-                        path.display()
-                    ));
+    for sub in ["src", "tests"] {
+        let dir = crate_root.join(sub);
+        walk_rs_files(&dir, &mut |path, contents| {
+            if path.file_name().and_then(|n| n.to_str()) == Some("no_topology_dto_drift.rs") {
+                return;
+            }
+            for name in FORBIDDEN_STRUCT_NAMES {
+                for pattern in [
+                    format!("struct {name} "),
+                    format!("struct {name}{{"),
+                    format!("struct {name}("),
+                    format!("struct {name};"),
+                    format!("struct {name}\n"),
+                ] {
+                    if contents.contains(&pattern) {
+                        violations.push(format!(
+                            "{} redefines `{name}` — the canonical \
+                             obzenflow_topology::Topology is the wire contract \
+                             and infra-private mirrors must not be reintroduced \
+                             (FLOWIP-114b acceptance #6)",
+                            path.display()
+                        ));
+                    }
                 }
             }
-        }
-    });
+        });
+    }
     assert!(
         violations.is_empty(),
         "topology DTO drift detected:\n{}",
