@@ -197,7 +197,6 @@ impl HttpEndpoint for TopologyHttpEndpoint {
 mod tests {
     use super::*;
     use obzenflow_runtime::id_conversions::StageIdExt;
-    use obzenflow_runtime::pipeline::MiddlewareStackConfig;
     use obzenflow_topology::{
         DirectedEdge, EdgeKind, EdgeTypingLabelSource, EdgeTypingRole, JoinMetadataInfo, StageInfo,
         StageSubgraphMembership, StageType as TopologyStageType, StageTypingInfo,
