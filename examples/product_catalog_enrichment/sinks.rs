@@ -6,6 +6,7 @@ use super::domain::EnrichedOrderWithPromo;
 use obzenflow_core::TypedPayload;
 use obzenflow_runtime::stages::common::handlers::SinkHandler;
 use obzenflow_runtime::stages::sink::SinkTyped;
+use obzenflow_runtime::typing::SinkTyping;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -21,7 +22,9 @@ impl TypedPayload for CatalogAnalyticsSummary {
     const SCHEMA_VERSION: u32 = 1;
 }
 
-pub fn per_order_printer() -> impl SinkHandler + Clone + std::fmt::Debug + 'static {
+pub fn per_order_printer(
+) -> impl SinkHandler + SinkTyping<Input = EnrichedOrderWithPromo> + Clone + std::fmt::Debug + 'static
+{
     SinkTyped::new(|order: EnrichedOrderWithPromo| async move {
         println!("\n{}", "=".repeat(60));
         println!("📊 ORDER: {}", order.order_id);
@@ -79,7 +82,9 @@ pub fn per_order_printer() -> impl SinkHandler + Clone + std::fmt::Debug + 'stat
     })
 }
 
-pub fn summary_printer() -> impl SinkHandler + Clone + std::fmt::Debug + 'static {
+pub fn summary_printer(
+) -> impl SinkHandler + SinkTyping<Input = CatalogAnalyticsSummary> + Clone + std::fmt::Debug + 'static
+{
     SinkTyped::new(|summary: CatalogAnalyticsSummary| async move {
         println!("\n\n{}", "=".repeat(60));
         println!("🎯 FINAL ANALYTICS DASHBOARD");

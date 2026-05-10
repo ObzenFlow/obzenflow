@@ -2,11 +2,15 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Authoring-time stage typing contracts.
+//! Authoring-time stage typing trait markers and assertion helpers.
 //!
-//! These traits do not affect runtime execution semantics. They are used by the
-//! DSL macros to validate that a handler's declared type shape matches the
-//! contract written at the stage-definition layer.
+//! These traits do not affect runtime execution semantics. They are used
+//! by the DSL macros to validate that a handler's declared type shape
+//! matches the contract written at the stage-definition layer.
+//!
+//! The serialisable data carriers (`TypeHintInfo`, `StageTypingInfo`) live
+//! in `obzenflow_topology` as canonical annotations on `StageInfo`; import
+//! them from there directly.
 
 /// Source stage typing contract.
 pub trait SourceTyping {

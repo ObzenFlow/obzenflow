@@ -19,22 +19,19 @@ use std::sync::Arc;
 
 use super::surface_metrics::HttpSurfaceMetricsCollector;
 
-pub type MiddlewareStacks =
-    Arc<HashMap<StageId, obzenflow_runtime::pipeline::MiddlewareStackConfig>>;
 pub type ContractAttachments = Arc<HashMap<(StageId, StageId), Vec<String>>>;
-pub type JoinMetadataMap = Arc<HashMap<StageId, obzenflow_runtime::pipeline::JoinMetadata>>;
-pub type StageSubgraphMembershipMap =
-    Arc<HashMap<StageId, obzenflow_core::topology::subgraphs::StageSubgraphMembership>>;
-pub type SubgraphRegistry = Arc<Vec<obzenflow_core::topology::subgraphs::TopologySubgraphInfo>>;
 
 pub struct WebServerResources {
+    /// Canonical topology for this flow. Carries FLOWIP-114b annotations
+    /// (stage typing, join metadata, middleware, subgraph membership,
+    /// subgraph registry, role, cycle membership, flow name, API version)
+    /// directly on `StageInfo` / `DirectedEdge` / `Topology`.
     pub topology: Arc<Topology>,
-    pub flow_name: String,
-    pub middleware_stacks: Option<MiddlewareStacks>,
+    /// Structural contract names per edge. Still passed alongside the
+    /// topology because contracts are derived in `PipelineBuilder::build`
+    /// from the topology shape and are not yet baked into the canonical
+    /// `Topology`.
     pub contract_attachments: Option<ContractAttachments>,
-    pub join_metadata: Option<JoinMetadataMap>,
-    pub subgraph_membership: Option<StageSubgraphMembershipMap>,
-    pub subgraphs: Option<SubgraphRegistry>,
     pub metrics_exporter: Option<Arc<dyn MetricsExporter>>,
     pub flow_handle: Option<Arc<FlowHandle>>,
     pub extra_endpoints: Vec<Box<dyn HttpEndpoint>>,
@@ -140,12 +137,7 @@ fn validate_extra_endpoints(extra_endpoints: &[Box<dyn HttpEndpoint>]) -> Result
 /// // Start server with topology and metrics
 /// let handle = start_web_server(WebServerResources {
 ///     topology: flow_topology,
-///     flow_name: "my_flow".to_string(),
-///     middleware_stacks: None,
 ///     contract_attachments: None,
-///     join_metadata: None,
-///     subgraph_membership: None,
-///     subgraphs: None,
 ///     metrics_exporter: Some(metrics_exporter),
 ///     flow_handle: None,
 ///     extra_endpoints: vec![],
@@ -166,17 +158,12 @@ pub async fn start_web_server_with_config(
     resources: WebServerResources,
     server_config: ServerConfig,
 ) -> Result<tokio::task::JoinHandle<()>, WebError> {
-    use super::endpoints::topology::{StageMetadata, StageStatus, StageType};
+    use super::endpoints::topology::{StageMetadata, StageStatus};
     use super::endpoints::{FlowControlEndpoint, MetricsHttpEndpoint, TopologyHttpEndpoint};
 
     let WebServerResources {
         topology,
-        flow_name,
-        middleware_stacks,
         contract_attachments,
-        join_metadata,
-        subgraph_membership,
-        subgraphs,
         metrics_exporter,
         flow_handle,
         extra_endpoints,
@@ -207,36 +194,23 @@ pub async fn start_web_server_with_config(
         ready
     });
 
-    // Create stage metadata for topology endpoint
+    // Initial per-stage runtime status; the canonical topology already
+    // carries the structural stage type, so this map only carries status.
     let mut stages_metadata = HashMap::new();
     for stage_info in topology.stages() {
-        // Convert topology StageId to core StageId for the HashMap key
         let core_stage_id = StageId::from_ulid(stage_info.id.ulid());
         stages_metadata.insert(
             core_stage_id,
             StageMetadata {
-                stage_type: if topology.source_stages().contains(&stage_info.id) {
-                    StageType::Source
-                } else if topology.sink_stages().contains(&stage_info.id) {
-                    StageType::Sink
-                } else {
-                    StageType::Transform
-                },
                 status: StageStatus::Pending,
             },
         );
     }
 
-    // Always add topology endpoint
     server.register_endpoint(Box::new(TopologyHttpEndpoint::new(
         topology.clone(),
         Arc::new(stages_metadata),
-        flow_name,
-        middleware_stacks,
         contract_attachments,
-        join_metadata,
-        subgraph_membership,
-        subgraphs,
     )))?;
 
     let has_metrics_endpoint = metrics_exporter.is_some();
