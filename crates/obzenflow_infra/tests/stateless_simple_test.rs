@@ -76,8 +76,8 @@ async fn stateless_pipeline_runs_to_completion() {
         middleware: [],
 
         stages: {
-            numbers = source!(SimpleSource::new(5));
-            doubler = transform!(Map::new(|event| {
+            numbers = source!(serde_json::Value => SimpleSource::new(5));
+            doubler = transform!(serde_json::Value -> serde_json::Value => Map::new(|event| {
                 if let Some(value) = event.payload()["value"].as_u64() {
                     ChainEventFactory::data_event(
                         WriterId::from(StageId::new()),
@@ -91,7 +91,7 @@ async fn stateless_pipeline_runs_to_completion() {
                     event
                 }
             }));
-            printer = sink!(Printer);
+            printer = sink!(serde_json::Value => Printer);
         },
 
         topology: {

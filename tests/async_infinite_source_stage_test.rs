@@ -188,8 +188,8 @@ async fn async_infinite_source_stop_interrupts_blocked_next_and_calls_drain() ->
         middleware: [],
 
         stages: {
-            source = async_infinite_source!(source);
-            sink = sink!(sink);
+            source = async_infinite_source!(serde_json::Value => source);
+            sink = sink!(serde_json::Value => sink);
         },
 
         topology: {
@@ -242,10 +242,10 @@ async fn async_infinite_source_emits_events_and_applies_stage_middleware() -> Re
         middleware: [],
 
         stages: {
-            source = async_infinite_source!(source, [
+            source = async_infinite_source!(serde_json::Value => source, [
                 InjectFieldFactory
             ]);
-            sink = sink!(sink);
+            sink = sink!(serde_json::Value => sink);
         },
 
         topology: {

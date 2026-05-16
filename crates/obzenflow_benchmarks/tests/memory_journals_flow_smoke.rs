@@ -86,8 +86,8 @@ async fn memory_journals_flow_runs_to_completion() {
             middleware: [],
 
             stages: {
-                src = source!(source);
-                snk = sink!(sink);
+                src = source!(serde_json::Value => source);
+                snk = sink!(serde_json::Value => sink);
             },
 
             topology: {

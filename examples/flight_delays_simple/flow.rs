@@ -31,8 +31,8 @@ pub fn run_example() -> Result<()> {
             carriers = source!(CarrierDetails => sources::finite(carriers));
             flights = source!(FlightRecord => sources::finite(flights));
 
-            val = transform!(FlightValidator::new());
-            calc = transform!(DelayCalculator::new());
+            val = transform!(FlightRecord -> FlightRecord => FlightValidator::new());
+            calc = transform!(EnrichedFlight -> EnrichedFlight => DelayCalculator::new());
 
             enricher = join!(
                 catalog carriers: CarrierDetails,
@@ -54,7 +54,7 @@ pub fn run_example() -> Result<()> {
                 )
             );
 
-            agg = stateful!(CarrierAggregator::new());
+            agg = stateful!(EnrichedFlight -> CarrierStatistics => CarrierAggregator::new());
             printer = sink!(CarrierStatistics => sinks::table(
                 &["status", "carrier", "avg_delay", "flights"],
                 |stats| {

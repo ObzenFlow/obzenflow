@@ -159,9 +159,9 @@ async fn test_dropped_events_detection() -> Result<()> {
         middleware: [],
 
         stages: {
-            correlated_source = source!(source);
-            dropping_transform = transform!(transform);
-            collector_sink = sink!(sink);
+            correlated_source = source!(serde_json::Value => source);
+            dropping_transform = transform!(serde_json::Value -> serde_json::Value => transform);
+            collector_sink = sink!(serde_json::Value => sink);
         },
 
         topology: {

@@ -104,8 +104,8 @@ async fn test_basic_flow() -> Result<()> {
         middleware: [],
 
         stages: {
-            source = source!(TestEventSource::new(10));
-            sink = sink!(counter_sink);
+            source = source!(serde_json::Value => TestEventSource::new(10));
+            sink = sink!(serde_json::Value => counter_sink);
         },
 
         topology: {
@@ -160,9 +160,9 @@ async fn test_multi_stage_flow() -> Result<()> {
         middleware: [],
 
         stages: {
-            source = source!(TestEventSource::new(5));
-            doubler = transform!(Doubler::new());
-            sink = sink!(counter_sink);
+            source = source!(serde_json::Value => TestEventSource::new(5));
+            doubler = transform!(serde_json::Value -> serde_json::Value => Doubler::new());
+            sink = sink!(serde_json::Value => counter_sink);
         },
 
         topology: {
@@ -300,9 +300,9 @@ async fn test_pipeline_topology() -> Result<()> {
         middleware: [],
 
         stages: {
-            source = source!(NumberSource::new(3));
-            doubler = transform!(NumberDoubler::new());
-            sink = sink!(sum_sink);
+            source = source!(serde_json::Value => NumberSource::new(3));
+            doubler = transform!(serde_json::Value -> serde_json::Value => NumberDoubler::new());
+            sink = sink!(serde_json::Value => sum_sink);
         },
 
         topology: {

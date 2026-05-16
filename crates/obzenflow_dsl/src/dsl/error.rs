@@ -30,6 +30,19 @@ impl From<&str> for StageCreationError {
     }
 }
 
+/// Discriminator for the shape of an edge typing mismatch (FLOWIP-114c).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum EdgeTypingMismatchKind {
+    /// One upstream emits a different `Exact` type than the downstream declares.
+    SingleEdge,
+    /// Two or more upstreams emit differing `Exact` types into the same
+    /// non-join downstream slot, or the same join leg.
+    HeterogeneousFanIn {
+        other_upstream_stages: Vec<String>,
+        other_actual_types: Vec<String>,
+    },
+}
+
 /// Structured error type for failures during flow construction
 #[derive(Debug, Error)]
 pub enum FlowBuildError {
@@ -60,6 +73,20 @@ pub enum FlowBuildError {
         name: String,
         first_var: String,
         second_var: String,
+    },
+
+    #[error(
+        "Edge typing mismatch on {role:?} into '{downstream_stage}': '{upstream_stage}' emits \
+         '{actual_type}', expected '{expected_type}'. {suggested_fix}"
+    )]
+    EdgeTypingMismatch {
+        upstream_stage: String,
+        downstream_stage: String,
+        role: String,
+        expected_type: String,
+        actual_type: String,
+        kind: EdgeTypingMismatchKind,
+        suggested_fix: String,
     },
 }
 

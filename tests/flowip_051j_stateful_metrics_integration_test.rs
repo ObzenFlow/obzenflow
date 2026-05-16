@@ -269,9 +269,9 @@ async fn flowip_051j_stateful_metrics_accumulate_is_instrumented() -> Result<()>
         middleware: [],
 
         stages: {
-            src = source!(BurstSource::new(total_events));
-            counter = stateful!(SlowAccumulator::new(sleep_per_event));
-            snk = sink!(sink_handler);
+            src = source!(serde_json::Value => BurstSource::new(total_events));
+            counter = stateful!(serde_json::Value -> serde_json::Value => SlowAccumulator::new(sleep_per_event));
+            snk = sink!(serde_json::Value => sink_handler);
         },
 
         topology: {
@@ -467,10 +467,10 @@ async fn flowip_051j_join_metrics_counts_hydration_as_accumulation() -> Result<(
         middleware: [],
 
         stages: {
-            ref_src = source!(BurstSource::new(reference_events));
-            stream_src = source!(BurstSource::new(stream_events));
-            joiner = join!(catalog ref_src => NoopJoin);
-            snk = sink!(CollectingSink::new().0);
+            ref_src = source!(serde_json::Value => BurstSource::new(reference_events));
+            stream_src = source!(serde_json::Value => BurstSource::new(stream_events));
+            joiner = join!(catalog ref_src: serde_json::Value, serde_json::Value -> serde_json::Value => NoopJoin);
+            snk = sink!(serde_json::Value => CollectingSink::new().0);
         },
 
         topology: {

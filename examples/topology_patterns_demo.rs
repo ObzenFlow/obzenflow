@@ -426,7 +426,7 @@ fn main() -> Result<()> {
                 }));
 
                 // Aggregator demonstrates fan-in with StatefulHandler
-                aggregator = stateful!(MultiSourceAggregator::new().with_expected({
+                aggregator = stateful!(RawDataEvent -> RawDataEvent => MultiSourceAggregator::new().with_expected({
                     let mut m = BTreeMap::new();
                     m.insert("kafka".to_string(), 5);
                     m.insert("api".to_string(), 4);
@@ -435,16 +435,16 @@ fn main() -> Result<()> {
                 }));
 
                 // ✨ FLOWIP-080h: Router distributes to multiple sinks using Map helper
-                router = transform!(smart_router());
+                router = transform!(RawDataEvent -> RawDataEvent => smart_router());
 
                 // FAN-OUT: Three sinks receiving from one router
-                low_sink = sink!(PrioritySink::new("LOW", "low", low_counter_flow.clone()));
-                med_sink = sink!(PrioritySink::new(
+                low_sink = sink!(RawDataEvent => PrioritySink::new("LOW", "low", low_counter_flow.clone()));
+                med_sink = sink!(RawDataEvent => PrioritySink::new(
                     "MEDIUM",
                     "medium",
                     med_counter_flow.clone()
                 ));
-                high_sink = sink!(PrioritySink::new("HIGH", "high", high_counter_flow.clone()));
+                high_sink = sink!(RawDataEvent => PrioritySink::new("HIGH", "high", high_counter_flow.clone()));
             },
 
             topology: {

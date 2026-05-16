@@ -187,3 +187,7 @@ path = "examples/payment_gateway_resilience/main.rs"
 name = "hn_ai_digest_demo"
 path = "examples/hn_ai_digest_demo/main.rs"
 required-features = ["ai"]
+
+[[example]]
+name = "multi_source_ingest_demo"
+path = "examples/multi_source_ingest_demo.rs"

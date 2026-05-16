@@ -25,23 +25,41 @@ use obzenflow_runtime::typing::{
     JoinTyping, SinkTyping, SourceTyping, StatefulTyping, TransformTyping,
 };
 use obzenflow_topology::{EdgeKind, StageTypingInfo, Topology, TypeHintInfo};
+use std::any::{type_name, TypeId};
 use std::collections::HashMap;
 use std::fmt;
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-/// Three-way model for declared type positions.
+/// Two-way model for declared type positions.
+///
+/// `Exact` carries a runtime fingerprint of the Rust type (`type_id`) plus a
+/// canonical display name for rendering. Identity is by `type_id`; the
+/// `display_name` is for error messages and topology rendering only. See
+/// FLOWIP-114c "Canonical type identity" for the rationale. The earlier
+/// `Mixed` variant was removed in PR D of FLOWIP-114c; the wire-side
+/// `TypeHintInfo::Mixed` is kept for snapshot round-tripping but is no longer
+/// emitted by the DSL.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TypeHint {
     Unspecified,
-    Exact(String),
-    Mixed,
+    Exact {
+        type_id: TypeId,
+        display_name: String,
+    },
 }
 
 impl TypeHint {
-    pub fn exact(name: impl Into<String>) -> Self {
-        Self::Exact(name.into())
+    /// Construct an `Exact` hint from a Rust type. Identity is by `TypeId`,
+    /// which is canonical within one compilation; display name is the
+    /// compiler-chosen `std::any::type_name`, which gives identical types
+    /// identical rendered names regardless of how the caller spelled them.
+    pub fn exact<T: 'static>() -> Self {
+        Self::Exact {
+            type_id: TypeId::of::<T>(),
+            display_name: type_name::<T>().to_string(),
+        }
     }
 }
 
@@ -49,8 +67,9 @@ impl From<&TypeHint> for TypeHintInfo {
     fn from(value: &TypeHint) -> Self {
         match value {
             TypeHint::Unspecified => Self::Unspecified,
-            TypeHint::Exact(name) => Self::Exact { name: name.clone() },
-            TypeHint::Mixed => Self::Mixed,
+            TypeHint::Exact { display_name, .. } => Self::Exact {
+                name: display_name.clone(),
+            },
         }
     }
 }
@@ -196,15 +215,17 @@ impl EdgeInputRole {
     }
 }
 
-/// Structured result from the edge compatibility checker.
+/// Structured result from `validate_edge_typing`. Carries enough context to
+/// build a `FlowBuildError::EdgeTypingMismatch`. See FLOWIP-114c.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct EdgeWarning {
+pub struct EdgeError {
     pub upstream_stage: String,
     pub downstream_stage: String,
     pub upstream_type: String,
     pub expected_type: String,
     pub input_role: EdgeInputRole,
 }
+
 
 /// Descriptor wrapper that preserves typing metadata through type erasure.
 pub struct TypedStageDescriptor {
@@ -534,7 +555,11 @@ pub struct BoundTransform<In, Out, H> {
     _phantom: PhantomData<(In, Out)>,
 }
 
-impl<In, Out, H> BoundTransform<In, Out, H> {
+impl<In, Out, H> BoundTransform<In, Out, H>
+where
+    In: 'static,
+    Out: 'static,
+{
     pub fn new(inner: H) -> Self {
         Self {
             inner,
@@ -554,7 +579,7 @@ where
     }
 }
 
-impl<In, Out, H> TransformTyping for BoundTransform<In, Out, H> {
+impl<In: 'static, Out: 'static, H> TransformTyping for BoundTransform<In, Out, H> {
     type Input = In;
     type Output = Out;
 }
@@ -583,7 +608,11 @@ pub struct BoundAsyncTransform<In, Out, H> {
     _phantom: PhantomData<(In, Out)>,
 }
 
-impl<In, Out, H> BoundAsyncTransform<In, Out, H> {
+impl<In, Out, H> BoundAsyncTransform<In, Out, H>
+where
+    In: 'static,
+    Out: 'static,
+{
     pub fn new(inner: H) -> Self {
         Self {
             inner,
@@ -603,7 +632,7 @@ where
     }
 }
 
-impl<In, Out, H> TransformTyping for BoundAsyncTransform<In, Out, H> {
+impl<In: 'static, Out: 'static, H> TransformTyping for BoundAsyncTransform<In, Out, H> {
     type Input = In;
     type Output = Out;
 }
@@ -928,12 +957,18 @@ fn select_downstream_input_hint<'a>(
     (EdgeInputRole::Input, &downstream_metadata.input_type)
 }
 
-/// Collect non-blocking edge compatibility warnings for typed stages.
-pub fn collect_edge_warnings(
+/// Validate edge typing across forward edges in a built topology.
+///
+/// Returns `Ok(())` when every edge is compatible, or `Err(errors)` listing
+/// every per-edge mismatch. Composite-internal edges (both endpoints sharing
+/// a `StageSubgraphMembership.subgraph_id`) are skipped: the composite
+/// outer-boundary invariant is responsible for those, not the per-edge
+/// validator. See FLOWIP-114c "Composite-internal edge handling."
+pub fn validate_edge_typing(
     topology: &Topology,
     descriptors: &HashMap<String, Box<dyn StageDescriptor>>,
     name_to_id: &HashMap<String, StageId>,
-) -> Vec<EdgeWarning> {
+) -> Result<(), Vec<EdgeError>> {
     let mut id_to_descriptor: HashMap<StageId, &dyn StageDescriptor> = HashMap::new();
     for (dsl_name, descriptor) in descriptors {
         if let Some(stage_id) = name_to_id.get(dsl_name) {
@@ -941,7 +976,7 @@ pub fn collect_edge_warnings(
         }
     }
 
-    let mut warnings = Vec::new();
+    let mut errors = Vec::new();
     for edge in topology.edges() {
         if edge.kind != EdgeKind::Forward {
             continue;
@@ -949,6 +984,22 @@ pub fn collect_edge_warnings(
 
         let upstream_stage_id = StageId::from_ulid(edge.from.ulid());
         let downstream_stage_id = StageId::from_ulid(edge.to.ulid());
+
+        // Composite-internal-edge skip: if both endpoints belong to the same
+        // composite expansion (same `subgraph_id`), the edge is internal to a
+        // composite that was wired by composite-author code under composite
+        // unit tests. Per-edge validation does not apply.
+        let upstream_subgraph = topology
+            .stage_info(edge.from)
+            .and_then(|info| info.subgraph.as_ref().map(|m| m.subgraph_id.clone()));
+        let downstream_subgraph = topology
+            .stage_info(edge.to)
+            .and_then(|info| info.subgraph.as_ref().map(|m| m.subgraph_id.clone()));
+        if let (Some(u_sg), Some(d_sg)) = (&upstream_subgraph, &downstream_subgraph) {
+            if u_sg == d_sg {
+                continue;
+            }
+        }
 
         let Some(upstream_descriptor) = id_to_descriptor.get(&upstream_stage_id) else {
             continue;
@@ -971,25 +1022,36 @@ pub fn collect_edge_warnings(
         );
 
         match (&upstream_metadata.output_type, downstream_input_hint) {
-            (TypeHint::Exact(upstream_type), TypeHint::Exact(expected_type))
-                if upstream_type != expected_type =>
-            {
-                warnings.push(EdgeWarning {
+            (
+                TypeHint::Exact {
+                    type_id: upstream_id,
+                    display_name: upstream_name,
+                },
+                TypeHint::Exact {
+                    type_id: expected_id,
+                    display_name: expected_name,
+                },
+            ) if upstream_id != expected_id => {
+                errors.push(EdgeError {
                     upstream_stage: upstream_descriptor.name().to_string(),
                     downstream_stage: downstream_descriptor.name().to_string(),
-                    upstream_type: upstream_type.clone(),
-                    expected_type: expected_type.clone(),
+                    upstream_type: upstream_name.clone(),
+                    expected_type: expected_name.clone(),
                     input_role,
                 });
             }
-            (_, TypeHint::Mixed) | (_, TypeHint::Unspecified) | (TypeHint::Unspecified, _) => {}
-            (TypeHint::Mixed, _) => {}
+            (_, TypeHint::Unspecified) | (TypeHint::Unspecified, _) => {}
             _ => {}
         }
     }
 
-    warnings
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors)
+    }
 }
+
 
 #[cfg(test)]
 mod placeholder_warn_once_tests {

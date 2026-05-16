@@ -772,8 +772,8 @@ mod tests {
             middleware: [],
 
             stages: {
-                source = async_infinite_source!(source);
-                sink = sink!(sink);
+                source = async_infinite_source!(TestPayload => source);
+                sink = sink!(TestPayload => sink);
             },
 
             topology: {

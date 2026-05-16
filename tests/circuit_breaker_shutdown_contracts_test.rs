@@ -165,13 +165,13 @@ async fn breaker_driven_shutdown_emits_poison_eof_and_contract() -> Result<()> {
         middleware: [],
 
         stages: {
-            source = source!(source_handler, [
+            source = source!(serde_json::Value => source_handler, [
                 circuit_breaker(2) // Open after 2 failures
             ]);
-            failing_transform = transform!(transform, [
+            failing_transform = transform!(serde_json::Value -> serde_json::Value => transform, [
                 circuit_breaker(2)
             ]);
-            sink = sink!(sink_handler);
+            sink = sink!(serde_json::Value => sink_handler);
         },
 
         topology: {

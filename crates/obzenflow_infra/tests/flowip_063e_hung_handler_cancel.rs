@@ -103,9 +103,9 @@ async fn flowip_063e_hung_handler_can_be_cancelled_without_contract_failure() {
         middleware: [],
 
         stages: {
-            numbers = source!(OneEventSource::new());
-            hung = async_transform!(HungTransform);
-            snk = sink!(NoopSink);
+            numbers = source!(serde_json::Value => OneEventSource::new());
+            hung = async_transform!(serde_json::Value -> serde_json::Value => HungTransform);
+            snk = sink!(serde_json::Value => NoopSink);
         },
 
         topology: {

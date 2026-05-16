@@ -348,8 +348,8 @@ async fn sink_edge_emits_passed_delivery_contract_result() -> Result<()> {
         middleware: [],
 
         stages: {
-            source = source!(TestEventSource::new(10));
-            sink = sink!(sink_handler);
+            source = source!(serde_json::Value => TestEventSource::new(10));
+            sink = sink!(serde_json::Value => sink_handler);
         },
 
         topology: {
@@ -385,8 +385,8 @@ async fn buffered_sink_edge_emits_passed_delivery_contract_result_after_flush() 
         middleware: [],
 
         stages: {
-            source = source!(TestEventSource::new(10));
-            sink = sink!(sink_handler);
+            source = source!(serde_json::Value => TestEventSource::new(10));
+            sink = sink!(serde_json::Value => sink_handler);
         },
 
         topology: {
@@ -427,9 +427,9 @@ async fn fan_out_before_buffered_sink_emits_passed_delivery_contract_result() ->
         middleware: [],
 
         stages: {
-            source = source!(CorrelatedTestEventSource::new(source_events));
-            transform = transform!(FanOutTransform::new(fan_out));
-            sink = sink!(sink_handler);
+            source = source!(serde_json::Value => CorrelatedTestEventSource::new(source_events));
+            transform = transform!(serde_json::Value -> serde_json::Value => FanOutTransform::new(fan_out));
+            sink = sink!(serde_json::Value => sink_handler);
         },
 
         topology: {

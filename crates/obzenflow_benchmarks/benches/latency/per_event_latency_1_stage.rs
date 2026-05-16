@@ -142,8 +142,8 @@ async fn run_1_stage_pipeline() -> anyhow::Result<Duration> {
         middleware: [],
 
         stages: {
-            src = source!(source);
-            snk = sink!(sink);
+            src = source!(serde_json::Value => source);
+            snk = sink!(serde_json::Value => sink);
         },
 
         topology: {

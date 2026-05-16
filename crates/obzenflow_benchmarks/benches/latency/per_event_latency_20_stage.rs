@@ -166,27 +166,27 @@ async fn run_20_stage_pipeline() -> anyhow::Result<Duration> {
         middleware: [],
 
         stages: {
-            src = source!(source);
-            s1 = transform!(PassthroughStage::new("stage1"));
-            s2 = transform!(PassthroughStage::new("stage2"));
-            s3 = transform!(PassthroughStage::new("stage3"));
-            s4 = transform!(PassthroughStage::new("stage4"));
-            s5 = transform!(PassthroughStage::new("stage5"));
-            s6 = transform!(PassthroughStage::new("stage6"));
-            s7 = transform!(PassthroughStage::new("stage7"));
-            s8 = transform!(PassthroughStage::new("stage8"));
-            s9 = transform!(PassthroughStage::new("stage9"));
-            s10 = transform!(PassthroughStage::new("stage10"));
-            s11 = transform!(PassthroughStage::new("stage11"));
-            s12 = transform!(PassthroughStage::new("stage12"));
-            s13 = transform!(PassthroughStage::new("stage13"));
-            s14 = transform!(PassthroughStage::new("stage14"));
-            s15 = transform!(PassthroughStage::new("stage15"));
-            s16 = transform!(PassthroughStage::new("stage16"));
-            s17 = transform!(PassthroughStage::new("stage17"));
-            s18 = transform!(PassthroughStage::new("stage18"));
-            s19 = transform!(PassthroughStage::new("stage19"));
-            snk = sink!(sink);
+            src = source!(serde_json::Value => source);
+            s1 = transform!(serde_json::Value -> serde_json::Value => PassthroughStage::new("stage1"));
+            s2 = transform!(serde_json::Value -> serde_json::Value => PassthroughStage::new("stage2"));
+            s3 = transform!(serde_json::Value -> serde_json::Value => PassthroughStage::new("stage3"));
+            s4 = transform!(serde_json::Value -> serde_json::Value => PassthroughStage::new("stage4"));
+            s5 = transform!(serde_json::Value -> serde_json::Value => PassthroughStage::new("stage5"));
+            s6 = transform!(serde_json::Value -> serde_json::Value => PassthroughStage::new("stage6"));
+            s7 = transform!(serde_json::Value -> serde_json::Value => PassthroughStage::new("stage7"));
+            s8 = transform!(serde_json::Value -> serde_json::Value => PassthroughStage::new("stage8"));
+            s9 = transform!(serde_json::Value -> serde_json::Value => PassthroughStage::new("stage9"));
+            s10 = transform!(serde_json::Value -> serde_json::Value => PassthroughStage::new("stage10"));
+            s11 = transform!(serde_json::Value -> serde_json::Value => PassthroughStage::new("stage11"));
+            s12 = transform!(serde_json::Value -> serde_json::Value => PassthroughStage::new("stage12"));
+            s13 = transform!(serde_json::Value -> serde_json::Value => PassthroughStage::new("stage13"));
+            s14 = transform!(serde_json::Value -> serde_json::Value => PassthroughStage::new("stage14"));
+            s15 = transform!(serde_json::Value -> serde_json::Value => PassthroughStage::new("stage15"));
+            s16 = transform!(serde_json::Value -> serde_json::Value => PassthroughStage::new("stage16"));
+            s17 = transform!(serde_json::Value -> serde_json::Value => PassthroughStage::new("stage17"));
+            s18 = transform!(serde_json::Value -> serde_json::Value => PassthroughStage::new("stage18"));
+            s19 = transform!(serde_json::Value -> serde_json::Value => PassthroughStage::new("stage19"));
+            snk = sink!(serde_json::Value => sink);
         },
 
         topology: {

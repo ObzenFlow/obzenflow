@@ -242,10 +242,10 @@ async fn flowip_051l_rejects_cycles_with_non_transform_members() {
         middleware: [],
 
         stages: {
-            src = source!(TestEventSource::new(1));
-            agg = stateful!(NoopStateful);
-            tr = transform!(IdentityTransform);
-            snk = sink!(EventCounterSink::new().0);
+            src = source!(serde_json::Value => TestEventSource::new(1));
+            agg = stateful!(serde_json::Value -> serde_json::Value => NoopStateful);
+            tr = transform!(serde_json::Value -> serde_json::Value => IdentityTransform);
+            snk = sink!(serde_json::Value => EventCounterSink::new().0);
         },
 
         topology: {
@@ -279,10 +279,10 @@ async fn flowip_051l_cycle_guard_bounds_flow_signal_backflow() -> Result<()> {
         middleware: [],
 
         stages: {
-            src = source!(TestEventSource::new(5));
-            a = transform!(IdentityTransform);
-            b = transform!(DropAllTransform);
-            snk = sink!(counter_sink);
+            src = source!(serde_json::Value => TestEventSource::new(5));
+            a = transform!(serde_json::Value -> serde_json::Value => IdentityTransform);
+            b = transform!(serde_json::Value -> serde_json::Value => DropAllTransform);
+            snk = sink!(serde_json::Value => counter_sink);
         },
 
         topology: {
@@ -331,10 +331,10 @@ async fn flowip_051l_cycle_guard_bounds_data_backflow() -> Result<()> {
         middleware: [],
 
         stages: {
-            src = async_source!(CorrelatedEventSource::new(Duration::from_millis(500)));
-            a = transform!(IdentityTransform);
-            b = transform!(IdentityTransform);
-            snk = sink!(counter_sink);
+            src = async_source!(serde_json::Value => CorrelatedEventSource::new(Duration::from_millis(500)));
+            a = transform!(serde_json::Value -> serde_json::Value => IdentityTransform);
+            b = transform!(serde_json::Value -> serde_json::Value => IdentityTransform);
+            snk = sink!(serde_json::Value => counter_sink);
         },
 
         topology: {

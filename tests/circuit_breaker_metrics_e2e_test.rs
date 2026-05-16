@@ -203,14 +203,14 @@ async fn test_circuit_breaker_metrics_end_to_end() -> Result<()> {
         middleware: [],
 
         stages: {
-            cb_source = source!(source);
+            cb_source = source!(serde_json::Value => source);
 
             // Transform with circuit breaker (3 consecutive failures opens circuit)
-            cb_transform = transform!(transform, [
+            cb_transform = transform!(serde_json::Value -> serde_json::Value => transform, [
                 circuit_breaker(3)
             ]);
 
-            cb_sink = sink!(sink);
+            cb_sink = sink!(serde_json::Value => sink);
         },
 
         topology: {
@@ -396,11 +396,11 @@ async fn test_circuit_breaker_summary_events() -> Result<()> {
         middleware: [],
 
         stages: {
-            rapid_source = source!(RapidSource { count: 0, writer_id: WriterId::from(StageId::new()) });
-            cb_summary_transform = transform!(PassthroughTransform, [
+            rapid_source = source!(serde_json::Value => RapidSource { count: 0, writer_id: WriterId::from(StageId::new()) });
+            cb_summary_transform = transform!(serde_json::Value -> serde_json::Value => PassthroughTransform, [
                 circuit_breaker(10) // High threshold, won't trip
             ]);
-            null_sink = sink!(MetricsSink::new().0);
+            null_sink = sink!(serde_json::Value => MetricsSink::new().0);
         },
 
         topology: {

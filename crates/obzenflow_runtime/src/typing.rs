@@ -41,12 +41,6 @@ pub trait JoinTyping {
     type Output;
 }
 
-/// Internal marker used by typed placeholder handlers when a stage declares a
-/// `mixed` input position.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-#[doc(hidden)]
-pub struct MixedInput;
-
 /// Compile-time assertion helper for source handlers.
 pub fn assert_source_output<H, Out>(_: &H)
 where

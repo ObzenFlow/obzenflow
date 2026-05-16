@@ -189,10 +189,10 @@ async fn flowip_063e_join_keeps_active_edge_healthy_while_other_edge_idles() {
         middleware: [],
 
         stages: {
-            ref_src = source!(OneRefEventSource::new());
-            stream_src = async_source!(DelayedStreamSource::new());
-            joiner = join!(catalog ref_src => SlowJoin);
-            snk = sink!(NoopSink);
+            ref_src = source!(serde_json::Value => OneRefEventSource::new());
+            stream_src = async_source!(serde_json::Value => DelayedStreamSource::new());
+            joiner = join!(catalog ref_src: serde_json::Value, serde_json::Value -> serde_json::Value => SlowJoin);
+            snk = sink!(serde_json::Value => NoopSink);
         },
 
         topology: {

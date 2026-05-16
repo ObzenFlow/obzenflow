@@ -45,8 +45,8 @@ async fn csv_source_to_sink_roundtrip_skips_bad_rows() -> anyhow::Result<()> {
         middleware: [],
 
         stages: {
-            src = source!(source);
-            csv = sink!(sink);
+            src = source!(serde_json::Value => source);
+            csv = sink!(serde_json::Value => sink);
         },
 
         topology: {
@@ -89,8 +89,8 @@ async fn csv_untyped_source_to_sink_roundtrip_preserves_strings() -> anyhow::Res
         middleware: [],
 
         stages: {
-            src = source!(source);
-            csv = sink!(sink);
+            src = source!(serde_json::Value => source);
+            csv = sink!(serde_json::Value => sink);
         },
 
         topology: {
@@ -131,8 +131,8 @@ async fn csv_source_to_buffered_sink_roundtrip_flushes_on_eof() -> anyhow::Resul
         middleware: [],
 
         stages: {
-            src = source!(source);
-            csv = sink!(sink);
+            src = source!(serde_json::Value => source);
+            csv = sink!(serde_json::Value => sink);
         },
 
         topology: {

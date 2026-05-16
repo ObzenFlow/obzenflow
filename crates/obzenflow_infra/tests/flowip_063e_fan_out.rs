@@ -191,11 +191,11 @@ async fn flowip_063e_fan_out_produces_independent_liveness_transitions() {
         middleware: [],
 
         stages: {
-            numbers = async_source!(DelayedTwoEventSource::new());
-            slow = async_transform!(SlowTransform::new());
-            fast = async_transform!(FastTransform::new());
-            sink_slow = sink!(NoopSink);
-            sink_fast = sink!(NoopSink);
+            numbers = async_source!(serde_json::Value => DelayedTwoEventSource::new());
+            slow = async_transform!(serde_json::Value -> serde_json::Value => SlowTransform::new());
+            fast = async_transform!(serde_json::Value -> serde_json::Value => FastTransform::new());
+            sink_slow = sink!(serde_json::Value => NoopSink);
+            sink_fast = sink!(serde_json::Value => NoopSink);
         },
 
         topology: {

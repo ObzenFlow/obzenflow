@@ -116,16 +116,16 @@ async fn groupby_with_on_eof_emits_one_aggregate_per_key() {
         middleware: [],
 
         stages: {
-            src = source!(TransactionSource::new(10));
+            src = source!(serde_json::Value => TransactionSource::new(10));
             sales_by_product = stateful!(
-                GroupBy::new("product_id", |event: &ChainEvent, stats: &mut ProductStats| {
+                serde_json::Value -> serde_json::Value => GroupBy::new("product_id", |event: &ChainEvent, stats: &mut ProductStats| {
                     stats.quantity_sold += event.payload()["quantity"].as_u64().unwrap_or(0);
                     stats.revenue += event.payload()["revenue"].as_f64().unwrap_or(0.0);
                     stats.transaction_count += 1;
                 })
                 .emit_on_eof()
             );
-            sink = sink!(sink);
+            sink = sink!(serde_json::Value => sink);
         },
 
         topology: {
@@ -162,9 +162,9 @@ async fn reduce_with_on_eof_emits_single_total() {
         middleware: [],
 
         stages: {
-            src = source!(TransactionSource::new(5));
+            src = source!(serde_json::Value => TransactionSource::new(5));
             totals = stateful!(
-                Reduce::new(
+                serde_json::Value -> serde_json::Value => Reduce::new(
                     TotalStats { total_revenue: 0.0, total_transactions: 0, total_quantity: 0 },
                     |stats: &mut TotalStats, event: &ChainEvent| {
                         stats.total_revenue += event.payload()["revenue"].as_f64().unwrap_or(0.0);
@@ -174,7 +174,7 @@ async fn reduce_with_on_eof_emits_single_total() {
                 )
                 .emit_on_eof()
             );
-            sink = sink!(sink);
+            sink = sink!(serde_json::Value => sink);
         },
 
         topology: {
@@ -203,12 +203,12 @@ async fn conflate_emits_latest_value_per_key() {
         middleware: [],
 
         stages: {
-            src = source!(TransactionSource::new(8));
+            src = source!(serde_json::Value => TransactionSource::new(8));
             latest_by_product = stateful!(
-                Conflate::new("product_id")
+                serde_json::Value -> serde_json::Value => Conflate::new("product_id")
                     .emit_within(Duration::from_millis(1))
             );
-            sink = sink!(sink);
+            sink = sink!(serde_json::Value => sink);
         },
 
         topology: {

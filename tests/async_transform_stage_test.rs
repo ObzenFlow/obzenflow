@@ -281,9 +281,9 @@ async fn async_transform_routes_error_kinds_to_correct_journal() -> Result<()> {
         middleware: [],
 
         stages: {
-            source = source!(TestEventSource::new());
-            async_errors = async_transform!(transform);
-            sink = sink!(counter_sink);
+            source = source!(serde_json::Value => TestEventSource::new());
+            async_errors = async_transform!(serde_json::Value -> serde_json::Value => transform);
+            sink = sink!(serde_json::Value => counter_sink);
         },
 
         topology: {
@@ -436,11 +436,11 @@ async fn async_transform_applies_stage_middleware() -> Result<()> {
         middleware: [],
 
         stages: {
-            source = source!(TestEventSource::new());
-            mw_transform = async_transform!(AsyncPassThroughTransform, [
+            source = source!(serde_json::Value => TestEventSource::new());
+            mw_transform = async_transform!(serde_json::Value -> serde_json::Value => AsyncPassThroughTransform, [
                 InjectFieldFactory
             ]);
-            sink = sink!(sink);
+            sink = sink!(serde_json::Value => sink);
         },
 
         topology: {
@@ -490,9 +490,9 @@ async fn async_transform_drain_failure_is_stage_level_failure() -> Result<()> {
         middleware: [],
 
         stages: {
-            source = source!(TestEventSource::new());
-            drain_fail_transform = async_transform!(transform);
-            sink = sink!(sink);
+            source = source!(serde_json::Value => TestEventSource::new());
+            drain_fail_transform = async_transform!(serde_json::Value -> serde_json::Value => transform);
+            sink = sink!(serde_json::Value => sink);
         },
 
         topology: {

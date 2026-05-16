@@ -325,11 +325,11 @@ async fn flowip_051p_fan_out_siblings_converge_without_spurious_abort() -> Resul
         middleware: [],
 
         stages: {
-            src = source!(SingleSeedFanOutSource::new(fan_out, target_round_trips));
-            entry = transform!(FanOutEntryTransform::new(entry_processed_for_flow));
-            pass = transform!(PassThroughTransform);
-            iter = transform!(IterationTransform::new(iter_processed_for_flow));
-            snk = sink!(sink);
+            src = source!(serde_json::Value => SingleSeedFanOutSource::new(fan_out, target_round_trips));
+            entry = transform!(serde_json::Value -> serde_json::Value => FanOutEntryTransform::new(entry_processed_for_flow));
+            pass = transform!(serde_json::Value -> serde_json::Value => PassThroughTransform);
+            iter = transform!(serde_json::Value -> serde_json::Value => IterationTransform::new(iter_processed_for_flow));
+            snk = sink!(serde_json::Value => sink);
         },
 
         topology: {

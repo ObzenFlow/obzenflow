@@ -474,20 +474,38 @@ macro_rules! build_typed_flow {
                 .map_err(FlowBuildError::TopologyValidationFailed)?,
         );
 
-        let edge_warnings = $crate::dsl::typing::collect_edge_warnings(
-            &topology,
-            &descriptors,
-            &name_to_id,
-        );
-        for warning in &edge_warnings {
-            tracing::warn!(
-                upstream_stage = %warning.upstream_stage,
-                downstream_stage = %warning.downstream_stage,
-                upstream_type = %warning.upstream_type,
-                expected_type = %warning.expected_type,
-                input_role = %warning.input_role.as_str(),
-                "Typed edge compatibility mismatch"
-            );
+        // FLOWIP-114c PR D: validate_edge_typing returns Result<(), Vec<EdgeError>>.
+        // The first edge error is promoted to a hard FlowBuildError::EdgeTypingMismatch
+        // so downstream tooling sees a structured error rather than a tracing warning.
+        // Composite-internal edges are skipped inside validate_edge_typing.
+        if let Err(edge_errors) =
+            $crate::dsl::typing::validate_edge_typing(&topology, &descriptors, &name_to_id)
+        {
+            // Surface every error to tracing so the build log captures the full set.
+            for err in &edge_errors {
+                tracing::error!(
+                    upstream_stage = %err.upstream_stage,
+                    downstream_stage = %err.downstream_stage,
+                    upstream_type = %err.upstream_type,
+                    expected_type = %err.expected_type,
+                    input_role = %err.input_role.as_str(),
+                    "Typed edge compatibility mismatch"
+                );
+            }
+            let first = edge_errors.into_iter().next().expect("Err carries at least one error");
+            return Err($crate::dsl::error::FlowBuildError::EdgeTypingMismatch {
+                upstream_stage: first.upstream_stage,
+                downstream_stage: first.downstream_stage,
+                role: first.input_role.as_str().to_string(),
+                expected_type: first.expected_type,
+                actual_type: first.upstream_type,
+                kind: $crate::dsl::error::EdgeTypingMismatchKind::SingleEdge,
+                suggested_fix: "Insert an alignment transform, use a join for two-input typed \
+                                fan-in, or align upstream output types so the fan-in is \
+                                homogeneous. See FLOWIP-114c \"How to handle heterogeneous \
+                                fan-in.\""
+                    .to_string(),
+            });
         }
 
         // FLOWIP-051l (P0): backflow cycles are currently only supported for transform stages.

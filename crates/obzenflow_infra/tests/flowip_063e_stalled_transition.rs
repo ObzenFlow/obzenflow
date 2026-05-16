@@ -117,9 +117,9 @@ async fn flowip_063e_emits_stalled_transition_without_aborting_pipeline() {
         middleware: [],
 
         stages: {
-            numbers = source!(OneEventSource::new());
-            slow = async_transform!(StallingTransform::new());
-            sink = sink!(NoopSink);
+            numbers = source!(serde_json::Value => OneEventSource::new());
+            slow = async_transform!(serde_json::Value -> serde_json::Value => StallingTransform::new());
+            sink = sink!(serde_json::Value => NoopSink);
         },
 
         topology: {

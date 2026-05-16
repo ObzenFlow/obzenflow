@@ -208,7 +208,7 @@ fn build_flow() -> obzenflow_dsl::FlowDefinition {
 
         stages: {
             // Source: scripted stream of payment commands across three phases.
-            payments = source!(PaymentCommandSource::new(), [
+            payments = source!(PaymentCommand => PaymentCommandSource::new(), [
                 backpressure(BACKPRESSURE_WINDOW),
                 // Source-side circuit breaker: for real-world sources (MQTT, HTTP scrape, etc.)
                 // this prevents hot loops when the upstream feed is unhealthy.
@@ -224,7 +224,7 @@ fn build_flow() -> obzenflow_dsl::FlowDefinition {
 
             // Local validation: cheap checks that do NOT involve external IO.
             // Validation failures are tagged as errors and still emitted.
-            validated = transform!(name: "validation", ValidationTransform, [
+            validated = transform!(name: "validation", PaymentCommand -> ValidatedPayment => ValidationTransform, [
                 backpressure(BACKPRESSURE_WINDOW)
             ]);
 
@@ -243,7 +243,7 @@ fn build_flow() -> obzenflow_dsl::FlowDefinition {
             // - Slow-call contribution for gateway calls that take too long.
             // - Explicit Open/HalfOpen policies that still match the original
             //   semantics (emit fallback while Open; single-probe HalfOpen).
-            gateway = async_transform!(GatewayTransform, [
+            gateway = async_transform!(ValidatedPayment -> AuthorizedPayment => GatewayTransform, [
                 CircuitBreakerBuilder::new(3)
                     .cooldown(std::time::Duration::from_secs(5))
                     // Rate-based failure mode: open when >= 60% of the last
@@ -272,7 +272,7 @@ fn build_flow() -> obzenflow_dsl::FlowDefinition {
             ]);
 
             // Single sink that prints a concise summary at the end.
-            summary = sink!(PaymentSummarySink::new());
+            summary = sink!(AuthorizedPayment => PaymentSummarySink::new());
         },
 
         topology: {
@@ -333,6 +333,7 @@ fn build_glitchy_flow(config: GlitchyFlowConfig) -> obzenflow_dsl::FlowDefinitio
         .build()
     } else {
         source!(
+            PaymentCommand =>
             ScrapedGlitchyPaymentCommandSource::with_cycle(
                 total_events,
                 warmup_events,
@@ -363,10 +364,10 @@ fn build_glitchy_flow(config: GlitchyFlowConfig) -> obzenflow_dsl::FlowDefinitio
 
         stages: {
             payments = payments_stage;
-            validated = transform!(name: "validation", ValidationTransform, [
+            validated = transform!(name: "validation", PaymentCommand -> ValidatedPayment => ValidationTransform, [
                 backpressure(BACKPRESSURE_WINDOW)
             ]);
-            gateway = async_transform!(GatewayTransform, [
+            gateway = async_transform!(ValidatedPayment -> AuthorizedPayment => GatewayTransform, [
                 CircuitBreakerBuilder::new(3)
                     .cooldown(std::time::Duration::from_secs(5))
                     .rate_based_over_last_n_calls(5, 0.6)
@@ -386,7 +387,7 @@ fn build_glitchy_flow(config: GlitchyFlowConfig) -> obzenflow_dsl::FlowDefinitio
                     .with_contract_mode(CircuitBreakerContractMode::BreakerAware)
                     .build()
             ]);
-            summary = sink!(PaymentSummarySink::new_compact(summary_progress_every));
+            summary = sink!(AuthorizedPayment => PaymentSummarySink::new_compact(summary_progress_every));
         },
 
         topology: {
@@ -445,14 +446,14 @@ fn build_strict_flow() -> obzenflow_dsl::FlowDefinition {
         ],
 
         stages: {
-            payments = source!(name: "payments_strict", PaymentCommandSource::new(), [
+            payments = source!(name: "payments_strict", PaymentCommand => PaymentCommandSource::new(), [
                 backpressure(BACKPRESSURE_WINDOW)
             ]);
-            validated = transform!(name: "validation_strict", ValidationTransform, [
+            validated = transform!(name: "validation_strict", PaymentCommand -> ValidatedPayment => ValidationTransform, [
                 backpressure(BACKPRESSURE_WINDOW)
             ]);
-            gateway = async_transform!(name: "gateway_strict", GatewayTransform);
-            summary = sink!(name: "summary_strict", PaymentSummarySink::new());
+            gateway = async_transform!(name: "gateway_strict", ValidatedPayment -> AuthorizedPayment => GatewayTransform);
+            summary = sink!(name: "summary_strict", AuthorizedPayment => PaymentSummarySink::new());
         },
 
         topology: {

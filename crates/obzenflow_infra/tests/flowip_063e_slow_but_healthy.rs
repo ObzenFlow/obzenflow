@@ -135,9 +135,9 @@ async fn flowip_063e_slow_but_healthy_completes_and_emits_liveness_transitions()
         middleware: [],
 
         stages: {
-            numbers = source!(TwoEventSource::new());
-            slow_ai = async_transform!(SlowAiTransform::new());
-            sink = sink!(NoopSink);
+            numbers = source!(serde_json::Value => TwoEventSource::new());
+            slow_ai = async_transform!(serde_json::Value -> serde_json::Value => SlowAiTransform::new());
+            sink = sink!(serde_json::Value => NoopSink);
         },
 
         topology: {

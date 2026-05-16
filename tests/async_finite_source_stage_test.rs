@@ -152,8 +152,8 @@ async fn async_finite_source_emits_events_and_calls_drain() -> Result<()> {
         middleware: [],
 
         stages: {
-            source = async_source!(source);
-            sink = sink!(sink);
+            source = async_source!(serde_json::Value => source);
+            sink = sink!(serde_json::Value => sink);
         },
 
         topology: {
@@ -199,10 +199,10 @@ async fn async_finite_source_applies_stage_middleware() -> Result<()> {
         middleware: [],
 
         stages: {
-            source = async_source!(source, [
+            source = async_source!(serde_json::Value => source, [
                 InjectFieldFactory
             ]);
-            sink = sink!(sink);
+            sink = sink!(serde_json::Value => sink);
         },
 
         topology: {

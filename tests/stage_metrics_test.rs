@@ -141,9 +141,9 @@ async fn test_stage_level_metrics_automatic() -> Result<()> {
         middleware: [],
 
         stages: {
-            test_source = source!(source);
-            uppercase_transform = transform!(transform);
-            collector_sink = sink!(sink);
+            test_source = source!(serde_json::Value => source);
+            uppercase_transform = transform!(serde_json::Value -> serde_json::Value => transform);
+            collector_sink = sink!(serde_json::Value => sink);
         },
 
         topology: {

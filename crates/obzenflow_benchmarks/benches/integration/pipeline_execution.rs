@@ -177,8 +177,8 @@ async fn build_pipeline(
             middleware: [],
 
             stages: {
-                src = source!(source);
-                snk = sink!(sink);
+                src = source!(serde_json::Value => source);
+                snk = sink!(serde_json::Value => sink);
             },
 
             topology: {
@@ -192,10 +192,10 @@ async fn build_pipeline(
             middleware: [],
 
             stages: {
-                src = source!(source);
-                s1 = transform!(PassthroughStage::new("stage1"));
-                s2 = transform!(PassthroughStage::new("stage2"));
-                snk = sink!(sink);
+                src = source!(serde_json::Value => source);
+                s1 = transform!(serde_json::Value -> serde_json::Value => PassthroughStage::new("stage1"));
+                s2 = transform!(serde_json::Value -> serde_json::Value => PassthroughStage::new("stage2"));
+                snk = sink!(serde_json::Value => sink);
             },
 
             topology: {
@@ -211,12 +211,12 @@ async fn build_pipeline(
             middleware: [],
 
             stages: {
-                src = source!(source);
-                s1 = transform!(PassthroughStage::new("stage1"));
-                s2 = transform!(PassthroughStage::new("stage2"));
-                s3 = transform!(PassthroughStage::new("stage3"));
-                s4 = transform!(PassthroughStage::new("stage4"));
-                snk = sink!(sink);
+                src = source!(serde_json::Value => source);
+                s1 = transform!(serde_json::Value -> serde_json::Value => PassthroughStage::new("stage1"));
+                s2 = transform!(serde_json::Value -> serde_json::Value => PassthroughStage::new("stage2"));
+                s3 = transform!(serde_json::Value -> serde_json::Value => PassthroughStage::new("stage3"));
+                s4 = transform!(serde_json::Value -> serde_json::Value => PassthroughStage::new("stage4"));
+                snk = sink!(serde_json::Value => sink);
             },
 
             topology: {
@@ -234,17 +234,17 @@ async fn build_pipeline(
             middleware: [],
 
             stages: {
-                src = source!(source);
-                s1 = transform!(PassthroughStage::new("stage1"));
-                s2 = transform!(PassthroughStage::new("stage2"));
-                s3 = transform!(PassthroughStage::new("stage3"));
-                s4 = transform!(PassthroughStage::new("stage4"));
-                s5 = transform!(PassthroughStage::new("stage5"));
-                s6 = transform!(PassthroughStage::new("stage6"));
-                s7 = transform!(PassthroughStage::new("stage7"));
-                s8 = transform!(PassthroughStage::new("stage8"));
-                s9 = transform!(PassthroughStage::new("stage9"));
-                snk = sink!(sink);
+                src = source!(serde_json::Value => source);
+                s1 = transform!(serde_json::Value -> serde_json::Value => PassthroughStage::new("stage1"));
+                s2 = transform!(serde_json::Value -> serde_json::Value => PassthroughStage::new("stage2"));
+                s3 = transform!(serde_json::Value -> serde_json::Value => PassthroughStage::new("stage3"));
+                s4 = transform!(serde_json::Value -> serde_json::Value => PassthroughStage::new("stage4"));
+                s5 = transform!(serde_json::Value -> serde_json::Value => PassthroughStage::new("stage5"));
+                s6 = transform!(serde_json::Value -> serde_json::Value => PassthroughStage::new("stage6"));
+                s7 = transform!(serde_json::Value -> serde_json::Value => PassthroughStage::new("stage7"));
+                s8 = transform!(serde_json::Value -> serde_json::Value => PassthroughStage::new("stage8"));
+                s9 = transform!(serde_json::Value -> serde_json::Value => PassthroughStage::new("stage9"));
+                snk = sink!(serde_json::Value => sink);
             },
 
             topology: {

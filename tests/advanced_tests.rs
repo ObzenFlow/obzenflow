@@ -137,9 +137,9 @@ async fn test_dsl_pipeline() -> Result<()> {
         middleware: [],
 
         stages: {
-            generator = source!(EventGenerator::new());
-            doubler = transform!(Doubler::new());
-            summer = sink!(summer);
+            generator = source!(serde_json::Value => EventGenerator::new());
+            doubler = transform!(serde_json::Value -> serde_json::Value => Doubler::new());
+            summer = sink!(serde_json::Value => summer);
         },
 
         topology: {

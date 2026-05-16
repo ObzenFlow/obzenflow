@@ -443,8 +443,8 @@ where
         let chunk_descriptor = wrap_typed_descriptor(
             Box::new(chunk_descriptor),
             StageTypingMetadata::transform(
-                TypeHint::exact(type_name::<In>()),
-                TypeHint::exact(type_name::<Chunk>()),
+                TypeHint::exact::<In>(),
+                TypeHint::exact::<Chunk>(),
                 false,
                 None,
             ),
@@ -466,8 +466,8 @@ where
         let map_descriptor = wrap_typed_descriptor(
             Box::new(map_descriptor),
             StageTypingMetadata::transform(
-                TypeHint::exact(type_name::<Chunk>()),
-                TypeHint::exact(type_name::<Partial>()),
+                TypeHint::exact::<Chunk>(),
+                TypeHint::exact::<Partial>(),
                 false,
                 None,
             ),
@@ -485,8 +485,8 @@ where
         let collect_descriptor = wrap_typed_descriptor(
             Box::new(collect_descriptor),
             StageTypingMetadata::stateful(
-                TypeHint::exact(type_name::<Partial>()),
-                TypeHint::exact(type_name::<Collected>()),
+                TypeHint::exact::<Partial>(),
+                TypeHint::exact::<Collected>(),
                 false,
                 None,
             ),
@@ -504,8 +504,8 @@ where
         let finalize_descriptor = wrap_typed_descriptor(
             Box::new(finalize_descriptor),
             StageTypingMetadata::transform(
-                TypeHint::exact(type_name::<Collected>()),
-                TypeHint::exact(type_name::<Out>()),
+                TypeHint::exact::<Collected>(),
+                TypeHint::exact::<Out>(),
                 false,
                 None,
             ),

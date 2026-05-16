@@ -170,11 +170,11 @@ async fn rate_limiter_low_rate_half_eps_processes_all_events() -> Result<()> {
         middleware: [],
 
         stages: {
-            src = source!(SequenceSource::new(2));
-            throttled = transform!(PassthroughTransform, [
+            src = source!(serde_json::Value => SequenceSource::new(2));
+            throttled = transform!(serde_json::Value -> serde_json::Value => PassthroughTransform, [
                 rate_limit(0.5)
             ]);
-            snk = sink!(sink);
+            snk = sink!(serde_json::Value => sink);
         },
 
         topology: {
@@ -210,13 +210,13 @@ async fn rate_limiter_weighted_default_burst_makes_progress() -> Result<()> {
         middleware: [],
 
         stages: {
-            src = source!(SequenceSource::new(1));
-            throttled = transform!(PassthroughTransform, [
+            src = source!(serde_json::Value => SequenceSource::new(1));
+            throttled = transform!(serde_json::Value -> serde_json::Value => PassthroughTransform, [
                 RateLimiterBuilder::new(2.0)
                     .with_cost_per_event(5.0)
                     .build()
             ]);
-            snk = sink!(sink);
+            snk = sink!(serde_json::Value => sink);
         },
 
         topology: {
@@ -244,14 +244,14 @@ async fn rate_limiter_invalid_explicit_burst_fails_at_materialisation() {
         middleware: [],
 
         stages: {
-            src = source!(SequenceSource::new(1));
-            throttled = transform!(PassthroughTransform, [
+            src = source!(serde_json::Value => SequenceSource::new(1));
+            throttled = transform!(serde_json::Value -> serde_json::Value => PassthroughTransform, [
                 RateLimiterBuilder::new(10.0)
                     .with_burst(2.0)
                     .with_cost_per_event(5.0)
                     .build()
             ]);
-            snk = sink!(CountingSink::new().0);
+            snk = sink!(serde_json::Value => CountingSink::new().0);
         },
 
         topology: {
@@ -282,11 +282,11 @@ async fn rate_limiter_source_stage_limits_per_poll_and_documents_batching() -> R
         middleware: [],
 
         stages: {
-            src = source!(BatchedSource::new(vec![2, 2]), [
+            src = source!(serde_json::Value => BatchedSource::new(vec![2, 2]), [
                 rate_limit(1.0)
             ]);
-            passthrough = transform!(PassthroughTransform);
-            snk = sink!(sink);
+            passthrough = transform!(serde_json::Value -> serde_json::Value => PassthroughTransform);
+            snk = sink!(serde_json::Value => sink);
         },
 
         topology: {

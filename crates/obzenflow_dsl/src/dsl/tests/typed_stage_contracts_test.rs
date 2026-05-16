@@ -22,12 +22,13 @@ mod tests {
     };
     use obzenflow_topology::{StageType as TopologyStageType, TopologyBuilder, TypeHintInfo};
     use serde::{Deserialize, Serialize};
+    use std::any::type_name;
     use std::collections::HashMap;
     use std::time::Duration;
 
     use crate::dsl::stage_descriptor::StageDescriptor;
     use crate::dsl::typing::{
-        collect_edge_warnings, collect_stage_typing_info, EdgeInputRole, TypeHint,
+        collect_stage_typing_info, validate_edge_typing, EdgeInputRole, TypeHint,
     };
 
     #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -211,28 +212,6 @@ mod tests {
     }
 
     #[derive(Clone, Debug)]
-    struct InternalMixedMarker;
-
-    #[derive(Clone, Debug)]
-    struct MixedTransform;
-
-    impl TransformTyping for MixedTransform {
-        type Input = InternalMixedMarker;
-        type Output = OutputEvent;
-    }
-
-    #[async_trait]
-    impl TransformHandler for MixedTransform {
-        fn process(&self, _event: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> {
-            Ok(vec![])
-        }
-
-        async fn drain(&mut self) -> Result<(), HandlerError> {
-            Ok(())
-        }
-    }
-
-    #[derive(Clone, Debug)]
     struct ExactStateful;
 
     impl StatefulTyping for ExactStateful {
@@ -264,20 +243,6 @@ mod tests {
     impl SinkHandler for ExactSink {
         async fn consume(&mut self, _event: ChainEvent) -> Result<DeliveryPayload, HandlerError> {
             Ok(DeliveryPayload::success("sink", DeliveryMethod::Noop, None))
-        }
-    }
-
-    #[derive(Clone, Debug)]
-    struct MixedAuditSink;
-
-    #[async_trait]
-    impl SinkHandler for MixedAuditSink {
-        async fn consume(&mut self, _event: ChainEvent) -> Result<DeliveryPayload, HandlerError> {
-            Ok(DeliveryPayload::success(
-                "audit",
-                DeliveryMethod::Noop,
-                None,
-            ))
         }
     }
 
@@ -316,8 +281,8 @@ mod tests {
         }
     }
 
-    fn exact(name: &str) -> TypeHint {
-        TypeHint::Exact(name.to_string())
+    fn exact<T: 'static>() -> TypeHint {
+        TypeHint::exact::<T>()
     }
 
     #[test]
@@ -325,20 +290,20 @@ mod tests {
         let source = crate::source!(name: "source", InputEvent => SyncExactSource);
         assert_eq!(
             source.typing_metadata().unwrap().output_type,
-            exact("InputEvent")
+            exact::<InputEvent>()
         );
 
         let async_source =
             crate::async_source!(name: "async_source", InputEvent => AsyncExactSource);
         assert_eq!(
             async_source.typing_metadata().unwrap().output_type,
-            exact("InputEvent")
+            exact::<InputEvent>()
         );
 
         let infinite = crate::infinite_source!(name: "infinite", InputEvent => InfiniteExactSource);
         assert_eq!(
             infinite.typing_metadata().unwrap().output_type,
-            exact("InputEvent")
+            exact::<InputEvent>()
         );
 
         let async_infinite = crate::async_infinite_source!(
@@ -347,40 +312,40 @@ mod tests {
         );
         assert_eq!(
             async_infinite.typing_metadata().unwrap().output_type,
-            exact("InputEvent")
+            exact::<InputEvent>()
         );
 
         let transform =
             crate::transform!(name: "transform", InputEvent -> OutputEvent => ExactTransform);
         let transform_meta = transform.typing_metadata().unwrap();
-        assert_eq!(transform_meta.input_type, exact("InputEvent"));
-        assert_eq!(transform_meta.output_type, exact("OutputEvent"));
+        assert_eq!(transform_meta.input_type, exact::<InputEvent>());
+        assert_eq!(transform_meta.output_type, exact::<OutputEvent>());
 
         let untyped_transform = crate::transform!(
             name: "untyped_transform",
             InputEvent -> OutputEvent => UntypedTransform
         );
         let untyped_transform_meta = untyped_transform.typing_metadata().unwrap();
-        assert_eq!(untyped_transform_meta.input_type, exact("InputEvent"));
-        assert_eq!(untyped_transform_meta.output_type, exact("OutputEvent"));
+        assert_eq!(untyped_transform_meta.input_type, exact::<InputEvent>());
+        assert_eq!(untyped_transform_meta.output_type, exact::<OutputEvent>());
 
         let async_transform = crate::async_transform!(
             name: "async_transform",
             InputEvent -> OutputEvent => ExactAsyncTransform
         );
         let async_transform_meta = async_transform.typing_metadata().unwrap();
-        assert_eq!(async_transform_meta.input_type, exact("InputEvent"));
-        assert_eq!(async_transform_meta.output_type, exact("OutputEvent"));
+        assert_eq!(async_transform_meta.input_type, exact::<InputEvent>());
+        assert_eq!(async_transform_meta.output_type, exact::<OutputEvent>());
 
         let untyped_async_transform = crate::async_transform!(
             name: "untyped_async_transform",
             InputEvent -> OutputEvent => UntypedAsyncTransform
         );
         let untyped_async_transform_meta = untyped_async_transform.typing_metadata().unwrap();
-        assert_eq!(untyped_async_transform_meta.input_type, exact("InputEvent"));
+        assert_eq!(untyped_async_transform_meta.input_type, exact::<InputEvent>());
         assert_eq!(
             untyped_async_transform_meta.output_type,
-            exact("OutputEvent")
+            exact::<OutputEvent>()
         );
 
         let stateful = crate::stateful!(
@@ -389,13 +354,13 @@ mod tests {
             emit_interval = Duration::from_secs(5)
         );
         let stateful_meta = stateful.typing_metadata().unwrap();
-        assert_eq!(stateful_meta.input_type, exact("InputEvent"));
-        assert_eq!(stateful_meta.output_type, exact("OutputEvent"));
+        assert_eq!(stateful_meta.input_type, exact::<InputEvent>());
+        assert_eq!(stateful_meta.output_type, exact::<OutputEvent>());
 
         let sink = crate::sink!(name: "sink", OutputEvent => ExactSink);
         assert_eq!(
             sink.typing_metadata().unwrap().input_type,
-            exact("OutputEvent")
+            exact::<OutputEvent>()
         );
 
         let join = crate::join!(
@@ -404,9 +369,9 @@ mod tests {
             StreamEvent -> JoinedEvent => ExactJoin
         );
         let join_meta = join.typing_metadata().unwrap();
-        assert_eq!(join_meta.reference_type, exact("ReferenceEvent"));
-        assert_eq!(join_meta.stream_type, exact("StreamEvent"));
-        assert_eq!(join_meta.output_type, exact("JoinedEvent"));
+        assert_eq!(join_meta.reference_type, exact::<ReferenceEvent>());
+        assert_eq!(join_meta.stream_type, exact::<StreamEvent>());
+        assert_eq!(join_meta.output_type, exact::<JoinedEvent>());
         assert!(!join_meta.is_placeholder);
     }
 
@@ -423,7 +388,7 @@ mod tests {
         );
         descriptors.insert(
             "transform".to_string(),
-            crate::transform!(name: "transform", mixed -> OutputEvent => MixedTransform),
+            crate::transform!(name: "transform", InputEvent -> OutputEvent => ExactTransform),
         );
         descriptors.insert(
             "join".to_string(),
@@ -445,31 +410,33 @@ mod tests {
         assert_eq!(
             stage_typing.get(&source_id).unwrap().output_type,
             TypeHintInfo::Exact {
-                name: "InputEvent".to_string()
+                name: type_name::<InputEvent>().to_string()
             }
         );
         assert_eq!(
             stage_typing.get(&transform_id).unwrap().input_type,
-            TypeHintInfo::Mixed
+            TypeHintInfo::Exact {
+                name: type_name::<InputEvent>().to_string()
+            }
         );
 
         let join_typing = stage_typing.get(&join_id).unwrap();
         assert_eq!(
             join_typing.reference_type,
             TypeHintInfo::Exact {
-                name: "ReferenceEvent".to_string()
+                name: type_name::<ReferenceEvent>().to_string()
             }
         );
         assert_eq!(
             join_typing.stream_type,
             TypeHintInfo::Exact {
-                name: "StreamEvent".to_string()
+                name: type_name::<StreamEvent>().to_string()
             }
         );
         assert_eq!(
             join_typing.output_type,
             TypeHintInfo::Exact {
-                name: "JoinedEvent".to_string()
+                name: type_name::<JoinedEvent>().to_string()
             }
         );
     }
@@ -502,7 +469,7 @@ mod tests {
     }
 
     #[test]
-    fn placeholders_and_mixed_inputs_capture_metadata() {
+    fn placeholders_capture_metadata() {
         let source = crate::source!(name: "source", InputEvent => placeholder!("awaiting source"));
         let source_meta = source.typing_metadata().unwrap();
         assert!(source_meta.is_placeholder);
@@ -517,39 +484,16 @@ mod tests {
         );
         let async_transform_meta = async_transform.typing_metadata().unwrap();
         assert!(async_transform_meta.is_placeholder);
-        assert_eq!(async_transform_meta.input_type, exact("InputEvent"));
-        assert_eq!(async_transform_meta.output_type, exact("OutputEvent"));
-
-        let mixed_sink = crate::sink!(name: "audit", mixed => placeholder!("route everything"));
-        let mixed_sink_meta = mixed_sink.typing_metadata().unwrap();
-        assert!(mixed_sink_meta.is_placeholder);
-        assert_eq!(mixed_sink_meta.input_type, TypeHint::Mixed);
-        assert_eq!(
-            mixed_sink_meta.placeholder_message.as_deref(),
-            Some("route everything")
-        );
+        assert_eq!(async_transform_meta.input_type, exact::<InputEvent>());
+        assert_eq!(async_transform_meta.output_type, exact::<OutputEvent>());
     }
 
+    /// FLOWIP-114c: validate_edge_typing returns Err with one EdgeError per
+    /// mismatched forward edge.
     #[test]
-    fn mixed_input_macros_only_assert_exact_positions() {
-        let transform = crate::transform!(name: "router", mixed -> OutputEvent => MixedTransform);
-        let transform_meta = transform.typing_metadata().unwrap();
-        assert_eq!(transform_meta.input_type, TypeHint::Mixed);
-        assert_eq!(transform_meta.output_type, exact("OutputEvent"));
-        assert!(!transform_meta.is_placeholder);
-
-        let sink = crate::sink!(name: "audit", mixed => MixedAuditSink);
-        let sink_meta = sink.typing_metadata().unwrap();
-        assert_eq!(sink_meta.input_type, TypeHint::Mixed);
-        assert_eq!(sink_meta.output_type, TypeHint::Unspecified);
-        assert!(!sink_meta.is_placeholder);
-    }
-
-    #[test]
-    fn collect_edge_warnings_reports_exact_mismatch_and_suppresses_mixed() {
+    fn validate_edge_typing_reports_exact_mismatch() {
         let source_id = StageId::new();
-        let exact_sink_id = StageId::new();
-        let mixed_sink_id = StageId::new();
+        let sink_id = StageId::new();
 
         let mut descriptors: HashMap<String, Box<dyn StageDescriptor>> = HashMap::new();
         descriptors.insert(
@@ -557,18 +501,13 @@ mod tests {
             crate::source!(name: "source", InputEvent => placeholder!()),
         );
         descriptors.insert(
-            "exact_sink".to_string(),
-            crate::sink!(name: "exact_sink", OutputEvent => placeholder!()),
-        );
-        descriptors.insert(
-            "mixed_sink".to_string(),
-            crate::sink!(name: "mixed_sink", mixed => placeholder!()),
+            "sink".to_string(),
+            crate::sink!(name: "sink", OutputEvent => placeholder!()),
         );
 
         let mut name_to_id = HashMap::new();
         name_to_id.insert("source".to_string(), source_id);
-        name_to_id.insert("exact_sink".to_string(), exact_sink_id);
-        name_to_id.insert("mixed_sink".to_string(), mixed_sink_id);
+        name_to_id.insert("sink".to_string(), sink_id);
 
         let mut topology = TopologyBuilder::new();
         topology.add_stage_with_id(
@@ -578,32 +517,26 @@ mod tests {
         );
         topology.reset_current();
         topology.add_stage_with_id(
-            exact_sink_id.to_topology_id(),
-            Some("exact_sink".to_string()),
+            sink_id.to_topology_id(),
+            Some("sink".to_string()),
             TopologyStageType::Sink,
         );
         topology.reset_current();
-        topology.add_stage_with_id(
-            mixed_sink_id.to_topology_id(),
-            Some("mixed_sink".to_string()),
-            TopologyStageType::Sink,
-        );
-        topology.reset_current();
-        topology.add_edge(source_id.to_topology_id(), exact_sink_id.to_topology_id());
-        topology.add_edge(source_id.to_topology_id(), mixed_sink_id.to_topology_id());
+        topology.add_edge(source_id.to_topology_id(), sink_id.to_topology_id());
         let topology = topology.build_unchecked().unwrap();
 
-        let warnings = collect_edge_warnings(&topology, &descriptors, &name_to_id);
-        assert_eq!(warnings.len(), 1);
-        assert_eq!(warnings[0].upstream_stage, "source");
-        assert_eq!(warnings[0].downstream_stage, "exact_sink");
-        assert_eq!(warnings[0].upstream_type, "InputEvent");
-        assert_eq!(warnings[0].expected_type, "OutputEvent");
-        assert_eq!(warnings[0].input_role, EdgeInputRole::Input);
+        let errors = validate_edge_typing(&topology, &descriptors, &name_to_id)
+            .expect_err("expected an EdgeError for the mismatched edge");
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].upstream_stage, "source");
+        assert_eq!(errors[0].downstream_stage, "sink");
+        assert_eq!(errors[0].upstream_type, type_name::<InputEvent>());
+        assert_eq!(errors[0].expected_type, type_name::<OutputEvent>());
+        assert_eq!(errors[0].input_role, EdgeInputRole::Input);
     }
 
     #[test]
-    fn collect_edge_warnings_distinguishes_join_reference_and_stream_roles() {
+    fn validate_edge_typing_distinguishes_join_reference_and_stream_roles() {
         let reference_id = StageId::new();
         let stream_id = StageId::new();
         let join_id = StageId::new();
@@ -654,20 +587,21 @@ mod tests {
         topology.add_edge(stream_id.to_topology_id(), join_id.to_topology_id());
         let topology = topology.build_unchecked().unwrap();
 
-        let mut warnings = collect_edge_warnings(&topology, &descriptors, &name_to_id);
-        warnings.sort_by_key(|warning| match warning.input_role {
+        let mut errors = validate_edge_typing(&topology, &descriptors, &name_to_id)
+            .expect_err("expected EdgeErrors on join reference + stream mismatches");
+        errors.sort_by_key(|err| match err.input_role {
             EdgeInputRole::Reference => 0,
             EdgeInputRole::Stream => 1,
             EdgeInputRole::Input => 2,
         });
 
-        assert_eq!(warnings.len(), 2);
-        assert_eq!(warnings[0].input_role, EdgeInputRole::Reference);
-        assert_eq!(warnings[0].upstream_type, "InputEvent");
-        assert_eq!(warnings[0].expected_type, "ReferenceEvent");
+        assert_eq!(errors.len(), 2);
+        assert_eq!(errors[0].input_role, EdgeInputRole::Reference);
+        assert_eq!(errors[0].upstream_type, type_name::<InputEvent>());
+        assert_eq!(errors[0].expected_type, type_name::<ReferenceEvent>());
 
-        assert_eq!(warnings[1].input_role, EdgeInputRole::Stream);
-        assert_eq!(warnings[1].upstream_type, "AlternateEvent");
-        assert_eq!(warnings[1].expected_type, "StreamEvent");
+        assert_eq!(errors[1].input_role, EdgeInputRole::Stream);
+        assert_eq!(errors[1].upstream_type, type_name::<AlternateEvent>());
+        assert_eq!(errors[1].expected_type, type_name::<StreamEvent>());
     }
 }

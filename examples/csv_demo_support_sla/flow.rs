@@ -133,11 +133,11 @@ fn build_flow(
             customers = source!(Customer => customers);
             tickets = source!(Ticket => tickets);
 
-            triage = transform!(TicketTriage::new());
+            triage = transform!(Ticket -> TriagedTicket => TicketTriage::new());
 
             enrich = join!(catalog customers: Customer, TriagedTicket -> EnrichedTicket => join_handler);
 
-            csv_out = sink!(output_sink);
+            csv_out = sink!(EnrichedTicket => output_sink);
         },
 
         topology: {

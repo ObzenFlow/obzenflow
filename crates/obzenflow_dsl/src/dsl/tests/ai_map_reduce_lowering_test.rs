@@ -254,8 +254,8 @@ mod tests {
         let metadata = digest
             .typing_metadata()
             .expect("ai_map_reduce! should return a typed descriptor wrapper");
-        assert_eq!(metadata.input_type, TypeHint::exact("TestIn"));
-        assert_eq!(metadata.output_type, TypeHint::exact("TestOut"));
+        assert_eq!(metadata.input_type, TypeHint::exact::<TestIn>());
+        assert_eq!(metadata.output_type, TypeHint::exact::<TestOut>());
 
         let mut stages: HashMap<String, Box<dyn StageDescriptor>> = HashMap::new();
         stages.insert("batch".to_string(), mk_transform("batch"));
@@ -314,8 +314,8 @@ mod tests {
         let metadata = digest
             .typing_metadata()
             .expect("ai_map_reduce! should return a typed descriptor wrapper");
-        assert_eq!(metadata.input_type, TypeHint::exact("TestSeed"));
-        assert_eq!(metadata.output_type, TypeHint::exact("TestOut"));
+        assert_eq!(metadata.input_type, TypeHint::exact::<TestSeed>());
+        assert_eq!(metadata.output_type, TypeHint::exact::<TestOut>());
 
         let mut stages: HashMap<String, Box<dyn StageDescriptor>> = HashMap::new();
         stages.insert("batch".to_string(), mk_transform("batch"));
@@ -349,6 +349,56 @@ mod tests {
                 .stage_middleware_names()
                 .contains(&"test_reduce_mw".to_string()),
             "finalise stage should include reduce-scoped middleware from macro surface"
+        );
+    }
+
+    /// FLOWIP-114c Acceptance #20: composite outer-boundary invariant.
+    /// The entry stage must carry an `input_type` matching the composite's
+    /// declared outer input. The exit stage must carry an `output_type`
+    /// matching the composite's declared outer output. Without this, the
+    /// validator's composite-internal-edge skip rule would silently miss a
+    /// boundary mismatch.
+    #[test]
+    fn ai_map_reduce_outer_boundary_input_and_output_types_match_composite_contract() {
+        let digest = ai_map_reduce::map_reduce::<TestIn, TestChunk, TestPartial, TestCollected, TestOut>()
+            .chunker(NoopTransform)
+            .map(NoopAsyncTransform)
+            .collect(obzenflow_runtime::stages::stateful::CollectByInput::new(
+                TestCollected::default(),
+                |acc, partial: &TestPartial| acc.values.push(partial.value),
+            ))
+            .finalize(NoopAsyncTransform)
+            .build();
+
+        let mut stages: HashMap<String, Box<dyn StageDescriptor>> = HashMap::new();
+        stages.insert("digest".to_string(), digest);
+
+        let mut connections: Vec<(String, String, EdgeKind)> = Vec::new();
+        lower_composites(&mut stages, &mut connections)
+            .expect("ai_map_reduce composite should lower without error");
+
+        let entry = stages
+            .get("digest__chunk")
+            .expect("entry stage 'digest__chunk' should exist after lowering");
+        let entry_meta = entry
+            .typing_metadata()
+            .expect("entry stage should carry typing metadata");
+        assert_eq!(
+            entry_meta.input_type,
+            TypeHint::exact::<TestIn>(),
+            "entry stage input_type must equal the composite's declared outer input"
+        );
+
+        let exit = stages
+            .get("digest__finalize")
+            .expect("exit stage 'digest__finalize' should exist after lowering");
+        let exit_meta = exit
+            .typing_metadata()
+            .expect("exit stage should carry typing metadata");
+        assert_eq!(
+            exit_meta.output_type,
+            TypeHint::exact::<TestOut>(),
+            "exit stage output_type must equal the composite's declared outer output"
         );
     }
 

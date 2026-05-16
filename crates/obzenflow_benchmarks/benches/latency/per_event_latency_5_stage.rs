@@ -165,12 +165,12 @@ async fn run_5_stage_pipeline() -> anyhow::Result<Duration> {
         middleware: [],
 
         stages: {
-            src = source!(source);
-            s1 = transform!(PassthroughStage::new("stage1"));
-            s2 = transform!(PassthroughStage::new("stage2"));
-            s3 = transform!(PassthroughStage::new("stage3"));
-            s4 = transform!(PassthroughStage::new("stage4"));
-            snk = sink!(sink);
+            src = source!(serde_json::Value => source);
+            s1 = transform!(serde_json::Value -> serde_json::Value => PassthroughStage::new("stage1"));
+            s2 = transform!(serde_json::Value -> serde_json::Value => PassthroughStage::new("stage2"));
+            s3 = transform!(serde_json::Value -> serde_json::Value => PassthroughStage::new("stage3"));
+            s4 = transform!(serde_json::Value -> serde_json::Value => PassthroughStage::new("stage4"));
+            snk = sink!(serde_json::Value => sink);
         },
 
         topology: {
