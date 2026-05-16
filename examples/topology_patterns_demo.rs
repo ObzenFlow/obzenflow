@@ -2,15 +2,23 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Demo: Topology Patterns - Fan-In, Fan-Out, and Diamond Patterns (FLOWIP-080h)
+//! Demo: Topology Patterns - Homogeneous Fan-In with Content-Based Routing
+//! (FLOWIP-080h, recast under FLOWIP-114c).
 //!
-//! This demonstrates how ObzenFlow naturally handles complex topologies through
-//! independent journal readers and multiple upstream subscriptions.
+//! This is the canonical example of **homogeneous fan-in**: three upstream
+//! sources of the same `RawDataEvent` type feed a single typed aggregator.
+//! The aggregator emits `RawDataEvent` to a router that fans out to three
+//! priority-tiered sinks based on content. Every edge carries one type.
+//!
+//! For the **heterogeneous fan-in** case (three or more sources of different
+//! concrete types feeding one downstream via per-branch alignment
+//! transforms), see `examples/multi_source_ingest_demo.rs` and the
+//! authoring guide at `docs/typed-fan-in.md`.
 //!
 //! **Reference Example for**: Topology patterns, ETL pipelines, multi-source/sink architectures
 //!
 //! Key concepts demonstrated:
-//! - Fan-in: Multiple sources → single aggregator
+//! - Fan-in: Multiple sources → single aggregator (homogeneous on `RawDataEvent`)
 //! - Fan-out: Single router → multiple sinks
 //! - Diamond pattern: Combines both (realistic ETL)
 //! - StatefulHandler for aggregation (no Arc<Mutex>)

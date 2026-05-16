@@ -170,8 +170,8 @@ enabled = false
                     middleware: [],
 
                     stages: {
-                        src = infinite_source!(IdleInfiniteSource);
-                        sink = sink!(NoopSink);
+                        src = infinite_source!(serde_json::Value => IdleInfiniteSource);
+                        sink = sink!(serde_json::Value => NoopSink);
                     },
 
                     topology: {

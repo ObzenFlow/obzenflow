@@ -27,8 +27,11 @@ FlowApplication::run(flow! {
     middleware: [],
 
     stages: {
-        src = source!(my_source);
-        out = sink!(my_sink);
+        // Every stage declares its types. After FLOWIP-114c, untyped macro
+        // forms fail to compile. See `docs/typed-fan-in.md` for the full
+        // authoring guide.
+        src = source!(MyPayload => my_source);
+        out = sink!(MyPayload => my_sink);
     },
 
     topology: {

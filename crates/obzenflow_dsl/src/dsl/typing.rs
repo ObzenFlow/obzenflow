@@ -198,7 +198,7 @@ pub fn collect_stage_typing_info(
 }
 
 /// Which downstream input position was compared for an edge hint.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum EdgeInputRole {
     Input,
     Reference,
@@ -224,8 +224,8 @@ pub struct EdgeError {
     pub upstream_type: String,
     pub expected_type: String,
     pub input_role: EdgeInputRole,
+    pub kind: crate::dsl::error::EdgeTypingMismatchKind,
 }
-
 
 /// Descriptor wrapper that preserves typing metadata through type erasure.
 pub struct TypedStageDescriptor {
@@ -957,18 +957,111 @@ fn select_downstream_input_hint<'a>(
     (EdgeInputRole::Input, &downstream_metadata.input_type)
 }
 
+/// FLOWIP-114c per-stage typing-metadata check. Returns an error if any
+/// descriptor lacks `typing_metadata()` or carries `Unspecified` on a slot
+/// that is applicable for the descriptor's stage role.
+///
+/// Applicable slots by role:
+/// - Source (any kind): `output_type`
+/// - Transform / AsyncTransform / Stateful: `input_type`, `output_type`
+/// - Sink: `input_type`
+/// - Join: `reference_type`, `stream_type`, `output_type`
+#[allow(clippy::result_large_err)]
+pub fn validate_stage_typing_metadata(
+    descriptors: &HashMap<String, Box<dyn StageDescriptor>>,
+) -> Result<(), crate::dsl::error::FlowBuildError> {
+    use crate::dsl::error::FlowBuildError;
+
+    for (name, descriptor) in descriptors {
+        let Some(meta) = descriptor.typing_metadata() else {
+            return Err(FlowBuildError::StageMissingTypingMetadata {
+                stage_name: name.clone(),
+            });
+        };
+
+        let stage_type = descriptor.stage_type();
+        let unspecified = |hint: &TypeHint| matches!(hint, TypeHint::Unspecified);
+
+        match stage_type {
+            StageType::FiniteSource | StageType::InfiniteSource => {
+                if unspecified(&meta.output_type) {
+                    return Err(FlowBuildError::UnspecifiedTypingOnApplicableSlot {
+                        stage_name: name.clone(),
+                        slot: "output".to_string(),
+                    });
+                }
+            }
+            StageType::Transform | StageType::Stateful => {
+                if unspecified(&meta.input_type) {
+                    return Err(FlowBuildError::UnspecifiedTypingOnApplicableSlot {
+                        stage_name: name.clone(),
+                        slot: "input".to_string(),
+                    });
+                }
+                if unspecified(&meta.output_type) {
+                    return Err(FlowBuildError::UnspecifiedTypingOnApplicableSlot {
+                        stage_name: name.clone(),
+                        slot: "output".to_string(),
+                    });
+                }
+            }
+            StageType::Sink => {
+                if unspecified(&meta.input_type) {
+                    return Err(FlowBuildError::UnspecifiedTypingOnApplicableSlot {
+                        stage_name: name.clone(),
+                        slot: "input".to_string(),
+                    });
+                }
+            }
+            StageType::Join => {
+                if unspecified(&meta.reference_type) {
+                    return Err(FlowBuildError::UnspecifiedTypingOnApplicableSlot {
+                        stage_name: name.clone(),
+                        slot: "reference".to_string(),
+                    });
+                }
+                if unspecified(&meta.stream_type) {
+                    return Err(FlowBuildError::UnspecifiedTypingOnApplicableSlot {
+                        stage_name: name.clone(),
+                        slot: "stream".to_string(),
+                    });
+                }
+                if unspecified(&meta.output_type) {
+                    return Err(FlowBuildError::UnspecifiedTypingOnApplicableSlot {
+                        stage_name: name.clone(),
+                        slot: "output".to_string(),
+                    });
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
 /// Validate edge typing across forward edges in a built topology.
 ///
 /// Returns `Ok(())` when every edge is compatible, or `Err(errors)` listing
-/// every per-edge mismatch. Composite-internal edges (both endpoints sharing
-/// a `StageSubgraphMembership.subgraph_id`) are skipped: the composite
-/// outer-boundary invariant is responsible for those, not the per-edge
-/// validator. See FLOWIP-114c "Composite-internal edge handling."
+/// every per-edge and per-slot mismatch. Composite-internal edges (both
+/// endpoints sharing a `StageSubgraphMembership.subgraph_id`) are skipped:
+/// the composite outer-boundary invariant is responsible for those, not the
+/// per-edge validator. See FLOWIP-114c "Composite-internal edge handling."
+///
+/// Two passes:
+/// - Per-edge `Exact` mismatch produces `EdgeTypingMismatchKind::SingleEdge`
+///   when one upstream's `Exact` type disagrees with the downstream slot's
+///   declared `Exact` type.
+/// - Per-(downstream, slot) fan-in grouping produces
+///   `EdgeTypingMismatchKind::HeterogeneousFanIn` when two or more upstreams
+///   feeding the same slot emit different `Exact` types. Each leg of a join
+///   is checked independently per Acceptance #4.
 pub fn validate_edge_typing(
     topology: &Topology,
     descriptors: &HashMap<String, Box<dyn StageDescriptor>>,
     name_to_id: &HashMap<String, StageId>,
 ) -> Result<(), Vec<EdgeError>> {
+    use crate::dsl::error::EdgeTypingMismatchKind;
+
     let mut id_to_descriptor: HashMap<StageId, &dyn StageDescriptor> = HashMap::new();
     for (dsl_name, descriptor) in descriptors {
         if let Some(stage_id) = name_to_id.get(dsl_name) {
@@ -976,7 +1069,14 @@ pub fn validate_edge_typing(
         }
     }
 
-    let mut errors = Vec::new();
+    let mut errors: Vec<EdgeError> = Vec::new();
+
+    // Per-(downstream_id, role) fan-in collector. Holds (upstream_stage_name,
+    // type_id, display_name) for every Exact-typed inbound edge.
+    type IngressKey = (StageId, EdgeInputRole);
+    let mut fan_in: HashMap<IngressKey, Vec<(String, std::any::TypeId, String, String)>> =
+        HashMap::new();
+
     for edge in topology.edges() {
         if edge.kind != EdgeKind::Forward {
             continue;
@@ -1021,28 +1121,86 @@ pub fn validate_edge_typing(
             downstream_metadata,
         );
 
-        match (&upstream_metadata.output_type, downstream_input_hint) {
-            (
-                TypeHint::Exact {
-                    type_id: upstream_id,
-                    display_name: upstream_name,
-                },
-                TypeHint::Exact {
-                    type_id: expected_id,
-                    display_name: expected_name,
-                },
-            ) if upstream_id != expected_id => {
+        // (1) Per-edge SingleEdge mismatch.
+        if let (
+            TypeHint::Exact {
+                type_id: upstream_id,
+                display_name: upstream_name,
+            },
+            TypeHint::Exact {
+                type_id: expected_id,
+                display_name: expected_name,
+            },
+        ) = (&upstream_metadata.output_type, downstream_input_hint)
+        {
+            if upstream_id != expected_id {
                 errors.push(EdgeError {
                     upstream_stage: upstream_descriptor.name().to_string(),
                     downstream_stage: downstream_descriptor.name().to_string(),
                     upstream_type: upstream_name.clone(),
                     expected_type: expected_name.clone(),
                     input_role,
+                    kind: EdgeTypingMismatchKind::SingleEdge,
                 });
             }
-            (_, TypeHint::Unspecified) | (TypeHint::Unspecified, _) => {}
-            _ => {}
         }
+
+        // (2) Collect for fan-in grouping.
+        if let TypeHint::Exact {
+            type_id: u_id,
+            display_name: u_name,
+        } = &upstream_metadata.output_type
+        {
+            fan_in
+                .entry((downstream_stage_id, input_role))
+                .or_default()
+                .push((
+                    upstream_descriptor.name().to_string(),
+                    *u_id,
+                    u_name.clone(),
+                    downstream_descriptor.name().to_string(),
+                ));
+        }
+    }
+
+    // Per-slot HeterogeneousFanIn: when two or more upstreams in the same
+    // (downstream, role) group emit different Exact types, emit one error per
+    // offending slot. The error names the first upstream as the focal point
+    // and lists every other upstream + actual type via `other_*`.
+    for ((_downstream_id, role), entries) in &fan_in {
+        if entries.len() < 2 {
+            continue;
+        }
+        let first_type_id = entries[0].1;
+        let all_same = entries.iter().all(|(_, tid, _, _)| *tid == first_type_id);
+        if all_same {
+            continue;
+        }
+
+        let (focal_upstream, _focal_type_id, focal_display, downstream_stage_name) = &entries[0];
+        let other_upstream_stages: Vec<String> = entries[1..]
+            .iter()
+            .map(|(name, _, _, _)| name.clone())
+            .collect();
+        let other_actual_types: Vec<String> = entries[1..]
+            .iter()
+            .map(|(_, _, dn, _)| dn.clone())
+            .collect();
+        // The "expected" for a HeterogeneousFanIn slot is the focal upstream's
+        // type, which makes the error message read "the other upstreams should
+        // align to me". The author resolves by aligning all branches to one
+        // common envelope type.
+        errors.push(EdgeError {
+            upstream_stage: focal_upstream.clone(),
+            downstream_stage: downstream_stage_name.clone(),
+            upstream_type: focal_display.clone(),
+            expected_type: focal_display.clone(),
+            input_role: *role,
+            kind: EdgeTypingMismatchKind::HeterogeneousFanIn {
+                other_upstream_stages,
+                other_actual_types,
+            },
+        });
     }
 
     if errors.is_empty() {
@@ -1051,7 +1209,6 @@ pub fn validate_edge_typing(
         Err(errors)
     }
 }
-
 
 #[cfg(test)]
 mod placeholder_warn_once_tests {

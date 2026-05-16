@@ -892,50 +892,6 @@ macro_rules! __obzenflow_async_transform_untyped {
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __obzenflow_async_transform_typed {
-    // ── mixed input, placeholder ──
-    (input = mixed, output = $out:ty, name = $name:literal, handler = placeholder!(), middleware = [$($mw:expr),*]) => {{
-        let __metadata = $crate::dsl::typing::StageTypingMetadata::transform(
-            $crate::dsl::typing::TypeHint::Mixed,
-            $crate::dsl::typing::TypeHint::exact::<$out>(),
-            true,
-            None,
-        );
-        let __descriptor = $crate::__obzenflow_async_transform_untyped!(
-            name = $name,
-            handler = $crate::dsl::typing::PlaceholderAsyncTransform::<::obzenflow_runtime::typing::MixedInput, $out>::new(None),
-            middleware = [$($mw),*]
-        );
-        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
-    }};
-    (input = mixed, output = $out:ty, name = $name:literal, handler = placeholder!($msg:expr), middleware = [$($mw:expr),*]) => {{
-        let __metadata = $crate::dsl::typing::StageTypingMetadata::transform(
-            $crate::dsl::typing::TypeHint::Mixed,
-            $crate::dsl::typing::TypeHint::exact::<$out>(),
-            true,
-            Some(($msg).to_string()),
-        );
-        let __descriptor = $crate::__obzenflow_async_transform_untyped!(
-            name = $name,
-            handler = $crate::dsl::typing::PlaceholderAsyncTransform::<::obzenflow_runtime::typing::MixedInput, $out>::new(Some($msg)),
-            middleware = [$($mw),*]
-        );
-        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
-    }};
-    // ── mixed input, real handler ──
-    (input = mixed, output = $out:ty, name = $name:literal, handler = $handler:expr, middleware = [$($mw:expr),*]) => {{
-        let __handler = $handler;
-        let __handler =
-            $crate::dsl::typing::BoundAsyncTransform::<::obzenflow_runtime::typing::MixedInput, $out, _>::new(__handler);
-        ::obzenflow_runtime::typing::assert_transform_output::<_, $out>(&__handler);
-        let __metadata = $crate::dsl::typing::StageTypingMetadata::transform(
-            $crate::dsl::typing::TypeHint::Mixed,
-            $crate::dsl::typing::TypeHint::exact::<$out>(),
-            false,
-            None,
-        );
-        let __descriptor = $crate::__obzenflow_async_transform_untyped!(name = $name, handler = __handler, middleware = [$($mw),*]);
-        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
-    }};
     // ── exact input, placeholder ──
     (input = exact($in:ty), output = $out:ty, name = $name:literal, handler = placeholder!(), middleware = [$($mw:expr),*]) => {{
         let __metadata = $crate::dsl::typing::StageTypingMetadata::transform(
@@ -1115,43 +1071,6 @@ macro_rules! __obzenflow_sink_untyped {
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __obzenflow_sink_typed {
-    // ── mixed input, placeholder ──
-    (input = mixed, name = $name:literal, handler = placeholder!(), middleware = [$($mw:expr),*]) => {{
-        let __metadata = $crate::dsl::typing::StageTypingMetadata::sink(
-            $crate::dsl::typing::TypeHint::Mixed,
-            true,
-            None,
-        );
-        let __descriptor = $crate::__obzenflow_sink_untyped!(
-            name = $name,
-            handler = $crate::dsl::typing::PlaceholderSink::<::obzenflow_runtime::typing::MixedInput>::new(None),
-            middleware = [$($mw),*]
-        );
-        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
-    }};
-    (input = mixed, name = $name:literal, handler = placeholder!($msg:expr), middleware = [$($mw:expr),*]) => {{
-        let __metadata = $crate::dsl::typing::StageTypingMetadata::sink(
-            $crate::dsl::typing::TypeHint::Mixed,
-            true,
-            Some(($msg).to_string()),
-        );
-        let __descriptor = $crate::__obzenflow_sink_untyped!(
-            name = $name,
-            handler = $crate::dsl::typing::PlaceholderSink::<::obzenflow_runtime::typing::MixedInput>::new(Some($msg)),
-            middleware = [$($mw),*]
-        );
-        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
-    }};
-    // ── mixed input, real handler (no SinkTyping required) ──
-    (input = mixed, name = $name:literal, handler = $handler:expr, middleware = [$($mw:expr),*]) => {{
-        let __metadata = $crate::dsl::typing::StageTypingMetadata::sink(
-            $crate::dsl::typing::TypeHint::Mixed,
-            false,
-            None,
-        );
-        let __descriptor = $crate::__obzenflow_sink_untyped!(name = $name, handler = $handler, middleware = [$($mw),*]);
-        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
-    }};
     // ── exact input, placeholder ──
     (input = exact($in:ty), name = $name:literal, handler = placeholder!(), middleware = [$($mw:expr),*]) => {{
         let __metadata = $crate::dsl::typing::StageTypingMetadata::sink(
@@ -1540,96 +1459,6 @@ macro_rules! __obzenflow_stateful_untyped {
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __obzenflow_stateful_typed {
-    // ── mixed input, placeholder, no emit ──
-    (input = mixed, output = $out:ty, name = $name:literal, handler = placeholder!(), emit = none, middleware = [$($mw:expr),*]) => {{
-        let __metadata = $crate::dsl::typing::StageTypingMetadata::stateful(
-            $crate::dsl::typing::TypeHint::Mixed,
-            $crate::dsl::typing::TypeHint::exact::<$out>(),
-            true,
-            None,
-        );
-        let __descriptor = $crate::__obzenflow_stateful_untyped!(
-            name = $name,
-            handler = $crate::dsl::typing::PlaceholderStateful::<::obzenflow_runtime::typing::MixedInput, $out>::new(None),
-            emit = none,
-            middleware = [$($mw),*]
-        );
-        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
-    }};
-    // ── mixed input, placeholder, with emit ──
-    (input = mixed, output = $out:ty, name = $name:literal, handler = placeholder!(), emit = some($emit_interval:expr), middleware = [$($mw:expr),*]) => {{
-        let __metadata = $crate::dsl::typing::StageTypingMetadata::stateful(
-            $crate::dsl::typing::TypeHint::Mixed,
-            $crate::dsl::typing::TypeHint::exact::<$out>(),
-            true,
-            None,
-        );
-        let __descriptor = $crate::__obzenflow_stateful_untyped!(
-            name = $name,
-            handler = $crate::dsl::typing::PlaceholderStateful::<::obzenflow_runtime::typing::MixedInput, $out>::new(None),
-            emit = some($emit_interval),
-            middleware = [$($mw),*]
-        );
-        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
-    }};
-    // ── mixed input, placeholder msg, no emit ──
-    (input = mixed, output = $out:ty, name = $name:literal, handler = placeholder!($msg:expr), emit = none, middleware = [$($mw:expr),*]) => {{
-        let __metadata = $crate::dsl::typing::StageTypingMetadata::stateful(
-            $crate::dsl::typing::TypeHint::Mixed,
-            $crate::dsl::typing::TypeHint::exact::<$out>(),
-            true,
-            Some(($msg).to_string()),
-        );
-        let __descriptor = $crate::__obzenflow_stateful_untyped!(
-            name = $name,
-            handler = $crate::dsl::typing::PlaceholderStateful::<::obzenflow_runtime::typing::MixedInput, $out>::new(Some($msg)),
-            emit = none,
-            middleware = [$($mw),*]
-        );
-        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
-    }};
-    // ── mixed input, placeholder msg, with emit ──
-    (input = mixed, output = $out:ty, name = $name:literal, handler = placeholder!($msg:expr), emit = some($emit_interval:expr), middleware = [$($mw:expr),*]) => {{
-        let __metadata = $crate::dsl::typing::StageTypingMetadata::stateful(
-            $crate::dsl::typing::TypeHint::Mixed,
-            $crate::dsl::typing::TypeHint::exact::<$out>(),
-            true,
-            Some(($msg).to_string()),
-        );
-        let __descriptor = $crate::__obzenflow_stateful_untyped!(
-            name = $name,
-            handler = $crate::dsl::typing::PlaceholderStateful::<::obzenflow_runtime::typing::MixedInput, $out>::new(Some($msg)),
-            emit = some($emit_interval),
-            middleware = [$($mw),*]
-        );
-        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
-    }};
-    // ── mixed input, real handler, no emit ──
-    (input = mixed, output = $out:ty, name = $name:literal, handler = $handler:expr, emit = none, middleware = [$($mw:expr),*]) => {{
-        let __handler = $handler;
-        ::obzenflow_runtime::typing::assert_stateful_output::<_, $out>(&__handler);
-        let __metadata = $crate::dsl::typing::StageTypingMetadata::stateful(
-            $crate::dsl::typing::TypeHint::Mixed,
-            $crate::dsl::typing::TypeHint::exact::<$out>(),
-            false,
-            None,
-        );
-        let __descriptor = $crate::__obzenflow_stateful_untyped!(name = $name, handler = __handler, emit = none, middleware = [$($mw),*]);
-        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
-    }};
-    // ── mixed input, real handler, with emit ──
-    (input = mixed, output = $out:ty, name = $name:literal, handler = $handler:expr, emit = some($emit_interval:expr), middleware = [$($mw:expr),*]) => {{
-        let __handler = $handler;
-        ::obzenflow_runtime::typing::assert_stateful_output::<_, $out>(&__handler);
-        let __metadata = $crate::dsl::typing::StageTypingMetadata::stateful(
-            $crate::dsl::typing::TypeHint::Mixed,
-            $crate::dsl::typing::TypeHint::exact::<$out>(),
-            false,
-            None,
-        );
-        let __descriptor = $crate::__obzenflow_stateful_untyped!(name = $name, handler = __handler, emit = some($emit_interval), middleware = [$($mw),*]);
-        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
-    }};
     // ── exact input, placeholder, no emit ──
     (input = exact($in:ty), output = $out:ty, name = $name:literal, handler = placeholder!(), emit = none, middleware = [$($mw:expr),*]) => {{
         let __metadata = $crate::dsl::typing::StageTypingMetadata::stateful(
@@ -2078,106 +1907,11 @@ macro_rules! __obzenflow_join_typed {
         $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
     }};
 
-    // ── real handler: mixed reference, exact stream ──
-    (reference = mixed, stream = exact, output = $out:ty,
-     ref_type = (), stream_type = ($str_ty:ty),
-     name = $name:literal, ref_var = $ref_var:ident, handler = $handler:expr,
-     middleware = [$($mw:expr),*]) => {{
-        let __handler = {
-            fn __obzenflow_anchor_join<H>(handler: H) -> H
-            where
-                H: ::obzenflow_runtime::typing::JoinTyping<Stream = $str_ty, Output = $out>,
-            {
-                handler
-            }
-            __obzenflow_anchor_join($handler)
-        };
-        ::obzenflow_runtime::typing::assert_join_stream_output::<_, $str_ty, $out>(&__handler);
-        let __metadata = $crate::dsl::typing::StageTypingMetadata::join(
-            $crate::dsl::typing::TypeHint::Mixed,
-            $crate::dsl::typing::TypeHint::exact::<$str_ty>(),
-            $crate::dsl::typing::TypeHint::exact::<$out>(),
-            false,
-            None,
-        );
-        let __descriptor = $crate::__obzenflow_join_untyped!(
-            name = $name,
-            reference_stage_var = $ref_var,
-            handler = __handler,
-            middleware = [$($mw),*]
-        );
-        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
-    }};
-
-    // ── real handler: exact reference, mixed stream ──
-    (reference = exact, stream = mixed, output = $out:ty,
-     ref_type = ($ref_ty:ty), stream_type = (),
-     name = $name:literal, ref_var = $ref_var:ident, handler = $handler:expr,
-     middleware = [$($mw:expr),*]) => {{
-        let __handler = {
-            fn __obzenflow_anchor_join<H>(handler: H) -> H
-            where
-                H: ::obzenflow_runtime::typing::JoinTyping<Reference = $ref_ty, Output = $out>,
-            {
-                handler
-            }
-            __obzenflow_anchor_join($handler)
-        };
-        ::obzenflow_runtime::typing::assert_join_reference_output::<_, $ref_ty, $out>(&__handler);
-        let __metadata = $crate::dsl::typing::StageTypingMetadata::join(
-            $crate::dsl::typing::TypeHint::exact::<$ref_ty>(),
-            $crate::dsl::typing::TypeHint::Mixed,
-            $crate::dsl::typing::TypeHint::exact::<$out>(),
-            false,
-            None,
-        );
-        let __descriptor = $crate::__obzenflow_join_untyped!(
-            name = $name,
-            reference_stage_var = $ref_var,
-            handler = __handler,
-            middleware = [$($mw),*]
-        );
-        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
-    }};
-
-    // ── real handler: both mixed ──
-    (reference = mixed, stream = mixed, output = $out:ty,
-     ref_type = (), stream_type = (),
-     name = $name:literal, ref_var = $ref_var:ident, handler = $handler:expr,
-     middleware = [$($mw:expr),*]) => {{
-        let __handler = {
-            fn __obzenflow_anchor_join<H>(handler: H) -> H
-            where
-                H: ::obzenflow_runtime::typing::JoinTyping<Output = $out>,
-            {
-                handler
-            }
-            __obzenflow_anchor_join($handler)
-        };
-        ::obzenflow_runtime::typing::assert_join_output::<_, $out>(&__handler);
-        let __metadata = $crate::dsl::typing::StageTypingMetadata::join(
-            $crate::dsl::typing::TypeHint::Mixed,
-            $crate::dsl::typing::TypeHint::Mixed,
-            $crate::dsl::typing::TypeHint::exact::<$out>(),
-            false,
-            None,
-        );
-        let __descriptor = $crate::__obzenflow_join_untyped!(
-            name = $name,
-            reference_stage_var = $ref_var,
-            handler = __handler,
-            middleware = [$($mw),*]
-        );
-        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
-    }};
 }
 
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __obzenflow_join_hint {
-    (mixed) => {
-        $crate::dsl::typing::TypeHint::Mixed
-    };
     (exact, $ty:ty) => {
         $crate::dsl::typing::TypeHint::exact::<$ty>()
     };
@@ -2191,9 +1925,6 @@ macro_rules! __obzenflow_join_hint {
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __obzenflow_join_phantom_type {
-    (mixed) => {
-        ::obzenflow_runtime::typing::MixedInput
-    };
     (exact, $ty:ty) => {
         $ty
     };
@@ -2209,17 +1940,6 @@ macro_rules! __obzenflow_join_exact_stream_contract {
             ref_var = $ref_var,
             reference = exact,
             ref_type = ($reference),
-            stream = (),
-            $($rest)+
-        )
-    };
-    (name = $name:literal, ref_var = $ref_var:ident, reference = mixed, $($rest:tt)+) => {
-        $crate::__obzenflow_join_exact_stream_contract!(
-            @collect
-            name = $name,
-            ref_var = $ref_var,
-            reference = mixed,
-            ref_type = (),
             stream = (),
             $($rest)+
         )
@@ -2684,7 +2404,6 @@ macro_rules! join {
         )
     };
 }
-
 
 // ============================================================================
 // ai_map_reduce!  +  __obzenflow_ai_map_reduce_typed!

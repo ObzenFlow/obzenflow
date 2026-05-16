@@ -474,10 +474,12 @@ macro_rules! build_typed_flow {
                 .map_err(FlowBuildError::TopologyValidationFailed)?,
         );
 
-        // FLOWIP-114c PR D: validate_edge_typing returns Result<(), Vec<EdgeError>>.
-        // The first edge error is promoted to a hard FlowBuildError::EdgeTypingMismatch
-        // so downstream tooling sees a structured error rather than a tracing warning.
-        // Composite-internal edges are skipped inside validate_edge_typing.
+        // FLOWIP-114c PR D: stage-level metadata check first (None metadata,
+        // Unspecified on applicable slot), then per-edge / per-slot validator.
+        // Both surface as structured FlowBuildError variants so downstream
+        // tooling sees a typed error rather than a tracing warning.
+        $crate::dsl::typing::validate_stage_typing_metadata(&descriptors)?;
+
         if let Err(edge_errors) =
             $crate::dsl::typing::validate_edge_typing(&topology, &descriptors, &name_to_id)
         {
@@ -489,22 +491,35 @@ macro_rules! build_typed_flow {
                     upstream_type = %err.upstream_type,
                     expected_type = %err.expected_type,
                     input_role = %err.input_role.as_str(),
+                    kind = ?err.kind,
                     "Typed edge compatibility mismatch"
                 );
             }
-            let first = edge_errors.into_iter().next().expect("Err carries at least one error");
+            let first = edge_errors
+                .into_iter()
+                .next()
+                .expect("Err carries at least one error");
+            let suggested_fix = match first.kind {
+                $crate::dsl::error::EdgeTypingMismatchKind::SingleEdge => {
+                    "Align the upstream and downstream types, or insert an alignment transform. \
+                     See FLOWIP-114c \"How to handle heterogeneous fan-in\"."
+                        .to_string()
+                }
+                $crate::dsl::error::EdgeTypingMismatchKind::HeterogeneousFanIn { .. } => {
+                    "Insert per-branch alignment transforms so the fan-in is homogeneous on a \
+                     common envelope type, or use a join for two-input typed fan-in. See \
+                     FLOWIP-114c \"How to handle heterogeneous fan-in\"."
+                        .to_string()
+                }
+            };
             return Err($crate::dsl::error::FlowBuildError::EdgeTypingMismatch {
                 upstream_stage: first.upstream_stage,
                 downstream_stage: first.downstream_stage,
                 role: first.input_role.as_str().to_string(),
                 expected_type: first.expected_type,
                 actual_type: first.upstream_type,
-                kind: $crate::dsl::error::EdgeTypingMismatchKind::SingleEdge,
-                suggested_fix: "Insert an alignment transform, use a join for two-input typed \
-                                fan-in, or align upstream output types so the fan-in is \
-                                homogeneous. See FLOWIP-114c \"How to handle heterogeneous \
-                                fan-in.\""
-                    .to_string(),
+                kind: first.kind,
+                suggested_fix,
             });
         }
 

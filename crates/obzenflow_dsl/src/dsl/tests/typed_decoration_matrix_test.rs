@@ -16,12 +16,9 @@ mod tests {
     use obzenflow_runtime::stages::common::handlers::source::SourceError;
     use obzenflow_runtime::stages::common::handlers::{
         AsyncFiniteSourceHandler, AsyncInfiniteSourceHandler, AsyncTransformHandler,
-        FiniteSourceHandler, InfiniteSourceHandler, SinkHandler, StatefulHandler,
-        TransformHandler,
+        FiniteSourceHandler, InfiniteSourceHandler, SinkHandler, StatefulHandler, TransformHandler,
     };
-    use obzenflow_runtime::typing::{
-        SinkTyping, SourceTyping, StatefulTyping, TransformTyping,
-    };
+    use obzenflow_runtime::typing::{SinkTyping, SourceTyping, StatefulTyping, TransformTyping};
     use serde::{Deserialize, Serialize};
 
     #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -40,66 +37,103 @@ mod tests {
 
     #[derive(Clone, Debug)]
     struct Src;
-    impl SourceTyping for Src { type Output = Out; }
+    impl SourceTyping for Src {
+        type Output = Out;
+    }
     impl FiniteSourceHandler for Src {
-        fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> { Ok(None) }
+        fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
+            Ok(None)
+        }
     }
 
     #[derive(Clone, Debug)]
     struct AsyncSrc;
-    impl SourceTyping for AsyncSrc { type Output = Out; }
+    impl SourceTyping for AsyncSrc {
+        type Output = Out;
+    }
     #[async_trait]
     impl AsyncFiniteSourceHandler for AsyncSrc {
-        async fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> { Ok(None) }
+        async fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
+            Ok(None)
+        }
     }
 
     #[derive(Clone, Debug)]
     struct InfSrc;
-    impl SourceTyping for InfSrc { type Output = Out; }
+    impl SourceTyping for InfSrc {
+        type Output = Out;
+    }
     impl InfiniteSourceHandler for InfSrc {
-        fn next(&mut self) -> Result<Vec<ChainEvent>, SourceError> { Ok(vec![]) }
+        fn next(&mut self) -> Result<Vec<ChainEvent>, SourceError> {
+            Ok(vec![])
+        }
     }
 
     #[derive(Clone, Debug)]
     struct AsyncInfSrc;
-    impl SourceTyping for AsyncInfSrc { type Output = Out; }
+    impl SourceTyping for AsyncInfSrc {
+        type Output = Out;
+    }
     #[async_trait]
     impl AsyncInfiniteSourceHandler for AsyncInfSrc {
-        async fn next(&mut self) -> Result<Vec<ChainEvent>, SourceError> { Ok(vec![]) }
+        async fn next(&mut self) -> Result<Vec<ChainEvent>, SourceError> {
+            Ok(vec![])
+        }
     }
 
     #[derive(Clone, Debug)]
     struct Tr;
-    impl TransformTyping for Tr { type Input = In; type Output = Out; }
+    impl TransformTyping for Tr {
+        type Input = In;
+        type Output = Out;
+    }
     #[async_trait]
     impl TransformHandler for Tr {
-        fn process(&self, _e: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> { Ok(vec![]) }
-        async fn drain(&mut self) -> Result<(), HandlerError> { Ok(()) }
+        fn process(&self, _e: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> {
+            Ok(vec![])
+        }
+        async fn drain(&mut self) -> Result<(), HandlerError> {
+            Ok(())
+        }
     }
 
     #[derive(Clone, Debug)]
     struct AsyncTr;
-    impl TransformTyping for AsyncTr { type Input = In; type Output = Out; }
+    impl TransformTyping for AsyncTr {
+        type Input = In;
+        type Output = Out;
+    }
     #[async_trait]
     impl AsyncTransformHandler for AsyncTr {
-        async fn process(&self, _e: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> { Ok(vec![]) }
-        async fn drain(&mut self) -> Result<(), HandlerError> { Ok(()) }
+        async fn process(&self, _e: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> {
+            Ok(vec![])
+        }
+        async fn drain(&mut self) -> Result<(), HandlerError> {
+            Ok(())
+        }
     }
 
     #[derive(Clone, Debug)]
     struct St;
-    impl StatefulTyping for St { type Input = In; type Output = Out; }
+    impl StatefulTyping for St {
+        type Input = In;
+        type Output = Out;
+    }
     #[async_trait]
     impl StatefulHandler for St {
         type State = ();
         fn accumulate(&mut self, _s: &mut Self::State, _e: ChainEvent) {}
         fn initial_state(&self) -> Self::State {}
-        fn create_events(&self, _s: &Self::State) -> Result<Vec<ChainEvent>, HandlerError> { Ok(vec![]) }
+        fn create_events(&self, _s: &Self::State) -> Result<Vec<ChainEvent>, HandlerError> {
+            Ok(vec![])
+        }
     }
 
     #[derive(Clone, Debug)]
     struct Sn;
-    impl SinkTyping for Sn { type Input = Out; }
+    impl SinkTyping for Sn {
+        type Input = Out;
+    }
     #[async_trait]
     impl SinkHandler for Sn {
         async fn consume(&mut self, _e: ChainEvent) -> Result<DeliveryPayload, HandlerError> {
@@ -108,50 +142,146 @@ mod tests {
     }
 
     // ── source! ─────────────────────────────────────────────────────────────
-    #[test] fn source_typed_bare() { let _ = crate::source!(Out => Src); }
-    #[test] fn source_typed_mw() { let _ = crate::source!(Out => Src, []); }
-    #[test] fn source_typed_name() { let _ = crate::source!(name: "s", Out => Src); }
-    #[test] fn source_typed_name_mw() { let _ = crate::source!(name: "s", Out => Src, []); }
+    #[test]
+    fn source_typed_bare() {
+        let _ = crate::source!(Out => Src);
+    }
+    #[test]
+    fn source_typed_mw() {
+        let _ = crate::source!(Out => Src, []);
+    }
+    #[test]
+    fn source_typed_name() {
+        let _ = crate::source!(name: "s", Out => Src);
+    }
+    #[test]
+    fn source_typed_name_mw() {
+        let _ = crate::source!(name: "s", Out => Src, []);
+    }
 
     // ── async_source! ───────────────────────────────────────────────────────
-    #[test] fn async_source_typed_bare() { let _ = crate::async_source!(Out => AsyncSrc); }
-    #[test] fn async_source_typed_mw() { let _ = crate::async_source!(Out => AsyncSrc, []); }
-    #[test] fn async_source_typed_name() { let _ = crate::async_source!(name: "s", Out => AsyncSrc); }
-    #[test] fn async_source_typed_name_mw() { let _ = crate::async_source!(name: "s", Out => AsyncSrc, []); }
+    #[test]
+    fn async_source_typed_bare() {
+        let _ = crate::async_source!(Out => AsyncSrc);
+    }
+    #[test]
+    fn async_source_typed_mw() {
+        let _ = crate::async_source!(Out => AsyncSrc, []);
+    }
+    #[test]
+    fn async_source_typed_name() {
+        let _ = crate::async_source!(name: "s", Out => AsyncSrc);
+    }
+    #[test]
+    fn async_source_typed_name_mw() {
+        let _ = crate::async_source!(name: "s", Out => AsyncSrc, []);
+    }
 
     // ── infinite_source! ────────────────────────────────────────────────────
-    #[test] fn infinite_source_typed_bare() { let _ = crate::infinite_source!(Out => InfSrc); }
-    #[test] fn infinite_source_typed_mw() { let _ = crate::infinite_source!(Out => InfSrc, []); }
-    #[test] fn infinite_source_typed_name() { let _ = crate::infinite_source!(name: "s", Out => InfSrc); }
-    #[test] fn infinite_source_typed_name_mw() { let _ = crate::infinite_source!(name: "s", Out => InfSrc, []); }
+    #[test]
+    fn infinite_source_typed_bare() {
+        let _ = crate::infinite_source!(Out => InfSrc);
+    }
+    #[test]
+    fn infinite_source_typed_mw() {
+        let _ = crate::infinite_source!(Out => InfSrc, []);
+    }
+    #[test]
+    fn infinite_source_typed_name() {
+        let _ = crate::infinite_source!(name: "s", Out => InfSrc);
+    }
+    #[test]
+    fn infinite_source_typed_name_mw() {
+        let _ = crate::infinite_source!(name: "s", Out => InfSrc, []);
+    }
 
     // ── async_infinite_source! ──────────────────────────────────────────────
-    #[test] fn async_infinite_source_typed_bare() { let _ = crate::async_infinite_source!(Out => AsyncInfSrc); }
-    #[test] fn async_infinite_source_typed_mw() { let _ = crate::async_infinite_source!(Out => AsyncInfSrc, []); }
-    #[test] fn async_infinite_source_typed_name() { let _ = crate::async_infinite_source!(name: "s", Out => AsyncInfSrc); }
-    #[test] fn async_infinite_source_typed_name_mw() { let _ = crate::async_infinite_source!(name: "s", Out => AsyncInfSrc, []); }
+    #[test]
+    fn async_infinite_source_typed_bare() {
+        let _ = crate::async_infinite_source!(Out => AsyncInfSrc);
+    }
+    #[test]
+    fn async_infinite_source_typed_mw() {
+        let _ = crate::async_infinite_source!(Out => AsyncInfSrc, []);
+    }
+    #[test]
+    fn async_infinite_source_typed_name() {
+        let _ = crate::async_infinite_source!(name: "s", Out => AsyncInfSrc);
+    }
+    #[test]
+    fn async_infinite_source_typed_name_mw() {
+        let _ = crate::async_infinite_source!(name: "s", Out => AsyncInfSrc, []);
+    }
 
     // ── transform! ──────────────────────────────────────────────────────────
-    #[test] fn transform_typed_bare() { let _ = crate::transform!(In -> Out => Tr); }
-    #[test] fn transform_typed_mw() { let _ = crate::transform!(In -> Out => Tr, []); }
-    #[test] fn transform_typed_name() { let _ = crate::transform!(name: "t", In -> Out => Tr); }
-    #[test] fn transform_typed_name_mw() { let _ = crate::transform!(name: "t", In -> Out => Tr, []); }
+    #[test]
+    fn transform_typed_bare() {
+        let _ = crate::transform!(In -> Out => Tr);
+    }
+    #[test]
+    fn transform_typed_mw() {
+        let _ = crate::transform!(In -> Out => Tr, []);
+    }
+    #[test]
+    fn transform_typed_name() {
+        let _ = crate::transform!(name: "t", In -> Out => Tr);
+    }
+    #[test]
+    fn transform_typed_name_mw() {
+        let _ = crate::transform!(name: "t", In -> Out => Tr, []);
+    }
 
     // ── async_transform! ────────────────────────────────────────────────────
-    #[test] fn async_transform_typed_bare() { let _ = crate::async_transform!(In -> Out => AsyncTr); }
-    #[test] fn async_transform_typed_mw() { let _ = crate::async_transform!(In -> Out => AsyncTr, []); }
-    #[test] fn async_transform_typed_name() { let _ = crate::async_transform!(name: "t", In -> Out => AsyncTr); }
-    #[test] fn async_transform_typed_name_mw() { let _ = crate::async_transform!(name: "t", In -> Out => AsyncTr, []); }
+    #[test]
+    fn async_transform_typed_bare() {
+        let _ = crate::async_transform!(In -> Out => AsyncTr);
+    }
+    #[test]
+    fn async_transform_typed_mw() {
+        let _ = crate::async_transform!(In -> Out => AsyncTr, []);
+    }
+    #[test]
+    fn async_transform_typed_name() {
+        let _ = crate::async_transform!(name: "t", In -> Out => AsyncTr);
+    }
+    #[test]
+    fn async_transform_typed_name_mw() {
+        let _ = crate::async_transform!(name: "t", In -> Out => AsyncTr, []);
+    }
 
     // ── stateful! ───────────────────────────────────────────────────────────
-    #[test] fn stateful_typed_bare() { let _ = crate::stateful!(In -> Out => St); }
-    #[test] fn stateful_typed_mw() { let _ = crate::stateful!(In -> Out => St, []); }
-    #[test] fn stateful_typed_name() { let _ = crate::stateful!(name: "s", In -> Out => St); }
-    #[test] fn stateful_typed_name_mw() { let _ = crate::stateful!(name: "s", In -> Out => St, []); }
+    #[test]
+    fn stateful_typed_bare() {
+        let _ = crate::stateful!(In -> Out => St);
+    }
+    #[test]
+    fn stateful_typed_mw() {
+        let _ = crate::stateful!(In -> Out => St, []);
+    }
+    #[test]
+    fn stateful_typed_name() {
+        let _ = crate::stateful!(name: "s", In -> Out => St);
+    }
+    #[test]
+    fn stateful_typed_name_mw() {
+        let _ = crate::stateful!(name: "s", In -> Out => St, []);
+    }
 
     // ── sink! ───────────────────────────────────────────────────────────────
-    #[test] fn sink_typed_bare() { let _ = crate::sink!(Out => Sn); }
-    #[test] fn sink_typed_mw() { let _ = crate::sink!(Out => Sn, []); }
-    #[test] fn sink_typed_name() { let _ = crate::sink!(name: "s", Out => Sn); }
-    #[test] fn sink_typed_name_mw() { let _ = crate::sink!(name: "s", Out => Sn, []); }
+    #[test]
+    fn sink_typed_bare() {
+        let _ = crate::sink!(Out => Sn);
+    }
+    #[test]
+    fn sink_typed_mw() {
+        let _ = crate::sink!(Out => Sn, []);
+    }
+    #[test]
+    fn sink_typed_name() {
+        let _ = crate::sink!(name: "s", Out => Sn);
+    }
+    #[test]
+    fn sink_typed_name_mw() {
+        let _ = crate::sink!(name: "s", Out => Sn, []);
+    }
 }

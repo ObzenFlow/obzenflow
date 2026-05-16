@@ -174,7 +174,10 @@ fn align_kafka_fn() -> Map<impl Fn(ChainEvent) -> ChainEvent + Send + Sync + Clo
 
 fn align_webhook_fn() -> Map<impl Fn(ChainEvent) -> ChainEvent + Send + Sync + Clone> {
     Map::new(|event: ChainEvent| {
-        let source = event.payload()["source"].as_str().unwrap_or("?").to_string();
+        let source = event.payload()["source"]
+            .as_str()
+            .unwrap_or("?")
+            .to_string();
         let writer = WriterId::from(StageId::new());
         ChainEventFactory::data_event(
             writer,
@@ -205,7 +208,10 @@ impl StatefulHandler for IngestAggregator {
     type State = IngestSummary;
 
     fn accumulate(&mut self, state: &mut Self::State, event: ChainEvent) {
-        let origin = event.payload()["origin"].as_str().unwrap_or("?").to_string();
+        let origin = event.payload()["origin"]
+            .as_str()
+            .unwrap_or("?")
+            .to_string();
         state.total += 1;
         *state.per_origin.entry(origin).or_insert(0) += 1;
     }
@@ -214,7 +220,10 @@ impl StatefulHandler for IngestAggregator {
         IngestSummary::default()
     }
 
-    fn create_events(&self, state: &Self::State) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
+    fn create_events(
+        &self,
+        state: &Self::State,
+    ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
         let writer_id = WriterId::from(StageId::new());
         let body = serde_json::to_value(state).map_err(|e| HandlerError::Other(e.to_string()))?;
         Ok(vec![ChainEventFactory::data_event(
@@ -232,9 +241,15 @@ struct SummaryConsole;
 
 #[async_trait]
 impl SinkHandler for SummaryConsole {
-    async fn consume(&mut self, event: ChainEvent) -> std::result::Result<DeliveryPayload, HandlerError> {
+    async fn consume(
+        &mut self,
+        event: ChainEvent,
+    ) -> std::result::Result<DeliveryPayload, HandlerError> {
         println!("=== IngestSummary ===");
-        println!("{}", serde_json::to_string_pretty(&event.payload()).unwrap_or_default());
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&event.payload()).unwrap_or_default()
+        );
         Ok(DeliveryPayload::success(
             "summary_console",
             DeliveryMethod::Custom("Stdout".to_string()),

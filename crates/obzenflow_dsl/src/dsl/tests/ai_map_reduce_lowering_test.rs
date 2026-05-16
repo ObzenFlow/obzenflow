@@ -360,15 +360,16 @@ mod tests {
     /// boundary mismatch.
     #[test]
     fn ai_map_reduce_outer_boundary_input_and_output_types_match_composite_contract() {
-        let digest = ai_map_reduce::map_reduce::<TestIn, TestChunk, TestPartial, TestCollected, TestOut>()
-            .chunker(NoopTransform)
-            .map(NoopAsyncTransform)
-            .collect(obzenflow_runtime::stages::stateful::CollectByInput::new(
-                TestCollected::default(),
-                |acc, partial: &TestPartial| acc.values.push(partial.value),
-            ))
-            .finalize(NoopAsyncTransform)
-            .build();
+        let digest =
+            ai_map_reduce::map_reduce::<TestIn, TestChunk, TestPartial, TestCollected, TestOut>()
+                .chunker(NoopTransform)
+                .map(NoopAsyncTransform)
+                .collect(obzenflow_runtime::stages::stateful::CollectByInput::new(
+                    TestCollected::default(),
+                    |acc, partial: &TestPartial| acc.values.push(partial.value),
+                ))
+                .finalize(NoopAsyncTransform)
+                .build();
 
         let mut stages: HashMap<String, Box<dyn StageDescriptor>> = HashMap::new();
         stages.insert("digest".to_string(), digest);

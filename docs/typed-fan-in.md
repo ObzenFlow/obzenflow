@@ -84,22 +84,46 @@ unless the upstream source is naturally union-shaped.
 
 ## What you'll see if you violate the rule
 
-A typed flow that wires two upstreams of differing `Exact` types into the
-same non-join downstream slot fails at flow build with:
+Three structured `FlowBuildError` variants are emitted by `build_typed_flow!`
+under FLOWIP-114c:
+
+**Per-stage**
+
+```
+FlowBuildError::StageMissingTypingMetadata { stage_name }
+FlowBuildError::UnspecifiedTypingOnApplicableSlot { stage_name, slot }
+```
+
+The first fires when a descriptor returns `typing_metadata() == None` (the
+legacy untyped path is gone). The second fires when an applicable slot
+(`input` for transforms/stateful/sinks, `output` for sources/transforms/
+stateful/joins, `reference`/`stream` for joins) is `Unspecified`.
+
+**Per-edge / per-slot**
 
 ```
 FlowBuildError::EdgeTypingMismatch {
     upstream_stage: "...",
     downstream_stage: "...",
-    role: "Input" | "Reference" | "Stream",
+    role: "input" | "reference" | "stream",
     expected_type: "...",
     actual_type: "...",
-    kind: SingleEdge | HeterogeneousFanIn { other_upstream_stages, other_actual_types },
-    suggested_fix: "Insert an alignment transform, use a join for two-input typed fan-in, ...",
+    kind: SingleEdge
+        | HeterogeneousFanIn {
+              other_upstream_stages: Vec<String>,
+              other_actual_types: Vec<String>,
+          },
+    suggested_fix: "...",
 }
 ```
 
-The error names every conflicting stage and type, plus the suggested fix.
+`SingleEdge` fires when one upstream `Exact` type disagrees with the
+downstream slot's declared `Exact` type. `HeterogeneousFanIn` fires when
+two or more upstreams in the same `(downstream, role)` group emit
+different `Exact` types; the focal upstream is reported in
+`upstream_stage`/`actual_type`, and the rest of the group is listed in
+`other_upstream_stages`/`other_actual_types`. The `suggested_fix` text is
+specific to the kind.
 
 ## Why the runtime is still type-erased
 

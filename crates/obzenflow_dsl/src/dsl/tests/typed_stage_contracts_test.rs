@@ -26,9 +26,12 @@ mod tests {
     use std::collections::HashMap;
     use std::time::Duration;
 
+    use crate::dsl::error::{EdgeTypingMismatchKind, FlowBuildError};
     use crate::dsl::stage_descriptor::StageDescriptor;
+    use crate::dsl::stage_descriptor::TransformDescriptor;
     use crate::dsl::typing::{
-        collect_stage_typing_info, validate_edge_typing, EdgeInputRole, TypeHint,
+        collect_stage_typing_info, validate_edge_typing, validate_stage_typing_metadata,
+        EdgeInputRole, TypeHint,
     };
 
     #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -342,7 +345,10 @@ mod tests {
             InputEvent -> OutputEvent => UntypedAsyncTransform
         );
         let untyped_async_transform_meta = untyped_async_transform.typing_metadata().unwrap();
-        assert_eq!(untyped_async_transform_meta.input_type, exact::<InputEvent>());
+        assert_eq!(
+            untyped_async_transform_meta.input_type,
+            exact::<InputEvent>()
+        );
         assert_eq!(
             untyped_async_transform_meta.output_type,
             exact::<OutputEvent>()
@@ -603,5 +609,213 @@ mod tests {
         assert_eq!(errors[1].input_role, EdgeInputRole::Stream);
         assert_eq!(errors[1].upstream_type, type_name::<AlternateEvent>());
         assert_eq!(errors[1].expected_type, type_name::<StreamEvent>());
+    }
+
+    // ─── FLOWIP-114c PR D closing-pass regression tests ────────────────────
+
+    /// A descriptor that returns no typing metadata (the legacy untyped path)
+    /// must be rejected by validate_stage_typing_metadata with
+    /// FlowBuildError::StageMissingTypingMetadata.
+    #[test]
+    fn validate_stage_typing_metadata_rejects_descriptor_with_none_metadata() {
+        let descriptor: Box<dyn StageDescriptor> = Box::new(TransformDescriptor {
+            name: "untyped_transform".to_string(),
+            handler: ExactTransform,
+            middleware: vec![],
+        });
+        // Sanity: the bare TransformDescriptor returns None.
+        assert!(descriptor.typing_metadata().is_none());
+
+        let mut descriptors: HashMap<String, Box<dyn StageDescriptor>> = HashMap::new();
+        descriptors.insert("transform".to_string(), descriptor);
+
+        let err = validate_stage_typing_metadata(&descriptors).expect_err(
+            "expected StageMissingTypingMetadata for descriptor without typing metadata",
+        );
+        match err {
+            FlowBuildError::StageMissingTypingMetadata { stage_name } => {
+                assert_eq!(stage_name, "transform");
+            }
+            other => panic!("unexpected error variant: {other:?}"),
+        }
+    }
+
+    /// A typed flow whose author somehow passed Unspecified into an applicable
+    /// slot (here: a transform's input) must be rejected.
+    #[test]
+    fn validate_stage_typing_metadata_rejects_unspecified_on_applicable_slot() {
+        // Use the typed transform!() macro to build a valid descriptor, then
+        // wrap it with synthetic metadata that has Unspecified input.
+        use crate::dsl::typing::{wrap_typed_descriptor, StageTypingMetadata};
+
+        let inner: Box<dyn StageDescriptor> = Box::new(TransformDescriptor {
+            name: "synthetic".to_string(),
+            handler: ExactTransform,
+            middleware: vec![],
+        });
+        let bad_metadata = StageTypingMetadata::transform(
+            TypeHint::Unspecified,
+            TypeHint::exact::<OutputEvent>(),
+            false,
+            None,
+        );
+        let wrapped = wrap_typed_descriptor(inner, bad_metadata);
+
+        let mut descriptors: HashMap<String, Box<dyn StageDescriptor>> = HashMap::new();
+        descriptors.insert("transform".to_string(), wrapped);
+
+        let err = validate_stage_typing_metadata(&descriptors).expect_err(
+            "expected UnspecifiedTypingOnApplicableSlot for transform with Unspecified input",
+        );
+        match err {
+            FlowBuildError::UnspecifiedTypingOnApplicableSlot { stage_name, slot } => {
+                assert_eq!(stage_name, "transform");
+                assert_eq!(slot, "input");
+            }
+            other => panic!("unexpected error variant: {other:?}"),
+        }
+    }
+
+    /// Three upstreams of three different Exact types feeding the same
+    /// non-join downstream slot must produce a HeterogeneousFanIn error
+    /// listing the other conflicting upstreams in `other_upstream_stages`.
+    #[test]
+    fn validate_edge_typing_emits_heterogeneous_fan_in_for_non_join_slot() {
+        let source_a_id = StageId::new();
+        let source_b_id = StageId::new();
+        let source_c_id = StageId::new();
+        let sink_id = StageId::new();
+
+        let mut descriptors: HashMap<String, Box<dyn StageDescriptor>> = HashMap::new();
+        descriptors.insert(
+            "source_a".to_string(),
+            crate::source!(name: "source_a", InputEvent => placeholder!()),
+        );
+        descriptors.insert(
+            "source_b".to_string(),
+            crate::source!(name: "source_b", AlternateEvent => placeholder!()),
+        );
+        descriptors.insert(
+            "source_c".to_string(),
+            crate::source!(name: "source_c", StreamEvent => placeholder!()),
+        );
+        descriptors.insert(
+            "sink".to_string(),
+            crate::sink!(name: "sink", InputEvent => placeholder!()),
+        );
+
+        let mut name_to_id = HashMap::new();
+        name_to_id.insert("source_a".to_string(), source_a_id);
+        name_to_id.insert("source_b".to_string(), source_b_id);
+        name_to_id.insert("source_c".to_string(), source_c_id);
+        name_to_id.insert("sink".to_string(), sink_id);
+
+        let mut topology = TopologyBuilder::new();
+        topology.add_stage_with_id(
+            source_a_id.to_topology_id(),
+            Some("source_a".to_string()),
+            TopologyStageType::FiniteSource,
+        );
+        topology.reset_current();
+        topology.add_stage_with_id(
+            source_b_id.to_topology_id(),
+            Some("source_b".to_string()),
+            TopologyStageType::FiniteSource,
+        );
+        topology.reset_current();
+        topology.add_stage_with_id(
+            source_c_id.to_topology_id(),
+            Some("source_c".to_string()),
+            TopologyStageType::FiniteSource,
+        );
+        topology.reset_current();
+        topology.add_stage_with_id(
+            sink_id.to_topology_id(),
+            Some("sink".to_string()),
+            TopologyStageType::Sink,
+        );
+        topology.reset_current();
+        topology.add_edge(source_a_id.to_topology_id(), sink_id.to_topology_id());
+        topology.add_edge(source_b_id.to_topology_id(), sink_id.to_topology_id());
+        topology.add_edge(source_c_id.to_topology_id(), sink_id.to_topology_id());
+        let topology = topology.build_unchecked().unwrap();
+
+        let errors = validate_edge_typing(&topology, &descriptors, &name_to_id)
+            .expect_err("expected EdgeErrors for heterogeneous fan-in into a non-join sink");
+
+        // Find the HeterogeneousFanIn error (there may also be SingleEdge
+        // errors for the per-edge mismatches against InputEvent).
+        let het = errors
+            .iter()
+            .find(|e| matches!(e.kind, EdgeTypingMismatchKind::HeterogeneousFanIn { .. }))
+            .expect("expected at least one HeterogeneousFanIn error");
+        assert_eq!(het.downstream_stage, "sink");
+        assert_eq!(het.input_role, EdgeInputRole::Input);
+        if let EdgeTypingMismatchKind::HeterogeneousFanIn {
+            other_upstream_stages,
+            other_actual_types,
+        } = &het.kind
+        {
+            // The focal upstream is one of source_a/b/c; the other two appear
+            // in other_upstream_stages.
+            assert_eq!(other_upstream_stages.len(), 2);
+            assert_eq!(other_actual_types.len(), 2);
+            let mut all = vec![het.upstream_stage.clone()];
+            all.extend_from_slice(other_upstream_stages);
+            all.sort();
+            assert_eq!(all, vec!["source_a", "source_b", "source_c"]);
+        } else {
+            unreachable!();
+        }
+    }
+
+    /// Two stages declared with the same Rust type but spelled two different
+    /// ways (short name vs path-qualified) must compare as equal under the
+    /// TypeId-based identity. This is the FLOWIP-114c canonical-identity
+    /// regression test that 105j Background flagged.
+    #[test]
+    fn validate_edge_typing_treats_type_id_equivalent_spellings_as_match() {
+        // Bind a path-qualified alias to the same underlying type.
+        type AliasedInput = crate::dsl::tests::typed_stage_contracts_test::tests::InputEvent;
+
+        let source_id = StageId::new();
+        let sink_id = StageId::new();
+
+        let mut descriptors: HashMap<String, Box<dyn StageDescriptor>> = HashMap::new();
+        // Source declares the short-named `InputEvent`.
+        descriptors.insert(
+            "source".to_string(),
+            crate::source!(name: "source", InputEvent => placeholder!()),
+        );
+        // Sink declares the path-qualified alias of the same type.
+        descriptors.insert(
+            "sink".to_string(),
+            crate::sink!(name: "sink", AliasedInput => placeholder!()),
+        );
+
+        let mut name_to_id = HashMap::new();
+        name_to_id.insert("source".to_string(), source_id);
+        name_to_id.insert("sink".to_string(), sink_id);
+
+        let mut topology = TopologyBuilder::new();
+        topology.add_stage_with_id(
+            source_id.to_topology_id(),
+            Some("source".to_string()),
+            TopologyStageType::FiniteSource,
+        );
+        topology.reset_current();
+        topology.add_stage_with_id(
+            sink_id.to_topology_id(),
+            Some("sink".to_string()),
+            TopologyStageType::Sink,
+        );
+        topology.reset_current();
+        topology.add_edge(source_id.to_topology_id(), sink_id.to_topology_id());
+        let topology = topology.build_unchecked().unwrap();
+
+        // Despite the two different spellings, the TypeId is identical, so
+        // validate_edge_typing must report no mismatch.
+        validate_edge_typing(&topology, &descriptors, &name_to_id)
+            .expect("identical TypeId from two spellings must validate clean");
     }
 }

@@ -88,6 +88,19 @@ pub enum FlowBuildError {
         kind: EdgeTypingMismatchKind,
         suggested_fix: String,
     },
+
+    #[error(
+        "Stage '{stage_name}' carries no typing metadata. After FLOWIP-114c, every \
+         DSL-authored stage must declare its types via the typed macro form (e.g. \
+         `transform!(In -> Out => handler)`)."
+    )]
+    StageMissingTypingMetadata { stage_name: String },
+
+    #[error(
+        "Stage '{stage_name}' has Unspecified typing on the {slot} slot, which is applicable \
+         for this stage role. Declare the type via the typed macro form."
+    )]
+    UnspecifiedTypingOnApplicableSlot { stage_name: String, slot: String },
 }
 
 impl From<FlowBuildError> for String {
