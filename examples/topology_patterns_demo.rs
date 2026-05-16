@@ -12,8 +12,7 @@
 //!
 //! For the **heterogeneous fan-in** case (three or more sources of different
 //! concrete types feeding one downstream via per-branch alignment
-//! transforms), see `examples/multi_source_ingest_demo.rs` and the
-//! authoring guide at `docs/typed-fan-in.md`.
+//! transforms), see `examples/multi_source_ingest_demo/`.
 //!
 //! **Reference Example for**: Topology patterns, ETL pipelines, multi-source/sink architectures
 //!

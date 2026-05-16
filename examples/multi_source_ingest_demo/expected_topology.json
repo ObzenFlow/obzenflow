@@ -1,5 +1,5 @@
 {
-  "_doc": "Structural reference for FLOWIP-114c multi_source_ingest_demo. Stage IDs are per-run ULIDs and are NOT asserted; the test at crates/obzenflow_dsl/src/dsl/tests/multi_source_ingest_demo_test.rs asserts the structural invariants below.",
+  "_doc": "Structural reference for FLOWIP-114c multi_source_ingest_demo. Stage IDs are per-run ULIDs and are NOT asserted; the test at tests/multi_source_ingest_demo_topology_test.rs asserts the structural invariants below.",
   "flow_name": "multi_source_ingest_demo",
   "stages": [
     {

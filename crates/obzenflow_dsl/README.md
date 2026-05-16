@@ -28,8 +28,8 @@ FlowApplication::run(flow! {
 
     stages: {
         // Every stage declares its types. After FLOWIP-114c, untyped macro
-        // forms fail to compile. See `docs/typed-fan-in.md` for the full
-        // authoring guide.
+        // forms fail to compile. See `examples/multi_source_ingest_demo/`
+        // for the canonical heterogeneous-fan-in pattern.
         src = source!(MyPayload => my_source);
         out = sink!(MyPayload => my_sink);
     },

@@ -190,4 +190,4 @@ required-features = ["ai"]
 
 [[example]]
 name = "multi_source_ingest_demo"
-path = "examples/multi_source_ingest_demo.rs"
+path = "examples/multi_source_ingest_demo/main.rs"

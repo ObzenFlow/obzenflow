@@ -16,8 +16,8 @@
 //!    `IngestedEvent` `TypeId` (homogeneous fan-in).
 //!
 //! Stage IDs are per-run ULIDs; we do not assert byte-for-byte JSON
-//! equality with `multi_source_ingest_demo.expected_topology.json`, which
-//! exists as a human-readable reference.
+//! equality with `examples/multi_source_ingest_demo/expected_topology.json`,
+//! which exists as a human-readable reference.
 
 use std::collections::HashMap;
 
