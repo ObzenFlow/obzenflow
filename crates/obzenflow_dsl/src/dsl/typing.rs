@@ -215,6 +215,12 @@ impl EdgeInputRole {
     }
 }
 
+impl fmt::Display for EdgeInputRole {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Structured result from `validate_edge_typing`. Carries enough context to
 /// build a `FlowBuildError::EdgeTypingMismatch`. See FLOWIP-114c.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1069,13 +1075,20 @@ pub fn validate_edge_typing(
         }
     }
 
-    let mut errors: Vec<EdgeError> = Vec::new();
-
     // Per-(downstream_id, role) fan-in collector. Holds (upstream_stage_name,
-    // type_id, display_name) for every Exact-typed inbound edge.
+    // type_id, display_name, downstream_stage_name) for every Exact-typed
+    // inbound edge.
     type IngressKey = (StageId, EdgeInputRole);
     let mut fan_in: HashMap<IngressKey, Vec<(String, std::any::TypeId, String, String)>> =
         HashMap::new();
+
+    // SingleEdge errors collected during the per-edge pass, keyed by
+    // (downstream_id, role) so the final-merge step can drop the ones subsumed
+    // by a HeterogeneousFanIn on the same slot. FLOWIP-114c PR closing:
+    // surfacing the richer kind matters more than reporting every individual
+    // upstream that disagrees with the downstream contract on a heterogeneous
+    // group.
+    let mut single_edge_errors: HashMap<IngressKey, Vec<EdgeError>> = HashMap::new();
 
     for edge in topology.edges() {
         if edge.kind != EdgeKind::Forward {
@@ -1134,14 +1147,17 @@ pub fn validate_edge_typing(
         ) = (&upstream_metadata.output_type, downstream_input_hint)
         {
             if upstream_id != expected_id {
-                errors.push(EdgeError {
-                    upstream_stage: upstream_descriptor.name().to_string(),
-                    downstream_stage: downstream_descriptor.name().to_string(),
-                    upstream_type: upstream_name.clone(),
-                    expected_type: expected_name.clone(),
-                    input_role,
-                    kind: EdgeTypingMismatchKind::SingleEdge,
-                });
+                single_edge_errors
+                    .entry((downstream_stage_id, input_role))
+                    .or_default()
+                    .push(EdgeError {
+                        upstream_stage: upstream_descriptor.name().to_string(),
+                        downstream_stage: downstream_descriptor.name().to_string(),
+                        upstream_type: upstream_name.clone(),
+                        expected_type: expected_name.clone(),
+                        input_role,
+                        kind: EdgeTypingMismatchKind::SingleEdge,
+                    });
             }
         }
 
@@ -1165,12 +1181,23 @@ pub fn validate_edge_typing(
 
     // Per-slot HeterogeneousFanIn: when two or more upstreams in the same
     // (downstream, role) group emit different Exact types, emit one error per
-    // offending slot. The error names the first upstream as the focal point
-    // and lists every other upstream + actual type via `other_*`.
-    for ((_downstream_id, role), entries) in &fan_in {
+    // offending slot. The error names the alphabetically-first upstream as the
+    // focal point and lists every other upstream + actual type via `other_*`.
+    // The sort is on upstream stage name so the focal element is stable across
+    // changes to topology edge insertion order; without it, the regression
+    // tests in Acceptance #25 would be flaky.
+    let mut hetero_slots: Vec<IngressKey> = Vec::new();
+    let mut hetero_errors: Vec<EdgeError> = Vec::new();
+    let mut fan_in_keys: Vec<IngressKey> = fan_in.keys().copied().collect();
+    fan_in_keys.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.as_str().cmp(b.1.as_str())));
+
+    for key in fan_in_keys {
+        let entries = fan_in.get_mut(&key).expect("key from keys iteration");
         if entries.len() < 2 {
             continue;
         }
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+
         let first_type_id = entries[0].1;
         let all_same = entries.iter().all(|(_, tid, _, _)| *tid == first_type_id);
         if all_same {
@@ -1190,17 +1217,38 @@ pub fn validate_edge_typing(
         // type, which makes the error message read "the other upstreams should
         // align to me". The author resolves by aligning all branches to one
         // common envelope type.
-        errors.push(EdgeError {
+        hetero_slots.push(key);
+        hetero_errors.push(EdgeError {
             upstream_stage: focal_upstream.clone(),
             downstream_stage: downstream_stage_name.clone(),
             upstream_type: focal_display.clone(),
             expected_type: focal_display.clone(),
-            input_role: *role,
+            input_role: key.1,
             kind: EdgeTypingMismatchKind::HeterogeneousFanIn {
                 other_upstream_stages,
                 other_actual_types,
             },
         });
+    }
+
+    // Final assembly: HeterogeneousFanIn first (the architecturally-meaningful
+    // diagnosis), then SingleEdge errors that are NOT subsumed by a hetero
+    // group on the same (downstream, role) slot. `build_typed_flow!` surfaces
+    // the first error from the returned vector as the structured
+    // `FlowBuildError::EdgeTypingMismatch`, so the ordering chosen here
+    // determines which kind reaches the user.
+    let mut errors: Vec<EdgeError> = hetero_errors;
+    let mut surviving_single_keys: Vec<IngressKey> =
+        single_edge_errors.keys().copied().collect();
+    surviving_single_keys
+        .sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.as_str().cmp(b.1.as_str())));
+    for key in surviving_single_keys {
+        if hetero_slots.contains(&key) {
+            continue;
+        }
+        let mut bucket = single_edge_errors.remove(&key).unwrap_or_default();
+        bucket.sort_by(|a, b| a.upstream_stage.cmp(&b.upstream_stage));
+        errors.extend(bucket);
     }
 
     if errors.is_empty() {

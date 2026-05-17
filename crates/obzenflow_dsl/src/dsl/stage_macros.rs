@@ -4,7 +4,10 @@
 
 //! Stage macros for building ObzenFlow pipeline descriptors.
 //!
-//! Public macros use canonical directional contracts for typed stages:
+//! Public macros only accept the typed shape. Every authoring site declares
+//! its input and output types so the topology API and Studio can label every
+//! stage and every edge, and so the edge-compatibility validator (FLOWIP-114c)
+//! can catch type-level fan-in mistakes at build time.
 //!
 //! ```ignore
 //! source!(Out => handler)
@@ -18,27 +21,28 @@
 //! join!(catalog CatalogStage: Catalog, Stream -> Out => handler)
 //! ```
 //!
-//! Untyped macros follow the same naming and join-role conventions:
+//! Each form supports four decorations: bare (binding-derived name), the
+//! `name: "..."` prefix to override the runtime stage name, a `[middleware,
+//! ...]` suffix to attach middleware, and the named-plus-middleware
+//! combination. The 8 stage families x 4 decorations matrix is exercised as a
+//! permanent regression by `typed_decoration_matrix_test`.
 //!
-//! ```ignore
-//! source!(handler)
-//! async_source!(handler)
-//! infinite_source!(handler)
-//! async_infinite_source!(handler)
-//! transform!(handler)
-//! async_transform!(handler)
-//! stateful!(handler)
-//! sink!(handler)
-//! join!(catalog CatalogStage => handler)
-//! ```
+//! The pre-FLOWIP-114c untyped forms (`source!(handler)`,
+//! `transform!(handler)`, `sink!(handler)`, etc.) and the mixed-leg join arms
+//! (`join!(catalog Ref: mixed, ...)`) were removed in the PR that operationalised
+//! FLOWIP-114c. Authoring patterns that previously reached for an untyped
+//! handler to demux events at runtime are now expressed as joins (two typed
+//! inputs) or per-branch alignment transforms (homogeneous fan-in on an
+//! envelope type); see `examples/multi_source_ingest_demo` for the canonical
+//! pattern and FLOWIP-114c "How to handle heterogeneous fan-in" for the
+//! rationale.
 //!
-//! By default, runtime stage names are derived from the left-hand binding in
-//! the enclosing `flow!` block. Use `name: "..."` to override the runtime
-//! name explicitly.
-//!
-//! Typed arms dispatch into `#[doc(hidden)]` helper macros that handle
-//! normalisation, metadata construction, assertions, and descriptor wrapping.
-//! Untyped arms produce descriptors directly.
+//! Public typed arms dispatch into `#[doc(hidden)]` helper macros
+//! (`__obzenflow_*_typed!`) that handle normalisation, metadata construction,
+//! and descriptor wrapping. The doc-hidden helpers also expose
+//! `__obzenflow_*_untyped!` arms used internally by typed expansions for
+//! descriptor assembly; those are not part of the public surface and are not
+//! reachable by author code.
 
 // ============================================================================
 // placeholder!

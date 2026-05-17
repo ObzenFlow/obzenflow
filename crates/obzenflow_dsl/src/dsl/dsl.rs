@@ -384,7 +384,28 @@ macro_rules! build_typed_flow {
             descriptors.insert(name, descriptor);
         }
 
-        // Build StageInfo list
+        // FLOWIP-114c: build the subgraph membership map from lowering
+        // artifacts BEFORE topology stages are assembled, so the StageInfo
+        // entries passed to `validate_edge_typing` carry `subgraph_id`.
+        // Without this, the validator's composite-internal-edge skip rule
+        // cannot fire (it reads `topology.stage_info(...).subgraph`), and
+        // any flow using `ai_map_reduce!` would surface as a SingleEdge
+        // mismatch on the `chunk -> collect` manifest edge at the validator
+        // boundary. The same map is reused downstream when assembling the
+        // annotated topology returned to the caller.
+        let mut subgraph_membership_map: HashMap<StageId, obzenflow_topology::StageSubgraphMembership> =
+            HashMap::new();
+        for (stage_name, membership) in lowering_artifacts.stage_subgraphs {
+            let stage_id = *name_to_id.get(&stage_name).ok_or_else(|| {
+                FlowBuildError::StageResourcesFailed(format!(
+                    "Lowering artifacts reference unknown stage '{stage_name}'"
+                ))
+            })?;
+            subgraph_membership_map.insert(stage_id, membership);
+        }
+
+        // Build StageInfo list, attaching composite subgraph membership where
+        // applicable so the validator sees a fully-annotated topology.
         let mut topology_stages: Vec<TopologyStageInfo> = Vec::new();
         let descriptor_names: Vec<String> = descriptors.keys().cloned().collect();
         for name in &descriptor_names {
@@ -396,11 +417,15 @@ macro_rules! build_typed_flow {
                 .expect("name_to_id should contain all stage names");
             let topology_id = to_topology_id(core_id);
             let topology_stage_type = to_topology_stage_type(descriptor.stage_type());
-            topology_stages.push(TopologyStageInfo::new(
+            let mut info = TopologyStageInfo::new(
                 topology_id,
                 descriptor.name().to_string(),
                 topology_stage_type,
-            ));
+            );
+            if let Some(membership) = subgraph_membership_map.get(&core_id) {
+                info = info.with_subgraph(membership.clone());
+            }
+            topology_stages.push(info);
         }
 
         // Build edges, including join reference edges and explicit topology edges
@@ -515,7 +540,7 @@ macro_rules! build_typed_flow {
             return Err($crate::dsl::error::FlowBuildError::EdgeTypingMismatch {
                 upstream_stage: first.upstream_stage,
                 downstream_stage: first.downstream_stage,
-                role: first.input_role.as_str().to_string(),
+                role: first.input_role,
                 expected_type: first.expected_type,
                 actual_type: first.upstream_type,
                 kind: first.kind,
@@ -675,19 +700,11 @@ macro_rules! build_typed_flow {
         // Collect logical subgraph metadata (FLOWIP-086z-part-2).
         // Canonical types live in `obzenflow-topology`; subgraph payload uses
         // topology `StageId`s so we convert from core IDs at this boundary.
-        use obzenflow_topology::{
-            StageSubgraphMembership, SubgraphInternalEdge, TopologySubgraphInfo,
-        };
-        let mut subgraph_membership_map: HashMap<StageId, StageSubgraphMembership> =
-            HashMap::new();
-        for (stage_name, membership) in lowering_artifacts.stage_subgraphs {
-            let stage_id = *name_to_id.get(&stage_name).ok_or_else(|| {
-                FlowBuildError::StageResourcesFailed(format!(
-                    "Lowering artifacts reference unknown stage '{stage_name}'"
-                ))
-            })?;
-            subgraph_membership_map.insert(stage_id, membership);
-        }
+        // The `subgraph_membership_map` was built earlier (above the topology
+        // assembly) so the validator at flow-build time sees subgraph IDs on
+        // composite-internal stages; it is reused here to enrich the final
+        // annotated topology.
+        use obzenflow_topology::{SubgraphInternalEdge, TopologySubgraphInfo};
 
         let mut subgraphs: Vec<TopologySubgraphInfo> = Vec::new();
         for spec in lowering_artifacts.subgraphs {

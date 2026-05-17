@@ -901,4 +901,181 @@ mod tests {
              at build time.",
         );
     }
+
+    /// FLOWIP-114c Acceptance #4 + #25, passing case: a join whose stream slot
+    /// has two upstreams of the same `Exact` type must build successfully. The
+    /// reference-leg upstream also matches the declared reference type. The
+    /// homogeneous-fan-in invariant applies independently per join leg.
+    #[test]
+    fn validate_edge_typing_accepts_homogeneous_fan_in_on_join_stream_leg() {
+        let reference_id = StageId::new();
+        let stream_a_id = StageId::new();
+        let stream_b_id = StageId::new();
+        let join_id = StageId::new();
+
+        let mut join = crate::join!(
+            name: "join",
+            catalog reference: ReferenceEvent,
+            StreamEvent -> JoinedEvent => placeholder!()
+        );
+        join.set_reference_stage_id(reference_id);
+
+        let mut descriptors: HashMap<String, Box<dyn StageDescriptor>> = HashMap::new();
+        descriptors.insert(
+            "reference".to_string(),
+            crate::source!(name: "reference", ReferenceEvent => placeholder!()),
+        );
+        descriptors.insert(
+            "stream_a".to_string(),
+            crate::source!(name: "stream_a", StreamEvent => placeholder!()),
+        );
+        descriptors.insert(
+            "stream_b".to_string(),
+            crate::source!(name: "stream_b", StreamEvent => placeholder!()),
+        );
+        descriptors.insert("join".to_string(), join);
+
+        let mut name_to_id = HashMap::new();
+        name_to_id.insert("reference".to_string(), reference_id);
+        name_to_id.insert("stream_a".to_string(), stream_a_id);
+        name_to_id.insert("stream_b".to_string(), stream_b_id);
+        name_to_id.insert("join".to_string(), join_id);
+
+        let mut topology = TopologyBuilder::new();
+        for (id, name, role) in [
+            (reference_id, "reference", TopologyStageType::FiniteSource),
+            (stream_a_id, "stream_a", TopologyStageType::FiniteSource),
+            (stream_b_id, "stream_b", TopologyStageType::FiniteSource),
+            (join_id, "join", TopologyStageType::Join),
+        ] {
+            topology.add_stage_with_id(id.to_topology_id(), Some(name.to_string()), role);
+            topology.reset_current();
+        }
+        topology.add_edge(reference_id.to_topology_id(), join_id.to_topology_id());
+        topology.add_edge(stream_a_id.to_topology_id(), join_id.to_topology_id());
+        topology.add_edge(stream_b_id.to_topology_id(), join_id.to_topology_id());
+        let topology = topology.build_unchecked().unwrap();
+
+        validate_edge_typing(&topology, &descriptors, &name_to_id).expect(
+            "homogeneous fan-in on a join stream leg with matching reference leg must \
+             validate cleanly under FLOWIP-114c",
+        );
+    }
+
+    /// FLOWIP-114c Acceptance #4 + #25, failing case: a join whose stream slot
+    /// has two upstreams of differing `Exact` types must produce a
+    /// HeterogeneousFanIn error with `input_role: EdgeInputRole::Stream`,
+    /// naming both upstreams and both types. The dedupe rule on
+    /// `validate_edge_typing` surfaces the architecturally-meaningful kind
+    /// rather than a SingleEdge mismatch from the one upstream that disagrees
+    /// with the declared stream type.
+    #[test]
+    fn validate_edge_typing_rejects_heterogeneous_fan_in_on_join_stream_leg() {
+        let reference_id = StageId::new();
+        let stream_a_id = StageId::new();
+        let stream_b_id = StageId::new();
+        let join_id = StageId::new();
+
+        let mut join = crate::join!(
+            name: "join",
+            catalog reference: ReferenceEvent,
+            StreamEvent -> JoinedEvent => placeholder!()
+        );
+        join.set_reference_stage_id(reference_id);
+
+        let mut descriptors: HashMap<String, Box<dyn StageDescriptor>> = HashMap::new();
+        descriptors.insert(
+            "reference".to_string(),
+            crate::source!(name: "reference", ReferenceEvent => placeholder!()),
+        );
+        descriptors.insert(
+            "stream_a".to_string(),
+            crate::source!(name: "stream_a", StreamEvent => placeholder!()),
+        );
+        descriptors.insert(
+            "stream_b".to_string(),
+            crate::source!(name: "stream_b", AlternateEvent => placeholder!()),
+        );
+        descriptors.insert("join".to_string(), join);
+
+        let mut name_to_id = HashMap::new();
+        name_to_id.insert("reference".to_string(), reference_id);
+        name_to_id.insert("stream_a".to_string(), stream_a_id);
+        name_to_id.insert("stream_b".to_string(), stream_b_id);
+        name_to_id.insert("join".to_string(), join_id);
+
+        let mut topology = TopologyBuilder::new();
+        for (id, name, role) in [
+            (reference_id, "reference", TopologyStageType::FiniteSource),
+            (stream_a_id, "stream_a", TopologyStageType::FiniteSource),
+            (stream_b_id, "stream_b", TopologyStageType::FiniteSource),
+            (join_id, "join", TopologyStageType::Join),
+        ] {
+            topology.add_stage_with_id(id.to_topology_id(), Some(name.to_string()), role);
+            topology.reset_current();
+        }
+        topology.add_edge(reference_id.to_topology_id(), join_id.to_topology_id());
+        topology.add_edge(stream_a_id.to_topology_id(), join_id.to_topology_id());
+        topology.add_edge(stream_b_id.to_topology_id(), join_id.to_topology_id());
+        let topology = topology.build_unchecked().unwrap();
+
+        let errors = validate_edge_typing(&topology, &descriptors, &name_to_id).expect_err(
+            "expected a HeterogeneousFanIn error on the join stream leg with differing types",
+        );
+
+        // After the validator's dedupe rule the HeterogeneousFanIn is the only
+        // error reported for the (join, Stream) slot. No SingleEdge survives,
+        // and the reference leg matched so no error fires there.
+        assert_eq!(
+            errors.len(),
+            1,
+            "expected exactly one EdgeError after dedupe, got {errors:?}",
+        );
+        let het = &errors[0];
+        assert_eq!(het.downstream_stage, "join");
+        assert_eq!(het.input_role, EdgeInputRole::Stream);
+
+        // The focal upstream is the alphabetically-first by sort, so it is
+        // `stream_a` with `StreamEvent` (which matches the declared stream
+        // type). The other upstream is `stream_b` with `AlternateEvent`.
+        assert_eq!(het.upstream_stage, "stream_a");
+        assert_eq!(het.upstream_type, type_name::<StreamEvent>());
+
+        match &het.kind {
+            EdgeTypingMismatchKind::HeterogeneousFanIn {
+                other_upstream_stages,
+                other_actual_types,
+            } => {
+                assert_eq!(other_upstream_stages, &vec!["stream_b".to_string()]);
+                assert_eq!(
+                    other_actual_types,
+                    &vec![type_name::<AlternateEvent>().to_string()]
+                );
+            }
+            other => panic!("expected HeterogeneousFanIn kind, got {other:?}"),
+        }
+
+        // Confirm the rendered `FlowBuildError::EdgeTypingMismatch` message
+        // includes both upstreams and both types under the
+        // Heterogeneous-branch Display path. The dsl.rs surfacing code wraps
+        // this same error so the failure the author sees is the same string
+        // shape.
+        let rendered = FlowBuildError::fmt_edge_typing_mismatch(
+            &het.upstream_stage,
+            &het.downstream_stage,
+            het.input_role,
+            &het.upstream_type,
+            &het.expected_type,
+            &het.kind,
+            "Insert per-branch alignment transforms.",
+        );
+        assert!(
+            rendered.contains("Heterogeneous fan-in"),
+            "expected Heterogeneous-branch render, got: {rendered}"
+        );
+        assert!(rendered.contains("'stream_a'"));
+        assert!(rendered.contains("'stream_b'"));
+        assert!(rendered.contains(type_name::<StreamEvent>()));
+        assert!(rendered.contains(type_name::<AlternateEvent>()));
+    }
 }

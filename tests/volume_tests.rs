@@ -2,7 +2,14 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-#![cfg(any())] // Disabled: legacy throughput/backpressure harness, not part of safety cluster focused tests
+#![cfg(any())] // Disabled: legacy throughput/backpressure harness, not part of safety cluster focused tests.
+// FLOWIP-114c note: the `flow!` blocks below use the canonical typed macro
+// surface (`source!(T => h)`, `transform!(In -> Out => h)`, `sink!(In => h)`)
+// so this file does not advertise the deleted untyped forms. Re-enabling the
+// harness requires reconciling the handlers with the current DSL traits
+// (`SourceTyping`, `TransformTyping`, `SinkTyping`) and reviewing the
+// `DiskJournal::new` / monitoring-middleware surface drift since this file
+// was last live.
 
 // tests/volume_tests.rs
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
@@ -166,9 +173,9 @@ async fn test_basic_throughput() -> Result<()> {
         middleware: [],
 
         stages: {
-            source = source!(EventGenerator::new(1000, 1000, "TestEvent".to_string()));
-            passthrough = transform!(PassthroughStage::new());
-            sink = sink!(counter_sink);
+            source = source!(BenchEvent => EventGenerator::new(1000, 1000, "TestEvent".to_string()));
+            passthrough = transform!(BenchEvent -> BenchEvent => PassthroughStage::new());
+            sink = sink!(BenchEvent => counter_sink);
         },
 
         topology: {
@@ -216,9 +223,9 @@ async fn test_backpressure() -> Result<()> {
         middleware: [],
 
         stages: {
-            source = source!(EventGenerator::new(1000, 100, "TestEvent".to_string()));
-            cpu_intensive = transform!(CpuIntensiveStage::new(Duration::from_micros(100)));
-            sink = sink!(counter_sink);
+            source = source!(BenchEvent => EventGenerator::new(1000, 100, "TestEvent".to_string()));
+            cpu_intensive = transform!(BenchEvent -> BenchEvent => CpuIntensiveStage::new(Duration::from_micros(100)));
+            sink = sink!(BenchEvent => counter_sink);
         },
 
         topology: {
@@ -262,9 +269,9 @@ async fn test_memory_pressure() -> Result<()> {
         middleware: [],
 
         stages: {
-            source = source!(EventGenerator::new(100, 50, "TestEvent".to_string()));
-            memory_intensive = transform!(MemoryIntensiveStage::new(1024 * 1024)); // 1MB per event
-            sink = sink!(counter_sink);
+            source = source!(BenchEvent => EventGenerator::new(100, 50, "TestEvent".to_string()));
+            memory_intensive = transform!(BenchEvent -> BenchEvent => MemoryIntensiveStage::new(1024 * 1024)); // 1MB per event
+            sink = sink!(BenchEvent => counter_sink);
         },
 
         topology: {

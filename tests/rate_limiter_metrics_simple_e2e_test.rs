@@ -3,7 +3,12 @@
 // https://obzenflow.dev
 
 #![cfg(any())]
-// Disabled for now: rate limiter + finite source drain semantics need a dedicated flowip; kept as a manual harness
+// Disabled for now: rate limiter + finite source drain semantics need a dedicated flowip; kept as a manual harness.
+// FLOWIP-114c note: the `flow!` block below uses the canonical typed macro
+// surface (`source!(T => h, [middleware])`, `transform!(In -> Out => h)`,
+// `sink!(In => h)`). Re-enabling the harness requires reconciling the
+// handlers with the current DSL trait surface (`SourceTyping`,
+// `TransformTyping`, `SinkTyping`).
 
 //! Simplified end-to-end test for Rate Limiter metrics in FLOWIP-056-666
 //!
@@ -147,11 +152,11 @@ async fn test_rate_limiter_metrics_simple() -> Result<()> {
 
         stages: {
             // Apply rate limiter at the source stage
-            burst_source = source!(source, [
+            burst_source = source!(RateLimiterTestEvent => source, [
                 rate_limit(5.0)  // 5 events per second
             ]);
-            passthrough = transform!(transform);
-            counting_sink = sink!(sink);
+            passthrough = transform!(RateLimiterTestEvent -> RateLimiterTestEvent => transform);
+            counting_sink = sink!(RateLimiterTestEvent => sink);
         },
 
         topology: {
