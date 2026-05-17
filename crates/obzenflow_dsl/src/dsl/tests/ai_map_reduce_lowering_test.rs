@@ -587,8 +587,8 @@ mod tests {
             ),
         ];
 
-        let artifacts = lower_composites(&mut stages, &mut connections)
-            .expect("composite lowering succeeds");
+        let artifacts =
+            lower_composites(&mut stages, &mut connections).expect("composite lowering succeeds");
 
         let mut name_to_id: StdHashMap<String, StageId> = StdHashMap::new();
         for name in stages.keys() {

@@ -3,13 +3,13 @@
 // https://obzenflow.dev
 
 #![cfg(any())] // Disabled: legacy throughput/backpressure harness, not part of safety cluster focused tests.
-// FLOWIP-114c note: the `flow!` blocks below use the canonical typed macro
-// surface (`source!(T => h)`, `transform!(In -> Out => h)`, `sink!(In => h)`)
-// so this file does not advertise the deleted untyped forms. Re-enabling the
-// harness requires reconciling the handlers with the current DSL traits
-// (`SourceTyping`, `TransformTyping`, `SinkTyping`) and reviewing the
-// `DiskJournal::new` / monitoring-middleware surface drift since this file
-// was last live.
+               // FLOWIP-114c note: the `flow!` blocks below use the canonical typed macro
+               // surface (`source!(T => h)`, `transform!(In -> Out => h)`, `sink!(In => h)`)
+               // so this file does not advertise the deleted untyped forms. Re-enabling the
+               // harness requires reconciling the handlers with the current DSL traits
+               // (`SourceTyping`, `TransformTyping`, `SinkTyping`) and reviewing the
+               // `DiskJournal::new` / monitoring-middleware surface drift since this file
+               // was last live.
 
 // tests/volume_tests.rs
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};

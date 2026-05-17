@@ -141,10 +141,7 @@ impl FlowBuildError {
                     "Heterogeneous fan-in on {role} into '{downstream_stage}': \
                      '{upstream_stage}' emits '{actual_type}'"
                 );
-                for (stage, ty) in other_upstream_stages
-                    .iter()
-                    .zip(other_actual_types.iter())
-                {
+                for (stage, ty) in other_upstream_stages.iter().zip(other_actual_types.iter()) {
                     msg.push_str(&format!(", '{stage}' emits '{ty}'"));
                 }
                 msg.push_str(&format!(". {suggested_fix}"));

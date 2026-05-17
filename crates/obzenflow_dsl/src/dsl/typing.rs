@@ -1238,8 +1238,7 @@ pub fn validate_edge_typing(
     // `FlowBuildError::EdgeTypingMismatch`, so the ordering chosen here
     // determines which kind reaches the user.
     let mut errors: Vec<EdgeError> = hetero_errors;
-    let mut surviving_single_keys: Vec<IngressKey> =
-        single_edge_errors.keys().copied().collect();
+    let mut surviving_single_keys: Vec<IngressKey> = single_edge_errors.keys().copied().collect();
     surviving_single_keys
         .sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.as_str().cmp(b.1.as_str())));
     for key in surviving_single_keys {

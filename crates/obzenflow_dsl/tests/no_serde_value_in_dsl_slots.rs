@@ -135,8 +135,7 @@ fn lint_contents(rel_path: &str, contents: &str) -> Vec<String> {
         // string-literal contents do not perturb paren depth or smuggle in
         // a `serde_json::Value` mention. Use the masked body for the
         // violation check and the raw body for annotation detection.
-        let (masked_body, end_line) =
-            accumulate_macro_body(&masked_refs, idx, after_macro);
+        let (masked_body, end_line) = accumulate_macro_body(&masked_refs, idx, after_macro);
         let raw_body = raw_macro_body(&raw_lines, idx, after_macro, end_line);
 
         let invocation_has_value = masked_body.contains("serde_json::Value");
@@ -484,7 +483,8 @@ mod tests {
     fn lint_does_not_flag_value_inside_string_literal_in_macro_body() {
         // The error message string mentions serde_json::Value but no type
         // slot uses it.
-        let contents = "let _ = source!(MyEvent => MyHandler::new(\"serde_json::Value not allowed\"));";
+        let contents =
+            "let _ = source!(MyEvent => MyHandler::new(\"serde_json::Value not allowed\"));";
         let violations = lint_contents("fixture.rs", contents);
         assert!(
             violations.is_empty(),
