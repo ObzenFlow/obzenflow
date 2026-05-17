@@ -265,7 +265,7 @@ fn main() -> Result<()> {
                 // FLOWIP-080j: TopNByTyped - Type-safe accumulation with no ChainEvent!
                 // Type-safe extraction functions instead of string field names
                 top_products = stateful!(
-                    typed_stateful::top_n_by(
+                    OrderEvent -> TopProductsUpdate => typed_stateful::top_n_by(
                         5,
                         |order: &OrderEvent| order.product_id.clone(), // Key extractor
                         |order: &OrderEvent| order.total_value,        // Score extractor

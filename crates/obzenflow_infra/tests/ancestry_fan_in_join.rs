@@ -48,7 +48,7 @@ struct RefRow {
 }
 
 impl TypedPayload for RefRow {
-    const EVENT_TYPE: &'static str = "test.flowip_071h.ref_row";
+    const EVENT_TYPE: &'static str = "test.ancestry.ref_row";
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -57,7 +57,7 @@ struct StreamRow {
 }
 
 impl TypedPayload for StreamRow {
-    const EVENT_TYPE: &'static str = "test.flowip_071h.stream_row";
+    const EVENT_TYPE: &'static str = "test.ancestry.stream_row";
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -66,7 +66,7 @@ struct DrainOnlyOutput {
 }
 
 impl TypedPayload for DrainOnlyOutput {
-    const EVENT_TYPE: &'static str = "test.flowip_071h.drain_only_output";
+    const EVENT_TYPE: &'static str = "test.ancestry.drain_only_output";
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -75,7 +75,7 @@ struct MatchOutput {
 }
 
 impl TypedPayload for MatchOutput {
-    const EVENT_TYPE: &'static str = "test.flowip_071h.match_output";
+    const EVENT_TYPE: &'static str = "test.ancestry.match_output";
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -84,7 +84,7 @@ struct FanOutOutput {
 }
 
 impl TypedPayload for FanOutOutput {
-    const EVENT_TYPE: &'static str = "test.flowip_071h.fan_out_output";
+    const EVENT_TYPE: &'static str = "test.ancestry.fan_out_output";
 }
 
 #[derive(Clone, Debug)]
@@ -377,8 +377,8 @@ async fn drain_only_output_inherits_reference_and_stream_ancestry_even_if_no_out
     let control = Arc::new(JonestownStrategy);
     let mut join_config = JoinConfig::new(
         join_stage,
-        "flowip_071h_drain_only",
-        "flowip_071h",
+        "ancestry_drain_only",
+        "ancestry",
         reference_stage,
         stream_stage,
     );
@@ -580,8 +580,8 @@ async fn conservative_reference_ancestry_overclaims_distinct_reference_writers()
     let control = Arc::new(JonestownStrategy);
     let mut join_config = JoinConfig::new(
         join_stage,
-        "flowip_071h_overclaim",
-        "flowip_071h",
+        "ancestry_overclaim",
+        "ancestry",
         reference_stage,
         stream_stage,
     );
@@ -775,8 +775,8 @@ async fn fan_out_outputs_all_carry_merged_ancestry_from_both_sides() {
     let control = Arc::new(JonestownStrategy);
     let mut join_config = JoinConfig::new(
         join_stage,
-        "flowip_071h_fan_out",
-        "flowip_071h",
+        "ancestry_fan_out",
+        "ancestry",
         reference_stage,
         stream_stage,
     );
@@ -989,8 +989,8 @@ async fn error_journal_entries_carry_merged_parent_ancestry() {
     let control = Arc::new(JonestownStrategy);
     let mut join_config = JoinConfig::new(
         join_stage,
-        "flowip_071h_error_journal_ancestry",
-        "flowip_071h",
+        "ancestry_error_journal",
+        "ancestry",
         reference_stage,
         stream_stage,
     );

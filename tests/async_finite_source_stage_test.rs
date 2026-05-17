@@ -9,6 +9,7 @@ use obzenflow_adapters::middleware::{Middleware, MiddlewareContext, MiddlewareFa
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
 use obzenflow_core::event::ChainEventContent;
+use obzenflow_core::TypedPayload;
 use obzenflow_core::{StageId, WriterId};
 use obzenflow_dsl::{async_source, flow, sink};
 use obzenflow_infra::journal::disk_journals;
@@ -16,7 +17,20 @@ use obzenflow_runtime::pipeline::config::StageConfig;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{AsyncFiniteSourceHandler, SinkHandler};
 use obzenflow_runtime::stages::SourceError;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
+
+/// File-local payload for the async-finite source stage test. The JSON
+/// shape matches what `TestAsyncEventSource` emits; the type fingerprints
+/// the stage contract per FLOWIP-114c.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct AsyncTestEvent {
+    index: u64,
+}
+
+impl TypedPayload for AsyncTestEvent {
+    const EVENT_TYPE: &'static str = "async_finite_source.event";
+}
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
@@ -152,8 +166,8 @@ async fn async_finite_source_emits_events_and_calls_drain() -> Result<()> {
         middleware: [],
 
         stages: {
-            source = async_source!(source);
-            sink = sink!(sink);
+            source = async_source!(AsyncTestEvent => source);
+            sink = sink!(AsyncTestEvent => sink);
         },
 
         topology: {
@@ -199,10 +213,10 @@ async fn async_finite_source_applies_stage_middleware() -> Result<()> {
         middleware: [],
 
         stages: {
-            source = async_source!(source, [
+            source = async_source!(AsyncTestEvent => source, [
                 InjectFieldFactory
             ]);
-            sink = sink!(sink);
+            sink = sink!(AsyncTestEvent => sink);
         },
 
         topology: {

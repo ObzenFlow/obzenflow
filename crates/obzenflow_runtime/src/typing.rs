@@ -41,12 +41,6 @@ pub trait JoinTyping {
     type Output;
 }
 
-/// Internal marker used by typed placeholder handlers when a stage declares a
-/// `mixed` input position.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-#[doc(hidden)]
-pub struct MixedInput;
-
 /// Compile-time assertion helper for source handlers.
 pub fn assert_source_output<H, Out>(_: &H)
 where
@@ -61,58 +55,12 @@ where
 {
 }
 
-/// Compile-time assertion helper for mixed-input transform handlers.
-pub fn assert_transform_output<H, Out>(_: &H)
-where
-    H: TransformTyping<Output = Out>,
-{
-}
-
-/// Compile-time assertion helper for stateful handlers.
-pub fn assert_stateful_contract<H, In, Out>(_: &H)
-where
-    H: StatefulTyping<Input = In, Output = Out>,
-{
-}
-
-/// Compile-time assertion helper for mixed-input stateful handlers.
-pub fn assert_stateful_output<H, Out>(_: &H)
-where
-    H: StatefulTyping<Output = Out>,
-{
-}
-
-/// Compile-time assertion helper for sink handlers.
-pub fn assert_sink_input<H, In>(_: &H)
-where
-    H: SinkTyping<Input = In>,
-{
-}
-
-/// Compile-time assertion helper for join handlers with exact reference and stream types.
-pub fn assert_join_contract<H, Ref, Stream, Out>(_: &H)
-where
-    H: JoinTyping<Reference = Ref, Stream = Stream, Output = Out>,
-{
-}
-
-/// Compile-time assertion helper for joins with only output proven.
-pub fn assert_join_output<H, Out>(_: &H)
-where
-    H: JoinTyping<Output = Out>,
-{
-}
-
-/// Compile-time assertion helper for joins with exact reference type and output.
-pub fn assert_join_reference_output<H, Ref, Out>(_: &H)
-where
-    H: JoinTyping<Reference = Ref, Output = Out>,
-{
-}
-
-/// Compile-time assertion helper for joins with exact stream type and output.
-pub fn assert_join_stream_output<H, Stream, Out>(_: &H)
-where
-    H: JoinTyping<Stream = Stream, Output = Out>,
-{
-}
+// FLOWIP-114c PR D: the previous mixed-input / partial-typing assertion
+// helpers (`assert_transform_output`, `assert_stateful_output`,
+// `assert_stateful_contract`, `assert_sink_input`, `assert_join_contract`,
+// `assert_join_output`, `assert_join_reference_output`,
+// `assert_join_stream_output`) are removed. The DSL no longer has authoring
+// surfaces that need to bypass `TransformTyping`/`SinkTyping`/`StatefulTyping`/
+// `JoinTyping`. The remaining typed contract is established at the macro
+// expansion site by emitting `TypeHint::exact::<T>()` metadata; runtime
+// fingerprinting is type-erased through `ChainEvent`.

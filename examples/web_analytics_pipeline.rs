@@ -297,7 +297,7 @@ fn main() -> Result<()> {
                 }));
 
                 // FLOWIP-080j: GroupByTyped for per-user session tracking
-                session_tracker = stateful!(typed_stateful::group_by(
+                session_tracker = stateful!(UserEvent -> SessionUpdate => typed_stateful::group_by(
                     |event: &UserEvent| event.user_id.clone(),
                     |session: &mut SessionData, event: &UserEvent| {
                         event.update_session(session);

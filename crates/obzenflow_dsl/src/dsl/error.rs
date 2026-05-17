@@ -7,6 +7,8 @@ use thiserror::Error;
 use obzenflow_adapters::middleware::MiddlewareFactoryError;
 use obzenflow_topology::TopologyError;
 
+use crate::dsl::typing::EdgeInputRole;
+
 #[derive(Debug, Error)]
 pub enum StageCreationError {
     #[error(transparent)]
@@ -28,6 +30,19 @@ impl From<&str> for StageCreationError {
     fn from(message: &str) -> Self {
         Self::Message(message.to_string())
     }
+}
+
+/// Discriminator for the shape of an edge typing mismatch (FLOWIP-114c).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum EdgeTypingMismatchKind {
+    /// One upstream emits a different `Exact` type than the downstream declares.
+    SingleEdge,
+    /// Two or more upstreams emit differing `Exact` types into the same
+    /// non-join downstream slot, or the same join leg.
+    HeterogeneousFanIn {
+        other_upstream_stages: Vec<String>,
+        other_actual_types: Vec<String>,
+    },
 }
 
 /// Structured error type for failures during flow construction
@@ -61,6 +76,79 @@ pub enum FlowBuildError {
         first_var: String,
         second_var: String,
     },
+
+    #[error(
+        "{}",
+        FlowBuildError::fmt_edge_typing_mismatch(
+            upstream_stage,
+            downstream_stage,
+            *role,
+            actual_type,
+            expected_type,
+            kind,
+            suggested_fix,
+        )
+    )]
+    EdgeTypingMismatch {
+        upstream_stage: String,
+        downstream_stage: String,
+        role: EdgeInputRole,
+        expected_type: String,
+        actual_type: String,
+        kind: EdgeTypingMismatchKind,
+        suggested_fix: String,
+    },
+
+    #[error(
+        "Stage '{stage_name}' carries no typing metadata. After FLOWIP-114c, every \
+         DSL-authored stage must declare its types via the typed macro form (e.g. \
+         `transform!(In -> Out => handler)`)."
+    )]
+    StageMissingTypingMetadata { stage_name: String },
+
+    #[error(
+        "Stage '{stage_name}' has Unspecified typing on the {slot} slot, which is applicable \
+         for this stage role. Declare the type via the typed macro form."
+    )]
+    UnspecifiedTypingOnApplicableSlot { stage_name: String, slot: String },
+}
+
+impl FlowBuildError {
+    /// Render an `EdgeTypingMismatch` body. Branches on `kind` so the
+    /// `HeterogeneousFanIn` form lists every offending upstream and its actual
+    /// type, instead of the misleading "X emits T, expected T" shape that
+    /// reusing the SingleEdge template produced for the focal upstream in
+    /// earlier revisions.
+    pub fn fmt_edge_typing_mismatch(
+        upstream_stage: &str,
+        downstream_stage: &str,
+        role: EdgeInputRole,
+        actual_type: &str,
+        expected_type: &str,
+        kind: &EdgeTypingMismatchKind,
+        suggested_fix: &str,
+    ) -> String {
+        match kind {
+            EdgeTypingMismatchKind::SingleEdge => format!(
+                "Edge typing mismatch on {role} into '{downstream_stage}': '{upstream_stage}' \
+                 emits '{actual_type}', expected '{expected_type}'. {suggested_fix}"
+            ),
+            EdgeTypingMismatchKind::HeterogeneousFanIn {
+                other_upstream_stages,
+                other_actual_types,
+            } => {
+                let mut msg = format!(
+                    "Heterogeneous fan-in on {role} into '{downstream_stage}': \
+                     '{upstream_stage}' emits '{actual_type}'"
+                );
+                for (stage, ty) in other_upstream_stages.iter().zip(other_actual_types.iter()) {
+                    msg.push_str(&format!(", '{stage}' emits '{ty}'"));
+                }
+                msg.push_str(&format!(". {suggested_fix}"));
+                msg
+            }
+        }
+    }
 }
 
 impl From<FlowBuildError> for String {

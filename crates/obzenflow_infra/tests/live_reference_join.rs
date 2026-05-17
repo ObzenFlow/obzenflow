@@ -205,7 +205,7 @@ async fn live_join_processes_stream_without_reference_eof() {
     let mut join_config = JoinConfig::new(
         join_stage,
         "live_join_no_ref_eof",
-        "flowip_084g",
+        "live_reference_join",
         reference_stage,
         stream_stage,
     );
@@ -505,7 +505,7 @@ async fn live_join_on_source_eof_outputs_carry_reference_and_stream_ancestry() {
     let mut join_config = JoinConfig::new(
         join_stage,
         "live_join_on_source_eof_ancestry",
-        "flowip_084g",
+        "live_reference_join",
         reference_stage,
         stream_stage,
     );
@@ -692,7 +692,7 @@ async fn live_join_reference_batch_cap_prevents_stream_starvation() {
     let mut join_config = JoinConfig::new(
         join_stage,
         "live_join_batch_cap",
-        "flowip_084g",
+        "live_reference_join",
         reference_stage,
         stream_stage,
     );
@@ -885,7 +885,7 @@ async fn live_join_forwards_reference_eof() {
     let mut join_config = JoinConfig::new(
         join_stage,
         "live_join_reference_eof_forwarded",
-        "flowip_084g",
+        "live_reference_join",
         reference_stage,
         stream_stage,
     );
@@ -1135,7 +1135,7 @@ async fn live_join_reference_errors_are_per_record() {
     let mut join_config = JoinConfig::new(
         join_stage,
         "live_join_reference_error_per_record",
-        "flowip_084g",
+        "live_reference_join",
         reference_stage,
         stream_stage,
     );

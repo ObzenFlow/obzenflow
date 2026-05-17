@@ -170,8 +170,11 @@ enabled = false
                     middleware: [],
 
                     stages: {
-                        src = infinite_source!(IdleInfiniteSource);
-                        sink = sink!(NoopSink);
+                        // allow-serde-value: runtime lifecycle test for FlowApplication launch
+                        // mechanics; the handlers are payload-agnostic by design.
+                        src = infinite_source!(serde_json::Value => IdleInfiniteSource);
+                        // allow-serde-value: runtime lifecycle test, see above.
+                        sink = sink!(serde_json::Value => NoopSink);
                     },
 
                     topology: {

@@ -5,7 +5,7 @@
 use async_trait::async_trait;
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventContent, ChainEventFactory};
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
-use obzenflow_core::WriterId;
+use obzenflow_core::{TypedPayload, WriterId};
 use obzenflow_dsl::{flow, sink, source};
 use obzenflow_infra::journal::memory_journals;
 use obzenflow_runtime::pipeline::PipelineState;
@@ -13,7 +13,20 @@ use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{FiniteSourceHandler, SinkHandler};
 use obzenflow_runtime::stages::SourceError;
 use obzenflow_runtime::supervised_base::SupervisorHandle;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
+
+/// File-local payload for the memory-journals smoke test. Matches the
+/// `{ "n": u64 }` shape emitted by `TestSource`; the type satisfies
+/// FLOWIP-114c's typed-stage requirement.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct SmokeEvent {
+    n: u64,
+}
+
+impl TypedPayload for SmokeEvent {
+    const EVENT_TYPE: &'static str = "bench.smoke_event";
+}
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -86,8 +99,8 @@ async fn memory_journals_flow_runs_to_completion() {
             middleware: [],
 
             stages: {
-                src = source!(source);
-                snk = sink!(sink);
+                src = source!(SmokeEvent => source);
+                snk = sink!(SmokeEvent => sink);
             },
 
             topology: {

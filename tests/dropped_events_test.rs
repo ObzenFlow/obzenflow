@@ -11,6 +11,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
+use obzenflow_core::TypedPayload;
 use obzenflow_core::{StageId, WriterId};
 use obzenflow_dsl::{flow, sink, source, transform};
 use obzenflow_infra::journal::disk_journals;
@@ -18,7 +19,20 @@ use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
     FiniteSourceHandler, SinkHandler, TransformHandler,
 };
+use serde::{Deserialize, Serialize};
 use serde_json::json;
+
+/// File-local payload for the dropped-events test. The JSON shape matches
+/// what `CorrelatedSource` emits; the type fingerprints the stage
+/// contract per FLOWIP-114c.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct CorrelatedTestEvent {
+    id: u64,
+}
+
+impl TypedPayload for CorrelatedTestEvent {
+    const EVENT_TYPE: &'static str = "dropped_events.correlated_event";
+}
 use std::sync::{Arc, Mutex};
 
 /// Source that emits events with correlations
@@ -159,9 +173,9 @@ async fn test_dropped_events_detection() -> Result<()> {
         middleware: [],
 
         stages: {
-            correlated_source = source!(source);
-            dropping_transform = transform!(transform);
-            collector_sink = sink!(sink);
+            correlated_source = source!(CorrelatedTestEvent => source);
+            dropping_transform = transform!(CorrelatedTestEvent -> CorrelatedTestEvent => transform);
+            collector_sink = sink!(CorrelatedTestEvent => sink);
         },
 
         topology: {

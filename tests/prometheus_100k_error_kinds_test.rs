@@ -26,6 +26,19 @@ use obzenflow_runtime::stages::common::handlers::{FiniteSourceHandler, SinkHandl
 use obzenflow_runtime::stages::transform::Map;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+
+/// File-local payload for the prometheus 100k error-kinds test. The JSON
+/// shape matches what `HighVolumeSource` emits; the type fingerprints
+/// the stage contract per FLOWIP-114c.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct MetricSample {
+    index: u64,
+    value: f64,
+}
+
+impl TypedPayload for MetricSample {
+    const EVENT_TYPE: &'static str = "prometheus_100k.metric_sample";
+}
 use tokio::time::{sleep, Duration};
 
 /// Source that generates 100,000 events with a deterministic error pattern.
@@ -187,9 +200,9 @@ async fn prometheus_100k_error_processor_error_kinds_are_domain_only() -> Result
         middleware: [],
 
         stages: {
-            high_volume_source = source!(source);
-            error_processor = transform!(transform);
-            completion_sink = sink!(sink);
+            high_volume_source = source!(MetricSample => source);
+            error_processor = transform!(MetricSample -> MetricSample => transform);
+            completion_sink = sink!(MetricSample => sink);
         },
 
         topology: {

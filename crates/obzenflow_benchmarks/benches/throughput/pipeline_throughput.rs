@@ -14,6 +14,7 @@ use obzenflow_benchmarks::prelude::*;
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
 use obzenflow_core::event::ChainEventContent;
+use obzenflow_core::TypedPayload;
 use obzenflow_core::WriterId;
 use obzenflow_dsl::{flow, sink, source, transform};
 use obzenflow_infra::journal::disk_journals;
@@ -23,6 +24,7 @@ use obzenflow_runtime::stages::common::handlers::{
 };
 use obzenflow_runtime::stages::SourceError;
 use obzenflow_runtime::supervised_base::SupervisorHandle;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -35,6 +37,19 @@ const STAGE_COUNTS: &[usize] = &[1, 3, 5, 10]; // Simplified for maintainability
 /// Configuration for throughput testing
 const THROUGHPUT_EVENT_COUNT: u64 = 1000; // More events for accurate throughput measurement
 const THROUGHPUT_WARMUP: u64 = 100;
+
+/// File-local payload type for the throughput bench. The JSON shape matches
+/// what `TimestampedSource` emits; the type itself is a FLOWIP-114c
+/// topology fingerprint, not enforced at runtime.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct BenchEvent {
+    index: u64,
+    emit_time_nanos: u64,
+}
+
+impl TypedPayload for BenchEvent {
+    const EVENT_TYPE: &'static str = "bench.throughput_event";
+}
 
 /// Test source that emits events with timestamps
 #[derive(Clone, Debug)]
@@ -179,8 +194,8 @@ async fn build_pipeline(
             middleware: [],
 
             stages: {
-                src = source!(source);
-                snk = sink!(sink);
+                src = source!(BenchEvent => source);
+                snk = sink!(BenchEvent => sink);
             },
 
             topology: {
@@ -194,10 +209,10 @@ async fn build_pipeline(
             middleware: [],
 
             stages: {
-                src = source!(source);
-                s1 = transform!(PassthroughStage::new("stage1"));
-                s2 = transform!(PassthroughStage::new("stage2"));
-                snk = sink!(sink);
+                src = source!(BenchEvent => source);
+                s1 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage1"));
+                s2 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage2"));
+                snk = sink!(BenchEvent => sink);
             },
 
             topology: {
@@ -213,12 +228,12 @@ async fn build_pipeline(
             middleware: [],
 
             stages: {
-                src = source!(source);
-                s1 = transform!(PassthroughStage::new("stage1"));
-                s2 = transform!(PassthroughStage::new("stage2"));
-                s3 = transform!(PassthroughStage::new("stage3"));
-                s4 = transform!(PassthroughStage::new("stage4"));
-                snk = sink!(sink);
+                src = source!(BenchEvent => source);
+                s1 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage1"));
+                s2 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage2"));
+                s3 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage3"));
+                s4 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage4"));
+                snk = sink!(BenchEvent => sink);
             },
 
             topology: {
@@ -238,17 +253,17 @@ async fn build_pipeline(
                 middleware: [],
 
                 stages: {
-                    src = source!(source);
-                    s1 = transform!(PassthroughStage::new("stage1"));
-                    s2 = transform!(PassthroughStage::new("stage2"));
-                    s3 = transform!(PassthroughStage::new("stage3"));
-                    s4 = transform!(PassthroughStage::new("stage4"));
-                    s5 = transform!(PassthroughStage::new("stage5"));
-                    s6 = transform!(PassthroughStage::new("stage6"));
-                    s7 = transform!(PassthroughStage::new("stage7"));
-                    s8 = transform!(PassthroughStage::new("stage8"));
-                    s9 = transform!(PassthroughStage::new("stage9"));
-                    snk = sink!(sink);
+                    src = source!(BenchEvent => source);
+                    s1 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage1"));
+                    s2 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage2"));
+                    s3 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage3"));
+                    s4 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage4"));
+                    s5 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage5"));
+                    s6 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage6"));
+                    s7 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage7"));
+                    s8 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage8"));
+                    s9 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage9"));
+                    snk = sink!(BenchEvent => sink);
                 },
 
                 topology: {

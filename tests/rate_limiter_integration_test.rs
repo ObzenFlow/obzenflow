@@ -7,6 +7,7 @@ use async_trait::async_trait;
 use obzenflow_adapters::middleware::{rate_limit, RateLimiterBuilder};
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
+use obzenflow_core::TypedPayload;
 use obzenflow_core::{StageId, WriterId};
 use obzenflow_dsl::{flow, sink, source, transform};
 use obzenflow_infra::journal::disk_journals;
@@ -15,7 +16,20 @@ use obzenflow_runtime::stages::common::handlers::{
     FiniteSourceHandler, SinkHandler, TransformHandler,
 };
 use obzenflow_runtime::stages::SourceError;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
+
+/// File-local payload for the rate-limiter integration test. The JSON
+/// shape matches what `SequenceSource` / `BatchedSource` emit; the type
+/// fingerprints the stage contract per FLOWIP-114c.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct RateLimiterTestEvent {
+    index: u64,
+}
+
+impl TypedPayload for RateLimiterTestEvent {
+    const EVENT_TYPE: &'static str = "rate_limiter.event";
+}
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
@@ -165,16 +179,16 @@ impl SinkHandler for CountingSink {
 async fn rate_limiter_low_rate_half_eps_processes_all_events() -> Result<()> {
     let (sink, count) = CountingSink::new();
     let handle = flow! {
-        name: "flowip_050h_low_rate_half_eps",
-        journals: disk_journals(unique_journal_dir("flowip_050h_low_rate_half_eps")),
+        name: "rate_limiter_low_rate_half_eps",
+        journals: disk_journals(unique_journal_dir("rate_limiter_low_rate_half_eps")),
         middleware: [],
 
         stages: {
-            src = source!(SequenceSource::new(2));
-            throttled = transform!(PassthroughTransform, [
+            src = source!(RateLimiterTestEvent => SequenceSource::new(2));
+            throttled = transform!(RateLimiterTestEvent -> RateLimiterTestEvent => PassthroughTransform, [
                 rate_limit(0.5)
             ]);
-            snk = sink!(sink);
+            snk = sink!(RateLimiterTestEvent => sink);
         },
 
         topology: {
@@ -205,18 +219,18 @@ async fn rate_limiter_low_rate_half_eps_processes_all_events() -> Result<()> {
 async fn rate_limiter_weighted_default_burst_makes_progress() -> Result<()> {
     let (sink, count) = CountingSink::new();
     let handle = flow! {
-        name: "flowip_050h_weighted_default_burst",
-        journals: disk_journals(unique_journal_dir("flowip_050h_weighted_default_burst")),
+        name: "rate_limiter_weighted_default_burst",
+        journals: disk_journals(unique_journal_dir("rate_limiter_weighted_default_burst")),
         middleware: [],
 
         stages: {
-            src = source!(SequenceSource::new(1));
-            throttled = transform!(PassthroughTransform, [
+            src = source!(RateLimiterTestEvent => SequenceSource::new(1));
+            throttled = transform!(RateLimiterTestEvent -> RateLimiterTestEvent => PassthroughTransform, [
                 RateLimiterBuilder::new(2.0)
                     .with_cost_per_event(5.0)
                     .build()
             ]);
-            snk = sink!(sink);
+            snk = sink!(RateLimiterTestEvent => sink);
         },
 
         topology: {
@@ -239,19 +253,19 @@ async fn rate_limiter_weighted_default_burst_makes_progress() -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rate_limiter_invalid_explicit_burst_fails_at_materialisation() {
     let result = flow! {
-        name: "flowip_050h_invalid_rate_limiter",
-        journals: disk_journals(unique_journal_dir("flowip_050h_invalid_rate_limiter")),
+        name: "rate_limiter_invalid",
+        journals: disk_journals(unique_journal_dir("rate_limiter_invalid")),
         middleware: [],
 
         stages: {
-            src = source!(SequenceSource::new(1));
-            throttled = transform!(PassthroughTransform, [
+            src = source!(RateLimiterTestEvent => SequenceSource::new(1));
+            throttled = transform!(RateLimiterTestEvent -> RateLimiterTestEvent => PassthroughTransform, [
                 RateLimiterBuilder::new(10.0)
                     .with_burst(2.0)
                     .with_cost_per_event(5.0)
                     .build()
             ]);
-            snk = sink!(CountingSink::new().0);
+            snk = sink!(RateLimiterTestEvent => CountingSink::new().0);
         },
 
         topology: {
@@ -277,16 +291,16 @@ async fn rate_limiter_invalid_explicit_burst_fails_at_materialisation() {
 async fn rate_limiter_source_stage_limits_per_poll_and_documents_batching() -> Result<()> {
     let (sink, count) = CountingSink::new();
     let handle = flow! {
-        name: "flowip_050h_source_poll_gating",
-        journals: disk_journals(unique_journal_dir("flowip_050h_source_poll_gating")),
+        name: "rate_limiter_source_poll_gating",
+        journals: disk_journals(unique_journal_dir("rate_limiter_source_poll_gating")),
         middleware: [],
 
         stages: {
-            src = source!(BatchedSource::new(vec![2, 2]), [
+            src = source!(RateLimiterTestEvent => BatchedSource::new(vec![2, 2]), [
                 rate_limit(1.0)
             ]);
-            passthrough = transform!(PassthroughTransform);
-            snk = sink!(sink);
+            passthrough = transform!(RateLimiterTestEvent -> RateLimiterTestEvent => PassthroughTransform);
+            snk = sink!(RateLimiterTestEvent => sink);
         },
 
         topology: {

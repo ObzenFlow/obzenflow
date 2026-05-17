@@ -8,6 +8,7 @@ use obzenflow_core::event::{
     ChainEvent, ChainEventFactory, EdgeLivenessState, SystemEvent, SystemEventType,
 };
 use obzenflow_core::journal::Journal;
+use obzenflow_core::TypedPayload;
 use obzenflow_core::{StageId, WriterId};
 use obzenflow_dsl::{async_transform, flow, sink, source};
 use obzenflow_infra::application::FlowApplication;
@@ -18,60 +19,88 @@ use obzenflow_runtime::stages::common::handlers::{
     AsyncTransformHandler, FiniteSourceHandler, SinkHandler,
 };
 use obzenflow_runtime::stages::SourceError;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
+
+/// File-local payload for the slow-but-healthy test. The JSON shape
+/// matches what `TwoEventSource` emits; the type fingerprints the stage
+/// contract per FLOWIP-114c.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct ProbeEvent {
+    value: u64,
+}
+
+impl TypedPayload for ProbeEvent {
+    const EVENT_TYPE: &'static str = "probe.event";
+}
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::Poll;
 use std::time::Duration;
 
 #[derive(Clone, Debug)]
-struct OneEventSource {
-    emitted: bool,
+struct TwoEventSource {
+    next_value: u64,
+    remaining: usize,
     writer_id: WriterId,
 }
 
-impl OneEventSource {
+impl TwoEventSource {
     fn new() -> Self {
         Self {
-            emitted: false,
+            next_value: 1,
+            remaining: 2,
             writer_id: WriterId::from(StageId::new()),
         }
     }
 }
 
-impl FiniteSourceHandler for OneEventSource {
+impl FiniteSourceHandler for TwoEventSource {
     fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
-        if self.emitted {
+        if self.remaining == 0 {
             return Ok(None);
         }
-        self.emitted = true;
+
+        self.remaining = self.remaining.saturating_sub(1);
+        let value = self.next_value;
+        self.next_value = self.next_value.saturating_add(1);
+
         Ok(Some(vec![ChainEventFactory::data_event(
             self.writer_id,
-            "flowip_063e.input",
-            json!({ "value": 1 }),
+            "liveness.input",
+            json!({ "value": value }),
         )]))
     }
 }
 
 #[derive(Clone, Debug)]
-struct StallingTransform {
+struct SlowAiTransform {
     writer_id: WriterId,
+    calls: Arc<AtomicUsize>,
 }
 
-impl StallingTransform {
+impl SlowAiTransform {
     fn new() -> Self {
         Self {
             writer_id: WriterId::from(StageId::new()),
+            calls: Arc::new(AtomicUsize::new(0)),
         }
     }
 }
 
 #[async_trait]
-impl AsyncTransformHandler for StallingTransform {
+impl AsyncTransformHandler for SlowAiTransform {
     async fn process(&self, event: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> {
-        tokio::time::sleep(Duration::from_secs(130)).await;
+        let call_index = self.calls.fetch_add(1, Ordering::SeqCst);
+        if call_index == 0 {
+            tokio::time::sleep(Duration::from_secs(50)).await;
+        } else if call_index == 1 {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        }
+
         Ok(vec![ChainEventFactory::data_event(
             self.writer_id,
-            "flowip_063e.output",
+            "liveness.output",
             event.payload().clone(),
         )])
     }
@@ -86,7 +115,10 @@ struct NoopSink;
 
 #[async_trait]
 impl SinkHandler for NoopSink {
-    async fn consume(&mut self, _event: ChainEvent) -> Result<DeliveryPayload, HandlerError> {
+    async fn consume(
+        &mut self,
+        _event: ChainEvent,
+    ) -> std::result::Result<DeliveryPayload, HandlerError> {
         Ok(DeliveryPayload::success(
             "noop",
             DeliveryMethod::Custom("Noop".to_string()),
@@ -96,7 +128,7 @@ impl SinkHandler for NoopSink {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn flowip_063e_emits_stalled_transition_without_aborting_pipeline() {
+async fn liveness_slow_but_healthy_completes_and_emits_liveness_transitions() {
     tokio::time::pause();
 
     let system_journal_slot: Arc<Mutex<Option<Arc<dyn Journal<SystemEvent>>>>> =
@@ -112,19 +144,19 @@ async fn flowip_063e_emits_stalled_transition_without_aborting_pipeline() {
     });
 
     let flow_definition = flow! {
-        name: "flowip_063e_stalled_transition",
+        name: "liveness_slow_but_healthy",
         journals: memory_journals(),
         middleware: [],
 
         stages: {
-            numbers = source!(OneEventSource::new());
-            slow = async_transform!(StallingTransform::new());
-            sink = sink!(NoopSink);
+            numbers = source!(ProbeEvent => TwoEventSource::new());
+            slow_ai = async_transform!(ProbeEvent -> ProbeEvent => SlowAiTransform::new());
+            sink = sink!(ProbeEvent => NoopSink);
         },
 
         topology: {
-            numbers |> slow;
-            slow |> sink;
+            numbers |> slow_ai;
+            slow_ai |> sink;
         }
     };
 
@@ -134,7 +166,7 @@ async fn flowip_063e_emits_stalled_transition_without_aborting_pipeline() {
     });
 
     let mut result = None;
-    for _ in 0..300 {
+    for _ in 0..240 {
         match run_task.poll() {
             Poll::Ready(res) => {
                 result = Some(res);
@@ -144,6 +176,12 @@ async fn flowip_063e_emits_stalled_transition_without_aborting_pipeline() {
                 tokio::time::advance(Duration::from_secs(1)).await;
                 tokio::task::yield_now().await;
             }
+        }
+    }
+
+    if result.is_none() {
+        if let Poll::Ready(res) = run_task.poll() {
+            result = Some(res);
         }
     }
 
@@ -162,19 +200,19 @@ async fn flowip_063e_emits_stalled_transition_without_aborting_pipeline() {
         .await
         .expect("read system journal");
 
-    let mut saw_stalled = false;
+    let mut saw_suspect = false;
     let mut saw_recovered = false;
     for envelope in envelopes {
         match &envelope.event.event {
             SystemEventType::EdgeLiveness { state, .. } => match state {
-                EdgeLivenessState::Stalled => saw_stalled = true,
+                EdgeLivenessState::Suspect => saw_suspect = true,
                 EdgeLivenessState::Recovered => saw_recovered = true,
                 _ => {}
             },
             SystemEventType::ContractStatus { pass, .. } => {
                 assert!(
                     *pass,
-                    "unexpected ContractStatus(pass=false) while exercising stalled transition"
+                    "unexpected ContractStatus(pass=false) while exercising slow-but-healthy handler"
                 );
             }
             _ => {}
@@ -182,11 +220,11 @@ async fn flowip_063e_emits_stalled_transition_without_aborting_pipeline() {
     }
 
     assert!(
-        saw_stalled,
-        "expected EdgeLiveness Stalled during 130s handler call"
+        saw_suspect,
+        "expected at least one EdgeLiveness Suspect transition during slow handler call"
     );
     assert!(
         saw_recovered,
-        "expected EdgeLiveness Recovered after handler returned and progress resumed"
+        "expected EdgeLiveness Recovered after the handler returned and progress resumed"
     );
 }

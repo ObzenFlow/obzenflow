@@ -190,10 +190,10 @@ fn main() -> Result<()> {
 
                 // Transform with NO override
                 // Inherits flow-level rate limit of 1.0 events/sec
-                throttled_transform = transform!(PassthroughTransform::new());
+                throttled_transform = transform!(CounterEvent -> CounterEvent => PassthroughTransform::new());
 
                 // Sink
-                counting_sink = sink!(CountingSink::new());
+                counting_sink = sink!(CounterEvent => CountingSink::new());
             },
 
             topology: {

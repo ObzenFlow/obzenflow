@@ -10,8 +10,21 @@ use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
 use obzenflow_core::event::{PipelineLifecycleEvent, SystemEvent, SystemEventType};
 use obzenflow_core::journal::Journal;
-use obzenflow_core::{StageId, WriterId};
+use obzenflow_core::{StageId, TypedPayload, WriterId};
 use obzenflow_dsl::{flow, infinite_source, sink, source};
+use serde::{Deserialize, Serialize};
+
+/// File-local payload for the stop-lifecycle test. The JSON shape matches
+/// what `SlowInfiniteSource` / `SlowFiniteSource` emit; the type
+/// fingerprints the stage contract per FLOWIP-114c.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct LifecycleEvent {
+    n: u64,
+}
+
+impl TypedPayload for LifecycleEvent {
+    const EVENT_TYPE: &'static str = "stateful.lifecycle_event";
+}
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
@@ -205,13 +218,13 @@ async fn stop_infinite_source_reports_cancelled() -> Result<()> {
     let journal_root = dir.path().join("journals");
 
     let handle = flow! {
-        name: "flowip_051j_stop_infinite_source",
+        name: "stateful_stop_infinite_source",
         journals: disk_journals(journal_root.clone()),
         middleware: [],
 
         stages: {
-            src = infinite_source!(SlowInfiniteSource::new(Duration::from_millis(5)));
-            snk = sink!(NoopSink);
+            src = infinite_source!(LifecycleEvent => SlowInfiniteSource::new(Duration::from_millis(5)));
+            snk = sink!(LifecycleEvent => NoopSink);
         },
 
         topology: {
@@ -258,14 +271,14 @@ async fn stop_finite_source_reports_cancelled() -> Result<()> {
     let journal_root = dir.path().join("journals");
 
     let handle = flow! {
-        name: "flowip_051j_stop_finite_source",
+        name: "stateful_stop_finite_source",
         journals: disk_journals(journal_root.clone()),
         middleware: [],
 
         stages: {
             // Large upper bound so the source is still active when Stop is issued.
-            src = source!(SlowFiniteSource::new(10_000, Duration::from_millis(5)));
-            snk = sink!(NoopSink);
+            src = source!(LifecycleEvent => SlowFiniteSource::new(10_000, Duration::from_millis(5)));
+            snk = sink!(LifecycleEvent => NoopSink);
         },
 
         topology: {
@@ -312,13 +325,13 @@ async fn stop_cancel_timeout_overrides_cancel_reason() -> Result<()> {
     let journal_root = dir.path().join("journals");
 
     let handle = flow! {
-        name: "flowip_051j_stop_cancel_timeout_reason",
+        name: "stateful_stop_cancel_timeout_reason",
         journals: disk_journals(journal_root.clone()),
         middleware: [],
 
         stages: {
-            src = infinite_source!(SlowInfiniteSource::new(Duration::from_millis(1)));
-            snk = sink!(SlowSink::new(Duration::from_millis(250)));
+            src = infinite_source!(LifecycleEvent => SlowInfiniteSource::new(Duration::from_millis(1)));
+            snk = sink!(LifecycleEvent => SlowSink::new(Duration::from_millis(250)));
         },
 
         topology: {

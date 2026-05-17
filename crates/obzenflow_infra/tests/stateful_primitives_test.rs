@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use obzenflow_core::TypedPayload;
 use obzenflow_core::{
     event::chain_event::{ChainEvent, ChainEventFactory},
     event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload},
@@ -21,6 +22,20 @@ use obzenflow_runtime::stages::stateful::{Conflate, GroupBy, Reduce};
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+
+/// File-local payload for the stateful-primitives test. The JSON shape
+/// matches what `TransactionSource` emits; the type fingerprints the
+/// stage contract per FLOWIP-114c.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct TransactionEvent {
+    product_id: String,
+    quantity: u64,
+    revenue: f64,
+}
+
+impl TypedPayload for TransactionEvent {
+    const EVENT_TYPE: &'static str = "stateful_primitives.transaction";
+}
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 struct ProductStats {
@@ -116,16 +131,16 @@ async fn groupby_with_on_eof_emits_one_aggregate_per_key() {
         middleware: [],
 
         stages: {
-            src = source!(TransactionSource::new(10));
+            src = source!(TransactionEvent => TransactionSource::new(10));
             sales_by_product = stateful!(
-                GroupBy::new("product_id", |event: &ChainEvent, stats: &mut ProductStats| {
+                TransactionEvent -> TransactionEvent => GroupBy::new("product_id", |event: &ChainEvent, stats: &mut ProductStats| {
                     stats.quantity_sold += event.payload()["quantity"].as_u64().unwrap_or(0);
                     stats.revenue += event.payload()["revenue"].as_f64().unwrap_or(0.0);
                     stats.transaction_count += 1;
                 })
                 .emit_on_eof()
             );
-            sink = sink!(sink);
+            sink = sink!(TransactionEvent => sink);
         },
 
         topology: {
@@ -162,9 +177,9 @@ async fn reduce_with_on_eof_emits_single_total() {
         middleware: [],
 
         stages: {
-            src = source!(TransactionSource::new(5));
+            src = source!(TransactionEvent => TransactionSource::new(5));
             totals = stateful!(
-                Reduce::new(
+                TransactionEvent -> TransactionEvent => Reduce::new(
                     TotalStats { total_revenue: 0.0, total_transactions: 0, total_quantity: 0 },
                     |stats: &mut TotalStats, event: &ChainEvent| {
                         stats.total_revenue += event.payload()["revenue"].as_f64().unwrap_or(0.0);
@@ -174,7 +189,7 @@ async fn reduce_with_on_eof_emits_single_total() {
                 )
                 .emit_on_eof()
             );
-            sink = sink!(sink);
+            sink = sink!(TransactionEvent => sink);
         },
 
         topology: {
@@ -203,12 +218,12 @@ async fn conflate_emits_latest_value_per_key() {
         middleware: [],
 
         stages: {
-            src = source!(TransactionSource::new(8));
+            src = source!(TransactionEvent => TransactionSource::new(8));
             latest_by_product = stateful!(
-                Conflate::new("product_id")
+                TransactionEvent -> TransactionEvent => Conflate::new("product_id")
                     .emit_within(Duration::from_millis(1))
             );
-            sink = sink!(sink);
+            sink = sink!(TransactionEvent => sink);
         },
 
         topology: {

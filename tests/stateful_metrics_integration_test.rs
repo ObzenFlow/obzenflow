@@ -12,6 +12,7 @@ use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
 use obzenflow_core::metrics::MetricsExporter;
+use obzenflow_core::TypedPayload;
 use obzenflow_core::{StageId, WriterId};
 use obzenflow_dsl::{flow, join, sink, source, stateful};
 use obzenflow_infra::journal::disk_journals;
@@ -20,7 +21,51 @@ use obzenflow_runtime::stages::common::handlers::{
     FiniteSourceHandler, JoinHandler, SinkHandler, StatefulHandler,
 };
 use obzenflow_runtime::stages::SourceError;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
+
+/// File-local payload for the stateful-metrics flow. The JSON shape
+/// matches what `BurstSource` emits; the type fingerprints the stage
+/// contract per FLOWIP-114c.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct MetricEvent {
+    index: u64,
+}
+
+impl TypedPayload for MetricEvent {
+    const EVENT_TYPE: &'static str = "metric.event";
+}
+
+/// The join's two legs are semantically distinct typed inputs per
+/// FLOWIP-114c, so we declare separate types even though the underlying
+/// `BurstSource` produces the same shape on both legs in this test.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct RefMetricEvent {
+    index: u64,
+}
+
+impl TypedPayload for RefMetricEvent {
+    const EVENT_TYPE: &'static str = "metric.ref";
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct StreamMetricEvent {
+    index: u64,
+}
+
+impl TypedPayload for StreamMetricEvent {
+    const EVENT_TYPE: &'static str = "metric.stream";
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct JoinedMetricEvent {
+    ref_index: u64,
+    stream_index: u64,
+}
+
+impl TypedPayload for JoinedMetricEvent {
+    const EVENT_TYPE: &'static str = "metric.joined";
+}
 use std::io::BufRead;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
@@ -251,7 +296,7 @@ fn metric_line_value(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn flowip_051j_stateful_metrics_accumulate_is_instrumented() -> Result<()> {
+async fn stateful_metrics_accumulate_is_instrumented() -> Result<()> {
     let timeout_flow = Duration::from_secs(30);
     let timeout_metrics = Duration::from_secs(10);
 
@@ -260,18 +305,18 @@ async fn flowip_051j_stateful_metrics_accumulate_is_instrumented() -> Result<()>
     let expected_processing_time_s = total_events as f64 * sleep_per_event.as_secs_f64();
 
     let (sink_handler, sink_events) = CollectingSink::new();
-    let journal_dir = unique_journal_dir("flowip_051j_stateful_metrics");
+    let journal_dir = unique_journal_dir("stateful_metrics");
     let journal_dir_for_flow = journal_dir.clone();
 
     let flow_handle = flow! {
-        name: "flowip_051j_stateful_metrics",
+        name: "stateful_metrics",
         journals: disk_journals(journal_dir_for_flow.clone()),
         middleware: [],
 
         stages: {
-            src = source!(BurstSource::new(total_events));
-            counter = stateful!(SlowAccumulator::new(sleep_per_event));
-            snk = sink!(sink_handler);
+            src = source!(MetricEvent => BurstSource::new(total_events));
+            counter = stateful!(MetricEvent -> MetricEvent => SlowAccumulator::new(sleep_per_event));
+            snk = sink!(MetricEvent => sink_handler);
         },
 
         topology: {
@@ -288,7 +333,7 @@ async fn flowip_051j_stateful_metrics_accumulate_is_instrumented() -> Result<()>
         .map_err(|e| anyhow!("Failed to run flow: {e:?}"))?
         .ok_or_else(|| anyhow!("Metrics exporter was not configured"))?;
 
-    let flow_label = "flow=\"flowip_051j_stateful_metrics\"".to_string();
+    let flow_label = "flow=\"stateful_metrics\"".to_string();
     let stage_label = "stage=\"counter\"".to_string();
     let debug_patterns = vec![
         "obzenflow_events_total".to_string(),
@@ -454,7 +499,7 @@ async fn flowip_051j_stateful_metrics_accumulate_is_instrumented() -> Result<()>
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn flowip_051j_join_metrics_counts_hydration_as_accumulation() -> Result<()> {
+async fn stateful_join_metrics_counts_hydration_as_accumulation() -> Result<()> {
     let timeout_flow = Duration::from_secs(30);
     let timeout_metrics = Duration::from_secs(10);
 
@@ -462,15 +507,15 @@ async fn flowip_051j_join_metrics_counts_hydration_as_accumulation() -> Result<(
     let stream_events: usize = 0;
 
     let flow_handle = flow! {
-        name: "flowip_051j_join_metrics",
-        journals: disk_journals(unique_journal_dir("flowip_051j_join_metrics")),
+        name: "stateful_join_metrics",
+        journals: disk_journals(unique_journal_dir("stateful_join_metrics")),
         middleware: [],
 
         stages: {
-            ref_src = source!(BurstSource::new(reference_events));
-            stream_src = source!(BurstSource::new(stream_events));
-            joiner = join!(catalog ref_src => NoopJoin);
-            snk = sink!(CollectingSink::new().0);
+            ref_src = source!(RefMetricEvent => BurstSource::new(reference_events));
+            stream_src = source!(StreamMetricEvent => BurstSource::new(stream_events));
+            joiner = join!(catalog ref_src: RefMetricEvent, StreamMetricEvent -> JoinedMetricEvent => NoopJoin);
+            snk = sink!(JoinedMetricEvent => CollectingSink::new().0);
         },
 
         topology: {
@@ -487,7 +532,7 @@ async fn flowip_051j_join_metrics_counts_hydration_as_accumulation() -> Result<(
         .map_err(|e| anyhow!("Failed to run flow: {e:?}"))?
         .ok_or_else(|| anyhow!("Metrics exporter was not configured"))?;
 
-    let flow_label = "flow=\"flowip_051j_join_metrics\"".to_string();
+    let flow_label = "flow=\"stateful_join_metrics\"".to_string();
     let stage_label = "stage=\"joiner\"".to_string();
     let debug_patterns = vec![
         "obzenflow_events_total".to_string(),

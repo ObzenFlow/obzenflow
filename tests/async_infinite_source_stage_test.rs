@@ -9,6 +9,7 @@ use obzenflow_adapters::middleware::{Middleware, MiddlewareContext, MiddlewareFa
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
 use obzenflow_core::event::ChainEventContent;
+use obzenflow_core::TypedPayload;
 use obzenflow_core::{StageId, WriterId};
 use obzenflow_dsl::{async_infinite_source, flow, sink};
 use obzenflow_infra::journal::disk_journals;
@@ -18,7 +19,20 @@ use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{AsyncInfiniteSourceHandler, SinkHandler};
 use obzenflow_runtime::stages::SourceError;
 use obzenflow_runtime::supervised_base::SupervisorHandle;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
+
+/// File-local payload for the async-infinite source stage test. The JSON
+/// shape matches what `TestAsyncInfiniteSource` emits; the type
+/// fingerprints the stage contract per FLOWIP-114c.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct AsyncInfiniteEvent {
+    n: u64,
+}
+
+impl TypedPayload for AsyncInfiniteEvent {
+    const EVENT_TYPE: &'static str = "async_infinite_source.event";
+}
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
@@ -188,8 +202,8 @@ async fn async_infinite_source_stop_interrupts_blocked_next_and_calls_drain() ->
         middleware: [],
 
         stages: {
-            source = async_infinite_source!(source);
-            sink = sink!(sink);
+            source = async_infinite_source!(AsyncInfiniteEvent => source);
+            sink = sink!(AsyncInfiniteEvent => sink);
         },
 
         topology: {
@@ -242,10 +256,10 @@ async fn async_infinite_source_emits_events_and_applies_stage_middleware() -> Re
         middleware: [],
 
         stages: {
-            source = async_infinite_source!(source, [
+            source = async_infinite_source!(AsyncInfiniteEvent => source, [
                 InjectFieldFactory
             ]);
-            sink = sink!(sink);
+            sink = sink!(AsyncInfiniteEvent => sink);
         },
 
         topology: {

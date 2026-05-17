@@ -19,6 +19,7 @@ use obzenflow_core::event::system_event::{ContractResultStatusLabel, SystemEvent
 use obzenflow_core::event::SystemEventType;
 use obzenflow_core::journal::journal_owner::JournalOwner;
 use obzenflow_core::journal::Journal;
+use obzenflow_core::TypedPayload;
 use obzenflow_core::{DeliveryContract, EventId, StageId, SystemId, WriterId};
 use obzenflow_dsl::{flow, sink, source, transform};
 use obzenflow_infra::journal::disk_journals;
@@ -28,7 +29,31 @@ use obzenflow_runtime::stages::common::handlers::{
     CommitReceipt, FiniteSourceHandler, SinkConsumeReport, SinkHandler, SinkLifecycleReport,
     TransformHandler,
 };
+use serde::{Deserialize, Serialize};
 use serde_json::json;
+
+/// File-local payload for the delivery-contract wiring test. The JSON
+/// shape matches what `TestEventSource` / `CorrelatedTestEventSource`
+/// emit; the type fingerprints the stage contract per FLOWIP-114c.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct DeliveryTestEvent {
+    index: u64,
+}
+
+impl TypedPayload for DeliveryTestEvent {
+    const EVENT_TYPE: &'static str = "delivery_contract.test_event";
+}
+
+/// The fan-out transform emits a different shape (`{ "fan_out_index": ... }`)
+/// so its output is a distinct typed payload from the input.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct FanOutTestEvent {
+    fan_out_index: u64,
+}
+
+impl TypedPayload for FanOutTestEvent {
+    const EVENT_TYPE: &'static str = "delivery_contract.fan_out_event";
+}
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -348,8 +373,8 @@ async fn sink_edge_emits_passed_delivery_contract_result() -> Result<()> {
         middleware: [],
 
         stages: {
-            source = source!(TestEventSource::new(10));
-            sink = sink!(sink_handler);
+            source = source!(DeliveryTestEvent => TestEventSource::new(10));
+            sink = sink!(DeliveryTestEvent => sink_handler);
         },
 
         topology: {
@@ -385,8 +410,8 @@ async fn buffered_sink_edge_emits_passed_delivery_contract_result_after_flush() 
         middleware: [],
 
         stages: {
-            source = source!(TestEventSource::new(10));
-            sink = sink!(sink_handler);
+            source = source!(DeliveryTestEvent => TestEventSource::new(10));
+            sink = sink!(DeliveryTestEvent => sink_handler);
         },
 
         topology: {
@@ -427,9 +452,9 @@ async fn fan_out_before_buffered_sink_emits_passed_delivery_contract_result() ->
         middleware: [],
 
         stages: {
-            source = source!(CorrelatedTestEventSource::new(source_events));
-            transform = transform!(FanOutTransform::new(fan_out));
-            sink = sink!(sink_handler);
+            source = source!(DeliveryTestEvent => CorrelatedTestEventSource::new(source_events));
+            transform = transform!(DeliveryTestEvent -> FanOutTestEvent => FanOutTransform::new(fan_out));
+            sink = sink!(FanOutTestEvent => sink_handler);
         },
 
         topology: {

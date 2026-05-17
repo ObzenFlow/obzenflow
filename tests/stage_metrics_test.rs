@@ -11,6 +11,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
+use obzenflow_core::TypedPayload;
 use obzenflow_core::{StageId, WriterId};
 use obzenflow_dsl::{flow, sink, source, transform};
 use obzenflow_infra::journal::disk_journals;
@@ -18,7 +19,21 @@ use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
     FiniteSourceHandler, SinkHandler, TransformHandler,
 };
+use serde::{Deserialize, Serialize};
 use serde_json::json;
+
+/// File-local payload for the stage-metrics test. The JSON shape matches
+/// what `TestSource` emits; the type fingerprints the stage contract per
+/// FLOWIP-114c.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct MetricEvent {
+    data: String,
+    index: usize,
+}
+
+impl TypedPayload for MetricEvent {
+    const EVENT_TYPE: &'static str = "stage_metrics.event";
+}
 use std::sync::{Arc, Mutex};
 use tokio::time::{sleep, Duration};
 
@@ -141,9 +156,9 @@ async fn test_stage_level_metrics_automatic() -> Result<()> {
         middleware: [],
 
         stages: {
-            test_source = source!(source);
-            uppercase_transform = transform!(transform);
-            collector_sink = sink!(sink);
+            test_source = source!(MetricEvent => source);
+            uppercase_transform = transform!(MetricEvent -> MetricEvent => transform);
+            collector_sink = sink!(MetricEvent => sink);
         },
 
         topology: {

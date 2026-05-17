@@ -15,7 +15,7 @@ struct InputEvent {
 }
 
 impl TypedPayload for InputEvent {
-    const EVENT_TYPE: &'static str = "flowip_105h.input";
+    const EVENT_TYPE: &'static str = "placeholder.input";
     const SCHEMA_VERSION: u32 = 1;
 }
 
@@ -25,7 +25,7 @@ struct IntermediateEvent {
 }
 
 impl TypedPayload for IntermediateEvent {
-    const EVENT_TYPE: &'static str = "flowip_105h.intermediate";
+    const EVENT_TYPE: &'static str = "placeholder.intermediate";
     const SCHEMA_VERSION: u32 = 1;
 }
 
@@ -35,15 +35,15 @@ struct OutputEvent {
 }
 
 impl TypedPayload for OutputEvent {
-    const EVENT_TYPE: &'static str = "flowip_105h.output";
+    const EVENT_TYPE: &'static str = "placeholder.output";
     const SCHEMA_VERSION: u32 = 1;
 }
 
 #[tokio::test]
 async fn placeholder_handlers_survive_full_lifecycle() -> Result<()> {
     let handle = flow! {
-        name: "flowip_105h_placeholder_handlers_lifecycle_test",
-        journals: disk_journals(PathBuf::from("target/flowip_105h_placeholder_handlers_lifecycle")),
+        name: "placeholder_handlers_lifecycle_test",
+        journals: disk_journals(PathBuf::from("target/placeholder_handlers_lifecycle")),
         middleware: [],
 
         stages: {

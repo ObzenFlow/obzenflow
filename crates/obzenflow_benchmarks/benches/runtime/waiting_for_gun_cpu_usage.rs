@@ -12,6 +12,7 @@ use async_trait::async_trait;
 use criterion::{criterion_group, criterion_main, Criterion};
 use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
+use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, sink, source};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::bootstrap::{
@@ -22,12 +23,25 @@ use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{FiniteSourceHandler, SinkHandler};
 use obzenflow_runtime::stages::SourceError;
 use obzenflow_runtime::supervised_base::SupervisorHandle;
+use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use sysinfo::{Pid, ProcessExt, System, SystemExt};
 use tempfile::{tempdir, TempDir};
 use tokio::runtime::Runtime;
+
+/// File-local payload type for the waiting-for-gun bench. The idle source
+/// never emits; the type satisfies FLOWIP-114c's requirement that every
+/// DSL stage declares a concrete type fingerprint.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct BenchEvent {
+    tick: u64,
+}
+
+impl TypedPayload for BenchEvent {
+    const EVENT_TYPE: &'static str = "bench.waiting_for_gun_event";
+}
 
 /// Source that never emits and never completes.
 #[derive(Clone, Debug)]
@@ -84,8 +98,8 @@ async fn measure_waiting_for_gun_cpu() -> anyhow::Result<f64> {
         middleware: [],
 
         stages: {
-            src = source!(IdleSource::new());
-            snk = sink!(NoopSink);
+            src = source!(BenchEvent => IdleSource::new());
+            snk = sink!(BenchEvent => NoopSink);
         },
 
         topology: {

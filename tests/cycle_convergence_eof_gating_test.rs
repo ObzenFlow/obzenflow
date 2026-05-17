@@ -8,6 +8,7 @@ use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
 use obzenflow_core::event::ChainEventContent;
 use obzenflow_core::event::CorrelationId;
+use obzenflow_core::TypedPayload;
 use obzenflow_core::{StageId, WriterId};
 use obzenflow_dsl::{async_source, async_transform, flow, sink, source, transform};
 use obzenflow_infra::journal::disk_journals;
@@ -16,7 +17,21 @@ use obzenflow_runtime::stages::common::handlers::{
     AsyncFiniteSourceHandler, AsyncTransformHandler, FiniteSourceHandler, SinkHandler,
     TransformHandler,
 };
+use serde::{Deserialize, Serialize};
 use serde_json::json;
+
+/// File-local payload for the cycle-convergence test. The JSON shape
+/// matches what the seed sources emit; the type fingerprints the stage
+/// contract per FLOWIP-114c.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct SeedEvent {
+    depth: u64,
+    target: u64,
+}
+
+impl TypedPayload for SeedEvent {
+    const EVENT_TYPE: &'static str = "cycle.seed";
+}
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -264,8 +279,8 @@ impl SinkHandler for DoneCounterSink {
 }
 
 #[tokio::test]
-async fn flowip_051n_buffers_external_eof_until_scc_quiescent() -> Result<()> {
-    let journal_root = unique_journal_dir("flowip_051n_buffers_external_eof");
+async fn cycle_buffers_external_eof_until_scc_quiescent() -> Result<()> {
+    let journal_root = unique_journal_dir("cycle_buffers_external_eof");
 
     let target_iterations = 5u64;
     let iter_delay = Duration::from_millis(200);
@@ -277,15 +292,15 @@ async fn flowip_051n_buffers_external_eof_until_scc_quiescent() -> Result<()> {
     let (sink, done_count) = DoneCounterSink::new();
 
     let handle = flow! {
-        name: "flowip_051n_buffers_external_eof_until_scc_quiescent",
+        name: "cycle_buffers_external_eof_until_scc_quiescent",
         journals: disk_journals(journal_root),
         middleware: [],
 
         stages: {
-            src = source!(SingleSeedSource::new(target_iterations));
-            entry = transform!(EntryConvergeTransform::new(entry_processed_for_flow));
-            iter = async_transform!(IterationTransform::new(iter_processed_for_flow, iter_delay));
-            snk = sink!(sink);
+            src = source!(SeedEvent => SingleSeedSource::new(target_iterations));
+            entry = transform!(SeedEvent -> SeedEvent => EntryConvergeTransform::new(entry_processed_for_flow));
+            iter = async_transform!(SeedEvent -> SeedEvent => IterationTransform::new(iter_processed_for_flow, iter_delay));
+            snk = sink!(SeedEvent => sink);
         },
 
         topology: {
@@ -420,8 +435,8 @@ impl FiniteSourceHandler for DualSeedSource {
 }
 
 #[tokio::test]
-async fn flowip_051n_buffers_drain_until_scc_quiescent() -> Result<()> {
-    let journal_root = unique_journal_dir("flowip_051n_buffers_drain");
+async fn cycle_buffers_drain_until_scc_quiescent() -> Result<()> {
+    let journal_root = unique_journal_dir("cycle_buffers_drain");
 
     let target_iterations = 5u64;
     let iter_delay = Duration::from_millis(200);
@@ -434,15 +449,15 @@ async fn flowip_051n_buffers_drain_until_scc_quiescent() -> Result<()> {
     let (sink, done_count) = DoneCounterSink::new();
 
     let handle = flow! {
-        name: "flowip_051n_buffers_drain_until_scc_quiescent",
+        name: "cycle_buffers_drain_until_scc_quiescent",
         journals: disk_journals(journal_root),
         middleware: [],
 
         stages: {
-            src = async_source!(SeedThenDrainSource::new(target_iterations, drain_delay));
-            entry = transform!(EntryConvergeTransform::new(entry_processed_for_flow));
-            iter = async_transform!(IterationTransform::new(iter_processed_for_flow, iter_delay));
-            snk = sink!(sink);
+            src = async_source!(SeedEvent => SeedThenDrainSource::new(target_iterations, drain_delay));
+            entry = transform!(SeedEvent -> SeedEvent => EntryConvergeTransform::new(entry_processed_for_flow));
+            iter = async_transform!(SeedEvent -> SeedEvent => IterationTransform::new(iter_processed_for_flow, iter_delay));
+            snk = sink!(SeedEvent => sink);
         },
 
         topology: {
@@ -480,8 +495,8 @@ async fn flowip_051n_buffers_drain_until_scc_quiescent() -> Result<()> {
 }
 
 #[tokio::test]
-async fn flowip_051n_max_iterations_exceeded_routes_to_error_journal() -> Result<()> {
-    let journal_root = unique_journal_dir("flowip_051n_max_iterations_routing");
+async fn cycle_max_iterations_exceeded_routes_to_error_journal() -> Result<()> {
+    let journal_root = unique_journal_dir("cycle_max_iterations_routing");
     let journal_root_for_flow = journal_root.clone();
 
     let entry_processed = Arc::new(AtomicU64::new(0));
@@ -496,15 +511,15 @@ async fn flowip_051n_max_iterations_exceeded_routes_to_error_journal() -> Result
     let diverge_target = 1_000u64;
 
     let handle = flow! {
-        name: "flowip_051n_max_iterations_exceeded_routes_to_error_journal",
+        name: "cycle_max_iterations_exceeded_routes_to_error_journal",
         journals: disk_journals(journal_root_for_flow),
         middleware: [],
 
         stages: {
-            src = source!(DualSeedSource::new(converge_target, diverge_target));
-            entry = transform!(EntryConvergeTransform::new(entry_processed_for_flow));
-            iter = async_transform!(IterationTransform::new(iter_processed_for_flow, Duration::ZERO));
-            snk = sink!(sink);
+            src = source!(SeedEvent => DualSeedSource::new(converge_target, diverge_target));
+            entry = transform!(SeedEvent -> SeedEvent => EntryConvergeTransform::new(entry_processed_for_flow));
+            iter = async_transform!(SeedEvent -> SeedEvent => IterationTransform::new(iter_processed_for_flow, Duration::ZERO));
+            snk = sink!(SeedEvent => sink);
         },
 
         topology: {
@@ -548,18 +563,18 @@ async fn flowip_051n_max_iterations_exceeded_routes_to_error_journal() -> Result
 }
 
 #[tokio::test]
-async fn flowip_051n_rejects_sccs_with_multiple_entry_points() {
+async fn cycle_rejects_sccs_with_multiple_entry_points() {
     let result = flow! {
-        name: "flowip_051n_reject_multi_entry_scc",
-        journals: disk_journals(unique_journal_dir("flowip_051n_reject_multi_entry_scc")),
+        name: "cycle_reject_multi_entry_scc",
+        journals: disk_journals(unique_journal_dir("cycle_reject_multi_entry_scc")),
         middleware: [],
 
         stages: {
-            src1 = source!(SingleSeedSource::new(1));
-            src2 = source!(SingleSeedSource::new(1));
-            a = transform!(EntryConvergeTransform::new(Arc::new(AtomicU64::new(0))));
-            b = transform!(EntryConvergeTransform::new(Arc::new(AtomicU64::new(0))));
-            snk = sink!(DoneCounterSink::new().0);
+            src1 = source!(SeedEvent => SingleSeedSource::new(1));
+            src2 = source!(SeedEvent => SingleSeedSource::new(1));
+            a = transform!(SeedEvent -> SeedEvent => EntryConvergeTransform::new(Arc::new(AtomicU64::new(0))));
+            b = transform!(SeedEvent -> SeedEvent => EntryConvergeTransform::new(Arc::new(AtomicU64::new(0))));
+            snk = sink!(SeedEvent => DoneCounterSink::new().0);
         },
 
         topology: {

@@ -25,23 +25,41 @@ use obzenflow_runtime::typing::{
     JoinTyping, SinkTyping, SourceTyping, StatefulTyping, TransformTyping,
 };
 use obzenflow_topology::{EdgeKind, StageTypingInfo, Topology, TypeHintInfo};
+use std::any::{type_name, TypeId};
 use std::collections::HashMap;
 use std::fmt;
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-/// Three-way model for declared type positions.
+/// Two-way model for declared type positions.
+///
+/// `Exact` carries a runtime fingerprint of the Rust type (`type_id`) plus a
+/// canonical display name for rendering. Identity is by `type_id`; the
+/// `display_name` is for error messages and topology rendering only. See
+/// FLOWIP-114c "Canonical type identity" for the rationale. The earlier
+/// `Mixed` variant was removed in PR D of FLOWIP-114c; the wire-side
+/// `TypeHintInfo::Mixed` is kept for snapshot round-tripping but is no longer
+/// emitted by the DSL.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TypeHint {
     Unspecified,
-    Exact(String),
-    Mixed,
+    Exact {
+        type_id: TypeId,
+        display_name: String,
+    },
 }
 
 impl TypeHint {
-    pub fn exact(name: impl Into<String>) -> Self {
-        Self::Exact(name.into())
+    /// Construct an `Exact` hint from a Rust type. Identity is by `TypeId`,
+    /// which is canonical within one compilation; display name is the
+    /// compiler-chosen `std::any::type_name`, which gives identical types
+    /// identical rendered names regardless of how the caller spelled them.
+    pub fn exact<T: 'static>() -> Self {
+        Self::Exact {
+            type_id: TypeId::of::<T>(),
+            display_name: type_name::<T>().to_string(),
+        }
     }
 }
 
@@ -49,8 +67,9 @@ impl From<&TypeHint> for TypeHintInfo {
     fn from(value: &TypeHint) -> Self {
         match value {
             TypeHint::Unspecified => Self::Unspecified,
-            TypeHint::Exact(name) => Self::Exact { name: name.clone() },
-            TypeHint::Mixed => Self::Mixed,
+            TypeHint::Exact { display_name, .. } => Self::Exact {
+                name: display_name.clone(),
+            },
         }
     }
 }
@@ -179,7 +198,7 @@ pub fn collect_stage_typing_info(
 }
 
 /// Which downstream input position was compared for an edge hint.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum EdgeInputRole {
     Input,
     Reference,
@@ -196,14 +215,22 @@ impl EdgeInputRole {
     }
 }
 
-/// Structured result from the edge compatibility checker.
+impl fmt::Display for EdgeInputRole {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Structured result from `validate_edge_typing`. Carries enough context to
+/// build a `FlowBuildError::EdgeTypingMismatch`. See FLOWIP-114c.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct EdgeWarning {
+pub struct EdgeError {
     pub upstream_stage: String,
     pub downstream_stage: String,
     pub upstream_type: String,
     pub expected_type: String,
     pub input_role: EdgeInputRole,
+    pub kind: crate::dsl::error::EdgeTypingMismatchKind,
 }
 
 /// Descriptor wrapper that preserves typing metadata through type erasure.
@@ -534,7 +561,11 @@ pub struct BoundTransform<In, Out, H> {
     _phantom: PhantomData<(In, Out)>,
 }
 
-impl<In, Out, H> BoundTransform<In, Out, H> {
+impl<In, Out, H> BoundTransform<In, Out, H>
+where
+    In: 'static,
+    Out: 'static,
+{
     pub fn new(inner: H) -> Self {
         Self {
             inner,
@@ -554,7 +585,7 @@ where
     }
 }
 
-impl<In, Out, H> TransformTyping for BoundTransform<In, Out, H> {
+impl<In: 'static, Out: 'static, H> TransformTyping for BoundTransform<In, Out, H> {
     type Input = In;
     type Output = Out;
 }
@@ -583,7 +614,11 @@ pub struct BoundAsyncTransform<In, Out, H> {
     _phantom: PhantomData<(In, Out)>,
 }
 
-impl<In, Out, H> BoundAsyncTransform<In, Out, H> {
+impl<In, Out, H> BoundAsyncTransform<In, Out, H>
+where
+    In: 'static,
+    Out: 'static,
+{
     pub fn new(inner: H) -> Self {
         Self {
             inner,
@@ -603,7 +638,7 @@ where
     }
 }
 
-impl<In, Out, H> TransformTyping for BoundAsyncTransform<In, Out, H> {
+impl<In: 'static, Out: 'static, H> TransformTyping for BoundAsyncTransform<In, Out, H> {
     type Input = In;
     type Output = Out;
 }
@@ -928,12 +963,111 @@ fn select_downstream_input_hint<'a>(
     (EdgeInputRole::Input, &downstream_metadata.input_type)
 }
 
-/// Collect non-blocking edge compatibility warnings for typed stages.
-pub fn collect_edge_warnings(
+/// FLOWIP-114c per-stage typing-metadata check. Returns an error if any
+/// descriptor lacks `typing_metadata()` or carries `Unspecified` on a slot
+/// that is applicable for the descriptor's stage role.
+///
+/// Applicable slots by role:
+/// - Source (any kind): `output_type`
+/// - Transform / AsyncTransform / Stateful: `input_type`, `output_type`
+/// - Sink: `input_type`
+/// - Join: `reference_type`, `stream_type`, `output_type`
+#[allow(clippy::result_large_err)]
+pub fn validate_stage_typing_metadata(
+    descriptors: &HashMap<String, Box<dyn StageDescriptor>>,
+) -> Result<(), crate::dsl::error::FlowBuildError> {
+    use crate::dsl::error::FlowBuildError;
+
+    for (name, descriptor) in descriptors {
+        let Some(meta) = descriptor.typing_metadata() else {
+            return Err(FlowBuildError::StageMissingTypingMetadata {
+                stage_name: name.clone(),
+            });
+        };
+
+        let stage_type = descriptor.stage_type();
+        let unspecified = |hint: &TypeHint| matches!(hint, TypeHint::Unspecified);
+
+        match stage_type {
+            StageType::FiniteSource | StageType::InfiniteSource => {
+                if unspecified(&meta.output_type) {
+                    return Err(FlowBuildError::UnspecifiedTypingOnApplicableSlot {
+                        stage_name: name.clone(),
+                        slot: "output".to_string(),
+                    });
+                }
+            }
+            StageType::Transform | StageType::Stateful => {
+                if unspecified(&meta.input_type) {
+                    return Err(FlowBuildError::UnspecifiedTypingOnApplicableSlot {
+                        stage_name: name.clone(),
+                        slot: "input".to_string(),
+                    });
+                }
+                if unspecified(&meta.output_type) {
+                    return Err(FlowBuildError::UnspecifiedTypingOnApplicableSlot {
+                        stage_name: name.clone(),
+                        slot: "output".to_string(),
+                    });
+                }
+            }
+            StageType::Sink => {
+                if unspecified(&meta.input_type) {
+                    return Err(FlowBuildError::UnspecifiedTypingOnApplicableSlot {
+                        stage_name: name.clone(),
+                        slot: "input".to_string(),
+                    });
+                }
+            }
+            StageType::Join => {
+                if unspecified(&meta.reference_type) {
+                    return Err(FlowBuildError::UnspecifiedTypingOnApplicableSlot {
+                        stage_name: name.clone(),
+                        slot: "reference".to_string(),
+                    });
+                }
+                if unspecified(&meta.stream_type) {
+                    return Err(FlowBuildError::UnspecifiedTypingOnApplicableSlot {
+                        stage_name: name.clone(),
+                        slot: "stream".to_string(),
+                    });
+                }
+                if unspecified(&meta.output_type) {
+                    return Err(FlowBuildError::UnspecifiedTypingOnApplicableSlot {
+                        stage_name: name.clone(),
+                        slot: "output".to_string(),
+                    });
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Validate edge typing across forward edges in a built topology.
+///
+/// Returns `Ok(())` when every edge is compatible, or `Err(errors)` listing
+/// every per-edge and per-slot mismatch. Composite-internal edges (both
+/// endpoints sharing a `StageSubgraphMembership.subgraph_id`) are skipped:
+/// the composite outer-boundary invariant is responsible for those, not the
+/// per-edge validator. See FLOWIP-114c "Composite-internal edge handling."
+///
+/// Two passes:
+/// - Per-edge `Exact` mismatch produces `EdgeTypingMismatchKind::SingleEdge`
+///   when one upstream's `Exact` type disagrees with the downstream slot's
+///   declared `Exact` type.
+/// - Per-(downstream, slot) fan-in grouping produces
+///   `EdgeTypingMismatchKind::HeterogeneousFanIn` when two or more upstreams
+///   feeding the same slot emit different `Exact` types. Each leg of a join
+///   is checked independently per Acceptance #4.
+pub fn validate_edge_typing(
     topology: &Topology,
     descriptors: &HashMap<String, Box<dyn StageDescriptor>>,
     name_to_id: &HashMap<String, StageId>,
-) -> Vec<EdgeWarning> {
+) -> Result<(), Vec<EdgeError>> {
+    use crate::dsl::error::EdgeTypingMismatchKind;
+
     let mut id_to_descriptor: HashMap<StageId, &dyn StageDescriptor> = HashMap::new();
     for (dsl_name, descriptor) in descriptors {
         if let Some(stage_id) = name_to_id.get(dsl_name) {
@@ -941,7 +1075,21 @@ pub fn collect_edge_warnings(
         }
     }
 
-    let mut warnings = Vec::new();
+    // Per-(downstream_id, role) fan-in collector. Holds (upstream_stage_name,
+    // type_id, display_name, downstream_stage_name) for every Exact-typed
+    // inbound edge.
+    type IngressKey = (StageId, EdgeInputRole);
+    let mut fan_in: HashMap<IngressKey, Vec<(String, std::any::TypeId, String, String)>> =
+        HashMap::new();
+
+    // SingleEdge errors collected during the per-edge pass, keyed by
+    // (downstream_id, role) so the final-merge step can drop the ones subsumed
+    // by a HeterogeneousFanIn on the same slot. FLOWIP-114c PR closing:
+    // surfacing the richer kind matters more than reporting every individual
+    // upstream that disagrees with the downstream contract on a heterogeneous
+    // group.
+    let mut single_edge_errors: HashMap<IngressKey, Vec<EdgeError>> = HashMap::new();
+
     for edge in topology.edges() {
         if edge.kind != EdgeKind::Forward {
             continue;
@@ -949,6 +1097,22 @@ pub fn collect_edge_warnings(
 
         let upstream_stage_id = StageId::from_ulid(edge.from.ulid());
         let downstream_stage_id = StageId::from_ulid(edge.to.ulid());
+
+        // Composite-internal-edge skip: if both endpoints belong to the same
+        // composite expansion (same `subgraph_id`), the edge is internal to a
+        // composite that was wired by composite-author code under composite
+        // unit tests. Per-edge validation does not apply.
+        let upstream_subgraph = topology
+            .stage_info(edge.from)
+            .and_then(|info| info.subgraph.as_ref().map(|m| m.subgraph_id.clone()));
+        let downstream_subgraph = topology
+            .stage_info(edge.to)
+            .and_then(|info| info.subgraph.as_ref().map(|m| m.subgraph_id.clone()));
+        if let (Some(u_sg), Some(d_sg)) = (&upstream_subgraph, &downstream_subgraph) {
+            if u_sg == d_sg {
+                continue;
+            }
+        }
 
         let Some(upstream_descriptor) = id_to_descriptor.get(&upstream_stage_id) else {
             continue;
@@ -970,25 +1134,127 @@ pub fn collect_edge_warnings(
             downstream_metadata,
         );
 
-        match (&upstream_metadata.output_type, downstream_input_hint) {
-            (TypeHint::Exact(upstream_type), TypeHint::Exact(expected_type))
-                if upstream_type != expected_type =>
-            {
-                warnings.push(EdgeWarning {
-                    upstream_stage: upstream_descriptor.name().to_string(),
-                    downstream_stage: downstream_descriptor.name().to_string(),
-                    upstream_type: upstream_type.clone(),
-                    expected_type: expected_type.clone(),
-                    input_role,
-                });
+        // (1) Per-edge SingleEdge mismatch.
+        if let (
+            TypeHint::Exact {
+                type_id: upstream_id,
+                display_name: upstream_name,
+            },
+            TypeHint::Exact {
+                type_id: expected_id,
+                display_name: expected_name,
+            },
+        ) = (&upstream_metadata.output_type, downstream_input_hint)
+        {
+            if upstream_id != expected_id {
+                single_edge_errors
+                    .entry((downstream_stage_id, input_role))
+                    .or_default()
+                    .push(EdgeError {
+                        upstream_stage: upstream_descriptor.name().to_string(),
+                        downstream_stage: downstream_descriptor.name().to_string(),
+                        upstream_type: upstream_name.clone(),
+                        expected_type: expected_name.clone(),
+                        input_role,
+                        kind: EdgeTypingMismatchKind::SingleEdge,
+                    });
             }
-            (_, TypeHint::Mixed) | (_, TypeHint::Unspecified) | (TypeHint::Unspecified, _) => {}
-            (TypeHint::Mixed, _) => {}
-            _ => {}
+        }
+
+        // (2) Collect for fan-in grouping.
+        if let TypeHint::Exact {
+            type_id: u_id,
+            display_name: u_name,
+        } = &upstream_metadata.output_type
+        {
+            fan_in
+                .entry((downstream_stage_id, input_role))
+                .or_default()
+                .push((
+                    upstream_descriptor.name().to_string(),
+                    *u_id,
+                    u_name.clone(),
+                    downstream_descriptor.name().to_string(),
+                ));
         }
     }
 
-    warnings
+    // Per-slot HeterogeneousFanIn: when two or more upstreams in the same
+    // (downstream, role) group emit different Exact types, emit one error per
+    // offending slot. The error names the alphabetically-first upstream as the
+    // focal point and lists every other upstream + actual type via `other_*`.
+    // The sort is on upstream stage name so the focal element is stable across
+    // changes to topology edge insertion order; without it, the regression
+    // tests in Acceptance #25 would be flaky.
+    let mut hetero_slots: Vec<IngressKey> = Vec::new();
+    let mut hetero_errors: Vec<EdgeError> = Vec::new();
+    let mut fan_in_keys: Vec<IngressKey> = fan_in.keys().copied().collect();
+    fan_in_keys.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.as_str().cmp(b.1.as_str())));
+
+    for key in fan_in_keys {
+        let entries = fan_in.get_mut(&key).expect("key from keys iteration");
+        if entries.len() < 2 {
+            continue;
+        }
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+
+        let first_type_id = entries[0].1;
+        let all_same = entries.iter().all(|(_, tid, _, _)| *tid == first_type_id);
+        if all_same {
+            continue;
+        }
+
+        let (focal_upstream, _focal_type_id, focal_display, downstream_stage_name) = &entries[0];
+        let other_upstream_stages: Vec<String> = entries[1..]
+            .iter()
+            .map(|(name, _, _, _)| name.clone())
+            .collect();
+        let other_actual_types: Vec<String> = entries[1..]
+            .iter()
+            .map(|(_, _, dn, _)| dn.clone())
+            .collect();
+        // The "expected" for a HeterogeneousFanIn slot is the focal upstream's
+        // type, which makes the error message read "the other upstreams should
+        // align to me". The author resolves by aligning all branches to one
+        // common envelope type.
+        hetero_slots.push(key);
+        hetero_errors.push(EdgeError {
+            upstream_stage: focal_upstream.clone(),
+            downstream_stage: downstream_stage_name.clone(),
+            upstream_type: focal_display.clone(),
+            expected_type: focal_display.clone(),
+            input_role: key.1,
+            kind: EdgeTypingMismatchKind::HeterogeneousFanIn {
+                other_upstream_stages,
+                other_actual_types,
+            },
+        });
+    }
+
+    // Final assembly: HeterogeneousFanIn first (the architecturally-meaningful
+    // diagnosis), then SingleEdge errors that are NOT subsumed by a hetero
+    // group on the same (downstream, role) slot. `build_typed_flow!` surfaces
+    // the first error from the returned vector as the structured
+    // `FlowBuildError::EdgeTypingMismatch`, so the ordering chosen here
+    // determines which kind reaches the user.
+    let mut errors: Vec<EdgeError> = hetero_errors;
+    let mut surviving_single_keys: Vec<IngressKey> = single_edge_errors.keys().copied().collect();
+    surviving_single_keys
+        .sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.as_str().cmp(b.1.as_str())));
+    for key in surviving_single_keys {
+        if hetero_slots.contains(&key) {
+            continue;
+        }
+        let mut bucket = single_edge_errors.remove(&key).unwrap_or_default();
+        bucket.sort_by(|a, b| a.upstream_stage.cmp(&b.upstream_stage));
+        errors.extend(bucket);
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors)
+    }
 }
 
 #[cfg(test)]

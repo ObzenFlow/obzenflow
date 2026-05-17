@@ -24,6 +24,8 @@ use obzenflow_runtime::stages::common::handlers::{
 use obzenflow_runtime::stages::SourceError;
 // Monitoring removed per FLOWIP-056-666
 use async_trait::async_trait;
+use obzenflow_core::TypedPayload;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -33,6 +35,20 @@ use tokio::runtime::Runtime;
 
 const DEFAULT_WARMUP_EVENT_COUNT: u64 = 2;
 const DEFAULT_TEST_EVENT_COUNT: u64 = 20;
+
+/// File-local payload type for the latency bench. The JSON shape matches
+/// what `TimestampedSource` emits; the type itself is a FLOWIP-114c
+/// topology fingerprint, not enforced at runtime.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct BenchEvent {
+    event_id: u64,
+    emit_time_nanos: u128,
+}
+
+impl TypedPayload for BenchEvent {
+    const EVENT_TYPE: &'static str = "bench.timestamped_event";
+}
+
 const DEFAULT_PIPELINE_TIMEOUT_SECS: u64 = 180;
 
 fn env_u64(name: &str, default: u64) -> u64 {
@@ -195,107 +211,107 @@ async fn run_100_stage_pipeline() -> anyhow::Result<Duration> {
         middleware: [],
 
         stages: {
-            src = source!(source);
-            s1 = transform!(PassthroughStage::new("stage1"));
-            s2 = transform!(PassthroughStage::new("stage2"));
-            s3 = transform!(PassthroughStage::new("stage3"));
-            s4 = transform!(PassthroughStage::new("stage4"));
-            s5 = transform!(PassthroughStage::new("stage5"));
-            s6 = transform!(PassthroughStage::new("stage6"));
-            s7 = transform!(PassthroughStage::new("stage7"));
-            s8 = transform!(PassthroughStage::new("stage8"));
-            s9 = transform!(PassthroughStage::new("stage9"));
-            s10 = transform!(PassthroughStage::new("stage10"));
-            s11 = transform!(PassthroughStage::new("stage11"));
-            s12 = transform!(PassthroughStage::new("stage12"));
-            s13 = transform!(PassthroughStage::new("stage13"));
-            s14 = transform!(PassthroughStage::new("stage14"));
-            s15 = transform!(PassthroughStage::new("stage15"));
-            s16 = transform!(PassthroughStage::new("stage16"));
-            s17 = transform!(PassthroughStage::new("stage17"));
-            s18 = transform!(PassthroughStage::new("stage18"));
-            s19 = transform!(PassthroughStage::new("stage19"));
-            s20 = transform!(PassthroughStage::new("stage20"));
-            s21 = transform!(PassthroughStage::new("stage21"));
-            s22 = transform!(PassthroughStage::new("stage22"));
-            s23 = transform!(PassthroughStage::new("stage23"));
-            s24 = transform!(PassthroughStage::new("stage24"));
-            s25 = transform!(PassthroughStage::new("stage25"));
-            s26 = transform!(PassthroughStage::new("stage26"));
-            s27 = transform!(PassthroughStage::new("stage27"));
-            s28 = transform!(PassthroughStage::new("stage28"));
-            s29 = transform!(PassthroughStage::new("stage29"));
-            s30 = transform!(PassthroughStage::new("stage30"));
-            s31 = transform!(PassthroughStage::new("stage31"));
-            s32 = transform!(PassthroughStage::new("stage32"));
-            s33 = transform!(PassthroughStage::new("stage33"));
-            s34 = transform!(PassthroughStage::new("stage34"));
-            s35 = transform!(PassthroughStage::new("stage35"));
-            s36 = transform!(PassthroughStage::new("stage36"));
-            s37 = transform!(PassthroughStage::new("stage37"));
-            s38 = transform!(PassthroughStage::new("stage38"));
-            s39 = transform!(PassthroughStage::new("stage39"));
-            s40 = transform!(PassthroughStage::new("stage40"));
-            s41 = transform!(PassthroughStage::new("stage41"));
-            s42 = transform!(PassthroughStage::new("stage42"));
-            s43 = transform!(PassthroughStage::new("stage43"));
-            s44 = transform!(PassthroughStage::new("stage44"));
-            s45 = transform!(PassthroughStage::new("stage45"));
-            s46 = transform!(PassthroughStage::new("stage46"));
-            s47 = transform!(PassthroughStage::new("stage47"));
-            s48 = transform!(PassthroughStage::new("stage48"));
-            s49 = transform!(PassthroughStage::new("stage49"));
-            s50 = transform!(PassthroughStage::new("stage50"));
-            s51 = transform!(PassthroughStage::new("stage51"));
-            s52 = transform!(PassthroughStage::new("stage52"));
-            s53 = transform!(PassthroughStage::new("stage53"));
-            s54 = transform!(PassthroughStage::new("stage54"));
-            s55 = transform!(PassthroughStage::new("stage55"));
-            s56 = transform!(PassthroughStage::new("stage56"));
-            s57 = transform!(PassthroughStage::new("stage57"));
-            s58 = transform!(PassthroughStage::new("stage58"));
-            s59 = transform!(PassthroughStage::new("stage59"));
-            s60 = transform!(PassthroughStage::new("stage60"));
-            s61 = transform!(PassthroughStage::new("stage61"));
-            s62 = transform!(PassthroughStage::new("stage62"));
-            s63 = transform!(PassthroughStage::new("stage63"));
-            s64 = transform!(PassthroughStage::new("stage64"));
-            s65 = transform!(PassthroughStage::new("stage65"));
-            s66 = transform!(PassthroughStage::new("stage66"));
-            s67 = transform!(PassthroughStage::new("stage67"));
-            s68 = transform!(PassthroughStage::new("stage68"));
-            s69 = transform!(PassthroughStage::new("stage69"));
-            s70 = transform!(PassthroughStage::new("stage70"));
-            s71 = transform!(PassthroughStage::new("stage71"));
-            s72 = transform!(PassthroughStage::new("stage72"));
-            s73 = transform!(PassthroughStage::new("stage73"));
-            s74 = transform!(PassthroughStage::new("stage74"));
-            s75 = transform!(PassthroughStage::new("stage75"));
-            s76 = transform!(PassthroughStage::new("stage76"));
-            s77 = transform!(PassthroughStage::new("stage77"));
-            s78 = transform!(PassthroughStage::new("stage78"));
-            s79 = transform!(PassthroughStage::new("stage79"));
-            s80 = transform!(PassthroughStage::new("stage80"));
-            s81 = transform!(PassthroughStage::new("stage81"));
-            s82 = transform!(PassthroughStage::new("stage82"));
-            s83 = transform!(PassthroughStage::new("stage83"));
-            s84 = transform!(PassthroughStage::new("stage84"));
-            s85 = transform!(PassthroughStage::new("stage85"));
-            s86 = transform!(PassthroughStage::new("stage86"));
-            s87 = transform!(PassthroughStage::new("stage87"));
-            s88 = transform!(PassthroughStage::new("stage88"));
-            s89 = transform!(PassthroughStage::new("stage89"));
-            s90 = transform!(PassthroughStage::new("stage90"));
-            s91 = transform!(PassthroughStage::new("stage91"));
-            s92 = transform!(PassthroughStage::new("stage92"));
-            s93 = transform!(PassthroughStage::new("stage93"));
-            s94 = transform!(PassthroughStage::new("stage94"));
-            s95 = transform!(PassthroughStage::new("stage95"));
-            s96 = transform!(PassthroughStage::new("stage96"));
-            s97 = transform!(PassthroughStage::new("stage97"));
-            s98 = transform!(PassthroughStage::new("stage98"));
-            s99 = transform!(PassthroughStage::new("stage99"));
-            snk = sink!(sink);
+            src = source!(BenchEvent => source);
+            s1 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage1"));
+            s2 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage2"));
+            s3 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage3"));
+            s4 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage4"));
+            s5 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage5"));
+            s6 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage6"));
+            s7 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage7"));
+            s8 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage8"));
+            s9 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage9"));
+            s10 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage10"));
+            s11 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage11"));
+            s12 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage12"));
+            s13 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage13"));
+            s14 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage14"));
+            s15 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage15"));
+            s16 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage16"));
+            s17 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage17"));
+            s18 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage18"));
+            s19 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage19"));
+            s20 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage20"));
+            s21 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage21"));
+            s22 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage22"));
+            s23 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage23"));
+            s24 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage24"));
+            s25 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage25"));
+            s26 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage26"));
+            s27 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage27"));
+            s28 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage28"));
+            s29 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage29"));
+            s30 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage30"));
+            s31 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage31"));
+            s32 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage32"));
+            s33 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage33"));
+            s34 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage34"));
+            s35 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage35"));
+            s36 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage36"));
+            s37 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage37"));
+            s38 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage38"));
+            s39 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage39"));
+            s40 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage40"));
+            s41 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage41"));
+            s42 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage42"));
+            s43 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage43"));
+            s44 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage44"));
+            s45 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage45"));
+            s46 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage46"));
+            s47 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage47"));
+            s48 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage48"));
+            s49 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage49"));
+            s50 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage50"));
+            s51 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage51"));
+            s52 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage52"));
+            s53 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage53"));
+            s54 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage54"));
+            s55 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage55"));
+            s56 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage56"));
+            s57 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage57"));
+            s58 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage58"));
+            s59 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage59"));
+            s60 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage60"));
+            s61 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage61"));
+            s62 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage62"));
+            s63 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage63"));
+            s64 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage64"));
+            s65 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage65"));
+            s66 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage66"));
+            s67 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage67"));
+            s68 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage68"));
+            s69 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage69"));
+            s70 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage70"));
+            s71 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage71"));
+            s72 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage72"));
+            s73 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage73"));
+            s74 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage74"));
+            s75 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage75"));
+            s76 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage76"));
+            s77 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage77"));
+            s78 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage78"));
+            s79 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage79"));
+            s80 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage80"));
+            s81 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage81"));
+            s82 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage82"));
+            s83 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage83"));
+            s84 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage84"));
+            s85 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage85"));
+            s86 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage86"));
+            s87 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage87"));
+            s88 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage88"));
+            s89 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage89"));
+            s90 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage90"));
+            s91 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage91"));
+            s92 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage92"));
+            s93 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage93"));
+            s94 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage94"));
+            s95 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage95"));
+            s96 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage96"));
+            s97 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage97"));
+            s98 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage98"));
+            s99 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage99"));
+            snk = sink!(BenchEvent => sink);
         },
 
         topology: {

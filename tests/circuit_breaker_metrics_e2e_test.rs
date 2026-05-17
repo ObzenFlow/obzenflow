@@ -10,6 +10,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use obzenflow_adapters::middleware::circuit_breaker;
+use obzenflow_core::TypedPayload;
 use obzenflow_core::{
     event::chain_event::{ChainEvent, ChainEventFactory},
     event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload},
@@ -22,7 +23,22 @@ use obzenflow_runtime::stages::common::handlers::{
     FiniteSourceHandler, SinkHandler, TransformHandler,
 };
 use obzenflow_runtime::stages::SourceError;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
+
+/// File-local payload for the circuit-breaker metrics test. The JSON
+/// shape matches what `TimedEventSource` / `RapidSource` emit; the type
+/// fingerprints the stage contract per FLOWIP-114c.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct CircuitMetricEvent {
+    sequence: u64,
+    #[serde(rename = "type")]
+    kind: String,
+}
+
+impl TypedPayload for CircuitMetricEvent {
+    const EVENT_TYPE: &'static str = "circuit_breaker_metrics.event";
+}
 use std::sync::{Arc, Mutex};
 use tokio::time::{sleep, Duration};
 
@@ -203,14 +219,14 @@ async fn test_circuit_breaker_metrics_end_to_end() -> Result<()> {
         middleware: [],
 
         stages: {
-            cb_source = source!(source);
+            cb_source = source!(CircuitMetricEvent => source);
 
             // Transform with circuit breaker (3 consecutive failures opens circuit)
-            cb_transform = transform!(transform, [
+            cb_transform = transform!(CircuitMetricEvent -> CircuitMetricEvent => transform, [
                 circuit_breaker(3)
             ]);
 
-            cb_sink = sink!(sink);
+            cb_sink = sink!(CircuitMetricEvent => sink);
         },
 
         topology: {
@@ -396,11 +412,11 @@ async fn test_circuit_breaker_summary_events() -> Result<()> {
         middleware: [],
 
         stages: {
-            rapid_source = source!(RapidSource { count: 0, writer_id: WriterId::from(StageId::new()) });
-            cb_summary_transform = transform!(PassthroughTransform, [
+            rapid_source = source!(CircuitMetricEvent => RapidSource { count: 0, writer_id: WriterId::from(StageId::new()) });
+            cb_summary_transform = transform!(CircuitMetricEvent -> CircuitMetricEvent => PassthroughTransform, [
                 circuit_breaker(10) // High threshold, won't trip
             ]);
-            null_sink = sink!(MetricsSink::new().0);
+            null_sink = sink!(CircuitMetricEvent => MetricsSink::new().0);
         },
 
         topology: {

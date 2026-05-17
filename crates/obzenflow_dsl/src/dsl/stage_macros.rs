@@ -4,7 +4,10 @@
 
 //! Stage macros for building ObzenFlow pipeline descriptors.
 //!
-//! Public macros use canonical directional contracts for typed stages:
+//! Public macros only accept the typed shape. Every authoring site declares
+//! its input and output types so the topology API and Studio can label every
+//! stage and every edge, and so the edge-compatibility validator (FLOWIP-114c)
+//! can catch type-level fan-in mistakes at build time.
 //!
 //! ```ignore
 //! source!(Out => handler)
@@ -18,27 +21,28 @@
 //! join!(catalog CatalogStage: Catalog, Stream -> Out => handler)
 //! ```
 //!
-//! Untyped macros follow the same naming and join-role conventions:
+//! Each form supports four decorations: bare (binding-derived name), the
+//! `name: "..."` prefix to override the runtime stage name, a `[middleware,
+//! ...]` suffix to attach middleware, and the named-plus-middleware
+//! combination. The 8 stage families x 4 decorations matrix is exercised as a
+//! permanent regression by `typed_decoration_matrix_test`.
 //!
-//! ```ignore
-//! source!(handler)
-//! async_source!(handler)
-//! infinite_source!(handler)
-//! async_infinite_source!(handler)
-//! transform!(handler)
-//! async_transform!(handler)
-//! stateful!(handler)
-//! sink!(handler)
-//! join!(catalog CatalogStage => handler)
-//! ```
+//! The pre-FLOWIP-114c untyped forms (`source!(handler)`,
+//! `transform!(handler)`, `sink!(handler)`, etc.) and the mixed-leg join arms
+//! (`join!(catalog Ref: mixed, ...)`) were removed in the PR that operationalised
+//! FLOWIP-114c. Authoring patterns that previously reached for an untyped
+//! handler to demux events at runtime are now expressed as joins (two typed
+//! inputs) or per-branch alignment transforms (homogeneous fan-in on an
+//! envelope type); see `examples/multi_source_ingest_demo` for the canonical
+//! pattern and FLOWIP-114c "How to handle heterogeneous fan-in" for the
+//! rationale.
 //!
-//! By default, runtime stage names are derived from the left-hand binding in
-//! the enclosing `flow!` block. Use `name: "..."` to override the runtime
-//! name explicitly.
-//!
-//! Typed arms dispatch into `#[doc(hidden)]` helper macros that handle
-//! normalisation, metadata construction, assertions, and descriptor wrapping.
-//! Untyped arms produce descriptors directly.
+//! Public typed arms dispatch into `#[doc(hidden)]` helper macros
+//! (`__obzenflow_*_typed!`) that handle normalisation, metadata construction,
+//! and descriptor wrapping. The doc-hidden helpers also expose
+//! `__obzenflow_*_untyped!` arms used internally by typed expansions for
+//! descriptor assembly; those are not part of the public surface and are not
+//! reachable by author code.
 
 // ============================================================================
 // placeholder!
@@ -66,7 +70,7 @@ macro_rules! placeholder {
 macro_rules! __obzenflow_source_typed {
     (output = $out:ty, name = $name:literal, handler = placeholder!(), middleware = [$($mw:expr),*]) => {{
         let __metadata = $crate::dsl::typing::StageTypingMetadata::source(
-            $crate::dsl::typing::TypeHint::exact(stringify!($out)),
+            $crate::dsl::typing::TypeHint::exact::<$out>(),
             true,
             None,
         );
@@ -79,7 +83,7 @@ macro_rules! __obzenflow_source_typed {
     }};
     (output = $out:ty, name = $name:literal, handler = placeholder!($msg:expr), middleware = [$($mw:expr),*]) => {{
         let __metadata = $crate::dsl::typing::StageTypingMetadata::source(
-            $crate::dsl::typing::TypeHint::exact(stringify!($out)),
+            $crate::dsl::typing::TypeHint::exact::<$out>(),
             true,
             Some(($msg).to_string()),
         );
@@ -92,9 +96,9 @@ macro_rules! __obzenflow_source_typed {
     }};
     (output = $out:ty, name = $name:literal, handler = $handler:expr, middleware = [$($mw:expr),*]) => {{
         let __handler = $handler;
-        ::obzenflow_runtime::typing::assert_source_output::<_, $out>(&__handler);
+        // FLOWIP-114c PR D: assert_source_output dropped, see sink rationale.
         let __metadata = $crate::dsl::typing::StageTypingMetadata::source(
-            $crate::dsl::typing::TypeHint::exact(stringify!($out)),
+            $crate::dsl::typing::TypeHint::exact::<$out>(),
             false,
             None,
         );
@@ -123,30 +127,6 @@ macro_rules! __obzenflow_source_untyped {
 /// Create a finite source stage descriptor.
 #[macro_export]
 macro_rules! source {
-    // ── untyped (binding-derived name) ──
-    ($handler:expr) => {
-        $crate::__obzenflow_source_untyped!(
-            name = "__obzenflow_binding_derived_name__",
-            handler = $handler,
-            middleware = []
-        )
-    };
-    ($handler:expr, [$($mw:expr),*]) => {
-        $crate::__obzenflow_source_untyped!(
-            name = "__obzenflow_binding_derived_name__",
-            handler = $handler,
-            middleware = [$($mw),*]
-        )
-    };
-
-    // ── untyped (explicit name override) ──
-    (name: $name:literal, $handler:expr) => {
-        $crate::__obzenflow_source_untyped!(name = $name, handler = $handler, middleware = [])
-    };
-    (name: $name:literal, $handler:expr, [$($mw:expr),*]) => {
-        $crate::__obzenflow_source_untyped!(name = $name, handler = $handler, middleware = [$($mw),*])
-    };
-
     // ── typed (binding-derived name) ──
     ($out:ty => placeholder!()) => {
         $crate::__obzenflow_source_typed!(
@@ -243,7 +223,7 @@ macro_rules! __obzenflow_async_source_untyped {
 macro_rules! __obzenflow_async_source_typed {
     (output = $out:ty, name = $name:literal, handler = placeholder!(), middleware = [$($mw:expr),*]) => {{
         let __metadata = $crate::dsl::typing::StageTypingMetadata::source(
-            $crate::dsl::typing::TypeHint::exact(stringify!($out)),
+            $crate::dsl::typing::TypeHint::exact::<$out>(),
             true,
             None,
         );
@@ -256,7 +236,7 @@ macro_rules! __obzenflow_async_source_typed {
     }};
     (output = $out:ty, name = $name:literal, handler = placeholder!($msg:expr), middleware = [$($mw:expr),*]) => {{
         let __metadata = $crate::dsl::typing::StageTypingMetadata::source(
-            $crate::dsl::typing::TypeHint::exact(stringify!($out)),
+            $crate::dsl::typing::TypeHint::exact::<$out>(),
             true,
             Some(($msg).to_string()),
         );
@@ -269,9 +249,9 @@ macro_rules! __obzenflow_async_source_typed {
     }};
     (output = $out:ty, name = $name:literal, handler = ($handler:expr, $poll_timeout:expr), middleware = [$($mw:expr),*]) => {{
         let __handler = $handler;
-        ::obzenflow_runtime::typing::assert_source_output::<_, $out>(&__handler);
+        // FLOWIP-114c PR D: assert_source_output dropped, see sink rationale.
         let __metadata = $crate::dsl::typing::StageTypingMetadata::source(
-            $crate::dsl::typing::TypeHint::exact(stringify!($out)),
+            $crate::dsl::typing::TypeHint::exact::<$out>(),
             false,
             None,
         );
@@ -284,9 +264,9 @@ macro_rules! __obzenflow_async_source_typed {
     }};
     (output = $out:ty, name = $name:literal, handler = $handler:expr, middleware = [$($mw:expr),*]) => {{
         let __handler = $handler;
-        ::obzenflow_runtime::typing::assert_source_output::<_, $out>(&__handler);
+        // FLOWIP-114c PR D: assert_source_output dropped, see sink rationale.
         let __metadata = $crate::dsl::typing::StageTypingMetadata::source(
-            $crate::dsl::typing::TypeHint::exact(stringify!($out)),
+            $crate::dsl::typing::TypeHint::exact::<$out>(),
             false,
             None,
         );
@@ -302,50 +282,6 @@ macro_rules! __obzenflow_async_source_typed {
 /// Create an async finite source stage descriptor.
 #[macro_export]
 macro_rules! async_source {
-    // ── untyped (binding-derived name) ──
-    (($handler:expr, $poll_timeout:expr)) => {
-        $crate::__obzenflow_async_source_untyped!(
-            name = "__obzenflow_binding_derived_name__",
-            handler = ($handler, $poll_timeout),
-            middleware = []
-        )
-    };
-    (($handler:expr, $poll_timeout:expr), [$($mw:expr),*]) => {
-        $crate::__obzenflow_async_source_untyped!(
-            name = "__obzenflow_binding_derived_name__",
-            handler = ($handler, $poll_timeout),
-            middleware = [$($mw),*]
-        )
-    };
-    ($handler:expr) => {
-        $crate::__obzenflow_async_source_untyped!(name = "__obzenflow_binding_derived_name__", handler = $handler, middleware = [])
-    };
-    ($handler:expr, [$($mw:expr),*]) => {
-        $crate::__obzenflow_async_source_untyped!(name = "__obzenflow_binding_derived_name__", handler = $handler, middleware = [$($mw),*])
-    };
-
-    // ── untyped (explicit name override) ──
-    (name: $name:literal, ($handler:expr, $poll_timeout:expr)) => {
-        $crate::__obzenflow_async_source_untyped!(
-            name = $name,
-            handler = ($handler, $poll_timeout),
-            middleware = []
-        )
-    };
-    (name: $name:literal, ($handler:expr, $poll_timeout:expr), [$($mw:expr),*]) => {
-        $crate::__obzenflow_async_source_untyped!(
-            name = $name,
-            handler = ($handler, $poll_timeout),
-            middleware = [$($mw),*]
-        )
-    };
-    (name: $name:literal, $handler:expr) => {
-        $crate::__obzenflow_async_source_untyped!(name = $name, handler = $handler, middleware = [])
-    };
-    (name: $name:literal, $handler:expr, [$($mw:expr),*]) => {
-        $crate::__obzenflow_async_source_untyped!(name = $name, handler = $handler, middleware = [$($mw),*])
-    };
-
     // ── typed (binding-derived name) ──
     ($out:ty => placeholder!()) => {
         $crate::__obzenflow_async_source_typed!(output = $out, name = "__obzenflow_binding_derived_name__", handler = placeholder!(), middleware = [])
@@ -421,7 +357,7 @@ macro_rules! __obzenflow_infinite_source_untyped {
 macro_rules! __obzenflow_infinite_source_typed {
     (output = $out:ty, name = $name:literal, handler = placeholder!(), middleware = [$($mw:expr),*]) => {{
         let __metadata = $crate::dsl::typing::StageTypingMetadata::source(
-            $crate::dsl::typing::TypeHint::exact(stringify!($out)),
+            $crate::dsl::typing::TypeHint::exact::<$out>(),
             true,
             None,
         );
@@ -434,7 +370,7 @@ macro_rules! __obzenflow_infinite_source_typed {
     }};
     (output = $out:ty, name = $name:literal, handler = placeholder!($msg:expr), middleware = [$($mw:expr),*]) => {{
         let __metadata = $crate::dsl::typing::StageTypingMetadata::source(
-            $crate::dsl::typing::TypeHint::exact(stringify!($out)),
+            $crate::dsl::typing::TypeHint::exact::<$out>(),
             true,
             Some(($msg).to_string()),
         );
@@ -447,9 +383,9 @@ macro_rules! __obzenflow_infinite_source_typed {
     }};
     (output = $out:ty, name = $name:literal, handler = $handler:expr, middleware = [$($mw:expr),*]) => {{
         let __handler = $handler;
-        ::obzenflow_runtime::typing::assert_source_output::<_, $out>(&__handler);
+        // FLOWIP-114c PR D: assert_source_output dropped, see sink rationale.
         let __metadata = $crate::dsl::typing::StageTypingMetadata::source(
-            $crate::dsl::typing::TypeHint::exact(stringify!($out)),
+            $crate::dsl::typing::TypeHint::exact::<$out>(),
             false,
             None,
         );
@@ -465,30 +401,6 @@ macro_rules! __obzenflow_infinite_source_typed {
 /// Create an infinite source stage descriptor.
 #[macro_export]
 macro_rules! infinite_source {
-    // ── untyped (binding-derived name) ──
-    ($handler:expr) => {
-        $crate::__obzenflow_infinite_source_untyped!(
-            name = "__obzenflow_binding_derived_name__",
-            handler = $handler,
-            middleware = []
-        )
-    };
-    ($handler:expr, [$($mw:expr),*]) => {
-        $crate::__obzenflow_infinite_source_untyped!(
-            name = "__obzenflow_binding_derived_name__",
-            handler = $handler,
-            middleware = [$($mw),*]
-        )
-    };
-
-    // ── untyped (explicit name override) ──
-    (name: $name:literal, $handler:expr) => {
-        $crate::__obzenflow_infinite_source_untyped!(name = $name, handler = $handler, middleware = [])
-    };
-    (name: $name:literal, $handler:expr, [$($mw:expr),*]) => {
-        $crate::__obzenflow_infinite_source_untyped!(name = $name, handler = $handler, middleware = [$($mw),*])
-    };
-
     // ── typed (binding-derived name) ──
     ($out:ty => placeholder!()) => {
         $crate::__obzenflow_infinite_source_typed!(
@@ -615,7 +527,7 @@ macro_rules! __obzenflow_async_infinite_source_untyped {
 macro_rules! __obzenflow_async_infinite_source_typed {
     (output = $out:ty, name = $name:literal, handler = placeholder!(), middleware = [$($mw:expr),*]) => {{
         let __metadata = $crate::dsl::typing::StageTypingMetadata::source(
-            $crate::dsl::typing::TypeHint::exact(stringify!($out)),
+            $crate::dsl::typing::TypeHint::exact::<$out>(),
             true,
             None,
         );
@@ -628,7 +540,7 @@ macro_rules! __obzenflow_async_infinite_source_typed {
     }};
     (output = $out:ty, name = $name:literal, handler = placeholder!($msg:expr), middleware = [$($mw:expr),*]) => {{
         let __metadata = $crate::dsl::typing::StageTypingMetadata::source(
-            $crate::dsl::typing::TypeHint::exact(stringify!($out)),
+            $crate::dsl::typing::TypeHint::exact::<$out>(),
             true,
             Some(($msg).to_string()),
         );
@@ -641,9 +553,9 @@ macro_rules! __obzenflow_async_infinite_source_typed {
     }};
     (output = $out:ty, name = $name:literal, handler = ($handler:expr, $poll_timeout:expr), middleware = [$($mw:expr),*]) => {{
         let __handler = $handler;
-        ::obzenflow_runtime::typing::assert_source_output::<_, $out>(&__handler);
+        // FLOWIP-114c PR D: assert_source_output dropped, see sink rationale.
         let __metadata = $crate::dsl::typing::StageTypingMetadata::source(
-            $crate::dsl::typing::TypeHint::exact(stringify!($out)),
+            $crate::dsl::typing::TypeHint::exact::<$out>(),
             false,
             None,
         );
@@ -656,9 +568,9 @@ macro_rules! __obzenflow_async_infinite_source_typed {
     }};
     (output = $out:ty, name = $name:literal, handler = $handler:expr, middleware = [$($mw:expr),*]) => {{
         let __handler = $handler;
-        ::obzenflow_runtime::typing::assert_source_output::<_, $out>(&__handler);
+        // FLOWIP-114c PR D: assert_source_output dropped, see sink rationale.
         let __metadata = $crate::dsl::typing::StageTypingMetadata::source(
-            $crate::dsl::typing::TypeHint::exact(stringify!($out)),
+            $crate::dsl::typing::TypeHint::exact::<$out>(),
             false,
             None,
         );
@@ -674,58 +586,6 @@ macro_rules! __obzenflow_async_infinite_source_typed {
 /// Create an async infinite source stage descriptor.
 #[macro_export]
 macro_rules! async_infinite_source {
-    // ── untyped (binding-derived name) ──
-    (($handler:expr, $poll_timeout:expr)) => {
-        $crate::__obzenflow_async_infinite_source_untyped!(
-            name = "__obzenflow_binding_derived_name__",
-            handler = ($handler, $poll_timeout),
-            middleware = []
-        )
-    };
-    (($handler:expr, $poll_timeout:expr), [$($mw:expr),*]) => {
-        $crate::__obzenflow_async_infinite_source_untyped!(
-            name = "__obzenflow_binding_derived_name__",
-            handler = ($handler, $poll_timeout),
-            middleware = [$($mw),*]
-        )
-    };
-    ($handler:expr) => {
-        $crate::__obzenflow_async_infinite_source_untyped!(
-            name = "__obzenflow_binding_derived_name__",
-            handler = $handler,
-            middleware = []
-        )
-    };
-    ($handler:expr, [$($mw:expr),*]) => {
-        $crate::__obzenflow_async_infinite_source_untyped!(
-            name = "__obzenflow_binding_derived_name__",
-            handler = $handler,
-            middleware = [$($mw),*]
-        )
-    };
-
-    // ── untyped (explicit name override) ──
-    (name: $name:literal, ($handler:expr, $poll_timeout:expr)) => {
-        $crate::__obzenflow_async_infinite_source_untyped!(
-            name = $name,
-            handler = ($handler, $poll_timeout),
-            middleware = []
-        )
-    };
-    (name: $name:literal, ($handler:expr, $poll_timeout:expr), [$($mw:expr),*]) => {
-        $crate::__obzenflow_async_infinite_source_untyped!(
-            name = $name,
-            handler = ($handler, $poll_timeout),
-            middleware = [$($mw),*]
-        )
-    };
-    (name: $name:literal, $handler:expr) => {
-        $crate::__obzenflow_async_infinite_source_untyped!(name = $name, handler = $handler, middleware = [])
-    };
-    (name: $name:literal, $handler:expr, [$($mw:expr),*]) => {
-        $crate::__obzenflow_async_infinite_source_untyped!(name = $name, handler = $handler, middleware = [$($mw),*])
-    };
-
     // ── typed (binding-derived name) ──
     ($out:ty => placeholder!()) => {
         $crate::__obzenflow_async_infinite_source_typed!(
@@ -879,55 +739,11 @@ macro_rules! __obzenflow_transform_untyped {
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __obzenflow_transform_typed {
-    // ── mixed input, placeholder ──
-    (input = mixed, output = $out:ty, name = $name:literal, handler = placeholder!(), middleware = [$($mw:expr),*]) => {{
-        let __metadata = $crate::dsl::typing::StageTypingMetadata::transform(
-            $crate::dsl::typing::TypeHint::Mixed,
-            $crate::dsl::typing::TypeHint::exact(stringify!($out)),
-            true,
-            None,
-        );
-        let __descriptor = $crate::__obzenflow_transform_untyped!(
-            name = $name,
-            handler = $crate::dsl::typing::PlaceholderTransform::<::obzenflow_runtime::typing::MixedInput, $out>::new(None),
-            middleware = [$($mw),*]
-        );
-        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
-    }};
-    (input = mixed, output = $out:ty, name = $name:literal, handler = placeholder!($msg:expr), middleware = [$($mw:expr),*]) => {{
-        let __metadata = $crate::dsl::typing::StageTypingMetadata::transform(
-            $crate::dsl::typing::TypeHint::Mixed,
-            $crate::dsl::typing::TypeHint::exact(stringify!($out)),
-            true,
-            Some(($msg).to_string()),
-        );
-        let __descriptor = $crate::__obzenflow_transform_untyped!(
-            name = $name,
-            handler = $crate::dsl::typing::PlaceholderTransform::<::obzenflow_runtime::typing::MixedInput, $out>::new(Some($msg)),
-            middleware = [$($mw),*]
-        );
-        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
-    }};
-    // ── mixed input, real handler ──
-    (input = mixed, output = $out:ty, name = $name:literal, handler = $handler:expr, middleware = [$($mw:expr),*]) => {{
-        let __handler = $handler;
-        let __handler =
-            $crate::dsl::typing::BoundTransform::<::obzenflow_runtime::typing::MixedInput, $out, _>::new(__handler);
-        ::obzenflow_runtime::typing::assert_transform_output::<_, $out>(&__handler);
-        let __metadata = $crate::dsl::typing::StageTypingMetadata::transform(
-            $crate::dsl::typing::TypeHint::Mixed,
-            $crate::dsl::typing::TypeHint::exact(stringify!($out)),
-            false,
-            None,
-        );
-        let __descriptor = $crate::__obzenflow_transform_untyped!(name = $name, handler = __handler, middleware = [$($mw),*]);
-        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
-    }};
     // ── exact input, placeholder ──
     (input = exact($in:ty), output = $out:ty, name = $name:literal, handler = placeholder!(), middleware = [$($mw:expr),*]) => {{
         let __metadata = $crate::dsl::typing::StageTypingMetadata::transform(
-            $crate::dsl::typing::TypeHint::exact(stringify!($in)),
-            $crate::dsl::typing::TypeHint::exact(stringify!($out)),
+            $crate::dsl::typing::TypeHint::exact::<$in>(),
+            $crate::dsl::typing::TypeHint::exact::<$out>(),
             true,
             None,
         );
@@ -940,8 +756,8 @@ macro_rules! __obzenflow_transform_typed {
     }};
     (input = exact($in:ty), output = $out:ty, name = $name:literal, handler = placeholder!($msg:expr), middleware = [$($mw:expr),*]) => {{
         let __metadata = $crate::dsl::typing::StageTypingMetadata::transform(
-            $crate::dsl::typing::TypeHint::exact(stringify!($in)),
-            $crate::dsl::typing::TypeHint::exact(stringify!($out)),
+            $crate::dsl::typing::TypeHint::exact::<$in>(),
+            $crate::dsl::typing::TypeHint::exact::<$out>(),
             true,
             Some(($msg).to_string()),
         );
@@ -959,8 +775,8 @@ macro_rules! __obzenflow_transform_typed {
             $crate::dsl::typing::BoundTransform::<$in, $out, _>::new(__handler);
         ::obzenflow_runtime::typing::assert_transform_contract::<_, $in, $out>(&__handler);
         let __metadata = $crate::dsl::typing::StageTypingMetadata::transform(
-            $crate::dsl::typing::TypeHint::exact(stringify!($in)),
-            $crate::dsl::typing::TypeHint::exact(stringify!($out)),
+            $crate::dsl::typing::TypeHint::exact::<$in>(),
+            $crate::dsl::typing::TypeHint::exact::<$out>(),
             false,
             None,
         );
@@ -1048,106 +864,6 @@ macro_rules! __obzenflow_transform_exact_contract {
 /// Create a transform stage descriptor.
 #[macro_export]
 macro_rules! transform {
-    // ── typed (binding-derived name): mixed input ──
-    (mixed -> $out:ty => placeholder!()) => {
-        $crate::__obzenflow_transform_typed!(
-            input = mixed,
-            output = $out,
-            name = "__obzenflow_binding_derived_name__",
-            handler = placeholder!(),
-            middleware = []
-        )
-    };
-    (mixed -> $out:ty => placeholder!($msg:expr)) => {
-        $crate::__obzenflow_transform_typed!(
-            input = mixed,
-            output = $out,
-            name = "__obzenflow_binding_derived_name__",
-            handler = placeholder!($msg),
-            middleware = []
-        )
-    };
-    (mixed -> $out:ty => placeholder!(), [$($mw:expr),*]) => {
-        $crate::__obzenflow_transform_typed!(
-            input = mixed,
-            output = $out,
-            name = "__obzenflow_binding_derived_name__",
-            handler = placeholder!(),
-            middleware = [$($mw),*]
-        )
-    };
-    (mixed -> $out:ty => placeholder!($msg:expr), [$($mw:expr),*]) => {
-        $crate::__obzenflow_transform_typed!(
-            input = mixed,
-            output = $out,
-            name = "__obzenflow_binding_derived_name__",
-            handler = placeholder!($msg),
-            middleware = [$($mw),*]
-        )
-    };
-    (mixed -> $out:ty => $handler:expr) => {
-        $crate::__obzenflow_transform_typed!(
-            input = mixed,
-            output = $out,
-            name = "__obzenflow_binding_derived_name__",
-            handler = $handler,
-            middleware = []
-        )
-    };
-    (mixed -> $out:ty => $handler:expr, [$($mw:expr),*]) => {
-        $crate::__obzenflow_transform_typed!(
-            input = mixed,
-            output = $out,
-            name = "__obzenflow_binding_derived_name__",
-            handler = $handler,
-            middleware = [$($mw),*]
-        )
-    };
-
-    // ── typed (explicit name override): mixed input ──
-    (name: $name:literal, mixed -> $out:ty => placeholder!()) => {
-        $crate::__obzenflow_transform_typed!(input = mixed, output = $out, name = $name, handler = placeholder!(), middleware = [])
-    };
-    (name: $name:literal, mixed -> $out:ty => placeholder!($msg:expr)) => {
-        $crate::__obzenflow_transform_typed!(input = mixed, output = $out, name = $name, handler = placeholder!($msg), middleware = [])
-    };
-    (name: $name:literal, mixed -> $out:ty => placeholder!(), [$($mw:expr),*]) => {
-        $crate::__obzenflow_transform_typed!(input = mixed, output = $out, name = $name, handler = placeholder!(), middleware = [$($mw),*])
-    };
-    (name: $name:literal, mixed -> $out:ty => placeholder!($msg:expr), [$($mw:expr),*]) => {
-        $crate::__obzenflow_transform_typed!(input = mixed, output = $out, name = $name, handler = placeholder!($msg), middleware = [$($mw),*])
-    };
-    (name: $name:literal, mixed -> $out:ty => $handler:expr) => {
-        $crate::__obzenflow_transform_typed!(input = mixed, output = $out, name = $name, handler = $handler, middleware = [])
-    };
-    (name: $name:literal, mixed -> $out:ty => $handler:expr, [$($mw:expr),*]) => {
-        $crate::__obzenflow_transform_typed!(input = mixed, output = $out, name = $name, handler = $handler, middleware = [$($mw),*])
-    };
-
-    // ── untyped (binding-derived name) ──
-    ($handler:expr) => {
-        $crate::__obzenflow_transform_untyped!(
-            name = "__obzenflow_binding_derived_name__",
-            handler = $handler,
-            middleware = []
-        )
-    };
-    ($handler:expr, [$($mw:expr),*]) => {
-        $crate::__obzenflow_transform_untyped!(
-            name = "__obzenflow_binding_derived_name__",
-            handler = $handler,
-            middleware = [$($mw),*]
-        )
-    };
-
-    // ── untyped (explicit name override) ──
-    (name: $name:literal, $handler:expr) => {
-        $crate::__obzenflow_transform_untyped!(name = $name, handler = $handler, middleware = [])
-    };
-    (name: $name:literal, $handler:expr, [$($mw:expr),*]) => {
-        $crate::__obzenflow_transform_untyped!(name = $name, handler = $handler, middleware = [$($mw),*])
-    };
-
     // ── typed (exact input) ──
     (name: $name:literal, $($rest:tt)+) => {
         $crate::__obzenflow_transform_exact_contract!(name = $name, $($rest)+)
@@ -1180,55 +896,11 @@ macro_rules! __obzenflow_async_transform_untyped {
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __obzenflow_async_transform_typed {
-    // ── mixed input, placeholder ──
-    (input = mixed, output = $out:ty, name = $name:literal, handler = placeholder!(), middleware = [$($mw:expr),*]) => {{
-        let __metadata = $crate::dsl::typing::StageTypingMetadata::transform(
-            $crate::dsl::typing::TypeHint::Mixed,
-            $crate::dsl::typing::TypeHint::exact(stringify!($out)),
-            true,
-            None,
-        );
-        let __descriptor = $crate::__obzenflow_async_transform_untyped!(
-            name = $name,
-            handler = $crate::dsl::typing::PlaceholderAsyncTransform::<::obzenflow_runtime::typing::MixedInput, $out>::new(None),
-            middleware = [$($mw),*]
-        );
-        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
-    }};
-    (input = mixed, output = $out:ty, name = $name:literal, handler = placeholder!($msg:expr), middleware = [$($mw:expr),*]) => {{
-        let __metadata = $crate::dsl::typing::StageTypingMetadata::transform(
-            $crate::dsl::typing::TypeHint::Mixed,
-            $crate::dsl::typing::TypeHint::exact(stringify!($out)),
-            true,
-            Some(($msg).to_string()),
-        );
-        let __descriptor = $crate::__obzenflow_async_transform_untyped!(
-            name = $name,
-            handler = $crate::dsl::typing::PlaceholderAsyncTransform::<::obzenflow_runtime::typing::MixedInput, $out>::new(Some($msg)),
-            middleware = [$($mw),*]
-        );
-        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
-    }};
-    // ── mixed input, real handler ──
-    (input = mixed, output = $out:ty, name = $name:literal, handler = $handler:expr, middleware = [$($mw:expr),*]) => {{
-        let __handler = $handler;
-        let __handler =
-            $crate::dsl::typing::BoundAsyncTransform::<::obzenflow_runtime::typing::MixedInput, $out, _>::new(__handler);
-        ::obzenflow_runtime::typing::assert_transform_output::<_, $out>(&__handler);
-        let __metadata = $crate::dsl::typing::StageTypingMetadata::transform(
-            $crate::dsl::typing::TypeHint::Mixed,
-            $crate::dsl::typing::TypeHint::exact(stringify!($out)),
-            false,
-            None,
-        );
-        let __descriptor = $crate::__obzenflow_async_transform_untyped!(name = $name, handler = __handler, middleware = [$($mw),*]);
-        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
-    }};
     // ── exact input, placeholder ──
     (input = exact($in:ty), output = $out:ty, name = $name:literal, handler = placeholder!(), middleware = [$($mw:expr),*]) => {{
         let __metadata = $crate::dsl::typing::StageTypingMetadata::transform(
-            $crate::dsl::typing::TypeHint::exact(stringify!($in)),
-            $crate::dsl::typing::TypeHint::exact(stringify!($out)),
+            $crate::dsl::typing::TypeHint::exact::<$in>(),
+            $crate::dsl::typing::TypeHint::exact::<$out>(),
             true,
             None,
         );
@@ -1241,8 +913,8 @@ macro_rules! __obzenflow_async_transform_typed {
     }};
     (input = exact($in:ty), output = $out:ty, name = $name:literal, handler = placeholder!($msg:expr), middleware = [$($mw:expr),*]) => {{
         let __metadata = $crate::dsl::typing::StageTypingMetadata::transform(
-            $crate::dsl::typing::TypeHint::exact(stringify!($in)),
-            $crate::dsl::typing::TypeHint::exact(stringify!($out)),
+            $crate::dsl::typing::TypeHint::exact::<$in>(),
+            $crate::dsl::typing::TypeHint::exact::<$out>(),
             true,
             Some(($msg).to_string()),
         );
@@ -1260,8 +932,8 @@ macro_rules! __obzenflow_async_transform_typed {
             $crate::dsl::typing::BoundAsyncTransform::<$in, $out, _>::new(__handler);
         ::obzenflow_runtime::typing::assert_transform_contract::<_, $in, $out>(&__handler);
         let __metadata = $crate::dsl::typing::StageTypingMetadata::transform(
-            $crate::dsl::typing::TypeHint::exact(stringify!($in)),
-            $crate::dsl::typing::TypeHint::exact(stringify!($out)),
+            $crate::dsl::typing::TypeHint::exact::<$in>(),
+            $crate::dsl::typing::TypeHint::exact::<$out>(),
             false,
             None,
         );
@@ -1349,106 +1021,6 @@ macro_rules! __obzenflow_async_transform_exact_contract {
 /// Create an async transform stage descriptor.
 #[macro_export]
 macro_rules! async_transform {
-    // ── typed (binding-derived name): mixed input ──
-    (mixed -> $out:ty => placeholder!()) => {
-        $crate::__obzenflow_async_transform_typed!(
-            input = mixed,
-            output = $out,
-            name = "__obzenflow_binding_derived_name__",
-            handler = placeholder!(),
-            middleware = []
-        )
-    };
-    (mixed -> $out:ty => placeholder!($msg:expr)) => {
-        $crate::__obzenflow_async_transform_typed!(
-            input = mixed,
-            output = $out,
-            name = "__obzenflow_binding_derived_name__",
-            handler = placeholder!($msg),
-            middleware = []
-        )
-    };
-    (mixed -> $out:ty => placeholder!(), [$($mw:expr),*]) => {
-        $crate::__obzenflow_async_transform_typed!(
-            input = mixed,
-            output = $out,
-            name = "__obzenflow_binding_derived_name__",
-            handler = placeholder!(),
-            middleware = [$($mw),*]
-        )
-    };
-    (mixed -> $out:ty => placeholder!($msg:expr), [$($mw:expr),*]) => {
-        $crate::__obzenflow_async_transform_typed!(
-            input = mixed,
-            output = $out,
-            name = "__obzenflow_binding_derived_name__",
-            handler = placeholder!($msg),
-            middleware = [$($mw),*]
-        )
-    };
-    (mixed -> $out:ty => $handler:expr) => {
-        $crate::__obzenflow_async_transform_typed!(
-            input = mixed,
-            output = $out,
-            name = "__obzenflow_binding_derived_name__",
-            handler = $handler,
-            middleware = []
-        )
-    };
-    (mixed -> $out:ty => $handler:expr, [$($mw:expr),*]) => {
-        $crate::__obzenflow_async_transform_typed!(
-            input = mixed,
-            output = $out,
-            name = "__obzenflow_binding_derived_name__",
-            handler = $handler,
-            middleware = [$($mw),*]
-        )
-    };
-
-    // ── typed (explicit name override): mixed input ──
-    (name: $name:literal, mixed -> $out:ty => placeholder!()) => {
-        $crate::__obzenflow_async_transform_typed!(input = mixed, output = $out, name = $name, handler = placeholder!(), middleware = [])
-    };
-    (name: $name:literal, mixed -> $out:ty => placeholder!($msg:expr)) => {
-        $crate::__obzenflow_async_transform_typed!(input = mixed, output = $out, name = $name, handler = placeholder!($msg), middleware = [])
-    };
-    (name: $name:literal, mixed -> $out:ty => placeholder!(), [$($mw:expr),*]) => {
-        $crate::__obzenflow_async_transform_typed!(input = mixed, output = $out, name = $name, handler = placeholder!(), middleware = [$($mw),*])
-    };
-    (name: $name:literal, mixed -> $out:ty => placeholder!($msg:expr), [$($mw:expr),*]) => {
-        $crate::__obzenflow_async_transform_typed!(input = mixed, output = $out, name = $name, handler = placeholder!($msg), middleware = [$($mw),*])
-    };
-    (name: $name:literal, mixed -> $out:ty => $handler:expr) => {
-        $crate::__obzenflow_async_transform_typed!(input = mixed, output = $out, name = $name, handler = $handler, middleware = [])
-    };
-    (name: $name:literal, mixed -> $out:ty => $handler:expr, [$($mw:expr),*]) => {
-        $crate::__obzenflow_async_transform_typed!(input = mixed, output = $out, name = $name, handler = $handler, middleware = [$($mw),*])
-    };
-
-    // ── untyped (binding-derived name) ──
-    ($handler:expr) => {
-        $crate::__obzenflow_async_transform_untyped!(
-            name = "__obzenflow_binding_derived_name__",
-            handler = $handler,
-            middleware = []
-        )
-    };
-    ($handler:expr, [$($mw:expr),*]) => {
-        $crate::__obzenflow_async_transform_untyped!(
-            name = "__obzenflow_binding_derived_name__",
-            handler = $handler,
-            middleware = [$($mw),*]
-        )
-    };
-
-    // ── untyped (explicit name override) ──
-    (name: $name:literal, $handler:expr) => {
-        $crate::__obzenflow_async_transform_untyped!(name = $name, handler = $handler, middleware = [])
-    };
-    (name: $name:literal, $handler:expr, [$($mw:expr),*]) => {
-        $crate::__obzenflow_async_transform_untyped!(name = $name, handler = $handler, middleware = [$($mw),*])
-    };
-
     // ── typed (exact input) ──
     (name: $name:literal, $($rest:tt)+) => {
         $crate::__obzenflow_async_transform_exact_contract!(name = $name, $($rest)+)
@@ -1503,47 +1075,10 @@ macro_rules! __obzenflow_sink_untyped {
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __obzenflow_sink_typed {
-    // ── mixed input, placeholder ──
-    (input = mixed, name = $name:literal, handler = placeholder!(), middleware = [$($mw:expr),*]) => {{
-        let __metadata = $crate::dsl::typing::StageTypingMetadata::sink(
-            $crate::dsl::typing::TypeHint::Mixed,
-            true,
-            None,
-        );
-        let __descriptor = $crate::__obzenflow_sink_untyped!(
-            name = $name,
-            handler = $crate::dsl::typing::PlaceholderSink::<::obzenflow_runtime::typing::MixedInput>::new(None),
-            middleware = [$($mw),*]
-        );
-        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
-    }};
-    (input = mixed, name = $name:literal, handler = placeholder!($msg:expr), middleware = [$($mw:expr),*]) => {{
-        let __metadata = $crate::dsl::typing::StageTypingMetadata::sink(
-            $crate::dsl::typing::TypeHint::Mixed,
-            true,
-            Some(($msg).to_string()),
-        );
-        let __descriptor = $crate::__obzenflow_sink_untyped!(
-            name = $name,
-            handler = $crate::dsl::typing::PlaceholderSink::<::obzenflow_runtime::typing::MixedInput>::new(Some($msg)),
-            middleware = [$($mw),*]
-        );
-        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
-    }};
-    // ── mixed input, real handler (no SinkTyping required) ──
-    (input = mixed, name = $name:literal, handler = $handler:expr, middleware = [$($mw:expr),*]) => {{
-        let __metadata = $crate::dsl::typing::StageTypingMetadata::sink(
-            $crate::dsl::typing::TypeHint::Mixed,
-            false,
-            None,
-        );
-        let __descriptor = $crate::__obzenflow_sink_untyped!(name = $name, handler = $handler, middleware = [$($mw),*]);
-        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
-    }};
     // ── exact input, placeholder ──
     (input = exact($in:ty), name = $name:literal, handler = placeholder!(), middleware = [$($mw:expr),*]) => {{
         let __metadata = $crate::dsl::typing::StageTypingMetadata::sink(
-            $crate::dsl::typing::TypeHint::exact(stringify!($in)),
+            $crate::dsl::typing::TypeHint::exact::<$in>(),
             true,
             None,
         );
@@ -1556,7 +1091,7 @@ macro_rules! __obzenflow_sink_typed {
     }};
     (input = exact($in:ty), name = $name:literal, handler = placeholder!($msg:expr), middleware = [$($mw:expr),*]) => {{
         let __metadata = $crate::dsl::typing::StageTypingMetadata::sink(
-            $crate::dsl::typing::TypeHint::exact(stringify!($in)),
+            $crate::dsl::typing::TypeHint::exact::<$in>(),
             true,
             Some(($msg).to_string()),
         );
@@ -1614,11 +1149,15 @@ macro_rules! __obzenflow_sink_typed {
     };
 
     // ── exact input, real handler ──
+    //
+    // FLOWIP-114c PR D: the previous `assert_sink_input::<_, $in>` check is dropped.
+    // Per the proposal's canonical-identity rationale, the declared input is a
+    // topology fingerprint, not a Rust type-system constraint, matching the
+    // tautological pattern already used by `BoundTransform` wrappers.
     (input = exact($in:ty), name = $name:literal, handler = $handler:expr, middleware = [$($mw:expr),*]) => {{
         let __handler = $handler;
-        ::obzenflow_runtime::typing::assert_sink_input::<_, $in>(&__handler);
         let __metadata = $crate::dsl::typing::StageTypingMetadata::sink(
-            $crate::dsl::typing::TypeHint::exact(stringify!($in)),
+            $crate::dsl::typing::TypeHint::exact::<$in>(),
             false,
             None,
         );
@@ -1630,46 +1169,6 @@ macro_rules! __obzenflow_sink_typed {
 /// Create a sink stage descriptor.
 #[macro_export]
 macro_rules! sink {
-    // ── typed (binding-derived name): mixed input ──
-    (mixed => placeholder!()) => {
-        $crate::__obzenflow_sink_typed!(input = mixed, name = "__obzenflow_binding_derived_name__", handler = placeholder!(), middleware = [])
-    };
-    (mixed => placeholder!($msg:expr)) => {
-        $crate::__obzenflow_sink_typed!(input = mixed, name = "__obzenflow_binding_derived_name__", handler = placeholder!($msg), middleware = [])
-    };
-    (mixed => placeholder!(), [$($mw:expr),*]) => {
-        $crate::__obzenflow_sink_typed!(input = mixed, name = "__obzenflow_binding_derived_name__", handler = placeholder!(), middleware = [$($mw),*])
-    };
-    (mixed => placeholder!($msg:expr), [$($mw:expr),*]) => {
-        $crate::__obzenflow_sink_typed!(input = mixed, name = "__obzenflow_binding_derived_name__", handler = placeholder!($msg), middleware = [$($mw),*])
-    };
-    (mixed => $handler:expr) => {
-        $crate::__obzenflow_sink_typed!(input = mixed, name = "__obzenflow_binding_derived_name__", handler = $handler, middleware = [])
-    };
-    (mixed => $handler:expr, [$($mw:expr),*]) => {
-        $crate::__obzenflow_sink_typed!(input = mixed, name = "__obzenflow_binding_derived_name__", handler = $handler, middleware = [$($mw),*])
-    };
-
-    // ── typed (explicit name override): mixed input ──
-    (name: $name:literal, mixed => placeholder!()) => {
-        $crate::__obzenflow_sink_typed!(input = mixed, name = $name, handler = placeholder!(), middleware = [])
-    };
-    (name: $name:literal, mixed => placeholder!($msg:expr)) => {
-        $crate::__obzenflow_sink_typed!(input = mixed, name = $name, handler = placeholder!($msg), middleware = [])
-    };
-    (name: $name:literal, mixed => placeholder!(), [$($mw:expr),*]) => {
-        $crate::__obzenflow_sink_typed!(input = mixed, name = $name, handler = placeholder!(), middleware = [$($mw),*])
-    };
-    (name: $name:literal, mixed => placeholder!($msg:expr), [$($mw:expr),*]) => {
-        $crate::__obzenflow_sink_typed!(input = mixed, name = $name, handler = placeholder!($msg), middleware = [$($mw),*])
-    };
-    (name: $name:literal, mixed => $handler:expr) => {
-        $crate::__obzenflow_sink_typed!(input = mixed, name = $name, handler = $handler, middleware = [])
-    };
-    (name: $name:literal, mixed => $handler:expr, [$($mw:expr),*]) => {
-        $crate::__obzenflow_sink_typed!(input = mixed, name = $name, handler = $handler, middleware = [$($mw),*])
-    };
-
     // ── typed (binding-derived name): closure shorthand ──
     (|$arg:ident : $ty:ty| $body:block) => {
         $crate::__obzenflow_sink_typed!(
@@ -1702,14 +1201,6 @@ macro_rules! sink {
             handler = ::obzenflow_runtime::stages::sink::SinkTyped::new(move |$arg: $ty| async move $body),
             middleware = [$($mw),*]
         )
-    };
-
-    // ── untyped (binding-derived name): handler ──
-    ($handler:expr) => {
-        $crate::__obzenflow_sink_untyped!(name = "__obzenflow_binding_derived_name__", handler = $handler, middleware = [])
-    };
-    ($handler:expr, [$($mw:expr),*]) => {
-        $crate::__obzenflow_sink_untyped!(name = "__obzenflow_binding_derived_name__", handler = $handler, middleware = [$($mw),*])
     };
 
     // ── typed (binding-derived name): exact input ──
@@ -1846,14 +1337,6 @@ macro_rules! sink {
         )
     };
 
-    // ── untyped (explicit name override): handler ──
-    (name: $name:literal, $handler:expr) => {
-        $crate::__obzenflow_sink_untyped!(name = $name, handler = $handler, middleware = [])
-    };
-    (name: $name:literal, $handler:expr, [$($mw:expr),*]) => {
-        $crate::__obzenflow_sink_untyped!(name = $name, handler = $handler, middleware = [$($mw),*])
-    };
-
     // ── typed (explicit name override): exact input ──
     (name: $name:literal, $in:ty => placeholder!()) => {
         $crate::__obzenflow_sink_typed!(input = exact($in), name = $name, handler = placeholder!(), middleware = [])
@@ -1980,101 +1463,11 @@ macro_rules! __obzenflow_stateful_untyped {
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __obzenflow_stateful_typed {
-    // ── mixed input, placeholder, no emit ──
-    (input = mixed, output = $out:ty, name = $name:literal, handler = placeholder!(), emit = none, middleware = [$($mw:expr),*]) => {{
-        let __metadata = $crate::dsl::typing::StageTypingMetadata::stateful(
-            $crate::dsl::typing::TypeHint::Mixed,
-            $crate::dsl::typing::TypeHint::exact(stringify!($out)),
-            true,
-            None,
-        );
-        let __descriptor = $crate::__obzenflow_stateful_untyped!(
-            name = $name,
-            handler = $crate::dsl::typing::PlaceholderStateful::<::obzenflow_runtime::typing::MixedInput, $out>::new(None),
-            emit = none,
-            middleware = [$($mw),*]
-        );
-        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
-    }};
-    // ── mixed input, placeholder, with emit ──
-    (input = mixed, output = $out:ty, name = $name:literal, handler = placeholder!(), emit = some($emit_interval:expr), middleware = [$($mw:expr),*]) => {{
-        let __metadata = $crate::dsl::typing::StageTypingMetadata::stateful(
-            $crate::dsl::typing::TypeHint::Mixed,
-            $crate::dsl::typing::TypeHint::exact(stringify!($out)),
-            true,
-            None,
-        );
-        let __descriptor = $crate::__obzenflow_stateful_untyped!(
-            name = $name,
-            handler = $crate::dsl::typing::PlaceholderStateful::<::obzenflow_runtime::typing::MixedInput, $out>::new(None),
-            emit = some($emit_interval),
-            middleware = [$($mw),*]
-        );
-        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
-    }};
-    // ── mixed input, placeholder msg, no emit ──
-    (input = mixed, output = $out:ty, name = $name:literal, handler = placeholder!($msg:expr), emit = none, middleware = [$($mw:expr),*]) => {{
-        let __metadata = $crate::dsl::typing::StageTypingMetadata::stateful(
-            $crate::dsl::typing::TypeHint::Mixed,
-            $crate::dsl::typing::TypeHint::exact(stringify!($out)),
-            true,
-            Some(($msg).to_string()),
-        );
-        let __descriptor = $crate::__obzenflow_stateful_untyped!(
-            name = $name,
-            handler = $crate::dsl::typing::PlaceholderStateful::<::obzenflow_runtime::typing::MixedInput, $out>::new(Some($msg)),
-            emit = none,
-            middleware = [$($mw),*]
-        );
-        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
-    }};
-    // ── mixed input, placeholder msg, with emit ──
-    (input = mixed, output = $out:ty, name = $name:literal, handler = placeholder!($msg:expr), emit = some($emit_interval:expr), middleware = [$($mw:expr),*]) => {{
-        let __metadata = $crate::dsl::typing::StageTypingMetadata::stateful(
-            $crate::dsl::typing::TypeHint::Mixed,
-            $crate::dsl::typing::TypeHint::exact(stringify!($out)),
-            true,
-            Some(($msg).to_string()),
-        );
-        let __descriptor = $crate::__obzenflow_stateful_untyped!(
-            name = $name,
-            handler = $crate::dsl::typing::PlaceholderStateful::<::obzenflow_runtime::typing::MixedInput, $out>::new(Some($msg)),
-            emit = some($emit_interval),
-            middleware = [$($mw),*]
-        );
-        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
-    }};
-    // ── mixed input, real handler, no emit ──
-    (input = mixed, output = $out:ty, name = $name:literal, handler = $handler:expr, emit = none, middleware = [$($mw:expr),*]) => {{
-        let __handler = $handler;
-        ::obzenflow_runtime::typing::assert_stateful_output::<_, $out>(&__handler);
-        let __metadata = $crate::dsl::typing::StageTypingMetadata::stateful(
-            $crate::dsl::typing::TypeHint::Mixed,
-            $crate::dsl::typing::TypeHint::exact(stringify!($out)),
-            false,
-            None,
-        );
-        let __descriptor = $crate::__obzenflow_stateful_untyped!(name = $name, handler = __handler, emit = none, middleware = [$($mw),*]);
-        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
-    }};
-    // ── mixed input, real handler, with emit ──
-    (input = mixed, output = $out:ty, name = $name:literal, handler = $handler:expr, emit = some($emit_interval:expr), middleware = [$($mw:expr),*]) => {{
-        let __handler = $handler;
-        ::obzenflow_runtime::typing::assert_stateful_output::<_, $out>(&__handler);
-        let __metadata = $crate::dsl::typing::StageTypingMetadata::stateful(
-            $crate::dsl::typing::TypeHint::Mixed,
-            $crate::dsl::typing::TypeHint::exact(stringify!($out)),
-            false,
-            None,
-        );
-        let __descriptor = $crate::__obzenflow_stateful_untyped!(name = $name, handler = __handler, emit = some($emit_interval), middleware = [$($mw),*]);
-        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
-    }};
     // ── exact input, placeholder, no emit ──
     (input = exact($in:ty), output = $out:ty, name = $name:literal, handler = placeholder!(), emit = none, middleware = [$($mw:expr),*]) => {{
         let __metadata = $crate::dsl::typing::StageTypingMetadata::stateful(
-            $crate::dsl::typing::TypeHint::exact(stringify!($in)),
-            $crate::dsl::typing::TypeHint::exact(stringify!($out)),
+            $crate::dsl::typing::TypeHint::exact::<$in>(),
+            $crate::dsl::typing::TypeHint::exact::<$out>(),
             true,
             None,
         );
@@ -2089,8 +1482,8 @@ macro_rules! __obzenflow_stateful_typed {
     // ── exact input, placeholder, with emit ──
     (input = exact($in:ty), output = $out:ty, name = $name:literal, handler = placeholder!(), emit = some($emit_interval:expr), middleware = [$($mw:expr),*]) => {{
         let __metadata = $crate::dsl::typing::StageTypingMetadata::stateful(
-            $crate::dsl::typing::TypeHint::exact(stringify!($in)),
-            $crate::dsl::typing::TypeHint::exact(stringify!($out)),
+            $crate::dsl::typing::TypeHint::exact::<$in>(),
+            $crate::dsl::typing::TypeHint::exact::<$out>(),
             true,
             None,
         );
@@ -2105,8 +1498,8 @@ macro_rules! __obzenflow_stateful_typed {
     // ── exact input, placeholder msg, no emit ──
     (input = exact($in:ty), output = $out:ty, name = $name:literal, handler = placeholder!($msg:expr), emit = none, middleware = [$($mw:expr),*]) => {{
         let __metadata = $crate::dsl::typing::StageTypingMetadata::stateful(
-            $crate::dsl::typing::TypeHint::exact(stringify!($in)),
-            $crate::dsl::typing::TypeHint::exact(stringify!($out)),
+            $crate::dsl::typing::TypeHint::exact::<$in>(),
+            $crate::dsl::typing::TypeHint::exact::<$out>(),
             true,
             Some(($msg).to_string()),
         );
@@ -2121,8 +1514,8 @@ macro_rules! __obzenflow_stateful_typed {
     // ── exact input, placeholder msg, with emit ──
     (input = exact($in:ty), output = $out:ty, name = $name:literal, handler = placeholder!($msg:expr), emit = some($emit_interval:expr), middleware = [$($mw:expr),*]) => {{
         let __metadata = $crate::dsl::typing::StageTypingMetadata::stateful(
-            $crate::dsl::typing::TypeHint::exact(stringify!($in)),
-            $crate::dsl::typing::TypeHint::exact(stringify!($out)),
+            $crate::dsl::typing::TypeHint::exact::<$in>(),
+            $crate::dsl::typing::TypeHint::exact::<$out>(),
             true,
             Some(($msg).to_string()),
         );
@@ -2137,10 +1530,10 @@ macro_rules! __obzenflow_stateful_typed {
     // ── exact input, real handler, no emit ──
     (input = exact($in:ty), output = $out:ty, name = $name:literal, handler = $handler:expr, emit = none, middleware = [$($mw:expr),*]) => {{
         let __handler = $handler;
-        ::obzenflow_runtime::typing::assert_stateful_contract::<_, $in, $out>(&__handler);
+        // FLOWIP-114c PR D: assert_stateful_contract dropped, see sink rationale.
         let __metadata = $crate::dsl::typing::StageTypingMetadata::stateful(
-            $crate::dsl::typing::TypeHint::exact(stringify!($in)),
-            $crate::dsl::typing::TypeHint::exact(stringify!($out)),
+            $crate::dsl::typing::TypeHint::exact::<$in>(),
+            $crate::dsl::typing::TypeHint::exact::<$out>(),
             false,
             None,
         );
@@ -2150,10 +1543,10 @@ macro_rules! __obzenflow_stateful_typed {
     // ── exact input, real handler, with emit ──
     (input = exact($in:ty), output = $out:ty, name = $name:literal, handler = $handler:expr, emit = some($emit_interval:expr), middleware = [$($mw:expr),*]) => {{
         let __handler = $handler;
-        ::obzenflow_runtime::typing::assert_stateful_contract::<_, $in, $out>(&__handler);
+        // FLOWIP-114c PR D: assert_stateful_contract dropped, see sink rationale.
         let __metadata = $crate::dsl::typing::StageTypingMetadata::stateful(
-            $crate::dsl::typing::TypeHint::exact(stringify!($in)),
-            $crate::dsl::typing::TypeHint::exact(stringify!($out)),
+            $crate::dsl::typing::TypeHint::exact::<$in>(),
+            $crate::dsl::typing::TypeHint::exact::<$out>(),
             false,
             None,
         );
@@ -2307,86 +1700,6 @@ macro_rules! __obzenflow_stateful_exact_contract {
 /// Create a stateful stage descriptor.
 #[macro_export]
 macro_rules! stateful {
-    // ── typed (binding-derived name): mixed input ──
-    (mixed -> $out:ty => placeholder!()) => {
-        $crate::__obzenflow_stateful_typed!(input = mixed, output = $out, name = "__obzenflow_binding_derived_name__", handler = placeholder!(), emit = none, middleware = [])
-    };
-    (mixed -> $out:ty => placeholder!($msg:expr)) => {
-        $crate::__obzenflow_stateful_typed!(input = mixed, output = $out, name = "__obzenflow_binding_derived_name__", handler = placeholder!($msg), emit = none, middleware = [])
-    };
-    (mixed -> $out:ty => placeholder!(), [$($mw:expr),*]) => {
-        $crate::__obzenflow_stateful_typed!(input = mixed, output = $out, name = "__obzenflow_binding_derived_name__", handler = placeholder!(), emit = none, middleware = [$($mw),*])
-    };
-    (mixed -> $out:ty => placeholder!($msg:expr), [$($mw:expr),*]) => {
-        $crate::__obzenflow_stateful_typed!(input = mixed, output = $out, name = "__obzenflow_binding_derived_name__", handler = placeholder!($msg), emit = none, middleware = [$($mw),*])
-    };
-    (mixed -> $out:ty => $handler:expr) => {
-        $crate::__obzenflow_stateful_typed!(input = mixed, output = $out, name = "__obzenflow_binding_derived_name__", handler = $handler, emit = none, middleware = [])
-    };
-    (mixed -> $out:ty => $handler:expr, [$($mw:expr),*]) => {
-        $crate::__obzenflow_stateful_typed!(input = mixed, output = $out, name = "__obzenflow_binding_derived_name__", handler = $handler, emit = none, middleware = [$($mw),*])
-    };
-    (mixed -> $out:ty => $handler:expr, emit_interval = $emit_interval:expr) => {
-        $crate::__obzenflow_stateful_typed!(input = mixed, output = $out, name = "__obzenflow_binding_derived_name__", handler = $handler, emit = some($emit_interval), middleware = [])
-    };
-    (mixed -> $out:ty => $handler:expr, emit_interval = $emit_interval:expr, [$($mw:expr),*]) => {
-        $crate::__obzenflow_stateful_typed!(input = mixed, output = $out, name = "__obzenflow_binding_derived_name__", handler = $handler, emit = some($emit_interval), middleware = [$($mw),*])
-    };
-
-    // ── typed (explicit name override): mixed input ──
-    (name: $name:literal, mixed -> $out:ty => placeholder!()) => {
-        $crate::__obzenflow_stateful_typed!(input = mixed, output = $out, name = $name, handler = placeholder!(), emit = none, middleware = [])
-    };
-    (name: $name:literal, mixed -> $out:ty => placeholder!($msg:expr)) => {
-        $crate::__obzenflow_stateful_typed!(input = mixed, output = $out, name = $name, handler = placeholder!($msg), emit = none, middleware = [])
-    };
-    (name: $name:literal, mixed -> $out:ty => placeholder!(), [$($mw:expr),*]) => {
-        $crate::__obzenflow_stateful_typed!(input = mixed, output = $out, name = $name, handler = placeholder!(), emit = none, middleware = [$($mw),*])
-    };
-    (name: $name:literal, mixed -> $out:ty => placeholder!($msg:expr), [$($mw:expr),*]) => {
-        $crate::__obzenflow_stateful_typed!(input = mixed, output = $out, name = $name, handler = placeholder!($msg), emit = none, middleware = [$($mw),*])
-    };
-    (name: $name:literal, mixed -> $out:ty => $handler:expr) => {
-        $crate::__obzenflow_stateful_typed!(input = mixed, output = $out, name = $name, handler = $handler, emit = none, middleware = [])
-    };
-    (name: $name:literal, mixed -> $out:ty => $handler:expr, [$($mw:expr),*]) => {
-        $crate::__obzenflow_stateful_typed!(input = mixed, output = $out, name = $name, handler = $handler, emit = none, middleware = [$($mw),*])
-    };
-    (name: $name:literal, mixed -> $out:ty => $handler:expr, emit_interval = $emit_interval:expr) => {
-        $crate::__obzenflow_stateful_typed!(input = mixed, output = $out, name = $name, handler = $handler, emit = some($emit_interval), middleware = [])
-    };
-    (name: $name:literal, mixed -> $out:ty => $handler:expr, emit_interval = $emit_interval:expr, [$($mw:expr),*]) => {
-        $crate::__obzenflow_stateful_typed!(input = mixed, output = $out, name = $name, handler = $handler, emit = some($emit_interval), middleware = [$($mw),*])
-    };
-
-    // ── untyped (binding-derived name) ──
-    ($handler:expr) => {
-        $crate::__obzenflow_stateful_untyped!(name = "__obzenflow_binding_derived_name__", handler = $handler, emit = none, middleware = [])
-    };
-    ($handler:expr, [$($mw:expr),*]) => {
-        $crate::__obzenflow_stateful_untyped!(name = "__obzenflow_binding_derived_name__", handler = $handler, emit = none, middleware = [$($mw),*])
-    };
-    ($handler:expr, emit_interval = $emit_interval:expr) => {
-        $crate::__obzenflow_stateful_untyped!(name = "__obzenflow_binding_derived_name__", handler = $handler, emit = some($emit_interval), middleware = [])
-    };
-    ($handler:expr, emit_interval = $emit_interval:expr, [$($mw:expr),*]) => {
-        $crate::__obzenflow_stateful_untyped!(name = "__obzenflow_binding_derived_name__", handler = $handler, emit = some($emit_interval), middleware = [$($mw),*])
-    };
-
-    // ── untyped (explicit name override) ──
-    (name: $name:literal, $handler:expr) => {
-        $crate::__obzenflow_stateful_untyped!(name = $name, handler = $handler, emit = none, middleware = [])
-    };
-    (name: $name:literal, $handler:expr, [$($mw:expr),*]) => {
-        $crate::__obzenflow_stateful_untyped!(name = $name, handler = $handler, emit = none, middleware = [$($mw),*])
-    };
-    (name: $name:literal, $handler:expr, emit_interval = $emit_interval:expr) => {
-        $crate::__obzenflow_stateful_untyped!(name = $name, handler = $handler, emit = some($emit_interval), middleware = [])
-    };
-    (name: $name:literal, $handler:expr, emit_interval = $emit_interval:expr, [$($mw:expr),*]) => {
-        $crate::__obzenflow_stateful_untyped!(name = $name, handler = $handler, emit = some($emit_interval), middleware = [$($mw),*])
-    };
-
     // ── typed (exact input) ──
     (name: $name:literal, $($rest:tt)+) => {
         $crate::__obzenflow_stateful_exact_contract!(name = $name, $($rest)+)
@@ -2430,7 +1743,7 @@ macro_rules! __obzenflow_join_typed {
         let __metadata = $crate::dsl::typing::StageTypingMetadata::join(
             $crate::__obzenflow_join_hint!($ref_hint $(, $ref_ty)?),
             $crate::__obzenflow_join_hint!($str_hint $(, $str_ty)?),
-            $crate::dsl::typing::TypeHint::exact(stringify!($out)),
+            $crate::dsl::typing::TypeHint::exact::<$out>(),
             true,
             None,
         );
@@ -2453,7 +1766,7 @@ macro_rules! __obzenflow_join_typed {
         let __metadata = $crate::dsl::typing::StageTypingMetadata::join(
             $crate::__obzenflow_join_hint!($ref_hint $(, $ref_ty)?),
             $crate::__obzenflow_join_hint!($str_hint $(, $str_ty)?),
-            $crate::dsl::typing::TypeHint::exact(stringify!($out)),
+            $crate::dsl::typing::TypeHint::exact::<$out>(),
             true,
             Some(($msg).to_string()),
         );
@@ -2573,28 +1886,19 @@ macro_rules! __obzenflow_join_typed {
     };
 
     // ── real handler: both exact ──
+    //
+    // FLOWIP-114c PR D: __obzenflow_anchor_join JoinTyping bound dropped.
+    // The metadata declares ref/stream/output types; the handler does not need
+    // to implement JoinTyping itself, matching the BoundTransform tautology.
     (reference = exact, stream = exact, output = $out:ty,
      ref_type = ($ref_ty:ty), stream_type = ($str_ty:ty),
      name = $name:literal, ref_var = $ref_var:ident, handler = $handler:expr,
      middleware = [$($mw:expr),*]) => {{
-        let __handler = {
-            fn __obzenflow_anchor_join<H>(handler: H) -> H
-            where
-                H: ::obzenflow_runtime::typing::JoinTyping<
-                    Reference = $ref_ty,
-                    Stream = $str_ty,
-                    Output = $out,
-                >,
-            {
-                handler
-            }
-            __obzenflow_anchor_join($handler)
-        };
-        ::obzenflow_runtime::typing::assert_join_contract::<_, $ref_ty, $str_ty, $out>(&__handler);
+        let __handler = $handler;
         let __metadata = $crate::dsl::typing::StageTypingMetadata::join(
-            $crate::dsl::typing::TypeHint::exact(stringify!($ref_ty)),
-            $crate::dsl::typing::TypeHint::exact(stringify!($str_ty)),
-            $crate::dsl::typing::TypeHint::exact(stringify!($out)),
+            $crate::dsl::typing::TypeHint::exact::<$ref_ty>(),
+            $crate::dsl::typing::TypeHint::exact::<$str_ty>(),
+            $crate::dsl::typing::TypeHint::exact::<$out>(),
             false,
             None,
         );
@@ -2607,108 +1911,13 @@ macro_rules! __obzenflow_join_typed {
         $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
     }};
 
-    // ── real handler: mixed reference, exact stream ──
-    (reference = mixed, stream = exact, output = $out:ty,
-     ref_type = (), stream_type = ($str_ty:ty),
-     name = $name:literal, ref_var = $ref_var:ident, handler = $handler:expr,
-     middleware = [$($mw:expr),*]) => {{
-        let __handler = {
-            fn __obzenflow_anchor_join<H>(handler: H) -> H
-            where
-                H: ::obzenflow_runtime::typing::JoinTyping<Stream = $str_ty, Output = $out>,
-            {
-                handler
-            }
-            __obzenflow_anchor_join($handler)
-        };
-        ::obzenflow_runtime::typing::assert_join_stream_output::<_, $str_ty, $out>(&__handler);
-        let __metadata = $crate::dsl::typing::StageTypingMetadata::join(
-            $crate::dsl::typing::TypeHint::Mixed,
-            $crate::dsl::typing::TypeHint::exact(stringify!($str_ty)),
-            $crate::dsl::typing::TypeHint::exact(stringify!($out)),
-            false,
-            None,
-        );
-        let __descriptor = $crate::__obzenflow_join_untyped!(
-            name = $name,
-            reference_stage_var = $ref_var,
-            handler = __handler,
-            middleware = [$($mw),*]
-        );
-        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
-    }};
-
-    // ── real handler: exact reference, mixed stream ──
-    (reference = exact, stream = mixed, output = $out:ty,
-     ref_type = ($ref_ty:ty), stream_type = (),
-     name = $name:literal, ref_var = $ref_var:ident, handler = $handler:expr,
-     middleware = [$($mw:expr),*]) => {{
-        let __handler = {
-            fn __obzenflow_anchor_join<H>(handler: H) -> H
-            where
-                H: ::obzenflow_runtime::typing::JoinTyping<Reference = $ref_ty, Output = $out>,
-            {
-                handler
-            }
-            __obzenflow_anchor_join($handler)
-        };
-        ::obzenflow_runtime::typing::assert_join_reference_output::<_, $ref_ty, $out>(&__handler);
-        let __metadata = $crate::dsl::typing::StageTypingMetadata::join(
-            $crate::dsl::typing::TypeHint::exact(stringify!($ref_ty)),
-            $crate::dsl::typing::TypeHint::Mixed,
-            $crate::dsl::typing::TypeHint::exact(stringify!($out)),
-            false,
-            None,
-        );
-        let __descriptor = $crate::__obzenflow_join_untyped!(
-            name = $name,
-            reference_stage_var = $ref_var,
-            handler = __handler,
-            middleware = [$($mw),*]
-        );
-        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
-    }};
-
-    // ── real handler: both mixed ──
-    (reference = mixed, stream = mixed, output = $out:ty,
-     ref_type = (), stream_type = (),
-     name = $name:literal, ref_var = $ref_var:ident, handler = $handler:expr,
-     middleware = [$($mw:expr),*]) => {{
-        let __handler = {
-            fn __obzenflow_anchor_join<H>(handler: H) -> H
-            where
-                H: ::obzenflow_runtime::typing::JoinTyping<Output = $out>,
-            {
-                handler
-            }
-            __obzenflow_anchor_join($handler)
-        };
-        ::obzenflow_runtime::typing::assert_join_output::<_, $out>(&__handler);
-        let __metadata = $crate::dsl::typing::StageTypingMetadata::join(
-            $crate::dsl::typing::TypeHint::Mixed,
-            $crate::dsl::typing::TypeHint::Mixed,
-            $crate::dsl::typing::TypeHint::exact(stringify!($out)),
-            false,
-            None,
-        );
-        let __descriptor = $crate::__obzenflow_join_untyped!(
-            name = $name,
-            reference_stage_var = $ref_var,
-            handler = __handler,
-            middleware = [$($mw),*]
-        );
-        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
-    }};
 }
 
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __obzenflow_join_hint {
-    (mixed) => {
-        $crate::dsl::typing::TypeHint::Mixed
-    };
     (exact, $ty:ty) => {
-        $crate::dsl::typing::TypeHint::exact(stringify!($ty))
+        $crate::dsl::typing::TypeHint::exact::<$ty>()
     };
     (exact) => {
         compile_error!(
@@ -2720,9 +1929,6 @@ macro_rules! __obzenflow_join_hint {
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __obzenflow_join_phantom_type {
-    (mixed) => {
-        ::obzenflow_runtime::typing::MixedInput
-    };
     (exact, $ty:ty) => {
         $ty
     };
@@ -2738,17 +1944,6 @@ macro_rules! __obzenflow_join_exact_stream_contract {
             ref_var = $ref_var,
             reference = exact,
             ref_type = ($reference),
-            stream = (),
-            $($rest)+
-        )
-    };
-    (name = $name:literal, ref_var = $ref_var:ident, reference = mixed, $($rest:tt)+) => {
-        $crate::__obzenflow_join_exact_stream_contract!(
-            @collect
-            name = $name,
-            ref_var = $ref_var,
-            reference = mixed,
-            ref_type = (),
             stream = (),
             $($rest)+
         )
@@ -3193,164 +2388,6 @@ macro_rules! __obzenflow_join_exact_stream_contract {
 /// Create a join stage descriptor.
 #[macro_export]
 macro_rules! join {
-    // ── typed (binding-derived name) ──
-    (catalog $ref_var:ident : $reference:ty, mixed -> $out:ty => placeholder!()) => {
-        $crate::__obzenflow_join_typed!(
-            reference = exact,
-            stream = mixed,
-            output = $out,
-            ref_type = ($reference),
-            stream_type = (),
-            name = "__obzenflow_binding_derived_name__",
-            ref_var = $ref_var,
-            handler = placeholder!(),
-            middleware = []
-        )
-    };
-    (catalog $ref_var:ident : $reference:ty, mixed -> $out:ty => placeholder!($msg:expr)) => {
-        $crate::__obzenflow_join_typed!(
-            reference = exact,
-            stream = mixed,
-            output = $out,
-            ref_type = ($reference),
-            stream_type = (),
-            name = "__obzenflow_binding_derived_name__",
-            ref_var = $ref_var,
-            handler = placeholder!($msg),
-            middleware = []
-        )
-    };
-    (catalog $ref_var:ident : $reference:ty, mixed -> $out:ty => placeholder!(), [$($mw:expr),*]) => {
-        $crate::__obzenflow_join_typed!(
-            reference = exact,
-            stream = mixed,
-            output = $out,
-            ref_type = ($reference),
-            stream_type = (),
-            name = "__obzenflow_binding_derived_name__",
-            ref_var = $ref_var,
-            handler = placeholder!(),
-            middleware = [$($mw),*]
-        )
-    };
-    (catalog $ref_var:ident : $reference:ty, mixed -> $out:ty => placeholder!($msg:expr), [$($mw:expr),*]) => {
-        $crate::__obzenflow_join_typed!(
-            reference = exact,
-            stream = mixed,
-            output = $out,
-            ref_type = ($reference),
-            stream_type = (),
-            name = "__obzenflow_binding_derived_name__",
-            ref_var = $ref_var,
-            handler = placeholder!($msg),
-            middleware = [$($mw),*]
-        )
-    };
-    (catalog $ref_var:ident : $reference:ty, mixed -> $out:ty => $handler:expr) => {
-        $crate::__obzenflow_join_typed!(
-            reference = exact,
-            stream = mixed,
-            output = $out,
-            ref_type = ($reference),
-            stream_type = (),
-            name = "__obzenflow_binding_derived_name__",
-            ref_var = $ref_var,
-            handler = $handler,
-            middleware = []
-        )
-    };
-    (catalog $ref_var:ident : $reference:ty, mixed -> $out:ty => $handler:expr, [$($mw:expr),*]) => {
-        $crate::__obzenflow_join_typed!(
-            reference = exact,
-            stream = mixed,
-            output = $out,
-            ref_type = ($reference),
-            stream_type = (),
-            name = "__obzenflow_binding_derived_name__",
-            ref_var = $ref_var,
-            handler = $handler,
-            middleware = [$($mw),*]
-        )
-    };
-    (catalog $ref_var:ident : mixed, mixed -> $out:ty => placeholder!()) => {
-        $crate::__obzenflow_join_typed!(
-            reference = mixed,
-            stream = mixed,
-            output = $out,
-            ref_type = (),
-            stream_type = (),
-            name = "__obzenflow_binding_derived_name__",
-            ref_var = $ref_var,
-            handler = placeholder!(),
-            middleware = []
-        )
-    };
-    (catalog $ref_var:ident : mixed, mixed -> $out:ty => placeholder!($msg:expr)) => {
-        $crate::__obzenflow_join_typed!(
-            reference = mixed,
-            stream = mixed,
-            output = $out,
-            ref_type = (),
-            stream_type = (),
-            name = "__obzenflow_binding_derived_name__",
-            ref_var = $ref_var,
-            handler = placeholder!($msg),
-            middleware = []
-        )
-    };
-    (catalog $ref_var:ident : mixed, mixed -> $out:ty => placeholder!(), [$($mw:expr),*]) => {
-        $crate::__obzenflow_join_typed!(
-            reference = mixed,
-            stream = mixed,
-            output = $out,
-            ref_type = (),
-            stream_type = (),
-            name = "__obzenflow_binding_derived_name__",
-            ref_var = $ref_var,
-            handler = placeholder!(),
-            middleware = [$($mw),*]
-        )
-    };
-    (catalog $ref_var:ident : mixed, mixed -> $out:ty => placeholder!($msg:expr), [$($mw:expr),*]) => {
-        $crate::__obzenflow_join_typed!(
-            reference = mixed,
-            stream = mixed,
-            output = $out,
-            ref_type = (),
-            stream_type = (),
-            name = "__obzenflow_binding_derived_name__",
-            ref_var = $ref_var,
-            handler = placeholder!($msg),
-            middleware = [$($mw),*]
-        )
-    };
-    (catalog $ref_var:ident : mixed, mixed -> $out:ty => $handler:expr) => {
-        $crate::__obzenflow_join_typed!(
-            reference = mixed,
-            stream = mixed,
-            output = $out,
-            ref_type = (),
-            stream_type = (),
-            name = "__obzenflow_binding_derived_name__",
-            ref_var = $ref_var,
-            handler = $handler,
-            middleware = []
-        )
-    };
-    (catalog $ref_var:ident : mixed, mixed -> $out:ty => $handler:expr, [$($mw:expr),*]) => {
-        $crate::__obzenflow_join_typed!(
-            reference = mixed,
-            stream = mixed,
-            output = $out,
-            ref_type = (),
-            stream_type = (),
-            name = "__obzenflow_binding_derived_name__",
-            ref_var = $ref_var,
-            handler = $handler,
-            middleware = [$($mw),*]
-        )
-    };
-
     // ── typed (binding-derived name): exact stream ──
     (catalog $ref_var:ident : $reference:ty, $($rest:tt)+) => {
         $crate::__obzenflow_join_exact_stream_contract!(
@@ -3358,172 +2395,6 @@ macro_rules! join {
             ref_var = $ref_var,
             reference = exact($reference),
             $($rest)+
-        )
-    };
-    (catalog $ref_var:ident : mixed, $($rest:tt)+) => {
-        $crate::__obzenflow_join_exact_stream_contract!(
-            name = "__obzenflow_binding_derived_name__",
-            ref_var = $ref_var,
-            reference = mixed,
-            $($rest)+
-        )
-    };
-
-    // ── typed (explicit name override) ──
-    (name: $name:literal, catalog $ref_var:ident : $reference:ty, mixed -> $out:ty => placeholder!()) => {
-        $crate::__obzenflow_join_typed!(
-            reference = exact,
-            stream = mixed,
-            output = $out,
-            ref_type = ($reference),
-            stream_type = (),
-            name = $name,
-            ref_var = $ref_var,
-            handler = placeholder!(),
-            middleware = []
-        )
-    };
-    (name: $name:literal, catalog $ref_var:ident : $reference:ty, mixed -> $out:ty => placeholder!($msg:expr)) => {
-        $crate::__obzenflow_join_typed!(
-            reference = exact,
-            stream = mixed,
-            output = $out,
-            ref_type = ($reference),
-            stream_type = (),
-            name = $name,
-            ref_var = $ref_var,
-            handler = placeholder!($msg),
-            middleware = []
-        )
-    };
-    (name: $name:literal, catalog $ref_var:ident : $reference:ty, mixed -> $out:ty => placeholder!(), [$($mw:expr),*]) => {
-        $crate::__obzenflow_join_typed!(
-            reference = exact,
-            stream = mixed,
-            output = $out,
-            ref_type = ($reference),
-            stream_type = (),
-            name = $name,
-            ref_var = $ref_var,
-            handler = placeholder!(),
-            middleware = [$($mw),*]
-        )
-    };
-    (name: $name:literal, catalog $ref_var:ident : $reference:ty, mixed -> $out:ty => placeholder!($msg:expr), [$($mw:expr),*]) => {
-        $crate::__obzenflow_join_typed!(
-            reference = exact,
-            stream = mixed,
-            output = $out,
-            ref_type = ($reference),
-            stream_type = (),
-            name = $name,
-            ref_var = $ref_var,
-            handler = placeholder!($msg),
-            middleware = [$($mw),*]
-        )
-    };
-    (name: $name:literal, catalog $ref_var:ident : $reference:ty, mixed -> $out:ty => $handler:expr) => {
-        $crate::__obzenflow_join_typed!(
-            reference = exact,
-            stream = mixed,
-            output = $out,
-            ref_type = ($reference),
-            stream_type = (),
-            name = $name,
-            ref_var = $ref_var,
-            handler = $handler,
-            middleware = []
-        )
-    };
-    (name: $name:literal, catalog $ref_var:ident : $reference:ty, mixed -> $out:ty => $handler:expr, [$($mw:expr),*]) => {
-        $crate::__obzenflow_join_typed!(
-            reference = exact,
-            stream = mixed,
-            output = $out,
-            ref_type = ($reference),
-            stream_type = (),
-            name = $name,
-            ref_var = $ref_var,
-            handler = $handler,
-            middleware = [$($mw),*]
-        )
-    };
-    (name: $name:literal, catalog $ref_var:ident : mixed, mixed -> $out:ty => placeholder!()) => {
-        $crate::__obzenflow_join_typed!(
-            reference = mixed,
-            stream = mixed,
-            output = $out,
-            ref_type = (),
-            stream_type = (),
-            name = $name,
-            ref_var = $ref_var,
-            handler = placeholder!(),
-            middleware = []
-        )
-    };
-    (name: $name:literal, catalog $ref_var:ident : mixed, mixed -> $out:ty => placeholder!($msg:expr)) => {
-        $crate::__obzenflow_join_typed!(
-            reference = mixed,
-            stream = mixed,
-            output = $out,
-            ref_type = (),
-            stream_type = (),
-            name = $name,
-            ref_var = $ref_var,
-            handler = placeholder!($msg),
-            middleware = []
-        )
-    };
-    (name: $name:literal, catalog $ref_var:ident : mixed, mixed -> $out:ty => placeholder!(), [$($mw:expr),*]) => {
-        $crate::__obzenflow_join_typed!(
-            reference = mixed,
-            stream = mixed,
-            output = $out,
-            ref_type = (),
-            stream_type = (),
-            name = $name,
-            ref_var = $ref_var,
-            handler = placeholder!(),
-            middleware = [$($mw),*]
-        )
-    };
-    (name: $name:literal, catalog $ref_var:ident : mixed, mixed -> $out:ty => placeholder!($msg:expr), [$($mw:expr),*]) => {
-        $crate::__obzenflow_join_typed!(
-            reference = mixed,
-            stream = mixed,
-            output = $out,
-            ref_type = (),
-            stream_type = (),
-            name = $name,
-            ref_var = $ref_var,
-            handler = placeholder!($msg),
-            middleware = [$($mw),*]
-        )
-    };
-    (name: $name:literal, catalog $ref_var:ident : mixed, mixed -> $out:ty => $handler:expr) => {
-        $crate::__obzenflow_join_typed!(
-            reference = mixed,
-            stream = mixed,
-            output = $out,
-            ref_type = (),
-            stream_type = (),
-            name = $name,
-            ref_var = $ref_var,
-            handler = $handler,
-            middleware = []
-        )
-    };
-    (name: $name:literal, catalog $ref_var:ident : mixed, mixed -> $out:ty => $handler:expr, [$($mw:expr),*]) => {
-        $crate::__obzenflow_join_typed!(
-            reference = mixed,
-            stream = mixed,
-            output = $out,
-            ref_type = (),
-            stream_type = (),
-            name = $name,
-            ref_var = $ref_var,
-            handler = $handler,
-            middleware = [$($mw),*]
         )
     };
 
@@ -3535,40 +2406,6 @@ macro_rules! join {
             reference = exact($reference),
             $($rest)+
         )
-    };
-    (name: $name:literal, catalog $ref_var:ident : mixed, $($rest:tt)+) => {
-        $crate::__obzenflow_join_exact_stream_contract!(
-            name = $name,
-            ref_var = $ref_var,
-            reference = mixed,
-            $($rest)+
-        )
-    };
-
-    // ── untyped (binding-derived name) ──
-    (catalog $ref_var:ident => $handler:expr) => {
-        $crate::__obzenflow_join_untyped!(
-            name = "__obzenflow_binding_derived_name__",
-            reference_stage_var = $ref_var,
-            handler = $handler,
-            middleware = []
-        )
-    };
-    (catalog $ref_var:ident => $handler:expr, [$($mw:expr),*]) => {
-        $crate::__obzenflow_join_untyped!(
-            name = "__obzenflow_binding_derived_name__",
-            reference_stage_var = $ref_var,
-            handler = $handler,
-            middleware = [$($mw),*]
-        )
-    };
-
-    // ── untyped (explicit name override) ──
-    (name: $name:literal, catalog $ref_var:ident => $handler:expr) => {
-        $crate::__obzenflow_join_untyped!(name = $name, reference_stage_var = $ref_var, handler = $handler, middleware = [])
-    };
-    (name: $name:literal, catalog $ref_var:ident => $handler:expr, [$($mw:expr),*]) => {
-        $crate::__obzenflow_join_untyped!(name = $name, reference_stage_var = $ref_var, handler = $handler, middleware = [$($mw),*])
     };
 }
 
@@ -3752,8 +2589,8 @@ macro_rules! __obzenflow_ai_map_reduce_cadillac_typed_default {
         middleware = [ $($mw_role:ident : $mw_expr:expr),* $(,)? ]
     ) => {{
         let __metadata = $crate::dsl::typing::StageTypingMetadata::transform(
-            $crate::dsl::typing::TypeHint::exact(stringify!($($seed_ty)+)),
-            $crate::dsl::typing::TypeHint::exact(stringify!($out_ty)),
+            $crate::dsl::typing::TypeHint::exact::<$($seed_ty)+>(),
+            $crate::dsl::typing::TypeHint::exact::<$out_ty>(),
             false,
             None,
         );
@@ -3830,8 +2667,8 @@ macro_rules! __obzenflow_ai_map_reduce_cadillac_typed_collect {
         middleware = [ $($mw_role:ident : $mw_expr:expr),* $(,)? ]
     ) => {{
         let __metadata = $crate::dsl::typing::StageTypingMetadata::transform(
-            $crate::dsl::typing::TypeHint::exact(stringify!($($seed_ty)+)),
-            $crate::dsl::typing::TypeHint::exact(stringify!($out_ty)),
+            $crate::dsl::typing::TypeHint::exact::<$($seed_ty)+>(),
+            $crate::dsl::typing::TypeHint::exact::<$out_ty>(),
             false,
             None,
         );
@@ -4006,8 +2843,8 @@ macro_rules! __obzenflow_ai_map_reduce_typed {
         middleware = [ $($mw_role:ident : $mw_expr:expr),* $(,)? ]
     ) => {{
         let __metadata = $crate::dsl::typing::StageTypingMetadata::transform(
-            $crate::dsl::typing::TypeHint::exact(stringify!($($in)+)),
-            $crate::dsl::typing::TypeHint::exact(stringify!($out)),
+            $crate::dsl::typing::TypeHint::exact::<$($in)+>(),
+            $crate::dsl::typing::TypeHint::exact::<$out>(),
             false,
             None,
         );

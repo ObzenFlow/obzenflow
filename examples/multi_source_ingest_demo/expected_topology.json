@@ -1,0 +1,81 @@
+{
+  "_doc": "Structural reference for FLOWIP-114c multi_source_ingest_demo. Stage IDs are per-run ULIDs and are NOT asserted; the test at tests/multi_source_ingest_demo_topology_test.rs asserts the structural invariants below.",
+  "flow_name": "multi_source_ingest_demo",
+  "stages": [
+    {
+      "name": "kafka_source",
+      "stage_type": "finite_source",
+      "typing": {
+        "output_type": "KafkaRawEvent"
+      }
+    },
+    {
+      "name": "webhook_source",
+      "stage_type": "finite_source",
+      "typing": {
+        "output_type": "WebhookEnvelope"
+      }
+    },
+    {
+      "name": "file_source",
+      "stage_type": "finite_source",
+      "typing": {
+        "output_type": "FileLine"
+      }
+    },
+    {
+      "name": "align_kafka",
+      "stage_type": "transform",
+      "typing": {
+        "input_type": "KafkaRawEvent",
+        "output_type": "IngestedEvent"
+      }
+    },
+    {
+      "name": "align_webhook",
+      "stage_type": "transform",
+      "typing": {
+        "input_type": "WebhookEnvelope",
+        "output_type": "IngestedEvent"
+      }
+    },
+    {
+      "name": "align_file",
+      "stage_type": "transform",
+      "typing": {
+        "input_type": "FileLine",
+        "output_type": "IngestedEvent"
+      }
+    },
+    {
+      "name": "aggregator",
+      "stage_type": "stateful",
+      "typing": {
+        "input_type": "IngestedEvent",
+        "output_type": "IngestSummary"
+      }
+    },
+    {
+      "name": "summary_sink",
+      "stage_type": "sink",
+      "typing": {
+        "input_type": "IngestSummary"
+      }
+    }
+  ],
+  "edges": [
+    {"from": "kafka_source", "to": "align_kafka", "payload_type": "KafkaRawEvent"},
+    {"from": "webhook_source", "to": "align_webhook", "payload_type": "WebhookEnvelope"},
+    {"from": "file_source", "to": "align_file", "payload_type": "FileLine"},
+    {"from": "align_kafka", "to": "aggregator", "payload_type": "IngestedEvent"},
+    {"from": "align_webhook", "to": "aggregator", "payload_type": "IngestedEvent"},
+    {"from": "align_file", "to": "aggregator", "payload_type": "IngestedEvent"},
+    {"from": "aggregator", "to": "summary_sink", "payload_type": "IngestSummary"}
+  ],
+  "structural_invariants": [
+    "every stage has typing_metadata().is_some()",
+    "no applicable slot is Unspecified",
+    "the three inbound edges into 'aggregator' all carry IngestedEvent (homogeneous fan-in)",
+    "validate_edge_typing returns Ok(())"
+  ]
+}

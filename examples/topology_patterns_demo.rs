@@ -2,15 +2,22 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Demo: Topology Patterns - Fan-In, Fan-Out, and Diamond Patterns (FLOWIP-080h)
+//! Demo: Topology Patterns - Homogeneous Fan-In with Content-Based Routing
+//! (FLOWIP-080h, recast under FLOWIP-114c).
 //!
-//! This demonstrates how ObzenFlow naturally handles complex topologies through
-//! independent journal readers and multiple upstream subscriptions.
+//! This is the canonical example of **homogeneous fan-in**: three upstream
+//! sources of the same `RawDataEvent` type feed a single typed aggregator.
+//! The aggregator emits `RawDataEvent` to a router that fans out to three
+//! priority-tiered sinks based on content. Every edge carries one type.
+//!
+//! For the **heterogeneous fan-in** case (three or more sources of different
+//! concrete types feeding one downstream via per-branch alignment
+//! transforms), see `examples/multi_source_ingest_demo/`.
 //!
 //! **Reference Example for**: Topology patterns, ETL pipelines, multi-source/sink architectures
 //!
 //! Key concepts demonstrated:
-//! - Fan-in: Multiple sources → single aggregator
+//! - Fan-in: Multiple sources → single aggregator (homogeneous on `RawDataEvent`)
 //! - Fan-out: Single router → multiple sinks
 //! - Diamond pattern: Combines both (realistic ETL)
 //! - StatefulHandler for aggregation (no Arc<Mutex>)
@@ -426,7 +433,7 @@ fn main() -> Result<()> {
                 }));
 
                 // Aggregator demonstrates fan-in with StatefulHandler
-                aggregator = stateful!(MultiSourceAggregator::new().with_expected({
+                aggregator = stateful!(RawDataEvent -> RawDataEvent => MultiSourceAggregator::new().with_expected({
                     let mut m = BTreeMap::new();
                     m.insert("kafka".to_string(), 5);
                     m.insert("api".to_string(), 4);
@@ -435,16 +442,16 @@ fn main() -> Result<()> {
                 }));
 
                 // ✨ FLOWIP-080h: Router distributes to multiple sinks using Map helper
-                router = transform!(smart_router());
+                router = transform!(RawDataEvent -> RawDataEvent => smart_router());
 
                 // FAN-OUT: Three sinks receiving from one router
-                low_sink = sink!(PrioritySink::new("LOW", "low", low_counter_flow.clone()));
-                med_sink = sink!(PrioritySink::new(
+                low_sink = sink!(RawDataEvent => PrioritySink::new("LOW", "low", low_counter_flow.clone()));
+                med_sink = sink!(RawDataEvent => PrioritySink::new(
                     "MEDIUM",
                     "medium",
                     med_counter_flow.clone()
                 ));
-                high_sink = sink!(PrioritySink::new("HIGH", "high", high_counter_flow.clone()));
+                high_sink = sink!(RawDataEvent => PrioritySink::new("HIGH", "high", high_counter_flow.clone()));
             },
 
             topology: {

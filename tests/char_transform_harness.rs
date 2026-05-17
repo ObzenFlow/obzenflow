@@ -162,7 +162,7 @@ async fn run_char_transform(base: &Path) -> Result<()> {
                 middleware: [],
 
                 stages: {
-                    src = source!(TextCharSource::new());
+                    src = source!(CharEvent => TextCharSource::new());
 
                     mapper = transform!(CharEvent -> TransformedChar =>
                         transforms::map(|char_event: CharEvent| {
@@ -186,7 +186,7 @@ async fn run_char_transform(base: &Path) -> Result<()> {
                         ).emit_on_eof()
                     );
 
-                    sink = sink!(TextSink);
+                    sink = sink!(TextAccumulator => TextSink);
                 },
 
                 links: {
