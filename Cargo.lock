@@ -1604,6 +1604,7 @@ dependencies = [
  "obzenflow_dsl",
  "obzenflow_infra",
  "obzenflow_runtime",
+ "serde",
  "serde_json",
  "sysinfo",
  "tempfile",

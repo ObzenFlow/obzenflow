@@ -18,6 +18,7 @@ use obzenflow_core::event::types::ViolationCause as EventViolationCause;
 use obzenflow_core::event::SystemEventType;
 use obzenflow_core::journal::journal_owner::JournalOwner;
 use obzenflow_core::journal::Journal;
+use obzenflow_core::TypedPayload;
 use obzenflow_core::{
     CycleDepth, DivergenceContract, StageId, SystemId, TransportContract, WriterId,
 };
@@ -28,7 +29,20 @@ use obzenflow_runtime::stages::common::handlers::source::traits::SourceError;
 use obzenflow_runtime::stages::common::handlers::{
     AsyncTransformHandler, FiniteSourceHandler, SinkHandler, TransformHandler,
 };
+use serde::{Deserialize, Serialize};
 use serde_json::json;
+
+/// File-local payload for the mid-flight-divergence abort test. The JSON
+/// shape matches what `SeedSource` emits; the type fingerprints the
+/// stage contract per FLOWIP-114c.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct SeedEvent {
+    n: u64,
+}
+
+impl TypedPayload for SeedEvent {
+    const EVENT_TYPE: &'static str = "divergence.seed";
+}
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
@@ -91,7 +105,7 @@ impl FiniteSourceHandler for SeedSource {
         self.remaining -= 1;
         Ok(Some(vec![ChainEventFactory::data_event(
             self.writer_id,
-            "flowip_080r.seed",
+            "divergence.seed",
             json!({ "n": self.remaining }),
         )]))
     }
@@ -272,21 +286,21 @@ impl SinkHandler for CountingSink {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn flowip_080r_aborts_on_mid_flight_divergence_violation() -> Result<()> {
-    let journal_root = unique_journal_dir("flowip_080r_mid_flight_divergence_abort");
+async fn divergence_aborts_on_mid_flight_violation() -> Result<()> {
+    let journal_root = unique_journal_dir("divergence_mid_flight_abort");
     let _ = fs::remove_dir_all(&journal_root);
     let journal_root_for_flow = journal_root.clone();
 
     let handle = flow! {
-        name: "flowip_080r_mid_flight_divergence_abort",
+        name: "divergence_mid_flight_abort",
         journals: disk_journals(journal_root_for_flow),
         middleware: [],
 
         stages: {
-            src = source!(serde_json::Value => SeedSource::new(30));
-            entry = async_transform!(serde_json::Value -> serde_json::Value => SlowEntryTransform::new(Duration::from_millis(10)));
-            iter = transform!(serde_json::Value -> serde_json::Value => SignalStormTransform::new(50));
-            snk = sink!(serde_json::Value => CountingSink);
+            src = source!(SeedEvent => SeedSource::new(30));
+            entry = async_transform!(SeedEvent -> SeedEvent => SlowEntryTransform::new(Duration::from_millis(10)));
+            iter = transform!(SeedEvent -> SeedEvent => SignalStormTransform::new(50));
+            snk = sink!(SeedEvent => CountingSink);
         },
 
         topology: {
@@ -359,20 +373,20 @@ async fn flowip_080r_aborts_on_mid_flight_divergence_violation() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn flowip_080r_emits_mid_flight_contract_health_heartbeats() -> Result<()> {
-    let journal_root = unique_journal_dir("flowip_080r_mid_flight_contract_health");
+async fn divergence_emits_mid_flight_contract_health_heartbeats() -> Result<()> {
+    let journal_root = unique_journal_dir("divergence_mid_flight_contract_health");
     let _ = fs::remove_dir_all(&journal_root);
     let journal_root_for_flow = journal_root.clone();
 
     let handle = flow! {
-        name: "flowip_080r_mid_flight_contract_health",
+        name: "divergence_mid_flight_contract_health",
         journals: disk_journals(journal_root_for_flow),
         middleware: [],
 
         stages: {
-            src = source!(serde_json::Value => SeedSource::new(50));
-            delay = async_transform!(serde_json::Value -> serde_json::Value => SlowEntryTransform::new(Duration::from_millis(1)));
-            snk = sink!(serde_json::Value => CountingSink);
+            src = source!(SeedEvent => SeedSource::new(50));
+            delay = async_transform!(SeedEvent -> SeedEvent => SlowEntryTransform::new(Duration::from_millis(1)));
+            snk = sink!(SeedEvent => CountingSink);
         },
 
         topology: {
@@ -431,23 +445,23 @@ async fn flowip_080r_emits_mid_flight_contract_health_heartbeats() -> Result<()>
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn flowip_080r_does_not_false_positive_on_fan_in_inside_cycle() -> Result<()> {
-    let journal_root = unique_journal_dir("flowip_080r_fan_in_inside_cycle");
+async fn divergence_does_not_false_positive_on_fan_in_inside_cycle() -> Result<()> {
+    let journal_root = unique_journal_dir("divergence_fan_in_inside_cycle");
     let _ = fs::remove_dir_all(&journal_root);
     let journal_root_for_flow = journal_root.clone();
 
     let handle = flow! {
-        name: "flowip_080r_fan_in_inside_cycle",
+        name: "divergence_fan_in_inside_cycle",
         journals: disk_journals(journal_root_for_flow),
         middleware: [],
 
         stages: {
-            src = source!(serde_json::Value => SeedSource::new(50));
-            entry = transform!(serde_json::Value -> serde_json::Value => FanInEntryTransform);
-            a = transform!(serde_json::Value -> serde_json::Value => PassThroughTransform);
-            b = transform!(serde_json::Value -> serde_json::Value => PassThroughTransform);
-            merge = transform!(serde_json::Value -> serde_json::Value => PassThroughTransform);
-            snk = sink!(serde_json::Value => CountingSink);
+            src = source!(SeedEvent => SeedSource::new(50));
+            entry = transform!(SeedEvent -> SeedEvent => FanInEntryTransform);
+            a = transform!(SeedEvent -> SeedEvent => PassThroughTransform);
+            b = transform!(SeedEvent -> SeedEvent => PassThroughTransform);
+            merge = transform!(SeedEvent -> SeedEvent => PassThroughTransform);
+            snk = sink!(SeedEvent => CountingSink);
         },
 
         topology: {
@@ -523,21 +537,21 @@ async fn flowip_080r_does_not_false_positive_on_fan_in_inside_cycle() -> Result<
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn flowip_080r_aborts_on_cycle_depth_divergence_violation() -> Result<()> {
-    let journal_root = unique_journal_dir("flowip_080r_cycle_depth_divergence_abort");
+async fn divergence_aborts_on_cycle_depth_violation() -> Result<()> {
+    let journal_root = unique_journal_dir("divergence_cycle_depth_abort");
     let _ = fs::remove_dir_all(&journal_root);
     let journal_root_for_flow = journal_root.clone();
 
     let handle = flow! {
-        name: "flowip_080r_cycle_depth_divergence_abort",
+        name: "divergence_cycle_depth_abort",
         journals: disk_journals(journal_root_for_flow),
         middleware: [],
 
         stages: {
-            src = source!(serde_json::Value => SeedSource::new(10));
-            entry = async_transform!(serde_json::Value -> serde_json::Value => CycleDepthInjectionEntryTransform::new(Duration::from_millis(5), 100));
-            iter = transform!(serde_json::Value -> serde_json::Value => DropAllDataTransform);
-            snk = sink!(serde_json::Value => CountingSink);
+            src = source!(SeedEvent => SeedSource::new(10));
+            entry = async_transform!(SeedEvent -> SeedEvent => CycleDepthInjectionEntryTransform::new(Duration::from_millis(5), 100));
+            iter = transform!(SeedEvent -> SeedEvent => DropAllDataTransform);
+            snk = sink!(SeedEvent => CountingSink);
         },
 
         topology: {

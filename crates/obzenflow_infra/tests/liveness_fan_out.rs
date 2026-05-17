@@ -6,6 +6,7 @@ use async_trait::async_trait;
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
 use obzenflow_core::event::{ChainEvent, ChainEventFactory, EdgeLivenessState, SystemEventType};
 use obzenflow_core::journal::Journal;
+use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{async_source, async_transform, flow, sink};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::memory_journals;
@@ -16,7 +17,20 @@ use obzenflow_runtime::stages::common::handlers::{
 };
 use obzenflow_runtime::stages::LivenessSnapshots;
 use obzenflow_runtime::stages::SourceError;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
+
+/// File-local payload for the fan-out test. The JSON shape matches what
+/// `DelayedTwoEventSource` emits; the type fingerprints the stage
+/// contract per FLOWIP-114c.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct ProbeEvent {
+    value: u64,
+}
+
+impl TypedPayload for ProbeEvent {
+    const EVENT_TYPE: &'static str = "probe.event";
+}
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -53,7 +67,7 @@ impl AsyncFiniteSourceHandler for DelayedTwoEventSource {
                 self.emitted = 1;
                 Ok(Some(vec![ChainEventFactory::data_event(
                     writer_id,
-                    "flowip_063e.fanout.input",
+                    "liveness.fanout.input",
                     json!({ "value": 1 }),
                 )]))
             }
@@ -62,7 +76,7 @@ impl AsyncFiniteSourceHandler for DelayedTwoEventSource {
                 tokio::time::sleep(Duration::from_secs(10)).await;
                 Ok(Some(vec![ChainEventFactory::data_event(
                     writer_id,
-                    "flowip_063e.fanout.input",
+                    "liveness.fanout.input",
                     json!({ "value": 2 }),
                 )]))
             }
@@ -95,7 +109,7 @@ impl AsyncTransformHandler for SlowTransform {
         }
         Ok(vec![ChainEventFactory::data_event(
             self.writer_id,
-            "flowip_063e.fanout.slow",
+            "liveness.fanout.slow",
             event.payload().clone(),
         )])
     }
@@ -123,7 +137,7 @@ impl AsyncTransformHandler for FastTransform {
     async fn process(&self, event: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> {
         Ok(vec![ChainEventFactory::data_event(
             self.writer_id,
-            "flowip_063e.fanout.fast",
+            "liveness.fanout.fast",
             event.payload().clone(),
         )])
     }
@@ -163,7 +177,7 @@ fn stage_id_by_name(registry: &LivenessSnapshots, name: &str) -> obzenflow_core:
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn flowip_063e_fan_out_produces_independent_liveness_transitions() {
+async fn liveness_fan_out_produces_independent_liveness_transitions() {
     tokio::time::pause();
 
     let system_journal_slot: Arc<
@@ -186,16 +200,16 @@ async fn flowip_063e_fan_out_produces_independent_liveness_transitions() {
     });
 
     let flow_definition = flow! {
-        name: "flowip_063e_fan_out",
+        name: "liveness_fan_out",
         journals: memory_journals(),
         middleware: [],
 
         stages: {
-            numbers = async_source!(serde_json::Value => DelayedTwoEventSource::new());
-            slow = async_transform!(serde_json::Value -> serde_json::Value => SlowTransform::new());
-            fast = async_transform!(serde_json::Value -> serde_json::Value => FastTransform::new());
-            sink_slow = sink!(serde_json::Value => NoopSink);
-            sink_fast = sink!(serde_json::Value => NoopSink);
+            numbers = async_source!(ProbeEvent => DelayedTwoEventSource::new());
+            slow = async_transform!(ProbeEvent -> ProbeEvent => SlowTransform::new());
+            fast = async_transform!(ProbeEvent -> ProbeEvent => FastTransform::new());
+            sink_slow = sink!(ProbeEvent => NoopSink);
+            sink_fast = sink!(ProbeEvent => NoopSink);
         },
 
         topology: {

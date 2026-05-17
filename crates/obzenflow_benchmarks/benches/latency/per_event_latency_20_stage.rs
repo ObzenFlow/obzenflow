@@ -23,6 +23,8 @@ use obzenflow_runtime::stages::common::handlers::{
 use obzenflow_runtime::stages::SourceError;
 // Monitoring removed per FLOWIP-056-666
 use async_trait::async_trait;
+use obzenflow_core::TypedPayload;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -32,6 +34,19 @@ use tokio::runtime::Runtime;
 
 const WARMUP_EVENT_COUNT: u64 = 10;
 const TEST_EVENT_COUNT: u64 = 100;
+
+/// File-local payload type for the latency bench. The JSON shape matches
+/// what `TimestampedSource` emits; the type itself is a FLOWIP-114c
+/// topology fingerprint, not enforced at runtime.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct BenchEvent {
+    event_id: u64,
+    emit_time_nanos: u128,
+}
+
+impl TypedPayload for BenchEvent {
+    const EVENT_TYPE: &'static str = "bench.timestamped_event";
+}
 
 /// Test source that emits timestamped events
 #[derive(Clone, Debug)]
@@ -166,27 +181,27 @@ async fn run_20_stage_pipeline() -> anyhow::Result<Duration> {
         middleware: [],
 
         stages: {
-            src = source!(serde_json::Value => source);
-            s1 = transform!(serde_json::Value -> serde_json::Value => PassthroughStage::new("stage1"));
-            s2 = transform!(serde_json::Value -> serde_json::Value => PassthroughStage::new("stage2"));
-            s3 = transform!(serde_json::Value -> serde_json::Value => PassthroughStage::new("stage3"));
-            s4 = transform!(serde_json::Value -> serde_json::Value => PassthroughStage::new("stage4"));
-            s5 = transform!(serde_json::Value -> serde_json::Value => PassthroughStage::new("stage5"));
-            s6 = transform!(serde_json::Value -> serde_json::Value => PassthroughStage::new("stage6"));
-            s7 = transform!(serde_json::Value -> serde_json::Value => PassthroughStage::new("stage7"));
-            s8 = transform!(serde_json::Value -> serde_json::Value => PassthroughStage::new("stage8"));
-            s9 = transform!(serde_json::Value -> serde_json::Value => PassthroughStage::new("stage9"));
-            s10 = transform!(serde_json::Value -> serde_json::Value => PassthroughStage::new("stage10"));
-            s11 = transform!(serde_json::Value -> serde_json::Value => PassthroughStage::new("stage11"));
-            s12 = transform!(serde_json::Value -> serde_json::Value => PassthroughStage::new("stage12"));
-            s13 = transform!(serde_json::Value -> serde_json::Value => PassthroughStage::new("stage13"));
-            s14 = transform!(serde_json::Value -> serde_json::Value => PassthroughStage::new("stage14"));
-            s15 = transform!(serde_json::Value -> serde_json::Value => PassthroughStage::new("stage15"));
-            s16 = transform!(serde_json::Value -> serde_json::Value => PassthroughStage::new("stage16"));
-            s17 = transform!(serde_json::Value -> serde_json::Value => PassthroughStage::new("stage17"));
-            s18 = transform!(serde_json::Value -> serde_json::Value => PassthroughStage::new("stage18"));
-            s19 = transform!(serde_json::Value -> serde_json::Value => PassthroughStage::new("stage19"));
-            snk = sink!(serde_json::Value => sink);
+            src = source!(BenchEvent => source);
+            s1 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage1"));
+            s2 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage2"));
+            s3 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage3"));
+            s4 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage4"));
+            s5 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage5"));
+            s6 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage6"));
+            s7 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage7"));
+            s8 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage8"));
+            s9 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage9"));
+            s10 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage10"));
+            s11 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage11"));
+            s12 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage12"));
+            s13 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage13"));
+            s14 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage14"));
+            s15 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage15"));
+            s16 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage16"));
+            s17 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage17"));
+            s18 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage18"));
+            s19 = transform!(BenchEvent -> BenchEvent => PassthroughStage::new("stage19"));
+            snk = sink!(BenchEvent => sink);
         },
 
         topology: {

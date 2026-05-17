@@ -5,6 +5,7 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use obzenflow_core::TypedPayload;
 use obzenflow_core::{
     event::chain_event::{ChainEvent, ChainEventFactory},
     id::StageId,
@@ -18,7 +19,20 @@ use obzenflow_runtime::stages::common::handlers::{
     FiniteSourceHandler, SinkHandler, StatefulHandler,
 };
 use obzenflow_runtime::stages::SourceError;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
+
+/// File-local payload for the stateful-patterns test. The JSON shape
+/// matches what `NumberSource` emits; the type fingerprints the stage
+/// contract per FLOWIP-114c.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct NumberEvent {
+    value: u64,
+}
+
+impl TypedPayload for NumberEvent {
+    const EVENT_TYPE: &'static str = "stateful_patterns.number_event";
+}
 
 #[derive(Clone, Debug)]
 struct NumberSource {
@@ -286,9 +300,9 @@ async fn counter_emits_single_event_on_drain() {
         middleware: [],
 
         stages: {
-            src = source!(serde_json::Value => NumberSource::new(5));
-            counter = stateful!(serde_json::Value -> serde_json::Value => CounterHandler::new());
-            sink = sink!(serde_json::Value => sink);
+            src = source!(NumberEvent => NumberSource::new(5));
+            counter = stateful!(NumberEvent -> NumberEvent => CounterHandler::new());
+            sink = sink!(NumberEvent => sink);
         },
 
         topology: {
@@ -318,9 +332,9 @@ async fn accumulator_emits_one_event_per_input_on_drain() {
         middleware: [],
 
         stages: {
-            src = source!(serde_json::Value => NumberSource::new(5));
-            acc = stateful!(serde_json::Value -> serde_json::Value => AccumulatorHandler::new());
-            sink = sink!(serde_json::Value => sink);
+            src = source!(NumberEvent => NumberSource::new(5));
+            acc = stateful!(NumberEvent -> NumberEvent => AccumulatorHandler::new());
+            sink = sink!(NumberEvent => sink);
         },
 
         topology: {
@@ -348,9 +362,9 @@ async fn sum_handler_emits_aggregated_result_on_drain() {
         middleware: [],
 
         stages: {
-            src = source!(serde_json::Value => NumberSource::new(10));
-            summer = stateful!(serde_json::Value -> serde_json::Value => SumHandler::new());
-            sink = sink!(serde_json::Value => sink);
+            src = source!(NumberEvent => NumberSource::new(10));
+            summer = stateful!(NumberEvent -> NumberEvent => SumHandler::new());
+            sink = sink!(NumberEvent => sink);
         },
 
         topology: {
@@ -380,9 +394,9 @@ async fn immediate_emitter_emits_during_accumulating() {
         middleware: [],
 
         stages: {
-            src = source!(serde_json::Value => NumberSource::new(5));
-            emitter = stateful!(serde_json::Value -> serde_json::Value => ImmediateEmitter::new());
-            sink = sink!(serde_json::Value => sink);
+            src = source!(NumberEvent => NumberSource::new(5));
+            emitter = stateful!(NumberEvent -> NumberEvent => ImmediateEmitter::new());
+            sink = sink!(NumberEvent => sink);
         },
 
         topology: {
@@ -410,9 +424,9 @@ async fn empty_source_still_triggers_drain_for_stateful_handler() {
         middleware: [],
 
         stages: {
-            src = source!(serde_json::Value => EmptySource::new());
-            counter = stateful!(serde_json::Value -> serde_json::Value => CounterHandler::new());
-            sink = sink!(serde_json::Value => sink);
+            src = source!(NumberEvent => EmptySource::new());
+            counter = stateful!(NumberEvent -> NumberEvent => CounterHandler::new());
+            sink = sink!(NumberEvent => sink);
         },
 
         topology: {

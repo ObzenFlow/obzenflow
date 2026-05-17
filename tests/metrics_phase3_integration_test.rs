@@ -16,6 +16,7 @@ use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
 use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
 use obzenflow_core::metrics::MetricsExporter;
+use obzenflow_core::TypedPayload;
 use obzenflow_core::{StageId, WriterId};
 use obzenflow_dsl::{flow, sink, source, transform};
 use obzenflow_infra::journal::disk_journals;
@@ -25,7 +26,20 @@ use obzenflow_runtime::stages::common::handlers::{
     FiniteSourceHandler, SinkHandler, TransformHandler,
 };
 use obzenflow_runtime::stages::SourceError;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
+
+/// File-local payload for the phase-3 metrics integration test. The JSON
+/// shape matches what `BurstSource` emits; the type fingerprints the
+/// stage contract per FLOWIP-114c.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct MetricEvent {
+    index: u64,
+}
+
+impl TypedPayload for MetricEvent {
+    const EVENT_TYPE: &'static str = "metric.sample";
+}
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use std::time::SystemTime;
@@ -284,24 +298,24 @@ fn metric_line_value(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn flowip_059a_all_stage_metrics_include_flow_id_label() -> Result<()> {
+async fn metrics_all_stage_metrics_include_flow_id_label() -> Result<()> {
     let timeout_flow = Duration::from_secs(30);
     let timeout_metrics = Duration::from_secs(10);
 
     let flow_handle = flow! {
-        name: "flowip_059a_flow_id_labels",
-        journals: disk_journals(unique_journal_dir("flowip_059a_flow_id_labels")),
+        name: "metrics_flow_id_labels",
+        journals: disk_journals(unique_journal_dir("metrics_flow_id_labels")),
         middleware: [],
 
         stages: {
-            src = source!(serde_json::Value => BurstSource::new(50), [
+            src = source!(MetricEvent => BurstSource::new(50), [
                 // No summaries/threshold crossings required; utilization is derived from bucket state.
                 rate_limit_with_burst(10_000.0, 10_000.0)
             ]);
-            trans = transform!(serde_json::Value -> serde_json::Value => DropTransform, [
+            trans = transform!(MetricEvent -> MetricEvent => DropTransform, [
                 circuit_breaker(10)
             ]);
-            snk = sink!(serde_json::Value => CountingSink::new().0);
+            snk = sink!(MetricEvent => CountingSink::new().0);
         },
 
         topology: {
@@ -345,7 +359,7 @@ async fn flowip_059a_all_stage_metrics_include_flow_id_label() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn flowip_059a_processing_time_sum_tracks_actual_work() -> Result<()> {
+async fn metrics_processing_time_sum_tracks_actual_work() -> Result<()> {
     let timeout_flow = Duration::from_secs(30);
     let timeout_metrics = Duration::from_secs(10);
 
@@ -353,14 +367,14 @@ async fn flowip_059a_processing_time_sum_tracks_actual_work() -> Result<()> {
     let total_events: usize = 100;
 
     let flow_handle = flow! {
-        name: "flowip_059a_processing_time_sum",
-        journals: disk_journals(unique_journal_dir("flowip_059a_processing_time_sum")),
+        name: "metrics_processing_time_sum",
+        journals: disk_journals(unique_journal_dir("metrics_processing_time_sum")),
         middleware: [],
 
         stages: {
-            src = source!(serde_json::Value => BurstSource::new(total_events));
-            trans = transform!(serde_json::Value -> serde_json::Value => PassthroughTransform);
-            snk = sink!(serde_json::Value => SleepingSink::new(per_event));
+            src = source!(MetricEvent => BurstSource::new(total_events));
+            trans = transform!(MetricEvent -> MetricEvent => PassthroughTransform);
+            snk = sink!(MetricEvent => SleepingSink::new(per_event));
         },
 
         topology: {
@@ -373,7 +387,7 @@ async fn flowip_059a_processing_time_sum_tracks_actual_work() -> Result<()> {
 
     let exporter = run_with_metrics_timeout(flow_handle, timeout_flow).await?;
 
-    let flow_label = "flow=\"flowip_059a_processing_time_sum\"".to_string();
+    let flow_label = "flow=\"metrics_processing_time_sum\"".to_string();
     let stage_label = "stage=\"snk\"".to_string();
     let debug_patterns = vec![
         "obzenflow_processing_time_seconds_sum".to_string(),
@@ -437,26 +451,26 @@ async fn flowip_059a_processing_time_sum_tracks_actual_work() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn flowip_059a_circuit_breaker_counters_are_exported_with_joinable_labels() -> Result<()> {
+async fn metrics_circuit_breaker_counters_are_exported_with_joinable_labels() -> Result<()> {
     // Strict timeout protocol: if the flow or metrics pipeline hangs, fail fast.
     let timeout_flow = Duration::from_secs(30);
     let timeout_metrics = Duration::from_secs(10);
 
     let flow_handle = flow! {
-        name: "flowip_059a_cb_phase3",
-        journals: disk_journals(unique_journal_dir("flowip_059a_cb_phase3")),
+        name: "metrics_cb_phase3",
+        journals: disk_journals(unique_journal_dir("metrics_cb_phase3")),
         middleware: [],
 
         stages: {
             // 1000 events triggers a CircuitBreaker summary (>=1000 processed requests).
             // Use 1001 so the summary is not emitted on the final stage output.
-            src = source!(serde_json::Value => BurstSource::new(1001));
+            src = source!(MetricEvent => BurstSource::new(1001));
             // Drop downstream data outputs to keep journaling light; the circuit breaker
             // still observes successful processing and emits a summary at 1000.
-            trans = transform!(serde_json::Value -> serde_json::Value => DropTransform, [
+            trans = transform!(MetricEvent -> MetricEvent => DropTransform, [
                 circuit_breaker(10)
             ]);
-            snk = sink!(serde_json::Value => CountingSink::new().0);
+            snk = sink!(MetricEvent => CountingSink::new().0);
         },
 
         topology: {
@@ -475,7 +489,7 @@ async fn flowip_059a_circuit_breaker_counters_are_exported_with_joinable_labels(
     let exporter = run_with_metrics_timeout(flow_handle, timeout_flow).await?;
 
     let cb_stage_label = format!("stage_id=\"{cb_stage_id}\"");
-    let flow_label = "flow=\"flowip_059a_cb_phase3\"".to_string();
+    let flow_label = "flow=\"metrics_cb_phase3\"".to_string();
     let debug_patterns = vec![
         "obzenflow_circuit_breaker".to_string(),
         "obzenflow_circuit_breaker_requests_total".to_string(),
@@ -514,24 +528,24 @@ async fn flowip_059a_circuit_breaker_counters_are_exported_with_joinable_labels(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn flowip_059a_circuit_breaker_cumulative_metrics_are_exported_and_trippable() -> Result<()> {
+async fn metrics_circuit_breaker_cumulative_are_exported_and_trippable() -> Result<()> {
     // Strict timeout protocol: if the flow or metrics pipeline hangs, fail fast.
     let timeout_flow = Duration::from_secs(30);
     let timeout_metrics = Duration::from_secs(10);
 
     let flow_handle = flow! {
-        name: "flowip_059a_cb_cumulative",
-        journals: disk_journals(unique_journal_dir("flowip_059a_cb_cumulative")),
+        name: "metrics_cb_cumulative",
+        journals: disk_journals(unique_journal_dir("metrics_cb_cumulative")),
         middleware: [],
 
         stages: {
             // 1001 events ensures the 1000-threshold summary is emitted before the run completes.
-            src = source!(serde_json::Value => BurstSource::new(1001));
+            src = source!(MetricEvent => BurstSource::new(1001));
             // First event succeeds, second event fails (Timeout), opening the breaker.
-            trans = transform!(serde_json::Value -> serde_json::Value => TimeoutAfterFirstTransform, [
+            trans = transform!(MetricEvent -> MetricEvent => TimeoutAfterFirstTransform, [
                 circuit_breaker(1)
             ]);
-            snk = sink!(serde_json::Value => CountingSink::new().0);
+            snk = sink!(MetricEvent => CountingSink::new().0);
         },
 
         topology: {
@@ -550,7 +564,7 @@ async fn flowip_059a_circuit_breaker_cumulative_metrics_are_exported_and_trippab
     let exporter = run_with_metrics_timeout(flow_handle, timeout_flow).await?;
 
     let cb_stage_label = format!("stage_id=\"{cb_stage_id}\"");
-    let flow_label = "flow=\"flowip_059a_cb_cumulative\"".to_string();
+    let flow_label = "flow=\"metrics_cb_cumulative\"".to_string();
     let debug_patterns = vec![
         "obzenflow_circuit_breaker_opened_total".to_string(),
         "obzenflow_circuit_breaker_successes_total".to_string(),
@@ -640,7 +654,7 @@ async fn flowip_059a_circuit_breaker_cumulative_metrics_are_exported_and_trippab
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn flowip_059a_rate_limiter_metrics_are_exported_with_joinable_labels() -> Result<()> {
+async fn metrics_rate_limiter_are_exported_with_joinable_labels() -> Result<()> {
     // Strict timeout protocol: if the flow or metrics pipeline hangs, fail fast.
     let timeout_flow = Duration::from_secs(30);
     let timeout_metrics = Duration::from_secs(10);
@@ -649,12 +663,12 @@ async fn flowip_059a_rate_limiter_metrics_are_exported_with_joinable_labels() ->
     // Configure the limiter to produce at least one delayed event while keeping
     // the end-to-end run comfortably inside CI timing variance.
     let flow_handle = flow! {
-        name: "flowip_059a_rl_phase3",
-        journals: disk_journals(unique_journal_dir("flowip_059a_rl_phase3")),
+        name: "metrics_rl_phase3",
+        journals: disk_journals(unique_journal_dir("metrics_rl_phase3")),
         middleware: [],
 
         stages: {
-            src = source!(serde_json::Value => BurstSource::new(total_events), [
+            src = source!(MetricEvent => BurstSource::new(total_events), [
                 // Force deterministic backpressure: small burst + low rate so at least
                 // one event must block while still allowing the run to complete
                 // within the metrics wait window on slower CI hosts.
@@ -662,8 +676,8 @@ async fn flowip_059a_rate_limiter_metrics_are_exported_with_joinable_labels() ->
             ]);
             // Drop downstream data outputs to keep journaling light; rate limiting
             // metrics are emitted from the source stage.
-            trans = transform!(serde_json::Value -> serde_json::Value => DropTransform);
-            snk = sink!(serde_json::Value => CountingSink::new().0);
+            trans = transform!(MetricEvent -> MetricEvent => DropTransform);
+            snk = sink!(MetricEvent => CountingSink::new().0);
         },
 
         topology: {
@@ -682,7 +696,7 @@ async fn flowip_059a_rate_limiter_metrics_are_exported_with_joinable_labels() ->
     let exporter = run_with_metrics_timeout(flow_handle, timeout_flow).await?;
 
     let rl_stage_label = format!("stage_id=\"{rl_stage_id}\"");
-    let flow_label = "flow=\"flowip_059a_rl_phase3\"".to_string();
+    let flow_label = "flow=\"metrics_rl_phase3\"".to_string();
     let debug_patterns = vec![
         "obzenflow_rate_limiter".to_string(),
         "obzenflow_rate_limiter_events_total".to_string(),
@@ -798,7 +812,7 @@ async fn flowip_059a_rate_limiter_metrics_are_exported_with_joinable_labels() ->
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn flowip_059a2_circuit_breaker_requests_total_is_accurate_without_summaries() -> Result<()> {
+async fn metrics_circuit_breaker_requests_total_is_accurate_without_summaries() -> Result<()> {
     // This regression test exercises the pre-fix failure mode:
     // Summary events are emitted periodically (>=1000 or 10s). For short runs,
     // Summary-based counters undercount or stay at 0. Wide-event RuntimeContext
@@ -808,16 +822,16 @@ async fn flowip_059a2_circuit_breaker_requests_total_is_accurate_without_summari
     let total_events: usize = 500;
 
     let flow_handle = flow! {
-        name: "flowip_059a2_cb_no_summary",
-        journals: disk_journals(unique_journal_dir("flowip_059a2_cb_no_summary")),
+        name: "metrics_cb_no_summary",
+        journals: disk_journals(unique_journal_dir("metrics_cb_no_summary")),
         middleware: [],
 
         stages: {
-            src = source!(serde_json::Value => BurstSource::new(total_events));
-            trans = transform!(serde_json::Value -> serde_json::Value => DropTransform, [
+            src = source!(MetricEvent => BurstSource::new(total_events));
+            trans = transform!(MetricEvent -> MetricEvent => DropTransform, [
                 circuit_breaker(10)
             ]);
-            snk = sink!(serde_json::Value => CountingSink::new().0);
+            snk = sink!(MetricEvent => CountingSink::new().0);
         },
 
         topology: {
@@ -836,7 +850,7 @@ async fn flowip_059a2_circuit_breaker_requests_total_is_accurate_without_summari
     let exporter = run_with_metrics_timeout(flow_handle, timeout_flow).await?;
 
     let cb_stage_label = format!("stage_id=\"{cb_stage_id}\"");
-    let flow_label = "flow=\"flowip_059a2_cb_no_summary\"".to_string();
+    let flow_label = "flow=\"metrics_cb_no_summary\"".to_string();
     let debug_patterns = vec![
         "obzenflow_circuit_breaker_requests_total".to_string(),
         "obzenflow_circuit_breaker_successes_total".to_string(),
@@ -867,7 +881,7 @@ async fn flowip_059a2_circuit_breaker_requests_total_is_accurate_without_summari
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn flowip_059a2_rate_limiter_events_total_is_accurate_without_summaries() -> Result<()> {
+async fn metrics_rate_limiter_events_total_is_accurate_without_summaries() -> Result<()> {
     // Same regression class as CB: WindowUtilization events are periodic.
     // Wide-event RuntimeContext snapshots must carry cumulative RL counters, and
     // utilization must be derivable from bucket state even when no summaries emit.
@@ -876,18 +890,18 @@ async fn flowip_059a2_rate_limiter_events_total_is_accurate_without_summaries() 
     let total_events: usize = 200;
 
     let flow_handle = flow! {
-        name: "flowip_059a2_rl_no_summary",
-        journals: disk_journals(unique_journal_dir("flowip_059a2_rl_no_summary")),
+        name: "metrics_rl_no_summary",
+        journals: disk_journals(unique_journal_dir("metrics_rl_no_summary")),
         middleware: [],
 
         stages: {
-            src = source!(serde_json::Value => BurstSource::new(total_events), [
+            src = source!(MetricEvent => BurstSource::new(total_events), [
                 // High rate + high burst ensures no time-based (10s) or count-based (1000)
                 // WindowUtilization summary is *not* required for correct totals or utilization.
                 rate_limit_with_burst(10_000.0, 10_000.0)
             ]);
-            trans = transform!(serde_json::Value -> serde_json::Value => DropTransform);
-            snk = sink!(serde_json::Value => CountingSink::new().0);
+            trans = transform!(MetricEvent -> MetricEvent => DropTransform);
+            snk = sink!(MetricEvent => CountingSink::new().0);
         },
 
         topology: {
@@ -906,7 +920,7 @@ async fn flowip_059a2_rate_limiter_events_total_is_accurate_without_summaries() 
     let exporter = run_with_metrics_timeout(flow_handle, timeout_flow).await?;
 
     let rl_stage_label = format!("stage_id=\"{rl_stage_id}\"");
-    let flow_label = "flow=\"flowip_059a2_rl_no_summary\"".to_string();
+    let flow_label = "flow=\"metrics_rl_no_summary\"".to_string();
     let debug_patterns = vec![
         "obzenflow_rate_limiter_events_total".to_string(),
         "obzenflow_rate_limiter_utilization".to_string(),
@@ -974,19 +988,19 @@ async fn flowip_059a2_rate_limiter_events_total_is_accurate_without_summaries() 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn flowip_059a_contract_metrics_are_exported_and_joinable_to_topology() -> Result<()> {
+async fn metrics_contract_metrics_are_exported_and_joinable_to_topology() -> Result<()> {
     // Strict timeout protocol: if the flow or metrics pipeline hangs, fail fast.
     let timeout_flow = Duration::from_secs(30);
     let timeout_metrics = Duration::from_secs(10);
 
     let flow_handle = flow! {
-        name: "flowip_059a_contracts_phase3",
-        journals: disk_journals(unique_journal_dir("flowip_059a_contracts_phase3")),
+        name: "metrics_contracts_phase3",
+        journals: disk_journals(unique_journal_dir("metrics_contracts_phase3")),
         middleware: [],
 
         stages: {
-            src = source!(serde_json::Value => BurstSource::new(10));
-            snk = sink!(serde_json::Value => CountingSink::new().0);
+            src = source!(MetricEvent => BurstSource::new(10));
+            snk = sink!(MetricEvent => CountingSink::new().0);
         },
 
         topology: {
@@ -1010,11 +1024,11 @@ async fn flowip_059a_contract_metrics_are_exported_and_joinable_to_topology() ->
         "obzenflow_contract_results_total".to_string(),
         "obzenflow_contract_violations_total".to_string(),
         "obzenflow_contract_overrides_total".to_string(),
-        "flow=\"flowip_059a_contracts_phase3\"".to_string(),
+        "flow=\"metrics_contracts_phase3\"".to_string(),
     ];
     let metrics_text = wait_for_metrics(&exporter, timeout_metrics, &debug_patterns, |text| {
         text.contains("obzenflow_contract_results_total")
-            && text.contains("flow=\"flowip_059a_contracts_phase3\"")
+            && text.contains("flow=\"metrics_contracts_phase3\"")
     })
     .await?;
 
@@ -1029,7 +1043,7 @@ async fn flowip_059a_contract_metrics_are_exported_and_joinable_to_topology() ->
             assert!(
                 metrics_text.lines().any(|l| {
                     l.starts_with("obzenflow_contract_results_total{")
-                        && l.contains("flow=\"flowip_059a_contracts_phase3\"")
+                        && l.contains("flow=\"metrics_contracts_phase3\"")
                         && l.contains(&upstream_label)
                         && l.contains(&downstream_label)
                         && l.contains(&contract_label)

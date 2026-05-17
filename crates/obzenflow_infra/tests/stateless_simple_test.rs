@@ -3,6 +3,7 @@
 // https://obzenflow.dev
 
 use async_trait::async_trait;
+use obzenflow_core::TypedPayload;
 use obzenflow_core::{
     event::chain_event::{ChainEvent, ChainEventFactory},
     event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload},
@@ -16,7 +17,31 @@ use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{FiniteSourceHandler, SinkHandler};
 use obzenflow_runtime::stages::transform::Map;
 use obzenflow_runtime::stages::SourceError;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
+
+/// File-local payload for the stateless-simple test. The JSON shape
+/// matches what `SimpleSource` emits; the type fingerprints the stage
+/// contract per FLOWIP-114c.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct StatelessSimpleEvent {
+    value: u64,
+}
+
+impl TypedPayload for StatelessSimpleEvent {
+    const EVENT_TYPE: &'static str = "stateless_simple.event";
+}
+
+/// Output of the `Map` doubler.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct DoubledEvent {
+    original: u64,
+    doubled: u64,
+}
+
+impl TypedPayload for DoubledEvent {
+    const EVENT_TYPE: &'static str = "stateless_simple.doubled_event";
+}
 
 #[derive(Clone, Debug)]
 struct SimpleSource {
@@ -76,8 +101,8 @@ async fn stateless_pipeline_runs_to_completion() {
         middleware: [],
 
         stages: {
-            numbers = source!(serde_json::Value => SimpleSource::new(5));
-            doubler = transform!(serde_json::Value -> serde_json::Value => Map::new(|event| {
+            numbers = source!(StatelessSimpleEvent => SimpleSource::new(5));
+            doubler = transform!(StatelessSimpleEvent -> DoubledEvent => Map::new(|event| {
                 if let Some(value) = event.payload()["value"].as_u64() {
                     ChainEventFactory::data_event(
                         WriterId::from(StageId::new()),
@@ -91,7 +116,7 @@ async fn stateless_pipeline_runs_to_completion() {
                     event
                 }
             }));
-            printer = sink!(serde_json::Value => Printer);
+            printer = sink!(DoubledEvent => Printer);
         },
 
         topology: {

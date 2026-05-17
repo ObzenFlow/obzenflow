@@ -6,6 +6,7 @@ use async_trait::async_trait;
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
 use obzenflow_core::event::{ChainEvent, ChainEventFactory, SystemEvent, SystemEventType};
 use obzenflow_core::journal::Journal;
+use obzenflow_core::TypedPayload;
 use obzenflow_core::{StageId, WriterId};
 use obzenflow_dsl::{async_transform, flow, sink, source};
 use obzenflow_infra::application::FlowApplication;
@@ -17,7 +18,20 @@ use obzenflow_runtime::stages::common::handlers::{
 };
 use obzenflow_runtime::stages::common::stage_handle::{STOP_REASON_TIMEOUT, STOP_REASON_USER_STOP};
 use obzenflow_runtime::stages::SourceError;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
+
+/// File-local payload for the hung-handler cancellation test. The JSON
+/// shape matches what `OneEventSource` emits; the type fingerprints the
+/// stage contract per FLOWIP-114c.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct ProbeEvent {
+    value: u64,
+}
+
+impl TypedPayload for ProbeEvent {
+    const EVENT_TYPE: &'static str = "probe.event";
+}
 use std::future;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -45,7 +59,7 @@ impl FiniteSourceHandler for OneEventSource {
         self.emitted = true;
         Ok(Some(vec![ChainEventFactory::data_event(
             self.writer_id,
-            "flowip_063e.input",
+            "liveness.input",
             json!({ "value": 1 }),
         )]))
     }
@@ -81,7 +95,7 @@ impl SinkHandler for NoopSink {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn flowip_063e_hung_handler_can_be_cancelled_without_contract_failure() {
+async fn liveness_hung_handler_can_be_cancelled_without_contract_failure() {
     let flow_handle_slot: Arc<Mutex<Option<Arc<FlowHandle>>>> = Arc::new(Mutex::new(None));
     let system_journal_slot: Arc<Mutex<Option<Arc<dyn Journal<SystemEvent>>>>> =
         Arc::new(Mutex::new(None));
@@ -98,14 +112,14 @@ async fn flowip_063e_hung_handler_can_be_cancelled_without_contract_failure() {
     });
 
     let flow_definition = flow! {
-        name: "flowip_063e_hung_handler_cancel",
+        name: "liveness_hung_handler_cancel",
         journals: memory_journals(),
         middleware: [],
 
         stages: {
-            numbers = source!(serde_json::Value => OneEventSource::new());
-            hung = async_transform!(serde_json::Value -> serde_json::Value => HungTransform);
-            snk = sink!(serde_json::Value => NoopSink);
+            numbers = source!(ProbeEvent => OneEventSource::new());
+            hung = async_transform!(ProbeEvent -> ProbeEvent => HungTransform);
+            snk = sink!(ProbeEvent => NoopSink);
         },
 
         topology: {

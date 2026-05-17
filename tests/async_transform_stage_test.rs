@@ -14,6 +14,7 @@ use obzenflow_core::event::ChainEventContent;
 use obzenflow_core::journal::journal_owner::JournalOwner;
 use obzenflow_core::journal::Journal;
 use obzenflow_core::StageId;
+use obzenflow_core::TypedPayload;
 use obzenflow_core::WriterId;
 use obzenflow_dsl::{async_transform, flow, sink, source};
 use obzenflow_infra::journal::disk_journals;
@@ -22,7 +23,20 @@ use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
     AsyncTransformHandler, FiniteSourceHandler, SinkHandler,
 };
+use serde::{Deserialize, Serialize};
 use serde_json::json;
+
+/// File-local payload for the async-transform stage test. The JSON shape
+/// matches what `TestEventSource` emits; the type fingerprints the stage
+/// contract per FLOWIP-114c.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct AsyncTransformEvent {
+    index: u64,
+}
+
+impl TypedPayload for AsyncTransformEvent {
+    const EVENT_TYPE: &'static str = "async_transform.event";
+}
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -281,9 +295,9 @@ async fn async_transform_routes_error_kinds_to_correct_journal() -> Result<()> {
         middleware: [],
 
         stages: {
-            source = source!(serde_json::Value => TestEventSource::new());
-            async_errors = async_transform!(serde_json::Value -> serde_json::Value => transform);
-            sink = sink!(serde_json::Value => counter_sink);
+            source = source!(AsyncTransformEvent => TestEventSource::new());
+            async_errors = async_transform!(AsyncTransformEvent -> AsyncTransformEvent => transform);
+            sink = sink!(AsyncTransformEvent => counter_sink);
         },
 
         topology: {
@@ -436,11 +450,11 @@ async fn async_transform_applies_stage_middleware() -> Result<()> {
         middleware: [],
 
         stages: {
-            source = source!(serde_json::Value => TestEventSource::new());
-            mw_transform = async_transform!(serde_json::Value -> serde_json::Value => AsyncPassThroughTransform, [
+            source = source!(AsyncTransformEvent => TestEventSource::new());
+            mw_transform = async_transform!(AsyncTransformEvent -> AsyncTransformEvent => AsyncPassThroughTransform, [
                 InjectFieldFactory
             ]);
-            sink = sink!(serde_json::Value => sink);
+            sink = sink!(AsyncTransformEvent => sink);
         },
 
         topology: {
@@ -490,9 +504,9 @@ async fn async_transform_drain_failure_is_stage_level_failure() -> Result<()> {
         middleware: [],
 
         stages: {
-            source = source!(serde_json::Value => TestEventSource::new());
-            drain_fail_transform = async_transform!(serde_json::Value -> serde_json::Value => transform);
-            sink = sink!(serde_json::Value => sink);
+            source = source!(AsyncTransformEvent => TestEventSource::new());
+            drain_fail_transform = async_transform!(AsyncTransformEvent -> AsyncTransformEvent => transform);
+            sink = sink!(AsyncTransformEvent => sink);
         },
 
         topology: {

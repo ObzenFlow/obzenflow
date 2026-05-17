@@ -19,6 +19,7 @@ use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, Delivery
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::journal::journal_owner::JournalOwner;
 use obzenflow_core::journal::Journal;
+use obzenflow_core::TypedPayload;
 use obzenflow_core::{StageId, WriterId};
 use obzenflow_dsl::{flow, sink, source, transform};
 use obzenflow_infra::journal::disk_journals;
@@ -27,7 +28,20 @@ use obzenflow_runtime::stages::common::handlers::{
     FiniteSourceHandler, SinkHandler, TransformHandler,
 };
 use obzenflow_runtime::stages::SourceError;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
+
+/// File-local payload for the circuit-breaker shutdown contracts test.
+/// The JSON shape matches what `FiniteTestSource` emits; the type
+/// fingerprints the stage contract per FLOWIP-114c.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct BreakerTestEvent {
+    index: u64,
+}
+
+impl TypedPayload for BreakerTestEvent {
+    const EVENT_TYPE: &'static str = "circuit_breaker_shutdown.event";
+}
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::time::{sleep, Duration};
@@ -165,13 +179,13 @@ async fn breaker_driven_shutdown_emits_poison_eof_and_contract() -> Result<()> {
         middleware: [],
 
         stages: {
-            source = source!(serde_json::Value => source_handler, [
+            source = source!(BreakerTestEvent => source_handler, [
                 circuit_breaker(2) // Open after 2 failures
             ]);
-            failing_transform = transform!(serde_json::Value -> serde_json::Value => transform, [
+            failing_transform = transform!(BreakerTestEvent -> BreakerTestEvent => transform, [
                 circuit_breaker(2)
             ]);
-            sink = sink!(serde_json::Value => sink_handler);
+            sink = sink!(BreakerTestEvent => sink_handler);
         },
 
         topology: {

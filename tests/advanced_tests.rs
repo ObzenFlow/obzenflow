@@ -15,7 +15,21 @@ use obzenflow_runtime::stages::common::handlers::{
 // FLOWIP-056-666: Monitoring middleware temporarily disabled pending redesign
 use anyhow::Result;
 use async_trait::async_trait;
+use obzenflow_core::TypedPayload;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
+
+/// File-local payload for the advanced tests. The JSON shape matches
+/// what `EventGenerator` / `Doubler` emit; the type fingerprints the
+/// stage contract per FLOWIP-114c.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct AdvancedTestEvent {
+    value: u64,
+}
+
+impl TypedPayload for AdvancedTestEvent {
+    const EVENT_TYPE: &'static str = "advanced_tests.event";
+}
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -137,9 +151,9 @@ async fn test_dsl_pipeline() -> Result<()> {
         middleware: [],
 
         stages: {
-            generator = source!(serde_json::Value => EventGenerator::new());
-            doubler = transform!(serde_json::Value -> serde_json::Value => Doubler::new());
-            summer = sink!(serde_json::Value => summer);
+            generator = source!(AdvancedTestEvent => EventGenerator::new());
+            doubler = transform!(AdvancedTestEvent -> AdvancedTestEvent => Doubler::new());
+            summer = sink!(AdvancedTestEvent => summer);
         },
 
         topology: {

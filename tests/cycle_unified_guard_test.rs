@@ -7,6 +7,7 @@ use async_trait::async_trait;
 use obzenflow_core::event::chain_event::ChainEventFactory;
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
 use obzenflow_core::event::CorrelationId;
+use obzenflow_core::TypedPayload;
 use obzenflow_core::{ChainEvent, StageId, WriterId};
 use obzenflow_dsl::{async_source, flow, sink, source, stateful, transform};
 use obzenflow_infra::journal::disk_journals;
@@ -14,7 +15,20 @@ use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
     AsyncFiniteSourceHandler, FiniteSourceHandler, SinkHandler, StatefulHandler, TransformHandler,
 };
+use serde::{Deserialize, Serialize};
 use serde_json::json;
+
+/// File-local payload for the cycle-guard test. The JSON shape matches
+/// what `TestEventSource` emits; the type fingerprints the stage
+/// contract per FLOWIP-114c.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct SeedEvent {
+    n: u64,
+}
+
+impl TypedPayload for SeedEvent {
+    const EVENT_TYPE: &'static str = "cycle.seed_event";
+}
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -235,17 +249,17 @@ fn any_log_contains(run_dir: &Path, needle: &str) -> Result<bool> {
 }
 
 #[tokio::test]
-async fn flowip_051l_rejects_cycles_with_non_transform_members() {
+async fn cycle_guard_rejects_cycles_with_non_transform_members() {
     let result = flow! {
-        name: "flowip_051l_reject_stateful_cycle",
-        journals: disk_journals(std::path::PathBuf::from("target/flowip_051l_reject_stateful_cycle")),
+        name: "cycle_guard_reject_stateful_cycle",
+        journals: disk_journals(std::path::PathBuf::from("target/cycle_guard_reject_stateful_cycle")),
         middleware: [],
 
         stages: {
-            src = source!(serde_json::Value => TestEventSource::new(1));
-            agg = stateful!(serde_json::Value -> serde_json::Value => NoopStateful);
-            tr = transform!(serde_json::Value -> serde_json::Value => IdentityTransform);
-            snk = sink!(serde_json::Value => EventCounterSink::new().0);
+            src = source!(SeedEvent => TestEventSource::new(1));
+            agg = stateful!(SeedEvent -> SeedEvent => NoopStateful);
+            tr = transform!(SeedEvent -> SeedEvent => IdentityTransform);
+            snk = sink!(SeedEvent => EventCounterSink::new().0);
         },
 
         topology: {
@@ -266,23 +280,23 @@ async fn flowip_051l_rejects_cycles_with_non_transform_members() {
 }
 
 #[tokio::test]
-async fn flowip_051l_cycle_guard_bounds_flow_signal_backflow() -> Result<()> {
-    let base = PathBuf::from("target/flowip_051l_cycle_guard_bounds");
+async fn cycle_guard_bounds_flow_signal_backflow() -> Result<()> {
+    let base = PathBuf::from("target/cycle_guard_bounds");
     let _ = fs::remove_dir_all(&base);
     let base_for_flow = base.clone();
 
     let (counter_sink, counter) = EventCounterSink::new();
 
     let handle = flow! {
-        name: "flowip_051l_cycle_guard_bounds",
+        name: "cycle_guard_bounds",
         journals: disk_journals(base_for_flow),
         middleware: [],
 
         stages: {
-            src = source!(serde_json::Value => TestEventSource::new(5));
-            a = transform!(serde_json::Value -> serde_json::Value => IdentityTransform);
-            b = transform!(serde_json::Value -> serde_json::Value => DropAllTransform);
-            snk = sink!(serde_json::Value => counter_sink);
+            src = source!(SeedEvent => TestEventSource::new(5));
+            a = transform!(SeedEvent -> SeedEvent => IdentityTransform);
+            b = transform!(SeedEvent -> SeedEvent => DropAllTransform);
+            snk = sink!(SeedEvent => counter_sink);
         },
 
         topology: {
@@ -318,23 +332,23 @@ async fn flowip_051l_cycle_guard_bounds_flow_signal_backflow() -> Result<()> {
 }
 
 #[tokio::test]
-async fn flowip_051l_cycle_guard_bounds_data_backflow() -> Result<()> {
-    let base = PathBuf::from("target/flowip_051l_cycle_guard_bounds_data");
+async fn cycle_guard_bounds_data_backflow() -> Result<()> {
+    let base = PathBuf::from("target/cycle_guard_bounds_data");
     let _ = fs::remove_dir_all(&base);
     let base_for_flow = base.clone();
 
     let (counter_sink, counter) = EventCounterSink::new();
 
     let handle = flow! {
-        name: "flowip_051l_cycle_guard_bounds_data",
+        name: "cycle_guard_bounds_data",
         journals: disk_journals(base_for_flow),
         middleware: [],
 
         stages: {
-            src = async_source!(serde_json::Value => CorrelatedEventSource::new(Duration::from_millis(500)));
-            a = transform!(serde_json::Value -> serde_json::Value => IdentityTransform);
-            b = transform!(serde_json::Value -> serde_json::Value => IdentityTransform);
-            snk = sink!(serde_json::Value => counter_sink);
+            src = async_source!(SeedEvent => CorrelatedEventSource::new(Duration::from_millis(500)));
+            a = transform!(SeedEvent -> SeedEvent => IdentityTransform);
+            b = transform!(SeedEvent -> SeedEvent => IdentityTransform);
+            snk = sink!(SeedEvent => counter_sink);
         },
 
         topology: {

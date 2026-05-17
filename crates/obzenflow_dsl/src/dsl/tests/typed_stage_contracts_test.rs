@@ -818,4 +818,87 @@ mod tests {
         validate_edge_typing(&topology, &descriptors, &name_to_id)
             .expect("identical TypeId from two spellings must validate clean");
     }
+
+    /// FLOWIP-114c PR E: documenting the `serde_json::Value`-as-the-new-
+    /// `mixed` failure mode.
+    ///
+    /// If two semantically different event shapes are both spelled as
+    /// `serde_json::Value` in DSL slots, the validator cannot tell them
+    /// apart because `TypeId::of::<serde_json::Value>()` is one constant
+    /// across the whole compilation. The flow build succeeds even though
+    /// the upstream is, semantically, emitting two different things into
+    /// the downstream slot. This is exactly what the PR D bulk migration
+    /// accidentally enabled before PR E cleaned it up, and exactly why
+    /// the `no_serde_value_in_dsl_slots` lint exists alongside this test.
+    ///
+    /// The correct pattern is per-branch alignment with concrete
+    /// `TypedPayload` structs that normalise to one common envelope
+    /// type, demonstrated in `examples/multi_source_ingest_demo/`.
+    #[test]
+    fn validate_edge_typing_accepts_value_into_value_silently_documenting_anti_pattern() {
+        // Two distinct semantic events the test author "should" model as
+        // separate types (e.g. an order and a charge), but they both get
+        // spelled `serde_json::Value` in DSL slots. The validator sees a
+        // single TypeId on every edge.
+        let source_a_id = StageId::new();
+        let source_b_id = StageId::new();
+        let sink_id = StageId::new();
+
+        let mut descriptors: HashMap<String, Box<dyn StageDescriptor>> = HashMap::new();
+        descriptors.insert(
+            "order_source".to_string(),
+            // allow-serde-value: deliberate anti-pattern demonstration (Value-as-blessed-answer).
+            crate::source!(name: "order_source", serde_json::Value => placeholder!()),
+        );
+        descriptors.insert(
+            "charge_source".to_string(),
+            // allow-serde-value: see above; deliberate anti-pattern demonstration.
+            crate::source!(name: "charge_source", serde_json::Value => placeholder!()),
+        );
+        descriptors.insert(
+            "consolidator".to_string(),
+            // allow-serde-value: see above; deliberate anti-pattern demonstration.
+            crate::sink!(name: "consolidator", serde_json::Value => placeholder!()),
+        );
+
+        let mut name_to_id = HashMap::new();
+        name_to_id.insert("order_source".to_string(), source_a_id);
+        name_to_id.insert("charge_source".to_string(), source_b_id);
+        name_to_id.insert("consolidator".to_string(), sink_id);
+
+        let mut topology = TopologyBuilder::new();
+        topology.add_stage_with_id(
+            source_a_id.to_topology_id(),
+            Some("order_source".to_string()),
+            TopologyStageType::FiniteSource,
+        );
+        topology.reset_current();
+        topology.add_stage_with_id(
+            source_b_id.to_topology_id(),
+            Some("charge_source".to_string()),
+            TopologyStageType::FiniteSource,
+        );
+        topology.reset_current();
+        topology.add_stage_with_id(
+            sink_id.to_topology_id(),
+            Some("consolidator".to_string()),
+            TopologyStageType::Sink,
+        );
+        topology.reset_current();
+        topology.add_edge(source_a_id.to_topology_id(), sink_id.to_topology_id());
+        topology.add_edge(source_b_id.to_topology_id(), sink_id.to_topology_id());
+        let topology = topology.build_unchecked().unwrap();
+
+        // The validator accepts this. That is the failure mode this test
+        // exists to document: the type system is satisfied because every
+        // slot's TypeId is the same, but the topology is meaningless.
+        validate_edge_typing(&topology, &descriptors, &name_to_id).expect(
+            "serde_json::Value collapses every payload into one TypeId, so the validator \
+             accepts this flow even though the two sources semantically emit different \
+             events. This is the wrong answer. See examples/multi_source_ingest_demo/ for \
+             the correct per-branch alignment pattern, and the lint at \
+             obzenflow_dsl/tests/no_serde_value_in_dsl_slots.rs which enforces the policy \
+             at build time.",
+        );
+    }
 }

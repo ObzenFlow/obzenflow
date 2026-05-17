@@ -8,6 +8,7 @@ use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
 use obzenflow_core::event::ChainEventContent;
 use obzenflow_core::event::CorrelationId;
+use obzenflow_core::TypedPayload;
 use obzenflow_core::{StageId, WriterId};
 use obzenflow_dsl::{flow, sink, source, transform};
 use obzenflow_infra::journal::disk_journals;
@@ -15,7 +16,22 @@ use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
     FiniteSourceHandler, SinkHandler, TransformHandler,
 };
+use serde::{Deserialize, Serialize};
 use serde_json::json;
+
+/// File-local payload for the cycle-guard fan-out test. The JSON shape
+/// matches what the seed sources emit; the type fingerprints the stage
+/// contract per FLOWIP-114c.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct SeedEvent {
+    item: u64,
+    iter: u64,
+    target: u64,
+}
+
+impl TypedPayload for SeedEvent {
+    const EVENT_TYPE: &'static str = "cycle.seed";
+}
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -305,8 +321,8 @@ impl SinkHandler for DoneCounterSink {
 /// see 10 visits per round, hit max_iterations=30 at the start of round 4,
 /// and abort some siblings before convergence.
 #[tokio::test]
-async fn flowip_051p_fan_out_siblings_converge_without_spurious_abort() -> Result<()> {
-    let journal_root = unique_journal_dir("flowip_051p_fan_out");
+async fn cycle_guard_fan_out_siblings_converge_without_spurious_abort() -> Result<()> {
+    let journal_root = unique_journal_dir("cycle_guard_fan_out");
     let journal_root_for_flow = journal_root.clone();
 
     let fan_out = 10u64;
@@ -320,16 +336,16 @@ async fn flowip_051p_fan_out_siblings_converge_without_spurious_abort() -> Resul
     let iter_processed_for_flow = iter_processed.clone();
 
     let handle = flow! {
-        name: "flowip_051p_fan_out_siblings_converge_without_spurious_abort",
+        name: "cycle_guard_fan_out_siblings_converge_without_spurious_abort",
         journals: disk_journals(journal_root_for_flow),
         middleware: [],
 
         stages: {
-            src = source!(serde_json::Value => SingleSeedFanOutSource::new(fan_out, target_round_trips));
-            entry = transform!(serde_json::Value -> serde_json::Value => FanOutEntryTransform::new(entry_processed_for_flow));
-            pass = transform!(serde_json::Value -> serde_json::Value => PassThroughTransform);
-            iter = transform!(serde_json::Value -> serde_json::Value => IterationTransform::new(iter_processed_for_flow));
-            snk = sink!(serde_json::Value => sink);
+            src = source!(SeedEvent => SingleSeedFanOutSource::new(fan_out, target_round_trips));
+            entry = transform!(SeedEvent -> SeedEvent => FanOutEntryTransform::new(entry_processed_for_flow));
+            pass = transform!(SeedEvent -> SeedEvent => PassThroughTransform);
+            iter = transform!(SeedEvent -> SeedEvent => IterationTransform::new(iter_processed_for_flow));
+            snk = sink!(SeedEvent => sink);
         },
 
         topology: {

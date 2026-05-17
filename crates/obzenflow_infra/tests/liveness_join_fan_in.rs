@@ -6,6 +6,7 @@ use async_trait::async_trait;
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
 use obzenflow_core::event::{ChainEvent, ChainEventFactory, SystemEvent, SystemEventType};
 use obzenflow_core::journal::Journal;
+use obzenflow_core::TypedPayload;
 use obzenflow_core::{StageId, WriterId};
 use obzenflow_dsl::{async_source, flow, join, sink, source};
 use obzenflow_infra::application::FlowApplication;
@@ -17,7 +18,42 @@ use obzenflow_runtime::stages::common::handlers::{
 };
 use obzenflow_runtime::stages::LivenessSnapshots;
 use obzenflow_runtime::stages::SourceError;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
+
+/// File-local payloads for the join-fan-in test. The two legs (reference
+/// and stream) carry semantically different events; declaring them as
+/// distinct types is the FLOWIP-114c correct way to model a join's two
+/// concrete inputs.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct CatalogRecord {
+    value: u64,
+}
+
+impl TypedPayload for CatalogRecord {
+    const EVENT_TYPE: &'static str = "catalog.record";
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct LiveEvent {
+    value: u64,
+}
+
+impl TypedPayload for LiveEvent {
+    const EVENT_TYPE: &'static str = "stream.live_event";
+}
+
+/// The join's output type (this test uses a `NoopSink`, but the type slot
+/// still needs declaring).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct EnrichedRecord {
+    ref_value: u64,
+    stream_value: u64,
+}
+
+impl TypedPayload for EnrichedRecord {
+    const EVENT_TYPE: &'static str = "join.enriched_record";
+}
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -45,7 +81,7 @@ impl obzenflow_runtime::stages::common::handlers::FiniteSourceHandler for OneRef
         self.emitted = true;
         Ok(Some(vec![ChainEventFactory::data_event(
             self.writer_id,
-            "flowip_063e.join.ref",
+            "liveness.join.ref",
             json!({ "kind": "ref", "value": 1 }),
         )]))
     }
@@ -85,7 +121,7 @@ impl AsyncFiniteSourceHandler for DelayedStreamSource {
             .expect("stream writer_id should be bound by runtime");
         Ok(Some(vec![ChainEventFactory::data_event(
             writer_id,
-            "flowip_063e.join.stream",
+            "liveness.join.stream",
             json!({ "kind": "stream", "value": 2 }),
         )]))
     }
@@ -119,7 +155,7 @@ impl JoinHandler for SlowJoin {
 
         Ok(vec![ChainEventFactory::data_event(
             writer_id,
-            "flowip_063e.join.out",
+            "liveness.join.out",
             event.payload().clone(),
         )])
     }
@@ -164,7 +200,7 @@ fn stage_id_by_name(registry: &LivenessSnapshots, name: &str) -> StageId {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn flowip_063e_join_keeps_active_edge_healthy_while_other_edge_idles() {
+async fn liveness_join_keeps_active_edge_healthy_while_other_edge_idles() {
     let system_journal_slot: Arc<Mutex<Option<Arc<dyn Journal<SystemEvent>>>>> =
         Arc::new(Mutex::new(None));
     let registry_slot: Arc<Mutex<Option<LivenessSnapshots>>> = Arc::new(Mutex::new(None));
@@ -184,15 +220,15 @@ async fn flowip_063e_join_keeps_active_edge_healthy_while_other_edge_idles() {
     });
 
     let flow_definition = flow! {
-        name: "flowip_063e_join_fan_in",
+        name: "liveness_join_fan_in",
         journals: memory_journals(),
         middleware: [],
 
         stages: {
-            ref_src = source!(serde_json::Value => OneRefEventSource::new());
-            stream_src = async_source!(serde_json::Value => DelayedStreamSource::new());
-            joiner = join!(catalog ref_src: serde_json::Value, serde_json::Value -> serde_json::Value => SlowJoin);
-            snk = sink!(serde_json::Value => NoopSink);
+            ref_src = source!(CatalogRecord => OneRefEventSource::new());
+            stream_src = async_source!(LiveEvent => DelayedStreamSource::new());
+            joiner = join!(catalog ref_src: CatalogRecord, LiveEvent -> EnrichedRecord => SlowJoin);
+            snk = sink!(EnrichedRecord => NoopSink);
         },
 
         topology: {

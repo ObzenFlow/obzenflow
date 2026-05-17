@@ -15,7 +15,30 @@ use obzenflow_runtime::stages::common::handlers::{
 // FLOWIP-056-666: Monitoring middleware temporarily disabled pending redesign
 use anyhow::Result;
 use async_trait::async_trait;
+use obzenflow_core::TypedPayload;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
+
+/// File-local payloads for the basic-streaming tests. The two source
+/// shapes correspond to `TestEventSource` (`index`) and `NumberSource`
+/// (`value`); the types fingerprint the stage contract per FLOWIP-114c.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct StreamItem {
+    index: u64,
+}
+
+impl TypedPayload for StreamItem {
+    const EVENT_TYPE: &'static str = "basic_streaming.stream_item";
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct NumberItem {
+    value: u64,
+}
+
+impl TypedPayload for NumberItem {
+    const EVENT_TYPE: &'static str = "basic_streaming.number_item";
+}
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -104,8 +127,8 @@ async fn test_basic_flow() -> Result<()> {
         middleware: [],
 
         stages: {
-            source = source!(serde_json::Value => TestEventSource::new(10));
-            sink = sink!(serde_json::Value => counter_sink);
+            source = source!(StreamItem => TestEventSource::new(10));
+            sink = sink!(StreamItem => counter_sink);
         },
 
         topology: {
@@ -160,9 +183,9 @@ async fn test_multi_stage_flow() -> Result<()> {
         middleware: [],
 
         stages: {
-            source = source!(serde_json::Value => TestEventSource::new(5));
-            doubler = transform!(serde_json::Value -> serde_json::Value => Doubler::new());
-            sink = sink!(serde_json::Value => counter_sink);
+            source = source!(StreamItem => TestEventSource::new(5));
+            doubler = transform!(StreamItem -> StreamItem => Doubler::new());
+            sink = sink!(StreamItem => counter_sink);
         },
 
         topology: {
@@ -300,9 +323,9 @@ async fn test_pipeline_topology() -> Result<()> {
         middleware: [],
 
         stages: {
-            source = source!(serde_json::Value => NumberSource::new(3));
-            doubler = transform!(serde_json::Value -> serde_json::Value => NumberDoubler::new());
-            sink = sink!(serde_json::Value => sum_sink);
+            source = source!(NumberItem => NumberSource::new(3));
+            doubler = transform!(NumberItem -> NumberItem => NumberDoubler::new());
+            sink = sink!(NumberItem => sum_sink);
         },
 
         topology: {
