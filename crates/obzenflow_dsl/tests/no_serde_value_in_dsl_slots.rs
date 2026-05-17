@@ -179,9 +179,7 @@ fn mask_strings_and_line_comments(line: &str) -> String {
     while i < bytes.len() {
         let b = bytes[i];
         if b == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'/' {
-            for j in i..bytes.len() {
-                out[j] = b' ';
-            }
+            out[i..].fill(b' ');
             return String::from_utf8(out).unwrap_or_default();
         }
         if b == b'"' {
@@ -199,9 +197,7 @@ fn mask_strings_and_line_comments(line: &str) -> String {
                 }
                 i += 1;
             }
-            for j in start..i {
-                out[j] = b' ';
-            }
+            out[start..i].fill(b' ');
             continue;
         }
         if b == b'\'' {
@@ -219,9 +215,7 @@ fn mask_strings_and_line_comments(line: &str) -> String {
             }
             if i < bytes.len() && bytes[i] == b'\'' {
                 i += 1;
-                for j in start..i {
-                    out[j] = b' ';
-                }
+                out[start..i].fill(b' ');
             }
             continue;
         }
@@ -247,8 +241,8 @@ fn raw_macro_body(
     let mut out = String::new();
     out.push_str(&lines[line_idx][start_col_after_paren..]);
     out.push('\n');
-    for row in (line_idx + 1)..end_line {
-        out.push_str(lines[row]);
+    for line in &lines[(line_idx + 1)..end_line] {
+        out.push_str(line);
         out.push('\n');
     }
     out.push_str(lines[end_line]);
