@@ -294,6 +294,110 @@ macro_rules! flow {
     }};
 }
 
+/// Build a flow for tests, returning a `FlowTestHarness` (FLOWIP-114h).
+///
+/// This macro is gated behind `#[cfg(any(test, feature = "test-support"))]`.
+/// It reuses the normal `flow!` build path, but retains the stage data journals
+/// produced during construction so deterministic test helpers can observe them.
+#[cfg(any(test, feature = "test-support"))]
+#[macro_export]
+macro_rules! test_flow {
+    // Pattern with explicit flow name (stage descriptors as expressions)
+    {
+        name: $flow_name:literal,
+        journals: $journals:expr,
+        middleware: [$($flow_mw:expr),*],
+
+        stages: {
+            $($stage_name:ident = $descriptor:expr;)*
+        },
+
+        topology: {
+            $(
+                $edge:tt
+            )*
+        }
+    } => {{
+        async move {
+            use $crate::prelude::*;
+            use $crate::dsl::stage_descriptor::*;
+            use std::collections::HashMap;
+
+            let journals = $journals;
+
+            let mut stages: HashMap<String, Box<dyn StageDescriptor>> = HashMap::new();
+            $(
+                let descriptor = $descriptor;
+                stages.insert(stringify!($stage_name).to_string(), descriptor);
+            )*
+
+            for (binding, descriptor) in stages.iter_mut() {
+                if descriptor.name() == BINDING_DERIVED_NAME_SENTINEL {
+                    descriptor.set_name(binding.clone());
+                }
+            }
+
+            let mut connections: Vec<(String, String, obzenflow_topology::EdgeKind)> = Vec::new();
+            $crate::parse_topology!(connections, $($edge)*);
+
+            let lowering_artifacts =
+                $crate::dsl::composites::lower_composites(&mut stages, &mut connections)?;
+
+            let create_flow_middleware =
+                || -> Vec<Box<dyn obzenflow_adapters::middleware::MiddlewareFactory>> {
+                    vec![
+                        $(Box::new($flow_mw) as Box<dyn obzenflow_adapters::middleware::MiddlewareFactory>),*
+                    ]
+                };
+
+            $crate::build_typed_flow!(
+                $flow_name,
+                journals,
+                stages,
+                connections,
+                create_flow_middleware,
+                lowering_artifacts,
+                finish: |handle, stage_data_journals| {
+                    obzenflow_runtime::testing::FlowTestHarness::from_parts(handle, stage_data_journals)
+                        .map_err(|e| $crate::dsl::FlowBuildError::StageResourcesFailed(format!(
+                            "Failed to build FlowTestHarness: {e}"
+                        )))
+                }
+            )
+        }
+    }};
+
+    // Pattern without explicit flow name (uses "default")
+    {
+        journals: $journals:expr,
+        middleware: [$($flow_mw:expr),*],
+
+        stages: {
+            $($stage_name:ident = $descriptor:expr;)*
+        },
+
+        topology: {
+            $(
+                $edge:tt
+            )*
+        }
+    } => {{
+        $crate::test_flow! {
+            name: "default",
+            journals: $journals,
+            middleware: [$($flow_mw),*],
+
+            stages: {
+                $($stage_name = $descriptor;)*
+            },
+
+            topology: {
+                $($edge)*
+            }
+        }
+    }};
+}
+
 /// Build the actual flow from collected stages and connections
 #[macro_export]
 macro_rules! build_typed_flow {
@@ -309,6 +413,18 @@ macro_rules! build_typed_flow {
     }};
 
     ($flow_name:expr, $journals:expr, $stages:expr, $connections:expr, $create_flow_middleware:expr, $lowering_artifacts:expr) => {{
+        $crate::build_typed_flow!(
+            $flow_name,
+            $journals,
+            $stages,
+            $connections,
+            $create_flow_middleware,
+            $lowering_artifacts,
+            finish: |handle, _stage_data_journals| Ok::<FlowHandle, FlowBuildError>(handle)
+        )
+    }};
+
+    ($flow_name:expr, $journals:expr, $stages:expr, $connections:expr, $create_flow_middleware:expr, $lowering_artifacts:expr, finish: $finish:expr) => {{
         use $crate::prelude::*;
         use $crate::dsl::FlowBuildError;
         use std::collections::{HashMap, HashSet};
@@ -1311,6 +1427,7 @@ macro_rules! build_typed_flow {
             .await
             .map_err(|e| FlowBuildError::PipelineBuildFailed(format!("{:?}", e)))?;
 
-        Ok::<FlowHandle, FlowBuildError>(handle)
+        let stage_data_journals = stage_resources_set.stage_journals;
+        $finish(handle, stage_data_journals)
     }};
 }

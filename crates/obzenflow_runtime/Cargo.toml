@@ -11,6 +11,9 @@ publish = true
 [lib]
 doctest = false
 
+[features]
+test-support = ["tokio/test-util"]
+
 [dependencies]
 # Internal dependencies
 obzenflow_core = { workspace = true }

@@ -8,6 +8,9 @@ license.workspace = true
 repository.workspace = true
 publish = true
 
+[features]
+test-support = ["obzenflow_runtime/test-support"]
+
 [dependencies]
 # Internal dependencies - all layers needed for DSL
 obzenflow_core = { workspace = true }

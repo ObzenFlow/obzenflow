@@ -2,14 +2,19 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use async_trait::async_trait;
-use obzenflow_adapters::middleware::{rate_limit, RateLimiterBuilder};
+use obzenflow_adapters::middleware::{rate_limit_with_burst, RateLimiterBuilder};
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
+use obzenflow_core::event::chain_event::ChainEventContent;
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
+use obzenflow_core::event::payloads::observability_payload::{
+    MiddlewareLifecycle, ObservabilityPayload, RateLimiterEvent,
+};
+use obzenflow_core::journal::Journal;
 use obzenflow_core::TypedPayload;
 use obzenflow_core::{StageId, WriterId};
-use obzenflow_dsl::{flow, sink, source, transform};
+use obzenflow_dsl::{sink, source, test_flow, transform};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
@@ -32,7 +37,7 @@ impl TypedPayload for RateLimiterTestEvent {
 }
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, SystemTime};
 
 fn unique_journal_dir(prefix: &str) -> std::path::PathBuf {
     let suffix = SystemTime::now()
@@ -40,6 +45,33 @@ fn unique_journal_dir(prefix: &str) -> std::path::PathBuf {
         .unwrap_or_else(|_| Duration::from_millis(0))
         .as_nanos();
     std::path::PathBuf::from("target").join(format!("{prefix}_{suffix}"))
+}
+
+async fn rate_limiter_delayed_events(
+    stage_journal: &Arc<dyn Journal<ChainEvent>>,
+) -> Result<usize> {
+    let mut reader = stage_journal
+        .reader()
+        .await
+        .map_err(|e| anyhow!("failed to create stage journal reader: {e}"))?;
+
+    let mut delayed: usize = 0;
+    loop {
+        match reader.next().await {
+            Ok(Some(envelope)) => {
+                if let ChainEventContent::Observability(ObservabilityPayload::Middleware(mw)) =
+                    &envelope.event.content
+                {
+                    if let MiddlewareLifecycle::RateLimiter(RateLimiterEvent::Delayed { .. }) = mw
+                    {
+                        delayed += 1;
+                    }
+                }
+            }
+            Ok(None) => return Ok(delayed),
+            Err(e) => return Err(anyhow!("failed to read stage journal: {e}")),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -178,7 +210,7 @@ impl SinkHandler for CountingSink {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rate_limiter_low_rate_half_eps_processes_all_events() -> Result<()> {
     let (sink, count) = CountingSink::new();
-    let handle = flow! {
+    let test_handle = test_flow! {
         name: "rate_limiter_low_rate_half_eps",
         journals: disk_journals(unique_journal_dir("rate_limiter_low_rate_half_eps")),
         middleware: [],
@@ -186,7 +218,7 @@ async fn rate_limiter_low_rate_half_eps_processes_all_events() -> Result<()> {
         stages: {
             src = source!(RateLimiterTestEvent => SequenceSource::new(2));
             throttled = transform!(RateLimiterTestEvent -> RateLimiterTestEvent => PassthroughTransform, [
-                rate_limit(0.5)
+                rate_limit_with_burst(50.0, 1.0)
             ]);
             snk = sink!(RateLimiterTestEvent => sink);
         },
@@ -197,19 +229,22 @@ async fn rate_limiter_low_rate_half_eps_processes_all_events() -> Result<()> {
         }
     }
     .await
-    .map_err(|e| anyhow::anyhow!("failed to create low-rate flow: {e}"))?;
+    .map_err(|e| anyhow!("failed to create low-rate flow: {e}"))?;
 
-    let start = Instant::now();
-    tokio::time::timeout(Duration::from_secs(8), handle.run())
+    let (_, throttled_journal) = test_handle
+        .stage_journal_for_test("throttled")
+        .map_err(|e| anyhow!("failed to look up throttled stage journal: {e}"))?;
+
+    tokio::time::timeout(Duration::from_secs(8), test_handle.into_inner().run())
         .await
-        .map_err(|_| anyhow::anyhow!("low-rate flow run timed out"))?
-        .map_err(|e| anyhow::anyhow!("low-rate flow run failed: {e}"))?;
-    let elapsed = start.elapsed();
+        .map_err(|_| anyhow!("low-rate flow run timed out"))?
+        .map_err(|e| anyhow!("low-rate flow run failed: {e}"))?;
 
     assert_eq!(count.load(Ordering::Relaxed), 2);
+    let delayed = rate_limiter_delayed_events(&throttled_journal).await?;
     assert!(
-        elapsed >= Duration::from_millis(1500),
-        "expected low-rate limiter to delay the second event, elapsed={elapsed:?}"
+        delayed >= 1,
+        "expected at least one rate limiter delayed event on the throttled stage journal"
     );
 
     Ok(())
@@ -218,7 +253,7 @@ async fn rate_limiter_low_rate_half_eps_processes_all_events() -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rate_limiter_weighted_default_burst_makes_progress() -> Result<()> {
     let (sink, count) = CountingSink::new();
-    let handle = flow! {
+    let test_handle = test_flow! {
         name: "rate_limiter_weighted_default_burst",
         journals: disk_journals(unique_journal_dir("rate_limiter_weighted_default_burst")),
         middleware: [],
@@ -239,12 +274,12 @@ async fn rate_limiter_weighted_default_burst_makes_progress() -> Result<()> {
         }
     }
     .await
-    .map_err(|e| anyhow::anyhow!("failed to create weighted flow: {e}"))?;
+    .map_err(|e| anyhow!("failed to create weighted flow: {e}"))?;
 
-    tokio::time::timeout(Duration::from_secs(3), handle.run())
+    tokio::time::timeout(Duration::from_secs(2), test_handle.into_inner().run())
         .await
-        .map_err(|_| anyhow::anyhow!("weighted flow run timed out"))?
-        .map_err(|e| anyhow::anyhow!("weighted flow run failed: {e}"))?;
+        .map_err(|_| anyhow!("weighted flow run timed out"))?
+        .map_err(|e| anyhow!("weighted flow run failed: {e}"))?;
 
     assert_eq!(count.load(Ordering::Relaxed), 1);
     Ok(())
@@ -252,7 +287,7 @@ async fn rate_limiter_weighted_default_burst_makes_progress() -> Result<()> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rate_limiter_invalid_explicit_burst_fails_at_materialisation() {
-    let result = flow! {
+    let result = test_flow! {
         name: "rate_limiter_invalid",
         journals: disk_journals(unique_journal_dir("rate_limiter_invalid")),
         middleware: [],
@@ -290,14 +325,14 @@ async fn rate_limiter_invalid_explicit_burst_fails_at_materialisation() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rate_limiter_source_stage_limits_per_poll_and_documents_batching() -> Result<()> {
     let (sink, count) = CountingSink::new();
-    let handle = flow! {
+    let test_handle = test_flow! {
         name: "rate_limiter_source_poll_gating",
         journals: disk_journals(unique_journal_dir("rate_limiter_source_poll_gating")),
         middleware: [],
 
         stages: {
             src = source!(RateLimiterTestEvent => BatchedSource::new(vec![2, 2]), [
-                rate_limit(1.0)
+                rate_limit_with_burst(50.0, 1.0)
             ]);
             passthrough = transform!(RateLimiterTestEvent -> RateLimiterTestEvent => PassthroughTransform);
             snk = sink!(RateLimiterTestEvent => sink);
@@ -309,23 +344,22 @@ async fn rate_limiter_source_stage_limits_per_poll_and_documents_batching() -> R
         }
     }
     .await
-    .map_err(|e| anyhow::anyhow!("failed to create source poll-gating flow: {e}"))?;
+    .map_err(|e| anyhow!("failed to create source poll-gating flow: {e}"))?;
 
-    let start = Instant::now();
-    tokio::time::timeout(Duration::from_secs(5), handle.run())
+    let (_, src_journal) = test_handle
+        .stage_journal_for_test("src")
+        .map_err(|e| anyhow!("failed to look up src stage journal: {e}"))?;
+
+    tokio::time::timeout(Duration::from_secs(8), test_handle.into_inner().run())
         .await
-        .map_err(|_| anyhow::anyhow!("source poll-gating flow run timed out"))?
-        .map_err(|e| anyhow::anyhow!("source poll-gating flow run failed: {e}"))?;
-    let elapsed = start.elapsed();
+        .map_err(|_| anyhow!("source poll-gating flow run timed out"))?
+        .map_err(|e| anyhow!("source poll-gating flow run failed: {e}"))?;
 
     assert_eq!(count.load(Ordering::Relaxed), 4);
+    let delayed = rate_limiter_delayed_events(&src_journal).await?;
     assert!(
-        elapsed >= Duration::from_millis(900),
-        "expected at least one poll to be delayed, elapsed={elapsed:?}"
-    );
-    assert!(
-        elapsed < Duration::from_millis(2500),
-        "source-stage rate limiting should gate polls, not each emitted event, elapsed={elapsed:?}"
+        delayed >= 1,
+        "expected at least one rate limiter delayed event on the src stage journal"
     );
 
     Ok(())

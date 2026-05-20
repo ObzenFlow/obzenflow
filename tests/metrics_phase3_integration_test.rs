@@ -18,7 +18,7 @@ use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStat
 use obzenflow_core::metrics::MetricsExporter;
 use obzenflow_core::TypedPayload;
 use obzenflow_core::{StageId, WriterId};
-use obzenflow_dsl::{flow, sink, source, transform};
+use obzenflow_dsl::{sink, source, test_flow, transform};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::id_conversions::StageIdExt;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
@@ -26,6 +26,7 @@ use obzenflow_runtime::stages::common::handlers::{
     FiniteSourceHandler, SinkHandler, TransformHandler,
 };
 use obzenflow_runtime::stages::SourceError;
+use obzenflow_runtime::testing::MetricsBarrier;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -41,7 +42,6 @@ impl TypedPayload for MetricEvent {
     const EVENT_TYPE: &'static str = "metric.sample";
 }
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
 use std::time::SystemTime;
 use tokio::time::{sleep, Duration};
 
@@ -192,29 +192,23 @@ impl SinkHandler for SleepingSink {
     }
 }
 
-async fn wait_for_metrics(
+fn render_metrics_checked(
     exporter: &Arc<dyn MetricsExporter>,
-    timeout: Duration,
     debug_patterns: &[String],
     predicate: impl Fn(&str) -> bool,
 ) -> Result<String> {
-    let start = Instant::now();
-    let mut last = String::new();
+    let snapshot = exporter
+        .render_metrics()
+        .map_err(|e| anyhow!("Failed to render metrics: {e}"))?;
 
-    while start.elapsed() < timeout {
-        last = exporter
-            .render_metrics()
-            .map_err(|e| anyhow!("Failed to render metrics: {e}"))?;
-        if predicate(&last) {
-            return Ok(last);
-        }
-        sleep(Duration::from_millis(50)).await;
+    if predicate(&snapshot) {
+        return Ok(snapshot);
     }
 
-    let excerpt = filter_metrics_lines(&last, debug_patterns, 120);
+    let excerpt = filter_metrics_lines(&snapshot, debug_patterns, 120);
     Err(anyhow!(
-        "timed out waiting for expected metrics (last snapshot length={}).\nFiltered excerpt:\n{}",
-        last.len(),
+        "metrics snapshot did not include expected lines (snapshot length={}).\nFiltered excerpt:\n{}",
+        snapshot.len(),
         if excerpt.is_empty() {
             "(no matching lines)"
         } else {
@@ -249,18 +243,33 @@ fn unique_journal_dir(prefix: &str) -> std::path::PathBuf {
     std::path::PathBuf::from("target").join(format!("{prefix}_{suffix}"))
 }
 
-async fn run_with_metrics_timeout(
-    flow_handle: obzenflow_runtime::pipeline::handle::FlowHandle,
+async fn run_with_metrics_barrier(
+    test_handle: obzenflow_runtime::testing::FlowTestHarness,
     timeout: Duration,
 ) -> Result<Arc<dyn MetricsExporter>> {
-    match tokio::time::timeout(timeout, flow_handle.run_with_metrics()).await {
-        Ok(run_result) => run_result
-            .map_err(|e| anyhow!("Failed to run flow: {e:?}"))?
-            .ok_or_else(|| anyhow!("Metrics exporter was not configured")),
-        Err(_) => Err(anyhow!(
-            "flow did not complete within {timeout:?} (timeout)"
-        )),
+    let exporter = test_handle
+        .metrics_exporter()
+        .ok_or_else(|| anyhow!("Metrics exporter was not configured"))?;
+
+    let metrics_barrier = MetricsBarrier::try_on_flow(&test_handle)
+        .await
+        .map_err(|e| anyhow!("Failed to construct MetricsBarrier: {e}"))?;
+
+    match tokio::time::timeout(timeout, test_handle.into_inner().run()).await {
+        Ok(run_result) => run_result.map_err(|e| anyhow!("Failed to run flow: {e:?}"))?,
+        Err(_) => {
+            return Err(anyhow!(
+                "flow did not complete within {timeout:?} (timeout)"
+            ))
+        }
     }
+
+    metrics_barrier
+        .wait_for_drained()
+        .await
+        .map_err(|e| anyhow!("MetricsBarrier wait failed: {e}"))?;
+
+    Ok(exporter)
 }
 
 fn stage_id_with_middleware(
@@ -300,9 +309,8 @@ fn metric_line_value(
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn metrics_all_stage_metrics_include_flow_id_label() -> Result<()> {
     let timeout_flow = Duration::from_secs(30);
-    let timeout_metrics = Duration::from_secs(10);
 
-    let flow_handle = flow! {
+    let test_handle = test_flow! {
         name: "metrics_flow_id_labels",
         journals: disk_journals(unique_journal_dir("metrics_flow_id_labels")),
         middleware: [],
@@ -326,7 +334,7 @@ async fn metrics_all_stage_metrics_include_flow_id_label() -> Result<()> {
     .await
     .map_err(|e| anyhow!("Flow creation failed: {e:?}"))?;
 
-    let exporter = run_with_metrics_timeout(flow_handle, timeout_flow).await?;
+    let exporter = run_with_metrics_barrier(test_handle, timeout_flow).await?;
 
     let debug_patterns = vec![
         "stage_id=\"".to_string(),
@@ -334,10 +342,9 @@ async fn metrics_all_stage_metrics_include_flow_id_label() -> Result<()> {
         "obzenflow_events_total".to_string(),
     ];
 
-    let metrics_text = wait_for_metrics(&exporter, timeout_metrics, &debug_patterns, |text| {
+    let metrics_text = render_metrics_checked(&exporter, &debug_patterns, |text| {
         text.contains("obzenflow_events_total") && text.contains("stage_id=\"")
-    })
-    .await?;
+    })?;
 
     let stage_lines: Vec<&str> = metrics_text
         .lines()
@@ -361,12 +368,11 @@ async fn metrics_all_stage_metrics_include_flow_id_label() -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn metrics_processing_time_sum_tracks_actual_work() -> Result<()> {
     let timeout_flow = Duration::from_secs(30);
-    let timeout_metrics = Duration::from_secs(10);
 
     let per_event = Duration::from_millis(10);
     let total_events: usize = 100;
 
-    let flow_handle = flow! {
+    let test_handle = test_flow! {
         name: "metrics_processing_time_sum",
         journals: disk_journals(unique_journal_dir("metrics_processing_time_sum")),
         middleware: [],
@@ -385,7 +391,7 @@ async fn metrics_processing_time_sum_tracks_actual_work() -> Result<()> {
     .await
     .map_err(|e| anyhow!("Flow creation failed: {e:?}"))?;
 
-    let exporter = run_with_metrics_timeout(flow_handle, timeout_flow).await?;
+    let exporter = run_with_metrics_barrier(test_handle, timeout_flow).await?;
 
     let flow_label = "flow=\"metrics_processing_time_sum\"".to_string();
     let stage_label = "stage=\"snk\"".to_string();
@@ -395,10 +401,9 @@ async fn metrics_processing_time_sum_tracks_actual_work() -> Result<()> {
         stage_label.clone(),
     ];
 
-    let metrics_text = wait_for_metrics(&exporter, timeout_metrics, &debug_patterns, |text| {
+    let metrics_text = render_metrics_checked(&exporter, &debug_patterns, |text| {
         text.contains("obzenflow_processing_time_seconds_sum") && text.contains(&stage_label)
-    })
-    .await?;
+    })?;
 
     let sum_s = metric_line_value(
         &metrics_text,
@@ -454,9 +459,8 @@ async fn metrics_processing_time_sum_tracks_actual_work() -> Result<()> {
 async fn metrics_circuit_breaker_counters_are_exported_with_joinable_labels() -> Result<()> {
     // Strict timeout protocol: if the flow or metrics pipeline hangs, fail fast.
     let timeout_flow = Duration::from_secs(30);
-    let timeout_metrics = Duration::from_secs(10);
 
-    let flow_handle = flow! {
+    let test_handle = test_flow! {
         name: "metrics_cb_phase3",
         journals: disk_journals(unique_journal_dir("metrics_cb_phase3")),
         middleware: [],
@@ -481,12 +485,12 @@ async fn metrics_circuit_breaker_counters_are_exported_with_joinable_labels() ->
     .await
     .map_err(|e| anyhow!("Flow creation failed: {e:?}"))?;
 
-    let topology = flow_handle
+    let topology = test_handle
         .topology()
         .expect("FlowHandle should expose the canonical topology with middleware annotations");
     let cb_stage_id = stage_id_with_middleware(&topology, "circuit_breaker")?;
 
-    let exporter = run_with_metrics_timeout(flow_handle, timeout_flow).await?;
+    let exporter = run_with_metrics_barrier(test_handle, timeout_flow).await?;
 
     let cb_stage_label = format!("stage_id=\"{cb_stage_id}\"");
     let flow_label = "flow=\"metrics_cb_phase3\"".to_string();
@@ -498,12 +502,11 @@ async fn metrics_circuit_breaker_counters_are_exported_with_joinable_labels() ->
         cb_stage_label.clone(),
     ];
 
-    let metrics_text = wait_for_metrics(&exporter, timeout_metrics, &debug_patterns, |text| {
+    let metrics_text = render_metrics_checked(&exporter, &debug_patterns, |text| {
         text.contains("obzenflow_circuit_breaker_requests_total")
             && text.contains("obzenflow_circuit_breaker_rejections_total")
             && text.contains(&cb_stage_label)
-    })
-    .await?;
+    })?;
 
     // Counters must exist and be stage_id joinable.
     assert!(
@@ -531,9 +534,8 @@ async fn metrics_circuit_breaker_counters_are_exported_with_joinable_labels() ->
 async fn metrics_circuit_breaker_cumulative_are_exported_and_trippable() -> Result<()> {
     // Strict timeout protocol: if the flow or metrics pipeline hangs, fail fast.
     let timeout_flow = Duration::from_secs(30);
-    let timeout_metrics = Duration::from_secs(10);
 
-    let flow_handle = flow! {
+    let test_handle = test_flow! {
         name: "metrics_cb_cumulative",
         journals: disk_journals(unique_journal_dir("metrics_cb_cumulative")),
         middleware: [],
@@ -556,12 +558,12 @@ async fn metrics_circuit_breaker_cumulative_are_exported_and_trippable() -> Resu
     .await
     .map_err(|e| anyhow!("Flow creation failed: {e:?}"))?;
 
-    let topology = flow_handle
+    let topology = test_handle
         .topology()
         .expect("FlowHandle should expose the canonical topology with middleware annotations");
     let cb_stage_id = stage_id_with_middleware(&topology, "circuit_breaker")?;
 
-    let exporter = run_with_metrics_timeout(flow_handle, timeout_flow).await?;
+    let exporter = run_with_metrics_barrier(test_handle, timeout_flow).await?;
 
     let cb_stage_label = format!("stage_id=\"{cb_stage_id}\"");
     let flow_label = "flow=\"metrics_cb_cumulative\"".to_string();
@@ -575,7 +577,7 @@ async fn metrics_circuit_breaker_cumulative_are_exported_and_trippable() -> Resu
         cb_stage_label.clone(),
     ];
 
-    let metrics_text = wait_for_metrics(&exporter, timeout_metrics, &debug_patterns, |text| {
+    let metrics_text = render_metrics_checked(&exporter, &debug_patterns, |text| {
         text.contains("obzenflow_circuit_breaker_opened_total")
             && text.contains("obzenflow_circuit_breaker_successes_total")
             && text.contains("obzenflow_circuit_breaker_failures_total")
@@ -583,8 +585,7 @@ async fn metrics_circuit_breaker_cumulative_are_exported_and_trippable() -> Resu
             && text.contains("obzenflow_circuit_breaker_state_transitions_total")
             && text.contains(&flow_label)
             && text.contains(&cb_stage_label)
-    })
-    .await?;
+    })?;
 
     let opened_total = metric_line_value(
         &metrics_text,
@@ -657,12 +658,11 @@ async fn metrics_circuit_breaker_cumulative_are_exported_and_trippable() -> Resu
 async fn metrics_rate_limiter_are_exported_with_joinable_labels() -> Result<()> {
     // Strict timeout protocol: if the flow or metrics pipeline hangs, fail fast.
     let timeout_flow = Duration::from_secs(30);
-    let timeout_metrics = Duration::from_secs(10);
     let total_events: usize = 250;
 
     // Configure the limiter to produce at least one delayed event while keeping
     // the end-to-end run comfortably inside CI timing variance.
-    let flow_handle = flow! {
+    let test_handle = test_flow! {
         name: "metrics_rl_phase3",
         journals: disk_journals(unique_journal_dir("metrics_rl_phase3")),
         middleware: [],
@@ -688,12 +688,12 @@ async fn metrics_rate_limiter_are_exported_with_joinable_labels() -> Result<()> 
     .await
     .map_err(|e| anyhow!("Flow creation failed: {e:?}"))?;
 
-    let topology = flow_handle
+    let topology = test_handle
         .topology()
         .expect("FlowHandle should expose the canonical topology with middleware annotations");
     let rl_stage_id = stage_id_with_middleware(&topology, "rate_limiter")?;
 
-    let exporter = run_with_metrics_timeout(flow_handle, timeout_flow).await?;
+    let exporter = run_with_metrics_barrier(test_handle, timeout_flow).await?;
 
     let rl_stage_label = format!("stage_id=\"{rl_stage_id}\"");
     let flow_label = "flow=\"metrics_rl_phase3\"".to_string();
@@ -712,7 +712,7 @@ async fn metrics_rate_limiter_are_exported_with_joinable_labels() -> Result<()> 
 
     let expected_events_total = total_events as f64;
     let join_labels = vec![flow_label.clone(), rl_stage_label.clone()];
-    let metrics_text = wait_for_metrics(&exporter, timeout_metrics, &debug_patterns, |text| {
+    let metrics_text = render_metrics_checked(&exporter, &debug_patterns, |text| {
         let events_total =
             metric_line_value(text, "obzenflow_rate_limiter_events_total{", &join_labels);
         let events_total_ok = events_total
@@ -726,8 +726,7 @@ async fn metrics_rate_limiter_are_exported_with_joinable_labels() -> Result<()> 
             && text.contains("obzenflow_rate_limiter_utilization")
             && text.contains("obzenflow_rate_limiter_bucket_tokens")
             && text.contains("obzenflow_rate_limiter_bucket_capacity")
-    })
-    .await?;
+    })?;
 
     // Counters must exist and be stage_id joinable.
     let events_total = metric_line_value(
@@ -818,10 +817,9 @@ async fn metrics_circuit_breaker_requests_total_is_accurate_without_summaries() 
     // Summary-based counters undercount or stay at 0. Wide-event RuntimeContext
     // snapshots must carry cumulative CB counters so the last event has truth.
     let timeout_flow = Duration::from_secs(30);
-    let timeout_metrics = Duration::from_secs(10);
     let total_events: usize = 500;
 
-    let flow_handle = flow! {
+    let test_handle = test_flow! {
         name: "metrics_cb_no_summary",
         journals: disk_journals(unique_journal_dir("metrics_cb_no_summary")),
         middleware: [],
@@ -842,12 +840,12 @@ async fn metrics_circuit_breaker_requests_total_is_accurate_without_summaries() 
     .await
     .map_err(|e| anyhow!("Flow creation failed: {e:?}"))?;
 
-    let topology = flow_handle
+    let topology = test_handle
         .topology()
         .expect("FlowHandle should expose the canonical topology with middleware annotations");
     let cb_stage_id = stage_id_with_middleware(&topology, "circuit_breaker")?;
 
-    let exporter = run_with_metrics_timeout(flow_handle, timeout_flow).await?;
+    let exporter = run_with_metrics_barrier(test_handle, timeout_flow).await?;
 
     let cb_stage_label = format!("stage_id=\"{cb_stage_id}\"");
     let flow_label = "flow=\"metrics_cb_no_summary\"".to_string();
@@ -859,12 +857,11 @@ async fn metrics_circuit_breaker_requests_total_is_accurate_without_summaries() 
         cb_stage_label.clone(),
     ];
 
-    let metrics_text = wait_for_metrics(&exporter, timeout_metrics, &debug_patterns, |text| {
+    let metrics_text = render_metrics_checked(&exporter, &debug_patterns, |text| {
         text.contains("obzenflow_circuit_breaker_requests_total")
             && text.contains(&flow_label)
             && text.contains(&cb_stage_label)
-    })
-    .await?;
+    })?;
 
     let requests_total = metric_line_value(
         &metrics_text,
@@ -886,10 +883,9 @@ async fn metrics_rate_limiter_events_total_is_accurate_without_summaries() -> Re
     // Wide-event RuntimeContext snapshots must carry cumulative RL counters, and
     // utilization must be derivable from bucket state even when no summaries emit.
     let timeout_flow = Duration::from_secs(30);
-    let timeout_metrics = Duration::from_secs(10);
     let total_events: usize = 200;
 
-    let flow_handle = flow! {
+    let test_handle = test_flow! {
         name: "metrics_rl_no_summary",
         journals: disk_journals(unique_journal_dir("metrics_rl_no_summary")),
         middleware: [],
@@ -912,12 +908,12 @@ async fn metrics_rate_limiter_events_total_is_accurate_without_summaries() -> Re
     .await
     .map_err(|e| anyhow!("Flow creation failed: {e:?}"))?;
 
-    let topology = flow_handle
+    let topology = test_handle
         .topology()
         .expect("FlowHandle should expose the canonical topology with middleware annotations");
     let rl_stage_id = stage_id_with_middleware(&topology, "rate_limiter")?;
 
-    let exporter = run_with_metrics_timeout(flow_handle, timeout_flow).await?;
+    let exporter = run_with_metrics_barrier(test_handle, timeout_flow).await?;
 
     let rl_stage_label = format!("stage_id=\"{rl_stage_id}\"");
     let flow_label = "flow=\"metrics_rl_no_summary\"".to_string();
@@ -930,15 +926,14 @@ async fn metrics_rate_limiter_events_total_is_accurate_without_summaries() -> Re
         rl_stage_label.clone(),
     ];
 
-    let metrics_text = wait_for_metrics(&exporter, timeout_metrics, &debug_patterns, |text| {
+    let metrics_text = render_metrics_checked(&exporter, &debug_patterns, |text| {
         text.contains("obzenflow_rate_limiter_events_total")
             && text.contains("obzenflow_rate_limiter_utilization")
             && text.contains("obzenflow_rate_limiter_bucket_tokens")
             && text.contains("obzenflow_rate_limiter_bucket_capacity")
             && text.contains(&flow_label)
             && text.contains(&rl_stage_label)
-    })
-    .await?;
+    })?;
 
     let events_total = metric_line_value(
         &metrics_text,
@@ -991,9 +986,8 @@ async fn metrics_rate_limiter_events_total_is_accurate_without_summaries() -> Re
 async fn metrics_contract_metrics_are_exported_and_joinable_to_topology() -> Result<()> {
     // Strict timeout protocol: if the flow or metrics pipeline hangs, fail fast.
     let timeout_flow = Duration::from_secs(30);
-    let timeout_metrics = Duration::from_secs(10);
 
-    let flow_handle = flow! {
+    let test_handle = test_flow! {
         name: "metrics_contracts_phase3",
         journals: disk_journals(unique_journal_dir("metrics_contracts_phase3")),
         middleware: [],
@@ -1010,7 +1004,7 @@ async fn metrics_contract_metrics_are_exported_and_joinable_to_topology() -> Res
     .await
     .map_err(|e| anyhow!("Flow creation failed: {e:?}"))?;
 
-    let contract_attachments = flow_handle
+    let contract_attachments = test_handle
         .contract_attachments()
         .expect("FlowHandle should expose contract attachments for joinability");
     assert!(
@@ -1018,7 +1012,7 @@ async fn metrics_contract_metrics_are_exported_and_joinable_to_topology() -> Res
         "expected at least one contract attachment"
     );
 
-    let exporter = run_with_metrics_timeout(flow_handle, timeout_flow).await?;
+    let exporter = run_with_metrics_barrier(test_handle, timeout_flow).await?;
 
     let debug_patterns = vec![
         "obzenflow_contract_results_total".to_string(),
@@ -1026,11 +1020,10 @@ async fn metrics_contract_metrics_are_exported_and_joinable_to_topology() -> Res
         "obzenflow_contract_overrides_total".to_string(),
         "flow=\"metrics_contracts_phase3\"".to_string(),
     ];
-    let metrics_text = wait_for_metrics(&exporter, timeout_metrics, &debug_patterns, |text| {
+    let metrics_text = render_metrics_checked(&exporter, &debug_patterns, |text| {
         text.contains("obzenflow_contract_results_total")
             && text.contains("flow=\"metrics_contracts_phase3\"")
-    })
-    .await?;
+    })?;
 
     // For every structurally attached contract, there must be a corresponding results series
     // with ID-first labels for joinability.

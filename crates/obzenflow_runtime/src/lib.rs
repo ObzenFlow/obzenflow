@@ -23,6 +23,9 @@ pub mod metrics;
 pub mod pipeline;
 pub mod stages;
 
+#[cfg(any(test, feature = "test-support"))]
+pub mod testing;
+
 /// Convenience re-exports of the most commonly used runtime types.
 ///
 /// The prelude gathers types that almost every flow definition or stage

@@ -13,6 +13,14 @@ Defines the handler traits that users implement to build processing stages, and 
 - **Metrics collection** via wide-event aggregation, piped to whatever exporter the adapters layer provides.
 - **Backpressure and contracts** for per-edge flow control and verification between stages.
 
+## Test support
+
+This crate exposes a test-only feature flag:
+
+- `test-support`: enables the `obzenflow_runtime::testing` module (FLOWIP-114h) and pulls in `tokio/test-util` to support paused-time tests (for example, `#[tokio::test(start_paused = true)]`).
+
+This feature is for deterministic CI and integration tests only. Production builds must not enable it.
+
 ## Stage types
 
 Each stage type has a corresponding handler trait (and async variant) that users implement:
