@@ -23,6 +23,7 @@ use obzenflow_core::event::{SystemEvent, WriterId};
 use obzenflow_core::journal::Journal;
 use obzenflow_core::StageId;
 use std::sync::Arc;
+use std::time::Duration;
 use thiserror::Error;
 
 /// Failure modes for [`MetricsBarrier`] construction.
@@ -118,10 +119,7 @@ impl MetricsBarrier {
     /// baseline first, so a covering `Exported` event appended before this
     /// call resolves the wait immediately. If the catch-up scan fails to
     /// find a covering watermark, the helper polls newly appended events.
-    pub async fn wait_for_stage_seq(
-        &self,
-        target_seq: u64,
-    ) -> Result<(), MetricsBarrierError> {
+    pub async fn wait_for_stage_seq(&self, target_seq: u64) -> Result<(), MetricsBarrierError> {
         let writer_key = self
             .stage_writer_key
             .as_ref()
@@ -132,9 +130,9 @@ impl MetricsBarrier {
             let envelopes = read_journal_from(&self.system_journal, scan_from).await?;
             let next_scan_from = scan_from + envelopes.len() as u64;
             for env in envelopes {
-                if let SystemEventType::MetricsCoordination(
-                    MetricsCoordinationEvent::Exported { watermark },
-                ) = &env.event.event
+                if let SystemEventType::MetricsCoordination(MetricsCoordinationEvent::Exported {
+                    watermark,
+                }) = &env.event.event
                 {
                     if let Some(seq) = watermark.clocks.get(writer_key) {
                         if *seq >= target_seq {
@@ -144,9 +142,9 @@ impl MetricsBarrier {
                 }
             }
             scan_from = next_scan_from;
-            // Yield instead of sleeping so this helper works under paused-time
-            // runtimes without auto-advancing the clock (FLOWIP-114h).
-            tokio::task::yield_now().await;
+            // Under paused time, allow the runtime to auto-advance by awaiting a timer.
+            // Under live time, this prevents a busy poll loop at EOF.
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
     }
 
@@ -168,7 +166,7 @@ impl MetricsBarrier {
                 }
             }
             scan_from = next_scan_from;
-            tokio::task::yield_now().await;
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
     }
 
@@ -219,8 +217,10 @@ async fn current_journal_offset(
 async fn read_journal_from(
     journal: &Arc<dyn Journal<SystemEvent>>,
     from: u64,
-) -> Result<Vec<obzenflow_core::event::event_envelope::EventEnvelope<SystemEvent>>, MetricsBarrierError>
-{
+) -> Result<
+    Vec<obzenflow_core::event::event_envelope::EventEnvelope<SystemEvent>>,
+    MetricsBarrierError,
+> {
     let mut reader = journal
         .reader_from(from)
         .await
@@ -331,7 +331,8 @@ mod tests {
             event: T,
             _parent: Option<&EventEnvelope<T>>,
         ) -> Result<EventEnvelope<T>, JournalError> {
-            let envelope = EventEnvelope::new(obzenflow_core::event::JournalWriterId::from(self.id), event);
+            let envelope =
+                EventEnvelope::new(obzenflow_core::event::JournalWriterId::from(self.id), event);
             let mut guard = self.events.lock().expect("MemoryJournal: poisoned lock");
             guard.push(envelope.clone());
             Ok(envelope)
@@ -370,7 +371,10 @@ mod tests {
             }))
         }
 
-        async fn reader_from(&self, position: u64) -> Result<Box<dyn JournalReader<T>>, JournalError> {
+        async fn reader_from(
+            &self,
+            position: u64,
+        ) -> Result<Box<dyn JournalReader<T>>, JournalError> {
             Ok(Box::new(MemoryJournalReader {
                 events: Arc::clone(&self.events),
                 pos: position as usize,
@@ -412,6 +416,102 @@ mod tests {
         FlowTestHarness::from_parts(handle, Vec::new()).expect("empty stage journals")
     }
 
+    fn harness_without_system_journal(
+        topology: Option<Arc<obzenflow_topology::Topology>>,
+    ) -> FlowTestHarness {
+        let (event_sender, _event_receiver, state_watcher) =
+            ChannelBuilder::<PipelineEvent, PipelineState>::new().build(PipelineState::Created);
+        let supervisor_task = SupervisorTaskBuilder::<PipelineState>::new("dummy_pipeline")
+            .spawn(|| async move { Ok::<(), Box<dyn std::error::Error + Send + Sync>>(()) });
+        let standard_handle = HandleBuilder::new()
+            .with_event_sender(event_sender)
+            .with_state_watcher(state_watcher)
+            .with_supervisor_task(supervisor_task)
+            .build_standard()
+            .expect("dummy handle should build");
+
+        let extras = FlowHandleExtras {
+            topology,
+            flow_name: "dummy".to_string(),
+            contract_attachments: None,
+            system_journal: None,
+            liveness_snapshots: None,
+        };
+
+        let handle = FlowHandle::new(standard_handle, None, extras);
+        FlowTestHarness::from_parts(handle, Vec::new()).expect("empty stage journals")
+    }
+
+    #[tokio::test]
+    async fn try_on_flow_errors_when_system_journal_is_missing() {
+        let harness = harness_without_system_journal(None);
+
+        let err = MetricsBarrier::try_on_flow(&harness)
+            .await
+            .err()
+            .expect("expected MissingSystemJournal");
+        assert!(
+            matches!(err, MetricsBarrierError::MissingSystemJournal),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn try_on_stage_errors_when_topology_is_missing() {
+        let system_journal: Arc<dyn Journal<SystemEvent>> = Arc::new(MemoryJournal::default());
+        let harness = harness_with_system_journal(system_journal, None);
+
+        let err = MetricsBarrier::try_on_stage(&harness, "stage")
+            .await
+            .err()
+            .expect("expected MissingTopology");
+        assert!(
+            matches!(err, MetricsBarrierError::MissingTopology),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn try_on_stage_errors_on_unknown_stage_name() {
+        let system_journal: Arc<dyn Journal<SystemEvent>> = Arc::new(MemoryJournal::default());
+
+        let mut topology_builder = TopologyBuilder::new();
+        topology_builder.add_stage(Some("present".to_string()));
+        topology_builder.add_stage(Some("sink".to_string()));
+        let topology = Arc::new(topology_builder.build_unchecked().expect("topology"));
+
+        let harness = harness_with_system_journal(system_journal, Some(topology));
+        let err = MetricsBarrier::try_on_stage(&harness, "missing")
+            .await
+            .err()
+            .expect("expected UnknownStage");
+        assert!(
+            matches!(err, MetricsBarrierError::UnknownStage(ref name) if name == "missing"),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn try_on_stage_errors_on_ambiguous_stage_name() {
+        let system_journal: Arc<dyn Journal<SystemEvent>> = Arc::new(MemoryJournal::default());
+
+        let mut topology_builder = TopologyBuilder::new();
+        topology_builder.add_stage(Some("dup".to_string()));
+        topology_builder.add_stage(Some("dup".to_string()));
+        topology_builder.add_stage(Some("sink".to_string()));
+        let topology = Arc::new(topology_builder.build_unchecked().expect("topology"));
+
+        let harness = harness_with_system_journal(system_journal, Some(topology));
+        let err = MetricsBarrier::try_on_stage(&harness, "dup")
+            .await
+            .err()
+            .expect("expected AmbiguousStage");
+        assert!(
+            matches!(err, MetricsBarrierError::AmbiguousStage(ref name) if name == "dup"),
+            "unexpected error: {err:?}"
+        );
+    }
+
     #[tokio::test]
     async fn wait_for_drained_resolves_when_event_appended_before_wait_begins() {
         let system_journal: Arc<dyn Journal<SystemEvent>> = Arc::new(MemoryJournal::default());
@@ -431,6 +531,32 @@ mod tests {
             )
             .await
             .expect("append drained");
+
+        tokio::time::timeout(Duration::from_secs(1), barrier.wait_for_drained())
+            .await
+            .expect("wait should resolve within timeout")
+            .expect("wait should succeed");
+    }
+
+    #[tokio::test]
+    async fn wait_for_drained_resolves_when_shutdown_appended_before_wait_begins() {
+        let system_journal: Arc<dyn Journal<SystemEvent>> = Arc::new(MemoryJournal::default());
+        let harness = harness_with_system_journal(system_journal.clone(), None);
+
+        let barrier = MetricsBarrier::try_on_flow(&harness)
+            .await
+            .expect("construct barrier");
+
+        system_journal
+            .append(
+                SystemEvent::new(
+                    WriterId::from(StageId::new()),
+                    SystemEventType::MetricsCoordination(MetricsCoordinationEvent::Shutdown),
+                ),
+                None,
+            )
+            .await
+            .expect("append shutdown");
 
         tokio::time::timeout(Duration::from_secs(1), barrier.wait_for_drained())
             .await
@@ -475,5 +601,126 @@ mod tests {
             .await
             .expect("wait should resolve within timeout")
             .expect("wait should succeed");
+    }
+
+    #[tokio::test]
+    async fn wait_for_stage_seq_filters_unrelated_writer_progress() {
+        let system_journal: Arc<dyn Journal<SystemEvent>> = Arc::new(MemoryJournal::default());
+
+        let mut topology_builder = TopologyBuilder::new();
+        let stage_topo_id = topology_builder.add_stage(Some("stage".to_string()));
+        let other_topo_id = topology_builder.add_stage(Some("other".to_string()));
+        topology_builder.add_stage(Some("sink".to_string()));
+        let topology = Arc::new(topology_builder.build_unchecked().expect("topology"));
+
+        let stage_id = StageId::from_topology_id(stage_topo_id);
+        let stage_key = WriterId::from(stage_id).to_string();
+        let other_id = StageId::from_topology_id(other_topo_id);
+        let other_key = WriterId::from(other_id).to_string();
+
+        let harness = harness_with_system_journal(system_journal.clone(), Some(topology));
+        let barrier = MetricsBarrier::try_on_stage(&harness, "stage")
+            .await
+            .expect("construct stage barrier");
+
+        let mut wait = tokio::spawn(async move { barrier.wait_for_stage_seq(5).await });
+
+        let mut watermark = VectorClock::new();
+        watermark.clocks.insert(other_key, 5);
+        system_journal
+            .append(
+                SystemEvent::new(
+                    WriterId::from(other_id),
+                    SystemEventType::MetricsCoordination(MetricsCoordinationEvent::Exported {
+                        watermark,
+                    }),
+                ),
+                None,
+            )
+            .await
+            .expect("append unrelated exported");
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            !wait.is_finished(),
+            "wait should not resolve on unrelated writer watermark"
+        );
+
+        let mut watermark = VectorClock::new();
+        watermark.clocks.insert(stage_key, 5);
+        system_journal
+            .append(
+                SystemEvent::new(
+                    WriterId::from(stage_id),
+                    SystemEventType::MetricsCoordination(MetricsCoordinationEvent::Exported {
+                        watermark,
+                    }),
+                ),
+                None,
+            )
+            .await
+            .expect("append covering exported");
+
+        tokio::time::timeout(Duration::from_secs(1), &mut wait)
+            .await
+            .expect("wait should resolve within timeout")
+            .expect("task should join")
+            .expect("wait should succeed");
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn wait_for_stage_seq_completes_under_paused_time_via_timer_polling() {
+        let system_journal: Arc<dyn Journal<SystemEvent>> = Arc::new(MemoryJournal::default());
+
+        let mut topology_builder = TopologyBuilder::new();
+        let stage_topo_id = topology_builder.add_stage(Some("stage".to_string()));
+        topology_builder.add_stage(Some("sink".to_string()));
+        let topology = Arc::new(topology_builder.build_unchecked().expect("topology"));
+
+        let stage_id = StageId::from_topology_id(stage_topo_id);
+        let stage_key = WriterId::from(stage_id).to_string();
+
+        let harness = harness_with_system_journal(system_journal.clone(), Some(topology));
+        let barrier = MetricsBarrier::try_on_stage(&harness, "stage")
+            .await
+            .expect("construct stage barrier");
+
+        let system_journal_for_writer = system_journal.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+
+            let mut watermark = VectorClock::new();
+            watermark.clocks.insert(stage_key, 2);
+
+            system_journal_for_writer
+                .append(
+                    SystemEvent::new(
+                        WriterId::from(stage_id),
+                        SystemEventType::MetricsCoordination(MetricsCoordinationEvent::Exported {
+                            watermark,
+                        }),
+                    ),
+                    None,
+                )
+                .await
+                .expect("append exported");
+        });
+
+        let mut wait_task = tokio::spawn(async move { barrier.wait_for_stage_seq(2).await });
+        let (watchdog_tx, mut watchdog_rx) = tokio::sync::oneshot::channel::<()>();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_secs(2));
+            let _ = watchdog_tx.send(());
+        });
+
+        tokio::select! {
+            res = &mut wait_task => {
+                res.expect("task should join").expect("wait should succeed");
+            }
+            _ = &mut watchdog_rx => {
+                wait_task.abort();
+                panic!("wait_for_stage_seq did not complete under paused time");
+            }
+        }
     }
 }

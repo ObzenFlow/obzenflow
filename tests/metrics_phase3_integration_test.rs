@@ -20,6 +20,8 @@ use obzenflow_core::TypedPayload;
 use obzenflow_core::{StageId, WriterId};
 use obzenflow_dsl::{sink, source, test_flow, transform};
 use obzenflow_infra::journal::disk_journals;
+#[cfg(feature = "test-support")]
+use obzenflow_infra::journal::memory_journals;
 use obzenflow_runtime::id_conversions::StageIdExt;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
@@ -304,6 +306,58 @@ fn metric_line_value(
             .last()
             .and_then(|v| v.parse::<f64>().ok())
     })
+}
+
+#[cfg(feature = "test-support")]
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn metrics_barrier_smoke_current_thread_paused_time() -> Result<()> {
+    let test_handle = test_flow! {
+        name: "metrics_barrier_paused_time_smoke",
+        journals: memory_journals(),
+        middleware: [],
+
+        stages: {
+            src = source!(MetricEvent => BurstSource::new(10));
+            trans = transform!(MetricEvent -> MetricEvent => PassthroughTransform);
+            snk = sink!(MetricEvent => CountingSink::new().0);
+        },
+
+        topology: {
+            src |> trans;
+            trans |> snk;
+        }
+    }
+    .await
+    .map_err(|e| anyhow!("Flow creation failed: {e:?}"))?;
+
+    let exporter = test_handle
+        .metrics_exporter()
+        .ok_or_else(|| anyhow!("Metrics exporter was not configured"))?;
+
+    let metrics_barrier = MetricsBarrier::try_on_flow(&test_handle)
+        .await
+        .map_err(|e| anyhow!("Failed to construct MetricsBarrier: {e}"))?;
+
+    test_handle
+        .into_inner()
+        .run()
+        .await
+        .map_err(|e| anyhow!("Failed to run flow: {e:?}"))?;
+
+    metrics_barrier
+        .wait_for_drained()
+        .await
+        .map_err(|e| anyhow!("MetricsBarrier wait failed: {e}"))?;
+
+    let snapshot = exporter
+        .render_metrics()
+        .map_err(|e| anyhow!("Failed to render metrics: {e}"))?;
+    assert!(
+        snapshot.contains("obzenflow_events_total"),
+        "expected rendered metrics to include obzenflow_events_total"
+    );
+
+    Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

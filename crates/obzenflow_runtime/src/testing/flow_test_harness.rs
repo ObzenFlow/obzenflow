@@ -87,9 +87,17 @@ impl FlowTestHarness {
             .collect();
 
         let stage_id = match matches.len() {
-            0 => return Err(StageJournalLookupError::UnknownStage(stage_name.to_string())),
+            0 => {
+                return Err(StageJournalLookupError::UnknownStage(
+                    stage_name.to_string(),
+                ))
+            }
             1 => matches.remove(0),
-            _ => return Err(StageJournalLookupError::AmbiguousStage(stage_name.to_string())),
+            _ => {
+                return Err(StageJournalLookupError::AmbiguousStage(
+                    stage_name.to_string(),
+                ))
+            }
         };
 
         let journal = self

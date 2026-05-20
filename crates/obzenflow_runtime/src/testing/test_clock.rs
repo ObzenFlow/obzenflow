@@ -84,9 +84,7 @@ impl TestClock {
     /// We approximate it by yielding and re-checking an observation until two
     /// consecutive post-yield observations are identical, after at least two yields,
     /// or until a small bounded maximum is reached. Hitting the bound is an error.
-    pub async fn settle_scheduler<T, E, F, Fut>(
-        mut observe: F,
-    ) -> Result<T, SettleSchedulerError>
+    pub async fn settle_scheduler<T, E, F, Fut>(mut observe: F) -> Result<T, SettleSchedulerError>
     where
         T: Clone + PartialEq,
         E: std::error::Error + Send + Sync + 'static,
@@ -102,9 +100,9 @@ impl TestClock {
         for turn in 0..MAX_YIELDS {
             tokio::task::yield_now().await;
 
-            let value = observe().await.map_err(|e| SettleSchedulerError::ObservationFailed {
-                source: e.into(),
-            })?;
+            let value = observe()
+                .await
+                .map_err(|e| SettleSchedulerError::ObservationFailed { source: e.into() })?;
 
             if let Some(prev) = &last {
                 if prev == &value {

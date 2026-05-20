@@ -5,8 +5,8 @@
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use obzenflow_adapters::middleware::{rate_limit_with_burst, RateLimiterBuilder};
-use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
 use obzenflow_core::event::chain_event::ChainEventContent;
+use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
 use obzenflow_core::event::payloads::observability_payload::{
     MiddlewareLifecycle, ObservabilityPayload, RateLimiterEvent,
@@ -59,13 +59,11 @@ async fn rate_limiter_delayed_events(
     loop {
         match reader.next().await {
             Ok(Some(envelope)) => {
-                if let ChainEventContent::Observability(ObservabilityPayload::Middleware(mw)) =
-                    &envelope.event.content
+                if let ChainEventContent::Observability(ObservabilityPayload::Middleware(
+                    MiddlewareLifecycle::RateLimiter(RateLimiterEvent::Delayed { .. }),
+                )) = &envelope.event.content
                 {
-                    if let MiddlewareLifecycle::RateLimiter(RateLimiterEvent::Delayed { .. }) = mw
-                    {
-                        delayed += 1;
-                    }
+                    delayed += 1;
                 }
             }
             Ok(None) => return Ok(delayed),

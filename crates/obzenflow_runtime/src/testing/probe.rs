@@ -9,9 +9,9 @@
 //! fan-in, and concurrent-writer semantics are deliberately out of scope
 //! for 114h and are reserved for FLOWIP-114k's audit-driven migrations.
 
-use crate::testing::FlowTestHarness;
 use crate::testing::stage_journal::StageJournalLookupError;
 use crate::testing::test_clock::SettleSchedulerError;
+use crate::testing::FlowTestHarness;
 use crate::testing::TestClock;
 use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::event::event_envelope::EventEnvelope;
@@ -166,10 +166,10 @@ impl JournalProbe {
                     }
                 }
             }
-            // Pull-based journal: yield so writer tasks can make progress before
-            // the next read. Avoid timers so the probe composes with paused-time
-            // runtimes (FLOWIP-114h).
-            tokio::task::yield_now().await;
+            // Pull-based journal: wait briefly between reads.
+            // Under paused time this allows the runtime to auto-advance; under
+            // live time it avoids a busy poll loop at EOF (FLOWIP-114h).
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
     }
 
@@ -221,5 +221,370 @@ impl JournalProbe {
                 Err(e) => return Err(JournalProbeError::JournalRead(e.to_string())),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::id_conversions::StageIdExt;
+    use crate::pipeline::handle::FlowHandleExtras;
+    use crate::pipeline::{FlowHandle, PipelineEvent, PipelineState};
+    use crate::supervised_base::{ChannelBuilder, HandleBuilder, SupervisorTaskBuilder};
+    use chrono::Utc;
+    use obzenflow_core::event::event_envelope::EventEnvelope;
+    use obzenflow_core::event::vector_clock::VectorClock;
+    use obzenflow_core::event::{ChainEvent, ChainEventFactory, JournalEvent, WriterId};
+    use obzenflow_core::id::JournalId;
+    use obzenflow_core::journal::journal_error::JournalError;
+    use obzenflow_core::journal::journal_owner::JournalOwner;
+    use obzenflow_core::journal::journal_reader::JournalReader;
+    use obzenflow_core::journal::Journal;
+    use obzenflow_topology::TopologyBuilder;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    struct MemoryJournal<T: JournalEvent> {
+        id: JournalId,
+        owner: Option<JournalOwner>,
+        events: Arc<Mutex<Vec<EventEnvelope<T>>>>,
+    }
+
+    impl<T: JournalEvent> Default for MemoryJournal<T> {
+        fn default() -> Self {
+            Self {
+                id: JournalId::new(),
+                owner: None,
+                events: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+    }
+
+    impl<T: JournalEvent> MemoryJournal<T> {
+        fn push_envelope(&self, envelope: EventEnvelope<T>) {
+            let mut guard = self.events.lock().expect("MemoryJournal: poisoned lock");
+            guard.push(envelope);
+        }
+    }
+
+    struct MemoryJournalReader<T: JournalEvent> {
+        events: Arc<Mutex<Vec<EventEnvelope<T>>>>,
+        pos: usize,
+    }
+
+    #[async_trait::async_trait]
+    impl<T> JournalReader<T> for MemoryJournalReader<T>
+    where
+        T: JournalEvent,
+    {
+        async fn next(&mut self) -> Result<Option<EventEnvelope<T>>, JournalError> {
+            let guard = self
+                .events
+                .lock()
+                .expect("MemoryJournalReader: poisoned lock");
+            if self.pos >= guard.len() {
+                return Ok(None);
+            }
+            let envelope = guard[self.pos].clone();
+            drop(guard);
+            self.pos += 1;
+            Ok(Some(envelope))
+        }
+
+        async fn skip(&mut self, n: u64) -> Result<u64, JournalError> {
+            let guard = self
+                .events
+                .lock()
+                .expect("MemoryJournalReader: poisoned lock");
+            let len = guard.len();
+            drop(guard);
+            let before = self.pos;
+            self.pos = std::cmp::min(len, self.pos.saturating_add(n as usize));
+            Ok((self.pos - before) as u64)
+        }
+
+        fn position(&self) -> u64 {
+            self.pos as u64
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl<T> Journal<T> for MemoryJournal<T>
+    where
+        T: JournalEvent + 'static,
+    {
+        fn id(&self) -> &JournalId {
+            &self.id
+        }
+
+        fn owner(&self) -> Option<&JournalOwner> {
+            self.owner.as_ref()
+        }
+
+        async fn append(
+            &self,
+            event: T,
+            _parent: Option<&EventEnvelope<T>>,
+        ) -> Result<EventEnvelope<T>, JournalError> {
+            let envelope =
+                EventEnvelope::new(obzenflow_core::event::JournalWriterId::from(self.id), event);
+            let mut guard = self.events.lock().expect("MemoryJournal: poisoned lock");
+            guard.push(envelope.clone());
+            Ok(envelope)
+        }
+
+        async fn read_causally_ordered(&self) -> Result<Vec<EventEnvelope<T>>, JournalError> {
+            let guard = self.events.lock().expect("MemoryJournal: poisoned lock");
+            Ok(guard.clone())
+        }
+
+        async fn read_causally_after(
+            &self,
+            after_event_id: &obzenflow_core::event::types::EventId,
+        ) -> Result<Vec<EventEnvelope<T>>, JournalError> {
+            let guard = self.events.lock().expect("MemoryJournal: poisoned lock");
+            let start = guard
+                .iter()
+                .position(|e| e.event.id() == after_event_id)
+                .map(|idx| idx + 1)
+                .unwrap_or(guard.len());
+            Ok(guard[start..].to_vec())
+        }
+
+        async fn read_event(
+            &self,
+            event_id: &obzenflow_core::event::types::EventId,
+        ) -> Result<Option<EventEnvelope<T>>, JournalError> {
+            let guard = self.events.lock().expect("MemoryJournal: poisoned lock");
+            Ok(guard.iter().find(|e| e.event.id() == event_id).cloned())
+        }
+
+        async fn reader(&self) -> Result<Box<dyn JournalReader<T>>, JournalError> {
+            Ok(Box::new(MemoryJournalReader {
+                events: Arc::clone(&self.events),
+                pos: 0,
+            }))
+        }
+
+        async fn reader_from(
+            &self,
+            position: u64,
+        ) -> Result<Box<dyn JournalReader<T>>, JournalError> {
+            Ok(Box::new(MemoryJournalReader {
+                events: Arc::clone(&self.events),
+                pos: position as usize,
+            }))
+        }
+
+        async fn read_last_n(&self, count: usize) -> Result<Vec<EventEnvelope<T>>, JournalError> {
+            let guard = self.events.lock().expect("MemoryJournal: poisoned lock");
+            let len = guard.len();
+            let start = len.saturating_sub(count);
+            Ok(guard[start..].iter().rev().cloned().collect())
+        }
+    }
+
+    fn harness_with_stage_journal(
+        stage_name: &str,
+        stage_id: StageId,
+        stage_journal: Arc<dyn Journal<ChainEvent>>,
+        topology: Arc<obzenflow_topology::Topology>,
+    ) -> FlowTestHarness {
+        let (event_sender, _event_receiver, state_watcher) =
+            ChannelBuilder::<PipelineEvent, PipelineState>::new().build(PipelineState::Created);
+        let supervisor_task = SupervisorTaskBuilder::<PipelineState>::new("dummy_pipeline")
+            .spawn(|| async move { Ok::<(), Box<dyn std::error::Error + Send + Sync>>(()) });
+        let standard_handle = HandleBuilder::new()
+            .with_event_sender(event_sender)
+            .with_state_watcher(state_watcher)
+            .with_supervisor_task(supervisor_task)
+            .build_standard()
+            .expect("dummy handle should build");
+
+        let extras = FlowHandleExtras {
+            topology: Some(topology),
+            flow_name: "dummy".to_string(),
+            contract_attachments: None,
+            system_journal: None,
+            liveness_snapshots: None,
+        };
+
+        let handle = FlowHandle::new(standard_handle, None, extras);
+        FlowTestHarness::from_parts(handle, vec![(stage_id, stage_journal)])
+            .unwrap_or_else(|e| panic!("failed to build FlowTestHarness for `{stage_name}`: {e}"))
+    }
+
+    #[tokio::test]
+    async fn events_received_so_far_counts_data_envelopes_only() {
+        let mut topology_builder = TopologyBuilder::new();
+        let stage_topo_id = topology_builder.add_stage(Some("stage".to_string()));
+        topology_builder.add_stage(Some("sink".to_string()));
+        let topology = topology_builder.build_unchecked().expect("topology");
+        let topology = Arc::new(topology);
+
+        let stage_id = StageId::from_topology_id(stage_topo_id);
+        let writer_id = WriterId::from(stage_id);
+
+        let stage_journal_impl: Arc<MemoryJournal<ChainEvent>> = Arc::new(MemoryJournal::default());
+        let stage_journal: Arc<dyn Journal<ChainEvent>> = stage_journal_impl.clone();
+
+        // Non-data envelopes should be ignored by the probe.
+        stage_journal
+            .append(ChainEventFactory::eof_event(writer_id, true), None)
+            .await
+            .expect("append eof");
+        stage_journal
+            .append(
+                ChainEventFactory::data_event(writer_id, "data", serde_json::json!({})),
+                None,
+            )
+            .await
+            .expect("append data1");
+        stage_journal
+            .append(ChainEventFactory::drain_event(writer_id), None)
+            .await
+            .expect("append drain");
+        stage_journal
+            .append(
+                ChainEventFactory::data_event(writer_id, "data", serde_json::json!({})),
+                None,
+            )
+            .await
+            .expect("append data2");
+
+        let harness = harness_with_stage_journal("stage", stage_id, stage_journal, topology);
+        let probe = JournalProbe::try_on_stage(&harness, "stage").expect("probe");
+
+        let observed = probe
+            .events_received_so_far()
+            .await
+            .expect("events_received_so_far");
+        assert_eq!(observed, 2, "expected to count data envelopes only");
+
+        let second = probe.expect_event(2).await.expect("expect second data");
+        assert!(second.envelope().event.is_data());
+    }
+
+    #[tokio::test]
+    async fn stage_writer_seq_errors_when_vector_clock_is_missing_writer_component() {
+        let mut topology_builder = TopologyBuilder::new();
+        let stage_topo_id = topology_builder.add_stage(Some("stage".to_string()));
+        topology_builder.add_stage(Some("sink".to_string()));
+        let topology = topology_builder.build_unchecked().expect("topology");
+        let topology = Arc::new(topology);
+
+        let stage_id = StageId::from_topology_id(stage_topo_id);
+        let writer_id = WriterId::from(stage_id);
+        let stage_journal_impl: Arc<MemoryJournal<ChainEvent>> = Arc::new(MemoryJournal::default());
+        let stage_journal: Arc<dyn Journal<ChainEvent>> = stage_journal_impl.clone();
+
+        let event = ChainEventFactory::data_event(writer_id, "data", serde_json::json!({}));
+        let envelope = EventEnvelope {
+            journal_writer_id: obzenflow_core::event::JournalWriterId::from(stage_journal_impl.id),
+            vector_clock: VectorClock::new(),
+            timestamp: Utc::now(),
+            event,
+        };
+        stage_journal_impl.push_envelope(envelope);
+
+        let harness = harness_with_stage_journal("stage", stage_id, stage_journal, topology);
+        let probe = JournalProbe::try_on_stage(&harness, "stage").expect("probe");
+
+        let observed = probe.expect_event(1).await.expect("expect first data");
+        let err = observed
+            .stage_writer_seq()
+            .expect_err("missing stage writer seq should error");
+        assert!(
+            matches!(err, JournalProbeError::MissingStageWriterSeq { .. }),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn expect_no_event_within_fails_when_event_written_at_boundary_instant() {
+        let mut topology_builder = TopologyBuilder::new();
+        let stage_topo_id = topology_builder.add_stage(Some("stage".to_string()));
+        topology_builder.add_stage(Some("sink".to_string()));
+        let topology = topology_builder.build_unchecked().expect("topology");
+        let topology = Arc::new(topology);
+
+        let stage_id = StageId::from_topology_id(stage_topo_id);
+        let writer_id = WriterId::from(stage_id);
+
+        let stage_journal_impl: Arc<MemoryJournal<ChainEvent>> = Arc::new(MemoryJournal::default());
+        let stage_journal: Arc<dyn Journal<ChainEvent>> = stage_journal_impl.clone();
+
+        let harness =
+            harness_with_stage_journal("stage", stage_id, stage_journal.clone(), topology);
+        let probe = JournalProbe::try_on_stage(&harness, "stage").expect("probe");
+
+        let window = Duration::from_secs(1);
+        tokio::spawn({
+            let stage_journal = stage_journal.clone();
+            async move {
+                tokio::time::sleep(window).await;
+                stage_journal
+                    .append(
+                        ChainEventFactory::data_event(writer_id, "data", serde_json::json!({})),
+                        None,
+                    )
+                    .await
+                    .expect("append data at boundary");
+            }
+        });
+
+        let err = probe
+            .expect_no_event_within(window)
+            .await
+            .expect_err("expected boundary instant event to be observed");
+        assert!(
+            matches!(err, JournalProbeError::UnexpectedEvent { .. }),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn expect_no_event_within_fails_on_chained_wakeup() {
+        let mut topology_builder = TopologyBuilder::new();
+        let stage_topo_id = topology_builder.add_stage(Some("stage".to_string()));
+        topology_builder.add_stage(Some("sink".to_string()));
+        let topology = topology_builder.build_unchecked().expect("topology");
+        let topology = Arc::new(topology);
+
+        let stage_id = StageId::from_topology_id(stage_topo_id);
+        let writer_id = WriterId::from(stage_id);
+
+        let stage_journal_impl: Arc<MemoryJournal<ChainEvent>> = Arc::new(MemoryJournal::default());
+        let stage_journal: Arc<dyn Journal<ChainEvent>> = stage_journal_impl.clone();
+
+        let harness =
+            harness_with_stage_journal("stage", stage_id, stage_journal.clone(), topology);
+        let probe = JournalProbe::try_on_stage(&harness, "stage").expect("probe");
+
+        let window = Duration::from_secs(1);
+        tokio::spawn({
+            let stage_journal = stage_journal.clone();
+            async move {
+                tokio::time::sleep(window).await;
+                tokio::spawn(async move {
+                    stage_journal
+                        .append(
+                            ChainEventFactory::data_event(writer_id, "data", serde_json::json!({})),
+                            None,
+                        )
+                        .await
+                        .expect("append chained data");
+                });
+            }
+        });
+
+        let err = probe
+            .expect_no_event_within(window)
+            .await
+            .expect_err("expected chained wakeup event to be observed");
+        assert!(
+            matches!(err, JournalProbeError::UnexpectedEvent { .. }),
+            "unexpected error: {err:?}"
+        );
     }
 }
