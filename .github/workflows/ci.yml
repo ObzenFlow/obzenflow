@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 jobs:
   dco:
@@ -125,16 +126,17 @@ jobs:
       CARGO_INCREMENTAL: "0"
       CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_TERM_COLOR: always
     strategy:
       fail-fast: false
       matrix:
         include:
           - name: default
-            cargo_args: ""
-            cargo_jobs: ""
-          - name: all-features
-            cargo_args: "--all-features"
-            cargo_jobs: "--jobs 1"
+            features: ""
+          - name: production-features
+            # Keep this list in sync with the workspace root features (FLOWIP-114h).
+            # Drift guard is owned by FLOWIP-114k.
+            features: "console,http-pull,ai"
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -144,8 +146,81 @@ jobs:
         run: cargo fetch --locked
       - uses: Swatinem/rust-cache@v2
 
+      - name: Install nextest
+        uses: taiki-e/install-action@nextest
+
       - name: Tests (${{ matrix.name }})
-        run: cargo test --workspace --locked ${{ matrix.cargo_args }} ${{ matrix.cargo_jobs }}
+        run: |
+          set -euo pipefail
+
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            profile="ci-fast"
+          else
+            profile="ci-full"
+          fi
+
+          if [[ -n "${{ matrix.features }}" ]]; then
+            cargo nextest run --workspace --locked --profile "${profile}" --features "${{ matrix.features }}"
+          else
+            cargo nextest run --workspace --locked --profile "${profile}"
+          fi
+
+  test-test-support:
+    needs: fmt
+    runs-on: ubuntu-latest
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.93.0
+      - name: Verify lockfile
+        run: cargo fetch --locked
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Demonstrating tests (test-support)
+        run: |
+          set -euo pipefail
+
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            profile="ci-fast"
+          else
+            profile="ci-full"
+          fi
+
+          cargo nextest run \
+            --workspace \
+            --locked \
+            --profile "${profile}" \
+            --features test-support \
+            -E 'binary(/^(stateful_metrics_integration_test|metrics_phase3_integration_test|rate_limiter_integration_test)$/)'
+
+  doctest:
+    needs: fmt
+    runs-on: ubuntu-latest
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.93.0
+      - name: Verify lockfile
+        run: cargo fetch --locked
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Doc tests
+        run: cargo test --workspace --doc --locked
 
   policy:
     runs-on: ubuntu-latest

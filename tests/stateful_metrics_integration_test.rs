@@ -11,16 +11,16 @@
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
-use obzenflow_core::metrics::MetricsExporter;
 use obzenflow_core::TypedPayload;
 use obzenflow_core::{StageId, WriterId};
-use obzenflow_dsl::{flow, join, sink, source, stateful};
+use obzenflow_dsl::{join, sink, source, stateful, test_flow};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
     FiniteSourceHandler, JoinHandler, SinkHandler, StatefulHandler,
 };
 use obzenflow_runtime::stages::SourceError;
+use obzenflow_runtime::testing::MetricsBarrier;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -69,7 +69,6 @@ impl TypedPayload for JoinedMetricEvent {
 use std::io::BufRead;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
-use tokio::time::sleep;
 
 #[derive(Clone, Debug)]
 struct BurstSource {
@@ -228,55 +227,6 @@ fn unique_journal_dir(prefix: &str) -> std::path::PathBuf {
     std::path::PathBuf::from("target").join(format!("{prefix}_{suffix}"))
 }
 
-async fn wait_for_metrics(
-    exporter: &Arc<dyn MetricsExporter>,
-    timeout: Duration,
-    debug_patterns: &[String],
-    predicate: impl Fn(&str) -> bool,
-) -> Result<String> {
-    let start = std::time::Instant::now();
-    let mut last = String::new();
-
-    while start.elapsed() < timeout {
-        last = exporter
-            .render_metrics()
-            .map_err(|e| anyhow!("Failed to render metrics: {e}"))?;
-        if predicate(&last) {
-            return Ok(last);
-        }
-        sleep(Duration::from_millis(50)).await;
-    }
-
-    let excerpt = filter_metrics_lines(&last, debug_patterns, 120);
-    Err(anyhow!(
-        "timed out waiting for expected metrics (last snapshot length={}).\nFiltered excerpt:\n{}",
-        last.len(),
-        if excerpt.is_empty() {
-            "(no matching lines)"
-        } else {
-            excerpt.as_str()
-        }
-    ))
-}
-
-fn filter_metrics_lines(metrics_text: &str, patterns: &[String], max_lines: usize) -> String {
-    if patterns.is_empty() || max_lines == 0 {
-        return String::new();
-    }
-
-    let mut out = Vec::new();
-    for line in metrics_text.lines() {
-        if patterns.iter().any(|p| !p.is_empty() && line.contains(p)) {
-            out.push(line);
-            if out.len() >= max_lines {
-                break;
-            }
-        }
-    }
-
-    out.join("\n")
-}
-
 fn metric_line_value(
     metrics_text: &str,
     metric_name: &str,
@@ -298,7 +248,6 @@ fn metric_line_value(
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stateful_metrics_accumulate_is_instrumented() -> Result<()> {
     let timeout_flow = Duration::from_secs(30);
-    let timeout_metrics = Duration::from_secs(10);
 
     let total_events: usize = 20;
     let sleep_per_event = Duration::from_millis(5);
@@ -308,7 +257,7 @@ async fn stateful_metrics_accumulate_is_instrumented() -> Result<()> {
     let journal_dir = unique_journal_dir("stateful_metrics");
     let journal_dir_for_flow = journal_dir.clone();
 
-    let flow_handle = flow! {
+    let test_handle = test_flow! {
         name: "stateful_metrics",
         journals: disk_journals(journal_dir_for_flow.clone()),
         middleware: [],
@@ -327,31 +276,29 @@ async fn stateful_metrics_accumulate_is_instrumented() -> Result<()> {
     .await
     .map_err(|e| anyhow!("Flow creation failed: {e:?}"))?;
 
-    let exporter = tokio::time::timeout(timeout_flow, flow_handle.run_with_metrics())
+    let metrics_barrier = MetricsBarrier::try_on_flow(&test_handle)
+        .await
+        .map_err(|e| anyhow!("failed to construct MetricsBarrier: {e}"))?;
+
+    let exporter = test_handle
+        .metrics_exporter()
+        .ok_or_else(|| anyhow!("Metrics exporter was not configured"))?;
+
+    tokio::time::timeout(timeout_flow, test_handle.into_inner().run())
         .await
         .map_err(|_| anyhow!("flow did not complete within {timeout_flow:?} (timeout)"))?
-        .map_err(|e| anyhow!("Failed to run flow: {e:?}"))?
-        .ok_or_else(|| anyhow!("Metrics exporter was not configured"))?;
+        .map_err(|e| anyhow!("Failed to run flow: {e:?}"))?;
+
+    metrics_barrier
+        .wait_for_drained()
+        .await
+        .map_err(|e| anyhow!("metrics subsystem did not drain: {e}"))?;
 
     let flow_label = "flow=\"stateful_metrics\"".to_string();
     let stage_label = "stage=\"counter\"".to_string();
-    let debug_patterns = vec![
-        "obzenflow_events_total".to_string(),
-        "obzenflow_events_accumulated_total".to_string(),
-        "obzenflow_events_emitted_total".to_string(),
-        "obzenflow_processing_time_seconds_sum".to_string(),
-        flow_label.clone(),
-        stage_label.clone(),
-    ];
-
-    let metrics_text = wait_for_metrics(&exporter, timeout_metrics, &debug_patterns, |text| {
-        text.contains("obzenflow_events_total")
-            && text.contains("obzenflow_events_accumulated_total")
-            && text.contains("obzenflow_events_emitted_total")
-            && text.contains("obzenflow_processing_time_seconds_sum")
-            && text.contains(&stage_label)
-    })
-    .await?;
+    let metrics_text = exporter
+        .render_metrics()
+        .map_err(|e| anyhow!("Failed to render metrics: {e}"))?;
 
     let events_total = metric_line_value(
         &metrics_text,
@@ -501,12 +448,11 @@ async fn stateful_metrics_accumulate_is_instrumented() -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stateful_join_metrics_counts_hydration_as_accumulation() -> Result<()> {
     let timeout_flow = Duration::from_secs(30);
-    let timeout_metrics = Duration::from_secs(10);
 
     let reference_events: usize = 10;
     let stream_events: usize = 0;
 
-    let flow_handle = flow! {
+    let test_handle = test_flow! {
         name: "stateful_join_metrics",
         journals: disk_journals(unique_journal_dir("stateful_join_metrics")),
         middleware: [],
@@ -526,29 +472,29 @@ async fn stateful_join_metrics_counts_hydration_as_accumulation() -> Result<()> 
     .await
     .map_err(|e| anyhow!("Flow creation failed: {e:?}"))?;
 
-    let exporter = tokio::time::timeout(timeout_flow, flow_handle.run_with_metrics())
+    let metrics_barrier = MetricsBarrier::try_on_flow(&test_handle)
+        .await
+        .map_err(|e| anyhow!("failed to construct MetricsBarrier: {e}"))?;
+
+    let exporter = test_handle
+        .metrics_exporter()
+        .ok_or_else(|| anyhow!("Metrics exporter was not configured"))?;
+
+    tokio::time::timeout(timeout_flow, test_handle.into_inner().run())
         .await
         .map_err(|_| anyhow!("flow did not complete within {timeout_flow:?} (timeout)"))?
-        .map_err(|e| anyhow!("Failed to run flow: {e:?}"))?
-        .ok_or_else(|| anyhow!("Metrics exporter was not configured"))?;
+        .map_err(|e| anyhow!("Failed to run flow: {e:?}"))?;
+
+    metrics_barrier
+        .wait_for_drained()
+        .await
+        .map_err(|e| anyhow!("metrics subsystem did not drain: {e}"))?;
 
     let flow_label = "flow=\"stateful_join_metrics\"".to_string();
     let stage_label = "stage=\"joiner\"".to_string();
-    let debug_patterns = vec![
-        "obzenflow_events_total".to_string(),
-        "obzenflow_events_accumulated_total".to_string(),
-        "obzenflow_events_emitted_total".to_string(),
-        flow_label.clone(),
-        stage_label.clone(),
-    ];
-
-    let metrics_text = wait_for_metrics(&exporter, timeout_metrics, &debug_patterns, |text| {
-        text.contains("obzenflow_events_total")
-            && text.contains("obzenflow_events_accumulated_total")
-            && text.contains("obzenflow_events_emitted_total")
-            && text.contains(&stage_label)
-    })
-    .await?;
+    let metrics_text = exporter
+        .render_metrics()
+        .map_err(|e| anyhow!("Failed to render metrics: {e}"))?;
 
     let events_total = metric_line_value(
         &metrics_text,

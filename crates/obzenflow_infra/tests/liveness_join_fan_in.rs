@@ -238,7 +238,10 @@ async fn liveness_join_keeps_active_edge_healthy_while_other_edge_idles() {
     };
 
     let run_handle = tokio::spawn(async move {
-        FlowApplication::run_with_web_endpoints_and_hooks(flow_definition, Vec::new(), vec![hook])
+        FlowApplication::builder()
+            .with_cli_args(["obzenflow"])
+            .with_flow_handle_hook(hook)
+            .run_async(flow_definition)
             .await
     });
 

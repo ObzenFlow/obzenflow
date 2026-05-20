@@ -3,7 +3,9 @@
 // https://obzenflow.dev
 
 use super::*;
-use crate::bootstrap::{install_bootstrap_config, BootstrapConfig, StartupMode};
+use crate::bootstrap::{
+    bootstrap_test_lock_async, install_bootstrap_config, BootstrapConfig, StartupMode,
+};
 use crate::id_conversions::StageIdExt;
 use crate::message_bus::FsmMessageBus;
 use crate::messaging::SystemSubscription;
@@ -431,6 +433,7 @@ fn is_gating_edge_for_contract_behaves_as_expected() {
 
 #[tokio::test]
 async fn manual_ready_for_run_publishes_state_and_waits_for_external_run() {
+    let _lock = bootstrap_test_lock_async().await;
     let _guard = install_bootstrap_config(BootstrapConfig {
         startup_mode: StartupMode::Manual,
         ..BootstrapConfig::default()
@@ -474,6 +477,7 @@ async fn manual_ready_for_run_publishes_state_and_waits_for_external_run() {
 
 #[tokio::test]
 async fn auto_ready_for_run_emits_run_and_reaches_running() {
+    let _lock = bootstrap_test_lock_async().await;
     let _guard = install_bootstrap_config(BootstrapConfig {
         startup_mode: StartupMode::Auto,
         ..BootstrapConfig::default()
@@ -548,6 +552,7 @@ async fn materializing_stage_count_mismatch_transitions_to_failed_without_panic(
 
 #[tokio::test]
 async fn materialized_to_ready_for_run_publishes_post_transition_state() {
+    let _lock = bootstrap_test_lock_async().await;
     let _guard = install_bootstrap_config(BootstrapConfig {
         startup_mode: StartupMode::Manual,
         ..BootstrapConfig::default()
@@ -591,6 +596,7 @@ async fn materialized_to_ready_for_run_publishes_post_transition_state() {
 
 #[tokio::test]
 async fn running_state_is_published_after_source_start_actions_complete() {
+    let _lock = bootstrap_test_lock_async().await;
     let _guard = install_bootstrap_config(BootstrapConfig {
         startup_mode: StartupMode::Manual,
         ..BootstrapConfig::default()
@@ -666,6 +672,7 @@ async fn running_state_is_published_after_source_start_actions_complete() {
 
 #[tokio::test]
 async fn early_run_queued_in_materialized_is_consumed_before_ready_for_run() {
+    let _lock = bootstrap_test_lock_async().await;
     let _guard = install_bootstrap_config(BootstrapConfig {
         startup_mode: StartupMode::Manual,
         ..BootstrapConfig::default()
@@ -762,6 +769,7 @@ async fn materialized_stage_failed_or_cancelled_before_readiness_transitions_to_
 
 #[tokio::test]
 async fn ready_for_run_stage_failure_transitions_to_error_before_run() {
+    let _lock = bootstrap_test_lock_async().await;
     let _guard = install_bootstrap_config(BootstrapConfig {
         startup_mode: StartupMode::Manual,
         ..BootstrapConfig::default()

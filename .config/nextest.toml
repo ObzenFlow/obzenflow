@@ -1,0 +1,36 @@
+[profile.default]
+slow-timeout = { period = "60s", terminate-after = 1 }
+retries = 0
+
+[profile.ci-fast]
+slow-timeout = { period = "60s", terminate-after = 1 }
+retries = 1
+# Filter is intentionally conservative under 114h. FLOWIP-114k widens it
+# as the audit identifies further long-running e2e cohorts.
+default-filter = "not test(/e2e_|_demo_/) and not binary(/prometheus_100k_error_kinds_test/)"
+
+[profile.ci-full]
+slow-timeout = { period = "300s", terminate-after = 2 }
+retries = 2
+
+[[profile.ci-fast.overrides]]
+filter = "binary(/metrics/)"
+test-group = "metrics-exporter-port"
+
+[[profile.ci-full.overrides]]
+filter = "binary(/metrics/)"
+test-group = "metrics-exporter-port"
+
+[[profile.ci-fast.overrides]]
+filter = "binary(/^(basic_streaming|advanced_tests|cycle_unified_guard_test|dropped_events_test|placeholder_handlers_lifecycle_test|stage_metrics_test|circuit_breaker_shutdown_contracts_test|stateless_simple_test|stateful_patterns_test|stateful_primitives_test)$/)"
+test-group = "disk-journal-paths"
+
+[[profile.ci-full.overrides]]
+filter = "binary(/^(basic_streaming|advanced_tests|cycle_unified_guard_test|dropped_events_test|placeholder_handlers_lifecycle_test|prometheus_100k_error_kinds_test|stage_metrics_test|circuit_breaker_shutdown_contracts_test|stateless_simple_test|stateful_patterns_test|stateful_primitives_test)$/)"
+test-group = "disk-journal-paths"
+
+[test-groups.metrics-exporter-port]
+max-threads = 1
+
+[test-groups.disk-journal-paths]
+max-threads = 1

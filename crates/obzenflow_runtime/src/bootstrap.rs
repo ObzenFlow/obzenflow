@@ -14,10 +14,16 @@ use std::sync::{OnceLock, RwLock};
 use std::time::Duration;
 
 #[cfg(test)]
-use std::sync::{Mutex, MutexGuard};
+use tokio::sync::{Mutex as TokioMutex, MutexGuard as TokioMutexGuard};
 
 thread_local! {
     static INSTALL_OWNER: u8 = const { 0 };
+}
+
+#[cfg(test)]
+fn bootstrap_test_mutex() -> &'static TokioMutex<()> {
+    static LOCK: OnceLock<TokioMutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| TokioMutex::new(()))
 }
 
 /// Controls whether a pipeline starts automatically after materialisation.
@@ -259,11 +265,13 @@ impl Drop for ActiveInstallLease {
 }
 
 #[cfg(test)]
-pub(crate) fn bootstrap_test_lock() -> MutexGuard<'static, ()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-        .lock()
-        .expect("bootstrap test lock poisoned")
+pub(crate) fn bootstrap_test_lock() -> TokioMutexGuard<'static, ()> {
+    bootstrap_test_mutex().blocking_lock()
+}
+
+#[cfg(test)]
+pub(crate) async fn bootstrap_test_lock_async() -> TokioMutexGuard<'static, ()> {
+    bootstrap_test_mutex().lock().await
 }
 
 #[cfg(test)]

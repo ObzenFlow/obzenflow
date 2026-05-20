@@ -139,6 +139,7 @@ futures = { workspace = true }
 console = ["obzenflow_infra/console"]
 http-pull = ["obzenflow_infra/reqwest-client"]
 ai = ["obzenflow_infra/ai-rig", "obzenflow_infra/ai-tiktoken"]
+test-support = ["obzenflow_runtime/test-support", "obzenflow_dsl/test-support"]
 
 [profile.release]
 lto = true
@@ -191,3 +192,18 @@ required-features = ["ai"]
 [[example]]
 name = "multi_source_ingest_demo"
 path = "examples/multi_source_ingest_demo/main.rs"
+
+[[test]]
+name = "stateful_metrics_integration_test"
+path = "tests/stateful_metrics_integration_test.rs"
+required-features = ["test-support"]
+
+[[test]]
+name = "metrics_phase3_integration_test"
+path = "tests/metrics_phase3_integration_test.rs"
+required-features = ["test-support"]
+
+[[test]]
+name = "rate_limiter_integration_test"
+path = "tests/rate_limiter_integration_test.rs"
+required-features = ["test-support"]

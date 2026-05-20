@@ -95,35 +95,37 @@ impl SinkHandler for Printer {
 
 #[tokio::test]
 async fn stateless_pipeline_runs_to_completion() {
-    FlowApplication::run(flow! {
-        name: "stateless_simple_test",
-        journals: disk_journals(std::path::PathBuf::from("target/stateless_simple_test_logs")),
-        middleware: [],
+    FlowApplication::builder()
+        .with_cli_args(["obzenflow"])
+        .run_async(flow! {
+            name: "stateless_simple_test",
+            journals: disk_journals(std::path::PathBuf::from("target/stateless_simple_test_logs")),
+            middleware: [],
 
-        stages: {
-            numbers = source!(StatelessSimpleEvent => SimpleSource::new(5));
-            doubler = transform!(StatelessSimpleEvent -> DoubledEvent => Map::new(|event| {
-                if let Some(value) = event.payload()["value"].as_u64() {
-                    ChainEventFactory::data_event(
-                        WriterId::from(StageId::new()),
-                        "doubled",
-                        json!({
-                            "original": value,
-                            "doubled": value * 2,
-                        }),
-                    )
-                } else {
-                    event
-                }
-            }));
-            printer = sink!(DoubledEvent => Printer);
-        },
+            stages: {
+                numbers = source!(StatelessSimpleEvent => SimpleSource::new(5));
+                doubler = transform!(StatelessSimpleEvent -> DoubledEvent => Map::new(|event| {
+                    if let Some(value) = event.payload()["value"].as_u64() {
+                        ChainEventFactory::data_event(
+                            WriterId::from(StageId::new()),
+                            "doubled",
+                            json!({
+                                "original": value,
+                                "doubled": value * 2,
+                            }),
+                        )
+                    } else {
+                        event
+                    }
+                }));
+                printer = sink!(DoubledEvent => Printer);
+            },
 
-        topology: {
-            numbers |> doubler;
-            doubler |> printer;
-        }
-    })
-    .await
-    .expect("flow should complete without stateful stages");
+            topology: {
+                numbers |> doubler;
+                doubler |> printer;
+            }
+        })
+        .await
+        .expect("flow should complete without stateful stages");
 }
