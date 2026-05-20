@@ -125,7 +125,9 @@ impl SinkHandler for CollectingSink {
 async fn groupby_with_on_eof_emits_one_aggregate_per_key() {
     let (sink, events) = CollectingSink::new();
 
-    FlowApplication::run(flow! {
+    FlowApplication::builder()
+        .with_cli_args(["obzenflow"])
+        .run_async(flow! {
         name: "stateful_primitives_groupby_test",
         journals: disk_journals(std::path::PathBuf::from("target/stateful_primitives_test_groupby")),
         middleware: [],
@@ -171,7 +173,9 @@ struct TotalStats {
 async fn reduce_with_on_eof_emits_single_total() {
     let (sink, events) = CollectingSink::new();
 
-    FlowApplication::run(flow! {
+    FlowApplication::builder()
+        .with_cli_args(["obzenflow"])
+        .run_async(flow! {
         name: "stateful_primitives_reduce_test",
         journals: disk_journals(std::path::PathBuf::from("target/stateful_primitives_test_reduce")),
         middleware: [],
@@ -212,7 +216,9 @@ async fn reduce_with_on_eof_emits_single_total() {
 async fn conflate_emits_latest_value_per_key() {
     let (sink, events) = CollectingSink::new();
 
-    FlowApplication::run(flow! {
+    FlowApplication::builder()
+        .with_cli_args(["obzenflow"])
+        .run_async(flow! {
         name: "stateful_primitives_conflate_test",
         journals: disk_journals(std::path::PathBuf::from("target/stateful_primitives_test_conflate")),
         middleware: [],

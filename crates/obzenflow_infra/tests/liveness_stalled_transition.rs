@@ -143,7 +143,10 @@ async fn liveness_emits_stalled_transition_without_aborting_pipeline() {
     };
 
     let mut run_task = tokio_test::task::spawn(async move {
-        FlowApplication::run_with_web_endpoints_and_hooks(flow_definition, Vec::new(), vec![hook])
+        FlowApplication::builder()
+            .with_cli_args(["obzenflow"])
+            .with_flow_handle_hook(hook)
+            .run_async(flow_definition)
             .await
     });
 
