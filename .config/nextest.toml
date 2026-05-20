@@ -14,11 +14,11 @@ slow-timeout = { period = "300s", terminate-after = 2 }
 retries = 2
 
 [[profile.ci-fast.overrides]]
-filter = "binary(/metrics/) or binary(/rate_limiter_metrics/)"
+filter = "binary(/metrics/)"
 test-group = "metrics-exporter-port"
 
 [[profile.ci-full.overrides]]
-filter = "binary(/metrics/) or binary(/rate_limiter_metrics/)"
+filter = "binary(/metrics/)"
 test-group = "metrics-exporter-port"
 
 [[profile.ci-fast.overrides]]
@@ -34,4 +34,3 @@ max-threads = 1
 
 [test-groups.disk-journal-paths]
 max-threads = 1
-
