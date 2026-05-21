@@ -54,7 +54,44 @@ cargo machete --skip-target-dir
 
 ## Test authoring
 
-ObzenFlow uses `cargo-nextest` profiles for CI. Pull requests run `ci-fast`; pushes to `main` and manual workflow dispatch run `ci-full`.
+ObzenFlow uses `cargo-nextest` as the supported workspace test runner. The CI test matrix is intentionally small and maps directly to `.github/workflows/ci.yml`:
+
+| CI job / matrix entry | Pull requests | Pushes to `main` and manual dispatch | What it proves |
+| --- | --- | --- | --- |
+| `test` / `default` | `ci-fast`, no extra features | `ci-full`, no extra features | The workspace passes without optional production features. |
+| `test` / `production-features` | `ci-fast`, `--features console,http-pull,ai` | `ci-full`, `--features console,http-pull,ai` | The explicitly supported production feature set passes. |
+| `test-test-support` | `ci-fast`, `--features test-support`, three targeted integration-test binaries | `ci-full`, `--features test-support`, three targeted integration-test binaries | The test-only support helpers compile and work in real tests. |
+
+`ci-fast` is the required PR gate. `ci-full` is the merge/manual gate and includes the long-running binaries excluded from `ci-fast`. The `production-features` entry also runs a guard that compares the workflow feature list to the root `Cargo.toml` production features; if it fails, either update the workflow matrix or mark the feature as intentionally test-only in the guard allowlist.
+
+Expanded, the normal PR test matrix is:
+
+```bash
+cargo nextest run --workspace --locked --profile ci-fast
+cargo nextest run --workspace --locked --profile ci-fast --features console,http-pull,ai
+```
+
+The separate `test-test-support` job is narrower than the normal matrix. It exists only to prove that test-only helpers behind `--features test-support` still compile and work. It runs these three existing integration-test binaries:
+
+- `stateful_metrics_integration_test`: stateful flow metrics coverage.
+- `metrics_exporter_integration_test`: metrics exporter integration coverage.
+- `rate_limiter_integration_test`: rate-limiter integration coverage that uses test-support helpers.
+
+If you change `obzenflow_runtime::testing`, the `test-support` feature, or one of those three files, also run:
+
+```bash
+cargo nextest run --workspace --locked --profile ci-fast --features test-support \
+  -E 'binary(/^(stateful_metrics_integration_test|metrics_exporter_integration_test|rate_limiter_integration_test)$/)'
+```
+
+Before opening a PR that touches runtime or tests, run the same profile that CI will run for your branch:
+
+```bash
+cargo nextest run --workspace --locked --profile ci-fast
+cargo nextest run --workspace --locked --profile ci-fast --features console,http-pull,ai
+```
+
+Use `ci-full` locally when you change slow e2e coverage, nextest filters, test groups, or timeout policy.
 
 Classify time-sensitive tests before adding sleeps or timeouts:
 
@@ -63,7 +100,7 @@ Classify time-sensitive tests before adding sleeps or timeouts:
 - **Hang guard**: the timeout only bounds a test that could otherwise hang. Keep it as wall-clock `tokio::time::timeout`, and add a nextest override if it legitimately exceeds the profile default.
 - **Benchmark**: keep benchmark timing out of `ci-fast`; benchmark code belongs under the benchmark crate and `cargo bench` flow.
 
-Use shared-resource groups in `.config/nextest.toml` when tests contend for a hard-coded port, hard-coded disk journal path, process-global singleton, or other resource that cannot be safely parallelised. Use per-test `slow-timeout` overrides only for tests with a documented reason to exceed the profile default.
+Use shared-resource groups in `.config/nextest.toml` when tests contend for a hard-coded port, hard-coded disk journal path, process-global singleton, or other resource that cannot be safely parallelised. Add the group selector in the same PR as the test that needs it. Use per-test `slow-timeout` overrides only for tests with a documented reason to exceed the profile default.
 
 Tier long-running e2e tests deliberately:
 
@@ -72,6 +109,11 @@ Tier long-running e2e tests deliberately:
 - Use `cfg(feature = "e2e")` only when the whole test binary needs external services, credentials, heavyweight optional dependencies, or compile-time-gated setup.
 
 Production CI must not use `--all-features` for tests. The workflow enumerates production features explicitly and verifies that list against the root `Cargo.toml` with `cargo metadata --no-deps`. Test-only features such as `test-support` are exercised by targeted commands.
+
+When adding a root Cargo feature, decide whether it is production or test-only:
+
+- Production features must be added to the `production-features` matrix entry in `.github/workflows/ci.yml`.
+- Test-only or e2e-only features must be added to the workflow guard's non-production allowlist.
 
 Full-application tests that launch `FlowApplication` under nextest must pass explicit argv through the builder:
 
