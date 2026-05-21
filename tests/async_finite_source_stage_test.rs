@@ -70,7 +70,7 @@ impl AsyncFiniteSourceHandler for TestAsyncEventSource {
         if self.emitted < 2 {
             let index = self.emitted;
             self.emitted += 1;
-            tokio::time::sleep(Duration::from_millis(5)).await;
+            tokio::task::yield_now().await;
             Ok(Some(vec![ChainEventFactory::data_event(
                 self.writer_id,
                 "TestEvent",

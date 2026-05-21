@@ -36,7 +36,7 @@ impl TypedPayload for AsyncInfiniteEvent {
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
-use tokio::sync::{mpsc, Mutex as TokioMutex};
+use tokio::sync::{mpsc, Mutex as TokioMutex, Notify};
 
 fn unique_journal_dir(prefix: &str) -> std::path::PathBuf {
     let suffix = SystemTime::now()
@@ -126,16 +126,20 @@ impl AsyncInfiniteSourceHandler for TestAsyncInfiniteSource {
 #[derive(Clone, Debug)]
 struct CollectSink {
     events: Arc<Mutex<Vec<ChainEvent>>>,
+    event_ready: Arc<Notify>,
 }
 
 impl CollectSink {
-    fn new() -> (Self, Arc<Mutex<Vec<ChainEvent>>>) {
+    fn new() -> (Self, Arc<Mutex<Vec<ChainEvent>>>, Arc<Notify>) {
         let events = Arc::new(Mutex::new(Vec::new()));
+        let event_ready = Arc::new(Notify::new());
         (
             Self {
                 events: events.clone(),
+                event_ready: event_ready.clone(),
             },
             events,
+            event_ready,
         )
     }
 }
@@ -147,6 +151,7 @@ impl SinkHandler for CollectSink {
         event: ChainEvent,
     ) -> std::result::Result<DeliveryPayload, HandlerError> {
         self.events.lock().unwrap().push(event);
+        self.event_ready.notify_waiters();
         Ok(DeliveryPayload::success(
             "collect_sink",
             DeliveryMethod::Custom("Collect".to_string()),
@@ -189,10 +194,33 @@ impl MiddlewareFactory for InjectFieldFactory {
     }
 }
 
+async fn wait_for_data_event_count(
+    events: &Arc<Mutex<Vec<ChainEvent>>>,
+    event_ready: &Notify,
+    expected: usize,
+) -> Result<()> {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let observed = events
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|event| event.is_data())
+                .count();
+            if observed >= expected {
+                return Ok(());
+            }
+            event_ready.notified().await;
+        }
+    })
+    .await
+    .map_err(|_| anyhow!("timeout waiting for {expected} data events"))?
+}
+
 #[tokio::test]
 async fn async_infinite_source_stop_interrupts_blocked_next_and_calls_drain() -> Result<()> {
     let (source, _tx, drain_calls) = TestAsyncInfiniteSource::new(32);
-    let (sink, events) = CollectSink::new();
+    let (sink, events, _event_ready) = CollectSink::new();
 
     let journal_root = unique_journal_dir("async_infinite_source_stop");
 
@@ -246,7 +274,7 @@ async fn async_infinite_source_stop_interrupts_blocked_next_and_calls_drain() ->
 #[tokio::test]
 async fn async_infinite_source_emits_events_and_applies_stage_middleware() -> Result<()> {
     let (source, tx, drain_calls) = TestAsyncInfiniteSource::new(32);
-    let (sink, events) = CollectSink::new();
+    let (sink, events, event_ready) = CollectSink::new();
 
     let journal_root = unique_journal_dir("async_infinite_source_middleware");
 
@@ -277,7 +305,7 @@ async fn async_infinite_source_emits_events_and_applies_stage_middleware() -> Re
     tx.send(2)
         .map_err(|_| anyhow!("failed to send to source channel"))?;
 
-    tokio::time::sleep(Duration::from_millis(25)).await;
+    wait_for_data_event_count(&events, &event_ready, 2).await?;
 
     handle.stop().await?;
 

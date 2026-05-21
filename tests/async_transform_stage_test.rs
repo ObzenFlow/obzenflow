@@ -175,7 +175,7 @@ impl AsyncTransformHandler for AsyncErrorTransform {
         &self,
         event: ChainEvent,
     ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
-        tokio::time::sleep(Duration::from_millis(5)).await;
+        tokio::task::yield_now().await;
 
         let index = event
             .payload()
@@ -239,7 +239,7 @@ impl AsyncTransformHandler for AsyncPassThroughTransform {
         &self,
         event: ChainEvent,
     ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
-        tokio::time::sleep(Duration::from_millis(5)).await;
+        tokio::task::yield_now().await;
         Ok(vec![event])
     }
 
@@ -271,7 +271,7 @@ impl AsyncTransformHandler for AsyncDrainFailTransform {
         &self,
         event: ChainEvent,
     ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
-        tokio::time::sleep(Duration::from_millis(5)).await;
+        tokio::task::yield_now().await;
         Ok(vec![event])
     }
 

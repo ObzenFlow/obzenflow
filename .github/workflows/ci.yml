@@ -134,8 +134,7 @@ jobs:
           - name: default
             features: ""
           - name: production-features
-            # Keep this list in sync with the workspace root features (FLOWIP-114h).
-            # Drift guard is owned by FLOWIP-114k.
+            # Keep this list in sync with the workspace root production features.
             features: "console,http-pull,ai"
     steps:
       - uses: actions/checkout@v4
@@ -148,6 +147,66 @@ jobs:
 
       - name: Install nextest
         uses: taiki-e/install-action@nextest
+
+      - name: Verify production feature list
+        if: matrix.name == 'production-features'
+        env:
+          WORKFLOW_PRODUCTION_FEATURES: ${{ matrix.features }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from __future__ import annotations
+
+          import json
+          import os
+          import pathlib
+          import subprocess
+          import sys
+
+          workspace = pathlib.Path(os.environ["GITHUB_WORKSPACE"]).resolve()
+          metadata = json.loads(
+              subprocess.check_output(
+                  ["cargo", "metadata", "--format-version", "1", "--no-deps"],
+                  text=True,
+              )
+          )
+
+          root_manifest = str(workspace / "Cargo.toml")
+          root_packages = [
+              package
+              for package in metadata["packages"]
+              if pathlib.Path(package["manifest_path"]).resolve() == pathlib.Path(root_manifest)
+          ]
+          if len(root_packages) != 1:
+              print(f"expected exactly one root package for {root_manifest}, found {len(root_packages)}")
+              sys.exit(1)
+
+          non_production_features = {"test-support", "e2e"}
+          root_features = set(root_packages[0].get("features", {}).keys())
+          expected = sorted(root_features - non_production_features)
+          actual = sorted(
+              feature.strip()
+              for feature in os.environ["WORKFLOW_PRODUCTION_FEATURES"].split(",")
+              if feature.strip()
+          )
+
+          missing = sorted(set(expected) - set(actual))
+          extra = sorted(set(actual) - set(expected))
+
+          if missing or extra:
+              print("Production feature list drift detected.")
+              print(f"Root production features: {','.join(expected) or '(none)'}")
+              print(f"Workflow feature list: {','.join(actual) or '(none)'}")
+              print(f"Missing from workflow: {','.join(missing) or '(none)'}")
+              print(f"Extra workflow-only features: {','.join(extra) or '(none)'}")
+              print()
+              print("Remediation:")
+              print(" - Update .github/workflows/ci.yml if a production feature changed.")
+              print(" - Add intentional test-only/non-production features to the guard allowlist.")
+              sys.exit(1)
+
+          print(f"Production feature list OK: {','.join(actual) or '(none)'}")
+          PY
 
       - name: Tests (${{ matrix.name }})
         run: |

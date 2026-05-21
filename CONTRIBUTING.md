@@ -43,13 +43,46 @@ cargo fmt --all
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 
 # Tests
-cargo test --workspace
-cargo test --workspace --all-features
+cargo nextest run --workspace --profile ci-fast
+cargo nextest run --workspace --profile ci-full
+cargo nextest run --workspace --profile ci-fast --features console,http-pull,ai
 
 # Dependency policy checks (CI runs these)
 cargo deny --all-features check
 cargo machete --skip-target-dir
 ```
+
+## Test authoring
+
+ObzenFlow uses `cargo-nextest` profiles for CI. Pull requests run `ci-fast`; pushes to `main` and manual workflow dispatch run `ci-full`.
+
+Classify time-sensitive tests before adding sleeps or timeouts:
+
+- **Semantic timing assertion**: the test asserts time-driven behaviour. Prefer `tokio::test(start_paused = true)` and `obzenflow_runtime::testing::TestClock` when the production code uses Tokio time.
+- **Synchronisation barrier**: the test waits for work to become observable. Prefer `JournalProbe`, `MetricsBarrier`, channel/notify readiness, or a state receiver instead of fixed sleeps.
+- **Hang guard**: the timeout only bounds a test that could otherwise hang. Keep it as wall-clock `tokio::time::timeout`, and add a nextest override if it legitimately exceeds the profile default.
+- **Benchmark**: keep benchmark timing out of `ci-fast`; benchmark code belongs under the benchmark crate and `cargo bench` flow.
+
+Use shared-resource groups in `.config/nextest.toml` when tests contend for a hard-coded port, hard-coded disk journal path, process-global singleton, or other resource that cannot be safely parallelised. Use per-test `slow-timeout` overrides only for tests with a documented reason to exceed the profile default.
+
+Tier long-running e2e tests deliberately:
+
+- Use a nextest profile filter when the test should still run automatically in `ci-full`.
+- Use `#[ignore]` when the test should compile normally but run only on demand.
+- Use `cfg(feature = "e2e")` only when the whole test binary needs external services, credentials, heavyweight optional dependencies, or compile-time-gated setup.
+
+Production CI must not use `--all-features` for tests. The workflow enumerates production features explicitly and verifies that list against the root `Cargo.toml` with `cargo metadata --no-deps`. Test-only features such as `test-support` are exercised by targeted commands.
+
+Full-application tests that launch `FlowApplication` under nextest must pass explicit argv through the builder:
+
+```rust
+FlowApplication::builder()
+    .with_cli_args(["obzenflow"])
+    .run_async(flow_definition)
+    .await
+```
+
+The `obzenflow_runtime::testing` helpers operate on envelope clocks and journal state. Do not use payload `correlation_id` as a causal-ordering key; under fan-out, multiple derived events may intentionally share the same correlation id.
 
 ## Pull request guidelines
 

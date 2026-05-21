@@ -44,7 +44,6 @@ impl TypedPayload for BreakerTestEvent {
 }
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use tokio::time::{sleep, Duration};
 
 /// Source that emits a fixed number of events and then ends.
 #[derive(Clone, Debug)]
@@ -202,9 +201,6 @@ async fn breaker_driven_shutdown_emits_poison_eof_and_contract() -> Result<()> {
         .await
         .map_err(|e| anyhow::anyhow!("Failed to run flow: {e:?}"))?
         .expect("Metrics should be enabled for breaker_shutdown_contracts");
-
-    // Give metrics and contract writers a brief moment to flush.
-    sleep(Duration::from_millis(200)).await;
 
     let metrics_text = metrics_exporter
         .render_metrics()

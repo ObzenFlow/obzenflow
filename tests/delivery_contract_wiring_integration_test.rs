@@ -57,7 +57,6 @@ impl TypedPayload for FanOutTestEvent {
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use tokio::time::{sleep, Duration};
 
 /// Source that generates a fixed number of events.
 #[derive(Clone, Debug)]
@@ -286,8 +285,6 @@ impl SinkHandler for BufferedCountingSink {
 }
 
 async fn assert_delivery_contract_pass(base_path: &Path) -> Result<()> {
-    sleep(Duration::from_millis(200)).await;
-
     let flows_dir = base_path.join("flows");
     assert!(flows_dir.exists(), "expected flows dir at {flows_dir:?}");
 
