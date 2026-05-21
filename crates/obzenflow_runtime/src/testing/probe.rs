@@ -7,7 +7,7 @@
 //!
 //! Specified for the non-cyclic single-writer-per-stage case. Cycle,
 //! fan-in, and concurrent-writer semantics are deliberately out of scope
-//! for 114h and are reserved for FLOWIP-114k's audit-driven migrations.
+//! for 114h and are reserved for FLOWIP-114n's audit-driven migrations.
 
 use crate::testing::stage_journal::StageJournalLookupError;
 use crate::testing::test_clock::SettleSchedulerError;

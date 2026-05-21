@@ -10,7 +10,7 @@
 //!
 //! The primitives are scoped to FLOWIP-114h's non-cyclic single-writer
 //! case. Cycle, fan-in, and concurrent-writer semantics for [`JournalProbe`]
-//! are out of scope and move to FLOWIP-114k.
+//! are out of scope and move to FLOWIP-114n.
 //!
 //! See `obzenflow_improvement_proposals/content/P0/open/FLOWIP-114h-...md`
 //! for the full contract.
