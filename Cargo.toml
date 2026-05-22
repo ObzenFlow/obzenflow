@@ -97,13 +97,14 @@ subtle = "2"
 	rustls-native-certs = "0.8"
 	matchit = "0.8"
 
-# Benchmarking / testing
-criterion = "0.5"
-proptest = "1.0"
-fastrand = "2.0"
-tempfile = "3.8"
-libc = "0.2"
-clap = { version = "4.5", features = ["derive"] }
+	# Benchmarking / testing
+	criterion = "0.5"
+	proptest = "1.0"
+	fastrand = "2.0"
+	tempfile = "3.8"
+	trybuild = "1.0"
+	libc = "0.2"
+	clap = { version = "4.5", features = ["derive"] }
 
 [dependencies]
 # Internal workspace dependencies
@@ -206,4 +207,19 @@ required-features = ["test-support"]
 [[test]]
 name = "rate_limiter_integration_test"
 path = "tests/rate_limiter_integration_test.rs"
+required-features = ["test-support"]
+
+[[test]]
+name = "divergence_mid_flight_abort_test"
+path = "tests/divergence_mid_flight_abort_test.rs"
+required-features = ["test-support"]
+
+[[test]]
+name = "cycle_unified_guard_test"
+path = "tests/cycle_unified_guard_test.rs"
+required-features = ["test-support"]
+
+[[test]]
+name = "cycle_convergence_eof_gating_test"
+path = "tests/cycle_convergence_eof_gating_test.rs"
 required-features = ["test-support"]

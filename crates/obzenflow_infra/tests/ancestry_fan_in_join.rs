@@ -405,17 +405,10 @@ async fn drain_only_output_inherits_reference_and_stream_ancestry_even_if_no_out
     handle.initialize().await.expect("initialize join");
     handle.ready().await.expect("ready join");
 
-    for _ in 0..200 {
-        if handle.is_terminal() {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    }
-    assert!(
-        handle.is_terminal(),
-        "join supervisor did not terminate; final state = {:?}",
-        handle.current_state()
-    );
+    handle
+        .wait_for_completion()
+        .await
+        .expect("join supervisor should complete");
 
     let events = join_journal
         .read_causally_ordered()
@@ -606,17 +599,10 @@ async fn conservative_reference_ancestry_overclaims_distinct_reference_writers()
     handle.initialize().await.expect("initialize join");
     handle.ready().await.expect("ready join");
 
-    for _ in 0..200 {
-        if handle.is_terminal() {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    }
-    assert!(
-        handle.is_terminal(),
-        "join supervisor did not terminate; final state = {:?}",
-        handle.current_state()
-    );
+    handle
+        .wait_for_completion()
+        .await
+        .expect("join supervisor should complete");
 
     let events = join_journal
         .read_causally_ordered()
@@ -801,17 +787,10 @@ async fn fan_out_outputs_all_carry_merged_ancestry_from_both_sides() {
     handle.initialize().await.expect("initialize join");
     handle.ready().await.expect("ready join");
 
-    for _ in 0..200 {
-        if handle.is_terminal() {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    }
-    assert!(
-        handle.is_terminal(),
-        "join supervisor did not terminate; final state = {:?}",
-        handle.current_state()
-    );
+    handle
+        .wait_for_completion()
+        .await
+        .expect("join supervisor should complete");
 
     let events = join_journal
         .read_causally_ordered()
@@ -1015,17 +994,10 @@ async fn error_journal_entries_carry_merged_parent_ancestry() {
     handle.initialize().await.expect("initialize join");
     handle.ready().await.expect("ready join");
 
-    for _ in 0..200 {
-        if handle.is_terminal() {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    }
-    assert!(
-        handle.is_terminal(),
-        "join supervisor did not terminate; final state = {:?}",
-        handle.current_state()
-    );
+    handle
+        .wait_for_completion()
+        .await
+        .expect("join supervisor should complete");
 
     let errors = join_error_journal
         .read_causally_ordered()

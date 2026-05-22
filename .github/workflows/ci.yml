@@ -259,7 +259,7 @@ jobs:
             --locked \
             --profile "${profile}" \
             --features test-support \
-            -E 'binary(/^(stateful_metrics_integration_test|metrics_exporter_integration_test|rate_limiter_integration_test)$/)'
+            -E 'binary(/^(stateful_metrics_integration_test|metrics_exporter_integration_test|rate_limiter_integration_test|divergence_mid_flight_abort_test|cycle_unified_guard_test|cycle_convergence_eof_gating_test|flowip_114n_ui_tests)$/)'
 
   doctest:
     needs: fmt
@@ -413,6 +413,38 @@ jobs:
         run: |
           ! grep -n '^pub mod base;' crates/obzenflow_runtime/src/supervised_base/mod.rs
           ! grep -n 'pub use base::Supervisor' crates/obzenflow_runtime/src/supervised_base/mod.rs
+
+      - name: Guard against barrier sleeps in migrated tests (FLOWIP-114n)
+        run: |
+          set -euo pipefail
+
+          # FLOWIP-114n: these files were migrated away from wall-clock sleeps as
+          # synchronisation barriers. Any remaining `tokio::time::sleep(...)` must
+          # be explicitly annotated to avoid regressions.
+          matches="$(
+            rg -n 'tokio::time::sleep\\(' \
+              tests/cycle_convergence_eof_gating_test.rs \
+              tests/cycle_unified_guard_test.rs \
+              tests/divergence_mid_flight_abort_test.rs \
+              crates/obzenflow_infra/tests/ancestry_fan_in_join.rs \
+              crates/obzenflow_infra/tests/live_reference_join.rs \
+              crates/obzenflow_infra/tests/replay_determinism.rs \
+              || true
+          )"
+
+          if [[ -z "${matches}" ]]; then
+            echo "OK: no tokio::time::sleep(...) calls found in FLOWIP-114n migrated files."
+            exit 0
+          fi
+
+          violations="$(printf '%s\n' "${matches}" | rg -v 'hang-guard:' || true)"
+          if [[ -n "${violations}" ]]; then
+            echo "Found tokio::time::sleep(...) without // hang-guard: annotation:"
+            echo "${violations}"
+            exit 1
+          fi
+
+          echo "OK: all tokio::time::sleep(...) calls are annotated with // hang-guard:."
 
       - name: Install cargo-deny
         uses: taiki-e/install-action@v2

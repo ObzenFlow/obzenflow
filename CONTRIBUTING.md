@@ -60,7 +60,7 @@ ObzenFlow uses `cargo-nextest` as the supported workspace test runner. The CI te
 | --- | --- | --- | --- |
 | `test` / `default` | `ci-fast`, no extra features | `ci-full`, no extra features | The workspace passes without optional production features. |
 | `test` / `production-features` | `ci-fast`, `--features console,http-pull,ai` | `ci-full`, `--features console,http-pull,ai` | The explicitly supported production feature set passes. |
-| `test-test-support` | `ci-fast`, `--features test-support`, three targeted integration-test binaries | `ci-full`, `--features test-support`, three targeted integration-test binaries | The test-only support helpers compile and work in real tests. |
+| `test-test-support` | `ci-fast`, `--features test-support`, targeted integration-test binaries | `ci-full`, `--features test-support`, targeted integration-test binaries | The test-only support helpers compile and work in real tests. |
 
 `ci-fast` is the required PR gate. `ci-full` is the merge/manual gate and includes the long-running binaries excluded from `ci-fast`. The `production-features` entry also runs a guard that compares the workflow feature list to the root `Cargo.toml` production features; if it fails, either update the workflow matrix or mark the feature as intentionally test-only in the guard allowlist.
 
@@ -71,17 +71,21 @@ cargo nextest run --workspace --locked --profile ci-fast
 cargo nextest run --workspace --locked --profile ci-fast --features console,http-pull,ai
 ```
 
-The separate `test-test-support` job is narrower than the normal matrix. It exists only to prove that test-only helpers behind `--features test-support` still compile and work. It runs these three existing integration-test binaries:
+The separate `test-test-support` job is narrower than the normal matrix. It exists only to prove that test-only helpers behind `--features test-support` still compile and work. It runs these integration-test binaries:
 
 - `stateful_metrics_integration_test`: stateful flow metrics coverage.
 - `metrics_exporter_integration_test`: metrics exporter integration coverage.
 - `rate_limiter_integration_test`: rate-limiter integration coverage that uses test-support helpers.
+- `divergence_mid_flight_abort_test`: paused-time contract-evaluation abort coverage (system journal assertions).
+- `cycle_unified_guard_test`: paused-time cycle guard / SCC max-iteration coverage.
+- `cycle_convergence_eof_gating_test`: paused-time cycle EOF gating coverage.
+- `flowip_114n_ui_tests`: compile-fail coverage for test-support helper contracts (trybuild).
 
 If you change `obzenflow_runtime::testing`, the `test-support` feature, or one of those three files, also run:
 
 ```bash
 cargo nextest run --workspace --locked --profile ci-fast --features test-support \
-  -E 'binary(/^(stateful_metrics_integration_test|metrics_exporter_integration_test|rate_limiter_integration_test)$/)'
+  -E 'binary(/^(stateful_metrics_integration_test|metrics_exporter_integration_test|rate_limiter_integration_test|divergence_mid_flight_abort_test|cycle_unified_guard_test|cycle_convergence_eof_gating_test|flowip_114n_ui_tests)$/)'
 ```
 
 Before opening a PR that touches runtime or tests, run the same profile that CI will run for your branch:
@@ -125,6 +129,12 @@ FlowApplication::builder()
 ```
 
 The `obzenflow_runtime::testing` helpers operate on envelope clocks and journal state. Do not use payload `correlation_id` as a causal-ordering key; under fan-out, multiple derived events may intentionally share the same correlation id.
+
+Prefer these primitives over fixed sleeps when writing tests:
+
+- `JournalProbe` (stage data journals): assert `expect_event(n)`, `expect_event_at_cycle_depth(...)`, `expect_event_observing_clock_component(...)`, `expect_event_child_of(...)`, `expect_event_authored_by(...)`, and paused-time `expect_no_event_during(...)`.
+- `JournalSnapshot` (captured journals): assert append-order vs causal-order properties via `JournalOrder`, `SequenceMatchMode`, `JournalExpectation`, `assert_happens_before`, and `assert_concurrent`.
+- `MetricsBarrier` (metrics/exporter): wait for exported watermarks without reading files or adding barrier sleeps.
 
 ## Pull request guidelines
 

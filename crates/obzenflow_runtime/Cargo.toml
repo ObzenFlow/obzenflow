@@ -38,3 +38,8 @@ libc = { workspace = true }
 [dev-dependencies]
 tokio-test = { workspace = true }
 ulid = { workspace = true }
+trybuild = { workspace = true }
+
+[[test]]
+name = "flowip_114n_ui_tests"
+required-features = ["test-support"]

@@ -21,13 +21,17 @@ use obzenflow_core::journal::Journal;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+struct MemoryJournalState<T: JournalEvent> {
+    events: Vec<EventEnvelope<T>>,
+    writer_clocks: HashMap<WriterId, VectorClock>,
+}
+
 /// In-memory journal for testing
 #[derive(Clone)]
 pub struct MemoryJournal<T: JournalEvent> {
     owner: Option<JournalOwner>,
     journal_id: JournalId,
-    events: Arc<Mutex<Vec<EventEnvelope<T>>>>,
-    writer_clocks: Arc<Mutex<HashMap<WriterId, VectorClock>>>,
+    state: Arc<Mutex<MemoryJournalState<T>>>,
     _phantom: std::marker::PhantomData<T>,
 }
 
@@ -37,16 +41,16 @@ pub struct MemoryJournal<T: JournalEvent> {
 /// When it reaches the current end of the journal it returns `Ok(None)` for that call,
 /// but subsequent calls will observe newly appended events.
 pub struct MemoryJournalReader<T: JournalEvent> {
-    events: Arc<Mutex<Vec<EventEnvelope<T>>>>,
+    state: Arc<Mutex<MemoryJournalState<T>>>,
     position: u64,
 }
 
 impl<T: JournalEvent> MemoryJournalReader<T> {
-    pub fn new(events: Arc<Mutex<Vec<EventEnvelope<T>>>>, position: u64) -> Self {
-        let len = events.lock().unwrap().len() as u64;
+    fn new(state: Arc<Mutex<MemoryJournalState<T>>>, position: u64) -> Self {
+        let len = state.lock().unwrap().events.len() as u64;
         let clamped = position.min(len);
         Self {
-            events,
+            state,
             position: clamped,
         }
     }
@@ -64,8 +68,10 @@ impl<T: JournalEvent> MemoryJournal<T> {
         Self {
             owner: None,
             journal_id: JournalId::new(),
-            events: Arc::new(Mutex::new(Vec::new())),
-            writer_clocks: Arc::new(Mutex::new(HashMap::new())),
+            state: Arc::new(Mutex::new(MemoryJournalState {
+                events: Vec::new(),
+                writer_clocks: HashMap::new(),
+            })),
             _phantom: std::marker::PhantomData,
         }
     }
@@ -75,20 +81,22 @@ impl<T: JournalEvent> MemoryJournal<T> {
         Self {
             owner: Some(owner),
             journal_id: JournalId::new(),
-            events: Arc::new(Mutex::new(Vec::new())),
-            writer_clocks: Arc::new(Mutex::new(HashMap::new())),
+            state: Arc::new(Mutex::new(MemoryJournalState {
+                events: Vec::new(),
+                writer_clocks: HashMap::new(),
+            })),
             _phantom: std::marker::PhantomData,
         }
     }
 
     /// Get the current number of events
     pub fn len(&self) -> usize {
-        self.events.lock().unwrap().len()
+        self.state.lock().unwrap().events.len()
     }
 
     /// Check if the journal is empty
     pub fn is_empty(&self) -> bool {
-        self.events.lock().unwrap().is_empty()
+        self.state.lock().unwrap().events.is_empty()
     }
 }
 
@@ -122,10 +130,11 @@ impl<T: JournalEvent + 'static> Journal<T> for MemoryJournal<T> {
         // Get writer_id from the event
         let writer_id = *event.writer_id();
 
-        let mut clocks = self.writer_clocks.lock().unwrap();
+        let mut state = self.state.lock().unwrap();
 
         // Get or create vector clock for this writer
-        let mut vector_clock = clocks
+        let mut vector_clock = state
+            .writer_clocks
             .get(&writer_id)
             .cloned()
             .unwrap_or_else(VectorClock::new);
@@ -142,8 +151,7 @@ impl<T: JournalEvent + 'static> Journal<T> for MemoryJournal<T> {
         CausalOrderingService::increment(&mut vector_clock, &writer_id.to_string());
 
         // Update stored clock
-        clocks.insert(writer_id, vector_clock.clone());
-        drop(clocks);
+        state.writer_clocks.insert(writer_id, vector_clock.clone());
 
         // Create envelope with proper vector clock
         let envelope = EventEnvelope {
@@ -154,16 +162,16 @@ impl<T: JournalEvent + 'static> Journal<T> for MemoryJournal<T> {
         };
 
         // Store event
-        let mut events = self.events.lock().unwrap();
-        events.push(envelope.clone());
+        state.events.push(envelope.clone());
 
         Ok(envelope)
     }
 
     async fn read_causally_ordered(&self) -> Result<Vec<EventEnvelope<T>>, JournalError> {
-        let events = self.events.lock().unwrap();
-        let events_copy = events.clone();
-        drop(events);
+        let events_copy = {
+            let state = self.state.lock().unwrap();
+            state.events.clone()
+        };
 
         CausalOrderingService::order_envelopes_by_event_id(events_copy)
     }
@@ -189,19 +197,16 @@ impl<T: JournalEvent + 'static> Journal<T> for MemoryJournal<T> {
         &self,
         event_id: &EventId,
     ) -> Result<Option<EventEnvelope<T>>, JournalError> {
-        let events = self.events.lock().unwrap();
-        Ok(events.iter().find(|e| e.event.id() == event_id).cloned())
+        let state = self.state.lock().unwrap();
+        Ok(state.events.iter().find(|e| e.event.id() == event_id).cloned())
     }
 
     async fn reader(&self) -> Result<Box<dyn JournalReader<T>>, JournalError> {
-        Ok(Box::new(MemoryJournalReader::new(self.events.clone(), 0)))
+        Ok(Box::new(MemoryJournalReader::new(self.state.clone(), 0)))
     }
 
     async fn reader_from(&self, position: u64) -> Result<Box<dyn JournalReader<T>>, JournalError> {
-        Ok(Box::new(MemoryJournalReader::new(
-            self.events.clone(),
-            position,
-        )))
+        Ok(Box::new(MemoryJournalReader::new(self.state.clone(), position)))
     }
 
     async fn read_last_n(&self, count: usize) -> Result<Vec<EventEnvelope<T>>, JournalError> {
@@ -209,12 +214,12 @@ impl<T: JournalEvent + 'static> Journal<T> for MemoryJournal<T> {
             return Ok(Vec::new());
         }
 
-        let events = self.events.lock().unwrap();
-        let len = events.len();
+        let state = self.state.lock().unwrap();
+        let len = state.events.len();
         let start = len.saturating_sub(count);
 
         // Return events in reverse order (most recent first)
-        let mut result: Vec<_> = events[start..].to_vec();
+        let mut result: Vec<_> = state.events[start..].to_vec();
         result.reverse();
         Ok(result)
     }
@@ -224,8 +229,8 @@ impl<T: JournalEvent + 'static> Journal<T> for MemoryJournal<T> {
 impl<T: JournalEvent + 'static> JournalReader<T> for MemoryJournalReader<T> {
     async fn next(&mut self) -> Result<Option<EventEnvelope<T>>, JournalError> {
         let env = {
-            let events = self.events.lock().unwrap();
-            events.get(self.position as usize).cloned()
+            let state = self.state.lock().unwrap();
+            state.events.get(self.position as usize).cloned()
         };
 
         if env.is_some() {
@@ -240,7 +245,7 @@ impl<T: JournalEvent + 'static> JournalReader<T> for MemoryJournalReader<T> {
     }
 
     async fn skip(&mut self, n: u64) -> Result<u64, JournalError> {
-        let len = self.events.lock().unwrap().len() as u64;
+        let len = self.state.lock().unwrap().events.len() as u64;
         let start = self.position;
         let target = (self.position + n).min(len);
         self.position = target;
@@ -252,7 +257,7 @@ impl<T: JournalEvent + 'static> JournalReader<T> for MemoryJournalReader<T> {
     }
 
     fn is_at_end(&self) -> bool {
-        self.position as usize >= self.events.lock().unwrap().len()
+        self.position as usize >= self.state.lock().unwrap().events.len()
     }
 }
 

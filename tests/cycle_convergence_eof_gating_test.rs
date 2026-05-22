@@ -9,9 +9,10 @@ use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, Delivery
 use obzenflow_core::event::ChainEventContent;
 use obzenflow_core::event::CorrelationId;
 use obzenflow_core::TypedPayload;
-use obzenflow_core::{StageId, WriterId};
-use obzenflow_dsl::{async_source, async_transform, flow, sink, source, transform};
+use obzenflow_core::{CycleDepth, StageId, WriterId};
+use obzenflow_dsl::{async_source, async_transform, flow, sink, source, test_flow, transform};
 use obzenflow_infra::journal::disk_journals;
+use obzenflow_runtime::testing::{JournalProbe, TestClock};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
     AsyncFiniteSourceHandler, AsyncTransformHandler, FiniteSourceHandler, SinkHandler,
@@ -224,7 +225,7 @@ impl AsyncTransformHandler for IterationTransform {
         }
 
         self.processed_iterations.fetch_add(1, Ordering::Relaxed);
-        tokio::time::sleep(self.delay).await;
+        tokio::time::sleep(self.delay).await; // hang-guard: test-only async latency under paused time
 
         let depth = payload.get("depth").and_then(|v| v.as_u64()).unwrap_or(0);
         let target = payload.get("target").and_then(|v| v.as_u64()).unwrap_or(0);
@@ -278,8 +279,10 @@ impl SinkHandler for DoneCounterSink {
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn cycle_buffers_external_eof_until_scc_quiescent() -> Result<()> {
+    let clock = TestClock::new().await.expect("paused runtime");
+
     let journal_root = unique_journal_dir("cycle_buffers_external_eof");
 
     let target_iterations = 5u64;
@@ -291,7 +294,7 @@ async fn cycle_buffers_external_eof_until_scc_quiescent() -> Result<()> {
     let iter_processed_for_flow = iter_processed.clone();
     let (sink, done_count) = DoneCounterSink::new();
 
-    let handle = flow! {
+    let harness = test_flow! {
         name: "cycle_buffers_external_eof_until_scc_quiescent",
         journals: disk_journals(journal_root),
         middleware: [],
@@ -313,9 +316,24 @@ async fn cycle_buffers_external_eof_until_scc_quiescent() -> Result<()> {
     .await
     .map_err(|e| anyhow::anyhow!("failed to create flow: {e}"))?;
 
-    tokio::time::timeout(Duration::from_secs(10), handle.run())
-        .await
-        .map_err(|_| anyhow::anyhow!("flow run timed out"))?
+    let probe = JournalProbe::try_on_stage(&harness, "entry")?;
+    let handle = harness.into_inner();
+    let run = tokio::spawn(handle.run());
+
+    // Drive paused time until the flow terminates.
+    for _ in 0..400 {
+        if run.is_finished() {
+            break;
+        }
+        clock.advance(Duration::from_millis(50)).await?;
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        run.is_finished(),
+        "flow did not terminate under paused time"
+    );
+    run.await
+        .expect("join handle")
         .map_err(|e| anyhow::anyhow!("flow run failed: {e}"))?;
 
     assert_eq!(
@@ -333,6 +351,22 @@ async fn cycle_buffers_external_eof_until_scc_quiescent() -> Result<()> {
         target_iterations.saturating_add(1),
         "expected entry stage to see seed + each returned iteration event"
     );
+
+    // Assert that the SCC entry stage observed the final cycle depth for the converging loop.
+    let scc_id = probe
+        .expect_event(1)
+        .await?
+        .envelope()
+        .event
+        .cycle_scc_id
+        .expect("scc id");
+    probe
+        .expect_event_at_cycle_depth(
+            scc_id,
+            CycleDepth::new((target_iterations.saturating_add(1)) as u16),
+            1,
+        )
+        .await?;
 
     Ok(())
 }
@@ -378,7 +412,7 @@ impl AsyncFiniteSourceHandler for SeedThenDrainSource {
                 Ok(Some(vec![event]))
             }
             1 => {
-                tokio::time::sleep(self.drain_delay).await;
+                tokio::time::sleep(self.drain_delay).await; // hang-guard: test-only virtual-time drain delay
                 self.state = 2;
                 Ok(Some(vec![ChainEventFactory::drain_event(self.writer_id)]))
             }
@@ -434,8 +468,10 @@ impl FiniteSourceHandler for DualSeedSource {
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn cycle_buffers_drain_until_scc_quiescent() -> Result<()> {
+    let clock = TestClock::new().await.expect("paused runtime");
+
     let journal_root = unique_journal_dir("cycle_buffers_drain");
 
     let target_iterations = 5u64;
@@ -448,7 +484,7 @@ async fn cycle_buffers_drain_until_scc_quiescent() -> Result<()> {
     let iter_processed_for_flow = iter_processed.clone();
     let (sink, done_count) = DoneCounterSink::new();
 
-    let handle = flow! {
+    let harness = test_flow! {
         name: "cycle_buffers_drain_until_scc_quiescent",
         journals: disk_journals(journal_root),
         middleware: [],
@@ -470,9 +506,24 @@ async fn cycle_buffers_drain_until_scc_quiescent() -> Result<()> {
     .await
     .map_err(|e| anyhow::anyhow!("failed to create flow: {e}"))?;
 
-    tokio::time::timeout(Duration::from_secs(10), handle.run())
-        .await
-        .map_err(|_| anyhow::anyhow!("flow run timed out"))?
+    let probe = JournalProbe::try_on_stage(&harness, "entry")?;
+    let handle = harness.into_inner();
+    let run = tokio::spawn(handle.run());
+
+    // Drive paused time until the flow terminates.
+    for _ in 0..400 {
+        if run.is_finished() {
+            break;
+        }
+        clock.advance(Duration::from_millis(50)).await?;
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        run.is_finished(),
+        "flow did not terminate under paused time"
+    );
+    run.await
+        .expect("join handle")
         .map_err(|e| anyhow::anyhow!("flow run failed: {e}"))?;
 
     assert_eq!(
@@ -490,6 +541,22 @@ async fn cycle_buffers_drain_until_scc_quiescent() -> Result<()> {
         target_iterations.saturating_add(1),
         "expected entry stage to see seed + each returned iteration event"
     );
+
+    // Assert the converging loop reached the final cycle depth even with a mid-flight drain.
+    let scc_id = probe
+        .expect_event(1)
+        .await?
+        .envelope()
+        .event
+        .cycle_scc_id
+        .expect("scc id");
+    probe
+        .expect_event_at_cycle_depth(
+            scc_id,
+            CycleDepth::new((target_iterations.saturating_add(1)) as u16),
+            1,
+        )
+        .await?;
 
     Ok(())
 }

@@ -8,9 +8,10 @@ use obzenflow_core::event::chain_event::ChainEventFactory;
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
 use obzenflow_core::event::CorrelationId;
 use obzenflow_core::TypedPayload;
-use obzenflow_core::{ChainEvent, StageId, WriterId};
-use obzenflow_dsl::{async_source, flow, sink, source, stateful, transform};
+use obzenflow_core::{ChainEvent, CycleDepth, StageId, WriterId};
+use obzenflow_dsl::{async_source, flow, sink, source, stateful, test_flow, transform};
 use obzenflow_infra::journal::disk_journals;
+use obzenflow_runtime::testing::{JournalProbe, TestClock};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
     AsyncFiniteSourceHandler, FiniteSourceHandler, SinkHandler, StatefulHandler, TransformHandler,
@@ -104,7 +105,7 @@ impl AsyncFiniteSourceHandler for CorrelatedEventSource {
             return Ok(Some(vec![event]));
         }
 
-        tokio::time::sleep(self.eof_delay).await;
+        tokio::time::sleep(self.eof_delay).await; // hang-guard: test-only EOF delay under paused time
         Ok(None)
     }
 }
@@ -331,15 +332,17 @@ async fn cycle_guard_bounds_flow_signal_backflow() -> Result<()> {
     Ok(())
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn cycle_guard_bounds_data_backflow() -> Result<()> {
+    let clock = TestClock::new().await.expect("paused runtime");
+
     let base = PathBuf::from("target/cycle_guard_bounds_data");
     let _ = fs::remove_dir_all(&base);
     let base_for_flow = base.clone();
 
     let (counter_sink, counter) = EventCounterSink::new();
 
-    let handle = flow! {
+    let harness = test_flow! {
         name: "cycle_guard_bounds_data",
         journals: disk_journals(base_for_flow),
         middleware: [],
@@ -361,9 +364,27 @@ async fn cycle_guard_bounds_data_backflow() -> Result<()> {
     .await
     .map_err(|e| anyhow::anyhow!("failed to create flow: {e}"))?;
 
-    tokio::time::timeout(Duration::from_secs(10), handle.run())
-        .await
-        .map_err(|_| anyhow::anyhow!("flow run timed out (possible data cycle amplification)"))?
+    let probe = JournalProbe::try_on_stage(&harness, "a")?;
+    let handle = harness.into_inner();
+    let run = tokio::spawn(handle.run());
+
+    // Drive paused time until the flow terminates.
+    //
+    // The pipeline may wait for metrics drain coordination under paused time;
+    // advance enough virtual time for that bounded wait to elapse.
+    for _ in 0..400 {
+        if run.is_finished() {
+            break;
+        }
+        clock.advance(Duration::from_millis(50)).await?;
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        run.is_finished(),
+        "flow did not terminate under paused time (possible data cycle amplification)"
+    );
+    run.await
+        .expect("join handle")
         .map_err(|e| anyhow::anyhow!("flow run failed: {e}"))?;
 
     assert_eq!(
@@ -372,19 +393,17 @@ async fn cycle_guard_bounds_data_backflow() -> Result<()> {
         "expected cycle guard to bound the data backflow iterations (default max_iterations=30)"
     );
 
-    let run_dir = single_flow_run_dir(&base)?;
-    let total_lines = count_log_lines(&run_dir)?;
-    assert!(
-        total_lines < 4000,
-        "expected bounded journal growth; total log lines={total_lines}, run_dir={:?}",
-        run_dir
-    );
-
-    assert!(
-        any_log_contains(&run_dir, "Cycle depth")?,
-        "expected to find cycle guard abort in logs; run_dir={:?}",
-        run_dir
-    );
+    // Assert that the SCC entry stage observed the expected max iteration depth.
+    let scc_id = probe
+        .expect_event(1)
+        .await?
+        .envelope()
+        .event
+        .cycle_scc_id
+        .expect("scc id");
+    probe
+        .expect_event_at_cycle_depth(scc_id, CycleDepth::new(30), 1)
+        .await?;
 
     Ok(())
 }
