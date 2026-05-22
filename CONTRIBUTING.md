@@ -136,6 +136,12 @@ Prefer these primitives over fixed sleeps when writing tests:
 - `JournalSnapshot` (captured journals): assert append-order vs causal-order properties via `JournalOrder`, `SequenceMatchMode`, `JournalExpectation`, `assert_happens_before`, and `assert_concurrent`.
 - `MetricsBarrier` (metrics/exporter): wait for exported watermarks without reading files or adding barrier sleeps.
 
+FLOWIP-114n migration patterns:
+
+- Cycle timing: run the test under paused Tokio time, drive virtual time through `TestClock`, settle the scheduler, then assert the expected SCC/depth with `JournalProbe::expect_event_at_cycle_depth(...)`.
+- Fan-in readback: use handle-level `wait_for_completion()` when the test needs a deterministic completion barrier, then read the causally ordered stage journal and assert vector-clock components directly. A clock component means "downstream of this writer", not "delivered from this upstream edge".
+- Journal snapshots: use `JournalSnapshot` when the test needs a stable append-order or causal-order boundary. Capture after the scheduler is settled; later appends do not change the snapshot.
+
 ## Pull request guidelines
 
 - Keep changes focused (one feature/fix per PR when possible).

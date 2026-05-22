@@ -422,7 +422,7 @@ jobs:
           # synchronisation barriers. Any remaining `tokio::time::sleep(...)` must
           # be explicitly annotated to avoid regressions.
           matches="$(
-            rg -n 'tokio::time::sleep\\(' \
+            rg -n 'tokio::time::sleep\(' \
               tests/cycle_convergence_eof_gating_test.rs \
               tests/cycle_unified_guard_test.rs \
               tests/divergence_mid_flight_abort_test.rs \
