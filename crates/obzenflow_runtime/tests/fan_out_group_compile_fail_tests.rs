@@ -3,7 +3,7 @@
 // https://obzenflow.dev
 
 #[test]
-fn flowip_114n_ui() {
+fn fan_out_group_rejects_payload_identity_keys() {
     let t = trybuild::TestCases::new();
-    t.compile_fail("tests/ui/flowip_114n_*.rs");
+    t.compile_fail("tests/compile_fail/fan_out_group_*.rs");
 }

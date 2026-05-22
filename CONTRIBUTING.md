@@ -79,13 +79,13 @@ The separate `test-test-support` job is narrower than the normal matrix. It exis
 - `divergence_mid_flight_abort_test`: paused-time contract-evaluation abort coverage (system journal assertions).
 - `cycle_unified_guard_test`: paused-time cycle guard / SCC max-iteration coverage.
 - `cycle_convergence_eof_gating_test`: paused-time cycle EOF gating coverage.
-- `flowip_114n_ui_tests`: compile-fail coverage for test-support helper contracts (trybuild).
+- `fan_out_group_compile_fail_tests`: compile-fail coverage that prevents payload identity, such as `correlation_id`, from becoming a fan-out grouping key.
 
 If you change `obzenflow_runtime::testing`, the `test-support` feature, or one of those three files, also run:
 
 ```bash
 cargo nextest run --workspace --locked --profile ci-fast --features test-support \
-  -E 'binary(/^(stateful_metrics_integration_test|metrics_exporter_integration_test|rate_limiter_integration_test|divergence_mid_flight_abort_test|cycle_unified_guard_test|cycle_convergence_eof_gating_test|flowip_114n_ui_tests)$/)'
+  -E 'binary(/^(stateful_metrics_integration_test|metrics_exporter_integration_test|rate_limiter_integration_test|divergence_mid_flight_abort_test|cycle_unified_guard_test|cycle_convergence_eof_gating_test|fan_out_group_compile_fail_tests)$/)'
 ```
 
 Before opening a PR that touches runtime or tests, run the same profile that CI will run for your branch:

@@ -1,5 +1,5 @@
 error[E0423]: cannot initialize a tuple struct which contains private fields
-  --> tests/ui/flowip_114n_fanoutgroup_from_correlation_id.rs:16:19
+  --> tests/compile_fail/fan_out_group_rejects_correlation_id.rs:16:19
    |
 16 |     let _parent = ParentEventId(event_id);
    |                   ^^^^^^^^^^^^^

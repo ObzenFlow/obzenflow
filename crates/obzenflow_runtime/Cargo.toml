@@ -41,5 +41,5 @@ ulid = { workspace = true }
 trybuild = { workspace = true }
 
 [[test]]
-name = "flowip_114n_ui_tests"
+name = "fan_out_group_compile_fail_tests"
 required-features = ["test-support"]
