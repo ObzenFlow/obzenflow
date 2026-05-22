@@ -26,8 +26,8 @@ use obzenflow_core::event::event_envelope::EventEnvelope;
 use obzenflow_core::event::EventId;
 use obzenflow_core::event::WriterId;
 use obzenflow_core::journal::Journal;
-use obzenflow_core::{CycleDepth, SccId};
 use obzenflow_core::StageId;
+use obzenflow_core::{CycleDepth, SccId};
 use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
@@ -935,11 +935,7 @@ mod tests {
             .expect_event_at_cycle_depth(scc, depth, 2)
             .await
             .expect("expect 2nd match at cycle depth");
-        assert_eq!(
-            second.envelope().event.cycle_scc_id,
-            Some(scc),
-            "scc id"
-        );
+        assert_eq!(second.envelope().event.cycle_scc_id, Some(scc), "scc id");
         assert_eq!(
             second.envelope().event.cycle_depth,
             Some(depth),
@@ -981,7 +977,10 @@ mod tests {
             serde_json::json!({"k": 3}),
         );
 
-        stage_journal.append(parent, None).await.expect("append parent");
+        stage_journal
+            .append(parent, None)
+            .await
+            .expect("append parent");
         stage_journal
             .append(child_1.clone(), None)
             .await
@@ -1026,7 +1025,10 @@ mod tests {
 
         let mut err = ChainEventFactory::data_event(writer_id, "err", serde_json::json!({}));
         err.processing_info.status = ProcessingStatus::error("boom");
-        stage_journal.append(err.clone(), None).await.expect("append err");
+        stage_journal
+            .append(err.clone(), None)
+            .await
+            .expect("append err");
 
         let harness = harness_with_stage_journal("stage", stage_id, stage_journal, topology);
         let probe = JournalProbe::try_on_stage(&harness, "stage").expect("probe");

@@ -115,10 +115,12 @@ impl FanOutGroup {
     }
 }
 
+type EventPredicate<T> = dyn Fn(&EventEnvelope<T>) -> bool + Send + Sync;
+
 #[derive(Clone)]
 pub struct EventShape<T: JournalEvent + 'static> {
     description: String,
-    predicate: Arc<dyn Fn(&EventEnvelope<T>) -> bool + Send + Sync>,
+    predicate: Arc<EventPredicate<T>>,
 }
 
 impl<T: JournalEvent + 'static> std::fmt::Debug for EventShape<T> {
@@ -198,7 +200,9 @@ impl EventShape<ChainEvent> {
             + 'static,
     ) -> Self {
         let predicate = Arc::new(predicate);
-        self.refine(description, move |env| predicate(&env.event.processing_info.status))
+        self.refine(description, move |env| {
+            predicate(&env.event.processing_info.status)
+        })
     }
 }
 
@@ -395,7 +399,10 @@ impl<T: JournalEvent + 'static> JournalSnapshot<T> {
         }
     }
 
-    pub fn matches(&self, expectation: &JournalExpectation<T>) -> Result<(), JournalExpectationError>
+    pub fn matches(
+        &self,
+        expectation: &JournalExpectation<T>,
+    ) -> Result<(), JournalExpectationError>
     where
         T: DirectParentId,
     {
@@ -416,7 +423,10 @@ async fn capture_journal<T: JournalEvent + 'static>(
         match reader.next().await {
             Ok(Some(env)) => {
                 let append_index = rows.len() as u64;
-                rows.push(SnapshotRow { append_index, envelope: env });
+                rows.push(SnapshotRow {
+                    append_index,
+                    envelope: env,
+                });
             }
             Ok(None) => return Ok(JournalSnapshot { rows }),
             Err(e) => return Err(JournalProbeError::JournalRead(e.to_string())),
@@ -464,9 +474,7 @@ fn assert_sequence<T: JournalEvent + 'static>(
     };
 
     let ok = match mode {
-        SequenceMatchMode::Exact => {
-            actual.len() == expected.len() && matches_at(0)
-        }
+        SequenceMatchMode::Exact => actual.len() == expected.len() && matches_at(0),
         SequenceMatchMode::Prefix => matches_at(0),
         SequenceMatchMode::ContiguousSubsequence => (0..=actual.len()).any(matches_at),
         SequenceMatchMode::OrderedSubsequence => ordered_subsequence_matches(),
@@ -502,7 +510,11 @@ fn assert_causal_partial_order<T: JournalEvent + 'static>(
     let mut used: Vec<bool> = vec![false; snapshot.rows.len()];
     for shape in expected {
         let mut matched = false;
-        for (idx, env) in snapshot.events(JournalOrder::Causal).into_iter().enumerate() {
+        for (idx, env) in snapshot
+            .events(JournalOrder::Causal)
+            .into_iter()
+            .enumerate()
+        {
             if used[idx] {
                 continue;
             }
@@ -545,7 +557,9 @@ fn assert_unordered_multiset<T: JournalEvent + DirectParentId + 'static>(
             ParentSelector::VectorClockComponent { writer_id, seq } => {
                 env.vector_clock.get(&writer_id.to_string()) == seq
             }
-            ParentSelector::ParentEventId(parent_id) => env.event.direct_parent_id() == Some(parent_id),
+            ParentSelector::ParentEventId(parent_id) => {
+                env.event.direct_parent_id() == Some(parent_id)
+            }
         })
         .collect();
 
@@ -726,8 +740,10 @@ mod tests {
     async fn snapshot_capture_is_eager_and_does_not_observe_late_appends() {
         let stage = StageId::new();
         let owner = JournalOwner::stage(stage);
-        let mut journal = MemoryJournal::<ChainEvent>::default();
-        journal.owner = Some(owner);
+        let journal = MemoryJournal::<ChainEvent> {
+            owner: Some(owner),
+            ..Default::default()
+        };
 
         let journal: Arc<dyn Journal<ChainEvent>> = Arc::new(journal);
         let writer = WriterId::from(stage);
@@ -854,8 +870,10 @@ mod tests {
         let writer = WriterId::from(stage);
 
         let owner = JournalOwner::stage(stage);
-        let mut journal = MemoryJournal::<ChainEvent>::default();
-        journal.owner = Some(owner);
+        let journal = MemoryJournal::<ChainEvent> {
+            owner: Some(owner),
+            ..Default::default()
+        };
         let journal: Arc<dyn Journal<ChainEvent>> = Arc::new(journal);
 
         let corr = CorrelationId::new();
@@ -907,7 +925,10 @@ mod tests {
         snapshot
             .assert_expectation(&JournalExpectation::UnorderedMultiset {
                 fan_out_group: group,
-                events: vec![EventShape::data_type("child.a"), EventShape::data_type("child.b")],
+                events: vec![
+                    EventShape::data_type("child.a"),
+                    EventShape::data_type("child.b"),
+                ],
             })
             .expect("should match the two fan-out children by direct parent id");
     }

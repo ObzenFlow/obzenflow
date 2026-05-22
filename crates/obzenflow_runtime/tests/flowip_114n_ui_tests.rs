@@ -7,4 +7,3 @@ fn flowip_114n_ui() {
     let t = trybuild::TestCases::new();
     t.compile_fail("tests/ui/flowip_114n_*.rs");
 }
-

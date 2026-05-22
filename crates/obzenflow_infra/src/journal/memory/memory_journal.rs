@@ -198,7 +198,11 @@ impl<T: JournalEvent + 'static> Journal<T> for MemoryJournal<T> {
         event_id: &EventId,
     ) -> Result<Option<EventEnvelope<T>>, JournalError> {
         let state = self.state.lock().unwrap();
-        Ok(state.events.iter().find(|e| e.event.id() == event_id).cloned())
+        Ok(state
+            .events
+            .iter()
+            .find(|e| e.event.id() == event_id)
+            .cloned())
     }
 
     async fn reader(&self) -> Result<Box<dyn JournalReader<T>>, JournalError> {
@@ -206,7 +210,10 @@ impl<T: JournalEvent + 'static> Journal<T> for MemoryJournal<T> {
     }
 
     async fn reader_from(&self, position: u64) -> Result<Box<dyn JournalReader<T>>, JournalError> {
-        Ok(Box::new(MemoryJournalReader::new(self.state.clone(), position)))
+        Ok(Box::new(MemoryJournalReader::new(
+            self.state.clone(),
+            position,
+        )))
     }
 
     async fn read_last_n(&self, count: usize) -> Result<Vec<EventEnvelope<T>>, JournalError> {

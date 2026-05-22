@@ -21,9 +21,7 @@ use obzenflow_core::event::system_event::{ContractResultStatusLabel, SystemEvent
 use obzenflow_core::event::types::ViolationCause as EventViolationCause;
 use obzenflow_core::event::SystemEventType;
 use obzenflow_core::TypedPayload;
-use obzenflow_core::{
-    CycleDepth, DivergenceContract, StageId, TransportContract, WriterId,
-};
+use obzenflow_core::{CycleDepth, DivergenceContract, StageId, TransportContract, WriterId};
 use obzenflow_dsl::{async_transform, sink, source, test_flow, transform};
 use obzenflow_infra::journal::memory_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
@@ -31,9 +29,7 @@ use obzenflow_runtime::stages::common::handlers::source::traits::SourceError;
 use obzenflow_runtime::stages::common::handlers::{
     AsyncTransformHandler, FiniteSourceHandler, SinkHandler, TransformHandler,
 };
-use obzenflow_runtime::testing::{
-    EventShape, JournalOrder, JournalSnapshot, TestClock,
-};
+use obzenflow_runtime::testing::{EventShape, JournalOrder, JournalSnapshot, TestClock};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -354,13 +350,15 @@ async fn divergence_aborts_on_mid_flight_violation() -> Result<()> {
         },
     );
 
-    let pipeline_failed = EventShape::<SystemEvent>::system_event_predicate(
-        "PipelineLifecycle::Failed",
-        |ev| matches!(
-            ev,
-            SystemEventType::PipelineLifecycle(obzenflow_core::event::system_event::PipelineLifecycleEvent::Failed { .. })
-        ),
-    );
+    let pipeline_failed =
+        EventShape::<SystemEvent>::system_event_predicate("PipelineLifecycle::Failed", |ev| {
+            matches!(
+                ev,
+                SystemEventType::PipelineLifecycle(
+                    obzenflow_core::event::system_event::PipelineLifecycleEvent::Failed { .. }
+                )
+            )
+        });
 
     // System events are appended without explicit parent chaining, so their vector clocks
     // do not necessarily encode strict happened-before across different system writers.
@@ -416,7 +414,10 @@ async fn divergence_emits_mid_flight_contract_health_heartbeats() -> Result<()> 
         clock.advance(Duration::from_millis(20)).await?;
         tokio::task::yield_now().await;
     }
-    assert!(run.is_finished(), "flow did not terminate under paused time");
+    assert!(
+        run.is_finished(),
+        "flow did not terminate under paused time"
+    );
 
     let _ = run.await.expect("join handle")?;
 
@@ -502,7 +503,10 @@ async fn divergence_does_not_false_positive_on_fan_in_inside_cycle() -> Result<(
         clock.advance(Duration::from_millis(20)).await?;
         tokio::task::yield_now().await;
     }
-    assert!(run.is_finished(), "flow did not terminate under paused time");
+    assert!(
+        run.is_finished(),
+        "flow did not terminate under paused time"
+    );
     run.await.expect("join handle")?;
 
     let _stable_len = TestClock::settle_scheduler(|| async {
@@ -595,10 +599,8 @@ async fn divergence_aborts_on_cycle_depth_violation() -> Result<()> {
         }
         clock.advance(Duration::from_millis(50)).await?;
         // Give supervisors a chance to run timers and propagate contract evidence.
-        let _ = TestClock::settle_scheduler(|| async {
-            Ok::<bool, Infallible>(run.is_finished())
-        })
-        .await?;
+        let _ = TestClock::settle_scheduler(|| async { Ok::<bool, Infallible>(run.is_finished()) })
+            .await?;
     }
     assert!(
         run.is_finished(),
