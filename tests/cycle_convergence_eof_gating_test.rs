@@ -326,7 +326,12 @@ async fn cycle_buffers_external_eof_until_scc_quiescent() -> Result<()> {
             break;
         }
         clock.advance(Duration::from_millis(50)).await?;
-        tokio::task::yield_now().await;
+        for _ in 0..16 {
+            if run.is_finished() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
     }
     assert!(
         run.is_finished(),
@@ -516,7 +521,12 @@ async fn cycle_buffers_drain_until_scc_quiescent() -> Result<()> {
             break;
         }
         clock.advance(Duration::from_millis(50)).await?;
-        tokio::task::yield_now().await;
+        for _ in 0..16 {
+            if run.is_finished() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
     }
     assert!(
         run.is_finished(),

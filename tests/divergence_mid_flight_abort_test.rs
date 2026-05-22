@@ -299,9 +299,8 @@ async fn divergence_aborts_on_mid_flight_violation() -> Result<()> {
     );
 
     let run = run.await.expect("join handle");
-    match run {
-        Ok(()) => anyhow::bail!("expected flow to abort due to divergence contract violation"),
-        Err(_) => {}
+    if let Ok(()) = run {
+        anyhow::bail!("expected flow to abort due to divergence contract violation");
     }
 
     // Ensure the system journal is stable before snapshot capture.
@@ -419,7 +418,7 @@ async fn divergence_emits_mid_flight_contract_health_heartbeats() -> Result<()> 
         "flow did not terminate under paused time"
     );
 
-    let _ = run.await.expect("join handle")?;
+    run.await.expect("join handle")?;
 
     let _stable_len = TestClock::settle_scheduler(|| async {
         let snapshot = JournalSnapshot::capture_system_journal(system_journal.clone()).await?;
@@ -608,9 +607,8 @@ async fn divergence_aborts_on_cycle_depth_violation() -> Result<()> {
     );
 
     let run = run.await.expect("join handle");
-    match run {
-        Ok(()) => anyhow::bail!("expected flow to abort due to cycle_depth divergence violation"),
-        Err(_) => {}
+    if let Ok(()) = run {
+        anyhow::bail!("expected flow to abort due to cycle_depth divergence violation");
     }
 
     let _stable_len = TestClock::settle_scheduler(|| async {

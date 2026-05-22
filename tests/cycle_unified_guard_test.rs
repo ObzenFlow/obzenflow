@@ -229,26 +229,6 @@ fn count_log_lines(run_dir: &Path) -> Result<usize> {
     Ok(total)
 }
 
-fn any_log_contains(run_dir: &Path, needle: &str) -> Result<bool> {
-    for entry in fs::read_dir(run_dir)? {
-        let path = entry?.path();
-        if !path.is_file() {
-            continue;
-        }
-        if path.file_name().and_then(|n| n.to_str()) == Some("system.log") {
-            continue;
-        }
-        if path.extension().and_then(|ext| ext.to_str()) != Some("log") {
-            continue;
-        }
-        let contents = fs::read_to_string(&path)?;
-        if contents.contains(needle) {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
 #[tokio::test]
 async fn cycle_guard_rejects_cycles_with_non_transform_members() {
     let result = flow! {
@@ -377,7 +357,12 @@ async fn cycle_guard_bounds_data_backflow() -> Result<()> {
             break;
         }
         clock.advance(Duration::from_millis(50)).await?;
-        tokio::task::yield_now().await;
+        for _ in 0..16 {
+            if run.is_finished() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
     }
     assert!(
         run.is_finished(),
