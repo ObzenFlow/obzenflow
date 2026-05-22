@@ -699,7 +699,7 @@ impl<H: FiniteSourceHandler> FiniteSourceHandler for MiddlewareFiniteSource<H> {
         //
         // Important: finite sources may complete via `Ok(None)`. For that final completion
         // poll, we intentionally avoid running non-CB middleware (especially rate limiting)
-        // so we don't delay shutdown or skew counters (see FLOWIP-059a phase-3 tests).
+        // so we don't delay shutdown or skew counters (see metrics exporter integration tests).
         let synthetic_event = ChainEventFactory::data_event(
             self.writer_id,
             "system.source.next",

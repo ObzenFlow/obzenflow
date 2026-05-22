@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! FLOWIP-059a Phase 3 integration tests
+//! Metrics exporter integration tests
 //!
 //! These tests validate end-to-end wiring for:
 //! - Middleware metrics (circuit breaker, rate limiter) flowing through MetricsAggregator
@@ -32,7 +32,7 @@ use obzenflow_runtime::testing::MetricsBarrier;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-/// File-local payload for the phase-3 metrics integration test. The JSON
+/// File-local payload for the metrics exporter integration test. The JSON
 /// shape matches what `BurstSource` emits; the type fingerprints the
 /// stage contract per FLOWIP-114c.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -515,8 +515,8 @@ async fn metrics_circuit_breaker_counters_are_exported_with_joinable_labels() ->
     let timeout_flow = Duration::from_secs(30);
 
     let test_handle = test_flow! {
-        name: "metrics_cb_phase3",
-        journals: disk_journals(unique_journal_dir("metrics_cb_phase3")),
+        name: "metrics_cb_exporter",
+        journals: disk_journals(unique_journal_dir("metrics_cb_exporter")),
         middleware: [],
 
         stages: {
@@ -547,7 +547,7 @@ async fn metrics_circuit_breaker_counters_are_exported_with_joinable_labels() ->
     let exporter = run_with_metrics_barrier(test_handle, timeout_flow).await?;
 
     let cb_stage_label = format!("stage_id=\"{cb_stage_id}\"");
-    let flow_label = "flow=\"metrics_cb_phase3\"".to_string();
+    let flow_label = "flow=\"metrics_cb_exporter\"".to_string();
     let debug_patterns = vec![
         "obzenflow_circuit_breaker".to_string(),
         "obzenflow_circuit_breaker_requests_total".to_string(),
@@ -717,8 +717,8 @@ async fn metrics_rate_limiter_are_exported_with_joinable_labels() -> Result<()> 
     // Configure the limiter to produce at least one delayed event while keeping
     // the end-to-end run comfortably inside CI timing variance.
     let test_handle = test_flow! {
-        name: "metrics_rl_phase3",
-        journals: disk_journals(unique_journal_dir("metrics_rl_phase3")),
+        name: "metrics_rl_exporter",
+        journals: disk_journals(unique_journal_dir("metrics_rl_exporter")),
         middleware: [],
 
         stages: {
@@ -750,7 +750,7 @@ async fn metrics_rate_limiter_are_exported_with_joinable_labels() -> Result<()> 
     let exporter = run_with_metrics_barrier(test_handle, timeout_flow).await?;
 
     let rl_stage_label = format!("stage_id=\"{rl_stage_id}\"");
-    let flow_label = "flow=\"metrics_rl_phase3\"".to_string();
+    let flow_label = "flow=\"metrics_rl_exporter\"".to_string();
     let debug_patterns = vec![
         "obzenflow_rate_limiter".to_string(),
         "obzenflow_rate_limiter_events_total".to_string(),
@@ -1042,8 +1042,8 @@ async fn metrics_contract_metrics_are_exported_and_joinable_to_topology() -> Res
     let timeout_flow = Duration::from_secs(30);
 
     let test_handle = test_flow! {
-        name: "metrics_contracts_phase3",
-        journals: disk_journals(unique_journal_dir("metrics_contracts_phase3")),
+        name: "metrics_contracts_exporter",
+        journals: disk_journals(unique_journal_dir("metrics_contracts_exporter")),
         middleware: [],
 
         stages: {
@@ -1072,11 +1072,11 @@ async fn metrics_contract_metrics_are_exported_and_joinable_to_topology() -> Res
         "obzenflow_contract_results_total".to_string(),
         "obzenflow_contract_violations_total".to_string(),
         "obzenflow_contract_overrides_total".to_string(),
-        "flow=\"metrics_contracts_phase3\"".to_string(),
+        "flow=\"metrics_contracts_exporter\"".to_string(),
     ];
     let metrics_text = render_metrics_checked(&exporter, &debug_patterns, |text| {
         text.contains("obzenflow_contract_results_total")
-            && text.contains("flow=\"metrics_contracts_phase3\"")
+            && text.contains("flow=\"metrics_contracts_exporter\"")
     })?;
 
     // For every structurally attached contract, there must be a corresponding results series
@@ -1090,7 +1090,7 @@ async fn metrics_contract_metrics_are_exported_and_joinable_to_topology() -> Res
             assert!(
                 metrics_text.lines().any(|l| {
                     l.starts_with("obzenflow_contract_results_total{")
-                        && l.contains("flow=\"metrics_contracts_phase3\"")
+                        && l.contains("flow=\"metrics_contracts_exporter\"")
                         && l.contains(&upstream_label)
                         && l.contains(&downstream_label)
                         && l.contains(&contract_label)

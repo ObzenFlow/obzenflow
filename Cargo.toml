@@ -199,8 +199,8 @@ path = "tests/stateful_metrics_integration_test.rs"
 required-features = ["test-support"]
 
 [[test]]
-name = "metrics_phase3_integration_test"
-path = "tests/metrics_phase3_integration_test.rs"
+name = "metrics_exporter_integration_test"
+path = "tests/metrics_exporter_integration_test.rs"
 required-features = ["test-support"]
 
 [[test]]

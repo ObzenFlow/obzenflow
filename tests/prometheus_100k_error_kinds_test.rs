@@ -39,8 +39,6 @@ struct MetricSample {
 impl TypedPayload for MetricSample {
     const EVENT_TYPE: &'static str = "prometheus_100k.metric_sample";
 }
-use tokio::time::{sleep, Duration};
-
 /// Source that generates 100,000 events with a deterministic error pattern.
 #[derive(Clone, Debug)]
 struct HighVolumeSource {
@@ -219,10 +217,6 @@ async fn prometheus_100k_error_processor_error_kinds_are_domain_only() -> Result
         .await
         .map_err(|e| anyhow::anyhow!("Failed to run flow: {e:?}"))?
         .expect("Metrics exporter should be configured");
-
-    // Give the metrics aggregator a brief moment to perform its final export
-    // after observing pipeline completion.
-    sleep(Duration::from_secs(1)).await;
 
     let metrics_text = metrics_exporter
         .render_metrics()

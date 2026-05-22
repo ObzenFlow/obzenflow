@@ -35,7 +35,6 @@ impl TypedPayload for MetricEvent {
     const EVENT_TYPE: &'static str = "stage_metrics.event";
 }
 use std::sync::{Arc, Mutex};
-use tokio::time::{sleep, Duration};
 
 /// Simple source that emits a few test events
 #[derive(Clone, Debug)]
@@ -176,9 +175,6 @@ async fn test_stage_level_metrics_automatic() -> Result<()> {
         .await
         .map_err(|e| anyhow::anyhow!("Failed to run flow: {e:?}"))?
         .expect("Metrics should be enabled by default");
-
-    // Give the metrics aggregator a brief moment to flush snapshots
-    sleep(Duration::from_secs(1)).await;
 
     // Get metrics
     let metrics_text = metrics_exporter

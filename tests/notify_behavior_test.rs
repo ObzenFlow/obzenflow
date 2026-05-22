@@ -3,7 +3,7 @@
 // https://obzenflow.dev
 
 use std::sync::Arc;
-use tokio::sync::Notify;
+use tokio::sync::{oneshot, Notify};
 
 #[tokio::test]
 async fn test_notify_race_condition() {
@@ -45,15 +45,17 @@ async fn test_notify_race_condition() {
     println!("\nTest 3: Prepare listener, spawn task, then fire");
     let signal3 = Arc::new(Notify::new());
     let signal3_task = signal3.clone();
+    let (ready_tx, ready_rx) = oneshot::channel();
 
     let handle = tokio::spawn(async move {
         let notified3 = signal3_task.notified();
         println!("Task: waiting for signal...");
+        let _ = ready_tx.send(());
         notified3.await;
         println!("Task: received signal!");
     });
 
-    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+    ready_rx.await.expect("task should prepare listener");
     println!("Main: firing signal");
     signal3.notify_waiters();
 
