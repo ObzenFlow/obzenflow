@@ -550,7 +550,8 @@ impl FlowApplicationBuilder {
                 .with(console_layer)
                 .with(tracing_subscriber::fmt::layer())
                 .with(filter)
-                .init();
+                .try_init()
+                .ok();
 
             eprintln!("🚦 tokio-console enabled on {bind}");
             eprintln!("   Connect with: tokio-console http://{bind}");
@@ -567,10 +568,10 @@ impl FlowApplicationBuilder {
         }
 
         // Standard tracing setup (no console-subscriber)
-        tracing_subscriber::registry()
+        let _ = tracing_subscriber::registry()
             .with(tracing_subscriber::fmt::layer())
             .with(filter)
-            .init();
+            .try_init();
     }
 }
 

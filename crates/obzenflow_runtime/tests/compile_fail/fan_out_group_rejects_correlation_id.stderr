@@ -1,0 +1,23 @@
+error[E0423]: cannot initialize a tuple struct which contains private fields
+  --> tests/compile_fail/fan_out_group_rejects_correlation_id.rs:16:19
+   |
+16 |     let _parent = ParentEventId(event_id);
+   |                   ^^^^^^^^^^^^^
+   |
+note: constructor is not visible here due to private fields
+  --> src/testing/journal_snapshot.rs
+   |
+   | pub struct ParentEventId(EventId);
+   |                          ^^^^^^^ private field
+help: you might have meant to use an associated function to build this type
+   |
+16 -     let _parent = ParentEventId(event_id);
+16 +     let _parent = ParentEventId::of(_);
+   |
+16 -     let _parent = ParentEventId(event_id);
+16 +     let _parent = ParentEventId::from_event_id(_);
+   |
+help: consider importing this tuple variant instead
+   |
+ 5 + use obzenflow_runtime::testing::ParentSelector::ParentEventId;
+   |

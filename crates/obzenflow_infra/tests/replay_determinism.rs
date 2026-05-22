@@ -208,7 +208,6 @@ async fn replay_determinism_covers_concurrent_writer_ordering() {
         .append(high, None)
         .await
         .expect("append high-id event");
-    tokio::time::sleep(std::time::Duration::from_millis(2)).await;
     upstream_journal
         .append(low, None)
         .await
@@ -499,17 +498,10 @@ async fn run_stateful_supervisor_once() -> Vec<serde_json::Value> {
     handle.initialize().await.expect("initialize stateful");
     handle.ready().await.expect("ready stateful");
 
-    for _ in 0..200 {
-        if handle.is_terminal() {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    }
-    assert!(
-        handle.is_terminal(),
-        "stateful supervisor did not terminate; final state = {:?}",
-        handle.current_state()
-    );
+    handle
+        .wait_for_completion()
+        .await
+        .expect("stateful supervisor should complete");
 
     let events = stateful_journal
         .read_causally_ordered()
@@ -725,17 +717,10 @@ async fn run_join_supervisor_once() -> Vec<JoinedRow> {
     handle.initialize().await.expect("initialize join");
     handle.ready().await.expect("ready join");
 
-    for _ in 0..200 {
-        if handle.is_terminal() {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    }
-    assert!(
-        handle.is_terminal(),
-        "join supervisor did not terminate; final state = {:?}",
-        handle.current_state()
-    );
+    handle
+        .wait_for_completion()
+        .await
+        .expect("join supervisor should complete");
 
     let events = join_journal
         .read_causally_ordered()

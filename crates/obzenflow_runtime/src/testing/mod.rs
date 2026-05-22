@@ -16,12 +16,18 @@
 //! for the full contract.
 
 pub mod flow_test_harness;
+pub mod journal_snapshot;
 pub mod metrics_barrier;
 pub mod probe;
 pub mod stage_journal;
 pub mod test_clock;
 
 pub use flow_test_harness::FlowTestHarness;
+pub use journal_snapshot::{
+    assert_concurrent, assert_happens_before, CausalAssertionError, EventShape, FanOutGroup,
+    JournalExpectation, JournalExpectationError, JournalOrder, JournalSnapshot, ParentEventId,
+    ParentSelector, SequenceMatchMode,
+};
 pub use metrics_barrier::{MetricsBarrier, MetricsBarrierError};
 pub use probe::{JournalProbe, JournalProbeError, JournalProbeEvent};
 pub use stage_journal::StageJournalLookupError;

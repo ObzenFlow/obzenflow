@@ -231,17 +231,10 @@ async fn live_join_processes_stream_without_reference_eof() {
     handle.initialize().await.expect("initialize join");
     handle.ready().await.expect("ready join");
 
-    for _ in 0..200 {
-        if handle.is_terminal() {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    }
-    assert!(
-        handle.is_terminal(),
-        "join supervisor did not terminate; final state = {:?}",
-        handle.current_state()
-    );
+    handle
+        .wait_for_completion()
+        .await
+        .expect("join supervisor should complete");
 
     let events = join_journal
         .read_causally_ordered()
@@ -531,17 +524,10 @@ async fn live_join_on_source_eof_outputs_carry_reference_and_stream_ancestry() {
     handle.initialize().await.expect("initialize join");
     handle.ready().await.expect("ready join");
 
-    for _ in 0..200 {
-        if handle.is_terminal() {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    }
-    assert!(
-        handle.is_terminal(),
-        "join supervisor did not terminate; final state = {:?}",
-        handle.current_state()
-    );
+    handle
+        .wait_for_completion()
+        .await
+        .expect("join supervisor should complete");
 
     let events = join_journal
         .read_causally_ordered()
@@ -719,17 +705,10 @@ async fn live_join_reference_batch_cap_prevents_stream_starvation() {
     handle.initialize().await.expect("initialize join");
     handle.ready().await.expect("ready join");
 
-    for _ in 0..200 {
-        if handle.is_terminal() {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    }
-    assert!(
-        handle.is_terminal(),
-        "join supervisor did not terminate; final state = {:?}",
-        handle.current_state()
-    );
+    handle
+        .wait_for_completion()
+        .await
+        .expect("join supervisor should complete");
 
     let events = join_journal
         .read_causally_ordered()
@@ -911,17 +890,10 @@ async fn live_join_forwards_reference_eof() {
     handle.initialize().await.expect("initialize join");
     handle.ready().await.expect("ready join");
 
-    for _ in 0..200 {
-        if handle.is_terminal() {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    }
-    assert!(
-        handle.is_terminal(),
-        "join supervisor did not terminate; final state = {:?}",
-        handle.current_state()
-    );
+    handle
+        .wait_for_completion()
+        .await
+        .expect("join supervisor should complete");
 
     let events = join_journal
         .read_causally_ordered()
@@ -1161,17 +1133,10 @@ async fn live_join_reference_errors_are_per_record() {
     handle.initialize().await.expect("initialize join");
     handle.ready().await.expect("ready join");
 
-    for _ in 0..200 {
-        if handle.is_terminal() {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    }
-    assert!(
-        handle.is_terminal(),
-        "join supervisor did not terminate; final state = {:?}",
-        handle.current_state()
-    );
+    handle
+        .wait_for_completion()
+        .await
+        .expect("join supervisor should complete");
 
     let output_events = join_journal
         .read_causally_ordered()
