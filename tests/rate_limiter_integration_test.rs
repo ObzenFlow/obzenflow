@@ -14,11 +14,11 @@ use obzenflow_core::event::payloads::observability_payload::{
 use obzenflow_core::journal::Journal;
 use obzenflow_core::TypedPayload;
 use obzenflow_core::{StageId, WriterId};
-use obzenflow_dsl::{sink, source, test_flow, transform};
+use obzenflow_dsl::{async_source, join, sink, source, test_flow, transform};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    FiniteSourceHandler, SinkHandler, TransformHandler,
+    AsyncFiniteSourceHandler, FiniteSourceHandler, JoinHandler, SinkHandler, TransformHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
@@ -320,6 +320,120 @@ async fn rate_limiter_invalid_explicit_burst_fails_at_materialisation() {
     assert!(err.contains("cost_per_event"), "error: {err}");
 }
 
+/// Source step in the FLOWIP-114m no-charge tests. `Done` ends the source.
+#[derive(Clone, Copy, Debug)]
+enum SourceStep {
+    Data,
+    Empty,
+    Err,
+    Done,
+}
+
+/// Sync finite source that scripts a sequence of polls so tests can exercise
+/// empty-batch and error outcomes alongside data batches.
+#[derive(Clone, Debug)]
+struct ScriptedSyncSource {
+    steps: Vec<SourceStep>,
+    index: usize,
+    next_event_id: usize,
+    writer_id: WriterId,
+}
+
+impl ScriptedSyncSource {
+    fn new(steps: Vec<SourceStep>) -> Self {
+        Self {
+            steps,
+            index: 0,
+            next_event_id: 0,
+            writer_id: WriterId::from(StageId::new()),
+        }
+    }
+}
+
+impl FiniteSourceHandler for ScriptedSyncSource {
+    fn bind_writer_id(&mut self, id: WriterId) {
+        self.writer_id = id;
+    }
+
+    fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
+        let step = self
+            .steps
+            .get(self.index)
+            .copied()
+            .unwrap_or(SourceStep::Done);
+        self.index += 1;
+        match step {
+            SourceStep::Data => {
+                let id = self.next_event_id;
+                self.next_event_id += 1;
+                Ok(Some(vec![ChainEventFactory::data_event(
+                    self.writer_id,
+                    "test.scripted",
+                    json!({ "index": id }),
+                )]))
+            }
+            SourceStep::Empty => Ok(Some(Vec::new())),
+            SourceStep::Err => Err(SourceError::Other("scripted error".to_string())),
+            SourceStep::Done => Ok(None),
+        }
+    }
+}
+
+/// Async counterpart of `ScriptedSyncSource`.
+#[derive(Clone, Debug)]
+struct ScriptedAsyncSource {
+    steps: Vec<SourceStep>,
+    index: usize,
+    next_event_id: usize,
+    writer_id: WriterId,
+}
+
+impl ScriptedAsyncSource {
+    fn new(steps: Vec<SourceStep>) -> Self {
+        Self {
+            steps,
+            index: 0,
+            next_event_id: 0,
+            writer_id: WriterId::from(StageId::new()),
+        }
+    }
+}
+
+#[async_trait]
+impl AsyncFiniteSourceHandler for ScriptedAsyncSource {
+    fn bind_writer_id(&mut self, id: WriterId) {
+        self.writer_id = id;
+    }
+
+    async fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
+        let step = self
+            .steps
+            .get(self.index)
+            .copied()
+            .unwrap_or(SourceStep::Done);
+        self.index += 1;
+        tokio::task::yield_now().await;
+        match step {
+            SourceStep::Data => {
+                let id = self.next_event_id;
+                self.next_event_id += 1;
+                Ok(Some(vec![ChainEventFactory::data_event(
+                    self.writer_id,
+                    "test.scripted",
+                    json!({ "index": id }),
+                )]))
+            }
+            SourceStep::Empty => Ok(Some(Vec::new())),
+            SourceStep::Err => Err(SourceError::Other("scripted error".to_string())),
+            SourceStep::Done => Ok(None),
+        }
+    }
+
+    async fn drain(&mut self) -> Result<(), SourceError> {
+        Ok(())
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rate_limiter_source_stage_limits_per_poll_and_documents_batching() -> Result<()> {
     let (sink, count) = CountingSink::new();
@@ -359,6 +473,483 @@ async fn rate_limiter_source_stage_limits_per_poll_and_documents_batching() -> R
         delayed >= 1,
         "expected at least one rate limiter delayed event on the src stage journal"
     );
+
+    Ok(())
+}
+
+// ----- FLOWIP-114m no-charge regression tests -----
+//
+// These tests pin the new finite-source rule: the rate limiter charges only
+// successful non-empty batches. EOF (`Ok(None)`), empty batches
+// (`Ok(Some(vec![]))`) and source errors (`Err(...)`) consume no token,
+// increment no admission counter, and emit no `Delayed` event.
+//
+// Each test uses `rate_limit_with_burst(refill_rate, capacity)` where
+// `capacity == expected_admission_count`. If the rule were violated (i.e. the
+// rate limiter charged a no-charge poll) the bucket would empty an admission
+// early, the next genuine admission would block for at least `1 / refill_rate`
+// seconds, and a `Delayed` event would be journaled. The assertions
+// `count == expected_admission_count && delayed == 0` therefore fail under
+// the buggy path.
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rate_limiter_async_finite_does_not_charge_eof_poll() -> Result<()> {
+    let (sink, count) = CountingSink::new();
+    let test_handle = test_flow! {
+        name: "rate_limiter_async_finite_eof_no_charge",
+        journals: disk_journals(unique_journal_dir("rate_limiter_async_finite_eof_no_charge")),
+        middleware: [],
+
+        stages: {
+            src = async_source!(RateLimiterTestEvent => ScriptedAsyncSource::new(vec![
+                SourceStep::Data,
+                SourceStep::Data,
+                SourceStep::Done,
+            ]), [
+                rate_limit_with_burst(1.0, 2.0)
+            ]);
+            snk = sink!(RateLimiterTestEvent => sink);
+        },
+
+        topology: {
+            src |> snk;
+        }
+    }
+    .await
+    .map_err(|e| anyhow!("failed to create async EOF no-charge flow: {e}"))?;
+
+    let (_, src_journal) = test_handle
+        .stage_journal_for_test("src")
+        .map_err(|e| anyhow!("failed to look up src stage journal: {e}"))?;
+
+    tokio::time::timeout(Duration::from_secs(4), test_handle.into_inner().run())
+        .await
+        .map_err(|_| anyhow!("async EOF no-charge flow run timed out"))?
+        .map_err(|e| anyhow!("async EOF no-charge flow run failed: {e}"))?;
+
+    assert_eq!(count.load(Ordering::Relaxed), 2);
+    let delayed = rate_limiter_delayed_events(&src_journal).await?;
+    assert_eq!(
+        delayed, 0,
+        "FLOWIP-114m: async finite EOF poll must not consume a rate-limiter token"
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rate_limiter_sync_finite_does_not_charge_eof_poll() -> Result<()> {
+    let (sink, count) = CountingSink::new();
+    let test_handle = test_flow! {
+        name: "rate_limiter_sync_finite_eof_no_charge",
+        journals: disk_journals(unique_journal_dir("rate_limiter_sync_finite_eof_no_charge")),
+        middleware: [],
+
+        stages: {
+            src = source!(RateLimiterTestEvent => ScriptedSyncSource::new(vec![
+                SourceStep::Data,
+                SourceStep::Data,
+                SourceStep::Done,
+            ]), [
+                rate_limit_with_burst(1.0, 2.0)
+            ]);
+            snk = sink!(RateLimiterTestEvent => sink);
+        },
+
+        topology: {
+            src |> snk;
+        }
+    }
+    .await
+    .map_err(|e| anyhow!("failed to create sync EOF no-charge flow: {e}"))?;
+
+    let (_, src_journal) = test_handle
+        .stage_journal_for_test("src")
+        .map_err(|e| anyhow!("failed to look up src stage journal: {e}"))?;
+
+    tokio::time::timeout(Duration::from_secs(4), test_handle.into_inner().run())
+        .await
+        .map_err(|_| anyhow!("sync EOF no-charge flow run timed out"))?
+        .map_err(|e| anyhow!("sync EOF no-charge flow run failed: {e}"))?;
+
+    assert_eq!(count.load(Ordering::Relaxed), 2);
+    let delayed = rate_limiter_delayed_events(&src_journal).await?;
+    assert_eq!(
+        delayed, 0,
+        "FLOWIP-114m: sync finite EOF poll must not consume a rate-limiter token"
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rate_limiter_async_finite_does_not_charge_empty_batch() -> Result<()> {
+    let (sink, count) = CountingSink::new();
+    let test_handle = test_flow! {
+        name: "rate_limiter_async_empty_no_charge",
+        journals: disk_journals(unique_journal_dir("rate_limiter_async_empty_no_charge")),
+        middleware: [],
+
+        stages: {
+            src = async_source!(RateLimiterTestEvent => ScriptedAsyncSource::new(vec![
+                SourceStep::Data,
+                SourceStep::Empty,
+                SourceStep::Data,
+                SourceStep::Done,
+            ]), [
+                rate_limit_with_burst(1.0, 2.0)
+            ]);
+            snk = sink!(RateLimiterTestEvent => sink);
+        },
+
+        topology: {
+            src |> snk;
+        }
+    }
+    .await
+    .map_err(|e| anyhow!("failed to create async empty-batch no-charge flow: {e}"))?;
+
+    let (_, src_journal) = test_handle
+        .stage_journal_for_test("src")
+        .map_err(|e| anyhow!("failed to look up src stage journal: {e}"))?;
+
+    tokio::time::timeout(Duration::from_secs(4), test_handle.into_inner().run())
+        .await
+        .map_err(|_| anyhow!("async empty-batch no-charge flow run timed out"))?
+        .map_err(|e| anyhow!("async empty-batch no-charge flow run failed: {e}"))?;
+
+    assert_eq!(count.load(Ordering::Relaxed), 2);
+    let delayed = rate_limiter_delayed_events(&src_journal).await?;
+    assert_eq!(
+        delayed, 0,
+        "FLOWIP-114m: empty async batch must not consume a rate-limiter token"
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rate_limiter_sync_finite_does_not_charge_empty_batch() -> Result<()> {
+    let (sink, count) = CountingSink::new();
+    let test_handle = test_flow! {
+        name: "rate_limiter_sync_empty_no_charge",
+        journals: disk_journals(unique_journal_dir("rate_limiter_sync_empty_no_charge")),
+        middleware: [],
+
+        stages: {
+            src = source!(RateLimiterTestEvent => ScriptedSyncSource::new(vec![
+                SourceStep::Data,
+                SourceStep::Empty,
+                SourceStep::Data,
+                SourceStep::Done,
+            ]), [
+                rate_limit_with_burst(1.0, 2.0)
+            ]);
+            snk = sink!(RateLimiterTestEvent => sink);
+        },
+
+        topology: {
+            src |> snk;
+        }
+    }
+    .await
+    .map_err(|e| anyhow!("failed to create sync empty-batch no-charge flow: {e}"))?;
+
+    let (_, src_journal) = test_handle
+        .stage_journal_for_test("src")
+        .map_err(|e| anyhow!("failed to look up src stage journal: {e}"))?;
+
+    tokio::time::timeout(Duration::from_secs(4), test_handle.into_inner().run())
+        .await
+        .map_err(|_| anyhow!("sync empty-batch no-charge flow run timed out"))?
+        .map_err(|e| anyhow!("sync empty-batch no-charge flow run failed: {e}"))?;
+
+    assert_eq!(count.load(Ordering::Relaxed), 2);
+    let delayed = rate_limiter_delayed_events(&src_journal).await?;
+    assert_eq!(
+        delayed, 0,
+        "FLOWIP-114m: empty sync batch must not consume a rate-limiter token"
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rate_limiter_async_finite_does_not_charge_source_error() -> Result<()> {
+    let (sink, count) = CountingSink::new();
+    let test_handle = test_flow! {
+        name: "rate_limiter_async_error_no_charge",
+        journals: disk_journals(unique_journal_dir("rate_limiter_async_error_no_charge")),
+        middleware: [],
+
+        stages: {
+            src = async_source!(RateLimiterTestEvent => ScriptedAsyncSource::new(vec![
+                SourceStep::Data,
+                SourceStep::Err,
+                SourceStep::Data,
+                SourceStep::Done,
+            ]), [
+                rate_limit_with_burst(1.0, 2.0)
+            ]);
+            snk = sink!(RateLimiterTestEvent => sink);
+        },
+
+        topology: {
+            src |> snk;
+        }
+    }
+    .await
+    .map_err(|e| anyhow!("failed to create async error no-charge flow: {e}"))?;
+
+    let (_, src_journal) = test_handle
+        .stage_journal_for_test("src")
+        .map_err(|e| anyhow!("failed to look up src stage journal: {e}"))?;
+
+    tokio::time::timeout(Duration::from_secs(4), test_handle.into_inner().run())
+        .await
+        .map_err(|_| anyhow!("async error no-charge flow run timed out"))?
+        .map_err(|e| anyhow!("async error no-charge flow run failed: {e}"))?;
+
+    assert_eq!(count.load(Ordering::Relaxed), 2);
+    let delayed = rate_limiter_delayed_events(&src_journal).await?;
+    assert_eq!(
+        delayed, 0,
+        "FLOWIP-114m: async source error must not consume a rate-limiter token"
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rate_limiter_sync_finite_does_not_charge_source_error() -> Result<()> {
+    let (sink, count) = CountingSink::new();
+    let test_handle = test_flow! {
+        name: "rate_limiter_sync_error_no_charge",
+        journals: disk_journals(unique_journal_dir("rate_limiter_sync_error_no_charge")),
+        middleware: [],
+
+        stages: {
+            src = source!(RateLimiterTestEvent => ScriptedSyncSource::new(vec![
+                SourceStep::Data,
+                SourceStep::Err,
+                SourceStep::Data,
+                SourceStep::Done,
+            ]), [
+                rate_limit_with_burst(1.0, 2.0)
+            ]);
+            snk = sink!(RateLimiterTestEvent => sink);
+        },
+
+        topology: {
+            src |> snk;
+        }
+    }
+    .await
+    .map_err(|e| anyhow!("failed to create sync error no-charge flow: {e}"))?;
+
+    let (_, src_journal) = test_handle
+        .stage_journal_for_test("src")
+        .map_err(|e| anyhow!("failed to look up src stage journal: {e}"))?;
+
+    tokio::time::timeout(Duration::from_secs(4), test_handle.into_inner().run())
+        .await
+        .map_err(|_| anyhow!("sync error no-charge flow run timed out"))?
+        .map_err(|e| anyhow!("sync error no-charge flow run failed: {e}"))?;
+
+    assert_eq!(count.load(Ordering::Relaxed), 2);
+    let delayed = rate_limiter_delayed_events(&src_journal).await?;
+    assert_eq!(
+        delayed, 0,
+        "FLOWIP-114m: sync source error must not consume a rate-limiter token"
+    );
+
+    Ok(())
+}
+
+// ----- FLOWIP-114m join+rate_limit regression test -----
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct RefPayload {
+    id: u64,
+}
+
+impl TypedPayload for RefPayload {
+    const EVENT_TYPE: &'static str = "flowip114m.ref_payload";
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct StreamPayload {
+    id: u64,
+}
+
+impl TypedPayload for StreamPayload {
+    const EVENT_TYPE: &'static str = "flowip114m.stream_payload";
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct EnrichedPayload {
+    source: String,
+    id: u64,
+}
+
+impl TypedPayload for EnrichedPayload {
+    const EVENT_TYPE: &'static str = "flowip114m.enriched_payload";
+}
+
+#[derive(Clone, Debug)]
+struct SingleRefSource {
+    emitted: bool,
+    writer_id: WriterId,
+}
+
+impl SingleRefSource {
+    fn new() -> Self {
+        Self {
+            emitted: false,
+            writer_id: WriterId::from(StageId::new()),
+        }
+    }
+}
+
+impl FiniteSourceHandler for SingleRefSource {
+    fn bind_writer_id(&mut self, id: WriterId) {
+        self.writer_id = id;
+    }
+
+    fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
+        if self.emitted {
+            return Ok(None);
+        }
+        self.emitted = true;
+        Ok(Some(vec![ChainEventFactory::data_event(
+            self.writer_id,
+            RefPayload::EVENT_TYPE,
+            json!({ "id": 1_u64 }),
+        )]))
+    }
+}
+
+#[derive(Clone, Debug)]
+struct TwoStreamEventsSource {
+    emitted: usize,
+    writer_id: Option<WriterId>,
+}
+
+impl TwoStreamEventsSource {
+    fn new() -> Self {
+        Self {
+            emitted: 0,
+            writer_id: None,
+        }
+    }
+}
+
+#[async_trait]
+impl AsyncFiniteSourceHandler for TwoStreamEventsSource {
+    fn bind_writer_id(&mut self, id: WriterId) {
+        self.writer_id = Some(id);
+    }
+
+    async fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
+        if self.emitted >= 2 {
+            return Ok(None);
+        }
+        let id = self.emitted as u64;
+        self.emitted += 1;
+        tokio::task::yield_now().await;
+        let writer_id = self
+            .writer_id
+            .expect("stream writer_id should be bound by runtime");
+        Ok(Some(vec![ChainEventFactory::data_event(
+            writer_id,
+            StreamPayload::EVENT_TYPE,
+            json!({ "id": id }),
+        )]))
+    }
+}
+
+#[derive(Clone, Debug)]
+struct PassthroughJoin;
+
+#[async_trait]
+impl JoinHandler for PassthroughJoin {
+    type State = ();
+
+    fn initial_state(&self) -> Self::State {}
+
+    fn process_event(
+        &self,
+        _state: &mut Self::State,
+        event: ChainEvent,
+        _source_id: StageId,
+        writer_id: WriterId,
+    ) -> Result<Vec<ChainEvent>, HandlerError> {
+        let source = if event.event_type() == RefPayload::EVENT_TYPE {
+            "ref"
+        } else {
+            "stream"
+        };
+        let id = event
+            .payload()
+            .get("id")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+
+        Ok(vec![ChainEventFactory::data_event(
+            writer_id,
+            EnrichedPayload::EVENT_TYPE,
+            json!({ "source": source, "id": id }),
+        )])
+    }
+
+    fn on_source_eof(
+        &self,
+        _state: &mut Self::State,
+        _source_id: StageId,
+        _writer_id: WriterId,
+    ) -> Result<Vec<ChainEvent>, HandlerError> {
+        Ok(Vec::new())
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rate_limiter_join_stage_supports_rate_limit_middleware() -> Result<()> {
+    let (sink, count) = CountingSink::new();
+    let test_handle = test_flow! {
+        name: "rate_limiter_join_support",
+        journals: disk_journals(unique_journal_dir("rate_limiter_join_support")),
+        middleware: [],
+
+        stages: {
+            ref_src = source!(RefPayload => SingleRefSource::new());
+            stream_src = async_source!(StreamPayload => TwoStreamEventsSource::new());
+            joiner = join!(catalog ref_src: RefPayload, StreamPayload -> EnrichedPayload => PassthroughJoin, [
+                // Burst is 3 to account for: 1 reference hydration event + 2 stream events.
+                rate_limit_with_burst(1.0, 3.0)
+            ]);
+            snk = sink!(EnrichedPayload => sink);
+        },
+
+        topology: {
+            stream_src |> joiner;
+            joiner |> snk;
+        }
+    }
+    .await
+    .map_err(|e| anyhow!("failed to create join+rate_limit flow: {e}"))?;
+
+    let (_, joiner_journal) = test_handle
+        .stage_journal_for_test("joiner")
+        .map_err(|e| anyhow!("failed to look up joiner stage journal: {e}"))?;
+
+    tokio::time::timeout(Duration::from_secs(6), test_handle.into_inner().run())
+        .await
+        .map_err(|_| anyhow!("join+rate_limit flow run timed out"))?
+        .map_err(|e| anyhow!("join+rate_limit flow run failed: {e}"))?;
+
+    assert_eq!(count.load(Ordering::Relaxed), 2);
+    let delayed = rate_limiter_delayed_events(&joiner_journal).await?;
+    assert_eq!(delayed, 0);
 
     Ok(())
 }

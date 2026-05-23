@@ -196,8 +196,12 @@ pub struct MetricsStore {
     pub circuit_breaker_state_transitions_total: HashMap<(StageId, String, String), u64>,
     circuit_breaker_last_state: HashMap<StageId, String>,
 
+    /// Counts rate-limiter admissions, not guaranteed downstream commits (a later middleware
+    /// returning `Skip`/`Abort` does not refund — FLOWIP-114m known limitation).
     pub rate_limiter_events_total: HashMap<StageId, u64>,
     pub rate_limiter_delayed_total: HashMap<StageId, u64>,
+    /// Counts rate-limiter token consumption, not guaranteed downstream commits (a later middleware
+    /// returning `Skip`/`Abort` does not refund — FLOWIP-114m known limitation).
     pub rate_limiter_tokens_consumed_total: HashMap<StageId, f64>,
     pub rate_limiter_delay_seconds_total: HashMap<StageId, f64>,
     // Bucket state for gauge metrics (FLOWIP-059a-3 Issue 3)
