@@ -6,6 +6,10 @@
 //!
 //! This middleware implements a blocking rate limiter that creates natural
 //! backpressure by blocking when out of tokens, ensuring no events are lost.
+//!
+//! FLOWIP-114m: on finite sources, the rate limiter charges only successful non-empty batches.
+//! EOF (`Ok(None)`), empty batches (`Ok(Some(vec![]))`) and source errors (`Err(...)`) consume
+//! no token, increment no admission counter, and emit no `Delayed` event.
 
 use crate::middleware::{
     ErrorAction, Middleware, MiddlewareAction, MiddlewareContext, MiddlewareFactory,
@@ -768,13 +772,15 @@ impl MiddlewareFactory for RateLimiterFactory {
     }
 
     fn supported_stage_types(&self) -> &[StageType] {
-        // Rate limiting makes sense for all stage types
+        // Rate limiting makes sense for all stage types, including joins where the
+        // single stage-local bucket is shared across both join inputs (FLOWIP-114m).
         &[
             StageType::FiniteSource,
             StageType::InfiniteSource,
             StageType::Transform,
             StageType::Sink,
             StageType::Stateful,
+            StageType::Join,
         ]
     }
 
@@ -955,6 +961,29 @@ mod tests {
         match middleware.pre_handle(&lifecycle_event, &mut ctx) {
             MiddlewareAction::Continue => {}
             other => panic!("Expected Continue for lifecycle event, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_rate_limiter_supported_stage_types_includes_join() {
+        let factory = RateLimiterFactory::new(10.0);
+        let supported = factory.supported_stage_types();
+        assert!(
+            supported.contains(&StageType::Join),
+            "FLOWIP-114m: Join must be a supported stage type for rate_limiter"
+        );
+        for expected in [
+            StageType::FiniteSource,
+            StageType::InfiniteSource,
+            StageType::Transform,
+            StageType::Sink,
+            StageType::Stateful,
+            StageType::Join,
+        ] {
+            assert!(
+                supported.contains(&expected),
+                "missing supported stage type: {expected:?}"
+            );
         }
     }
 

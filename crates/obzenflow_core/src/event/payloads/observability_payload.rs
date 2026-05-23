@@ -169,6 +169,9 @@ pub enum CircuitBreakerEvent {
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum RateLimiterEvent {
     Delayed {
+        /// Last predicted gate wait for the delayed admission attempt, in milliseconds.
+        ///
+        /// Not cumulative; see `rate_limiter_delay_seconds_total` for cumulative actual waited time.
         delay_ms: u64,
         current_rate: f64,
         limit_rate: f64,

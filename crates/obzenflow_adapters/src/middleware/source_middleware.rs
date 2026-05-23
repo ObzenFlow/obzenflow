@@ -268,33 +268,23 @@ impl<H: AsyncFiniteSourceHandler> AsyncFiniteSourceHandler for MiddlewareAsyncFi
             }
         }
 
-        // Phase 0b: flow-control / rate-limiter gating before polling.
+        // Phase 0b: flow-control gating before polling.
         //
-        // Keep these before `inner.next()` for async finite sources so we still gate the
-        // underlying IO. If the poll later returns `Ok(None)`, we discard any control events
-        // emitted here so the final completion poll cannot keep the supervisor alive forever.
+        // Rate-limiter has moved to a delivery-side gate inside Phase 1 (FLOWIP-114m):
+        // it now charges only successful non-empty batches, not finite-source I/O polling.
+        // If the poll later returns `Ok(None)`, we discard any control events emitted
+        // here so the final completion poll cannot keep the supervisor alive forever.
         let completion_control_base = ctx.control_events.len();
         for middleware in self.middleware_chain.iter() {
-            let name = middleware.middleware_name();
-            if name != "rate_limiter" && name != "flow_control" {
+            if middleware.middleware_name() != "flow_control" {
                 continue;
             }
 
             match middleware.pre_handle(&synthetic_event, &mut ctx) {
                 MiddlewareAction::Continue => continue,
                 MiddlewareAction::Skip(mut results) => {
-                    match name {
-                        "flow_control" => {
-                            let backoff = self.empty_poll_backoff.next_backoff();
-                            tokio::time::sleep(backoff).await;
-                        }
-                        "rate_limiter" => {
-                            // Future-proofing: if a non-blocking rate limiter returns Skip,
-                            // add a small sleep to avoid hot-looping.
-                            tokio::time::sleep(Duration::from_millis(1)).await;
-                        }
-                        _ => {}
-                    }
+                    let backoff = self.empty_poll_backoff.next_backoff();
+                    tokio::time::sleep(backoff).await;
 
                     // Pre-write enrichment for skip results
                     for result in &mut results {
@@ -361,10 +351,22 @@ impl<H: AsyncFiniteSourceHandler> AsyncFiniteSourceHandler for MiddlewareAsyncFi
             return Ok(Some(control_events));
         }
 
+        // Per FLOWIP-114m, rate-limiter admission charges only successful non-empty batches.
+        // Empty successful polls (`Ok(Some(vec![]))`) and source errors (`Err(...)`) flow
+        // through Phase 1 without touching the rate limiter. EOF (`Ok(None)`) was handled
+        // by the completion short-circuit above.
+        let inner_succeeded_with_events = matches!(
+            &inner_result,
+            Ok(Some(events)) if !events.is_empty()
+        );
+
         // Phase 1: all other middleware pre-handle (after polling).
         for middleware in self.middleware_chain.iter() {
             let name = middleware.middleware_name();
-            if name == "circuit_breaker" || name == "rate_limiter" || name == "flow_control" {
+            if name == "circuit_breaker" || name == "flow_control" {
+                continue;
+            }
+            if name == "rate_limiter" && !inner_succeeded_with_events {
                 continue;
             }
 
@@ -775,10 +777,22 @@ impl<H: FiniteSourceHandler> FiniteSourceHandler for MiddlewareFiniteSource<H> {
             return Ok(Some(control_events));
         }
 
+        // Per FLOWIP-114m, rate-limiter admission charges only successful non-empty batches.
+        // Empty polls (`Ok(Some(vec![]))`) and source errors (`Err(...)`) skip the rate
+        // limiter. EOF (`Ok(None)`) was handled by the completion short-circuit above.
+        let inner_succeeded_with_events = matches!(
+            &inner_result,
+            Ok(Some(events)) if !events.is_empty()
+        );
+
         // Phase 1: all other middleware pre-handle (runs after polling, preserving existing
         // source semantics while still allowing CB gating above).
         for middleware in self.middleware_chain.iter() {
-            if middleware.middleware_name() == "circuit_breaker" {
+            let name = middleware.middleware_name();
+            if name == "circuit_breaker" {
+                continue;
+            }
+            if name == "rate_limiter" && !inner_succeeded_with_events {
                 continue;
             }
             match middleware.pre_handle(&synthetic_event, &mut ctx) {
