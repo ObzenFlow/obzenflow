@@ -2662,7 +2662,10 @@ mod tests {
             "expected probe to be admitted in HalfOpen"
         );
         assert_eq!(cb.current_state(), CircuitState::HalfOpen);
-        assert_eq!(probe_ctx.get::<CircuitBreakerIsProbe>().copied(), Some(true));
+        assert_eq!(
+            probe_ctx.get::<CircuitBreakerIsProbe>().copied(),
+            Some(true)
+        );
 
         // Verify success_count was reset to 0 on HalfOpen entry.
         assert_eq!(
@@ -2908,7 +2911,10 @@ mod tests {
 
         assert!(should_retry, "expected CB to signal retry for RateLimited");
 
-        let delay_ms = ctx.get::<CircuitBreakerRetryDelayMs>().copied().unwrap_or(0);
+        let delay_ms = ctx
+            .get::<CircuitBreakerRetryDelayMs>()
+            .copied()
+            .unwrap_or(0);
 
         // The delay should be at least raw_wait (1000ms) because jitter adds,
         // not subtracts. But it should not be exactly 0.

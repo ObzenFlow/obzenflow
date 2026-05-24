@@ -41,7 +41,9 @@ impl MiddlewareFactory for BackpressureMiddlewareFactory {
     }
 
     fn plan_contribution(&self) -> MiddlewarePlanContribution {
-        MiddlewarePlanContribution::Backpressure { window: self.window }
+        MiddlewarePlanContribution::Backpressure {
+            window: self.window,
+        }
     }
 
     fn topology_config_slot(&self) -> Option<TopologyMiddlewareConfigSlot> {

@@ -10,7 +10,7 @@
 use super::{Middleware, MiddlewareAction, MiddlewareContext, SourceMiddlewarePhase};
 use async_trait::async_trait;
 use obzenflow_core::event::payloads::observability_payload::{
-    CircuitBreakerEvent, CircuitBreakerRejectionReason, MiddlewareLifecycle, MetricsLifecycle,
+    CircuitBreakerEvent, CircuitBreakerRejectionReason, MetricsLifecycle, MiddlewareLifecycle,
     ObservabilityPayload,
 };
 use obzenflow_core::event::status::processing_status::ErrorKind;
@@ -534,7 +534,8 @@ impl<H: AsyncInfiniteSourceHandler> AsyncInfiniteSourceHandler
         // Phase 1: post-poll middleware pre-handle.
         for middleware in self.middleware_chain.iter() {
             match middleware.source_phase() {
-                SourceMiddlewarePhase::CircuitBreakerGate | SourceMiddlewarePhase::RateLimiterGate => continue,
+                SourceMiddlewarePhase::CircuitBreakerGate
+                | SourceMiddlewarePhase::RateLimiterGate => continue,
                 SourceMiddlewarePhase::Ordinary => {}
             }
 
@@ -920,7 +921,8 @@ impl<H: InfiniteSourceHandler> InfiniteSourceHandler for MiddlewareInfiniteSourc
         // Phase 1: ordinary middleware post-poll.
         for middleware in self.middleware_chain.iter() {
             match middleware.source_phase() {
-                SourceMiddlewarePhase::CircuitBreakerGate | SourceMiddlewarePhase::RateLimiterGate => continue,
+                SourceMiddlewarePhase::CircuitBreakerGate
+                | SourceMiddlewarePhase::RateLimiterGate => continue,
                 SourceMiddlewarePhase::Ordinary => {}
             }
 

@@ -8,10 +8,9 @@
 //! with processing duration before they're written to the journal.
 
 use crate::middleware::{
-    context_keys::ProcessingStartNanos,
-    ControlMiddlewareRole, ErrorAction, Middleware, MiddlewareAction, MiddlewareContext,
-    MiddlewareFactory, MiddlewareOverrideKey, MiddlewarePlanContribution, SourceMiddlewarePhase,
-    TopologyMiddlewareConfigSlot,
+    context_keys::ProcessingStartNanos, ControlMiddlewareRole, ErrorAction, Middleware,
+    MiddlewareAction, MiddlewareContext, MiddlewareFactory, MiddlewareOverrideKey,
+    MiddlewarePlanContribution, SourceMiddlewarePhase, TopologyMiddlewareConfigSlot,
 };
 use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::time::MetricsDuration;

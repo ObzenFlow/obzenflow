@@ -129,7 +129,6 @@ impl Middleware for LoggingMiddleware {
             tracing::Level::WARN => tracing::warn!("{}", message),
             tracing::Level::ERROR => tracing::error!("{}", message),
         }
-
     }
 
     fn on_error(&self, event: &ChainEvent, _ctx: &mut MiddlewareContext) -> ErrorAction {

@@ -22,7 +22,10 @@ pub trait TypedMiddlewareEvent: Serialize + DeserializeOwned + Sized {
     fn from_event(event: &ChainEvent) -> Option<Self> {
         match &event.content {
             ChainEventContent::Observability(ObservabilityPayload::Middleware(
-                MiddlewareLifecycle::User(UserMiddlewareEvent { event_type, payload }),
+                MiddlewareLifecycle::User(UserMiddlewareEvent {
+                    event_type,
+                    payload,
+                }),
             )) if event_type == Self::EVENT_TYPE => serde_json::from_value(payload.clone()).ok(),
             _ => None,
         }
@@ -38,4 +41,3 @@ pub trait TypedMiddlewareEvent: Serialize + DeserializeOwned + Sized {
         )
     }
 }
-

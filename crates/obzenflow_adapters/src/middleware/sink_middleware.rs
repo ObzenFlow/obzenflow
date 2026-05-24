@@ -7,7 +7,10 @@
 //! This module provides middleware capabilities for SinkHandler implementations,
 //! with special focus on error handling and retry logic.
 
-use super::{context_keys::ProcessingStartNanos, ErrorAction, Middleware, MiddlewareAction, MiddlewareContext};
+use super::{
+    context_keys::ProcessingStartNanos, ErrorAction, Middleware, MiddlewareAction,
+    MiddlewareContext,
+};
 use async_trait::async_trait;
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
 use obzenflow_core::time::MetricsDuration;

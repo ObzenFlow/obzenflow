@@ -8,7 +8,9 @@
 //! tracking every decision for debugging and operational visibility.
 
 use indexmap::IndexMap;
-use obzenflow_adapters::middleware::{ControlMiddlewareRole, MiddlewareFactory, MiddlewareOverrideKey};
+use obzenflow_adapters::middleware::{
+    ControlMiddlewareRole, MiddlewareFactory, MiddlewareOverrideKey,
+};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -26,7 +28,9 @@ pub enum MiddlewareSource {
     Stage,
     /// Stage middleware that overrides flow middleware
     StageOverride {
-        overrode_type: String,
+        family_label: String,
+        flow_label: String,
+        stage_label: String,
         overrode_config: String,
     },
 }
@@ -101,8 +105,10 @@ pub fn resolve_middleware_view<'a>(
     stage_middleware: &'a [Box<dyn MiddlewareFactory>],
     stage_name: &str,
 ) -> Result<Vec<&'a dyn MiddlewareFactory>, MiddlewareResolutionError> {
-    let mut resolved: IndexMap<MiddlewareOverrideKey, (MiddlewareSourceScope, &'a dyn MiddlewareFactory)> =
-        IndexMap::new();
+    let mut resolved: IndexMap<
+        MiddlewareOverrideKey,
+        (MiddlewareSourceScope, &'a dyn MiddlewareFactory),
+    > = IndexMap::new();
 
     for factory in flow_middleware {
         let key = factory.override_key();
@@ -135,10 +141,7 @@ pub fn resolve_middleware_view<'a>(
         resolved.insert(key, (MiddlewareSourceScope::Stage, factory.as_ref()));
     }
 
-    Ok(resolved
-        .into_values()
-        .map(|(_, factory)| factory)
-        .collect())
+    Ok(resolved.into_values().map(|(_, factory)| factory).collect())
 }
 
 /// Pure function that resolves middleware with full tracking
@@ -204,7 +207,9 @@ pub fn resolve_middleware(
             }
 
             MiddlewareSource::StageOverride {
-                overrode_type: key.family_label().to_string(),
+                family_label: key.family_label().to_string(),
+                flow_label: existing.factory.label().to_string(),
+                stage_label: factory.label().to_string(),
                 overrode_config: format_factory_config(&existing.factory),
             }
         } else {
@@ -229,9 +234,9 @@ mod view_tests {
     use super::*;
     use obzenflow_adapters::middleware::control::ControlMiddlewareAggregator;
     use obzenflow_adapters::middleware::{
-        ControlMiddlewareRole, Middleware, MiddlewareAction, MiddlewareContext, MiddlewareFactoryResult,
-        MiddlewareHints, MiddlewarePlanContribution, MiddlewareSafety, SourceMiddlewarePhase,
-        TopologyMiddlewareConfigSlot,
+        ControlMiddlewareRole, Middleware, MiddlewareAction, MiddlewareContext,
+        MiddlewareFactoryResult, MiddlewareHints, MiddlewarePlanContribution, MiddlewareSafety,
+        SourceMiddlewarePhase, TopologyMiddlewareConfigSlot,
     };
     use obzenflow_core::event::context::StageType;
     use obzenflow_core::ChainEvent;
@@ -249,7 +254,11 @@ mod view_tests {
             SourceMiddlewarePhase::Ordinary
         }
 
-        fn pre_handle(&self, _event: &ChainEvent, _ctx: &mut MiddlewareContext) -> MiddlewareAction {
+        fn pre_handle(
+            &self,
+            _event: &ChainEvent,
+            _ctx: &mut MiddlewareContext,
+        ) -> MiddlewareAction {
             MiddlewareAction::Continue
         }
     }

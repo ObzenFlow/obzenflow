@@ -13,4 +13,3 @@ pub trait MiddlewareContextKey: 'static {
     /// Human-readable diagnostics only. Not a lookup key.
     const LABEL: &'static str;
 }
-

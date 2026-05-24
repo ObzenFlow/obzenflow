@@ -24,7 +24,7 @@ use obzenflow_core::ai::{
 use obzenflow_core::event::chain_event::ChainEventFactory;
 use obzenflow_core::event::observability::AiChunkingSnapshot;
 use obzenflow_core::event::payloads::observability_payload::{
-    CircuitBreakerEvent, CircuitBreakerRejectionReason, MiddlewareLifecycle, MetricsLifecycle,
+    CircuitBreakerEvent, CircuitBreakerRejectionReason, MetricsLifecycle, MiddlewareLifecycle,
     ObservabilityPayload,
 };
 use obzenflow_core::event::status::processing_status::ErrorKind;
@@ -114,18 +114,19 @@ fn update_chunk_failed_reason(
         return;
     }
 
-    let rejection_reason = ctx
-        .ephemeral_events()
-        .iter()
-        .rev()
-        .find_map(|event| match &event.content {
-            ChainEventContent::Observability(ObservabilityPayload::Middleware(
-                MiddlewareLifecycle::CircuitBreaker(CircuitBreakerEvent::Rejected {
-                    reason, ..
-                }),
-            )) => Some(*reason),
-            _ => None,
-        });
+    let rejection_reason =
+        ctx.ephemeral_events()
+            .iter()
+            .rev()
+            .find_map(|event| match &event.content {
+                ChainEventContent::Observability(ObservabilityPayload::Middleware(
+                    MiddlewareLifecycle::CircuitBreaker(CircuitBreakerEvent::Rejected {
+                        reason,
+                        ..
+                    }),
+                )) => Some(*reason),
+                _ => None,
+            });
 
     if let Some(reason) = rejection_reason {
         fn render(reason: CircuitBreakerRejectionReason) -> &'static str {

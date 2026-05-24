@@ -181,8 +181,8 @@ impl ValidationResult {
 mod tests {
     use super::*;
     use crate::middleware::{
-        Attempts, BackoffKind, Middleware, MiddlewareAction, MiddlewareContext, MiddlewareFactory,
-        BatchingHint, MiddlewareHints, RetryHint,
+        Attempts, BackoffKind, BatchingHint, Middleware, MiddlewareAction, MiddlewareContext,
+        MiddlewareFactory, MiddlewareHints, RetryHint,
     };
     use obzenflow_core::ChainEvent;
     use obzenflow_runtime::pipeline::config::StageConfig;

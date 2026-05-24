@@ -44,8 +44,10 @@ impl MiddlewareContext {
 
     /// Insert a typed slot value.
     pub fn insert<K: MiddlewareContextKey>(&mut self, value: K::Value) {
-        self.slots
-            .insert(TypeId::of::<K>(), Box::new(value) as Box<dyn Any + Send + Sync>);
+        self.slots.insert(
+            TypeId::of::<K>(),
+            Box::new(value) as Box<dyn Any + Send + Sync>,
+        );
     }
 
     /// Get a typed slot value by key.
@@ -70,10 +72,7 @@ impl MiddlewareContext {
     /// Remove a typed slot value by key.
     pub fn remove<K: MiddlewareContextKey>(&mut self) -> Option<K::Value> {
         let boxed = self.slots.remove(&TypeId::of::<K>())?;
-        boxed
-            .downcast::<K::Value>()
-            .ok()
-            .map(|boxed| *boxed)
+        boxed.downcast::<K::Value>().ok().map(|boxed| *boxed)
     }
 
     /// Write a control event to the journal
