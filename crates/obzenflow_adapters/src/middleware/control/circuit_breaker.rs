@@ -10,8 +10,9 @@
 
 use crate::middleware::{
     context_keys::{
-        CircuitBreakerAttempt, CircuitBreakerIsProbe, CircuitBreakerRetryAfterMs,
-        CircuitBreakerRetryDelayMs, CircuitBreakerShouldRetry,
+        CircuitBreakerAttempt, CircuitBreakerIsProbe, CircuitBreakerProbeSlot,
+        CircuitBreakerProbeSlotGuard, CircuitBreakerRetryAfterMs, CircuitBreakerRetryDelayMs,
+        CircuitBreakerShouldRetry,
     },
     ControlMiddlewareRole, Middleware, MiddlewareAction, MiddlewareContext, MiddlewareFactory,
     MiddlewareFactoryError, MiddlewareHints, MiddlewareOverrideKey, MiddlewarePlanContribution,
@@ -976,6 +977,9 @@ impl Middleware for CircuitBreakerMiddleware {
                         Ok(_) => {
                             // This call successfully reserved a probe slot.
                             ctx.insert::<CircuitBreakerIsProbe>(true);
+                            ctx.insert::<CircuitBreakerProbeSlot>(
+                                CircuitBreakerProbeSlotGuard::new(self.probe_in_flight.clone()),
+                            );
                             return MiddlewareAction::Continue;
                         }
                         Err(actual) => {
@@ -1301,7 +1305,7 @@ impl Middleware for CircuitBreakerMiddleware {
                     // happens in pre_handle when transitioning Open → HalfOpen;
                     // individual completions should decrement by 1 so that
                     // concurrent probes are not prematurely freed.
-                    self.probe_in_flight.fetch_sub(1, Ordering::SeqCst);
+                    drop(ctx.remove::<CircuitBreakerProbeSlot>());
 
                     if is_success {
                         self.success_count.fetch_add(1, Ordering::Relaxed);
@@ -2586,6 +2590,35 @@ mod tests {
             other => panic!("expected Skip action for HalfOpen non-probe, got {other:?}"),
         }
         assert!(ctx_has_rejection(&ctx));
+    }
+
+    #[test]
+    fn halfopen_probe_slot_is_released_when_context_drops_before_post_handle() {
+        let mut cb = CircuitBreakerMiddleware::new(1);
+        cb.half_open_policy = HalfOpenPolicy::new(NonZeroU32::new(1).unwrap(), OpenPolicy::Skip);
+
+        cb.state
+            .store(CircuitState::HalfOpen as u8, Ordering::SeqCst);
+        cb.probe_in_flight.store(0, Ordering::SeqCst);
+
+        let event = create_test_event();
+
+        {
+            let mut ctx = MiddlewareContext::new();
+            assert!(matches!(
+                cb.pre_handle(&event, &mut ctx),
+                MiddlewareAction::Continue
+            ));
+            assert_eq!(ctx.get::<CircuitBreakerIsProbe>().copied(), Some(true));
+        }
+
+        assert_eq!(cb.probe_in_flight.load(Ordering::SeqCst), 0);
+
+        let mut ctx2 = MiddlewareContext::new();
+        assert!(matches!(
+            cb.pre_handle(&event, &mut ctx2),
+            MiddlewareAction::Continue
+        ));
     }
 
     // -----------------------------------------------------------------------

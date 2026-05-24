@@ -21,7 +21,7 @@ use serde_json::Value;
 /// - Event type contains "error"/"failed"/"failure" → `Error`
 /// - Payload has `_error: true` → `Error` (uses `_error_message` if present)
 /// - Payload has `error` (string or object with `message`) → `Error`
-/// - Middleware baggage has `retry_attempt` → `Retry{attempt}`
+/// - Typed middleware context has `retry_attempt` → `Retry{attempt}`
 /// - Control events → `Filtered`
 /// - Otherwise `Success`
 #[derive(Debug, Clone)]
@@ -79,7 +79,7 @@ impl OutcomeEnrichmentMiddleware {
             }
         }
 
-        // 4) retry baggage
+        // 4) retry context
         if let Some(attempt) = ctx.get::<OutcomeRetryAttempt>().copied() {
             return ProcessingStatus::Retry { attempt };
         }

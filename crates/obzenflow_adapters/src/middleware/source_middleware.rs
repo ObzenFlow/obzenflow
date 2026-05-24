@@ -65,6 +65,8 @@ fn cb_rejection_backoff(ctx: &MiddlewareContext) -> Option<Duration> {
         .ephemeral_events()
         .iter()
         .rev()
+        // Invariant: only the circuit-breaker middleware emits CircuitBreakerEvent::Rejected.
+        // If multiple such events exist in a pass, the most recent one wins.
         .find_map(|event| match &event.content {
             ChainEventContent::Observability(ObservabilityPayload::Middleware(
                 MiddlewareLifecycle::CircuitBreaker(CircuitBreakerEvent::Rejected {

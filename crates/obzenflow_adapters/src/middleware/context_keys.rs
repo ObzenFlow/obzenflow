@@ -9,6 +9,8 @@
 
 use obzenflow_core::EventId;
 use obzenflow_core::MiddlewareContextKey;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
 
 // ---- Timing / processing --------------------------------------------------
 
@@ -30,6 +32,48 @@ pub(crate) struct CircuitBreakerIsProbe;
 impl MiddlewareContextKey for CircuitBreakerIsProbe {
     type Value = bool;
     const LABEL: &'static str = "circuit_breaker.is_probe";
+}
+
+/// RAII guard for circuit-breaker half-open probe slots.
+///
+/// When a half-open probe is admitted, the circuit breaker increments its
+/// `probe_in_flight` counter. In the normal path the slot is released in
+/// `post_handle`, but middleware short-circuiting (`Skip`/`Abort`) can bypass
+/// that call. This guard ensures the slot is released when the per-pass
+/// `MiddlewareContext` is dropped.
+#[derive(Debug)]
+pub(crate) struct CircuitBreakerProbeSlotGuard {
+    probe_in_flight: Arc<AtomicU32>,
+    released: bool,
+}
+
+impl CircuitBreakerProbeSlotGuard {
+    pub(crate) fn new(probe_in_flight: Arc<AtomicU32>) -> Self {
+        Self {
+            probe_in_flight,
+            released: false,
+        }
+    }
+
+    fn release_once(&mut self) {
+        if self.released {
+            return;
+        }
+        self.released = true;
+        self.probe_in_flight.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+impl Drop for CircuitBreakerProbeSlotGuard {
+    fn drop(&mut self) {
+        self.release_once();
+    }
+}
+
+pub(crate) struct CircuitBreakerProbeSlot;
+impl MiddlewareContextKey for CircuitBreakerProbeSlot {
+    type Value = CircuitBreakerProbeSlotGuard;
+    const LABEL: &'static str = "circuit_breaker.probe_slot_guard";
 }
 
 pub(crate) struct CircuitBreakerShouldRetry;
@@ -78,21 +122,15 @@ impl MiddlewareContextKey for OutcomeRetryAttempt {
 
 // ---- AI map-reduce --------------------------------------------------------
 
-pub(crate) struct AiMapReduceJobKey;
-impl MiddlewareContextKey for AiMapReduceJobKey {
-    type Value = EventId;
-    const LABEL: &'static str = "ai.map_reduce.job_key";
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct AiMapReduceChunkContext {
+    pub job_key: EventId,
+    pub chunk_index: usize,
+    pub chunk_count: usize,
 }
 
-pub(crate) struct AiMapReduceChunkIndex;
-impl MiddlewareContextKey for AiMapReduceChunkIndex {
-    type Value = usize;
-    const LABEL: &'static str = "ai.map_reduce.chunk_index";
+pub(crate) struct AiMapReduceChunkContextKey;
+impl MiddlewareContextKey for AiMapReduceChunkContextKey {
+    type Value = AiMapReduceChunkContext;
+    const LABEL: &'static str = "ai.map_reduce.chunk_context";
 }
-
-pub(crate) struct AiMapReduceChunkCount;
-impl MiddlewareContextKey for AiMapReduceChunkCount {
-    type Value = usize;
-    const LABEL: &'static str = "ai.map_reduce.chunk_count";
-}
-

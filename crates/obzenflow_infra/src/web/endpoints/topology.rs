@@ -310,7 +310,6 @@ mod tests {
                             limit_rate: 0.4,
                         }),
                         retry: None,
-                        backpressure: None,
                     });
                 }
                 s

@@ -8,7 +8,7 @@
 //! tracking every decision for debugging and operational visibility.
 
 use indexmap::IndexMap;
-use obzenflow_adapters::middleware::{MiddlewareFactory, MiddlewareOverrideKey};
+use obzenflow_adapters::middleware::{ControlMiddlewareRole, MiddlewareFactory, MiddlewareOverrideKey};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -174,9 +174,24 @@ pub fn resolve_middleware(
     for factory in stage_middleware {
         let key = factory.override_key();
 
-        // Check for override
+        // Same-scope duplicates (stage list) are configuration errors.
         if let Some(existing) = resolved.get(&key) {
-            // Track the override
+            if matches!(
+                existing.source,
+                MiddlewareSource::Stage | MiddlewareSource::StageOverride { .. }
+            ) {
+                return Err(MiddlewareResolutionError::DuplicateOverrideKey {
+                    stage_name: stage_name.to_string(),
+                    scope: MiddlewareSourceScope::Stage,
+                    family_label: key.family_label(),
+                    first_label: existing.factory.label(),
+                    second_label: factory.label(),
+                });
+            }
+        }
+
+        let source = if let Some(existing) = resolved.get(&key) {
+            // Existing is flow-level: record override audit and check override safety.
             overrides.push(OverrideRecord {
                 middleware_type: key.family_label().to_string(),
                 flow_config: format_factory_config(&existing.factory),
@@ -184,14 +199,10 @@ pub fn resolve_middleware(
                 reason: OverrideReason::ExplicitOverride,
             });
 
-            // Check for suspicious overrides
             if let Some(warning) = check_override_safety(&existing.factory, &factory) {
                 warnings.push(warning);
             }
-        }
 
-        // Determine source
-        let source = if let Some(existing) = resolved.get(&key) {
             MiddlewareSource::StageOverride {
                 overrode_type: key.family_label().to_string(),
                 overrode_config: format_factory_config(&existing.factory),
@@ -200,20 +211,7 @@ pub fn resolve_middleware(
             MiddlewareSource::Stage
         };
 
-        // Insert or override
-        let spec = MiddlewareSpec { source, factory };
-        if let Some(existing) = resolved.get(&key) {
-            if matches!(existing.source, MiddlewareSource::Stage | MiddlewareSource::StageOverride { .. }) {
-                return Err(MiddlewareResolutionError::DuplicateOverrideKey {
-                    stage_name: stage_name.to_string(),
-                    scope: MiddlewareSourceScope::Stage,
-                    family_label: key.family_label(),
-                    first_label: existing.factory.label(),
-                    second_label: spec.factory.label(),
-                });
-            }
-        }
-        resolved.insert(key, spec);
+        resolved.insert(key, MiddlewareSpec { source, factory });
     }
 
     // Phase 3: Validate final configuration
@@ -413,18 +411,9 @@ mod view_tests {
 
 /// Format factory configuration for display
 fn format_factory_config(factory: &dyn MiddlewareFactory) -> String {
-    // This will need to be implemented based on the actual MiddlewareFactory trait
-    // For now, we'll use a placeholder
-    match factory.label() {
-        "rate_limiter" => {
-            // TODO: Extract actual rate from factory
-            "rate_limit(...)".to_string()
-        }
-        "timeout" => {
-            // TODO: Extract actual timeout from factory
-            "timeout(...)".to_string()
-        }
-        _ => format!("{}(...)", factory.label()),
+    match factory.config_snapshot() {
+        Some(snapshot) => format!("{}({snapshot})", factory.label()),
+        None => format!("{}(...)", factory.label()),
     }
 }
 
@@ -433,31 +422,34 @@ fn check_override_safety(
     flow_mw: &dyn MiddlewareFactory,
     stage_mw: &dyn MiddlewareFactory,
 ) -> Option<ConfigWarning> {
-    match (flow_mw.label(), stage_mw.label()) {
-        ("rate_limiter", "rate_limiter") => {
-            // TODO: Once we can extract config from factories, implement actual checking
-            // For now, return a placeholder warning for demonstration
-            Some(ConfigWarning {
-                level: WarnLevel::Medium,
-                message: format!(
-                    "Stage '{}' overrides flow rate limiting - verify this is intentional",
-                    stage_mw.label()
-                ),
-                suggestion: Some(
-                    "Consider if this stage really needs different rate limiting".to_string(),
-                ),
-            })
-        }
-        ("timeout", "timeout") => {
-            // Check for significantly different timeouts
-            Some(ConfigWarning {
-                level: WarnLevel::Low,
-                message: "Stage overrides flow timeout".to_string(),
-                suggestion: None,
-            })
-        }
-        _ => None,
+    let family_label = stage_mw.override_key().family_label();
+    let flow_label = flow_mw.label();
+    let stage_label = stage_mw.label();
+
+    let role = stage_mw.control_role();
+    let stage_hints = stage_mw.hints();
+
+    if role == ControlMiddlewareRole::RateLimiter || stage_hints.rate_limits {
+        return Some(ConfigWarning {
+            level: WarnLevel::Medium,
+            message: format!(
+                "Stage overrides flow rate limiting (override family '{family_label}'): flow='{flow_label}', stage='{stage_label}'"
+            ),
+            suggestion: Some("Verify this stage needs different rate limiting".to_string()),
+        });
     }
+
+    if role == ControlMiddlewareRole::CircuitBreaker {
+        return Some(ConfigWarning {
+            level: WarnLevel::Medium,
+            message: format!(
+                "Stage overrides flow circuit breaker (override family '{family_label}'): flow='{flow_label}', stage='{stage_label}'"
+            ),
+            suggestion: Some("Verify this stage needs different circuit breaker settings".to_string()),
+        });
+    }
+
+    None
 }
 
 /// Validate the final middleware combination for potential issues
@@ -467,33 +459,20 @@ fn validate_middleware_combination(
 ) -> Vec<ConfigWarning> {
     let mut warnings = Vec::new();
 
-    // Check for missing critical middleware
-    let has_timeout = resolved
+    // Check for potentially conflicting middleware combinations based on typed hints/roles.
+    let has_retry = resolved
         .values()
-        .any(|spec| spec.factory.label() == "timeout");
-    let _has_rate_limit = resolved
-        .values()
-        .any(|spec| spec.factory.label() == "rate_limiter");
-
-    if !has_timeout {
-        warnings.push(ConfigWarning {
-            level: WarnLevel::Medium,
-            message: format!("Stage '{stage_name}' has no timeout middleware"),
-            suggestion: Some("Consider adding timeout middleware to prevent hanging".to_string()),
-        });
-    }
-
-    // Check for potentially conflicting middleware
-    let has_retry = resolved.values().any(|spec| spec.factory.label() == "retry");
+        .any(|spec| spec.factory.hints().retry.is_some());
     let has_circuit_breaker = resolved
         .values()
-        .any(|spec| spec.factory.label() == "circuit_breaker");
+        .any(|spec| spec.factory.control_role() == ControlMiddlewareRole::CircuitBreaker);
 
     if has_retry && !has_circuit_breaker {
         warnings.push(ConfigWarning {
             level: WarnLevel::Low,
-            message: "Retry middleware without circuit breaker can cause cascading failures"
-                .to_string(),
+            message: format!(
+                "Stage '{stage_name}' has retry behaviour without a circuit breaker; this can cause cascading failures"
+            ),
             suggestion: Some("Consider adding circuit breaker middleware".to_string()),
         });
     }

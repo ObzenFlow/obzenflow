@@ -1257,26 +1257,40 @@ macro_rules! build_typed_flow {
                     .collect();
 
                 // Extract config snapshots from all factories (FLOWIP-059)
-                let mut circuit_breaker_config: Option<serde_json::Value> = None;
-                let mut rate_limiter_config: Option<serde_json::Value> = None;
-                let mut retry_config: Option<serde_json::Value> = None;
-                let mut backpressure_config: Option<serde_json::Value> = None;
+                let mut circuit_breaker_config: Option<(&'static str, serde_json::Value)> = None;
+                let mut rate_limiter_config: Option<(&'static str, serde_json::Value)> = None;
+                let mut retry_config: Option<(&'static str, serde_json::Value)> = None;
 
                 for factory in &resolved_middleware_view {
                     if let Some(snapshot) = factory.config_snapshot() {
                         if let Some(slot) = factory.topology_config_slot() {
                             match slot {
                                 obzenflow_adapters::middleware::TopologyMiddlewareConfigSlot::CircuitBreaker => {
-                                    circuit_breaker_config = Some(snapshot)
+                                    if let Some((existing, _)) = &circuit_breaker_config {
+                                        return Err(FlowBuildError::StageResourcesFailed(format!(
+                                            "Stage '{name}' has multiple middleware claiming the CircuitBreaker topology config slot: '{existing}' and '{}'",
+                                            factory.label()
+                                        )));
+                                    }
+                                    circuit_breaker_config = Some((factory.label(), snapshot))
                                 }
                                 obzenflow_adapters::middleware::TopologyMiddlewareConfigSlot::RateLimiter => {
-                                    rate_limiter_config = Some(snapshot)
+                                    if let Some((existing, _)) = &rate_limiter_config {
+                                        return Err(FlowBuildError::StageResourcesFailed(format!(
+                                            "Stage '{name}' has multiple middleware claiming the RateLimiter topology config slot: '{existing}' and '{}'",
+                                            factory.label()
+                                        )));
+                                    }
+                                    rate_limiter_config = Some((factory.label(), snapshot))
                                 }
                                 obzenflow_adapters::middleware::TopologyMiddlewareConfigSlot::Retry => {
-                                    retry_config = Some(snapshot)
-                                }
-                                obzenflow_adapters::middleware::TopologyMiddlewareConfigSlot::Backpressure => {
-                                    backpressure_config = Some(snapshot)
+                                    if let Some((existing, _)) = &retry_config {
+                                        return Err(FlowBuildError::StageResourcesFailed(format!(
+                                            "Stage '{name}' has multiple middleware claiming the Retry topology config slot: '{existing}' and '{}'",
+                                            factory.label()
+                                        )));
+                                    }
+                                    retry_config = Some((factory.label(), snapshot))
                                 }
                             }
                         }
@@ -1285,10 +1299,9 @@ macro_rules! build_typed_flow {
 
                 middleware_stacks.insert(*id, MiddlewareStackConfig {
                     stack: merged_names,
-                    circuit_breaker: circuit_breaker_config,
-                    rate_limiter: rate_limiter_config,
-                    retry: retry_config,
-                    backpressure: backpressure_config,
+                    circuit_breaker: circuit_breaker_config.map(|(_, snapshot)| snapshot),
+                    rate_limiter: rate_limiter_config.map(|(_, snapshot)| snapshot),
+                    retry: retry_config.map(|(_, snapshot)| snapshot),
                 });
 
                 // Create handle with flow middleware (cycle protection is configured via StageConfig for transforms).
@@ -1340,10 +1353,6 @@ macro_rules! build_typed_flow {
                             .and_then(|v| serde_json::from_value(v.clone()).ok()),
                         retry: config
                             .retry
-                            .as_ref()
-                            .and_then(|v| serde_json::from_value(v.clone()).ok()),
-                        backpressure: config
-                            .backpressure
                             .as_ref()
                             .and_then(|v| serde_json::from_value(v.clone()).ok()),
                     },

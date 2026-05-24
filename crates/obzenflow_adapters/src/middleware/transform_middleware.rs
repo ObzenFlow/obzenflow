@@ -109,7 +109,7 @@ impl<H: TransformHandler> MiddlewareTransform<H> {
         // error-marked event so middleware (e.g., circuit breaker) can still
         // observe the ErrorKind-driven outcome.
         // TODO(051c): When sync retry is added, extract `retry_after` from
-        // `HandlerError::RateLimited { retry_after, .. }` into baggage so the
+        // `HandlerError::RateLimited { retry_after, .. }` into the typed middleware context so the
         // circuit breaker can honour provider back-off hints (mirrors the async path).
         //
         // TODO(D2/051c): The sync transform path catches `HandlerError` and converts
@@ -839,7 +839,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn async_middleware_transform_retries_via_circuit_breaker_baggage() {
+    async fn async_middleware_transform_retries_via_circuit_breaker_context() {
         use crate::middleware::control::{CircuitBreakerBuilder, ControlMiddlewareAggregator};
         use crate::middleware::MiddlewareFactory;
         use obzenflow_core::StageId;

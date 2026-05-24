@@ -45,7 +45,7 @@ impl MiddlewareFactory for BackpressureMiddlewareFactory {
     }
 
     fn topology_config_slot(&self) -> Option<TopologyMiddlewareConfigSlot> {
-        Some(TopologyMiddlewareConfigSlot::Backpressure)
+        None
     }
 
     fn create(

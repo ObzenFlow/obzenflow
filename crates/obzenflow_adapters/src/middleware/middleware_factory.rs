@@ -319,5 +319,4 @@ pub enum TopologyMiddlewareConfigSlot {
     CircuitBreaker,
     RateLimiter,
     Retry,
-    Backpressure,
 }

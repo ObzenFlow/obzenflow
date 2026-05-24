@@ -11,7 +11,7 @@
 
 use crate::middleware::{
     context_keys::{
-        AiMapReduceChunkCount, AiMapReduceChunkIndex, AiMapReduceJobKey, CircuitBreakerShouldRetry,
+        AiMapReduceChunkContext, AiMapReduceChunkContextKey, CircuitBreakerShouldRetry,
     },
     ControlMiddlewareRole, Middleware, MiddlewareAction, MiddlewareContext, MiddlewareFactory,
     MiddlewareOverrideKey, MiddlewarePlanContribution, SourceMiddlewarePhase,
@@ -401,9 +401,11 @@ where
         };
 
         let job_key = job_key_from_chunk_event(event);
-        ctx.insert::<AiMapReduceJobKey>(job_key);
-        ctx.insert::<AiMapReduceChunkIndex>(header.chunk_index);
-        ctx.insert::<AiMapReduceChunkCount>(header.chunk_count);
+        ctx.insert::<AiMapReduceChunkContextKey>(AiMapReduceChunkContext {
+            job_key,
+            chunk_index: header.chunk_index,
+            chunk_count: header.chunk_count,
+        });
 
         let default_reason = "map produced no partial output";
 
@@ -486,11 +488,12 @@ where
             return;
         }
 
-        let Some(job_key) = ctx.get::<AiMapReduceJobKey>().copied() else {
+        let Some(chunk_ctx) = ctx.get::<AiMapReduceChunkContextKey>().copied() else {
             return;
         };
-        let chunk_index = ctx.get::<AiMapReduceChunkIndex>().copied().unwrap_or(0);
-        let chunk_count = ctx.get::<AiMapReduceChunkCount>().copied().unwrap_or(0);
+        let job_key = chunk_ctx.job_key;
+        let chunk_index = chunk_ctx.chunk_index;
+        let chunk_count = chunk_ctx.chunk_count;
 
         let tagged = AiMapReduceTaggedPartial::<serde_json::Value> {
             job_key,
@@ -850,7 +853,7 @@ mod tests {
     }
 
     #[test]
-    fn map_wrapper_sets_baggage_and_preallocates_failure_markers() {
+    fn map_wrapper_sets_chunk_context_and_preallocates_failure_markers() {
         let middleware = mk_map_middleware();
         let mut ctx = MiddlewareContext::new();
 
@@ -877,10 +880,13 @@ mod tests {
         let action = middleware.pre_handle(&chunk_event, &mut ctx);
         assert!(matches!(action, MiddlewareAction::Continue));
 
-        let stored_job_key = ctx.get::<AiMapReduceJobKey>().copied().expect("job_key slot");
-        assert_eq!(stored_job_key, job_key);
-        assert_eq!(ctx.get::<AiMapReduceChunkIndex>().copied(), Some(1));
-        assert_eq!(ctx.get::<AiMapReduceChunkCount>().copied(), Some(3));
+        let stored = ctx
+            .get::<AiMapReduceChunkContextKey>()
+            .copied()
+            .expect("chunk context slot");
+        assert_eq!(stored.job_key, job_key);
+        assert_eq!(stored.chunk_index, 1);
+        assert_eq!(stored.chunk_count, 3);
 
         assert_eq!(ctx.control_events().len(), 2);
 
