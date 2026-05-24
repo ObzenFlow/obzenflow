@@ -14,6 +14,7 @@ use obzenflow_runtime::pipeline::config::StageConfig;
 use obzenflow_runtime::stages::common::control_strategies::ControlEventStrategy;
 use std::any::TypeId;
 use std::error::Error as StdError;
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use thiserror::Error;
 
@@ -282,7 +283,7 @@ impl<F: MiddlewareFactory + ?Sized> MiddlewareFactory for Box<F> {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy)]
 pub struct MiddlewareOverrideKey {
     type_id: TypeId,
     family_label: &'static str,
@@ -298,6 +299,20 @@ impl MiddlewareOverrideKey {
 
     pub fn family_label(&self) -> &'static str {
         self.family_label
+    }
+}
+
+impl PartialEq for MiddlewareOverrideKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.type_id == other.type_id
+    }
+}
+
+impl Eq for MiddlewareOverrideKey {}
+
+impl Hash for MiddlewareOverrideKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.type_id.hash(state);
     }
 }
 
@@ -319,4 +334,29 @@ pub enum TopologyMiddlewareConfigSlot {
     CircuitBreaker,
     RateLimiter,
     Retry,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::hash_map::DefaultHasher;
+
+    struct TestFamily;
+
+    fn hash_key(key: MiddlewareOverrideKey) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        key.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    #[test]
+    fn middleware_override_key_identity_ignores_family_label() {
+        let flow_key = MiddlewareOverrideKey::of::<TestFamily>("flow.label");
+        let stage_key = MiddlewareOverrideKey::of::<TestFamily>("stage.label");
+
+        assert_eq!(flow_key, stage_key);
+        assert_eq!(hash_key(flow_key), hash_key(stage_key));
+        assert_eq!(flow_key.family_label(), "flow.label");
+        assert_eq!(stage_key.family_label(), "stage.label");
+    }
 }

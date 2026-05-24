@@ -416,6 +416,26 @@ mod view_tests {
             other => panic!("expected Backpressure plan contribution, got {other:?}"),
         }
     }
+
+    #[test]
+    fn typed_override_key_ignores_diagnostic_family_label() {
+        let flow = vec![Box::new(MockFactory {
+            label: "flow.a",
+            key: MiddlewareOverrideKey::of::<FamilyA>("flow.family"),
+            control_role: ControlMiddlewareRole::None,
+            plan: MiddlewarePlanContribution::None,
+        }) as Box<dyn MiddlewareFactory>];
+        let stage = vec![Box::new(MockFactory {
+            label: "stage.a",
+            key: MiddlewareOverrideKey::of::<FamilyA>("stage.family"),
+            control_role: ControlMiddlewareRole::None,
+            plan: MiddlewarePlanContribution::None,
+        }) as Box<dyn MiddlewareFactory>];
+
+        let resolved = resolve_middleware_view(&flow, &stage, "stage").expect("resolve view");
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].label(), "stage.a");
+    }
 }
 
 /// Format factory configuration for display

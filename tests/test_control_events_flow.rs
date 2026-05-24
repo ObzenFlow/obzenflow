@@ -7,7 +7,9 @@
 
 use async_trait::async_trait;
 use obzenflow_adapters::middleware::MiddlewareTransform;
-use obzenflow_adapters::middleware::{Middleware, MiddlewareAction, MiddlewareContext};
+use obzenflow_adapters::middleware::{
+    Middleware, MiddlewareAction, MiddlewareContext, SourceMiddlewarePhase,
+};
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
 use obzenflow_core::{StageId, WriterId};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
@@ -18,6 +20,14 @@ use serde_json::json;
 struct TestControlMiddleware;
 
 impl Middleware for TestControlMiddleware {
+    fn label(&self) -> &'static str {
+        "test_control"
+    }
+
+    fn source_phase(&self) -> SourceMiddlewarePhase {
+        SourceMiddlewarePhase::Ordinary
+    }
+
     fn pre_handle(&self, _event: &ChainEvent, ctx: &mut MiddlewareContext) -> MiddlewareAction {
         // Emit a metrics state snapshot control event
         let writer_id = WriterId::from(StageId::new());

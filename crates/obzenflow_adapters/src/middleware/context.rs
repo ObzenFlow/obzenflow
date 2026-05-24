@@ -17,6 +17,7 @@ use std::collections::HashMap;
 /// This context is created fresh for each event processing and is never
 /// persisted. It enables middleware to communicate without mutating the
 /// core ChainEvent.
+#[derive(Default)]
 pub struct MiddlewareContext {
     // NOTE: All fields are private; use helper methods.
     ephemeral_events: Vec<ChainEvent>,
@@ -105,16 +106,6 @@ impl MiddlewareContext {
         F: FnMut(&ChainEvent) -> bool,
     {
         self.control_events.retain(f);
-    }
-}
-
-impl Default for MiddlewareContext {
-    fn default() -> Self {
-        Self {
-            ephemeral_events: Vec::new(),
-            control_events: Vec::new(),
-            slots: HashMap::new(),
-        }
     }
 }
 
