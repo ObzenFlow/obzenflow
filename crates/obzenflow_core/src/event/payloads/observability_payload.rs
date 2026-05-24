@@ -114,6 +114,7 @@ pub enum MiddlewareLifecycle {
     Backpressure(BackpressureEvent),
     Retry(RetryEvent),
     Sli(SliEvent),
+    User(UserMiddlewareEvent),
 }
 
 // ---- Circuit breaker ------------------------------------------------------
@@ -131,6 +132,10 @@ pub enum CircuitBreakerEvent {
         recovery_duration_ms: u64,
     },
     Rejected {
+        #[serde(default)]
+        reason: CircuitBreakerRejectionReason,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cooldown_remaining_ms: Option<u64>,
         #[serde(skip_serializing_if = "Option::is_none")]
         circuit_open_duration_ms: Option<u64>,
     },
@@ -162,6 +167,20 @@ pub enum CircuitBreakerEvent {
         #[serde(default)]
         time_in_half_open_seconds: f64,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CircuitBreakerRejectionReason {
+    CircuitOpen,
+    ProbeInProgress,
+    Unknown,
+}
+
+impl Default for CircuitBreakerRejectionReason {
+    fn default() -> Self {
+        Self::Unknown
+    }
 }
 
 // ---- Rate limiter ---------------------------------------------------------
@@ -279,4 +298,10 @@ pub enum SliEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         time_window_hours: Option<u32>,
     },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserMiddlewareEvent {
+    pub event_type: String,
+    pub payload: Value,
 }

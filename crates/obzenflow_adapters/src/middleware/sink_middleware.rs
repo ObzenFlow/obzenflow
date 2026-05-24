@@ -7,7 +7,7 @@
 //! This module provides middleware capabilities for SinkHandler implementations,
 //! with special focus on error handling and retry logic.
 
-use super::{ErrorAction, Middleware, MiddlewareAction, MiddlewareContext};
+use super::{context_keys::ProcessingStartNanos, ErrorAction, Middleware, MiddlewareAction, MiddlewareContext};
 use async_trait::async_trait;
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
 use obzenflow_core::time::MetricsDuration;
@@ -90,10 +90,8 @@ impl<H: SinkHandler> MiddlewareSink<H> {
                 }
 
                 // Extract timing from context if available (set by TimingMiddleware)
-                report.primary = if let Some(start_value) =
-                    ctx.get_baggage("processing_start_nanos")
-                {
-                    if let Some(start_nanos) = start_value.as_u64() {
+                report.primary = match ctx.get::<ProcessingStartNanos>().copied() {
+                    Some(start_nanos) => {
                         let now_nanos = std::time::SystemTime::now()
                             .duration_since(std::time::UNIX_EPOCH)
                             .unwrap()
@@ -107,11 +105,8 @@ impl<H: SinkHandler> MiddlewareSink<H> {
                         );
 
                         report.primary.with_processing_duration(duration)
-                    } else {
-                        report.primary
                     }
-                } else {
-                    report.primary
+                    None => report.primary,
                 };
 
                 Ok(report)
@@ -256,6 +251,14 @@ mod tests {
     struct RetryMiddleware;
 
     impl Middleware for RetryMiddleware {
+        fn label(&self) -> &'static str {
+            "test.retry_middleware"
+        }
+
+        fn source_phase(&self) -> crate::middleware::SourceMiddlewarePhase {
+            crate::middleware::SourceMiddlewarePhase::Ordinary
+        }
+
         fn on_error(&self, _event: &ChainEvent, _ctx: &mut MiddlewareContext) -> ErrorAction {
             ErrorAction::Retry
         }

@@ -3,12 +3,18 @@
 // https://obzenflow.dev
 
 use crate::middleware::control::ControlMiddlewareAggregator;
-use crate::middleware::{Middleware, MiddlewareAction, MiddlewareContext, MiddlewareFactory};
+use crate::middleware::{
+    ControlMiddlewareRole, Middleware, MiddlewareAction, MiddlewareContext, MiddlewareFactory,
+    MiddlewareOverrideKey, MiddlewarePlanContribution, SourceMiddlewarePhase,
+    TopologyMiddlewareConfigSlot,
+};
 use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::event::context::StageType;
 use obzenflow_runtime::pipeline::config::StageConfig;
 use std::num::NonZeroU64;
 use std::sync::Arc;
+
+pub struct BackpressureFamily;
 
 #[derive(Debug, Clone)]
 pub struct BackpressureMiddlewareFactory {
@@ -22,16 +28,32 @@ impl BackpressureMiddlewareFactory {
 }
 
 impl MiddlewareFactory for BackpressureMiddlewareFactory {
+    fn label(&self) -> &'static str {
+        "backpressure"
+    }
+
+    fn override_key(&self) -> MiddlewareOverrideKey {
+        MiddlewareOverrideKey::of::<BackpressureFamily>("backpressure")
+    }
+
+    fn control_role(&self) -> ControlMiddlewareRole {
+        ControlMiddlewareRole::None
+    }
+
+    fn plan_contribution(&self) -> MiddlewarePlanContribution {
+        MiddlewarePlanContribution::Backpressure { window: self.window }
+    }
+
+    fn topology_config_slot(&self) -> Option<TopologyMiddlewareConfigSlot> {
+        Some(TopologyMiddlewareConfigSlot::Backpressure)
+    }
+
     fn create(
         &self,
         _config: &StageConfig,
         _control_middleware: Arc<ControlMiddlewareAggregator>,
     ) -> crate::middleware::MiddlewareFactoryResult<Box<dyn Middleware>> {
         Ok(Box::new(BackpressureMiddleware))
-    }
-
-    fn name(&self) -> &str {
-        "backpressure"
     }
 
     fn supported_stage_types(&self) -> &[StageType] {
@@ -56,8 +78,12 @@ impl MiddlewareFactory for BackpressureMiddlewareFactory {
 struct BackpressureMiddleware;
 
 impl Middleware for BackpressureMiddleware {
-    fn middleware_name(&self) -> &'static str {
+    fn label(&self) -> &'static str {
         "backpressure"
+    }
+
+    fn source_phase(&self) -> SourceMiddlewarePhase {
+        SourceMiddlewarePhase::Ordinary
     }
 
     fn pre_handle(&self, _event: &ChainEvent, _ctx: &mut MiddlewareContext) -> MiddlewareAction {

@@ -9,7 +9,10 @@ mod tests {
     use std::collections::HashMap;
 
     use obzenflow_adapters::middleware::control::ControlMiddlewareAggregator;
-    use obzenflow_adapters::middleware::{Middleware, MiddlewareFactory};
+    use obzenflow_adapters::middleware::{
+        ControlMiddlewareRole, Middleware, MiddlewareFactory, MiddlewareOverrideKey,
+        MiddlewarePlanContribution, SourceMiddlewarePhase, TopologyMiddlewareConfigSlot,
+    };
     use obzenflow_core::TypedPayload;
     use obzenflow_runtime::pipeline::config::StageConfig;
     use obzenflow_runtime::stages::common::handler_error::HandlerError;
@@ -26,8 +29,12 @@ mod tests {
     struct TestMiddleware(&'static str);
 
     impl Middleware for TestMiddleware {
-        fn middleware_name(&self) -> &'static str {
+        fn label(&self) -> &'static str {
             self.0
+        }
+
+        fn source_phase(&self) -> SourceMiddlewarePhase {
+            SourceMiddlewarePhase::Ordinary
         }
     }
 
@@ -35,16 +42,34 @@ mod tests {
     struct TestMiddlewareFactory(&'static str);
 
     impl MiddlewareFactory for TestMiddlewareFactory {
+        fn label(&self) -> &'static str {
+            self.0
+        }
+
+        fn override_key(&self) -> MiddlewareOverrideKey {
+            // In production, override keys are stable family identifiers independent of display
+            // labels. For this test factory, the label itself is the family boundary.
+            MiddlewareOverrideKey::of::<Self>(self.0)
+        }
+
+        fn control_role(&self) -> ControlMiddlewareRole {
+            ControlMiddlewareRole::None
+        }
+
+        fn plan_contribution(&self) -> MiddlewarePlanContribution {
+            MiddlewarePlanContribution::None
+        }
+
+        fn topology_config_slot(&self) -> Option<TopologyMiddlewareConfigSlot> {
+            None
+        }
+
         fn create(
             &self,
             _config: &StageConfig,
             _control_middleware: Arc<ControlMiddlewareAggregator>,
         ) -> obzenflow_adapters::middleware::MiddlewareFactoryResult<Box<dyn Middleware>> {
             Ok(Box::new(TestMiddleware(self.0)))
-        }
-
-        fn name(&self) -> &str {
-            self.0
         }
     }
 

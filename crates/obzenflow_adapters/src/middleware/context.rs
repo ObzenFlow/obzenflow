@@ -8,60 +8,20 @@
 //! during event processing, preserving the immutability of ChainEvent.
 
 use obzenflow_core::ChainEvent;
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use obzenflow_core::MiddlewareContextKey;
+use std::any::{Any, TypeId};
 use std::collections::HashMap;
-
-/// Ephemeral event emitted by middleware during processing
-///
-/// These events enable middleware composition where outer middleware
-/// can communicate with inner middleware layers.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct MiddlewareEvent {
-    /// The source middleware that emitted this event
-    /// Examples: "circuit_breaker", "retry", "rate_limiter"
-    pub source: String,
-
-    /// The type of event emitted by the middleware
-    /// Examples: "opened", "closed", "rejected", "attempt_started"
-    pub event_type: String,
-
-    /// Additional structured data about the event
-    pub data: Value,
-}
-
-impl MiddlewareEvent {
-    /// Create a new middleware event
-    pub fn new(source: impl Into<String>, event_type: impl Into<String>, data: Value) -> Self {
-        Self {
-            source: source.into(),
-            event_type: event_type.into(),
-            data,
-        }
-    }
-
-    /// Create a simple middleware event without additional data
-    pub fn simple(source: impl Into<String>, event_type: impl Into<String>) -> Self {
-        Self::new(source, event_type, Value::Null)
-    }
-}
 
 /// Ephemeral context that flows through middleware during processing
 ///
 /// This context is created fresh for each event processing and is never
 /// persisted. It enables middleware to communicate without mutating the
 /// core ChainEvent.
-#[derive(Debug, Default, Clone)]
 pub struct MiddlewareContext {
-    /// Events emitted by middleware for inner layers to observe
-    pub events: Vec<MiddlewareEvent>,
-
-    /// Key-value baggage for middleware state
-    pub baggage: HashMap<String, Value>,
-
-    /// Control events to be written to the journal after processing
-    /// These are collected during middleware execution and appended by MiddlewareTransform
-    pub control_events: Vec<ChainEvent>,
+    // NOTE: All fields are private; use helper methods.
+    ephemeral_events: Vec<ChainEvent>,
+    control_events: Vec<ChainEvent>,
+    slots: HashMap<TypeId, Box<dyn Any + Send + Sync>>,
 }
 
 impl MiddlewareContext {
@@ -70,49 +30,50 @@ impl MiddlewareContext {
         Self::default()
     }
 
-    /// Emit an event that inner middleware can observe
-    pub fn emit_event(&mut self, source: &str, event_type: &str, data: Value) {
-        self.events
-            .push(MiddlewareEvent::new(source, event_type, data));
+    /// Record an ephemeral (in-memory only) event for middleware coordination.
+    ///
+    /// Ephemeral events are never appended to the journal; they are visible only
+    /// within the current middleware pass.
+    pub fn emit_ephemeral_event(&mut self, event: ChainEvent) {
+        self.ephemeral_events.push(event);
     }
 
-    /// Check if any middleware event matches the given source and type
-    pub fn has_event(&self, source: &str, event_type: &str) -> bool {
-        self.events
-            .iter()
-            .any(|e| e.source == source && e.event_type == event_type)
+    pub fn ephemeral_events(&self) -> &[ChainEvent] {
+        &self.ephemeral_events
     }
 
-    /// Get all events from a specific source
-    pub fn events_from(&self, source: &str) -> Vec<&MiddlewareEvent> {
-        self.events.iter().filter(|e| e.source == source).collect()
+    /// Insert a typed slot value.
+    pub fn insert<K: MiddlewareContextKey>(&mut self, value: K::Value) {
+        self.slots
+            .insert(TypeId::of::<K>(), Box::new(value) as Box<dyn Any + Send + Sync>);
     }
 
-    /// Find the first event matching source and type
-    pub fn find_event(&self, source: &str, event_type: &str) -> Option<&MiddlewareEvent> {
-        self.events
-            .iter()
-            .find(|e| e.source == source && e.event_type == event_type)
+    /// Get a typed slot value by key.
+    pub fn get<K: MiddlewareContextKey>(&self) -> Option<&K::Value> {
+        self.slots
+            .get(&TypeId::of::<K>())
+            .and_then(|boxed| boxed.downcast_ref::<K::Value>())
     }
 
-    /// Set a baggage value
-    pub fn set_baggage(&mut self, key: impl Into<String>, value: Value) {
-        self.baggage.insert(key.into(), value);
+    /// Get a mutable typed slot value by key.
+    pub fn get_mut<K: MiddlewareContextKey>(&mut self) -> Option<&mut K::Value> {
+        self.slots
+            .get_mut(&TypeId::of::<K>())
+            .and_then(|boxed| boxed.downcast_mut::<K::Value>())
     }
 
-    /// Get a baggage value
-    pub fn get_baggage(&self, key: &str) -> Option<&Value> {
-        self.baggage.get(key)
+    /// Check whether a typed slot value exists for the given key.
+    pub fn contains<K: MiddlewareContextKey>(&self) -> bool {
+        self.slots.contains_key(&TypeId::of::<K>())
     }
 
-    /// Check if a baggage key exists
-    pub fn has_baggage(&self, key: &str) -> bool {
-        self.baggage.contains_key(key)
-    }
-
-    /// Remove a baggage value
-    pub fn remove_baggage(&mut self, key: &str) -> Option<Value> {
-        self.baggage.remove(key)
+    /// Remove a typed slot value by key.
+    pub fn remove<K: MiddlewareContextKey>(&mut self) -> Option<K::Value> {
+        let boxed = self.slots.remove(&TypeId::of::<K>())?;
+        boxed
+            .downcast::<K::Value>()
+            .ok()
+            .map(|boxed| *boxed)
     }
 
     /// Write a control event to the journal
@@ -127,6 +88,45 @@ impl MiddlewareContext {
     pub fn write_control_event(&mut self, event: ChainEvent) {
         self.control_events.push(event);
     }
+
+    pub fn control_events(&self) -> &[ChainEvent] {
+        &self.control_events
+    }
+
+    pub fn take_control_events(&mut self) -> Vec<ChainEvent> {
+        std::mem::take(&mut self.control_events)
+    }
+
+    pub fn clear_control_events(&mut self) {
+        self.control_events.clear();
+    }
+
+    pub fn retain_control_events<F>(&mut self, f: F)
+    where
+        F: FnMut(&ChainEvent) -> bool,
+    {
+        self.control_events.retain(f);
+    }
+}
+
+impl Default for MiddlewareContext {
+    fn default() -> Self {
+        Self {
+            ephemeral_events: Vec::new(),
+            control_events: Vec::new(),
+            slots: HashMap::new(),
+        }
+    }
+}
+
+impl std::fmt::Debug for MiddlewareContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MiddlewareContext")
+            .field("ephemeral_events_len", &self.ephemeral_events.len())
+            .field("control_events_len", &self.control_events.len())
+            .field("slots_len", &self.slots.len())
+            .finish()
+    }
 }
 
 #[cfg(test)]
@@ -136,87 +136,43 @@ mod tests {
     use obzenflow_core::WriterId;
     use serde_json::json;
 
-    #[test]
-    fn test_middleware_event_creation() {
-        let event = MiddlewareEvent::new(
-            "circuit_breaker",
-            "opened",
-            json!({
-                "consecutive_failures": 10,
-                "threshold": 10
-            }),
-        );
+    struct RetryCountKey;
+    impl MiddlewareContextKey for RetryCountKey {
+        type Value = u32;
+        const LABEL: &'static str = "retry_count";
+    }
 
-        assert_eq!(event.source, "circuit_breaker");
-        assert_eq!(event.event_type, "opened");
-        assert_eq!(event.data["consecutive_failures"], 10);
+    struct CircuitStateKey;
+    impl MiddlewareContextKey for CircuitStateKey {
+        type Value = String;
+        const LABEL: &'static str = "circuit_state";
     }
 
     #[test]
-    fn test_simple_middleware_event() {
-        let event = MiddlewareEvent::simple("retry", "exhausted");
+    fn test_context_ephemeral_events_round_trip() {
+        let mut ctx = MiddlewareContext::new();
+        let writer_id = WriterId::from(obzenflow_core::StageId::new());
 
-        assert_eq!(event.source, "retry");
-        assert_eq!(event.event_type, "exhausted");
-        assert_eq!(event.data, Value::Null);
+        let event = ChainEventFactory::metrics_state_snapshot(writer_id, json!({ "k": 1 }));
+        ctx.emit_ephemeral_event(event.clone());
+
+        assert_eq!(ctx.ephemeral_events().len(), 1);
+        assert_eq!(ctx.ephemeral_events()[0].id, event.id);
     }
 
     #[test]
-    fn test_context_event_emission() {
+    fn test_context_typed_slots() {
         let mut ctx = MiddlewareContext::new();
 
-        ctx.emit_event(
-            "circuit_breaker",
-            "rejected",
-            json!({
-                "reason": "circuit_open"
-            }),
-        );
+        ctx.insert::<RetryCountKey>(3);
+        ctx.insert::<CircuitStateKey>("open".to_string());
 
-        ctx.emit_event(
-            "retry",
-            "attempt_started",
-            json!({
-                "attempt": 1,
-                "max_attempts": 3
-            }),
-        );
+        assert!(ctx.contains::<RetryCountKey>());
+        assert_eq!(ctx.get::<RetryCountKey>(), Some(&3));
 
-        assert_eq!(ctx.events.len(), 2);
-        assert!(ctx.has_event("circuit_breaker", "rejected"));
-        assert!(ctx.has_event("retry", "attempt_started"));
-        assert!(!ctx.has_event("rate_limiter", "throttled"));
-    }
-
-    #[test]
-    fn test_context_event_queries() {
-        let mut ctx = MiddlewareContext::new();
-
-        ctx.emit_event("circuit_breaker", "rejected", json!({"reason": "open"}));
-        ctx.emit_event("circuit_breaker", "opened", json!({"failures": 10}));
-        ctx.emit_event("retry", "attempt_started", json!({"attempt": 1}));
-
-        let cb_events = ctx.events_from("circuit_breaker");
-        assert_eq!(cb_events.len(), 2);
-
-        let rejected = ctx.find_event("circuit_breaker", "rejected");
-        assert!(rejected.is_some());
-        assert_eq!(rejected.unwrap().data["reason"], "open");
-    }
-
-    #[test]
-    fn test_context_baggage() {
-        let mut ctx = MiddlewareContext::new();
-
-        ctx.set_baggage("retry_count", json!(3));
-        ctx.set_baggage("circuit_state", json!("open"));
-
-        assert!(ctx.has_baggage("retry_count"));
-        assert_eq!(ctx.get_baggage("retry_count"), Some(&json!(3)));
-
-        let removed = ctx.remove_baggage("circuit_state");
-        assert_eq!(removed, Some(json!("open")));
-        assert!(!ctx.has_baggage("circuit_state"));
+        let removed = ctx.remove::<CircuitStateKey>();
+        assert_eq!(removed.as_deref(), Some("open"));
+        assert!(!ctx.contains::<CircuitStateKey>());
     }
 
     #[test]
@@ -239,8 +195,8 @@ mod tests {
             }),
         ));
 
-        assert_eq!(ctx.control_events.len(), 2);
-        assert!(ctx.control_events[0].is_lifecycle());
-        assert!(ctx.control_events[1].is_lifecycle());
+        assert_eq!(ctx.control_events().len(), 2);
+        assert!(ctx.control_events()[0].is_lifecycle());
+        assert!(ctx.control_events()[1].is_lifecycle());
     }
 }

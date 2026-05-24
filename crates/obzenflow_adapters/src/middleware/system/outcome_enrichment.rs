@@ -5,7 +5,10 @@
 //! Outcome enrichment middleware for setting ProcessingOutcome based on event characteristics.
 
 use crate::middleware::{
-    ErrorAction, Middleware, MiddlewareAction, MiddlewareContext, MiddlewareFactory,
+    context_keys::{OutcomeFailedEventType, OutcomeProcessingFailed, OutcomeRetryAttempt},
+    ControlMiddlewareRole, ErrorAction, Middleware, MiddlewareAction, MiddlewareContext,
+    MiddlewareFactory, MiddlewareOverrideKey, MiddlewarePlanContribution, SourceMiddlewarePhase,
+    TopologyMiddlewareConfigSlot,
 };
 use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::event::status::processing_status::ProcessingStatus;
@@ -77,12 +80,8 @@ impl OutcomeEnrichmentMiddleware {
         }
 
         // 4) retry baggage
-        if let Some(retry_info) = ctx.get_baggage("retry_attempt") {
-            if let Some(attempt) = retry_info.as_u64() {
-                return ProcessingStatus::Retry {
-                    attempt: attempt as u32,
-                };
-            }
+        if let Some(attempt) = ctx.get::<OutcomeRetryAttempt>().copied() {
+            return ProcessingStatus::Retry { attempt };
         }
 
         // 5) control events → filtered
@@ -95,6 +94,14 @@ impl OutcomeEnrichmentMiddleware {
 }
 
 impl Middleware for OutcomeEnrichmentMiddleware {
+    fn label(&self) -> &'static str {
+        "outcome_enrichment"
+    }
+
+    fn source_phase(&self) -> SourceMiddlewarePhase {
+        SourceMiddlewarePhase::Ordinary
+    }
+
     fn pre_handle(&self, _event: &ChainEvent, _ctx: &mut MiddlewareContext) -> MiddlewareAction {
         MiddlewareAction::Continue
     }
@@ -108,8 +115,8 @@ impl Middleware for OutcomeEnrichmentMiddleware {
     }
 
     fn on_error(&self, event: &ChainEvent, ctx: &mut MiddlewareContext) -> ErrorAction {
-        ctx.set_baggage("processing_failed", serde_json::json!(true));
-        ctx.set_baggage("failed_event_type", serde_json::json!(event.event_type()));
+        ctx.insert::<OutcomeProcessingFailed>(true);
+        ctx.insert::<OutcomeFailedEventType>(event.event_type());
         ErrorAction::Propagate
     }
 
@@ -137,6 +144,8 @@ impl Middleware for OutcomeEnrichmentMiddleware {
 // ==========================================================================
 // Factory
 // ==========================================================================
+pub struct OutcomeEnrichmentFamily;
+
 pub struct OutcomeEnrichmentMiddlewareFactory;
 
 impl Default for OutcomeEnrichmentMiddlewareFactory {
@@ -152,6 +161,26 @@ impl OutcomeEnrichmentMiddlewareFactory {
 }
 
 impl MiddlewareFactory for OutcomeEnrichmentMiddlewareFactory {
+    fn label(&self) -> &'static str {
+        "outcome_enrichment"
+    }
+
+    fn override_key(&self) -> MiddlewareOverrideKey {
+        MiddlewareOverrideKey::of::<OutcomeEnrichmentFamily>("outcome_enrichment")
+    }
+
+    fn control_role(&self) -> ControlMiddlewareRole {
+        ControlMiddlewareRole::None
+    }
+
+    fn plan_contribution(&self) -> MiddlewarePlanContribution {
+        MiddlewarePlanContribution::None
+    }
+
+    fn topology_config_slot(&self) -> Option<TopologyMiddlewareConfigSlot> {
+        None
+    }
+
     fn create(
         &self,
         config: &StageConfig,
@@ -160,10 +189,6 @@ impl MiddlewareFactory for OutcomeEnrichmentMiddlewareFactory {
         >,
     ) -> crate::middleware::MiddlewareFactoryResult<Box<dyn Middleware>> {
         Ok(Box::new(OutcomeEnrichmentMiddleware::new(&config.name)))
-    }
-
-    fn name(&self) -> &str {
-        "outcome_enrichment"
     }
 }
 
@@ -246,7 +271,7 @@ mod tests {
     fn detects_retry_from_context() {
         let mw = OutcomeEnrichmentMiddleware::new("test_stage");
         let mut ctx = MiddlewareContext::new();
-        ctx.set_baggage("retry_attempt", json!(3));
+        ctx.insert::<OutcomeRetryAttempt>(3);
 
         let mut event = ChainEventFactory::data_event(
             writer(),

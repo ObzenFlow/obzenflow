@@ -54,12 +54,22 @@
 //! You can also create custom middleware by implementing the `Middleware` trait:
 //!
 //! ```rust
-//! use obzenflow_adapters::middleware::{Middleware, MiddlewareAction, MiddlewareContext};
+//! use obzenflow_adapters::middleware::{
+//!     Middleware, MiddlewareAction, MiddlewareContext, SourceMiddlewarePhase,
+//! };
 //! use obzenflow_core::event::chain_event::ChainEvent;
 //!
 //! struct MyCustomMiddleware;
 //!
 //! impl Middleware for MyCustomMiddleware {
+//!     fn label(&self) -> &'static str {
+//!         "my_custom_middleware"
+//!     }
+//!
+//!     fn source_phase(&self) -> SourceMiddlewarePhase {
+//!         SourceMiddlewarePhase::Ordinary
+//!     }
+//!
 //!     fn pre_handle(&self, event: &ChainEvent, _ctx: &mut MiddlewareContext) -> MiddlewareAction {
 //!         println!("Processing event: {:?}", event.id);
 //!         MiddlewareAction::Continue
@@ -86,6 +96,7 @@ mod transform_middleware;
 
 // Common middleware utilities
 mod context;
+mod context_keys;
 mod function;
 mod hints;
 
@@ -102,9 +113,12 @@ mod system;
 // directly, and dashboards/query assets live outside the middleware API.
 
 // Core trait exports
-pub use middleware_factory::{MiddlewareFactory, MiddlewareFactoryError, MiddlewareFactoryResult};
+pub use middleware_factory::{
+    ControlMiddlewareRole, MiddlewareFactory, MiddlewareFactoryError, MiddlewareFactoryResult,
+    MiddlewareOverrideKey, MiddlewarePlanContribution, TopologyMiddlewareConfigSlot,
+};
 pub use middleware_safety::MiddlewareSafety;
-pub use middleware_trait::{ErrorAction, Middleware, MiddlewareAction};
+pub use middleware_trait::{ErrorAction, Middleware, MiddlewareAction, SourceMiddlewarePhase};
 
 // Handler-specific exports
 pub use join_middleware::{JoinHandlerMiddlewareExt, JoinMiddlewareBuilder, MiddlewareJoin};
@@ -124,7 +138,7 @@ pub use transform_middleware::{
 };
 
 // Common utilities
-pub use context::{MiddlewareContext, MiddlewareEvent};
+pub use context::MiddlewareContext;
 pub use function::{middleware_fn, FnMiddleware};
 pub use hints::{Attempts, BackoffKind, BatchingHint, MiddlewareHints, RetryHint};
 pub use observability::timing::TimingMiddleware;

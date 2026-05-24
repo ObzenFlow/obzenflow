@@ -103,13 +103,13 @@ impl<H: JoinHandler> MiddlewareJoin<H> {
         }
 
         // Append control events from middleware
-        if !ctx.control_events.is_empty() {
+        if !ctx.control_events().is_empty() {
             tracing::trace!(
                 "Appending {} control events from middleware",
-                ctx.control_events.len()
+                ctx.control_events().len()
             );
         }
-        let mut control_events = std::mem::take(&mut ctx.control_events);
+        let mut control_events = ctx.take_control_events();
         for control_event in &mut control_events {
             for middleware in self.middleware_chain.iter() {
                 middleware.pre_write(control_event, ctx);
@@ -203,7 +203,7 @@ where
 
         // Append any control events during drain
         // This is the final opportunity to emit middleware lifecycle events
-        let mut control_events = std::mem::take(&mut ctx.control_events);
+        let mut control_events = ctx.take_control_events();
         for control_event in &mut control_events {
             for middleware in self.middleware_chain.iter() {
                 middleware.pre_write(control_event, &ctx);
@@ -303,6 +303,14 @@ mod tests {
     struct SkipMiddleware;
 
     impl Middleware for SkipMiddleware {
+        fn label(&self) -> &'static str {
+            "test.skip_middleware"
+        }
+
+        fn source_phase(&self) -> crate::middleware::SourceMiddlewarePhase {
+            crate::middleware::SourceMiddlewarePhase::Ordinary
+        }
+
         fn pre_handle(&self, event: &ChainEvent, _ctx: &mut MiddlewareContext) -> MiddlewareAction {
             // Skip events with "skip" in their payload
             if event.payload().get("skip").is_some() {

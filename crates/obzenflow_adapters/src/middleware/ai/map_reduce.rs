@@ -9,7 +9,14 @@
 //! - `map` stage: drop manifests, tag partial outputs with job/chunk metadata,
 //!   and emit a terminal failure marker when a chunk produces no partial output.
 
-use crate::middleware::{Middleware, MiddlewareAction, MiddlewareContext, MiddlewareFactory};
+use crate::middleware::{
+    context_keys::{
+        AiMapReduceChunkCount, AiMapReduceChunkIndex, AiMapReduceJobKey, CircuitBreakerShouldRetry,
+    },
+    ControlMiddlewareRole, Middleware, MiddlewareAction, MiddlewareContext, MiddlewareFactory,
+    MiddlewareOverrideKey, MiddlewarePlanContribution, SourceMiddlewarePhase,
+    TopologyMiddlewareConfigSlot,
+};
 use obzenflow_core::ai::{
     AiMapReduceChunkFailed, AiMapReducePlanningManifest, AiMapReduceTaggedPartial,
     ChunkPlanningSummary,
@@ -17,7 +24,8 @@ use obzenflow_core::ai::{
 use obzenflow_core::event::chain_event::ChainEventFactory;
 use obzenflow_core::event::observability::AiChunkingSnapshot;
 use obzenflow_core::event::payloads::observability_payload::{
-    MetricsLifecycle, ObservabilityPayload,
+    CircuitBreakerEvent, CircuitBreakerRejectionReason, MiddlewareLifecycle, MetricsLifecycle,
+    ObservabilityPayload,
 };
 use obzenflow_core::event::status::processing_status::ErrorKind;
 use obzenflow_core::event::ChainEventContent;
@@ -31,10 +39,6 @@ use std::sync::Arc;
 const MAP_FAILURE_EVENT_TYPE: &str = "ai.map_reduce.map_failed.v1";
 const CHUNK_FAILED_EVENT_TYPE: &str = "ai.map_reduce.chunk_failed.v1";
 const TAGGED_PARTIAL_EVENT_TYPE: &str = "ai.map_reduce.tagged_partial.v1";
-
-const BAGGAGE_JOB_KEY: &str = "ai.map_reduce.job_key";
-const BAGGAGE_CHUNK_INDEX: &str = "ai.map_reduce.chunk_index";
-const BAGGAGE_CHUNK_COUNT: &str = "ai.map_reduce.chunk_count";
 
 fn job_key_from_chunk_event(chunk_event: &ChainEvent) -> EventId {
     chunk_event
@@ -60,7 +64,7 @@ struct ChunkEnvelopeIndexCount {
 }
 
 fn remove_control_events_by_type(ctx: &mut MiddlewareContext, event_type: &str) {
-    ctx.control_events.retain(|e| match &e.content {
+    ctx.retain_control_events(|e| match &e.content {
         ChainEventContent::Data {
             event_type: actual, ..
         } => actual != event_type,
@@ -76,8 +80,8 @@ fn has_typed_output<T: TypedPayload>(outputs: &[ChainEvent]) -> bool {
 }
 
 fn should_retry(ctx: &MiddlewareContext) -> bool {
-    ctx.get_baggage("circuit_breaker.should_retry")
-        .and_then(|v| v.as_bool())
+    ctx.get::<CircuitBreakerShouldRetry>()
+        .copied()
         .unwrap_or(false)
 }
 
@@ -110,26 +114,29 @@ fn update_chunk_failed_reason(
         return;
     }
 
-    if let Some(rejected) = ctx.find_event("circuit_breaker", "rejected") {
-        let reason = rejected
-            .data
-            .get("reason")
-            .and_then(|v| v.as_str())
-            .unwrap_or("rejected");
-        decoded.reason = format!("circuit_breaker:{reason}");
-        if let Ok(next) = serde_json::to_value(&decoded) {
-            *payload = next;
-        }
-        return;
-    }
+    let rejection_reason = ctx
+        .ephemeral_events()
+        .iter()
+        .rev()
+        .find_map(|event| match &event.content {
+            ChainEventContent::Observability(ObservabilityPayload::Middleware(
+                MiddlewareLifecycle::CircuitBreaker(CircuitBreakerEvent::Rejected {
+                    reason, ..
+                }),
+            )) => Some(*reason),
+            _ => None,
+        });
 
-    if let Some(throttled) = ctx.find_event("rate_limiter", "throttled") {
-        let reason = throttled
-            .data
-            .get("reason")
-            .and_then(|v| v.as_str())
-            .unwrap_or("throttled");
-        decoded.reason = format!("rate_limiter:{reason}");
+    if let Some(reason) = rejection_reason {
+        fn render(reason: CircuitBreakerRejectionReason) -> &'static str {
+            match reason {
+                CircuitBreakerRejectionReason::CircuitOpen => "circuit_open",
+                CircuitBreakerRejectionReason::ProbeInProgress => "probe_in_progress",
+                CircuitBreakerRejectionReason::Unknown => "unknown",
+            }
+        }
+
+        decoded.reason = format!("circuit_breaker:{}", render(reason));
         if let Ok(next) = serde_json::to_value(&decoded) {
             *payload = next;
         }
@@ -163,8 +170,12 @@ impl<Chunk> Middleware for AiMapReduceChunkManifestMiddleware<Chunk>
 where
     Chunk: TypedPayload + Send + Sync,
 {
-    fn middleware_name(&self) -> &'static str {
+    fn label(&self) -> &'static str {
         "ai_map_reduce.chunk_manifest"
+    }
+
+    fn source_phase(&self) -> SourceMiddlewarePhase {
+        SourceMiddlewarePhase::Ordinary
     }
 
     fn pre_handle(&self, _event: &ChainEvent, _ctx: &mut MiddlewareContext) -> MiddlewareAction {
@@ -274,6 +285,8 @@ pub struct AiMapReduceChunkManifestFactory<Chunk> {
     _phantom: PhantomData<Chunk>,
 }
 
+pub struct AiMapReduceChunkManifestFamily;
+
 impl<Chunk> AiMapReduceChunkManifestFactory<Chunk> {
     pub fn new() -> Self {
         Self {
@@ -292,16 +305,32 @@ impl<Chunk> MiddlewareFactory for AiMapReduceChunkManifestFactory<Chunk>
 where
     Chunk: TypedPayload + Send + Sync + 'static,
 {
+    fn label(&self) -> &'static str {
+        "ai_map_reduce.chunk_manifest"
+    }
+
+    fn override_key(&self) -> MiddlewareOverrideKey {
+        MiddlewareOverrideKey::of::<AiMapReduceChunkManifestFamily>("ai_map_reduce.chunk_manifest")
+    }
+
+    fn control_role(&self) -> ControlMiddlewareRole {
+        ControlMiddlewareRole::None
+    }
+
+    fn plan_contribution(&self) -> MiddlewarePlanContribution {
+        MiddlewarePlanContribution::None
+    }
+
+    fn topology_config_slot(&self) -> Option<TopologyMiddlewareConfigSlot> {
+        None
+    }
+
     fn create(
         &self,
         _config: &StageConfig,
         _control_middleware: Arc<crate::middleware::control::ControlMiddlewareAggregator>,
     ) -> crate::middleware::MiddlewareFactoryResult<Box<dyn Middleware>> {
         Ok(Box::new(AiMapReduceChunkManifestMiddleware::<Chunk>::new()))
-    }
-
-    fn name(&self) -> &str {
-        "ai_map_reduce.chunk_manifest"
     }
 }
 
@@ -333,8 +362,12 @@ where
     Chunk: TypedPayload + Send + Sync,
     Partial: TypedPayload + Send + Sync,
 {
-    fn middleware_name(&self) -> &'static str {
+    fn label(&self) -> &'static str {
         "ai_map_reduce.map_wrapper"
+    }
+
+    fn source_phase(&self) -> SourceMiddlewarePhase {
+        SourceMiddlewarePhase::Ordinary
     }
 
     fn pre_handle(&self, event: &ChainEvent, ctx: &mut MiddlewareContext) -> MiddlewareAction {
@@ -368,9 +401,9 @@ where
         };
 
         let job_key = job_key_from_chunk_event(event);
-        ctx.set_baggage(BAGGAGE_JOB_KEY, json!(job_key));
-        ctx.set_baggage(BAGGAGE_CHUNK_INDEX, json!(header.chunk_index));
-        ctx.set_baggage(BAGGAGE_CHUNK_COUNT, json!(header.chunk_count));
+        ctx.insert::<AiMapReduceJobKey>(job_key);
+        ctx.insert::<AiMapReduceChunkIndex>(header.chunk_index);
+        ctx.insert::<AiMapReduceChunkCount>(header.chunk_count);
 
         let default_reason = "map produced no partial output";
 
@@ -453,21 +486,11 @@ where
             return;
         }
 
-        let Some(job_key) = ctx
-            .get_baggage(BAGGAGE_JOB_KEY)
-            .cloned()
-            .and_then(|v| serde_json::from_value::<EventId>(v).ok())
-        else {
+        let Some(job_key) = ctx.get::<AiMapReduceJobKey>().copied() else {
             return;
         };
-        let chunk_index = ctx
-            .get_baggage(BAGGAGE_CHUNK_INDEX)
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0) as usize;
-        let chunk_count = ctx
-            .get_baggage(BAGGAGE_CHUNK_COUNT)
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0) as usize;
+        let chunk_index = ctx.get::<AiMapReduceChunkIndex>().copied().unwrap_or(0);
+        let chunk_count = ctx.get::<AiMapReduceChunkCount>().copied().unwrap_or(0);
 
         let tagged = AiMapReduceTaggedPartial::<serde_json::Value> {
             job_key,
@@ -490,6 +513,8 @@ pub struct AiMapReduceMapFactory<Chunk, Partial> {
     _phantom: PhantomData<(Chunk, Partial)>,
 }
 
+pub struct AiMapReduceMapFamily;
+
 impl<Chunk, Partial> AiMapReduceMapFactory<Chunk, Partial> {
     pub fn new() -> Self {
         Self {
@@ -509,16 +534,32 @@ where
     Chunk: TypedPayload + Send + Sync + 'static,
     Partial: TypedPayload + Send + Sync + 'static,
 {
+    fn label(&self) -> &'static str {
+        "ai_map_reduce.map_wrapper"
+    }
+
+    fn override_key(&self) -> MiddlewareOverrideKey {
+        MiddlewareOverrideKey::of::<AiMapReduceMapFamily>("ai_map_reduce.map_wrapper")
+    }
+
+    fn control_role(&self) -> ControlMiddlewareRole {
+        ControlMiddlewareRole::None
+    }
+
+    fn plan_contribution(&self) -> MiddlewarePlanContribution {
+        MiddlewarePlanContribution::None
+    }
+
+    fn topology_config_slot(&self) -> Option<TopologyMiddlewareConfigSlot> {
+        None
+    }
+
     fn create(
         &self,
         _config: &StageConfig,
         _control_middleware: Arc<crate::middleware::control::ControlMiddlewareAggregator>,
     ) -> crate::middleware::MiddlewareFactoryResult<Box<dyn Middleware>> {
         Ok(Box::new(AiMapReduceMapMiddleware::<Chunk, Partial>::new()))
-    }
-
-    fn name(&self) -> &str {
-        "ai_map_reduce.map_wrapper"
     }
 }
 
@@ -593,12 +634,12 @@ mod tests {
     #[test]
     fn chunk_manifest_factory_creates_middleware() {
         let factory = AiMapReduceChunkManifestFactory::<TestChunkEnvelope>::new();
-        assert_eq!(factory.name(), "ai_map_reduce.chunk_manifest");
+        assert_eq!(factory.label(), "ai_map_reduce.chunk_manifest");
 
         let middleware = factory
             .create(&stage_config(), control_aggregator())
             .expect("chunk manifest factory should materialize middleware");
-        assert_eq!(middleware.middleware_name(), "ai_map_reduce.chunk_manifest");
+        assert_eq!(middleware.label(), "ai_map_reduce.chunk_manifest");
     }
 
     #[test]
@@ -649,8 +690,8 @@ mod tests {
 
         middleware.post_handle(&input, &[chunk_event, snapshot_event], &mut ctx);
 
-        assert_eq!(ctx.control_events.len(), 1);
-        let manifest_event = &ctx.control_events[0];
+        assert_eq!(ctx.control_events().len(), 1);
+        let manifest_event = &ctx.control_events()[0];
         assert_eq!(
             manifest_event.event_type(),
             AiMapReducePlanningManifest::versioned_event_type()
@@ -697,8 +738,8 @@ mod tests {
 
         middleware.post_handle(&input, &outputs, &mut ctx);
 
-        assert_eq!(ctx.control_events.len(), 1);
-        let manifest = AiMapReducePlanningManifest::try_from_event(&ctx.control_events[0])
+        assert_eq!(ctx.control_events().len(), 1);
+        let manifest = AiMapReducePlanningManifest::try_from_event(&ctx.control_events()[0])
             .expect("manifest should decode");
         assert_eq!(manifest.job_key, input.id);
         assert_eq!(manifest.chunk_count, 3);
@@ -724,8 +765,8 @@ mod tests {
 
         middleware.post_handle(&input, &[chunk_event], &mut ctx);
 
-        assert_eq!(ctx.control_events.len(), 1);
-        let manifest = AiMapReducePlanningManifest::try_from_event(&ctx.control_events[0])
+        assert_eq!(ctx.control_events().len(), 1);
+        let manifest = AiMapReducePlanningManifest::try_from_event(&ctx.control_events()[0])
             .expect("manifest should decode");
         assert_eq!(manifest.chunk_count, 1);
         assert_eq!(manifest.seed_event_type, "job");
@@ -743,12 +784,12 @@ mod tests {
     #[test]
     fn map_factory_creates_middleware() {
         let factory = AiMapReduceMapFactory::<TestChunkEnvelope, TestPartial>::new();
-        assert_eq!(factory.name(), "ai_map_reduce.map_wrapper");
+        assert_eq!(factory.label(), "ai_map_reduce.map_wrapper");
 
         let middleware = factory
             .create(&stage_config(), control_aggregator())
             .expect("map wrapper factory should materialize middleware");
-        assert_eq!(middleware.middleware_name(), "ai_map_reduce.map_wrapper");
+        assert_eq!(middleware.label(), "ai_map_reduce.map_wrapper");
     }
 
     #[test]
@@ -771,7 +812,7 @@ mod tests {
 
         let action = middleware.pre_handle(&manifest, &mut ctx);
         assert!(matches!(action, MiddlewareAction::Skip(v) if v.is_empty()));
-        assert!(ctx.control_events.is_empty());
+        assert!(ctx.control_events().is_empty());
     }
 
     #[test]
@@ -782,7 +823,7 @@ mod tests {
         let other = ChainEventFactory::data_event(writer_id(), "other", json!({}));
         let action = middleware.pre_handle(&other, &mut ctx);
         assert!(matches!(action, MiddlewareAction::Skip(v) if v.is_empty()));
-        assert!(ctx.control_events.is_empty());
+        assert!(ctx.control_events().is_empty());
     }
 
     #[test]
@@ -805,7 +846,7 @@ mod tests {
             events[0].processing_info.status.kind(),
             Some(&ErrorKind::Deserialization)
         );
-        assert!(ctx.control_events.is_empty());
+        assert!(ctx.control_events().is_empty());
     }
 
     #[test]
@@ -836,27 +877,15 @@ mod tests {
         let action = middleware.pre_handle(&chunk_event, &mut ctx);
         assert!(matches!(action, MiddlewareAction::Continue));
 
-        let baggage_job_key = ctx
-            .get_baggage(BAGGAGE_JOB_KEY)
-            .cloned()
-            .and_then(|v| serde_json::from_value::<EventId>(v).ok())
-            .expect("job_key baggage");
-        assert_eq!(baggage_job_key, job_key);
-        assert_eq!(
-            ctx.get_baggage(BAGGAGE_CHUNK_INDEX)
-                .and_then(|v| v.as_u64()),
-            Some(1)
-        );
-        assert_eq!(
-            ctx.get_baggage(BAGGAGE_CHUNK_COUNT)
-                .and_then(|v| v.as_u64()),
-            Some(3)
-        );
+        let stored_job_key = ctx.get::<AiMapReduceJobKey>().copied().expect("job_key slot");
+        assert_eq!(stored_job_key, job_key);
+        assert_eq!(ctx.get::<AiMapReduceChunkIndex>().copied(), Some(1));
+        assert_eq!(ctx.get::<AiMapReduceChunkCount>().copied(), Some(3));
 
-        assert_eq!(ctx.control_events.len(), 2);
+        assert_eq!(ctx.control_events().len(), 2);
 
         let chunk_failed = ctx
-            .control_events
+            .control_events()
             .iter()
             .find(|e| AiMapReduceChunkFailed::event_type_matches(&e.event_type()))
             .expect("chunk_failed marker");
@@ -868,7 +897,7 @@ mod tests {
         assert_eq!(failed.reason, "map produced no partial output");
 
         let map_failed = ctx
-            .control_events
+            .control_events()
             .iter()
             .find(|e| e.event_type() == MAP_FAILURE_EVENT_TYPE)
             .expect("map_failed marker");
@@ -911,11 +940,11 @@ mod tests {
             middleware.pre_handle(&chunk_event, &mut ctx),
             MiddlewareAction::Continue
         ));
-        assert_eq!(ctx.control_events.len(), 2);
+        assert_eq!(ctx.control_events().len(), 2);
 
-        ctx.set_baggage("circuit_breaker.should_retry", json!(true));
+        ctx.insert::<CircuitBreakerShouldRetry>(true);
         middleware.post_handle(&chunk_event, &[], &mut ctx);
-        assert!(ctx.control_events.is_empty());
+        assert!(ctx.control_events().is_empty());
     }
 
     #[test]
@@ -945,7 +974,7 @@ mod tests {
             middleware.pre_handle(&chunk_event, &mut ctx),
             MiddlewareAction::Continue
         ));
-        assert_eq!(ctx.control_events.len(), 2);
+        assert_eq!(ctx.control_events().len(), 2);
 
         let partial_event = ChainEventFactory::derived_data_event(
             writer_id(),
@@ -954,7 +983,7 @@ mod tests {
             json!({ "value": 1 }),
         );
         middleware.post_handle(&chunk_event, &[partial_event], &mut ctx);
-        assert!(ctx.control_events.is_empty());
+        assert!(ctx.control_events().is_empty());
     }
 
     #[test]
@@ -989,9 +1018,9 @@ mod tests {
             ChainEventFactory::derived_data_event(writer_id(), &chunk_event, "other", json!({}));
 
         middleware.post_handle(&chunk_event, &[other_output], &mut ctx);
-        assert_eq!(ctx.control_events.len(), 2);
+        assert_eq!(ctx.control_events().len(), 2);
         assert!(ctx
-            .control_events
+            .control_events()
             .iter()
             .any(|e| e.event_type() == CHUNK_FAILED_EVENT_TYPE));
     }
@@ -1072,59 +1101,19 @@ mod tests {
             MiddlewareAction::Continue
         ));
 
-        ctx.emit_event("circuit_breaker", "rejected", json!({ "reason": "open" }));
-
-        let marker = ctx
-            .control_events
-            .iter()
-            .find(|e| AiMapReduceChunkFailed::event_type_matches(&e.event_type()))
-            .cloned()
-            .expect("chunk_failed marker");
-        let mut marker = marker;
-
-        middleware.pre_write(&mut marker, &ctx);
-
-        let updated =
-            AiMapReduceChunkFailed::try_from_event(&marker).expect("chunk_failed should decode");
-        assert_eq!(updated.reason, "circuit_breaker:open");
-    }
-
-    #[test]
-    fn map_wrapper_updates_chunk_failed_reason_from_rate_limiter_throttle() {
-        let middleware = mk_map_middleware();
-        let mut ctx = MiddlewareContext::new();
-
-        let parent = ChainEventFactory::data_event(writer_id(), "job", json!({}));
-        let chunk_payload = TestChunkEnvelope {
-            chunk_index: 0,
-            chunk_count: 1,
-            planning: ChunkPlanningSummary {
-                input_items_total: 0,
-                planned_items_total: 0,
-                excluded_items_total: 0,
-            },
-        };
-
-        let chunk_event = ChainEventFactory::derived_data_event(
+        ctx.emit_ephemeral_event(ChainEventFactory::observability_event(
             writer_id(),
-            &parent,
-            TestChunkEnvelope::versioned_event_type(),
-            serde_json::to_value(chunk_payload).expect("chunk should serialize"),
-        );
-
-        assert!(matches!(
-            middleware.pre_handle(&chunk_event, &mut ctx),
-            MiddlewareAction::Continue
+            ObservabilityPayload::Middleware(MiddlewareLifecycle::CircuitBreaker(
+                CircuitBreakerEvent::Rejected {
+                    reason: CircuitBreakerRejectionReason::CircuitOpen,
+                    cooldown_remaining_ms: None,
+                    circuit_open_duration_ms: None,
+                },
+            )),
         ));
 
-        ctx.emit_event(
-            "rate_limiter",
-            "throttled",
-            json!({ "reason": "bucket_empty" }),
-        );
-
         let marker = ctx
-            .control_events
+            .control_events()
             .iter()
             .find(|e| AiMapReduceChunkFailed::event_type_matches(&e.event_type()))
             .cloned()
@@ -1135,7 +1124,7 @@ mod tests {
 
         let updated =
             AiMapReduceChunkFailed::try_from_event(&marker).expect("chunk_failed should decode");
-        assert_eq!(updated.reason, "rate_limiter:bucket_empty");
+        assert_eq!(updated.reason, "circuit_breaker:circuit_open");
     }
 
     #[test]

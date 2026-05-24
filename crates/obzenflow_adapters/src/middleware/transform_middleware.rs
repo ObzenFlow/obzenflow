@@ -7,13 +7,18 @@
 //! This module provides the ability to wrap TransformHandler implementations
 //! with middleware for cross-cutting concerns like logging, monitoring, and retry logic.
 
-use super::{Middleware, MiddlewareAction, MiddlewareContext};
+use super::{
+    context_keys::{
+        CircuitBreakerAttempt, CircuitBreakerRetryAfterMs, CircuitBreakerRetryDelayMs,
+        CircuitBreakerShouldRetry, CircuitBreakerTotalRetryWallMs,
+    },
+    Middleware, MiddlewareAction, MiddlewareContext,
+};
 use async_trait::async_trait;
 use obzenflow_core::event::status::processing_status::ProcessingStatus;
 use obzenflow_core::ChainEvent;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{AsyncTransformHandler, TransformHandler};
-use serde_json::json;
 use std::future::Future;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -74,14 +79,14 @@ impl<H: TransformHandler> MiddlewareTransform<H> {
                     }
 
                     // Check for control events even on skip
-                    if !ctx.control_events.is_empty() {
+                    if !ctx.control_events().is_empty() {
                         tracing::trace!(
                             "Appending {} control events from middleware (skip path)",
-                            ctx.control_events.len()
+                            ctx.control_events().len()
                         );
                     }
                     // Pre-write on control events - take ownership to avoid borrow issues
-                    let mut control_events = std::mem::take(&mut ctx.control_events);
+                    let mut control_events = ctx.take_control_events();
                     for control_event in &mut control_events {
                         for mw in self.middleware_chain.iter() {
                             mw.pre_write(control_event, &ctx);
@@ -135,14 +140,14 @@ impl<H: TransformHandler> MiddlewareTransform<H> {
         }
 
         // Append control events after all middleware runs
-        if !ctx.control_events.is_empty() {
+        if !ctx.control_events().is_empty() {
             tracing::trace!(
                 "Appending {} control events from middleware",
-                ctx.control_events.len()
+                ctx.control_events().len()
             );
         }
         // Pre-write on control events - take ownership to avoid borrow issues
-        let mut control_events = std::mem::take(&mut ctx.control_events);
+        let mut control_events = ctx.take_control_events();
         for control_event in &mut control_events {
             for middleware in self.middleware_chain.iter() {
                 middleware.pre_write(control_event, &ctx);
@@ -258,7 +263,7 @@ impl<H: AsyncTransformHandler> AsyncMiddlewareTransform<H> {
             // Create a fresh ephemeral context per attempt so timing/observability middleware
             // can record per-attempt processing metadata cleanly.
             let mut ctx = MiddlewareContext::new();
-            ctx.set_baggage("circuit_breaker.attempt", json!(attempt));
+            ctx.insert::<CircuitBreakerAttempt>(attempt);
 
             // Pre-processing phase
             let mut short_circuit: Option<Vec<ChainEvent>> = None;
@@ -266,10 +271,9 @@ impl<H: AsyncTransformHandler> AsyncMiddlewareTransform<H> {
                 match middleware.pre_handle(&original, &mut ctx) {
                     MiddlewareAction::Continue => continue,
                     MiddlewareAction::Skip(mut results) => {
-                        accumulated_control_events.extend(std::mem::take(&mut ctx.control_events));
-                        ctx.set_baggage(
-                            "circuit_breaker.total_retry_wall_ms",
-                            json!(retry_start.elapsed().as_millis()),
+                        accumulated_control_events.extend(ctx.take_control_events());
+                        ctx.insert::<CircuitBreakerTotalRetryWallMs>(
+                            retry_start.elapsed().as_millis() as u64,
                         );
 
                         for result in &mut results {
@@ -287,10 +291,9 @@ impl<H: AsyncTransformHandler> AsyncMiddlewareTransform<H> {
                         break;
                     }
                     MiddlewareAction::Abort => {
-                        accumulated_control_events.extend(std::mem::take(&mut ctx.control_events));
-                        ctx.set_baggage(
-                            "circuit_breaker.total_retry_wall_ms",
-                            json!(retry_start.elapsed().as_millis()),
+                        accumulated_control_events.extend(ctx.take_control_events());
+                        ctx.insert::<CircuitBreakerTotalRetryWallMs>(
+                            retry_start.elapsed().as_millis() as u64,
                         );
 
                         let mut err = original.clone();
@@ -331,10 +334,7 @@ impl<H: AsyncTransformHandler> AsyncMiddlewareTransform<H> {
                         ..
                     } = &err
                     {
-                        ctx.set_baggage(
-                            "circuit_breaker.retry_after_ms",
-                            json!(wait.as_millis() as u64),
-                        );
+                        ctx.insert::<CircuitBreakerRetryAfterMs>(wait.as_millis() as u64);
                     }
                     let reason = format!("Transform handler error: {err:?}");
                     vec![original.clone().mark_as_error(reason, err.kind())]
@@ -346,18 +346,18 @@ impl<H: AsyncTransformHandler> AsyncMiddlewareTransform<H> {
                 middleware.post_handle(&original, &results, &mut ctx);
             }
 
-            accumulated_control_events.extend(std::mem::take(&mut ctx.control_events));
+            accumulated_control_events.extend(ctx.take_control_events());
 
             // Ask middleware (circuit breaker) if we should retry.
             let should_retry = ctx
-                .get_baggage("circuit_breaker.should_retry")
-                .and_then(|v| v.as_bool())
+                .get::<CircuitBreakerShouldRetry>()
+                .copied()
                 .unwrap_or(false);
 
             if should_retry {
                 let delay_ms = ctx
-                    .get_baggage("circuit_breaker.retry_delay_ms")
-                    .and_then(|v| v.as_u64())
+                    .get::<CircuitBreakerRetryDelayMs>()
+                    .copied()
                     .unwrap_or(0);
                 attempt = attempt.saturating_add(1);
                 if delay_ms > 0 {
@@ -367,10 +367,7 @@ impl<H: AsyncTransformHandler> AsyncMiddlewareTransform<H> {
             }
 
             // Final attempt: record total wall time across all attempts (including backoff).
-            ctx.set_baggage(
-                "circuit_breaker.total_retry_wall_ms",
-                json!(retry_start.elapsed().as_millis()),
-            );
+            ctx.insert::<CircuitBreakerTotalRetryWallMs>(retry_start.elapsed().as_millis() as u64);
 
             // Pre-write phase: allow middleware to enrich each result event.
             for result in &mut results {
@@ -484,9 +481,20 @@ mod tests {
     }
 
     impl Middleware for TestMiddleware {
+        fn label(&self) -> &'static str {
+            "test.middleware"
+        }
+
+        fn source_phase(&self) -> crate::middleware::SourceMiddlewarePhase {
+            crate::middleware::SourceMiddlewarePhase::Ordinary
+        }
+
         fn pre_handle(&self, _event: &ChainEvent, ctx: &mut MiddlewareContext) -> MiddlewareAction {
             println!("Pre-handle: {}", self.tag);
-            ctx.emit_event("test", &self.tag, json!({"phase": "pre"}));
+            ctx.emit_ephemeral_event(ChainEventFactory::metrics_state_snapshot(
+                obzenflow_core::WriterId::from(obzenflow_core::StageId::new()),
+                json!({"phase": "pre", "tag": self.tag}),
+            ));
             MiddlewareAction::Continue
         }
 
@@ -498,15 +506,14 @@ mod tests {
         ) {
             println!("Post-handle: {} - {} results", self.tag, results.len());
             // Check if we can see events from earlier middleware
-            let events_count = ctx.events.len();
+            let events_count = ctx.ephemeral_events().len();
             println!("Context has {events_count} events");
 
             // Emit a post-processing event
-            ctx.emit_event(
-                "test",
-                &self.tag,
-                json!({"phase": "post", "results": results.len()}),
-            );
+            ctx.emit_ephemeral_event(ChainEventFactory::metrics_state_snapshot(
+                obzenflow_core::WriterId::from(obzenflow_core::StageId::new()),
+                json!({"phase": "post", "tag": self.tag, "results": results.len()}),
+            ));
         }
     }
 
@@ -545,6 +552,14 @@ mod tests {
     }
 
     impl Middleware for ErrorObservingMiddleware {
+        fn label(&self) -> &'static str {
+            "test.error_observing_middleware"
+        }
+
+        fn source_phase(&self) -> crate::middleware::SourceMiddlewarePhase {
+            crate::middleware::SourceMiddlewarePhase::Ordinary
+        }
+
         fn post_handle(
             &self,
             _event: &ChainEvent,
@@ -667,6 +682,14 @@ mod tests {
     struct ControlEventMiddleware;
 
     impl Middleware for ControlEventMiddleware {
+        fn label(&self) -> &'static str {
+            "test.control_event_middleware"
+        }
+
+        fn source_phase(&self) -> crate::middleware::SourceMiddlewarePhase {
+            crate::middleware::SourceMiddlewarePhase::Ordinary
+        }
+
         fn pre_handle(&self, _event: &ChainEvent, ctx: &mut MiddlewareContext) -> MiddlewareAction {
             // Emit a control event
             let writer_id = obzenflow_core::WriterId::from(obzenflow_core::StageId::new());
@@ -738,6 +761,14 @@ mod tests {
     struct SkipWithControlMiddleware;
 
     impl Middleware for SkipWithControlMiddleware {
+        fn label(&self) -> &'static str {
+            "test.skip_with_control_middleware"
+        }
+
+        fn source_phase(&self) -> crate::middleware::SourceMiddlewarePhase {
+            crate::middleware::SourceMiddlewarePhase::Ordinary
+        }
+
         fn pre_handle(&self, _event: &ChainEvent, ctx: &mut MiddlewareContext) -> MiddlewareAction {
             // Write control event then skip
             let writer_id = obzenflow_core::WriterId::from(obzenflow_core::StageId::new());

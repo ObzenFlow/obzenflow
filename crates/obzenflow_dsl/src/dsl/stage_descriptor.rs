@@ -15,7 +15,8 @@ use obzenflow_adapters::middleware::control::ControlMiddlewareAggregator;
 use obzenflow_adapters::middleware::{
     validate_middleware_safety, AsyncFiniteSourceHandlerExt, AsyncInfiniteSourceHandlerExt,
     AsyncTransformHandlerExt, FiniteSourceHandlerExt, InfiniteSourceHandlerExt,
-    JoinHandlerMiddlewareExt, Middleware, MiddlewareFactory, OutcomeEnrichmentMiddleware,
+    ControlMiddlewareRole, JoinHandlerMiddlewareExt, Middleware, MiddlewareFactory,
+    OutcomeEnrichmentMiddleware,
     SinkHandlerExt, StatefulHandlerMiddlewareExt, SystemEnrichmentMiddleware, TimingMiddleware,
     TransformHandlerExt,
 };
@@ -249,7 +250,7 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> S
     fn stage_middleware_names(&self) -> Vec<String> {
         self.middleware
             .iter()
-            .map(|f| f.name().to_string())
+            .map(|f| f.label().to_string())
             .collect()
     }
 
@@ -277,7 +278,7 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> S
             flow_middleware,
             self.middleware,
             &config.name,
-        );
+        )?;
 
         // Log the resolution
         crate::middleware_resolution::log_resolved_middleware(&config.name, &resolved);
@@ -285,14 +286,12 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> S
         // Create system middleware with instrumentation
         let mut all_middleware = create_system_middleware(&config, StageType::FiniteSource);
 
-        let expects_circuit_breaker = resolved
-            .middleware
-            .iter()
-            .any(|spec| spec.factory.name() == "circuit_breaker");
-        let expects_rate_limiter = resolved
-            .middleware
-            .iter()
-            .any(|spec| spec.factory.name() == "rate_limiter");
+        let expects_circuit_breaker = resolved.middleware.iter().any(|spec| {
+            spec.factory.control_role() == ControlMiddlewareRole::CircuitBreaker
+        });
+        let expects_rate_limiter = resolved.middleware.iter().any(|spec| {
+            spec.factory.control_role() == ControlMiddlewareRole::RateLimiter
+        });
 
         // Add resolved user middleware, tracking whether circuit_breaker is present.
         //
@@ -303,7 +302,7 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> S
         let mut has_circuit_breaker = false;
         let mut user_middleware: Vec<Box<dyn Middleware>> = Vec::new();
         for spec in resolved.middleware.into_iter() {
-            if spec.factory.name() == "circuit_breaker" {
+            if spec.factory.control_role() == ControlMiddlewareRole::CircuitBreaker {
                 has_circuit_breaker = true;
                 user_middleware.push(spec.factory.create(&config, control_middleware.clone())?);
                 continue;
@@ -430,7 +429,7 @@ impl<H: AsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
     fn stage_middleware_names(&self) -> Vec<String> {
         self.middleware
             .iter()
-            .map(|f| f.name().to_string())
+            .map(|f| f.label().to_string())
             .collect()
     }
 
@@ -459,25 +458,23 @@ impl<H: AsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
             flow_middleware,
             self.middleware,
             &config.name,
-        );
+        )?;
 
         crate::middleware_resolution::log_resolved_middleware(&config.name, &resolved);
 
         let mut all_middleware = create_system_middleware(&config, StageType::FiniteSource);
 
-        let expects_circuit_breaker = resolved
-            .middleware
-            .iter()
-            .any(|spec| spec.factory.name() == "circuit_breaker");
-        let expects_rate_limiter = resolved
-            .middleware
-            .iter()
-            .any(|spec| spec.factory.name() == "rate_limiter");
+        let expects_circuit_breaker = resolved.middleware.iter().any(|spec| {
+            spec.factory.control_role() == ControlMiddlewareRole::CircuitBreaker
+        });
+        let expects_rate_limiter = resolved.middleware.iter().any(|spec| {
+            spec.factory.control_role() == ControlMiddlewareRole::RateLimiter
+        });
 
         let mut has_circuit_breaker = false;
         let mut user_middleware: Vec<Box<dyn Middleware>> = Vec::new();
         for spec in resolved.middleware.into_iter() {
-            if spec.factory.name() == "circuit_breaker" {
+            if spec.factory.control_role() == ControlMiddlewareRole::CircuitBreaker {
                 has_circuit_breaker = true;
                 user_middleware.push(spec.factory.create(&config, control_middleware.clone())?);
                 continue;
@@ -571,7 +568,7 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
     fn stage_middleware_names(&self) -> Vec<String> {
         self.middleware
             .iter()
-            .map(|f| f.name().to_string())
+            .map(|f| f.label().to_string())
             .collect()
     }
 
@@ -599,7 +596,7 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
             flow_middleware,
             self.middleware,
             &config.name,
-        );
+        )?;
 
         // Log the resolution
         crate::middleware_resolution::log_resolved_middleware(&config.name, &resolved);
@@ -607,14 +604,12 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
         // Create system middleware with instrumentation
         let mut all_middleware = create_system_middleware(&config, StageType::InfiniteSource);
 
-        let expects_circuit_breaker = resolved
-            .middleware
-            .iter()
-            .any(|spec| spec.factory.name() == "circuit_breaker");
-        let expects_rate_limiter = resolved
-            .middleware
-            .iter()
-            .any(|spec| spec.factory.name() == "rate_limiter");
+        let expects_circuit_breaker = resolved.middleware.iter().any(|spec| {
+            spec.factory.control_role() == ControlMiddlewareRole::CircuitBreaker
+        });
+        let expects_rate_limiter = resolved.middleware.iter().any(|spec| {
+            spec.factory.control_role() == ControlMiddlewareRole::RateLimiter
+        });
 
         // Add resolved user middleware, tracking whether circuit_breaker is present.
         //
@@ -625,7 +620,7 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
         let mut has_circuit_breaker = false;
         let mut user_middleware: Vec<Box<dyn Middleware>> = Vec::new();
         for spec in resolved.middleware.into_iter() {
-            if spec.factory.name() == "circuit_breaker" {
+            if spec.factory.control_role() == ControlMiddlewareRole::CircuitBreaker {
                 has_circuit_breaker = true;
                 user_middleware.push(spec.factory.create(&config, control_middleware.clone())?);
                 continue;
@@ -752,7 +747,7 @@ impl<H: AsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
     fn stage_middleware_names(&self) -> Vec<String> {
         self.middleware
             .iter()
-            .map(|f| f.name().to_string())
+            .map(|f| f.label().to_string())
             .collect()
     }
 
@@ -779,25 +774,23 @@ impl<H: AsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
             flow_middleware,
             self.middleware,
             &config.name,
-        );
+        )?;
 
         crate::middleware_resolution::log_resolved_middleware(&config.name, &resolved);
 
         let mut all_middleware = create_system_middleware(&config, StageType::InfiniteSource);
 
-        let expects_circuit_breaker = resolved
-            .middleware
-            .iter()
-            .any(|spec| spec.factory.name() == "circuit_breaker");
-        let expects_rate_limiter = resolved
-            .middleware
-            .iter()
-            .any(|spec| spec.factory.name() == "rate_limiter");
+        let expects_circuit_breaker = resolved.middleware.iter().any(|spec| {
+            spec.factory.control_role() == ControlMiddlewareRole::CircuitBreaker
+        });
+        let expects_rate_limiter = resolved.middleware.iter().any(|spec| {
+            spec.factory.control_role() == ControlMiddlewareRole::RateLimiter
+        });
 
         let mut has_circuit_breaker = false;
         let mut user_middleware: Vec<Box<dyn Middleware>> = Vec::new();
         for spec in resolved.middleware.into_iter() {
-            if spec.factory.name() == "circuit_breaker" {
+            if spec.factory.control_role() == ControlMiddlewareRole::CircuitBreaker {
                 has_circuit_breaker = true;
                 user_middleware.push(spec.factory.create(&config, control_middleware.clone())?);
                 continue;
@@ -888,7 +881,7 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Stag
     fn stage_middleware_names(&self) -> Vec<String> {
         self.middleware
             .iter()
-            .map(|f| f.name().to_string())
+            .map(|f| f.label().to_string())
             .collect()
     }
 
@@ -923,7 +916,7 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Stag
             flow_middleware,
             self.middleware,
             &config.name,
-        );
+        )?;
 
         // Log the resolution
         crate::middleware_resolution::log_resolved_middleware(&config.name, &resolved);
@@ -938,14 +931,12 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Stag
         // Create system middleware with instrumentation
         let mut all_middleware = create_system_middleware(&config, StageType::Transform);
 
-        let expects_circuit_breaker = resolved
-            .middleware
-            .iter()
-            .any(|spec| spec.factory.name() == "circuit_breaker");
-        let expects_rate_limiter = resolved
-            .middleware
-            .iter()
-            .any(|spec| spec.factory.name() == "rate_limiter");
+        let expects_circuit_breaker = resolved.middleware.iter().any(|spec| {
+            spec.factory.control_role() == ControlMiddlewareRole::CircuitBreaker
+        });
+        let expects_rate_limiter = resolved.middleware.iter().any(|spec| {
+            spec.factory.control_role() == ControlMiddlewareRole::RateLimiter
+        });
 
         // Add resolved user middleware
         let user_middleware: Vec<Box<dyn Middleware>> = resolved
@@ -1029,7 +1020,7 @@ impl<H: AsyncTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
     fn stage_middleware_names(&self) -> Vec<String> {
         self.middleware
             .iter()
-            .map(|f| f.name().to_string())
+            .map(|f| f.label().to_string())
             .collect()
     }
 
@@ -1062,7 +1053,7 @@ impl<H: AsyncTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
             flow_middleware,
             self.middleware,
             &config.name,
-        );
+        )?;
 
         // Log the resolution
         crate::middleware_resolution::log_resolved_middleware(&config.name, &resolved);
@@ -1077,14 +1068,12 @@ impl<H: AsyncTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
         // Create system middleware with instrumentation
         let mut all_middleware = create_system_middleware(&config, StageType::Transform);
 
-        let expects_circuit_breaker = resolved
-            .middleware
-            .iter()
-            .any(|spec| spec.factory.name() == "circuit_breaker");
-        let expects_rate_limiter = resolved
-            .middleware
-            .iter()
-            .any(|spec| spec.factory.name() == "rate_limiter");
+        let expects_circuit_breaker = resolved.middleware.iter().any(|spec| {
+            spec.factory.control_role() == ControlMiddlewareRole::CircuitBreaker
+        });
+        let expects_rate_limiter = resolved.middleware.iter().any(|spec| {
+            spec.factory.control_role() == ControlMiddlewareRole::RateLimiter
+        });
 
         // Add resolved user middleware
         let user_middleware: Vec<Box<dyn Middleware>> = resolved
@@ -1169,7 +1158,7 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
     fn stage_middleware_names(&self) -> Vec<String> {
         self.middleware
             .iter()
-            .map(|f| f.name().to_string())
+            .map(|f| f.label().to_string())
             .collect()
     }
 
@@ -1203,7 +1192,7 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
             flow_middleware,
             self.middleware,
             &config.name,
-        );
+        )?;
 
         // Log the resolution
         crate::middleware_resolution::log_resolved_middleware(&config.name, &resolved);
@@ -1218,14 +1207,12 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
         // Create system middleware with instrumentation
         let mut all_middleware = create_system_middleware(&config, StageType::Sink);
 
-        let expects_circuit_breaker = resolved
-            .middleware
-            .iter()
-            .any(|spec| spec.factory.name() == "circuit_breaker");
-        let expects_rate_limiter = resolved
-            .middleware
-            .iter()
-            .any(|spec| spec.factory.name() == "rate_limiter");
+        let expects_circuit_breaker = resolved.middleware.iter().any(|spec| {
+            spec.factory.control_role() == ControlMiddlewareRole::CircuitBreaker
+        });
+        let expects_rate_limiter = resolved.middleware.iter().any(|spec| {
+            spec.factory.control_role() == ControlMiddlewareRole::RateLimiter
+        });
 
         // Add resolved user middleware
         let user_middleware: Vec<Box<dyn Middleware>> = resolved
@@ -1458,7 +1445,7 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Stage
     fn stage_middleware_names(&self) -> Vec<String> {
         self.middleware
             .iter()
-            .map(|f| f.name().to_string())
+            .map(|f| f.label().to_string())
             .collect()
     }
 
@@ -1491,7 +1478,7 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Stage
             flow_middleware,
             self.middleware,
             &config.name,
-        );
+        )?;
 
         // Log the resolution
         crate::middleware_resolution::log_resolved_middleware(&config.name, &resolved);
@@ -1506,14 +1493,12 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Stage
         // Create system middleware with instrumentation (FLOWIP-080o-part-2)
         let mut all_middleware = create_system_middleware(&config, StageType::Stateful);
 
-        let expects_circuit_breaker = resolved
-            .middleware
-            .iter()
-            .any(|spec| spec.factory.name() == "circuit_breaker");
-        let expects_rate_limiter = resolved
-            .middleware
-            .iter()
-            .any(|spec| spec.factory.name() == "rate_limiter");
+        let expects_circuit_breaker = resolved.middleware.iter().any(|spec| {
+            spec.factory.control_role() == ControlMiddlewareRole::CircuitBreaker
+        });
+        let expects_rate_limiter = resolved.middleware.iter().any(|spec| {
+            spec.factory.control_role() == ControlMiddlewareRole::RateLimiter
+        });
 
         // Add resolved user middleware
         let user_middleware: Vec<Box<dyn Middleware>> = resolved
@@ -1626,7 +1611,7 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
     fn stage_middleware_names(&self) -> Vec<String> {
         self.middleware
             .iter()
-            .map(|f| f.name().to_string())
+            .map(|f| f.label().to_string())
             .collect()
     }
 
@@ -1671,7 +1656,7 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
             flow_middleware,
             self.middleware,
             &config.name,
-        );
+        )?;
 
         // Log the resolution
         crate::middleware_resolution::log_resolved_middleware(&config.name, &resolved);
@@ -1686,14 +1671,12 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
         // Create system middleware with instrumentation (FLOWIP-080o-part-2)
         let mut all_middleware = create_system_middleware(&config, StageType::Join);
 
-        let expects_circuit_breaker = resolved
-            .middleware
-            .iter()
-            .any(|spec| spec.factory.name() == "circuit_breaker");
-        let expects_rate_limiter = resolved
-            .middleware
-            .iter()
-            .any(|spec| spec.factory.name() == "rate_limiter");
+        let expects_circuit_breaker = resolved.middleware.iter().any(|spec| {
+            spec.factory.control_role() == ControlMiddlewareRole::CircuitBreaker
+        });
+        let expects_rate_limiter = resolved.middleware.iter().any(|spec| {
+            spec.factory.control_role() == ControlMiddlewareRole::RateLimiter
+        });
 
         // Add resolved user middleware
         let user_middleware: Vec<Box<dyn Middleware>> = resolved
