@@ -10,9 +10,9 @@
 
 use crate::middleware::{
     context_keys::{
-        CircuitBreakerAttempt, CircuitBreakerIsProbe, CircuitBreakerProbeSlot,
-        CircuitBreakerProbeSlotGuard, CircuitBreakerRetryAfterMs, CircuitBreakerRetryDelayMs,
-        CircuitBreakerShouldRetry,
+        CircuitBreakerAttempt, CircuitBreakerIsProbe, CircuitBreakerProbeGeneration,
+        CircuitBreakerProbeSlot, CircuitBreakerProbeSlotGuard, CircuitBreakerRetryAfterMs,
+        CircuitBreakerRetryDelayMs, CircuitBreakerShouldRetry,
     },
     ControlMiddlewareRole, Middleware, MiddlewareAction, MiddlewareContext, MiddlewareFactory,
     MiddlewareFactoryError, MiddlewareHints, MiddlewareOverrideKey, MiddlewarePlanContribution,
@@ -286,6 +286,10 @@ pub struct CircuitBreakerMiddleware {
     opened_at: Arc<Mutex<Option<Instant>>>,
     /// Number of probe requests in flight (for half-open state)
     probe_in_flight: Arc<AtomicU32>,
+    /// Serialises half-open epoch changes with probe admission.
+    probe_gate: Arc<Mutex<()>>,
+    /// Monotonic epoch for half-open probe outcomes.
+    probe_generation: Arc<AtomicU64>,
     /// Statistics for periodic summaries
     stats: Arc<Mutex<CircuitBreakerStats>>,
     /// When the last state change occurred
@@ -413,6 +417,8 @@ impl CircuitBreakerMiddleware {
             cooldown,
             opened_at: Arc::new(Mutex::new(None)),
             probe_in_flight: Arc::new(AtomicU32::new(0)),
+            probe_gate: Arc::new(Mutex::new(())),
+            probe_generation: Arc::new(AtomicU64::new(0)),
             stats: Arc::new(Mutex::new(CircuitBreakerStats {
                 requests_processed: 0,
                 requests_rejected: 0,
@@ -904,13 +910,18 @@ impl Middleware for CircuitBreakerMiddleware {
             CircuitState::Open => {
                 // Check if we should transition to half-open
                 if self.should_attempt_reset() {
-                    let transitioned = self.transition_to(CircuitState::HalfOpen, ctx);
-                    if transitioned {
-                        // Only reset probe slots if we won the CAS race.
-                        // If another thread already transitioned, they own
-                        // the reset and may already have probes in flight.
-                        self.probe_in_flight.store(0, Ordering::SeqCst);
-                        self.success_count.store(0, Ordering::Relaxed);
+                    {
+                        let _probe_gate = self.probe_gate.lock().ok();
+                        let transitioned = self.transition_to(CircuitState::HalfOpen, ctx);
+                        if transitioned {
+                            // Start a new half-open epoch. Do not reset
+                            // probe_in_flight here: probes from the previous
+                            // epoch may still be running and must release
+                            // their own slots instead of racing with a bulk
+                            // counter reset.
+                            self.probe_generation.fetch_add(1, Ordering::SeqCst);
+                            self.success_count.store(0, Ordering::Relaxed);
+                        }
                     }
                     // Continue to half-open handling (or whatever state
                     // we're now in if another thread won the transition).
@@ -944,6 +955,8 @@ impl Middleware for CircuitBreakerMiddleware {
 
             CircuitState::HalfOpen => {
                 // Allow up to `permitted_probes` concurrent probe requests.
+                let _probe_gate = self.probe_gate.lock().ok();
+                let probe_generation = self.probe_generation.load(Ordering::SeqCst);
                 let permitted = self.half_open_policy.permitted_probes.get();
                 let mut current = self.probe_in_flight.load(Ordering::SeqCst);
 
@@ -977,6 +990,7 @@ impl Middleware for CircuitBreakerMiddleware {
                         Ok(_) => {
                             // This call successfully reserved a probe slot.
                             ctx.insert::<CircuitBreakerIsProbe>(true);
+                            ctx.insert::<CircuitBreakerProbeGeneration>(probe_generation);
                             ctx.insert::<CircuitBreakerProbeSlot>(
                                 CircuitBreakerProbeSlotGuard::new(self.probe_in_flight.clone()),
                             );
@@ -1186,6 +1200,39 @@ impl Middleware for CircuitBreakerMiddleware {
             .map(|e| e.processing_info.processing_time.into())
             .max();
 
+        if is_probe {
+            let probe_generation = ctx.get::<CircuitBreakerProbeGeneration>().copied();
+            let _probe_gate = self.probe_gate.lock().ok();
+            drop(ctx.remove::<CircuitBreakerProbeSlot>());
+
+            if probe_generation == Some(self.probe_generation.load(Ordering::SeqCst))
+                && matches!(self.current_state(), CircuitState::HalfOpen)
+            {
+                if is_success {
+                    self.success_count.fetch_add(1, Ordering::Relaxed);
+
+                    // Probe succeeded — try to close the circuit. With
+                    // permitted_probes > 1, another probe may have already
+                    // moved the state; only the CAS winner runs side effects.
+                    if self.transition_to(CircuitState::Closed, ctx) {
+                        self.failure_count.store(0, Ordering::SeqCst);
+
+                        tracing::info!("Circuit breaker probe succeeded, circuit closed");
+                    }
+                } else {
+                    // Probe failed — try to reopen the circuit. Only the
+                    // CAS winner transitions; a late-arriving probe whose
+                    // CAS fails is a no-op (another probe already decided).
+                    if self.transition_to(CircuitState::Open, ctx) {
+                        tracing::warn!("Circuit breaker probe failed, circuit reopened");
+                    }
+                }
+            }
+
+            self.maybe_emit_summary(ctx);
+            return;
+        }
+
         match self.current_state() {
             CircuitState::Closed => {
                 // Track consecutive failures regardless of failure mode so the
@@ -1300,33 +1347,7 @@ impl Middleware for CircuitBreakerMiddleware {
             }
 
             CircuitState::HalfOpen => {
-                if is_probe {
-                    // Release only this probe's slot. The bulk reset to 0
-                    // happens in pre_handle when transitioning Open → HalfOpen;
-                    // individual completions should decrement by 1 so that
-                    // concurrent probes are not prematurely freed.
-                    drop(ctx.remove::<CircuitBreakerProbeSlot>());
-
-                    if is_success {
-                        self.success_count.fetch_add(1, Ordering::Relaxed);
-
-                        // Probe succeeded — try to close the circuit. With
-                        // permitted_probes > 1, another probe may have already
-                        // moved the state; only the CAS winner runs side effects.
-                        if self.transition_to(CircuitState::Closed, ctx) {
-                            self.failure_count.store(0, Ordering::SeqCst);
-
-                            tracing::info!("Circuit breaker probe succeeded, circuit closed");
-                        }
-                    } else {
-                        // Probe failed — try to reopen the circuit. Only the
-                        // CAS winner transitions; a late-arriving probe whose
-                        // CAS fails is a no-op (another probe already decided).
-                        if self.transition_to(CircuitState::Open, ctx) {
-                            tracing::warn!("Circuit breaker probe failed, circuit reopened");
-                        }
-                    }
-                }
+                // Non-probe calls cannot be admitted while HalfOpen.
             }
 
             CircuitState::Open => {
@@ -2619,6 +2640,67 @@ mod tests {
             cb.pre_handle(&event, &mut ctx2),
             MiddlewareAction::Continue
         ));
+    }
+
+    #[test]
+    fn stale_halfopen_probe_does_not_corrupt_new_generation() {
+        let mut cb = CircuitBreakerMiddleware::with_cooldown_and_fallback(
+            1,
+            StdDuration::from_millis(0),
+            None,
+            None,
+            None,
+            None,
+        );
+        cb.open_policy = OpenPolicy::Skip;
+        cb.half_open_policy = HalfOpenPolicy::new(NonZeroU32::new(1).unwrap(), OpenPolicy::Skip);
+
+        let event = create_test_event();
+        let mut ctx = MiddlewareContext::new();
+        assert!(matches!(
+            cb.pre_handle(&event, &mut ctx),
+            MiddlewareAction::Continue
+        ));
+        let mut failed = create_test_event();
+        failed.processing_info.status = ProcessingStatus::error("initial_failure");
+        cb.post_handle(&event, &[failed], &mut ctx);
+        assert_eq!(cb.current_state(), CircuitState::Open);
+
+        let stale_probe = create_test_event();
+        let mut stale_ctx = MiddlewareContext::new();
+        assert!(matches!(
+            cb.pre_handle(&stale_probe, &mut stale_ctx),
+            MiddlewareAction::Continue
+        ));
+        assert_eq!(cb.current_state(), CircuitState::HalfOpen);
+        assert_eq!(cb.probe_in_flight.load(Ordering::SeqCst), 1);
+
+        let mut reopen_ctx = MiddlewareContext::new();
+        assert!(cb.transition_to(CircuitState::Open, &mut reopen_ctx));
+
+        let blocked_probe = create_test_event();
+        let mut blocked_ctx = MiddlewareContext::new();
+        assert!(matches!(
+            cb.pre_handle(&blocked_probe, &mut blocked_ctx),
+            MiddlewareAction::Skip(results) if results.is_empty()
+        ));
+        assert_eq!(cb.current_state(), CircuitState::HalfOpen);
+        assert_eq!(cb.probe_in_flight.load(Ordering::SeqCst), 1);
+
+        cb.post_handle(&stale_probe, &[create_test_event()], &mut stale_ctx);
+        assert_eq!(cb.current_state(), CircuitState::HalfOpen);
+        assert_eq!(cb.probe_in_flight.load(Ordering::SeqCst), 0);
+
+        let fresh_probe = create_test_event();
+        let mut fresh_ctx = MiddlewareContext::new();
+        assert!(matches!(
+            cb.pre_handle(&fresh_probe, &mut fresh_ctx),
+            MiddlewareAction::Continue
+        ));
+        cb.post_handle(&fresh_probe, &[create_test_event()], &mut fresh_ctx);
+
+        assert_eq!(cb.current_state(), CircuitState::Closed);
+        assert_eq!(cb.probe_in_flight.load(Ordering::SeqCst), 0);
     }
 
     // -----------------------------------------------------------------------

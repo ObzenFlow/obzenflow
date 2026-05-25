@@ -34,6 +34,12 @@ impl MiddlewareContextKey for CircuitBreakerIsProbe {
     const LABEL: &'static str = "circuit_breaker.is_probe";
 }
 
+pub(crate) struct CircuitBreakerProbeGeneration;
+impl MiddlewareContextKey for CircuitBreakerProbeGeneration {
+    type Value = u64;
+    const LABEL: &'static str = "circuit_breaker.probe_generation";
+}
+
 /// RAII guard for circuit-breaker half-open probe slots.
 ///
 /// When a half-open probe is admitted, the circuit breaker increments its
@@ -60,7 +66,11 @@ impl CircuitBreakerProbeSlotGuard {
             return;
         }
         self.released = true;
-        self.probe_in_flight.fetch_sub(1, Ordering::SeqCst);
+        let _ = self
+            .probe_in_flight
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
+                current.checked_sub(1)
+            });
     }
 }
 
