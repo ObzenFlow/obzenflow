@@ -8,7 +8,9 @@
 //! with processing duration before they're written to the journal.
 
 use crate::middleware::{
-    ErrorAction, Middleware, MiddlewareAction, MiddlewareContext, MiddlewareFactory,
+    context_keys::ProcessingStartNanos, ControlMiddlewareRole, ErrorAction, Middleware,
+    MiddlewareAction, MiddlewareContext, MiddlewareFactory, MiddlewareOverrideKey,
+    MiddlewarePlanContribution, SourceMiddlewarePhase, TopologyMiddlewareConfigSlot,
 };
 use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::time::MetricsDuration;
@@ -34,13 +36,21 @@ impl TimingMiddleware {
 }
 
 impl Middleware for TimingMiddleware {
+    fn label(&self) -> &'static str {
+        "timing"
+    }
+
+    fn source_phase(&self) -> SourceMiddlewarePhase {
+        SourceMiddlewarePhase::Ordinary
+    }
+
     fn pre_handle(&self, event: &ChainEvent, ctx: &mut MiddlewareContext) -> MiddlewareAction {
         // Record the start time in the context as nanoseconds since epoch
         let start_nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos() as u64;
-        ctx.set_baggage("processing_start_nanos", serde_json::json!(start_nanos));
+        ctx.insert::<ProcessingStartNanos>(start_nanos);
 
         tracing::trace!(
             "TimingMiddleware[{}]: pre_handle for event {} at {}ns",
@@ -68,36 +78,29 @@ impl Middleware for TimingMiddleware {
 
     fn pre_write(&self, event: &mut ChainEvent, ctx: &MiddlewareContext) {
         // Calculate processing time and add to event
-        if let Some(start_value) = ctx.get_baggage("processing_start_nanos") {
-            if let Some(start_nanos) = start_value.as_u64() {
-                let now_nanos = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos() as u64;
-                let duration_nanos = now_nanos - start_nanos;
-                let duration = MetricsDuration::from_nanos(duration_nanos);
+        if let Some(start_nanos) = ctx.get::<ProcessingStartNanos>().copied() {
+            let now_nanos = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos() as u64;
+            let duration_nanos = now_nanos - start_nanos;
+            let duration = MetricsDuration::from_nanos(duration_nanos);
 
-                // Store duration
-                event.processing_info.processing_time = duration;
+            // Store duration
+            event.processing_info.processing_time = duration;
 
+            tracing::debug!(
+                "TimingMiddleware[{}]: Set processing_time={} for event {}",
+                self.stage_name,
+                duration,
+                event.id,
+            );
+
+            // Log warning if timing seems too low for processor stage
+            if self.stage_name.contains("processor") && duration.as_nanos() < 5_000_000 {
                 tracing::debug!(
-                    "TimingMiddleware[{}]: Set processing_time={} for event {}",
-                    self.stage_name,
+                    "TimingMiddleware: Processor timing seems too low: {} for event {}",
                     duration,
-                    event.id,
-                );
-
-                // Log warning if timing seems too low for processor stage
-                if self.stage_name.contains("processor") && duration.as_nanos() < 5_000_000 {
-                    tracing::debug!(
-                        "TimingMiddleware: Processor timing seems too low: {} for event {}",
-                        duration,
-                        event.id
-                    );
-                }
-            } else {
-                tracing::debug!(
-                    "TimingMiddleware: Could not parse start time from baggage for event {}",
                     event.id
                 );
             }
@@ -111,6 +114,8 @@ impl Middleware for TimingMiddleware {
 }
 
 /// Factory for creating TimingMiddleware instances with stage context
+pub struct TimingFamily;
+
 pub struct TimingMiddlewareFactory;
 
 impl Default for TimingMiddlewareFactory {
@@ -126,6 +131,26 @@ impl TimingMiddlewareFactory {
 }
 
 impl MiddlewareFactory for TimingMiddlewareFactory {
+    fn label(&self) -> &'static str {
+        "timing"
+    }
+
+    fn override_key(&self) -> MiddlewareOverrideKey {
+        MiddlewareOverrideKey::of::<TimingFamily>("timing")
+    }
+
+    fn control_role(&self) -> ControlMiddlewareRole {
+        ControlMiddlewareRole::None
+    }
+
+    fn plan_contribution(&self) -> MiddlewarePlanContribution {
+        MiddlewarePlanContribution::None
+    }
+
+    fn topology_config_slot(&self) -> Option<TopologyMiddlewareConfigSlot> {
+        None
+    }
+
     fn create(
         &self,
         config: &StageConfig,
@@ -134,10 +159,6 @@ impl MiddlewareFactory for TimingMiddlewareFactory {
         >,
     ) -> crate::middleware::MiddlewareFactoryResult<Box<dyn Middleware>> {
         Ok(Box::new(TimingMiddleware::new(&config.name)))
-    }
-
-    fn name(&self) -> &str {
-        "timing"
     }
 }
 
@@ -170,7 +191,7 @@ mod tests {
         assert!(matches!(action, MiddlewareAction::Continue));
 
         // Verify start time was recorded
-        assert!(ctx.get_baggage("processing_start_nanos").is_some());
+        assert!(ctx.get::<ProcessingStartNanos>().is_some());
 
         // Simulate some processing time
         thread::sleep(MetricsDuration::from_millis(10).to_std());

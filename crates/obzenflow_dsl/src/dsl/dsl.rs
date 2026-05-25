@@ -1023,37 +1023,29 @@ macro_rules! build_typed_flow {
 
         // Backpressure is opt-in (FLOWIP-086k): extract per-stage windows from middleware configs.
         use obzenflow_runtime::backpressure::BackpressurePlan;
-        use std::num::NonZeroU64;
 
         let mut backpressure_plan = BackpressurePlan::disabled();
         for (name, descriptor) in descriptors.iter() {
             let stage_id = *name_to_id.get(name).expect("name_to_id should contain stage ids");
-            for factory in descriptor.stage_middleware_factories() {
-                if factory.name() != "backpressure" {
-                    continue;
+            let flow_middleware = create_flow_middleware();
+            let resolved_middleware_view = $crate::middleware_resolution::resolve_middleware_view(
+                &flow_middleware,
+                descriptor.stage_middleware_factories(),
+                name,
+            )
+            .map_err(|e| {
+                FlowBuildError::StageResourcesFailed(format!(
+                    "Failed to resolve middleware for stage '{name}' while extracting backpressure: {e}"
+                ))
+            })?;
+
+            for factory in resolved_middleware_view {
+                if let obzenflow_adapters::middleware::MiddlewarePlanContribution::Backpressure {
+                    window,
+                } = factory.plan_contribution()
+                {
+                    backpressure_plan = backpressure_plan.with_stage_window(stage_id, window);
                 }
-                let snapshot = factory.config_snapshot().ok_or_else(|| {
-                    FlowBuildError::StageResourcesFailed(format!(
-                        "Stage '{}' enables backpressure but did not provide a config snapshot",
-                        name
-                    ))
-                })?;
-                let window = snapshot
-                    .get("window")
-                    .and_then(|v| v.as_u64())
-                    .ok_or_else(|| {
-                        FlowBuildError::StageResourcesFailed(format!(
-                            "Stage '{}' backpressure config is missing a numeric 'window' field",
-                            name
-                        ))
-                    })?;
-                let window = NonZeroU64::new(window).ok_or_else(|| {
-                    FlowBuildError::StageResourcesFailed(format!(
-                        "Stage '{}' backpressure window must be > 0",
-                        name
-                    ))
-                })?;
-                backpressure_plan = backpressure_plan.with_stage_window(stage_id, window);
             }
         }
 
@@ -1242,58 +1234,74 @@ macro_rules! build_typed_flow {
                 // Flow-level middleware list (stage-local middleware is resolved later).
                 let flow_middleware = create_flow_middleware();
 
-                // Structural: compute final middleware stack config for this stage (FLOWIP-059)
-                let flow_names: Vec<String> = flow_middleware
+                // Structural: compute the effective middleware stack config for this stage (FLOWIP-059).
+                //
+                // Important: this uses the resolved middleware view (flow + stage with typed overrides),
+                // not an independent merge of two name vectors. That keeps topology annotations consistent
+                // with runtime execution and plan extraction (FLOWIP-114p).
+                let resolved_middleware_view = $crate::middleware_resolution::resolve_middleware_view(
+                    &flow_middleware,
+                    descriptor.stage_middleware_factories(),
+                    &config.name,
+                )
+                .map_err(|e| {
+                    FlowBuildError::StageResourcesFailed(format!(
+                        "Failed to resolve middleware for stage '{}': {e}",
+                        name
+                    ))
+                })?;
+
+                let merged_names: Vec<String> = resolved_middleware_view
                     .iter()
-                    .map(|f| f.name().to_string())
+                    .map(|f| f.label().to_string())
                     .collect();
-                let stage_names = descriptor.stage_middleware_names();
-                // Merge roughly like resolve_middleware (flow first, then stage overrides/extends).
-                let mut merged_names: Vec<String> = Vec::new();
-                for mw_name in flow_names.into_iter().chain(stage_names.into_iter()) {
-                    if !merged_names.iter().any(|n| n == &mw_name) {
-                        merged_names.push(mw_name);
-                    }
-                }
 
                 // Extract config snapshots from all factories (FLOWIP-059)
-                let mut circuit_breaker_config: Option<serde_json::Value> = None;
-                let mut rate_limiter_config: Option<serde_json::Value> = None;
-                let mut retry_config: Option<serde_json::Value> = None;
-                let mut backpressure_config: Option<serde_json::Value> = None;
+                let mut circuit_breaker_config: Option<(&'static str, serde_json::Value)> = None;
+                let mut rate_limiter_config: Option<(&'static str, serde_json::Value)> = None;
+                let mut retry_config: Option<(&'static str, serde_json::Value)> = None;
 
-                // Check flow-level middleware
-                for factory in &flow_middleware {
+                for factory in &resolved_middleware_view {
                     if let Some(snapshot) = factory.config_snapshot() {
-                        match factory.name() {
-                            "circuit_breaker" => circuit_breaker_config = Some(snapshot),
-                            "rate_limiter" => rate_limiter_config = Some(snapshot),
-                            "retry" => retry_config = Some(snapshot),
-                            "backpressure" => backpressure_config = Some(snapshot),
-                            _ => {}
-                        }
-                    }
-                }
-
-                // Check stage-level middleware (overrides flow-level)
-                for factory in descriptor.stage_middleware_factories() {
-                    if let Some(snapshot) = factory.config_snapshot() {
-                        match factory.name() {
-                            "circuit_breaker" => circuit_breaker_config = Some(snapshot),
-                            "rate_limiter" => rate_limiter_config = Some(snapshot),
-                            "retry" => retry_config = Some(snapshot),
-                            "backpressure" => backpressure_config = Some(snapshot),
-                            _ => {}
+                        if let Some(slot) = factory.topology_config_slot() {
+                            match slot {
+                                obzenflow_adapters::middleware::TopologyMiddlewareConfigSlot::CircuitBreaker => {
+                                    if let Some((existing, _)) = &circuit_breaker_config {
+                                        return Err(FlowBuildError::StageResourcesFailed(format!(
+                                            "Stage '{name}' has multiple middleware claiming the CircuitBreaker topology config slot: '{existing}' and '{}'",
+                                            factory.label()
+                                        )));
+                                    }
+                                    circuit_breaker_config = Some((factory.label(), snapshot))
+                                }
+                                obzenflow_adapters::middleware::TopologyMiddlewareConfigSlot::RateLimiter => {
+                                    if let Some((existing, _)) = &rate_limiter_config {
+                                        return Err(FlowBuildError::StageResourcesFailed(format!(
+                                            "Stage '{name}' has multiple middleware claiming the RateLimiter topology config slot: '{existing}' and '{}'",
+                                            factory.label()
+                                        )));
+                                    }
+                                    rate_limiter_config = Some((factory.label(), snapshot))
+                                }
+                                obzenflow_adapters::middleware::TopologyMiddlewareConfigSlot::Retry => {
+                                    if let Some((existing, _)) = &retry_config {
+                                        return Err(FlowBuildError::StageResourcesFailed(format!(
+                                            "Stage '{name}' has multiple middleware claiming the Retry topology config slot: '{existing}' and '{}'",
+                                            factory.label()
+                                        )));
+                                    }
+                                    retry_config = Some((factory.label(), snapshot))
+                                }
+                            }
                         }
                     }
                 }
 
                 middleware_stacks.insert(*id, MiddlewareStackConfig {
                     stack: merged_names,
-                    circuit_breaker: circuit_breaker_config,
-                    rate_limiter: rate_limiter_config,
-                    retry: retry_config,
-                    backpressure: backpressure_config,
+                    circuit_breaker: circuit_breaker_config.map(|(_, snapshot)| snapshot),
+                    rate_limiter: rate_limiter_config.map(|(_, snapshot)| snapshot),
+                    retry: retry_config.map(|(_, snapshot)| snapshot),
                 });
 
                 // Create handle with flow middleware (cycle protection is configured via StageConfig for transforms).

@@ -20,12 +20,22 @@ use obzenflow_core::event::chain_event::ChainEvent;
 /// ## Example Implementation
 ///
 /// ```rust
-/// use obzenflow_adapters::middleware::{Middleware, MiddlewareAction, MiddlewareContext};
+/// use obzenflow_adapters::middleware::{
+///     Middleware, MiddlewareAction, MiddlewareContext, SourceMiddlewarePhase,
+/// };
 /// use obzenflow_core::ChainEvent;
 ///
 /// struct LoggingMiddleware;
 ///
 /// impl Middleware for LoggingMiddleware {
+///     fn label(&self) -> &'static str {
+///         "logging"
+///     }
+///
+///     fn source_phase(&self) -> SourceMiddlewarePhase {
+///         SourceMiddlewarePhase::Ordinary
+///     }
+///
 ///     fn pre_handle(&self, event: &ChainEvent, _ctx: &mut MiddlewareContext) -> MiddlewareAction {
 ///         println!("Processing event: {:?}", event.id);
 ///         MiddlewareAction::Continue
@@ -37,13 +47,11 @@ use obzenflow_core::event::chain_event::ChainEvent;
 /// }
 /// ```
 pub trait Middleware: Send + Sync {
-    /// Stable identifier for this middleware implementation.
-    ///
-    /// This is used for selective orchestration in adapter wrappers (e.g. sources)
-    /// without relying on `Any` downcasting or factory availability at runtime.
-    fn middleware_name(&self) -> &'static str {
-        "unknown"
-    }
+    /// Display label for logs, metrics labels, topology output, and diagnostics.
+    fn label(&self) -> &'static str;
+
+    /// Typed source-phase role used by source wrappers for control flow.
+    fn source_phase(&self) -> SourceMiddlewarePhase;
 
     /// Called before the inner step processes the event.
     ///
@@ -125,8 +133,12 @@ pub enum ErrorAction {
 
 // Implementation for Box<dyn Middleware> to allow boxed middleware
 impl<M: Middleware + ?Sized> Middleware for Box<M> {
-    fn middleware_name(&self) -> &'static str {
-        (**self).middleware_name()
+    fn label(&self) -> &'static str {
+        (**self).label()
+    }
+
+    fn source_phase(&self) -> SourceMiddlewarePhase {
+        (**self).source_phase()
     }
 
     fn pre_handle(&self, event: &ChainEvent, ctx: &mut MiddlewareContext) -> MiddlewareAction {
@@ -144,4 +156,11 @@ impl<M: Middleware + ?Sized> Middleware for Box<M> {
     fn pre_write(&self, event: &mut ChainEvent, ctx: &MiddlewareContext) {
         (**self).pre_write(event, ctx)
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceMiddlewarePhase {
+    CircuitBreakerGate,
+    RateLimiterGate,
+    Ordinary,
 }

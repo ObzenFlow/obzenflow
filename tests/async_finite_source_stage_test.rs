@@ -5,7 +5,10 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use obzenflow_adapters::middleware::control::ControlMiddlewareAggregator;
-use obzenflow_adapters::middleware::{Middleware, MiddlewareContext, MiddlewareFactory};
+use obzenflow_adapters::middleware::{
+    ControlMiddlewareRole, Middleware, MiddlewareContext, MiddlewareFactory, MiddlewareOverrideKey,
+    MiddlewarePlanContribution, SourceMiddlewarePhase, TopologyMiddlewareConfigSlot,
+};
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
 use obzenflow_core::event::ChainEventContent;
@@ -123,8 +126,12 @@ impl SinkHandler for CollectSink {
 struct InjectFieldMiddleware;
 
 impl Middleware for InjectFieldMiddleware {
-    fn middleware_name(&self) -> &'static str {
+    fn label(&self) -> &'static str {
         "inject_field"
+    }
+
+    fn source_phase(&self) -> SourceMiddlewarePhase {
+        SourceMiddlewarePhase::Ordinary
     }
 
     fn pre_write(&self, event: &mut ChainEvent, _ctx: &MiddlewareContext) {
@@ -140,16 +147,32 @@ impl Middleware for InjectFieldMiddleware {
 struct InjectFieldFactory;
 
 impl MiddlewareFactory for InjectFieldFactory {
+    fn label(&self) -> &'static str {
+        "inject_field"
+    }
+
+    fn override_key(&self) -> MiddlewareOverrideKey {
+        MiddlewareOverrideKey::of::<InjectFieldFactory>("inject_field")
+    }
+
+    fn control_role(&self) -> ControlMiddlewareRole {
+        ControlMiddlewareRole::None
+    }
+
+    fn plan_contribution(&self) -> MiddlewarePlanContribution {
+        MiddlewarePlanContribution::None
+    }
+
+    fn topology_config_slot(&self) -> Option<TopologyMiddlewareConfigSlot> {
+        None
+    }
+
     fn create(
         &self,
         _config: &StageConfig,
         _control_middleware: Arc<ControlMiddlewareAggregator>,
     ) -> obzenflow_adapters::middleware::MiddlewareFactoryResult<Box<dyn Middleware>> {
         Ok(Box::new(InjectFieldMiddleware))
-    }
-
-    fn name(&self) -> &str {
-        "inject_field"
     }
 }
 

@@ -21,8 +21,8 @@
 let mut ctx = MiddlewareContext::new();
 
 // 2. Flows through middleware chain
-middleware1.pre_handle(&event, &mut ctx)  // Can emit events, set baggage
-middleware2.pre_handle(&event, &mut ctx)  // Can see middleware1's events
+middleware1.pre_handle(&event, &mut ctx)  // Can emit ephemeral events, insert typed slots
+middleware2.pre_handle(&event, &mut ctx)  // Can see middleware1's ephemeral events/slots
 handler.process(event)                     // Core processing
 middleware2.post_handle(&event, &results, &mut ctx)
 middleware1.post_handle(&event, &results, &mut ctx)
@@ -32,15 +32,15 @@ middleware1.post_handle(&event, &results, &mut ctx)
 
 ### Three Types of Data
 
-1. **`events: Vec<MiddlewareEvent>`** - In-memory communication
-   - Circuit breaker emits "opened" → retry middleware sees it and skips
-   - Rate limiter emits "throttled" → monitoring middleware counts it
-   - Never persisted, only for this processing cycle
+1. **Ephemeral events (`Vec<ChainEvent>`)** - Typed in-memory communication
+   - Stored as `ChainEventContent::Observability(ObservabilityPayload::Middleware(..))`
+   - Never persisted, only for this middleware pass
+   - Built-in middleware use `MiddlewareLifecycle::{CircuitBreaker,RateLimiter,...}`
+   - Third-party middleware can use `TypedMiddlewareEvent` via `MiddlewareLifecycle::User`
 
-2. **`baggage: HashMap<String, Value>`** - Shared state during processing
-   - Retry middleware sets "attempt_count" → logging middleware includes it
-   - Timing middleware sets "start_time" → can calculate duration later
-   - Think of it like thread-local storage for the processing cycle
+2. **Typed per-pass slots** - Shared state during processing
+   - Keyed by `MiddlewareContextKey` (type-level identity, not strings)
+   - Used for attempt counters, retry-after hints, per-pass timing, etc.
 
 3. **`control_events: Vec<ChainEvent>`** - Durable events for journal
    - These ARE persisted after processing completes
@@ -53,10 +53,17 @@ middleware1.post_handle(&event, &results, &mut ctx)
 // Circuit breaker middleware
 fn pre_handle(&self, event: &ChainEvent, ctx: &mut MiddlewareContext) -> MiddlewareAction {
     if self.is_open() {
-        // Ephemeral - tells other middleware we're rejecting
-        ctx.emit_event("circuit_breaker", "rejected", json!({
-            "reason": "circuit_open"
-        }));
+        // Ephemeral - tells other middleware we're rejecting (in-memory only)
+        ctx.emit_ephemeral_event(ChainEventFactory::observability_event(
+            self.writer_id,
+            ObservabilityPayload::Middleware(MiddlewareLifecycle::CircuitBreaker(
+                CircuitBreakerEvent::Rejected {
+                    reason: CircuitBreakerRejectionReason::CircuitOpen,
+                    cooldown_remaining_ms: Some(100),
+                    circuit_open_duration_ms: None,
+                },
+            )),
+        ));
         
         // Durable - goes to journal for metrics
         ctx.write_control_event(ChainEventFactory::circuit_breaker_opened(
@@ -72,10 +79,15 @@ fn pre_handle(&self, event: &ChainEvent, ctx: &mut MiddlewareContext) -> Middlew
 
 // Retry middleware can see circuit breaker's rejection
 fn pre_handle(&self, event: &ChainEvent, ctx: &mut MiddlewareContext) -> MiddlewareAction {
-    if ctx.has_event("circuit_breaker", "rejected") {
-        // Don't retry if circuit is open
-        return MiddlewareAction::Abort;
-    }
+    let rejected = ctx.ephemeral_events().iter().any(|event| matches!(
+        &event.content,
+        ChainEventContent::Observability(
+            ObservabilityPayload::Middleware(MiddlewareLifecycle::CircuitBreaker(
+                CircuitBreakerEvent::Rejected { .. }
+            ))
+        )
+    ));
+    if rejected { return MiddlewareAction::Abort; }
     // ... normal retry logic
 }
 ```
@@ -125,11 +137,7 @@ As of FLOWIP-082f, transforms automatically skip events marked with `ProcessingS
 Note: cycle protection is implemented in stage supervisors (FLOWIP-051l) because flow control
 signals bypass the middleware chain.
 
-See `ChainEventFactory` methods in obzenflow_core for the current control event API. Key factory methods include:
-- `circuit_breaker_opened()`, `circuit_breaker_summary()`
-- `retry_exhausted()`
-- `metrics_state_snapshot()`, `metrics_ready()`, `metrics_drained()`
-- `windowing_count_event()`, `windowing_sum_event()`, `windowing_average_event()`
+See `ChainEventFactory` methods in `obzenflow_core` for the current control event API.
 
 ## Function-based Middleware
 

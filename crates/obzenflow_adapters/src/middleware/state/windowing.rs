@@ -8,7 +8,9 @@
 //! time windows complete before accepting EOF.
 
 use crate::middleware::{
-    ErrorAction, Middleware, MiddlewareAction, MiddlewareContext, MiddlewareFactory,
+    ControlMiddlewareRole, ErrorAction, Middleware, MiddlewareAction, MiddlewareContext,
+    MiddlewareFactory, MiddlewareOverrideKey, MiddlewarePlanContribution, SourceMiddlewarePhase,
+    TopologyMiddlewareConfigSlot,
 };
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
 use obzenflow_core::event::context::StageType;
@@ -17,7 +19,6 @@ use obzenflow_runtime::pipeline::config::StageConfig;
 use obzenflow_runtime::stages::common::control_strategies::{
     ControlEventStrategy, WindowingStrategy,
 };
-use serde_json::json;
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
@@ -28,6 +29,7 @@ use std::time::{Duration, Instant};
 /// emits an aggregated result. It requires a delay strategy to ensure
 /// the final window has a chance to emit before EOF.
 pub struct WindowingMiddleware {
+    label: &'static str,
     window_duration: Duration,
     window_start: Arc<RwLock<Option<Instant>>>,
     buffer: Arc<RwLock<Vec<ChainEvent>>>,
@@ -36,11 +38,13 @@ pub struct WindowingMiddleware {
 
 impl WindowingMiddleware {
     fn new(
+        label: &'static str,
         window_duration: Duration,
         window_start: Arc<RwLock<Option<Instant>>>,
         aggregation_fn: Arc<dyn Fn(Vec<ChainEvent>) -> ChainEvent + Send + Sync>,
     ) -> Self {
         Self {
+            label,
             window_duration,
             window_start,
             buffer: Arc::new(RwLock::new(Vec::new())),
@@ -57,7 +61,7 @@ impl WindowingMiddleware {
     }
 
     /// Emit the current window's aggregated result
-    fn emit_window(&self, ctx: &mut MiddlewareContext) -> Option<ChainEvent> {
+    fn emit_window(&self, _ctx: &mut MiddlewareContext) -> Option<ChainEvent> {
         let mut buffer = self.buffer.write().unwrap();
         if buffer.is_empty() {
             return None;
@@ -65,27 +69,24 @@ impl WindowingMiddleware {
 
         // Create aggregated event
         let events = buffer.drain(..).collect::<Vec<_>>();
-        let count = events.len();
         let aggregated = (self.aggregation_fn)(events);
 
         // Reset window start
         *self.window_start.write().unwrap() = Some(Instant::now());
-
-        // Emit metrics
-        ctx.emit_event(
-            "windowing",
-            "window_emitted",
-            json!({
-                "event_count": count,
-                "window_duration_ms": self.window_duration.as_millis(),
-            }),
-        );
 
         Some(aggregated)
     }
 }
 
 impl Middleware for WindowingMiddleware {
+    fn label(&self) -> &'static str {
+        self.label
+    }
+
+    fn source_phase(&self) -> SourceMiddlewarePhase {
+        SourceMiddlewarePhase::Ordinary
+    }
+
     fn pre_handle(&self, event: &ChainEvent, ctx: &mut MiddlewareContext) -> MiddlewareAction {
         // Let control events through unchanged
         if event.is_control() {
@@ -131,6 +132,8 @@ impl Middleware for WindowingMiddleware {
 }
 
 /// Factory for creating windowing middleware
+pub struct WindowingFamily;
+
 pub struct WindowingMiddlewareFactory {
     window_duration: Duration,
     aggregation_type: AggregationType,
@@ -262,6 +265,31 @@ impl WindowingMiddlewareFactory {
 }
 
 impl MiddlewareFactory for WindowingMiddlewareFactory {
+    fn label(&self) -> &'static str {
+        match &self.aggregation_type {
+            AggregationType::Count => "windowing_count",
+            AggregationType::Sum(_) => "windowing_sum",
+            AggregationType::Average(_) => "windowing_average",
+            AggregationType::Custom(_) => "windowing_custom",
+        }
+    }
+
+    fn override_key(&self) -> MiddlewareOverrideKey {
+        MiddlewareOverrideKey::of::<WindowingFamily>("windowing")
+    }
+
+    fn control_role(&self) -> ControlMiddlewareRole {
+        ControlMiddlewareRole::None
+    }
+
+    fn plan_contribution(&self) -> MiddlewarePlanContribution {
+        MiddlewarePlanContribution::None
+    }
+
+    fn topology_config_slot(&self) -> Option<TopologyMiddlewareConfigSlot> {
+        None
+    }
+
     fn create(
         &self,
         _config: &StageConfig,
@@ -269,6 +297,7 @@ impl MiddlewareFactory for WindowingMiddlewareFactory {
             crate::middleware::control::ControlMiddlewareAggregator,
         >,
     ) -> crate::middleware::MiddlewareFactoryResult<Box<dyn Middleware>> {
+        let label = self.label();
         let shared_window_start = if let Ok(mut pending) = self.pending_shared_state.lock() {
             if let Some(shared) = pending.pending_for_create.pop_front() {
                 shared
@@ -287,19 +316,11 @@ impl MiddlewareFactory for WindowingMiddlewareFactory {
         };
 
         Ok(Box::new(WindowingMiddleware::new(
+            label,
             self.window_duration,
             shared_window_start,
             self.create_aggregation_fn(),
         )))
-    }
-
-    fn name(&self) -> &str {
-        match &self.aggregation_type {
-            AggregationType::Count => "windowing_count",
-            AggregationType::Sum(_) => "windowing_sum",
-            AggregationType::Average(_) => "windowing_average",
-            AggregationType::Custom(_) => "windowing_custom",
-        }
     }
 
     fn create_control_strategy(&self) -> Option<Box<dyn ControlEventStrategy>> {
@@ -336,11 +357,12 @@ impl MiddlewareFactory for WindowingMiddlewareFactory {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn test_windowing_factory_creates_middleware() {
         let factory = WindowingMiddlewareFactory::tumbling_count(Duration::from_secs(60));
-        assert_eq!(factory.name(), "windowing_count");
+        assert_eq!(factory.label(), "windowing_count");
 
         let strategy = factory.create_control_strategy();
         assert!(strategy.is_some(), "Expected windowing strategy");
@@ -351,6 +373,7 @@ mod tests {
         let factory = WindowingMiddlewareFactory::tumbling_count(Duration::from_millis(100));
         // Create middleware directly without StageConfig
         let middleware = Box::new(WindowingMiddleware::new(
+            factory.label(),
             Duration::from_millis(100),
             Arc::new(RwLock::new(None)),
             factory.create_aggregation_fn(),
@@ -383,6 +406,7 @@ mod tests {
         let factory = WindowingMiddlewareFactory::tumbling_count(Duration::from_secs(60));
         // Create middleware directly without StageConfig
         let middleware = Box::new(WindowingMiddleware::new(
+            factory.label(),
             Duration::from_secs(60),
             Arc::new(RwLock::new(None)),
             factory.create_aggregation_fn(),
@@ -402,6 +426,7 @@ mod tests {
             .create_control_strategy()
             .expect("Expected windowing strategy");
         let middleware = WindowingMiddleware::new(
+            factory.label(),
             Duration::from_millis(50),
             if let Ok(mut pending) = factory.pending_shared_state.lock() {
                 pending

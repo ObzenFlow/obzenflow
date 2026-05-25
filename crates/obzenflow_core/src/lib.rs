@@ -29,7 +29,7 @@ pub use journal::journal_owner::JournalOwner;
 pub use journal::Journal;
 
 // Re-export schema types (FLOWIP-082a)
-pub use event::schema::TypedPayload;
+pub use event::schema::{MiddlewareContextKey, TypedMiddlewareEvent, TypedPayload};
 
 // Re-export typed IDs
 pub use id::{CycleDepth, FlowId, JournalId, SccId, StageId, SystemId};

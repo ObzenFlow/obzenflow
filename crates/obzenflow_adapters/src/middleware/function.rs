@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use super::{ErrorAction, Middleware, MiddlewareAction, MiddlewareContext};
+use super::{ErrorAction, Middleware, MiddlewareAction, MiddlewareContext, SourceMiddlewarePhase};
 use obzenflow_core::event::chain_event::ChainEvent;
 
 /// Middleware implementation that wraps functions/closures.
@@ -13,9 +13,13 @@ use obzenflow_core::event::chain_event::ChainEvent;
 /// ## Example
 ///
 /// ```rust
-/// use obzenflow_adapters::middleware::{FnMiddleware, MiddlewareAction, ErrorAction};
+/// use obzenflow_adapters::middleware::{
+///     ErrorAction, FnMiddleware, MiddlewareAction, SourceMiddlewarePhase,
+/// };
 ///
 /// let middleware = FnMiddleware {
+///     label: "example.fn_middleware",
+///     source_phase: SourceMiddlewarePhase::Ordinary,
 ///     pre: |event, ctx| {
 ///         println!("Processing: {:?}", event);
 ///         MiddlewareAction::Continue
@@ -35,6 +39,8 @@ where
     G: Fn(&ChainEvent, &[ChainEvent], &mut MiddlewareContext),
     H: Fn(&ChainEvent, &mut MiddlewareContext) -> ErrorAction,
 {
+    pub label: &'static str,
+    pub source_phase: SourceMiddlewarePhase,
     pub pre: F,
     pub post: G,
     pub error: H,
@@ -46,6 +52,14 @@ where
     G: Fn(&ChainEvent, &[ChainEvent], &mut MiddlewareContext) + Send + Sync,
     H: Fn(&ChainEvent, &mut MiddlewareContext) -> ErrorAction + Send + Sync,
 {
+    fn label(&self) -> &'static str {
+        self.label
+    }
+
+    fn source_phase(&self) -> SourceMiddlewarePhase {
+        self.source_phase
+    }
+
     fn pre_handle(&self, event: &ChainEvent, ctx: &mut MiddlewareContext) -> MiddlewareAction {
         // Call the stored pre-processing function
         (self.pre)(event, ctx)
@@ -72,6 +86,8 @@ where
     F: Fn(&ChainEvent, &mut MiddlewareContext) -> MiddlewareAction + Send + Sync + 'static,
 {
     FnMiddleware {
+        label: "fn_middleware",
+        source_phase: SourceMiddlewarePhase::Ordinary,
         pre,
         post: |_, _, _| {},                   // No-op for post-processing
         error: |_, _| ErrorAction::Propagate, // Default error handling

@@ -7,7 +7,9 @@
 //! Tracks events at flow entry (source) and exit (sink) points to provide
 //! true end-to-end latency and throughput metrics.
 
-use crate::middleware::{ErrorAction, Middleware, MiddlewareAction, MiddlewareContext};
+use crate::middleware::{
+    ErrorAction, Middleware, MiddlewareAction, MiddlewareContext, SourceMiddlewarePhase,
+};
 use crate::monitoring::metrics::core::{Metric, MetricSnapshot, MetricType, MetricValue};
 use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::event::context::StageType;
@@ -128,6 +130,17 @@ impl BoundaryTrackingMiddleware {
 }
 
 impl Middleware for BoundaryTrackingMiddleware {
+    fn label(&self) -> &'static str {
+        match self.boundary_type {
+            BoundaryType::Entry => "flow_boundary.entry",
+            BoundaryType::Exit => "flow_boundary.exit",
+        }
+    }
+
+    fn source_phase(&self) -> SourceMiddlewarePhase {
+        SourceMiddlewarePhase::Ordinary
+    }
+
     fn pre_handle(&self, event: &ChainEvent, _ctx: &mut MiddlewareContext) -> MiddlewareAction {
         if self.boundary_type == BoundaryType::Entry && self.tracker.is_flow_entry(event) {
             // Clone for async task

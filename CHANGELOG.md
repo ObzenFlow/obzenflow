@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- (FLOWIP-114p) Middleware control flow no longer keys off string middleware names. `Middleware` and `MiddlewareFactory` now require typed responsibilities (`source_phase`, `control_role`, `override_key`, `plan_contribution`, `topology_config_slot`) so routing, planning, and override/de-dupe behavior are compiler-checked.
+- (FLOWIP-114p) `MiddlewareContext` is now typed and encapsulated: removed the legacy string `MiddlewareEvent` APIs and string-keyed baggage, added typed per-pass slots via `MiddlewareContextKey`, and added typed user middleware events via `TypedMiddlewareEvent`.
+- (FLOWIP-114p) DSL middleware resolution is now fallible on same-scope duplicate override families, and topology/backpressure extraction uses the resolved middleware list plus typed factory contributions/slots instead of label matching.
+
 ## [0.1.2] - 2026-03-04
 
 ### Changed

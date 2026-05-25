@@ -24,7 +24,7 @@ pub fn validate_middleware_safety(
         let message = format!(
             "⚠️  Middleware '{}' does not officially support {} stages. \
              Applying to stage '{}' may have unexpected behavior!",
-            factory.name(),
+            factory.label(),
             format_stage_type(stage_type),
             stage_name
         );
@@ -38,7 +38,7 @@ pub fn validate_middleware_safety(
             let message = format!(
                 "⚠️  DANGEROUS: Applying '{}' middleware to {} stage '{}'. \
                  This can cause data loss or pipeline hangs if not configured correctly!",
-                factory.name(),
+                factory.label(),
                 format_stage_type(stage_type),
                 stage_name
             );
@@ -49,7 +49,7 @@ pub fn validate_middleware_safety(
         MiddlewareSafety::Advanced => {
             let message = format!(
                 "⚠️  ADVANCED: Middleware '{}' on stage '{}' requires careful configuration",
-                factory.name(),
+                factory.label(),
                 stage_name
             );
             warn!("{}", message);
@@ -76,10 +76,7 @@ fn check_dangerous_patterns(
     let hints = factory.hints();
 
     // Pattern 1: Skip control events on sinks
-    if (hints.drops_control_events
-        || (factory.name().contains("skip") && factory.name().contains("control")))
-        && stage_type == StageType::Sink
-    {
+    if hints.drops_control_events && stage_type == StageType::Sink {
         let message = format!(
             "❌ CRITICAL: Never skip control events on sink '{stage_name}'! \
                  This will prevent proper draining and cause data loss!"
@@ -104,21 +101,6 @@ fn check_dangerous_patterns(
                 _ => {}
             }
         }
-    } else if factory.name().contains("retry") {
-        // Fallback heuristic when hints not implemented
-        match stage_type {
-            StageType::FiniteSource | StageType::InfiniteSource => {
-                let message = format!(
-                    "⚠️  WARNING: Retry middleware '{}' on source '{}' may not make sense! \
-                     Sources generate data, they don't retry receiving it!",
-                    factory.name(),
-                    stage_name
-                );
-                warn!("{}", message);
-                result.warnings.push(message);
-            }
-            _ => {}
-        }
     }
 
     // Pattern 3: Unbounded batching on sinks
@@ -131,28 +113,10 @@ fn check_dangerous_patterns(
             warn!("{}", message);
             result.warnings.push(message);
         }
-    } else if factory.name().contains("batch") && factory.name().contains("unbounded") {
-        // Fallback heuristic
-        if stage_type == StageType::Sink {
-            let message = format!(
-                "⚠️  WARNING: Unbounded batching on sink '{stage_name}' can cause data to be stuck! \
-                 Make sure you have a timeout configured!"
-            );
-            warn!("{}", message);
-            result.warnings.push(message);
-        }
     }
 
     // Pattern 4: Rate limiting on sinks
     if hints.rate_limits && stage_type == StageType::Sink {
-        let message = format!(
-            "⚠️  WARNING: Rate limiting on sink '{stage_name}' can cause severe backpressure! \
-             Make sure upstream stages can handle this!"
-        );
-        warn!("{}", message);
-        result.warnings.push(message);
-    } else if factory.name().contains("rate_limit") && stage_type == StageType::Sink {
-        // Fallback heuristic
         let message = format!(
             "⚠️  WARNING: Rate limiting on sink '{stage_name}' can cause severe backpressure! \
              Make sure upstream stages can handle this!"
@@ -217,8 +181,8 @@ impl ValidationResult {
 mod tests {
     use super::*;
     use crate::middleware::{
-        Attempts, BackoffKind, Middleware, MiddlewareAction, MiddlewareContext, MiddlewareFactory,
-        MiddlewareHints, RetryHint,
+        Attempts, BackoffKind, BatchingHint, Middleware, MiddlewareAction, MiddlewareContext,
+        MiddlewareFactory, MiddlewareHints, RetryHint,
     };
     use obzenflow_core::ChainEvent;
     use obzenflow_runtime::pipeline::config::StageConfig;
@@ -227,6 +191,14 @@ mod tests {
     // Mock middleware for testing dangerous patterns
     struct MockSkipControlMiddleware;
     impl Middleware for MockSkipControlMiddleware {
+        fn label(&self) -> &'static str {
+            "mock.skip_control_middleware"
+        }
+
+        fn source_phase(&self) -> crate::middleware::SourceMiddlewarePhase {
+            crate::middleware::SourceMiddlewarePhase::Ordinary
+        }
+
         fn pre_handle(
             &self,
             _event: &ChainEvent,
@@ -236,8 +208,31 @@ mod tests {
         }
     }
 
+    struct MockSkipControlFamily;
     struct MockSkipControlFactory;
     impl MiddlewareFactory for MockSkipControlFactory {
+        fn label(&self) -> &'static str {
+            "opaque.drop_control"
+        }
+
+        fn override_key(&self) -> crate::middleware::MiddlewareOverrideKey {
+            crate::middleware::MiddlewareOverrideKey::of::<MockSkipControlFamily>(
+                "skip_control_events",
+            )
+        }
+
+        fn control_role(&self) -> crate::middleware::ControlMiddlewareRole {
+            crate::middleware::ControlMiddlewareRole::None
+        }
+
+        fn plan_contribution(&self) -> crate::middleware::MiddlewarePlanContribution {
+            crate::middleware::MiddlewarePlanContribution::None
+        }
+
+        fn topology_config_slot(&self) -> Option<crate::middleware::TopologyMiddlewareConfigSlot> {
+            None
+        }
+
         fn create(
             &self,
             _config: &StageConfig,
@@ -247,11 +242,8 @@ mod tests {
         ) -> crate::middleware::MiddlewareFactoryResult<Box<dyn Middleware>> {
             Ok(Box::new(MockSkipControlMiddleware))
         }
-        fn name(&self) -> &str {
-            "skip_control_events"
-        }
         fn supported_stage_types(&self) -> &[StageType] {
-            &[StageType::Transform]
+            &[StageType::Sink, StageType::Transform]
         }
         fn safety_level(&self) -> MiddlewareSafety {
             MiddlewareSafety::Dangerous
@@ -264,8 +256,31 @@ mod tests {
         }
     }
 
+    struct MockInfiniteRetryFamily;
     struct MockInfiniteRetryFactory;
     impl MiddlewareFactory for MockInfiniteRetryFactory {
+        fn label(&self) -> &'static str {
+            "opaque.infinite_attempts"
+        }
+
+        fn override_key(&self) -> crate::middleware::MiddlewareOverrideKey {
+            crate::middleware::MiddlewareOverrideKey::of::<MockInfiniteRetryFamily>(
+                "infinite_retry",
+            )
+        }
+
+        fn control_role(&self) -> crate::middleware::ControlMiddlewareRole {
+            crate::middleware::ControlMiddlewareRole::None
+        }
+
+        fn plan_contribution(&self) -> crate::middleware::MiddlewarePlanContribution {
+            crate::middleware::MiddlewarePlanContribution::None
+        }
+
+        fn topology_config_slot(&self) -> Option<crate::middleware::TopologyMiddlewareConfigSlot> {
+            None
+        }
+
         fn create(
             &self,
             _config: &StageConfig,
@@ -275,11 +290,8 @@ mod tests {
         ) -> crate::middleware::MiddlewareFactoryResult<Box<dyn Middleware>> {
             Ok(Box::new(MockSkipControlMiddleware)) // Reuse the middleware impl
         }
-        fn name(&self) -> &str {
-            "infinite_retry"
-        }
         fn supported_stage_types(&self) -> &[StageType] {
-            &[StageType::Transform, StageType::Sink]
+            &[StageType::FiniteSource, StageType::InfiniteSource]
         }
         fn safety_level(&self) -> MiddlewareSafety {
             MiddlewareSafety::Dangerous
@@ -329,8 +341,31 @@ mod tests {
     #[test]
     fn test_safe_middleware_no_warnings() {
         // Create a mock safe middleware factory
+        struct SafeFamily;
         struct SafeFactory;
         impl MiddlewareFactory for SafeFactory {
+            fn label(&self) -> &'static str {
+                "safe_middleware"
+            }
+
+            fn override_key(&self) -> crate::middleware::MiddlewareOverrideKey {
+                crate::middleware::MiddlewareOverrideKey::of::<SafeFamily>("safe_middleware")
+            }
+
+            fn control_role(&self) -> crate::middleware::ControlMiddlewareRole {
+                crate::middleware::ControlMiddlewareRole::None
+            }
+
+            fn plan_contribution(&self) -> crate::middleware::MiddlewarePlanContribution {
+                crate::middleware::MiddlewarePlanContribution::None
+            }
+
+            fn topology_config_slot(
+                &self,
+            ) -> Option<crate::middleware::TopologyMiddlewareConfigSlot> {
+                None
+            }
+
             fn create(
                 &self,
                 _: &StageConfig,
@@ -340,9 +375,6 @@ mod tests {
             ) -> crate::middleware::MiddlewareFactoryResult<Box<dyn Middleware>> {
                 unimplemented!()
             }
-            fn name(&self) -> &str {
-                "safe_middleware"
-            }
         }
 
         let factory = SafeFactory;
@@ -351,5 +383,122 @@ mod tests {
         assert!(result.is_ok());
         assert!(!result.has_warnings());
         assert!(!result.has_dangerous);
+    }
+
+    #[test]
+    fn test_rate_limit_on_sink_warning_is_hint_driven() {
+        struct RateLimitFamily;
+        struct RateLimitFactory;
+        impl MiddlewareFactory for RateLimitFactory {
+            fn label(&self) -> &'static str {
+                "opaque.rl"
+            }
+
+            fn override_key(&self) -> crate::middleware::MiddlewareOverrideKey {
+                crate::middleware::MiddlewareOverrideKey::of::<RateLimitFamily>("rate_limit")
+            }
+
+            fn control_role(&self) -> crate::middleware::ControlMiddlewareRole {
+                crate::middleware::ControlMiddlewareRole::None
+            }
+
+            fn plan_contribution(&self) -> crate::middleware::MiddlewarePlanContribution {
+                crate::middleware::MiddlewarePlanContribution::None
+            }
+
+            fn topology_config_slot(
+                &self,
+            ) -> Option<crate::middleware::TopologyMiddlewareConfigSlot> {
+                None
+            }
+
+            fn create(
+                &self,
+                _: &StageConfig,
+                _control_middleware: std::sync::Arc<
+                    crate::middleware::control::ControlMiddlewareAggregator,
+                >,
+            ) -> crate::middleware::MiddlewareFactoryResult<Box<dyn Middleware>> {
+                unimplemented!()
+            }
+
+            fn hints(&self) -> MiddlewareHints {
+                MiddlewareHints {
+                    rate_limits: true,
+                    ..Default::default()
+                }
+            }
+        }
+
+        let factory = RateLimitFactory;
+        let result = validate_middleware_safety(&factory, StageType::Sink, "snk");
+        assert!(result.is_ok());
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|w| w.contains("Rate limiting on sink")),
+            "expected Sink+RateLimit warning from typed hint"
+        );
+    }
+
+    #[test]
+    fn test_unbounded_batching_on_sink_warning_is_hint_driven() {
+        struct BatchingFamily;
+        struct UnboundedBatchingFactory;
+        impl MiddlewareFactory for UnboundedBatchingFactory {
+            fn label(&self) -> &'static str {
+                "opaque.batching"
+            }
+
+            fn override_key(&self) -> crate::middleware::MiddlewareOverrideKey {
+                crate::middleware::MiddlewareOverrideKey::of::<BatchingFamily>("batching")
+            }
+
+            fn control_role(&self) -> crate::middleware::ControlMiddlewareRole {
+                crate::middleware::ControlMiddlewareRole::None
+            }
+
+            fn plan_contribution(&self) -> crate::middleware::MiddlewarePlanContribution {
+                crate::middleware::MiddlewarePlanContribution::None
+            }
+
+            fn topology_config_slot(
+                &self,
+            ) -> Option<crate::middleware::TopologyMiddlewareConfigSlot> {
+                None
+            }
+
+            fn create(
+                &self,
+                _: &StageConfig,
+                _control_middleware: std::sync::Arc<
+                    crate::middleware::control::ControlMiddlewareAggregator,
+                >,
+            ) -> crate::middleware::MiddlewareFactoryResult<Box<dyn Middleware>> {
+                unimplemented!()
+            }
+
+            fn hints(&self) -> MiddlewareHints {
+                MiddlewareHints {
+                    batching: Some(BatchingHint {
+                        bounded: false,
+                        timeout_ms: None,
+                    }),
+                    ..Default::default()
+                }
+            }
+        }
+
+        let factory = UnboundedBatchingFactory;
+        let result = validate_middleware_safety(&factory, StageType::Sink, "snk");
+        assert!(result.is_ok());
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|w| w.contains("Unbounded batching")),
+            "expected Sink+UnboundedBatching warning from typed hint"
+        );
     }
 }

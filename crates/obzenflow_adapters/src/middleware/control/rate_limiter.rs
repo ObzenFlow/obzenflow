@@ -12,8 +12,9 @@
 //! no token, increment no admission counter, and emit no `Delayed` event.
 
 use crate::middleware::{
-    ErrorAction, Middleware, MiddlewareAction, MiddlewareContext, MiddlewareFactory,
-    MiddlewareFactoryError, MiddlewareSafety,
+    ControlMiddlewareRole, ErrorAction, Middleware, MiddlewareAction, MiddlewareContext,
+    MiddlewareFactory, MiddlewareFactoryError, MiddlewareOverrideKey, MiddlewarePlanContribution,
+    MiddlewareSafety, SourceMiddlewarePhase, TopologyMiddlewareConfigSlot,
 };
 use obzenflow_core::control_middleware::{RateLimiterMetrics, RateLimiterSnapshotter};
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
@@ -23,7 +24,6 @@ use obzenflow_core::event::payloads::observability_payload::{
 };
 use obzenflow_core::{StageId, WriterId};
 use obzenflow_runtime::pipeline::config::StageConfig;
-use serde_json::json;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use thiserror::Error;
@@ -36,6 +36,8 @@ const DEFAULT_COST_PER_EVENT: f64 = 1.0;
 const MODE_ENTER_THRESHOLD_PCT: f64 = 100.0;
 const MODE_EXIT_THRESHOLD_PCT: f64 = 80.0;
 const MODE_EXIT_HOLD_WINDOWS: u8 = 2;
+
+pub struct RateLimiterFamily;
 
 fn effective_capacity(
     events_per_second: f64,
@@ -471,8 +473,12 @@ impl RateLimiterMiddleware {
 }
 
 impl Middleware for RateLimiterMiddleware {
-    fn middleware_name(&self) -> &'static str {
+    fn label(&self) -> &'static str {
         "rate_limiter"
+    }
+
+    fn source_phase(&self) -> SourceMiddlewarePhase {
+        SourceMiddlewarePhase::RateLimiterGate
     }
 
     fn pre_handle(&self, event: &ChainEvent, ctx: &mut MiddlewareContext) -> MiddlewareAction {
@@ -535,15 +541,6 @@ impl Middleware for RateLimiterMiddleware {
                         "Rate limit passed - processing event immediately"
                     );
 
-                    ctx.emit_event(
-                        "rate_limiter",
-                        "event_allowed",
-                        json!({
-                            "event_id": event_id.to_string(),
-                            "available_tokens": available_tokens,
-                        }),
-                    );
-
                     return MiddlewareAction::Continue;
                 }
                 AdmissionAttempt::Blocked {
@@ -590,16 +587,6 @@ impl Middleware for RateLimiterMiddleware {
                             )),
                         ));
                     }
-
-                    ctx.emit_event(
-                        "rate_limiter",
-                        "event_blocked",
-                        json!({
-                            "event_id": event_id.to_string(),
-                            "wait_time_ms": wait_time.as_millis(),
-                            "available_tokens": available_tokens,
-                        }),
-                    );
 
                     // Block until tokens should be available
                     // For longer waits, use block_in_place to avoid blocking tokio worker threads
@@ -751,13 +738,33 @@ impl From<RateLimiterBuilder> for RateLimiterFactory {
 }
 
 impl MiddlewareFactory for RateLimiterFactory {
+    fn label(&self) -> &'static str {
+        "rate_limiter"
+    }
+
+    fn override_key(&self) -> MiddlewareOverrideKey {
+        MiddlewareOverrideKey::of::<RateLimiterFamily>("rate_limiter")
+    }
+
+    fn control_role(&self) -> ControlMiddlewareRole {
+        ControlMiddlewareRole::RateLimiter
+    }
+
+    fn plan_contribution(&self) -> MiddlewarePlanContribution {
+        MiddlewarePlanContribution::None
+    }
+
+    fn topology_config_slot(&self) -> Option<TopologyMiddlewareConfigSlot> {
+        Some(TopologyMiddlewareConfigSlot::RateLimiter)
+    }
+
     fn create(
         &self,
         config: &StageConfig,
         control_middleware: std::sync::Arc<super::ControlMiddlewareAggregator>,
     ) -> crate::middleware::MiddlewareFactoryResult<Box<dyn Middleware>> {
         let validated = self.validated_config().map_err(|err| {
-            MiddlewareFactoryError::invalid_configuration(self.name(), &config.name, err)
+            MiddlewareFactoryError::invalid_configuration(self.label(), &config.name, err)
         })?;
 
         Ok(Box::new(RateLimiterMiddleware::new(
@@ -765,10 +772,6 @@ impl MiddlewareFactory for RateLimiterFactory {
             validated,
             control_middleware,
         )))
-    }
-
-    fn name(&self) -> &str {
-        "rate_limiter"
     }
 
     fn supported_stage_types(&self) -> &[StageType] {
@@ -787,6 +790,13 @@ impl MiddlewareFactory for RateLimiterFactory {
     fn safety_level(&self) -> MiddlewareSafety {
         // Rate limiting on sinks can cause backpressure
         MiddlewareSafety::Advanced
+    }
+
+    fn hints(&self) -> crate::middleware::MiddlewareHints {
+        crate::middleware::MiddlewareHints {
+            rate_limits: true,
+            ..Default::default()
+        }
     }
 
     fn config_snapshot(&self) -> Option<serde_json::Value> {
@@ -824,6 +834,7 @@ mod tests {
     use obzenflow_core::event::chain_event::ChainEventContent;
     use obzenflow_core::event::{ChainEventFactory, WriterId};
     use obzenflow_runtime::pipeline::config::StageConfig;
+    use serde_json::json;
 
     fn test_stage_config(name: &str) -> StageConfig {
         StageConfig {
@@ -1227,7 +1238,7 @@ mod tests {
         let handle = std::thread::spawn(move || {
             let mut ctx = MiddlewareContext::new();
             middleware_for_thread.maybe_emit_summary(&mut ctx);
-            tx.send(ctx.control_events.len()).unwrap();
+            tx.send(ctx.control_events().len()).unwrap();
         });
 
         let emitted = rx
@@ -1253,9 +1264,9 @@ mod tests {
 
         let mut ctx = MiddlewareContext::new();
         middleware.maybe_emit_summary(&mut ctx);
-        assert_eq!(ctx.control_events.len(), 2);
+        assert_eq!(ctx.control_events().len(), 2);
 
-        match &ctx.control_events[0].content {
+        match &ctx.control_events()[0].content {
             ChainEventContent::Observability(ObservabilityPayload::Middleware(
                 MiddlewareLifecycle::RateLimiter(RateLimiterEvent::ModeChange {
                     mode_from,
@@ -1270,7 +1281,7 @@ mod tests {
             other => panic!("Expected mode change event, got {other:?}"),
         }
 
-        match &ctx.control_events[1].content {
+        match &ctx.control_events()[1].content {
             ChainEventContent::Observability(ObservabilityPayload::Middleware(
                 MiddlewareLifecycle::RateLimiter(RateLimiterEvent::WindowUtilization {
                     utilization_percent,
@@ -1295,8 +1306,8 @@ mod tests {
 
         let mut ctx = MiddlewareContext::new();
         middleware.maybe_emit_summary(&mut ctx);
-        assert_eq!(ctx.control_events.len(), 1);
-        match &ctx.control_events[0].content {
+        assert_eq!(ctx.control_events().len(), 1);
+        match &ctx.control_events()[0].content {
             ChainEventContent::Observability(ObservabilityPayload::Middleware(
                 MiddlewareLifecycle::RateLimiter(RateLimiterEvent::WindowUtilization { .. }),
             )) => {}
@@ -1313,8 +1324,8 @@ mod tests {
 
         let mut ctx = MiddlewareContext::new();
         middleware.maybe_emit_summary(&mut ctx);
-        assert_eq!(ctx.control_events.len(), 2);
-        match &ctx.control_events[0].content {
+        assert_eq!(ctx.control_events().len(), 2);
+        match &ctx.control_events()[0].content {
             ChainEventContent::Observability(ObservabilityPayload::Middleware(
                 MiddlewareLifecycle::RateLimiter(RateLimiterEvent::ModeChange {
                     mode_from,
@@ -1347,9 +1358,9 @@ mod tests {
 
         let mut ctx = MiddlewareContext::new();
         middleware.maybe_emit_activity_pulse(&mut ctx);
-        assert_eq!(ctx.control_events.len(), 1);
+        assert_eq!(ctx.control_events().len(), 1);
 
-        match &ctx.control_events[0].content {
+        match &ctx.control_events()[0].content {
             ChainEventContent::Observability(ObservabilityPayload::Middleware(
                 MiddlewareLifecycle::RateLimiter(RateLimiterEvent::ActivityPulse {
                     window_ms,

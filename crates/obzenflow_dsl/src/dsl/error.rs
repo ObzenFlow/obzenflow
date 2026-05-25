@@ -8,11 +8,15 @@ use obzenflow_adapters::middleware::MiddlewareFactoryError;
 use obzenflow_topology::TopologyError;
 
 use crate::dsl::typing::EdgeInputRole;
+use crate::middleware_resolution::MiddlewareResolutionError;
 
 #[derive(Debug, Error)]
 pub enum StageCreationError {
     #[error(transparent)]
     MiddlewareFactory(#[from] MiddlewareFactoryError),
+
+    #[error(transparent)]
+    MiddlewareResolution(#[from] MiddlewareResolutionError),
 
     #[error("{0}")]
     Message(String),

@@ -8,7 +8,9 @@
 //! have proper flow context before they're written to the journal.
 
 use crate::middleware::{
-    ErrorAction, Middleware, MiddlewareAction, MiddlewareContext, MiddlewareFactory,
+    ControlMiddlewareRole, ErrorAction, Middleware, MiddlewareAction, MiddlewareContext,
+    MiddlewareFactory, MiddlewareOverrideKey, MiddlewarePlanContribution, SourceMiddlewarePhase,
+    TopologyMiddlewareConfigSlot,
 };
 use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::event::context::{FlowContext, StageType};
@@ -50,6 +52,14 @@ impl SystemEnrichmentMiddleware {
 }
 
 impl Middleware for SystemEnrichmentMiddleware {
+    fn label(&self) -> &'static str {
+        "system_enrichment"
+    }
+
+    fn source_phase(&self) -> SourceMiddlewarePhase {
+        SourceMiddlewarePhase::Ordinary
+    }
+
     fn pre_handle(&self, _event: &ChainEvent, _ctx: &mut MiddlewareContext) -> MiddlewareAction {
         // No pre-processing needed for enrichment
         MiddlewareAction::Continue
@@ -187,6 +197,8 @@ pub struct SystemEnrichmentMiddlewareFactory {
     stage_type: StageType,
 }
 
+pub struct SystemEnrichmentFamily;
+
 impl SystemEnrichmentMiddlewareFactory {
     pub fn new(
         flow_name: impl Into<String>,
@@ -202,6 +214,26 @@ impl SystemEnrichmentMiddlewareFactory {
 }
 
 impl MiddlewareFactory for SystemEnrichmentMiddlewareFactory {
+    fn label(&self) -> &'static str {
+        "system_enrichment"
+    }
+
+    fn override_key(&self) -> MiddlewareOverrideKey {
+        MiddlewareOverrideKey::of::<SystemEnrichmentFamily>("system_enrichment")
+    }
+
+    fn control_role(&self) -> ControlMiddlewareRole {
+        ControlMiddlewareRole::None
+    }
+
+    fn plan_contribution(&self) -> MiddlewarePlanContribution {
+        MiddlewarePlanContribution::None
+    }
+
+    fn topology_config_slot(&self) -> Option<TopologyMiddlewareConfigSlot> {
+        None
+    }
+
     fn create(
         &self,
         config: &StageConfig,
@@ -216,10 +248,6 @@ impl MiddlewareFactory for SystemEnrichmentMiddlewareFactory {
             config.stage_id,
             self.stage_type,
         )))
-    }
-
-    fn name(&self) -> &str {
-        "system_enrichment"
     }
 }
 
