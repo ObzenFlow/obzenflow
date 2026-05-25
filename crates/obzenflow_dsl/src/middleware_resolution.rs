@@ -418,6 +418,34 @@ mod view_tests {
     }
 
     #[test]
+    fn stage_override_affects_only_its_own_stage() {
+        // A flow-level backpressure family resolves onto every stage independently.
+        let flow = vec![backpressure_factory("flow.bp", 10)];
+
+        // Stage A overrides the same typed family; stage B declares no stage middleware.
+        let stage_a = vec![backpressure_factory("stage_a.bp", 5)];
+
+        let resolved_a = resolve_middleware_view(&flow, &stage_a, "stage_a").expect("resolve A");
+        let resolved_b = resolve_middleware_view(&flow, &[], "stage_b").expect("resolve B");
+
+        // Stage A sees its override.
+        assert_eq!(resolved_a.len(), 1);
+        assert_eq!(resolved_a[0].label(), "stage_a.bp");
+        match resolved_a[0].plan_contribution() {
+            MiddlewarePlanContribution::Backpressure { window } => assert_eq!(window.get(), 5),
+            other => panic!("expected Backpressure plan contribution, got {other:?}"),
+        }
+
+        // Stage B is untouched: the flow-level contributor resolves independently for it.
+        assert_eq!(resolved_b.len(), 1);
+        assert_eq!(resolved_b[0].label(), "flow.bp");
+        match resolved_b[0].plan_contribution() {
+            MiddlewarePlanContribution::Backpressure { window } => assert_eq!(window.get(), 10),
+            other => panic!("expected Backpressure plan contribution, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn typed_override_key_ignores_diagnostic_family_label() {
         let flow = vec![Box::new(MockFactory {
             label: "flow.a",
