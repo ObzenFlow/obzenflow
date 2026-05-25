@@ -223,3 +223,8 @@ required-features = ["test-support"]
 name = "cycle_convergence_eof_gating_test"
 path = "tests/cycle_convergence_eof_gating_test.rs"
 required-features = ["test-support"]
+
+[[test]]
+name = "stateful_processing_time_window_test"
+path = "tests/stateful_processing_time_window_test.rs"
+required-features = ["test-support"]

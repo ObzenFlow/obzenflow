@@ -11,7 +11,7 @@ use crate::event::types::EventId;
 use serde::{Deserialize, Serialize};
 
 /// Payload that carries entry metadata through the flow
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CorrelationPayload {
     /// Timestamp when event entered the flow (nanos since epoch)
     pub entry_time_ns: u64,

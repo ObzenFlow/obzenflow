@@ -553,7 +553,10 @@ impl<H: StatefulHandler + Send + Sync + 'static> FsmAction for StatefulAction<H>
                     if let Some(vc) = upstream_vector_clock {
                         *vector_clock = Some(vc);
                     }
-                    *last_event_id = upstream_last_event.or(runtime_context.last_emitted_event_id);
+                    // Prefer this stage's last emitted output (final drained window) over the
+                    // upstream-advertised last_event_id; otherwise the authored EOF can
+                    // incorrectly point at an upstream terminal.
+                    *last_event_id = runtime_context.last_emitted_event_id.or(upstream_last_event);
                 }
 
                 // Attach flow/runtime context for downstream contract tracking

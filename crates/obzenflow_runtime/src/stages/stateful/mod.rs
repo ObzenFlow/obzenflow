@@ -50,6 +50,7 @@ pub mod config;
 pub mod fsm;
 pub mod handle;
 pub mod supervisor;
+pub mod windowing;
 
 // FLOWIP-080c: Composable primitives
 pub mod ai_map_reduce;
@@ -65,6 +66,7 @@ pub use handle::{StatefulHandle, StatefulHandleExt};
 // FLOWIP-080c: Re-export commonly used strategies for convenience
 pub use strategies::accumulators::{Accumulator, Conflate, GroupBy, Reduce, StatefulWithEmission};
 pub use strategies::emissions::{EmissionStrategy, EmitAlways, EveryN, OnEOF, TimeWindow};
+pub use windowing::{ProcessingTimeTumblingWindow, ProcessingTimeWindowAggregate, ProcessingTimeWindowKind};
 
 // FLOWIP-086z-part-2: AI map-reduce keyed collector
 pub use ai_map_reduce::CollectByInput;
