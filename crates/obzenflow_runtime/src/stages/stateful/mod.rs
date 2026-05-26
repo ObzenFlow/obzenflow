@@ -50,8 +50,6 @@ pub mod config;
 pub mod fsm;
 pub mod handle;
 pub mod supervisor;
-#[cfg(test)]
-mod windowing;
 
 // FLOWIP-080c: Composable primitives
 pub mod ai_map_reduce;

@@ -201,8 +201,8 @@ pub(crate) fn is_terminal_eof(
 mod tests {
     use super::*;
     use obzenflow_core::event::chain_event::ChainEventFactory;
-    use obzenflow_core::id::StageId;
     use obzenflow_core::event::JournalWriterId;
+    use obzenflow_core::id::StageId;
     use obzenflow_core::WriterId;
 
     #[test]

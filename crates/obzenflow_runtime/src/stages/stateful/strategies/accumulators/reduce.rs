@@ -251,20 +251,39 @@ mod tests {
 
     #[test]
     fn test_reduce_emit_format() {
-        let accumulator = Reduce::new(105i64, |_state: &mut i64, _event: &ChainEvent| {});
+        // Arbitrary seed; the no-op reduce must pass it through to `result` unchanged.
+        const SEED: i64 = 105;
+
+        let accumulator = Reduce::new(SEED, |_state: &mut i64, _event: &ChainEvent| {});
 
         let mut state = accumulator.initial_state();
-        let event = ChainEventFactory::data_event(
-            WriterId::from(StageId::new()),
-            "test",
-            json!({}),
-        );
+        let event = ChainEventFactory::data_event(WriterId::from(StageId::new()), "test", json!({}))
+            .with_new_correlation("reduce_emit_format");
+        let input_id = event.id;
+        let input_correlation = event.correlation_id;
+
         accumulator.accumulate(&mut state, event);
         let emitted = accumulator.emit(&state);
 
         assert_eq!(emitted.len(), 1);
         assert_eq!(emitted[0].event_type(), "reduced");
-        assert_eq!(emitted[0].payload()["result"], 105);
+        assert_eq!(emitted[0].payload()["result"], SEED);
+
+        // FLOWIP-054j fan-in lineage: the aggregate is parented to the contributing
+        // input rather than left at root causality.
+        assert_eq!(emitted[0].causality.parent_ids, vec![input_id]);
+        // A single-correlation window carries that scalar correlation through, with no mixed set.
+        assert_eq!(emitted[0].correlation_id, input_correlation);
+        assert!(emitted[0].correlation_ids.is_none());
+    }
+
+    #[test]
+    fn test_reduce_emit_noops_when_no_input() {
+        // The `is_empty()` guard in `emit` must suppress output when no data event was
+        // accumulated, so an empty window does not emit a spurious seed-value aggregate.
+        let accumulator = Reduce::new(105i64, |_state: &mut i64, _event: &ChainEvent| {});
+        let state = accumulator.initial_state();
+        assert!(accumulator.emit(&state).is_empty());
     }
 
     #[test]
@@ -692,8 +711,11 @@ mod typed_tests {
 
     #[test]
     fn test_reduce_typed_emit_format() {
+        // Arbitrary seed; the no-op reduce must pass it through to `count` unchanged.
+        const SEED: u64 = 105;
+
         let accumulator = ReduceTyped::new(
-            Counter { count: 105 },
+            Counter { count: SEED },
             |_counter: &mut Counter, _tx: &Transaction| {},
         );
 
@@ -702,13 +724,22 @@ mod typed_tests {
             WriterId::from(StageId::new()),
             "transaction",
             json!({ "amount": 1.0, "quantity": 1 }),
-        );
+        )
+        .with_new_correlation("reduce_typed_emit_format");
+        let input_id = event.id;
+        let input_correlation = event.correlation_id;
+
         accumulator.accumulate(&mut state, event);
         let emitted = accumulator.emit(&state);
 
         assert_eq!(emitted.len(), 1);
         assert_eq!(emitted[0].event_type(), Counter::EVENT_TYPE);
-        assert_eq!(emitted[0].payload()["count"], 105);
+        assert_eq!(emitted[0].payload()["count"], SEED);
+
+        // FLOWIP-054j fan-in lineage applies on the typed path too.
+        assert_eq!(emitted[0].causality.parent_ids, vec![input_id]);
+        assert_eq!(emitted[0].correlation_id, input_correlation);
+        assert!(emitted[0].correlation_ids.is_none());
     }
 
     #[test]

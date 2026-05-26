@@ -13,11 +13,11 @@ use crate::stages::stateful::strategies::emissions::{
     EmissionStrategy, EmitAlways, EveryN, OnEOF, TimeWindow,
 };
 use crate::typing::StatefulTyping;
-use obzenflow_core::event::ChainEventFactory;
-use obzenflow_core::event::ChainEventContent;
 use obzenflow_core::event::context::causality_context::CausalityContext;
 use obzenflow_core::event::context::ReplayContext;
 use obzenflow_core::event::payloads::correlation_payload::CorrelationPayload;
+use obzenflow_core::event::ChainEventContent;
+use obzenflow_core::event::ChainEventFactory;
 use obzenflow_core::id::StageId;
 use obzenflow_core::{ChainEvent, EventId, TypedPayload, WriterId};
 use std::collections::HashMap;
@@ -86,7 +86,10 @@ impl Accumulator for Conflate {
         state
             .values()
             .filter_map(|event| match &event.content {
-                ChainEventContent::Data { event_type, payload } => {
+                ChainEventContent::Data {
+                    event_type,
+                    payload,
+                } => {
                     let mut out =
                         ChainEventFactory::data_event(self.writer_id, event_type, payload.clone());
 
@@ -445,8 +448,7 @@ where
         state
             .values()
             .map(|value| {
-                let payload =
-                    serde_json::to_value(&value.value).unwrap_or(serde_json::Value::Null);
+                let payload = serde_json::to_value(&value.value).unwrap_or(serde_json::Value::Null);
                 let mut out = ChainEventFactory::data_event(self.writer_id, T::EVENT_TYPE, payload);
 
                 out.causality = CausalityContext::with_parent(value.source_event_id);

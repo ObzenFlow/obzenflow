@@ -45,7 +45,8 @@ impl TraceState {
         }
 
         if let Some(correlation_id) = event.correlation_id {
-            if self.correlation_ids.len() < max_depth || self.correlation_ids.contains(&correlation_id)
+            if self.correlation_ids.len() < max_depth
+                || self.correlation_ids.contains(&correlation_id)
             {
                 self.correlation_ids.insert(correlation_id);
             }
@@ -111,4 +112,3 @@ impl TraceState {
         self.parent_ids.is_empty()
     }
 }
-

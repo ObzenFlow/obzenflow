@@ -14,10 +14,13 @@ use obzenflow_core::{EventId, StageId, TypedPayload, WriterId};
 use obzenflow_dsl::{sink, source, stateful, test_flow, transform};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
-use obzenflow_runtime::stages::common::handlers::{FiniteSourceHandler, SinkHandler, TransformHandler};
+use obzenflow_runtime::stages::common::handlers::{
+    FiniteSourceHandler, SinkHandler, TransformHandler,
+};
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
@@ -45,6 +48,25 @@ struct WindowAgg {
 
 impl TypedPayload for WindowAgg {
     const EVENT_TYPE: &'static str = "stateful.emit_within.window.aggregate";
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct GroupInput {
+    group: String,
+    index: u64,
+}
+
+impl TypedPayload for GroupInput {
+    const EVENT_TYPE: &'static str = "stateful.emit_within.group_by.input";
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+struct GroupAgg {
+    event_count: u64,
+}
+
+impl TypedPayload for GroupAgg {
+    const EVENT_TYPE: &'static str = "stateful.emit_within.group_by.aggregate";
 }
 
 #[derive(Clone, Debug)]
@@ -154,6 +176,40 @@ impl FiniteSourceHandler for CorrelatedSequenceSource {
 }
 
 #[derive(Clone, Debug)]
+struct GroupedSequenceSource {
+    writer_id: WriterId,
+    items: Vec<(String, u64)>,
+    next: usize,
+}
+
+impl GroupedSequenceSource {
+    fn new(items: Vec<(String, u64)>) -> Self {
+        Self {
+            writer_id: WriterId::from(StageId::new()),
+            items,
+            next: 0,
+        }
+    }
+}
+
+impl FiniteSourceHandler for GroupedSequenceSource {
+    fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
+        if self.next >= self.items.len() {
+            return Ok(None);
+        }
+
+        let (group, index) = self.items[self.next].clone();
+        self.next += 1;
+
+        Ok(Some(vec![ChainEventFactory::data_event(
+            self.writer_id,
+            GroupInput::EVENT_TYPE,
+            json!({ "group": group, "index": index }),
+        )]))
+    }
+}
+
+#[derive(Clone, Debug)]
 struct AggregateSink {
     seen: Arc<Mutex<Vec<WindowAgg>>>,
 }
@@ -178,6 +234,23 @@ impl SinkHandler for AggregateSink {
         Ok(DeliveryPayload::success(
             "aggregate_sink",
             DeliveryMethod::Custom("Collect".to_string()),
+            None,
+        ))
+    }
+}
+
+#[derive(Clone, Debug)]
+struct AckSink;
+
+#[async_trait]
+impl SinkHandler for AckSink {
+    async fn consume(
+        &mut self,
+        _event: ChainEvent,
+    ) -> std::result::Result<DeliveryPayload, HandlerError> {
+        Ok(DeliveryPayload::success(
+            "ack_sink",
+            DeliveryMethod::Custom("Ack".to_string()),
             None,
         ))
     }
@@ -522,7 +595,10 @@ async fn emit_within_emits_more_than_one_window_aggregate_per_run_and_resets_sta
 
     let sum: u64 = aggregates.iter().map(|a| a.event_count).sum();
     let max: u64 = aggregates.iter().map(|a| a.event_count).max().unwrap_or(0);
-    assert_eq!(sum, total, "expected windows to partition inputs without duplication");
+    assert_eq!(
+        sum, total,
+        "expected windows to partition inputs without duplication"
+    );
     assert!(
         max < total,
         "expected accumulator state to reset between windows (max={max}, total={total})"
@@ -595,8 +671,8 @@ async fn forwarded_inbound_eof_does_not_complete_downstream_reader() -> Result<(
         }
     }
 
-    let forwarded_src_eof_idx =
-        forwarded_src_eof_idx.ok_or_else(|| anyhow!("expected tr stage to see forwarded source EOF"))?;
+    let forwarded_src_eof_idx = forwarded_src_eof_idx
+        .ok_or_else(|| anyhow!("expected tr stage to see forwarded source EOF"))?;
     let agg_idx =
         agg_idx.ok_or_else(|| anyhow!("expected tr stage to consume a window aggregate event"))?;
 
@@ -608,3 +684,107 @@ async fn forwarded_inbound_eof_does_not_complete_downstream_reader() -> Result<(
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn group_by_emit_within_parents_each_group_to_its_own_inputs() -> Result<()> {
+    let items = vec![
+        ("a".to_string(), 0u64),
+        ("b".to_string(), 1u64),
+        ("a".to_string(), 2u64),
+        ("b".to_string(), 3u64),
+        ("c".to_string(), 4u64),
+    ];
+
+    let harness = test_flow! {
+        name: "emit_within_group_by_lineage",
+        journals: disk_journals(unique_journal_dir("emit_within_group_by_lineage")),
+        middleware: [],
+
+        stages: {
+            src = source!(GroupInput => GroupedSequenceSource::new(items.clone()));
+            grp = stateful!(GroupInput -> GroupAgg =>
+                typed_stateful::group_by(
+                    |input: &GroupInput| input.group.clone(),
+                    |acc: &mut GroupAgg, _input: &GroupInput| {
+                        acc.event_count += 1;
+                    }
+                )
+                .emit_within(Duration::from_secs(60))
+            );
+            snk = sink!(GroupAgg => AckSink);
+        },
+
+        topology: {
+            src |> grp;
+            grp |> snk;
+        }
+    }
+    .await
+    .map_err(|e| anyhow!("failed to build test flow: {e}"))?;
+
+    let (_grp_stage_id, grp_journal) = harness.stage_journal_for_test("grp")?;
+    let (_src_stage_id, src_journal) = harness.stage_journal_for_test("src")?;
+
+    harness
+        .into_inner()
+        .run()
+        .await
+        .map_err(|e| anyhow!("flow run failed: {e}"))?;
+
+    let ordered_src = src_journal
+        .read_causally_ordered()
+        .await
+        .map_err(|e| anyhow!("failed to read src stage journal: {e}"))?;
+
+    let mut expected: BTreeMap<String, Vec<EventId>> = BTreeMap::new();
+    for env in ordered_src {
+        let ChainEventContent::Data {
+            event_type,
+            payload,
+        } = &env.event.content
+        else {
+            continue;
+        };
+        if event_type != GroupInput::EVENT_TYPE {
+            continue;
+        }
+        let group = payload
+            .get("group")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow!("expected group field on input payload"))?
+            .to_string();
+        expected.entry(group).or_default().push(env.event.id);
+    }
+
+    let ordered_grp = grp_journal
+        .read_causally_ordered()
+        .await
+        .map_err(|e| anyhow!("failed to read grp stage journal: {e}"))?;
+
+    let mut seen: BTreeMap<String, Vec<EventId>> = BTreeMap::new();
+    for env in ordered_grp {
+        let ChainEventContent::Data {
+            event_type,
+            payload,
+        } = &env.event.content
+        else {
+            continue;
+        };
+        if event_type != GroupAgg::EVENT_TYPE {
+            continue;
+        }
+        let key = payload
+            .get("key")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow!("expected key field on group_by payload"))?
+            .to_string();
+
+        seen.insert(key, env.event.causality.parent_ids.clone());
+    }
+
+    assert_eq!(
+        seen, expected,
+        "expected each group aggregate to be parented only to that group's input events"
+    );
+
+    Ok(())
+}
