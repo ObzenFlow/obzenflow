@@ -343,10 +343,10 @@ async fn last_window_aggregate_event(
 
 fn payload_writer_stage(payload: &FlowControlPayload) -> Option<StageId> {
     match payload {
-        FlowControlPayload::Eof { writer_id, .. } => match writer_id {
-            Some(WriterId::Stage(stage)) => Some(*stage),
-            _ => None,
-        },
+        FlowControlPayload::Eof {
+            writer_id: Some(WriterId::Stage(stage)),
+            ..
+        } => Some(*stage),
         _ => None,
     }
 }
