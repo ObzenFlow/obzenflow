@@ -26,7 +26,7 @@ use obzenflow_core::event::schema::TypedPayload;
 use obzenflow_core::event::types::CorrelationId;
 use obzenflow_core::{ChainEvent, EventId, StageId, WriterId};
 use serde::{Deserialize, Serialize};
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
 use std::marker::PhantomData;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -63,6 +63,11 @@ pub struct ProcessingTimeWindowAggregate {
     pub window_start_ms: u64,
     pub window_end_ms: u64,
     pub event_count: u64,
+    /// If inputs within the window carry mixed `correlation_id` values, the emitted
+    /// aggregate clears `ChainEvent.correlation_id` and instead records the distinct
+    /// contributing correlation IDs here (sorted, bounded).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub correlation_ids: Option<Vec<CorrelationId>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub field: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -160,6 +165,7 @@ pub struct ProcessingTimeWindowState {
     // Correlation/replay policy: propagate only when uniform across the window.
     correlation_seen: bool,
     correlation_mixed: bool,
+    correlation_ids: BTreeSet<CorrelationId>,
     correlation_id: Option<CorrelationId>,
     correlation_payload: Option<CorrelationPayload>,
     replay_context: Option<ReplayContext>,
@@ -180,6 +186,7 @@ impl ProcessingTimeWindowState {
         self.parent_ids.clear();
         self.correlation_seen = false;
         self.correlation_mixed = false;
+        self.correlation_ids.clear();
         self.correlation_id = None;
         self.correlation_payload = None;
         self.replay_context = None;
@@ -199,6 +206,7 @@ impl Default for ProcessingTimeWindowState {
             parent_ids: VecDeque::new(),
             correlation_seen: false,
             correlation_mixed: false,
+            correlation_ids: BTreeSet::new(),
             correlation_id: None,
             correlation_payload: None,
             replay_context: None,
@@ -307,6 +315,14 @@ where
         }
 
         // Correlation policy: only propagate when uniform.
+        if let Some(correlation_id) = event.correlation_id {
+            // Avoid unbounded accumulation when correlation IDs are highly cardinal.
+            // This mirrors the bounded lineage policy above.
+            if state.correlation_ids.len() < max_depth || state.correlation_ids.contains(&correlation_id) {
+                state.correlation_ids.insert(correlation_id);
+            }
+        }
+
         if !state.correlation_seen {
             state.correlation_seen = true;
             state.correlation_id = event.correlation_id;
@@ -363,12 +379,19 @@ where
             }
         };
 
+        let correlation_ids = if state.correlation_mixed && !state.correlation_ids.is_empty() {
+            Some(state.correlation_ids.iter().copied().collect())
+        } else {
+            None
+        };
+
         let payload = ProcessingTimeWindowAggregate {
             kind: self.aggregation.kind(),
             window_duration_ms: self.window_duration.as_millis() as u64,
             window_start_ms,
             window_end_ms,
             event_count: state.event_count,
+            correlation_ids,
             field: self.aggregation.field(),
             observed_values,
             sum,
@@ -447,5 +470,45 @@ mod tests {
         let agg2 = ProcessingTimeWindowAggregate::from_event(&out2[0])
             .expect("expected drain emission to be a window aggregate");
         assert_eq!(agg2.event_count, 1);
+    }
+
+    #[tokio::test]
+    async fn mixed_correlation_ids_are_recorded_as_sorted_set() {
+        let window_duration = Duration::from_millis(100);
+        let mut handler = ProcessingTimeTumblingWindow::<()>::count(window_duration);
+        let mut state = handler.initial_state();
+        let writer = WriterId::from(StageId::new());
+
+        let correlation_a = CorrelationId::new();
+        let correlation_b = CorrelationId::new();
+
+        let mut e1 = ChainEventFactory::data_event(writer, "test.windowing", json!({ "n": 1 }));
+        e1.correlation_id = Some(correlation_a);
+        let mut e2 = ChainEventFactory::data_event(writer, "test.windowing", json!({ "n": 2 }));
+        e2.correlation_id = Some(correlation_b);
+
+        handler.accumulate(&mut state, e1);
+        handler.accumulate(&mut state, e2);
+
+        let out = handler
+            .drain(&state)
+            .await
+            .expect("drain should succeed for count window");
+        assert_eq!(out.len(), 1);
+
+        assert!(
+            out[0].correlation_id.is_none(),
+            "mixed windows must not propagate a single correlation_id on the aggregate event"
+        );
+
+        let agg = ProcessingTimeWindowAggregate::from_event(&out[0])
+            .expect("expected mixed drain emission to be a window aggregate");
+        let set = agg
+            .correlation_ids
+            .expect("expected correlation_ids to be recorded for mixed windows");
+        assert_eq!(set.len(), 2);
+        assert!(set.contains(&correlation_a));
+        assert!(set.contains(&correlation_b));
+        assert!(set.windows(2).all(|w| w[0] <= w[1]), "correlation_ids must be sorted");
     }
 }

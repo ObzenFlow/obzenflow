@@ -293,23 +293,23 @@ Supervisor acts on ControlResolution
 
 The key design point is that `resolve_control_event` is a pure function. It computes the decision without performing any I/O. The supervisor then executes the decision by writing to journals, sleeping, or returning the appropriate `EventLoopDirective`. This is the same "decide then act" separation that the run loop enforces for FSM transitions.
 
-### Concrete example: shared-state windowing coordination
+### Concrete example: composing control strategies
 
-`WindowingStrategy` reads the current window start from shared state paired with
-windowing middleware:
-
-- If a window is still active, return `Delay(remaining_window_time)`.
-- Otherwise, return `Forward`.
-
-The builder composes this with any other strategies the stage needs:
+Builders can compose multiple strategies into a single `ControlEventStrategy` via `CompositeStrategy`.
+In practice, stage materialisation collects any control strategies produced by middleware factories and
+composes them when more than one is present:
 
 ```rust
-let strategy = CompositeStrategy::new(vec![
-    Box::new(WindowingStrategy::with_shared_window_start(
-        window_duration,
-        shared_window_start,
-    )),
-]);
+let strategies: Vec<Box<dyn ControlEventStrategy>> = middleware
+    .iter()
+    .filter_map(|spec| spec.factory.create_control_strategy())
+    .collect();
+
+let strategy: Arc<dyn ControlEventStrategy> = match strategies.len() {
+    0 => Arc::new(JonestownStrategy),
+    1 => Arc::from(strategies.into_iter().next().unwrap()),
+    _ => Arc::new(CompositeStrategy::new(strategies)),
+};
 ```
 
 The supervisor never knows which strategies are active. It calls `resolve_control_event`, gets back a `ControlResolution`, and acts on it.

@@ -38,7 +38,7 @@ pub use strategies::{
 // Re-export control strategies for convenience
 pub use crate::stages::common::control_strategies::{
     BackoffStrategy, CompositeStrategy, ControlEventAction, ControlEventStrategy,
-    JonestownStrategy, WindowingStrategy,
+    JonestownStrategy,
 };
 
 // Note: TransformSupervisor is NOT exported! It's an implementation detail.
