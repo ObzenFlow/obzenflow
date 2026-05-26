@@ -127,7 +127,9 @@ impl<TIn> ProcessingTimeTumblingWindow<TIn> {
     pub fn sum(window_duration: Duration, field: impl Into<String>) -> Self {
         Self {
             window_duration,
-            aggregation: AggregationSpec::Sum { field: field.into() },
+            aggregation: AggregationSpec::Sum {
+                field: field.into(),
+            },
             _phantom: PhantomData,
         }
     }
@@ -135,7 +137,9 @@ impl<TIn> ProcessingTimeTumblingWindow<TIn> {
     pub fn average(window_duration: Duration, field: impl Into<String>) -> Self {
         Self {
             window_duration,
-            aggregation: AggregationSpec::Average { field: field.into() },
+            aggregation: AggregationSpec::Average {
+                field: field.into(),
+            },
             _phantom: PhantomData,
         }
     }
@@ -318,7 +322,9 @@ where
         if let Some(correlation_id) = event.correlation_id {
             // Avoid unbounded accumulation when correlation IDs are highly cardinal.
             // This mirrors the bounded lineage policy above.
-            if state.correlation_ids.len() < max_depth || state.correlation_ids.contains(&correlation_id) {
+            if state.correlation_ids.len() < max_depth
+                || state.correlation_ids.contains(&correlation_id)
+            {
                 state.correlation_ids.insert(correlation_id);
             }
         }
@@ -435,15 +441,21 @@ mod tests {
         assert_eq!(state.event_count, 1);
 
         // Force the window start into the past so the next event arrives after completion.
-        state.window_start = state.window_start.and_then(|start| {
-            start.checked_sub(Duration::from_millis(25))
-        });
+        state.window_start = state
+            .window_start
+            .and_then(|start| start.checked_sub(Duration::from_millis(25)));
 
         let e2 = ChainEventFactory::data_event(writer, "test.windowing", json!({ "n": 2 }));
         handler.accumulate(&mut state, e2);
 
-        assert!(state.emit_pending, "expected boundary-triggered emission to be pending");
-        assert!(state.pending_event.is_some(), "expected triggering event to be stashed");
+        assert!(
+            state.emit_pending,
+            "expected boundary-triggered emission to be pending"
+        );
+        assert!(
+            state.pending_event.is_some(),
+            "expected triggering event to be stashed"
+        );
         assert_eq!(
             state.event_count, 1,
             "stashed event must not be counted in the prior window"
@@ -509,6 +521,9 @@ mod tests {
         assert_eq!(set.len(), 2);
         assert!(set.contains(&correlation_a));
         assert!(set.contains(&correlation_b));
-        assert!(set.windows(2).all(|w| w[0] <= w[1]), "correlation_ids must be sorted");
+        assert!(
+            set.windows(2).all(|w| w[0] <= w[1]),
+            "correlation_ids must be sorted"
+        );
     }
 }

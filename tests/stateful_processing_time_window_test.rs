@@ -65,11 +65,13 @@ impl FiniteSourceHandler for SequenceSource {
 
         let idx = self.next;
         self.next += 1;
-        Ok(Some(vec![obzenflow_core::event::chain_event::ChainEventFactory::data_event(
-            self.writer_id,
-            WindowInput::EVENT_TYPE,
-            json!({ "index": idx }),
-        )]))
+        Ok(Some(vec![
+            obzenflow_core::event::chain_event::ChainEventFactory::data_event(
+                self.writer_id,
+                WindowInput::EVENT_TYPE,
+                json!({ "index": idx }),
+            ),
+        ]))
     }
 }
 
@@ -123,7 +125,10 @@ impl AggregateSink {
 
 #[async_trait]
 impl SinkHandler for AggregateSink {
-    async fn consume(&mut self, event: ChainEvent) -> std::result::Result<DeliveryPayload, HandlerError> {
+    async fn consume(
+        &mut self,
+        event: ChainEvent,
+    ) -> std::result::Result<DeliveryPayload, HandlerError> {
         if let Some(agg) = ProcessingTimeWindowAggregate::from_event(&event) {
             let mut guard = self.seen.lock().unwrap();
             guard.push(agg);
@@ -281,8 +286,7 @@ async fn processing_time_window_flushes_final_partial_window_before_authored_eof
 
     if let FlowControlPayload::Eof { last_event_id, .. } = eof_payload {
         assert_eq!(
-            last_event_id,
-            last_agg_event_id,
+            last_event_id, last_agg_event_id,
             "expected authored EOF last_event_id to prefer the final aggregate"
         );
     } else {
@@ -339,8 +343,7 @@ async fn processing_time_window_final_aggregate_preserves_buffered_input_lineage
         "expected aggregate to be authored by the windowing stage"
     );
     assert_eq!(
-        aggregate.causality.parent_ids,
-        input_ids,
+        aggregate.causality.parent_ids, input_ids,
         "expected aggregate causality parents to be the buffered input event IDs"
     );
 
@@ -392,7 +395,10 @@ async fn processing_time_window_final_aggregate_records_mixed_correlation_ids() 
     assert_eq!(recorded.len(), 2);
     assert!(recorded.contains(&correlation_a));
     assert!(recorded.contains(&correlation_b));
-    assert!(recorded.windows(2).all(|w| w[0] <= w[1]), "expected deterministic sort");
+    assert!(
+        recorded.windows(2).all(|w| w[0] <= w[1]),
+        "expected deterministic sort"
+    );
 
     let aggregate_event = last_window_aggregate_event(&win_journal)
         .await?

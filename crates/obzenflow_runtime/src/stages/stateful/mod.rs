@@ -66,15 +66,16 @@ pub use handle::{StatefulHandle, StatefulHandleExt};
 // FLOWIP-080c: Re-export commonly used strategies for convenience
 pub use strategies::accumulators::{Accumulator, Conflate, GroupBy, Reduce, StatefulWithEmission};
 pub use strategies::emissions::{EmissionStrategy, EmitAlways, EveryN, OnEOF, TimeWindow};
-pub use windowing::{ProcessingTimeTumblingWindow, ProcessingTimeWindowAggregate, ProcessingTimeWindowKind};
+pub use windowing::{
+    ProcessingTimeTumblingWindow, ProcessingTimeWindowAggregate, ProcessingTimeWindowKind,
+};
 
 // FLOWIP-086z-part-2: AI map-reduce keyed collector
 pub use ai_map_reduce::CollectByInput;
 
 // Re-export control strategies for convenience
 pub use crate::stages::common::control_strategies::{
-    BackoffStrategy, CompositeStrategy, ControlEventAction, ControlEventStrategy,
-    JonestownStrategy,
+    BackoffStrategy, CompositeStrategy, ControlEventAction, ControlEventStrategy, JonestownStrategy,
 };
 
 // Note: StatefulSupervisor is NOT exported! It's an implementation detail.

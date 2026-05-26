@@ -556,7 +556,9 @@ impl<H: StatefulHandler + Send + Sync + 'static> FsmAction for StatefulAction<H>
                     // Prefer this stage's last emitted output (final drained window) over the
                     // upstream-advertised last_event_id; otherwise the authored EOF can
                     // incorrectly point at an upstream terminal.
-                    *last_event_id = runtime_context.last_emitted_event_id.or(upstream_last_event);
+                    *last_event_id = runtime_context
+                        .last_emitted_event_id
+                        .or(upstream_last_event);
                 }
 
                 // Attach flow/runtime context for downstream contract tracking
