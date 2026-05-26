@@ -257,8 +257,9 @@ mod tests {
         let accumulator = Reduce::new(SEED, |_state: &mut i64, _event: &ChainEvent| {});
 
         let mut state = accumulator.initial_state();
-        let event = ChainEventFactory::data_event(WriterId::from(StageId::new()), "test", json!({}))
-            .with_new_correlation("reduce_emit_format");
+        let event =
+            ChainEventFactory::data_event(WriterId::from(StageId::new()), "test", json!({}))
+                .with_new_correlation("reduce_emit_format");
         let input_id = event.id;
         let input_correlation = event.correlation_id;
 
