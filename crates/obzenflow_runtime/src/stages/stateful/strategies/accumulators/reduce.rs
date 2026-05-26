@@ -8,11 +8,13 @@
 // No grouping - just a single accumulation across all events.
 
 use super::Accumulator;
+use crate::stages::stateful::strategies::accumulators::trace::TraceState;
 use crate::stages::stateful::strategies::accumulators::wrapper::StatefulWithEmission;
 use crate::stages::stateful::strategies::emissions::{
     EmissionStrategy, EmitAlways, EveryN, OnEOF, TimeWindow,
 };
 use crate::typing::StatefulTyping;
+use obzenflow_core::event::context::causality_context::CausalityContext;
 use obzenflow_core::event::ChainEventFactory;
 use obzenflow_core::id::StageId;
 use obzenflow_core::{ChainEvent, TypedPayload, WriterId};
@@ -54,6 +56,15 @@ where
     reduce_fn: F,
     initial: S,
     writer_id: WriterId,
+}
+
+#[derive(Clone, Debug)]
+pub struct ReduceState<S>
+where
+    S: Clone + Send + Sync + Debug,
+{
+    value: S,
+    trace: TraceState,
 }
 
 impl<F, S> Debug for Reduce<F, S>
@@ -100,28 +111,51 @@ where
     F: Fn(&mut S, &ChainEvent) + Send + Sync + Clone,
     S: Clone + Send + Sync + Debug + Serialize,
 {
-    type State = S;
+    type State = ReduceState<S>;
 
     fn accumulate(&self, state: &mut Self::State, event: ChainEvent) {
-        (self.reduce_fn)(state, &event);
+        (self.reduce_fn)(&mut state.value, &event);
+        state.trace.record_event(&event);
     }
 
     fn initial_state(&self) -> Self::State {
-        self.initial.clone()
+        ReduceState {
+            value: self.initial.clone(),
+            trace: TraceState::default(),
+        }
     }
 
     fn emit(&self, state: &Self::State) -> Vec<ChainEvent> {
-        vec![ChainEventFactory::data_event(
+        if state.trace.is_empty() {
+            return Vec::new();
+        }
+
+        let mut out = ChainEventFactory::data_event(
             self.writer_id,
             "reduced",
             json!({
-                "result": state,
+                "result": &state.value,
             }),
-        )]
+        );
+
+        out.causality = CausalityContext {
+            parent_ids: state.trace.parent_ids(),
+        };
+
+        if let Some(ids) = state.trace.mixed_correlation_ids() {
+            out.correlation_ids = Some(ids);
+        } else {
+            out.correlation_id = state.trace.correlation_id();
+            out.correlation_payload = state.trace.correlation_payload();
+            out.replay_context = state.trace.replay_context();
+        }
+
+        vec![out]
     }
 
     fn reset(&self, state: &mut Self::State) {
-        *state = self.initial.clone();
+        state.value = self.initial.clone();
+        state.trace.reset();
     }
 }
 
@@ -170,7 +204,7 @@ mod tests {
         let accumulator = Reduce::new(42i64, |state: &mut i64, _event: &ChainEvent| {
             *state += 1;
         });
-        assert_eq!(accumulator.initial_state(), 42);
+        assert_eq!(accumulator.initial_state().value, 42);
     }
 
     #[test]
@@ -187,7 +221,7 @@ mod tests {
             json!({ "value": 10 }),
         );
         accumulator.accumulate(&mut state, event1);
-        assert_eq!(state, 10);
+        assert_eq!(state.value, 10);
 
         let event2 = ChainEventFactory::data_event(
             WriterId::from(StageId::new()),
@@ -195,7 +229,7 @@ mod tests {
             json!({ "value": 20 }),
         );
         accumulator.accumulate(&mut state, event2);
-        assert_eq!(state, 30);
+        assert_eq!(state.value, 30);
     }
 
     #[test]
@@ -212,16 +246,20 @@ mod tests {
             accumulator.accumulate(&mut state, event);
         }
 
-        assert_eq!(state, 5);
+        assert_eq!(state.value, 5);
     }
 
     #[test]
     fn test_reduce_emit_format() {
-        let accumulator = Reduce::new(100i64, |state: &mut i64, _event: &ChainEvent| {
-            *state += 1;
-        });
+        let accumulator = Reduce::new(105i64, |_state: &mut i64, _event: &ChainEvent| {});
 
-        let state = 105i64;
+        let mut state = accumulator.initial_state();
+        let event = ChainEventFactory::data_event(
+            WriterId::from(StageId::new()),
+            "test",
+            json!({}),
+        );
+        accumulator.accumulate(&mut state, event);
         let emitted = accumulator.emit(&state);
 
         assert_eq!(emitted.len(), 1);
@@ -235,9 +273,10 @@ mod tests {
             *sum += event.payload()["value"].as_i64().unwrap_or(0);
         });
 
-        let mut state = 100i64;
+        let mut state = accumulator.initial_state();
+        state.value = 100;
         accumulator.reset(&mut state);
-        assert_eq!(state, 0);
+        assert_eq!(state.value, 0);
     }
 
     #[test]
@@ -277,10 +316,10 @@ mod tests {
             accumulator.accumulate(&mut state, event);
         }
 
-        assert_eq!(state.count, 4);
-        assert_eq!(state.sum, 50.0);
-        assert_eq!(state.min, 5.0);
-        assert_eq!(state.max, 20.0);
+        assert_eq!(state.value.count, 4);
+        assert_eq!(state.value.sum, 50.0);
+        assert_eq!(state.value.min, 5.0);
+        assert_eq!(state.value.max, 20.0);
     }
 }
 
@@ -404,7 +443,7 @@ where
     S: Clone + Send + Sync + Debug + Serialize + TypedPayload + 'static,
     F: Fn(&mut S, &T) + Send + Sync + Clone + 'static,
 {
-    type State = S;
+    type State = ReduceState<S>;
 
     fn accumulate(&self, state: &mut Self::State, event: ChainEvent) {
         // Step 1: Deserialize ChainEvent → T
@@ -417,24 +456,44 @@ where
         };
 
         // Step 2: Apply reduce function with typed input
-        (self.reduce_fn)(state, &input);
+        (self.reduce_fn)(&mut state.value, &input);
+        state.trace.record_event(&event);
     }
 
     fn initial_state(&self) -> Self::State {
-        self.initial.clone()
+        ReduceState {
+            value: self.initial.clone(),
+            trace: TraceState::default(),
+        }
     }
 
     fn emit(&self, state: &Self::State) -> Vec<ChainEvent> {
-        let payload = serde_json::to_value(state).expect("ReduceTyped failed to serialize state");
-        vec![ChainEventFactory::data_event(
-            self.writer_id,
-            S::EVENT_TYPE,
-            payload,
-        )]
+        if state.trace.is_empty() {
+            return Vec::new();
+        }
+
+        let payload =
+            serde_json::to_value(&state.value).expect("ReduceTyped failed to serialize state");
+        let mut out = ChainEventFactory::data_event(self.writer_id, S::EVENT_TYPE, payload);
+
+        out.causality = CausalityContext {
+            parent_ids: state.trace.parent_ids(),
+        };
+
+        if let Some(ids) = state.trace.mixed_correlation_ids() {
+            out.correlation_ids = Some(ids);
+        } else {
+            out.correlation_id = state.trace.correlation_id();
+            out.correlation_payload = state.trace.correlation_payload();
+            out.replay_context = state.trace.replay_context();
+        }
+
+        vec![out]
     }
 
     fn reset(&self, state: &mut Self::State) {
-        *state = self.initial.clone();
+        state.value = self.initial.clone();
+        state.trace.reset();
     }
 }
 
@@ -551,7 +610,7 @@ mod typed_tests {
             |_stats: &mut TransactionStats, _tx: &Transaction| {},
         );
 
-        assert_eq!(accumulator.initial_state(), initial);
+        assert_eq!(accumulator.initial_state().value, initial);
     }
 
     #[test]
@@ -578,9 +637,9 @@ mod typed_tests {
         );
         accumulator.accumulate(&mut state, event1);
 
-        assert_eq!(state.total_amount, 50.0);
-        assert_eq!(state.total_quantity, 2);
-        assert_eq!(state.transaction_count, 1);
+        assert_eq!(state.value.total_amount, 50.0);
+        assert_eq!(state.value.total_quantity, 2);
+        assert_eq!(state.value.transaction_count, 1);
 
         let event2 = ChainEventFactory::data_event(
             WriterId::from(StageId::new()),
@@ -589,9 +648,9 @@ mod typed_tests {
         );
         accumulator.accumulate(&mut state, event2);
 
-        assert_eq!(state.total_amount, 125.0);
-        assert_eq!(state.total_quantity, 5);
-        assert_eq!(state.transaction_count, 2);
+        assert_eq!(state.value.total_amount, 125.0);
+        assert_eq!(state.value.total_quantity, 5);
+        assert_eq!(state.value.transaction_count, 2);
     }
 
     #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -628,19 +687,23 @@ mod typed_tests {
             accumulator.accumulate(&mut state, event);
         }
 
-        assert_eq!(state.count, 5);
+        assert_eq!(state.value.count, 5);
     }
 
     #[test]
     fn test_reduce_typed_emit_format() {
         let accumulator = ReduceTyped::new(
-            Counter { count: 100 },
-            |counter: &mut Counter, _tx: &Transaction| {
-                counter.count += 1;
-            },
+            Counter { count: 105 },
+            |_counter: &mut Counter, _tx: &Transaction| {},
         );
 
-        let state = Counter { count: 105 };
+        let mut state = accumulator.initial_state();
+        let event = ChainEventFactory::data_event(
+            WriterId::from(StageId::new()),
+            "transaction",
+            json!({ "amount": 1.0, "quantity": 1 }),
+        );
+        accumulator.accumulate(&mut state, event);
         let emitted = accumulator.emit(&state);
 
         assert_eq!(emitted.len(), 1);
@@ -663,14 +726,15 @@ mod typed_tests {
             },
         );
 
-        let mut state = TransactionStats {
+        let mut state = accumulator.initial_state();
+        state.value = TransactionStats {
             total_amount: 1000.0,
             total_quantity: 50,
             transaction_count: 10,
         };
 
         accumulator.reset(&mut state);
-        assert_eq!(state, initial);
+        assert_eq!(state.value, initial);
     }
 
     #[test]
@@ -702,7 +766,7 @@ mod typed_tests {
         accumulator.accumulate(&mut state, invalid_event);
 
         // Only the valid event should have been processed
-        assert_eq!(state.count, 1);
+        assert_eq!(state.value.count, 1);
     }
 
     #[test]
@@ -752,9 +816,9 @@ mod typed_tests {
             accumulator.accumulate(&mut state, event);
         }
 
-        assert_eq!(state.count, 4);
-        assert_eq!(state.sum, 50.0);
-        assert_eq!(state.min, 5.0);
-        assert_eq!(state.max, 20.0);
+        assert_eq!(state.value.count, 4);
+        assert_eq!(state.value.sum, 50.0);
+        assert_eq!(state.value.min, 5.0);
+        assert_eq!(state.value.max, 20.0);
     }
 }

@@ -57,6 +57,15 @@ pub struct ChainEvent {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub correlation_id: Option<CorrelationId>,
 
+    /// Distinct correlation IDs contributing to this derived event.
+    ///
+    /// When a derived event depends on inputs with mixed `correlation_id` values,
+    /// it must not inherit an arbitrary scalar `correlation_id`. In that case
+    /// `correlation_id` is cleared and this field records the distinct IDs
+    /// (sorted, bounded by lineage policy).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub correlation_ids: Option<Vec<CorrelationId>>,
+
     /// Metadata about when/where this correlation entered the flow
     #[serde(skip_serializing_if = "Option::is_none")]
     pub correlation_payload: Option<CorrelationPayload>,

@@ -66,6 +66,7 @@ impl ChainEventFactory {
             processing_info: ProcessingContext::default(),
             intent: None,
             correlation_id: None,
+            correlation_ids: None,
             correlation_payload: None,
             replay_context: None,
             ingress_context: None,

@@ -8,6 +8,7 @@
 // This is the most common aggregation pattern in stream processing.
 
 use super::Accumulator;
+use crate::stages::stateful::strategies::accumulators::trace::TraceState;
 use crate::stages::stateful::strategies::accumulators::wrapper::StatefulWithEmission;
 use crate::stages::stateful::strategies::emissions::{
     EmissionStrategy, EmitAlways, EveryN, OnEOF, TimeWindow,
@@ -15,30 +16,20 @@ use crate::stages::stateful::strategies::emissions::{
 use obzenflow_core::event::context::causality_context::CausalityContext;
 use obzenflow_core::event::ChainEventFactory;
 use obzenflow_core::id::StageId;
-use obzenflow_core::{ChainEvent, EventId, TypedPayload, WriterId};
+use obzenflow_core::{ChainEvent, TypedPayload, WriterId};
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::json;
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::fmt::Debug;
 use std::hash::Hash;
 use std::marker::PhantomData;
 use std::time::Duration;
 
-fn max_lineage_depth() -> usize {
-    // Match `ChainEventFactory::derived_event` defaults.
-    const DEFAULT_MAX_LINEAGE_DEPTH: usize = 100;
-
-    std::env::var("OBZENFLOW_MAX_LINEAGE_DEPTH")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(DEFAULT_MAX_LINEAGE_DEPTH)
-}
-
 #[doc(hidden)]
 #[derive(Clone, Debug)]
 pub struct GroupBucket<S> {
     value: S,
-    parent_ids: VecDeque<EventId>,
+    trace: TraceState,
 }
 
 impl<S> GroupBucket<S>
@@ -48,16 +39,8 @@ where
     fn new() -> Self {
         Self {
             value: S::default(),
-            parent_ids: VecDeque::new(),
+            trace: TraceState::default(),
         }
-    }
-
-    fn record_parent(&mut self, parent_id: EventId) {
-        let max_depth = max_lineage_depth();
-        if self.parent_ids.len() >= max_depth {
-            self.parent_ids.pop_front();
-        }
-        self.parent_ids.push_back(parent_id);
     }
 }
 
@@ -153,7 +136,7 @@ where
                     .or_insert_with(GroupBucket::new);
                 // Apply reduce function
                 (self.reduce_fn)(&event, &mut bucket.value);
-                bucket.record_parent(event.id);
+                bucket.trace.record_event(&event);
             }
             // If key is not a string, we could support other types in the future
             // For now, we silently skip non-string keys
@@ -178,10 +161,16 @@ where
                     }),
                 );
 
-                if !bucket.parent_ids.is_empty() {
-                    out.causality = CausalityContext {
-                        parent_ids: bucket.parent_ids.iter().copied().collect(),
-                    };
+                out.causality = CausalityContext {
+                    parent_ids: bucket.trace.parent_ids(),
+                };
+
+                if let Some(ids) = bucket.trace.mixed_correlation_ids() {
+                    out.correlation_ids = Some(ids);
+                } else {
+                    out.correlation_id = bucket.trace.correlation_id();
+                    out.correlation_payload = bucket.trace.correlation_payload();
+                    out.replay_context = bucket.trace.replay_context();
                 }
 
                 out
@@ -502,8 +491,6 @@ where
     type State = HashMap<K, GroupBucket<S>>;
 
     fn accumulate(&self, state: &mut Self::State, event: ChainEvent) {
-        let parent_id = event.id;
-
         // Step 1: Deserialize ChainEvent → T
         let input: T = match serde_json::from_value(event.payload().clone()) {
             Ok(v) => v,
@@ -519,7 +506,7 @@ where
         // Step 3: Update state using typed function (CORRECTED: state first, value second)
         let bucket = state.entry(key).or_insert_with(GroupBucket::new);
         (self.update_fn)(&mut bucket.value, &input);
-        bucket.record_parent(parent_id);
+        bucket.trace.record_event(&event);
     }
 
     fn initial_state(&self) -> Self::State {
@@ -541,10 +528,16 @@ where
                     }),
                 );
 
-                if !bucket.parent_ids.is_empty() {
-                    out.causality = CausalityContext {
-                        parent_ids: bucket.parent_ids.iter().copied().collect(),
-                    };
+                out.causality = CausalityContext {
+                    parent_ids: bucket.trace.parent_ids(),
+                };
+
+                if let Some(ids) = bucket.trace.mixed_correlation_ids() {
+                    out.correlation_ids = Some(ids);
+                } else {
+                    out.correlation_id = bucket.trace.correlation_id();
+                    out.correlation_payload = bucket.trace.correlation_payload();
+                    out.replay_context = bucket.trace.replay_context();
                 }
 
                 out

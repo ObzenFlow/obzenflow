@@ -14,8 +14,12 @@ use crate::stages::stateful::strategies::emissions::{
 };
 use crate::typing::StatefulTyping;
 use obzenflow_core::event::ChainEventFactory;
+use obzenflow_core::event::ChainEventContent;
+use obzenflow_core::event::context::causality_context::CausalityContext;
+use obzenflow_core::event::context::ReplayContext;
+use obzenflow_core::event::payloads::correlation_payload::CorrelationPayload;
 use obzenflow_core::id::StageId;
-use obzenflow_core::{ChainEvent, TypedPayload, WriterId};
+use obzenflow_core::{ChainEvent, EventId, TypedPayload, WriterId};
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::time::Duration;
@@ -79,8 +83,23 @@ impl Accumulator for Conflate {
     }
 
     fn emit(&self, state: &Self::State) -> Vec<ChainEvent> {
-        // Emit all latest values
-        state.values().cloned().collect()
+        state
+            .values()
+            .filter_map(|event| match &event.content {
+                ChainEventContent::Data { event_type, payload } => {
+                    let mut out =
+                        ChainEventFactory::data_event(self.writer_id, event_type, payload.clone());
+
+                    out.causality = CausalityContext::with_parent(event.id);
+                    out.correlation_id = event.correlation_id;
+                    out.correlation_payload = event.correlation_payload.clone();
+                    out.replay_context = event.replay_context.clone();
+
+                    Some(out)
+                }
+                _ => None,
+            })
+            .collect()
     }
 
     fn reset(&self, state: &mut Self::State) {
@@ -388,7 +407,7 @@ where
     K: Hash + Eq + Clone + Debug + Serialize + Send + Sync + 'static,
     FKey: Fn(&T) -> K + Send + Sync + Clone + 'static,
 {
-    type State = HashMap<K, T>;
+    type State = HashMap<K, ConflateTypedBucket<T>>;
 
     fn accumulate(&self, state: &mut Self::State, event: ChainEvent) {
         // Step 1: Deserialize ChainEvent → T
@@ -404,7 +423,16 @@ where
         let key = (self.key_fn)(&input);
 
         // Step 3: Store latest value (overwrites previous)
-        state.insert(key, input);
+        state.insert(
+            key,
+            ConflateTypedBucket {
+                value: input,
+                source_event_id: event.id,
+                correlation_id: event.correlation_id,
+                correlation_payload: event.correlation_payload.clone(),
+                replay_context: event.replay_context.clone(),
+            },
+        );
     }
 
     fn initial_state(&self) -> Self::State {
@@ -412,12 +440,21 @@ where
     }
 
     fn emit(&self, state: &Self::State) -> Vec<ChainEvent> {
-        // Emit all latest values as typed events
+        // Emit all latest values as derived typed events, parented to the
+        // originating input for each key.
         state
             .values()
             .map(|value| {
-                let payload = serde_json::to_value(value).unwrap_or(serde_json::Value::Null);
-                ChainEventFactory::data_event(self.writer_id, T::EVENT_TYPE, payload)
+                let payload =
+                    serde_json::to_value(&value.value).unwrap_or(serde_json::Value::Null);
+                let mut out = ChainEventFactory::data_event(self.writer_id, T::EVENT_TYPE, payload);
+
+                out.causality = CausalityContext::with_parent(value.source_event_id);
+                out.correlation_id = value.correlation_id;
+                out.correlation_payload = value.correlation_payload.clone();
+                out.replay_context = value.replay_context.clone();
+
+                out
             })
             .collect()
     }
@@ -425,6 +462,18 @@ where
     fn reset(&self, state: &mut Self::State) {
         state.clear();
     }
+}
+
+#[derive(Clone, Debug)]
+pub struct ConflateTypedBucket<T>
+where
+    T: Clone + Send + Sync + Debug,
+{
+    value: T,
+    source_event_id: EventId,
+    correlation_id: Option<obzenflow_core::event::types::CorrelationId>,
+    correlation_payload: Option<CorrelationPayload>,
+    replay_context: Option<ReplayContext>,
 }
 
 /// Builder pattern methods for combining with emission strategies
@@ -545,7 +594,7 @@ mod typed_tests {
         accumulator.accumulate(&mut state, event1);
 
         assert_eq!(state.len(), 1);
-        assert_eq!(state["sensor_1"].temperature, 20.5);
+        assert_eq!(state["sensor_1"].value.temperature, 20.5);
 
         // Second reading for sensor_1 (should overwrite)
         let reading2 = SensorReading {
@@ -562,8 +611,8 @@ mod typed_tests {
 
         // Should still have 1 entry, but with updated value
         assert_eq!(state.len(), 1);
-        assert_eq!(state["sensor_1"].temperature, 21.0);
-        assert_eq!(state["sensor_1"].timestamp, 2000);
+        assert_eq!(state["sensor_1"].value.temperature, 21.0);
+        assert_eq!(state["sensor_1"].value.timestamp, 2000);
     }
 
     #[test]
@@ -595,12 +644,12 @@ mod typed_tests {
 
         // Should have 3 sensors with their latest values
         assert_eq!(state.len(), 3);
-        assert_eq!(state["sensor_1"].temperature, 21.0);
-        assert_eq!(state["sensor_1"].timestamp, 2000);
-        assert_eq!(state["sensor_2"].temperature, 19.0);
-        assert_eq!(state["sensor_2"].timestamp, 3000);
-        assert_eq!(state["sensor_3"].temperature, 22.5);
-        assert_eq!(state["sensor_3"].timestamp, 2001);
+        assert_eq!(state["sensor_1"].value.temperature, 21.0);
+        assert_eq!(state["sensor_1"].value.timestamp, 2000);
+        assert_eq!(state["sensor_2"].value.temperature, 19.0);
+        assert_eq!(state["sensor_2"].value.timestamp, 3000);
+        assert_eq!(state["sensor_3"].value.temperature, 22.5);
+        assert_eq!(state["sensor_3"].value.timestamp, 2001);
     }
 
     #[test]
@@ -732,11 +781,11 @@ mod typed_tests {
 
         // Should have 3 users with their latest status
         assert_eq!(state.len(), 3);
-        assert_eq!(state[&1].status, "away");
-        assert_eq!(state[&1].last_seen, 2000);
-        assert_eq!(state[&2].status, "online");
-        assert_eq!(state[&2].last_seen, 3000);
-        assert_eq!(state[&3].status, "online");
-        assert_eq!(state[&3].last_seen, 2001);
+        assert_eq!(state[&1].value.status, "away");
+        assert_eq!(state[&1].value.last_seen, 2000);
+        assert_eq!(state[&2].value.status, "online");
+        assert_eq!(state[&2].value.last_seen, 3000);
+        assert_eq!(state[&3].value.status, "online");
+        assert_eq!(state[&3].value.last_seen, 2001);
     }
 }

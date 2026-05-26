@@ -211,12 +211,15 @@ pub(super) async fn dispatch_accumulating<
                         }
                         ControlResolution::Suppress => EventLoopDirective::Continue,
                         ControlResolution::BufferAtEntryPoint { .. } => {
-                            tracing::warn!(
+                            tracing::error!(
                                 stage_name = %ctx.stage_name,
                                 event_type = envelope.event.event_type(),
                                 "Stateful stage received entry-point buffering resolution without cycle config"
                             );
-                            EventLoopDirective::Continue
+                            EventLoopDirective::Transition(StatefulEvent::Error(format!(
+                                "Stateful stage reached cycle-entry buffering without cycle config: {}",
+                                envelope.event.event_type()
+                            )))
                         }
                         ControlResolution::Delay(_) => {
                             unreachable!("Delay is handled before executing the resolution")

@@ -9,7 +9,9 @@
 // like "top products by sales", "top users by activity", etc.
 
 use super::Accumulator;
+use crate::stages::stateful::strategies::accumulators::trace::TraceState;
 use obzenflow_core::event::chain_event::ChainEventFactory;
+use obzenflow_core::event::context::causality_context::CausalityContext;
 use obzenflow_core::id::StageId;
 use obzenflow_core::{ChainEvent, TypedPayload, WriterId};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
@@ -194,6 +196,7 @@ pub struct TopNByState {
     items: HashMap<String, AggregatedItem>,
     /// Maximum number of items to emit
     capacity: usize,
+    trace: TraceState,
 }
 
 // Implementation for FieldExtractor (simple string-based API)
@@ -221,6 +224,8 @@ impl Accumulator for TopNBy<FieldExtractor, FieldExtractor> {
                     count: 1,
                     metadata: event.payload().clone(),
                 });
+
+            state.trace.record_event(&event);
         }
     }
 
@@ -228,6 +233,7 @@ impl Accumulator for TopNBy<FieldExtractor, FieldExtractor> {
         TopNByState {
             items: HashMap::new(),
             capacity: self.n,
+            trace: TraceState::default(),
         }
     }
 
@@ -237,6 +243,7 @@ impl Accumulator for TopNBy<FieldExtractor, FieldExtractor> {
 
     fn reset(&self, state: &mut Self::State) {
         state.items.clear();
+        state.trace.reset();
     }
 }
 
@@ -269,6 +276,8 @@ where
                     count: 1,
                     metadata: event.payload().clone(),
                 });
+
+            state.trace.record_event(&event);
         }
     }
 
@@ -276,6 +285,7 @@ where
         TopNByState {
             items: HashMap::new(),
             capacity: self.n,
+            trace: TraceState::default(),
         }
     }
 
@@ -285,11 +295,19 @@ where
 
     fn reset(&self, state: &mut Self::State) {
         state.items.clear();
+        state.trace.reset();
     }
 }
 
 // Shared emit function
 fn emit_top_n(state: &TopNByState, writer_id: WriterId) -> Vec<ChainEvent> {
+    if state.items.is_empty() {
+        return Vec::new();
+    }
+    if state.trace.is_empty() {
+        return Vec::new();
+    }
+
     // Build a min-heap to find top N
     let mut heap: BinaryHeap<Reverse<AggregatedItem>> = BinaryHeap::new();
 
@@ -311,7 +329,7 @@ fn emit_top_n(state: &TopNByState, writer_id: WriterId) -> Vec<ChainEvent> {
     });
 
     // Create event with top N results
-    vec![ChainEventFactory::data_event(
+    let mut out = ChainEventFactory::data_event(
         writer_id,
         "top_n_by_result",
         json!({
@@ -328,7 +346,21 @@ fn emit_top_n(state: &TopNByState, writer_id: WriterId) -> Vec<ChainEvent> {
             "total_items": state.items.len(),
             "capacity": state.capacity,
         }),
-    )]
+    );
+
+    out.causality = CausalityContext {
+        parent_ids: state.trace.parent_ids(),
+    };
+
+    if let Some(ids) = state.trace.mixed_correlation_ids() {
+        out.correlation_ids = Some(ids);
+    } else {
+        out.correlation_id = state.trace.correlation_id();
+        out.correlation_payload = state.trace.correlation_payload();
+        out.replay_context = state.trace.replay_context();
+    }
+
+    vec![out]
 }
 
 /// Builder extensions for field-based TopNBy
@@ -676,6 +708,7 @@ pub struct TopNByTypedState {
     items: HashMap<String, AggregatedTypedItem>,
     /// Maximum number of items to emit
     capacity: usize,
+    trace: TraceState,
 }
 
 impl<T, K, FKey, FScore> Accumulator for TopNByTyped<T, K, FKey, FScore>
@@ -726,16 +759,26 @@ where
                 count: 1,
                 metadata: serialized,
             });
+
+        state.trace.record_event(&event);
     }
 
     fn initial_state(&self) -> Self::State {
         TopNByTypedState {
             items: HashMap::new(),
             capacity: self.n,
+            trace: TraceState::default(),
         }
     }
 
     fn emit(&self, state: &Self::State) -> Vec<ChainEvent> {
+        if state.items.is_empty() {
+            return Vec::new();
+        }
+        if state.trace.is_empty() {
+            return Vec::new();
+        }
+
         // Convert to vec and sort by total_score descending
         let mut items: Vec<_> = state.items.values().cloned().collect();
         items.sort_by(|a, b| {
@@ -748,7 +791,7 @@ where
         let top_n: Vec<_> = items.into_iter().take(state.capacity).collect();
 
         // Create result event
-        vec![ChainEventFactory::data_event(
+        let mut out = ChainEventFactory::data_event(
             self.writer_id,
             T::EVENT_TYPE,
             json!({
@@ -765,11 +808,26 @@ where
                 "total_items": state.items.len(),
                 "capacity": state.capacity,
             }),
-        )]
+        );
+
+        out.causality = CausalityContext {
+            parent_ids: state.trace.parent_ids(),
+        };
+
+        if let Some(ids) = state.trace.mixed_correlation_ids() {
+            out.correlation_ids = Some(ids);
+        } else {
+            out.correlation_id = state.trace.correlation_id();
+            out.correlation_payload = state.trace.correlation_payload();
+            out.replay_context = state.trace.replay_context();
+        }
+
+        vec![out]
     }
 
     fn reset(&self, state: &mut Self::State) {
         state.items.clear();
+        state.trace.reset();
     }
 }
 

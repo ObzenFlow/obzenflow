@@ -17,6 +17,7 @@ pub mod group_by;
 pub mod reduce;
 pub mod top_n;
 pub mod top_n_by;
+mod trace;
 pub mod wrapper;
 
 pub use conflate::{Conflate, ConflateTyped};

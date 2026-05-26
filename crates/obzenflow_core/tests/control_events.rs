@@ -160,6 +160,7 @@ fn test_direct_chain_event_construction() {
         processing_info: Default::default(),
         intent: None,
         correlation_id: None,
+        correlation_ids: None,
         correlation_payload: None,
         replay_context: None,
         ingress_context: None,

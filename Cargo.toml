@@ -225,6 +225,6 @@ path = "tests/cycle_convergence_eof_gating_test.rs"
 required-features = ["test-support"]
 
 [[test]]
-name = "stateful_processing_time_window_test"
-path = "tests/stateful_processing_time_window_test.rs"
+name = "stateful_emit_within_window_test"
+path = "tests/stateful_emit_within_window_test.rs"
 required-features = ["test-support"]
