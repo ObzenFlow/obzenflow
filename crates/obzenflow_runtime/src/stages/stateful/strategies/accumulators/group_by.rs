@@ -149,7 +149,7 @@ where
     }
 
     fn emit(&self, state: &Self::State) -> Vec<ChainEvent> {
-        state
+        let mut events: Vec<ChainEvent> = state
             .iter()
             .map(|(key, bucket)| {
                 let mut out = ChainEventFactory::data_event(
@@ -175,7 +175,9 @@ where
 
                 out
             })
-            .collect()
+            .collect();
+        super::sort_emitted_by_first_parent(&mut events);
+        events
     }
 
     fn reset(&self, state: &mut Self::State) {
@@ -350,6 +352,42 @@ mod tests {
     }
 
     #[test]
+    fn test_groupby_emit_order_is_deterministic_by_first_parent() {
+        let accumulator = GroupBy::new("category", |_e: &ChainEvent, stats: &mut TestStats| {
+            stats.count += 1;
+        });
+        let mut state = accumulator.initial_state();
+
+        // Insert keys out of order; emission must not depend on HashMap iteration.
+        for category in ["d", "a", "c", "b", "a", "d"] {
+            let event = ChainEventFactory::data_event(
+                WriterId::from(StageId::new()),
+                "test",
+                json!({ "category": category }),
+            );
+            accumulator.accumulate(&mut state, event);
+        }
+
+        let emitted = accumulator.emit(&state);
+        assert_eq!(emitted.len(), 4);
+
+        let firsts: Vec<_> = emitted
+            .iter()
+            .map(|e| e.causality.parent_ids.first().copied())
+            .collect();
+        let mut sorted = firsts.clone();
+        sorted.sort();
+        assert_eq!(
+            firsts, sorted,
+            "aggregates must be emitted sorted by oldest contributing event id"
+        );
+        assert!(
+            firsts.iter().all(|f| f.is_some()),
+            "every aggregate must carry at least one parent id"
+        );
+    }
+
+    #[test]
     fn test_groupby_reset() {
         let accumulator = GroupBy::new("category", |_event: &ChainEvent, stats: &mut TestStats| {
             stats.count += 1;
@@ -514,7 +552,7 @@ where
     }
 
     fn emit(&self, state: &Self::State) -> Vec<ChainEvent> {
-        state
+        let mut events: Vec<ChainEvent> = state
             .iter()
             .map(|(key, bucket)| {
                 let key_json = serde_json::to_value(key).unwrap_or(serde_json::Value::Null);
@@ -542,7 +580,9 @@ where
 
                 out
             })
-            .collect()
+            .collect();
+        super::sort_emitted_by_first_parent(&mut events);
+        events
     }
 
     fn reset(&self, state: &mut Self::State) {
@@ -797,6 +837,40 @@ mod typed_tests {
             assert!(result.get("total_items").is_some());
             assert!(result.get("total_revenue").is_some());
         }
+    }
+
+    #[test]
+    fn test_groupby_typed_emit_order_is_deterministic_by_first_parent() {
+        let accumulator = GroupByTyped::new(
+            |product: &Product| product.category.clone(),
+            |stats: &mut CategoryStats, product: &Product| {
+                stats.total_items += product.quantity as u64;
+            },
+        );
+        let mut state = accumulator.initial_state();
+
+        for category in ["d", "a", "c", "b"] {
+            let event = ChainEventFactory::data_event(
+                WriterId::from(StageId::new()),
+                "product",
+                json!({ "category": category, "price": 1, "quantity": 1 }),
+            );
+            accumulator.accumulate(&mut state, event);
+        }
+
+        let emitted = accumulator.emit(&state);
+        assert_eq!(emitted.len(), 4);
+
+        let firsts: Vec<_> = emitted
+            .iter()
+            .map(|e| e.causality.parent_ids.first().copied())
+            .collect();
+        let mut sorted = firsts.clone();
+        sorted.sort();
+        assert_eq!(
+            firsts, sorted,
+            "typed aggregates must be emitted sorted by oldest contributing event id"
+        );
     }
 
     #[test]

@@ -83,7 +83,7 @@ impl Accumulator for Conflate {
     }
 
     fn emit(&self, state: &Self::State) -> Vec<ChainEvent> {
-        state
+        let mut events: Vec<ChainEvent> = state
             .values()
             .filter_map(|event| match &event.content {
                 ChainEventContent::Data {
@@ -102,7 +102,9 @@ impl Accumulator for Conflate {
                 }
                 _ => None,
             })
-            .collect()
+            .collect();
+        super::sort_emitted_by_first_parent(&mut events);
+        events
     }
 
     fn reset(&self, state: &mut Self::State) {
@@ -264,6 +266,36 @@ mod tests {
         assert!(values.contains(&10));
         assert!(values.contains(&20));
         assert!(values.contains(&30));
+    }
+
+    #[test]
+    fn test_conflate_emit_order_is_deterministic_by_first_parent() {
+        let accumulator = Conflate::new("sensor_id");
+        let mut state = accumulator.initial_state();
+
+        for sensor in ["s_d", "s_a", "s_c", "s_b"] {
+            let event = ChainEventFactory::data_event(
+                WriterId::from(StageId::new()),
+                "reading",
+                json!({ "sensor_id": sensor, "value": 1 }),
+            );
+            accumulator.accumulate(&mut state, event);
+        }
+
+        let emitted = accumulator.emit(&state);
+        assert_eq!(emitted.len(), 4);
+
+        let firsts: Vec<_> = emitted
+            .iter()
+            .map(|e| e.causality.parent_ids.first().copied())
+            .collect();
+        let mut sorted = firsts.clone();
+        sorted.sort();
+        assert_eq!(
+            firsts, sorted,
+            "conflated snapshots must be emitted sorted by retained event id"
+        );
+        assert!(firsts.iter().all(|f| f.is_some()));
     }
 
     #[test]
@@ -445,7 +477,7 @@ where
     fn emit(&self, state: &Self::State) -> Vec<ChainEvent> {
         // Emit all latest values as derived typed events, parented to the
         // originating input for each key.
-        state
+        let mut events: Vec<ChainEvent> = state
             .values()
             .map(|value| {
                 let payload = serde_json::to_value(&value.value).unwrap_or(serde_json::Value::Null);
@@ -458,7 +490,9 @@ where
 
                 out
             })
-            .collect()
+            .collect();
+        super::sort_emitted_by_first_parent(&mut events);
+        events
     }
 
     fn reset(&self, state: &mut Self::State) {
@@ -687,6 +721,40 @@ mod typed_tests {
         assert!(temperatures.contains(&10.0));
         assert!(temperatures.contains(&20.0));
         assert!(temperatures.contains(&30.0));
+    }
+
+    #[test]
+    fn test_conflate_typed_emit_order_is_deterministic_by_first_parent() {
+        let accumulator = ConflateTyped::new(|r: &SensorReading| r.sensor_id.clone());
+        let mut state = accumulator.initial_state();
+
+        for sensor in ["s_d", "s_a", "s_c", "s_b"] {
+            let reading = SensorReading {
+                sensor_id: sensor.to_string(),
+                temperature: 1.0,
+                timestamp: 1,
+            };
+            let event = ChainEventFactory::data_event(
+                WriterId::from(StageId::new()),
+                "reading",
+                serde_json::to_value(&reading).unwrap(),
+            );
+            accumulator.accumulate(&mut state, event);
+        }
+
+        let emitted = accumulator.emit(&state);
+        assert_eq!(emitted.len(), 4);
+
+        let firsts: Vec<_> = emitted
+            .iter()
+            .map(|e| e.causality.parent_ids.first().copied())
+            .collect();
+        let mut sorted = firsts.clone();
+        sorted.sort();
+        assert_eq!(
+            firsts, sorted,
+            "typed conflated snapshots must be emitted sorted by retained event id"
+        );
     }
 
     #[test]

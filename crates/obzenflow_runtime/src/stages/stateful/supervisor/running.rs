@@ -297,21 +297,21 @@ pub(super) async fn dispatch_accumulating<
                         );
                     }
 
-                    // Check if we should emit based on updated state
+                    // Backpressure ack: upstream input was consumed into state.
+                    //
+                    // Note: This is intentionally independent of emission. Emission is driven by
+                    // accumulator state (and can also be timer-driven), whereas backpressure acks
+                    // reflect input consumption on the upstream edge.
+                    if let Some(upstream) = upstream_stage {
+                        if let Some(reader) = ctx.backpressure_readers.get(&upstream) {
+                            reader.ack_consumed(1);
+                        }
+                    }
+
+                    // Check if we should emit based on updated state.
                     if handler.should_emit(&mut ctx.current_state) {
                         EventLoopDirective::Transition(StatefulEvent::ShouldEmit)
                     } else {
-                        // Backpressure ack: upstream input was consumed into state.
-                        let upstream_stage = sup
-                            .subscription
-                            .as_ref()
-                            .and_then(|subscription| subscription.last_delivered_upstream_stage());
-                        if let Some(upstream) = upstream_stage {
-                            if let Some(reader) = ctx.backpressure_readers.get(&upstream) {
-                                reader.ack_consumed(1);
-                            }
-                        }
-
                         EventLoopDirective::Continue
                     }
                 }
