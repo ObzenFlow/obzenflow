@@ -647,7 +647,7 @@ where
         CollectByInputState::new()
     }
 
-    fn should_emit(&self, state: &Self::State) -> bool {
+    fn should_emit(&self, state: &mut Self::State) -> bool {
         if !state.pending_errors.is_empty() || !state.ready.is_empty() {
             return true;
         }
@@ -904,7 +904,7 @@ mod tests {
             tagged_partial_event(job_key, 1, 2, TestPartial { value: 20 }),
         );
 
-        assert!(collector.should_emit(&state));
+        assert!(collector.should_emit(&mut state));
         let out = collector.emit(&mut state).expect("emit should succeed");
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].event_type(), TestCollected::versioned_event_type());
@@ -939,7 +939,7 @@ mod tests {
         );
         collector.accumulate(&mut state, manifest_event(job_key, 1));
 
-        assert!(collector.should_emit(&state));
+        assert!(collector.should_emit(&mut state));
         let out = collector.emit(&mut state).expect("emit should succeed");
         assert_eq!(out.len(), 1);
         assert_eq!(
@@ -980,7 +980,7 @@ mod tests {
             tagged_partial_event(job_key, 1, 2, TestPartial { value: 2 }),
         );
 
-        assert!(collector.should_emit(&state));
+        assert!(collector.should_emit(&mut state));
         let out = collector.emit(&mut state).expect("emit should succeed");
         let collected: TestCollected =
             serde_json::from_value(out[0].payload()).expect("collected decode");
@@ -1004,7 +1004,7 @@ mod tests {
 
         collector.accumulate(&mut state, manifest_event(job_key, 0));
 
-        assert!(collector.should_emit(&state));
+        assert!(collector.should_emit(&mut state));
         let out = collector.emit(&mut state).expect("emit should succeed");
         let collected: TestCollected =
             serde_json::from_value(out[0].payload()).expect("collected decode");
@@ -1028,7 +1028,7 @@ mod tests {
             chunk_failed_event(job_key, 0, 2, "terminal map failure"),
         );
 
-        assert!(collector.should_emit(&state));
+        assert!(collector.should_emit(&mut state));
         let out = collector.emit(&mut state).expect("emit should succeed");
         assert_eq!(out.len(), 1);
         assert_eq!(
@@ -1067,7 +1067,7 @@ mod tests {
             tagged_partial_event(job2, 0, 1, TestPartial { value: 2 }),
         );
 
-        assert!(collector.should_emit(&state));
+        assert!(collector.should_emit(&mut state));
         let out = collector.emit(&mut state).expect("emit should succeed");
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].event_type(), JOB_CAPACITY_EXCEEDED_EVENT_TYPE);
@@ -1098,7 +1098,7 @@ mod tests {
         }
 
         // First emit run detects expiry and enqueues an error.
-        assert!(collector.should_emit(&state));
+        assert!(collector.should_emit(&mut state));
         let out = collector.emit(&mut state).expect("emit should succeed");
         assert!(out.is_empty());
         assert!(!state.pending_errors.is_empty());
@@ -1127,7 +1127,7 @@ mod tests {
             tagged_partial_event(job_key, 2, 2, TestPartial { value: 1 }),
         );
 
-        assert!(collector.should_emit(&state));
+        assert!(collector.should_emit(&mut state));
         let out = collector.emit(&mut state).expect("emit should succeed");
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].event_type(), JOB_FAILED_EVENT_TYPE);

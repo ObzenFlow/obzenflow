@@ -1593,3 +1593,114 @@ async fn transport_only_skips_observability_events() {
     assert_eq!(outcome.eof_count, 1);
     assert_eq!(outcome.total_readers, 1);
 }
+
+#[tokio::test]
+async fn forwarded_eof_with_missing_writer_is_not_terminal() {
+    let upstream_stage = StageId::new();
+    let upstream_owner = JournalOwner::stage(upstream_stage);
+    let upstream_journal: Arc<dyn Journal<ChainEvent>> = Arc::new(TestJournal::new(upstream_owner));
+
+    let upstream_writer_id = WriterId::Stage(upstream_stage);
+
+    // Simulate an EOF forwarded into this upstream journal but with a missing payload writer_id.
+    // This must not cause the downstream reader to treat the upstream as complete.
+    let forwarded_writer_id = WriterId::Stage(StageId::new());
+
+    upstream_journal
+        .append(
+            ChainEventFactory::data_event(upstream_writer_id, "test.event", json!({"n": 1})),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let mut forwarded_eof = ChainEventFactory::eof_event(forwarded_writer_id, true);
+    if let ChainEventContent::FlowControl(FlowControlPayload::Eof { writer_id, .. }) =
+        &mut forwarded_eof.content
+    {
+        *writer_id = None;
+    }
+
+    upstream_journal.append(forwarded_eof, None).await.unwrap();
+
+    // If the forwarded EOF were treated as terminal, this would never be observed.
+    upstream_journal
+        .append(
+            ChainEventFactory::data_event(upstream_writer_id, "test.event", json!({"n": 2})),
+            None,
+        )
+        .await
+        .unwrap();
+
+    // The authoritative EOF for this upstream.
+    upstream_journal
+        .append(ChainEventFactory::eof_event(upstream_writer_id, true), None)
+        .await
+        .unwrap();
+
+    let upstreams = [(upstream_stage, "upstream".to_string(), upstream_journal)];
+
+    let mut subscription = UpstreamSubscription::new_with_names("test_owner", &upstreams)
+        .await
+        .unwrap()
+        .transport_only();
+
+    let mut reader_progress = [ReaderProgress::new(upstream_stage)];
+
+    let first = subscription
+        .poll_next_with_state("test_fsm", Some(&mut reader_progress[..]))
+        .await;
+    match first {
+        PollResult::Event(env) => match env.event.content {
+            ChainEventContent::Data { .. } => {}
+            other => panic!("expected first delivered event to be Data, got {other:?}"),
+        },
+        other => panic!("expected PollResult::Event, got {other:?}"),
+    }
+
+    let second = subscription
+        .poll_next_with_state("test_fsm", Some(&mut reader_progress[..]))
+        .await;
+    match second {
+        PollResult::Event(env) => match env.event.content {
+            ChainEventContent::FlowControl(FlowControlPayload::Eof { .. }) => {}
+            other => panic!("expected second delivered event to be EOF, got {other:?}"),
+        },
+        other => panic!("expected PollResult::Event, got {other:?}"),
+    }
+
+    assert!(
+        subscription.take_last_eof_outcome().is_none(),
+        "expected forwarded EOF with missing writer_id to be non-terminal"
+    );
+
+    let third = subscription
+        .poll_next_with_state("test_fsm", Some(&mut reader_progress[..]))
+        .await;
+    match third {
+        PollResult::Event(env) => match env.event.content {
+            ChainEventContent::Data { .. } => {}
+            other => panic!("expected third delivered event to be Data, got {other:?}"),
+        },
+        other => panic!("expected PollResult::Event, got {other:?}"),
+    }
+
+    let fourth = subscription
+        .poll_next_with_state("test_fsm", Some(&mut reader_progress[..]))
+        .await;
+    match fourth {
+        PollResult::Event(env) => match env.event.content {
+            ChainEventContent::FlowControl(FlowControlPayload::Eof { .. }) => {}
+            other => panic!("expected fourth delivered event to be EOF, got {other:?}"),
+        },
+        other => panic!("expected PollResult::Event, got {other:?}"),
+    }
+
+    let outcome = subscription
+        .take_last_eof_outcome()
+        .expect("expected subscription to mark authoritative EOF");
+    assert!(outcome.is_final);
+    assert_eq!(outcome.stage_id, upstream_stage);
+    assert_eq!(outcome.eof_count, 1);
+    assert_eq!(outcome.total_readers, 1);
+}

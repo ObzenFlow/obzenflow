@@ -251,7 +251,11 @@ where
         ProcessingTimeWindowState::default()
     }
 
-    fn should_emit(&self, state: &Self::State) -> bool {
+    fn emit_interval_hint(&self) -> Option<Duration> {
+        Some(self.window_duration)
+    }
+
+    fn should_emit(&self, state: &mut Self::State) -> bool {
         if state.emit_pending {
             return true;
         }

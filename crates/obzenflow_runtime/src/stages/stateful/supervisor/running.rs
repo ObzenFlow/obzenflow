@@ -295,7 +295,7 @@ pub(super) async fn dispatch_accumulating<
                     }
 
                     // Check if we should emit based on updated state
-                    if handler.should_emit(&ctx.current_state) {
+                    if handler.should_emit(&mut ctx.current_state) {
                         EventLoopDirective::Transition(StatefulEvent::ShouldEmit)
                     } else {
                         // Backpressure ack: upstream input was consumed into state.
@@ -397,7 +397,7 @@ pub(super) async fn dispatch_accumulating<
             {
                 if baseline.elapsed() >= interval {
                     let handler = (*ctx.handler).clone();
-                    if handler.should_emit(&ctx.current_state) {
+                    if handler.should_emit(&mut ctx.current_state) {
                         directive = EventLoopDirective::Transition(StatefulEvent::ShouldEmit);
                     }
 

@@ -21,7 +21,7 @@ use obzenflow_core::event::CorrelationId;
 use obzenflow_core::ChainEvent;
 use obzenflow_core::EventId;
 use std::fmt::Debug;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 #[derive(Clone, Debug)]
 pub struct LineageParent {
@@ -62,16 +62,16 @@ fn propagate_lineage(parent: &LineageParent, events: &mut [ChainEvent]) {
             continue;
         }
 
-        if event.correlation_id.is_none() {
-            event.correlation_id = parent.correlation_id;
-            event.correlation_payload = parent.correlation_payload.clone();
-        }
-
-        if event.replay_context.is_none() {
-            event.replay_context = parent.replay_context.clone();
-        }
-
         if event.causality.is_root() {
+            if event.correlation_id.is_none() {
+                event.correlation_id = parent.correlation_id;
+                event.correlation_payload = parent.correlation_payload.clone();
+            }
+
+            if event.replay_context.is_none() {
+                event.replay_context = parent.replay_context.clone();
+            }
+
             let mut causality = CausalityContext::with_parent(parent.id);
 
             // Propagate ancestors up to depth limit (parent already counts as depth=1).
@@ -202,10 +202,14 @@ where
         state.events_seen += 1;
     }
 
-    fn should_emit(&self, state: &Self::State) -> bool {
-        // Use mutable clone to check (some strategies need to update internal state)
-        let mut emission = state.emission.clone();
-        emission.should_emit(state.events_seen, state.last_emit)
+    fn emit_interval_hint(&self) -> Option<Duration> {
+        self.initial_emission.emit_interval_hint()
+    }
+
+    fn should_emit(&self, state: &mut Self::State) -> bool {
+        state
+            .emission
+            .should_emit(state.events_seen, state.last_emit)
     }
 
     fn emit(&self, state: &mut Self::State) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
@@ -214,6 +218,11 @@ where
 
         if let Some(parent) = state.lineage_parent.as_ref() {
             propagate_lineage(parent, &mut events);
+        }
+
+        if state.emission.resets_accumulator_on_emit() {
+            self.accumulator.reset(&mut state.inner);
+            state.lineage_parent = None;
         }
 
         // Reset emission strategy
@@ -276,6 +285,88 @@ where
 }
 
 #[cfg(test)]
+mod time_window_tests {
+    use super::*;
+    use crate::stages::stateful::strategies::emissions::TimeWindow;
+    use obzenflow_core::event::chain_event::ChainEventFactory;
+    use obzenflow_core::id::StageId;
+    use obzenflow_core::WriterId;
+    use serde_json::json;
+    use std::time::Duration;
+
+    #[derive(Clone, Debug)]
+    struct Counter;
+
+    impl Accumulator for Counter {
+        type State = u64;
+
+        fn accumulate(&self, state: &mut Self::State, _event: ChainEvent) {
+            *state += 1;
+        }
+
+        fn initial_state(&self) -> Self::State {
+            0
+        }
+
+        fn emit(&self, state: &Self::State) -> Vec<ChainEvent> {
+            vec![ChainEventFactory::data_event(
+                WriterId::from(StageId::new()),
+                "test.counter",
+                json!({ "count": state }),
+            )]
+        }
+
+        fn reset(&self, state: &mut Self::State) {
+            *state = 0;
+        }
+    }
+
+    #[test]
+    fn stateful_with_emission_should_emit_persists_time_window_state() {
+        let handler =
+            StatefulWithEmission::new(Counter, TimeWindow::new(Duration::from_millis(20)));
+        let mut state = handler.initial_state();
+
+        assert!(
+            !handler.should_emit(&mut state),
+            "expected initial should_emit to be false"
+        );
+
+        std::thread::sleep(Duration::from_millis(30));
+
+        assert!(
+            handler.should_emit(&mut state),
+            "expected should_emit to become true after duration has elapsed"
+        );
+    }
+
+    #[test]
+    fn stateful_with_emission_emit_within_resets_accumulator_after_periodic_emit() {
+        let mut handler =
+            StatefulWithEmission::new(Counter, TimeWindow::new(Duration::from_millis(20)));
+        let mut state = handler.initial_state();
+
+        for _ in 0..3 {
+            handler.accumulate(
+                &mut state,
+                ChainEventFactory::data_event(
+                    WriterId::from(StageId::new()),
+                    "test.in",
+                    json!({ "n": 1 }),
+                ),
+            );
+        }
+
+        let _ = handler.emit(&mut state).expect("expected emit to succeed");
+
+        assert_eq!(
+            state.inner, 0,
+            "expected accumulator state to reset after a periodic time-window emit"
+        );
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::stages::stateful::strategies::accumulators::{GroupBy, Reduce};
@@ -309,7 +400,7 @@ mod tests {
             json!({ "category": "A" }),
         );
         handler.accumulate(&mut state, event1);
-        assert!(!handler.should_emit(&state)); // OnEOF doesn't emit during processing
+        assert!(!handler.should_emit(&mut state)); // OnEOF doesn't emit during processing
 
         let event2 = ChainEventFactory::data_event(
             WriterId::from(StageId::new()),
@@ -317,12 +408,12 @@ mod tests {
             json!({ "category": "B" }),
         );
         handler.accumulate(&mut state, event2);
-        assert!(!handler.should_emit(&state));
+        assert!(!handler.should_emit(&mut state));
 
         // Send EOF to trigger emission
         let eof_event = ChainEventFactory::eof_event(WriterId::from(StageId::new()), true);
         handler.accumulate(&mut state, eof_event);
-        assert!(handler.should_emit(&state)); // Should emit after EOF
+        assert!(handler.should_emit(&mut state)); // Should emit after EOF
 
         // Emit should return aggregated events (one per group for GroupBy)
         let emitted = handler
@@ -348,14 +439,14 @@ mod tests {
             let event =
                 ChainEventFactory::data_event(WriterId::from(StageId::new()), "test", json!({}));
             handler.accumulate(&mut state, event);
-            assert!(!handler.should_emit(&state));
+            assert!(!handler.should_emit(&mut state));
         }
 
         // Process event 3: should emit
         let event =
             ChainEventFactory::data_event(WriterId::from(StageId::new()), "test", json!({}));
         handler.accumulate(&mut state, event);
-        assert!(handler.should_emit(&state)); // Should emit after 3 events
+        assert!(handler.should_emit(&mut state)); // Should emit after 3 events
 
         // Emit should return an event (Reduce emits one event)
         let emitted = handler
@@ -385,7 +476,7 @@ mod tests {
         let parent_id = event.id;
 
         handler.accumulate(&mut state, event);
-        assert!(handler.should_emit(&state));
+        assert!(handler.should_emit(&mut state));
 
         let mut emitted = handler
             .emit(&mut state)
@@ -413,7 +504,7 @@ mod tests {
 
         // EmitAlways should emit after every event
         handler.accumulate(&mut state, event);
-        assert!(handler.should_emit(&state)); // Should always emit
+        assert!(handler.should_emit(&mut state)); // Should always emit
 
         // Emit should return an event (Reduce emits one event)
         let emitted = handler

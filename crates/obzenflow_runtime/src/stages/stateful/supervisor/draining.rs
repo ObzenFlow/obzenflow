@@ -173,7 +173,7 @@ pub(super) async fn dispatch_draining<
 
                     // After accumulation, mirror Accumulating semantics: if the handler says we
                     // should emit, do so inline.
-                    if handler.should_emit(&ctx.current_state) {
+                    if handler.should_emit(&mut ctx.current_state) {
                         match handler.emit(&mut ctx.current_state) {
                             Ok(events_to_emit) => {
                                 if !events_to_emit.is_empty() {

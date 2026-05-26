@@ -4,9 +4,9 @@
 
 // FLOWIP-080c: TimeWindow Emission Strategy
 //
-// Emits results periodically based on wall-clock time.
-// NOTE: This should only be used for observability, not correctness.
-// For correctness, use causal ordering strategies.
+// Emits results periodically based on wall-clock time (processing time).
+//
+// This is a processing-time trigger, not an event-time/watermark window model.
 
 use super::EmissionStrategy;
 use std::time::{Duration, Instant};
@@ -16,9 +16,10 @@ use std::time::{Duration, Instant};
 /// This strategy emits results periodically based on wall-clock time.
 /// Creates tumbling windows that emit after a fixed duration.
 ///
-/// **WARNING**: This uses wall-clock time and should only be used for
-/// observability purposes (dashboards, monitoring). For correctness in
-/// distributed systems, use causal ordering strategies instead.
+/// This uses processing time (wall-clock time) and therefore has the usual
+/// caveats: boundaries are driven by the runtime's scheduling and can be
+/// tick-approximate. ObzenFlow does not currently model event-time windows or
+/// watermark advancement.
 ///
 /// # Examples
 ///
@@ -71,6 +72,14 @@ impl EmissionStrategy for TimeWindow {
     fn reset(&mut self) {
         // Start new window from now
         self.window_start = Some(Instant::now());
+    }
+
+    fn resets_accumulator_on_emit(&self) -> bool {
+        true
+    }
+
+    fn emit_interval_hint(&self) -> Option<Duration> {
+        Some(self.duration)
     }
 }
 

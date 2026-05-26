@@ -12,16 +12,54 @@ use crate::stages::stateful::strategies::accumulators::wrapper::StatefulWithEmis
 use crate::stages::stateful::strategies::emissions::{
     EmissionStrategy, EmitAlways, EveryN, OnEOF, TimeWindow,
 };
+use obzenflow_core::event::context::causality_context::CausalityContext;
 use obzenflow_core::event::ChainEventFactory;
 use obzenflow_core::id::StageId;
-use obzenflow_core::{ChainEvent, TypedPayload, WriterId};
+use obzenflow_core::{ChainEvent, EventId, TypedPayload, WriterId};
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::json;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fmt::Debug;
 use std::hash::Hash;
 use std::marker::PhantomData;
 use std::time::Duration;
+
+fn max_lineage_depth() -> usize {
+    // Match `ChainEventFactory::derived_event` defaults.
+    const DEFAULT_MAX_LINEAGE_DEPTH: usize = 100;
+
+    std::env::var("OBZENFLOW_MAX_LINEAGE_DEPTH")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(DEFAULT_MAX_LINEAGE_DEPTH)
+}
+
+#[doc(hidden)]
+#[derive(Clone, Debug)]
+pub struct GroupBucket<S> {
+    value: S,
+    parent_ids: VecDeque<EventId>,
+}
+
+impl<S> GroupBucket<S>
+where
+    S: Default,
+{
+    fn new() -> Self {
+        Self {
+            value: S::default(),
+            parent_ids: VecDeque::new(),
+        }
+    }
+
+    fn record_parent(&mut self, parent_id: EventId) {
+        let max_depth = max_lineage_depth();
+        if self.parent_ids.len() >= max_depth {
+            self.parent_ids.pop_front();
+        }
+        self.parent_ids.push_back(parent_id);
+    }
+}
 
 /// Groups events by a key and maintains per-group state.
 ///
@@ -103,16 +141,19 @@ where
     F: Fn(&ChainEvent, &mut S) + Send + Sync + Clone,
     S: Clone + Send + Sync + Debug + Default + Serialize,
 {
-    type State = HashMap<String, S>;
+    type State = HashMap<String, GroupBucket<S>>;
 
     fn accumulate(&self, state: &mut Self::State, event: ChainEvent) {
         // Extract key from event
         if let Some(key_value) = event.payload().get(&self.key_field) {
             if let Some(key) = key_value.as_str() {
                 // Get or create group state
-                let group_state = state.entry(key.to_string()).or_default();
+                let bucket = state
+                    .entry(key.to_string())
+                    .or_insert_with(GroupBucket::new);
                 // Apply reduce function
-                (self.reduce_fn)(&event, group_state);
+                (self.reduce_fn)(&event, &mut bucket.value);
+                bucket.record_parent(event.id);
             }
             // If key is not a string, we could support other types in the future
             // For now, we silently skip non-string keys
@@ -127,15 +168,23 @@ where
     fn emit(&self, state: &Self::State) -> Vec<ChainEvent> {
         state
             .iter()
-            .map(|(key, group_state)| {
-                ChainEventFactory::data_event(
+            .map(|(key, bucket)| {
+                let mut out = ChainEventFactory::data_event(
                     self.writer_id,
                     "aggregated",
                     json!({
                         "key": key,
-                        "result": group_state,
+                        "result": &bucket.value,
                     }),
-                )
+                );
+
+                if !bucket.parent_ids.is_empty() {
+                    out.causality = CausalityContext {
+                        parent_ids: bucket.parent_ids.iter().copied().collect(),
+                    };
+                }
+
+                out
             })
             .collect()
     }
@@ -176,7 +225,8 @@ where
     /// Emit within a time window.
     ///
     /// Results are emitted periodically based on wall-clock time.
-    /// Note: This should only be used for observability, not correctness.
+    /// This is processing-time (wall-clock) tumbling behaviour, not an event-time
+    /// window model.
     pub fn emit_within(self, duration: Duration) -> StatefulWithEmission<Self, TimeWindow> {
         self.with_emission(TimeWindow::new(duration))
     }
@@ -233,8 +283,8 @@ mod tests {
 
         assert_eq!(state.len(), 1);
         assert!(state.contains_key("electronics"));
-        assert_eq!(state["electronics"].count, 1);
-        assert_eq!(state["electronics"].total, 100);
+        assert_eq!(state["electronics"].value.count, 1);
+        assert_eq!(state["electronics"].value.total, 100);
     }
 
     #[test]
@@ -268,12 +318,12 @@ mod tests {
         }
 
         assert_eq!(state.len(), 3);
-        assert_eq!(state["electronics"].count, 2);
-        assert_eq!(state["electronics"].total, 300);
-        assert_eq!(state["books"].count, 2);
-        assert_eq!(state["books"].total, 80);
-        assert_eq!(state["clothing"].count, 1);
-        assert_eq!(state["clothing"].total, 75);
+        assert_eq!(state["electronics"].value.count, 2);
+        assert_eq!(state["electronics"].value.total, 300);
+        assert_eq!(state["books"].value.count, 2);
+        assert_eq!(state["books"].value.total, 80);
+        assert_eq!(state["clothing"].value.count, 1);
+        assert_eq!(state["clothing"].value.total, 75);
     }
 
     #[test]
@@ -449,9 +499,11 @@ where
     FKey: Fn(&T) -> K + Send + Sync + Clone + 'static,
     FUpdate: Fn(&mut S, &T) + Send + Sync + Clone + 'static, // CORRECTED: state first, value second
 {
-    type State = HashMap<K, S>;
+    type State = HashMap<K, GroupBucket<S>>;
 
     fn accumulate(&self, state: &mut Self::State, event: ChainEvent) {
+        let parent_id = event.id;
+
         // Step 1: Deserialize ChainEvent → T
         let input: T = match serde_json::from_value(event.payload().clone()) {
             Ok(v) => v,
@@ -465,8 +517,9 @@ where
         let key = (self.key_fn)(&input);
 
         // Step 3: Update state using typed function (CORRECTED: state first, value second)
-        let group_state = state.entry(key).or_default();
-        (self.update_fn)(group_state, &input);
+        let bucket = state.entry(key).or_insert_with(GroupBucket::new);
+        (self.update_fn)(&mut bucket.value, &input);
+        bucket.record_parent(parent_id);
     }
 
     fn initial_state(&self) -> Self::State {
@@ -476,17 +529,25 @@ where
     fn emit(&self, state: &Self::State) -> Vec<ChainEvent> {
         state
             .iter()
-            .map(|(key, group_state)| {
+            .map(|(key, bucket)| {
                 let key_json = serde_json::to_value(key).unwrap_or(serde_json::Value::Null);
 
-                ChainEventFactory::data_event(
+                let mut out = ChainEventFactory::data_event(
                     self.writer_id,
                     S::EVENT_TYPE,
                     json!({
                         "key": key_json,
-                        "result": group_state,
+                        "result": &bucket.value,
                     }),
-                )
+                );
+
+                if !bucket.parent_ids.is_empty() {
+                    out.causality = CausalityContext {
+                        parent_ids: bucket.parent_ids.iter().copied().collect(),
+                    };
+                }
+
+                out
             })
             .collect()
     }
@@ -530,7 +591,8 @@ where
     /// Emit within a time window.
     ///
     /// Results are emitted periodically based on wall-clock time.
-    /// Note: This should only be used for observability, not correctness.
+    /// This is processing-time (wall-clock) tumbling behaviour, not an event-time
+    /// window model.
     pub fn emit_within(self, duration: Duration) -> StatefulWithEmission<Self, TimeWindow> {
         self.with_emission(TimeWindow::new(duration))
     }
@@ -648,8 +710,8 @@ mod typed_tests {
 
         assert_eq!(state.len(), 1);
         assert!(state.contains_key("electronics"));
-        assert_eq!(state["electronics"].total_items, 2);
-        assert_eq!(state["electronics"].total_revenue, 200);
+        assert_eq!(state["electronics"].value.total_items, 2);
+        assert_eq!(state["electronics"].value.total_revenue, 200);
     }
 
     #[test]
@@ -689,16 +751,16 @@ mod typed_tests {
         assert_eq!(state.len(), 3);
 
         // electronics: 2 items @ $100 + 1 item @ $150 = 3 items, $350 revenue
-        assert_eq!(state["electronics"].total_items, 3);
-        assert_eq!(state["electronics"].total_revenue, 350);
+        assert_eq!(state["electronics"].value.total_items, 3);
+        assert_eq!(state["electronics"].value.total_revenue, 350);
 
         // books: 3 items @ $20 + 2 items @ $15 = 5 items, $90 revenue
-        assert_eq!(state["books"].total_items, 5);
-        assert_eq!(state["books"].total_revenue, 90);
+        assert_eq!(state["books"].value.total_items, 5);
+        assert_eq!(state["books"].value.total_revenue, 90);
 
         // clothing: 5 items @ $50 = 5 items, $250 revenue
-        assert_eq!(state["clothing"].total_items, 5);
-        assert_eq!(state["clothing"].total_revenue, 250);
+        assert_eq!(state["clothing"].value.total_items, 5);
+        assert_eq!(state["clothing"].value.total_revenue, 250);
     }
 
     #[test]
@@ -856,11 +918,11 @@ mod typed_tests {
         }
 
         assert_eq!(state.len(), 3);
-        assert_eq!(state[&1].transaction_count, 2);
-        assert_eq!(state[&1].total_sales, 175.0);
-        assert_eq!(state[&2].transaction_count, 2);
-        assert_eq!(state[&2].total_sales, 75.0);
-        assert_eq!(state[&3].transaction_count, 1);
-        assert_eq!(state[&3].total_sales, 200.0);
+        assert_eq!(state[&1].value.transaction_count, 2);
+        assert_eq!(state[&1].value.total_sales, 175.0);
+        assert_eq!(state[&2].value.transaction_count, 2);
+        assert_eq!(state[&2].value.total_sales, 75.0);
+        assert_eq!(state[&3].value.transaction_count, 1);
+        assert_eq!(state[&3].value.total_sales, 200.0);
     }
 }

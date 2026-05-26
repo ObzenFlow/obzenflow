@@ -266,7 +266,7 @@ impl StatefulHandler for ImmediateEmitter {
         *state += 1;
     }
 
-    fn should_emit(&self, _state: &Self::State) -> bool {
+    fn should_emit(&self, _state: &mut Self::State) -> bool {
         true
     }
 

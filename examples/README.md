@@ -84,6 +84,9 @@ These examples are intentionally skeletal. Use them when you want to sketch topo
 
 More niche examples that target specific API surfaces or topology patterns. We use these to validate the developer experience as we add features, and they're useful if you want to explore a particular capability in isolation.
 
+- **`stateful_emit_within_tumbling`** — Processing-time tumbling windows with `typed_stateful::group_by(...).emit_within(...)` (FLOWIP-054j).
+  - Run: `cargo run -p obzenflow --example stateful_emit_within_tumbling`
+  - Code: [`examples/stateful_emit_within_tumbling.rs`](stateful_emit_within_tumbling.rs)
 - **`web_analytics_pipeline`** — Group/reduce stateful patterns with multiple emission strategies
 - **`topology_patterns_demo`** — Homogeneous fan-in with content-based routing (three sources of the same type into one aggregator, then one router to three priority sinks). Paired with `multi_source_ingest_demo` for the heterogeneous case.
 - **`multi_source_ingest_demo`** — Heterogeneous fan-in via per-branch alignment transforms (three sources of three different types normalised to one envelope, then a typed aggregator). The canonical reference for FLOWIP-114c typed authoring, including a long header comment that doubles as the authoring guide for multi-input stages.

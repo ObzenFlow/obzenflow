@@ -101,6 +101,10 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Super
 
         // Create context with subscription factory from resources
         let handler = self.handler;
+        let emit_interval = self
+            .config
+            .emit_interval
+            .or_else(|| handler.emit_interval_hint());
         let initial_state = handler.initial_state();
         let context = StatefulContext {
             handler: Arc::new(handler),
@@ -124,7 +128,7 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Super
             upstream_subscription_factory: self.resources.upstream_subscription_factory,
             events_since_last_heartbeat: 0,
             last_data_event_time: None,
-            emit_interval: self.config.emit_interval,
+            emit_interval,
             backpressure_writer: self.resources.backpressure_writer.clone(),
             backpressure_readers: self.resources.backpressure_readers.clone(),
             pending_outputs: std::collections::VecDeque::new(),
