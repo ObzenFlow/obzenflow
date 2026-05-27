@@ -170,7 +170,7 @@ impl FiniteSourceHandler for CorrelatedSequenceSource {
             WindowInput::EVENT_TYPE,
             json!({ "index": self.next as u64 - 1 }),
         );
-        event.correlation_id = Some(correlation_id);
+        event.set_single_correlation(correlation_id, None);
         Ok(Some(vec![event]))
     }
 }
@@ -531,12 +531,12 @@ async fn emit_within_final_aggregate_records_mixed_correlation_ids() -> Result<(
         .ok_or_else(|| anyhow!("expected win stage to emit an aggregate"))?;
 
     assert!(
-        aggregate_event.correlation_id.is_none(),
-        "mixed windows must not propagate a scalar correlation_id on the aggregate event"
+        aggregate_event.correlation_id().is_none(),
+        "mixed windows must not expose a scalar correlation_id on the aggregate event"
     );
     let recorded = aggregate_event
-        .correlation_ids
-        .clone()
+        .correlation_ids()
+        .map(|ids| ids.to_vec())
         .expect("expected correlation_ids to be present for mixed windows");
     assert_eq!(recorded.len(), 2);
     assert!(recorded.contains(&correlation_a));

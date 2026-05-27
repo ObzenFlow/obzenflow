@@ -15,9 +15,9 @@ use crate::stages::stateful::strategies::emissions::{
 use crate::typing::StatefulTyping;
 use obzenflow_core::event::context::causality_context::CausalityContext;
 use obzenflow_core::event::context::ReplayContext;
-use obzenflow_core::event::payloads::correlation_payload::CorrelationPayload;
 use obzenflow_core::event::ChainEventContent;
 use obzenflow_core::event::ChainEventFactory;
+use obzenflow_core::event::CorrelationContext;
 use obzenflow_core::id::StageId;
 use obzenflow_core::{ChainEvent, EventId, TypedPayload, WriterId};
 use std::collections::HashMap;
@@ -94,8 +94,7 @@ impl Accumulator for Conflate {
                         ChainEventFactory::data_event(self.writer_id, event_type, payload.clone());
 
                     out.causality = CausalityContext::with_parent(event.id);
-                    out.correlation_id = event.correlation_id;
-                    out.correlation_payload = event.correlation_payload.clone();
+                    out.correlation = event.correlation.clone();
                     out.replay_context = event.replay_context.clone();
 
                     Some(out)
@@ -463,8 +462,7 @@ where
             ConflateTypedBucket {
                 value: input,
                 source_event_id: event.id,
-                correlation_id: event.correlation_id,
-                correlation_payload: event.correlation_payload.clone(),
+                correlation: event.correlation.clone(),
                 replay_context: event.replay_context.clone(),
             },
         );
@@ -484,8 +482,7 @@ where
                 let mut out = ChainEventFactory::data_event(self.writer_id, T::EVENT_TYPE, payload);
 
                 out.causality = CausalityContext::with_parent(value.source_event_id);
-                out.correlation_id = value.correlation_id;
-                out.correlation_payload = value.correlation_payload.clone();
+                out.correlation = value.correlation.clone();
                 out.replay_context = value.replay_context.clone();
 
                 out
@@ -507,8 +504,7 @@ where
 {
     value: T,
     source_event_id: EventId,
-    correlation_id: Option<obzenflow_core::event::types::CorrelationId>,
-    correlation_payload: Option<CorrelationPayload>,
+    correlation: Option<CorrelationContext>,
     replay_context: Option<ReplayContext>,
 }
 

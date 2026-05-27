@@ -142,13 +142,7 @@ where
             parent_ids: state.trace.parent_ids(),
         };
 
-        if let Some(ids) = state.trace.mixed_correlation_ids() {
-            out.correlation_ids = Some(ids);
-        } else {
-            out.correlation_id = state.trace.correlation_id();
-            out.correlation_payload = state.trace.correlation_payload();
-            out.replay_context = state.trace.replay_context();
-        }
+        state.trace.apply_correlation_to_event(&mut out);
 
         vec![out]
     }
@@ -261,7 +255,7 @@ mod tests {
             ChainEventFactory::data_event(WriterId::from(StageId::new()), "test", json!({}))
                 .with_new_correlation("reduce_emit_format");
         let input_id = event.id;
-        let input_correlation = event.correlation_id;
+        let input_correlation = event.correlation.clone();
 
         accumulator.accumulate(&mut state, event);
         let emitted = accumulator.emit(&state);
@@ -274,8 +268,7 @@ mod tests {
         // input rather than left at root causality.
         assert_eq!(emitted[0].causality.parent_ids, vec![input_id]);
         // A single-correlation window carries that scalar correlation through, with no mixed set.
-        assert_eq!(emitted[0].correlation_id, input_correlation);
-        assert!(emitted[0].correlation_ids.is_none());
+        assert_eq!(emitted[0].correlation, input_correlation);
     }
 
     #[test]
@@ -500,13 +493,7 @@ where
             parent_ids: state.trace.parent_ids(),
         };
 
-        if let Some(ids) = state.trace.mixed_correlation_ids() {
-            out.correlation_ids = Some(ids);
-        } else {
-            out.correlation_id = state.trace.correlation_id();
-            out.correlation_payload = state.trace.correlation_payload();
-            out.replay_context = state.trace.replay_context();
-        }
+        state.trace.apply_correlation_to_event(&mut out);
 
         vec![out]
     }
@@ -728,7 +715,7 @@ mod typed_tests {
         )
         .with_new_correlation("reduce_typed_emit_format");
         let input_id = event.id;
-        let input_correlation = event.correlation_id;
+        let input_correlation = event.correlation.clone();
 
         accumulator.accumulate(&mut state, event);
         let emitted = accumulator.emit(&state);
@@ -739,8 +726,7 @@ mod typed_tests {
 
         // FLOWIP-054j fan-in lineage applies on the typed path too.
         assert_eq!(emitted[0].causality.parent_ids, vec![input_id]);
-        assert_eq!(emitted[0].correlation_id, input_correlation);
-        assert!(emitted[0].correlation_ids.is_none());
+        assert_eq!(emitted[0].correlation, input_correlation);
     }
 
     #[test]

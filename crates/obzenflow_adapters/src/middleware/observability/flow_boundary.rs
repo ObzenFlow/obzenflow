@@ -212,16 +212,15 @@ impl FlowMetrics {
 
     pub fn on_event_start(&self, event: &ChainEvent) {
         // Only track events with correlation IDs (source events)
-        if let Some(correlation_id) = &event.correlation_id {
+        if let Some(correlation_id) = event.correlation_id() {
             self.entry_counter.record_event();
 
             // Track when this correlation started
             let correlations = self.active_correlations.clone();
             let timeout = self.correlation_timeout;
-            let correlation_id_copy = *correlation_id;
             tokio::spawn(async move {
                 let mut correlations = correlations.write().await;
-                correlations.insert(correlation_id_copy, Instant::now());
+                correlations.insert(correlation_id, Instant::now());
 
                 // Clean up old correlations if map is getting large
                 if correlations.len() > 10000 {
@@ -240,7 +239,7 @@ impl FlowMetrics {
         _stage_duration: Duration,
     ) {
         // Track events exiting at sinks
-        if let Some(correlation_id) = &event.correlation_id {
+        if let Some(correlation_id) = event.correlation_id() {
             self.exit_counter.record_event();
 
             // Calculate end-to-end latency using correlation payload
@@ -250,15 +249,14 @@ impl FlowMetrics {
 
             // Clean up tracking
             let correlations = self.active_correlations.clone();
-            let correlation_id_copy = *correlation_id;
             tokio::spawn(async move {
-                correlations.write().await.remove(&correlation_id_copy);
+                correlations.write().await.remove(&correlation_id);
             });
         }
     }
 
     pub fn on_event_error(&self, event: &ChainEvent) {
-        if event.correlation_id.is_some() {
+        if event.correlation_id().is_some() {
             self.error_counter.record_error();
         }
     }

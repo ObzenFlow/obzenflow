@@ -4,6 +4,7 @@
 
 use super::*;
 use crate::event::ingestion::IngressContext;
+use crate::event::types::CorrelationId;
 use crate::id::StageId;
 use crate::WriterId;
 use serde_json::json;
@@ -42,9 +43,33 @@ fn test_derived_event() {
         json!({"data": "child"}),
     );
 
-    assert_eq!(child.correlation_id, parent.correlation_id);
+    assert_eq!(child.correlation, parent.correlation);
     assert_eq!(child.causality.parent_ids, vec![parent.id]);
     assert_eq!(child.ingress_context, parent.ingress_context);
+}
+
+#[test]
+fn correlation_serializes_as_single_context_field() {
+    let writer_id = WriterId::from(StageId::new());
+    let correlation_id = CorrelationId::new();
+    let mut event = ChainEventFactory::data_event(writer_id, "test.event", json!({"key": "value"}));
+
+    event.set_single_correlation(correlation_id, None);
+
+    let serialized = serde_json::to_value(event).expect("event should serialize");
+    let object = serialized
+        .as_object()
+        .expect("event should serialize as object");
+
+    assert!(object.contains_key("correlation"));
+    assert!(!object.contains_key("correlation_id"));
+    assert!(!object.contains_key("correlation_ids"));
+    assert!(!object.contains_key("correlation_payload"));
+    assert_eq!(
+        serialized["correlation"]["ids"].as_array().unwrap().len(),
+        1
+    );
+    assert!(serialized["correlation"].get("truncated").is_none());
 }
 
 #[test]

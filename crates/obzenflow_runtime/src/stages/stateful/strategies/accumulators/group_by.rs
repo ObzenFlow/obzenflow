@@ -165,13 +165,7 @@ where
                     parent_ids: bucket.trace.parent_ids(),
                 };
 
-                if let Some(ids) = bucket.trace.mixed_correlation_ids() {
-                    out.correlation_ids = Some(ids);
-                } else {
-                    out.correlation_id = bucket.trace.correlation_id();
-                    out.correlation_payload = bucket.trace.correlation_payload();
-                    out.replay_context = bucket.trace.replay_context();
-                }
+                bucket.trace.apply_correlation_to_event(&mut out);
 
                 out
             })
@@ -570,13 +564,7 @@ where
                     parent_ids: bucket.trace.parent_ids(),
                 };
 
-                if let Some(ids) = bucket.trace.mixed_correlation_ids() {
-                    out.correlation_ids = Some(ids);
-                } else {
-                    out.correlation_id = bucket.trace.correlation_id();
-                    out.correlation_payload = bucket.trace.correlation_payload();
-                    out.replay_context = bucket.trace.replay_context();
-                }
+                bucket.trace.apply_correlation_to_event(&mut out);
 
                 out
             })

@@ -28,7 +28,8 @@ pub mod utils;
 // Re-export main types at root level for convenience
 pub use chain_event::{
     ChainEvent, ChainEventContent, ChainEventFactory, CircuitBreakerSummaryEventParams,
-    ConsumptionFinalEventParams, ConsumptionProgressEventParams, SourceContractEventParams,
+    ConsumptionFinalEventParams, ConsumptionProgressEventParams, CorrelationContext,
+    SourceContractEventParams,
 };
 pub use event_envelope::EventEnvelope;
 pub use journal_event::JournalEvent;

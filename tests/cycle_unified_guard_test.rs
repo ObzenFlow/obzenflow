@@ -102,7 +102,7 @@ impl AsyncFiniteSourceHandler for CorrelatedEventSource {
         if !self.emitted {
             self.emitted = true;
             let mut event = ChainEventFactory::data_event(self.writer_id, "test.event", json!({}));
-            event.correlation_id = Some(self.correlation_id);
+            event.set_single_correlation(self.correlation_id, None);
             return Ok(Some(vec![event]));
         }
 

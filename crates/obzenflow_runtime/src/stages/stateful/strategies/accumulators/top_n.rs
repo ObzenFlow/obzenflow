@@ -206,13 +206,7 @@ where
             parent_ids: state.trace.parent_ids(),
         };
 
-        if let Some(ids) = state.trace.mixed_correlation_ids() {
-            out.correlation_ids = Some(ids);
-        } else {
-            out.correlation_id = state.trace.correlation_id();
-            out.correlation_payload = state.trace.correlation_payload();
-            out.replay_context = state.trace.replay_context();
-        }
+        state.trace.apply_correlation_to_event(&mut out);
 
         vec![out]
     }
@@ -631,13 +625,7 @@ where
             parent_ids: state.trace.parent_ids(),
         };
 
-        if let Some(ids) = state.trace.mixed_correlation_ids() {
-            out.correlation_ids = Some(ids);
-        } else {
-            out.correlation_id = state.trace.correlation_id();
-            out.correlation_payload = state.trace.correlation_payload();
-            out.replay_context = state.trace.replay_context();
-        }
+        state.trace.apply_correlation_to_event(&mut out);
 
         vec![out]
     }

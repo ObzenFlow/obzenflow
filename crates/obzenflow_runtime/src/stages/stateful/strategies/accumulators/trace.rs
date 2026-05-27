@@ -26,12 +26,22 @@ pub(crate) struct TraceState {
     correlation_seen: bool,
     correlation_mixed: bool,
     correlation_ids: BTreeSet<CorrelationId>,
+    correlation_ids_truncated: bool,
     correlation_id: Option<CorrelationId>,
     correlation_payload: Option<CorrelationPayload>,
     replay_context: Option<ReplayContext>,
 }
 
 impl TraceState {
+    fn record_correlation_id(&mut self, correlation_id: CorrelationId, max_depth: usize) {
+        if self.correlation_ids.len() < max_depth || self.correlation_ids.contains(&correlation_id)
+        {
+            self.correlation_ids.insert(correlation_id);
+        } else {
+            self.correlation_ids_truncated = true;
+        }
+    }
+
     pub(crate) fn record_event(&mut self, event: &ChainEvent) {
         if event.is_lifecycle() || event.is_control() {
             return;
@@ -44,18 +54,34 @@ impl TraceState {
             self.parent_ids.pop_front();
         }
 
-        if let Some(correlation_id) = event.correlation_id {
-            if self.correlation_ids.len() < max_depth
-                || self.correlation_ids.contains(&correlation_id)
-            {
-                self.correlation_ids.insert(correlation_id);
+        if let Some(correlation_ids) = event.correlation_ids() {
+            for correlation_id in correlation_ids {
+                self.record_correlation_id(*correlation_id, max_depth);
             }
+        }
+        if event.correlation_ids_truncated() {
+            self.correlation_ids_truncated = true;
+        }
+
+        let has_composite_correlation = event
+            .correlation
+            .as_ref()
+            .is_some_and(|correlation| correlation.single_id().is_none())
+            || event.correlation_ids_truncated();
+
+        if has_composite_correlation {
+            self.correlation_seen = true;
+            self.correlation_mixed = true;
+            self.correlation_id = None;
+            self.correlation_payload = None;
+            self.replay_context = None;
+            return;
         }
 
         if !self.correlation_seen {
             self.correlation_seen = true;
-            self.correlation_id = event.correlation_id;
-            self.correlation_payload = event.correlation_payload.clone();
+            self.correlation_id = event.correlation_id();
+            self.correlation_payload = event.correlation_payload().cloned();
             self.replay_context = event.replay_context.clone();
             return;
         }
@@ -64,7 +90,7 @@ impl TraceState {
             return;
         }
 
-        if self.correlation_id != event.correlation_id {
+        if self.correlation_id != event.correlation_id() {
             self.correlation_mixed = true;
             self.correlation_id = None;
             self.correlation_payload = None;
@@ -72,7 +98,7 @@ impl TraceState {
             return;
         }
 
-        if self.correlation_payload != event.correlation_payload {
+        if self.correlation_payload.as_ref() != event.correlation_payload() {
             self.correlation_payload = None;
         }
         if self.replay_context != event.replay_context {
@@ -108,7 +134,111 @@ impl TraceState {
         }
     }
 
+    pub(crate) fn correlation_ids_truncated(&self) -> bool {
+        self.correlation_ids_truncated
+    }
+
+    pub(crate) fn apply_correlation_to_event(&self, event: &mut ChainEvent) {
+        if let Some(ids) = self.mixed_correlation_ids() {
+            event.clear_correlation();
+            event.replay_context = None;
+            event.set_correlation_sample(ids, self.correlation_ids_truncated());
+        } else {
+            if let Some(correlation_id) = self.correlation_id() {
+                event.set_single_correlation(correlation_id, self.correlation_payload());
+            } else {
+                event.clear_correlation();
+            }
+            event.replay_context = self.replay_context();
+        }
+    }
+
     pub(crate) fn is_empty(&self) -> bool {
         self.parent_ids.is_empty()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use obzenflow_core::event::chain_event::ChainEventFactory;
+    use obzenflow_core::event::types::WriterId;
+    use obzenflow_core::StageId;
+    use serde_json::json;
+    use ulid::Ulid;
+
+    fn event_with_correlation(correlation_id: CorrelationId) -> ChainEvent {
+        let mut event =
+            ChainEventFactory::data_event(WriterId::from(StageId::new()), "in", json!({}));
+        event.set_single_correlation(correlation_id, None);
+        event
+    }
+
+    fn deterministic_correlation_id(value: u128) -> CorrelationId {
+        CorrelationId::from_ulid(Ulid::from(value))
+    }
+
+    #[test]
+    fn records_all_distinct_correlation_ids_under_cap() {
+        let mut trace = TraceState::default();
+        let ids = vec![
+            deterministic_correlation_id(3),
+            deterministic_correlation_id(1),
+            deterministic_correlation_id(2),
+        ];
+
+        for id in &ids {
+            trace.record_event(&event_with_correlation(*id));
+        }
+
+        assert_eq!(
+            trace.mixed_correlation_ids(),
+            Some(vec![
+                deterministic_correlation_id(1),
+                deterministic_correlation_id(2),
+                deterministic_correlation_id(3),
+            ])
+        );
+        assert!(!trace.correlation_ids_truncated());
+    }
+
+    #[test]
+    fn records_bounded_replay_stable_sample_when_correlation_ids_exceed_cap() {
+        let mut trace = TraceState::default();
+        let ids: Vec<_> = (100..=200)
+            .rev()
+            .map(deterministic_correlation_id)
+            .collect();
+
+        for id in &ids {
+            trace.record_event(&event_with_correlation(*id));
+        }
+
+        let recorded = trace
+            .mixed_correlation_ids()
+            .expect("expected mixed correlation IDs");
+        assert_eq!(recorded.len(), 100);
+        assert!(trace.correlation_ids_truncated());
+        assert!(!recorded.contains(&deterministic_correlation_id(100)));
+
+        let mut expected: Vec<_> = ids.iter().copied().take(100).collect();
+        expected.sort();
+        assert_eq!(recorded, expected);
+    }
+
+    #[test]
+    fn carries_truncation_from_upstream_mixed_correlation_event() {
+        let mut event =
+            ChainEventFactory::data_event(WriterId::from(StageId::new()), "aggregate", json!({}));
+        event.set_correlation_sample(vec![deterministic_correlation_id(1)], true);
+
+        let mut trace = TraceState::default();
+        trace.record_event(&event);
+
+        assert_eq!(
+            trace.mixed_correlation_ids(),
+            Some(vec![deterministic_correlation_id(1)])
+        );
+        assert!(trace.correlation_ids_truncated());
     }
 }

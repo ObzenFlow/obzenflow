@@ -53,13 +53,8 @@ fn apply_batch_trace(trace: &TraceState, events: &mut [ChainEvent]) {
             parent_ids: parent_ids.clone(),
         };
 
-        if event.correlation_id.is_none() && event.correlation_ids.is_none() {
-            if let Some(ids) = trace.mixed_correlation_ids() {
-                event.correlation_ids = Some(ids);
-            } else {
-                event.correlation_id = trace.correlation_id();
-                event.correlation_payload = trace.correlation_payload();
-            }
+        if event.correlation.is_none() {
+            trace.apply_correlation_to_event(event);
         }
 
         if event.replay_context.is_none() {
@@ -448,7 +443,7 @@ mod tests {
             json!({ "value": 1 }),
         )
         .with_new_correlation("test_source");
-        let correlation_id = event.correlation_id;
+        let correlation = event.correlation.clone();
         let parent_id = event.id;
 
         handler.accumulate(&mut state, event);
@@ -460,9 +455,9 @@ mod tests {
         assert_eq!(emitted.len(), 1);
 
         let out = emitted.pop().expect("expected output event");
-        assert_eq!(out.correlation_id, correlation_id);
+        assert_eq!(out.correlation, correlation);
         assert_eq!(out.causality.parent_ids, vec![parent_id]);
-        assert!(out.correlation_payload.is_some());
+        assert!(out.correlation_payload().is_some());
     }
 
     #[test]
@@ -508,10 +503,12 @@ mod batch_trace_tests {
     use super::*;
     use crate::stages::stateful::strategies::emissions::{OnEOF, TimeWindow};
     use obzenflow_core::event::chain_event::ChainEventFactory;
+    use obzenflow_core::event::CorrelationId;
     use obzenflow_core::id::StageId;
     use obzenflow_core::WriterId;
     use serde_json::json;
     use std::time::Duration;
+    use ulid::Ulid;
 
     /// A custom single-output accumulator that emits a root-causality event and does
     /// not author any provenance, exercising the wrapper's batch-trace fallback.
@@ -546,6 +543,10 @@ mod batch_trace_tests {
         ChainEventFactory::data_event(WriterId::from(StageId::new()), "in", json!({ "n": 1 }))
     }
 
+    fn deterministic_correlation_id(value: u128) -> CorrelationId {
+        CorrelationId::from_ulid(Ulid::from(value))
+    }
+
     #[test]
     fn batch_trace_fallback_parents_root_output_to_all_inputs() {
         let mut handler = StatefulWithEmission::new(RootCounter, OnEOF::new());
@@ -570,12 +571,37 @@ mod batch_trace_tests {
         // Full contributing frontier, not just the last input.
         assert_eq!(out.causality.parent_ids, ids);
         // Mixed correlation must not collapse to one arbitrary scalar.
-        assert!(out.correlation_id.is_none());
+        assert!(out.correlation_id().is_none());
         let recorded = out
-            .correlation_ids
-            .as_ref()
+            .correlation_ids()
             .expect("mixed fan-in must record a correlation set");
         assert_eq!(recorded.len(), 3);
+        assert!(!out.correlation_ids_truncated());
+    }
+
+    #[test]
+    fn batch_trace_fallback_marks_truncated_correlation_set() {
+        let mut handler = StatefulWithEmission::new(RootCounter, OnEOF::new());
+        let mut state = handler.initial_state();
+
+        for id in (100..=200).rev().map(deterministic_correlation_id) {
+            let mut event = input_event();
+            event.set_single_correlation(id, None);
+            handler.accumulate(&mut state, event);
+        }
+
+        let eof = ChainEventFactory::eof_event(WriterId::from(StageId::new()), true);
+        handler.accumulate(&mut state, eof);
+        let emitted = handler.emit(&mut state).expect("emit should succeed");
+        assert_eq!(emitted.len(), 1);
+
+        let out = &emitted[0];
+        let recorded = out
+            .correlation_ids()
+            .expect("mixed fan-in must record a correlation set");
+        assert_eq!(recorded.len(), 100);
+        assert!(out.correlation_ids_truncated());
+        assert!(!recorded.contains(&deterministic_correlation_id(100)));
     }
 
     #[test]
@@ -585,15 +611,17 @@ mod batch_trace_tests {
 
         // Seed one correlation and reuse it for every input (uniform fan-in).
         let seed = input_event().with_new_correlation("src");
-        let correlation = seed.correlation_id;
-        let payload = seed.correlation_payload.clone();
+        let correlation = seed.correlation_id();
+        let payload = seed.correlation_payload().cloned();
         assert!(correlation.is_some());
 
         let mut ids = Vec::new();
         for _ in 0..3 {
             let mut event = input_event();
-            event.correlation_id = correlation;
-            event.correlation_payload = payload.clone();
+            event.set_single_correlation(
+                correlation.expect("correlation should be set"),
+                payload.clone(),
+            );
             ids.push(event.id);
             handler.accumulate(&mut state, event);
         }
@@ -605,8 +633,8 @@ mod batch_trace_tests {
         let out = &emitted[0];
 
         assert_eq!(out.causality.parent_ids, ids);
-        assert_eq!(out.correlation_id, correlation);
-        assert!(out.correlation_ids.is_none());
+        assert_eq!(out.correlation_id(), correlation);
+        assert_eq!(out.correlation_ids().map(|ids| ids.len()), Some(1));
     }
 
     #[test]
