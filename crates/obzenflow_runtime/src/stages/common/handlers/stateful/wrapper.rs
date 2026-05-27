@@ -12,7 +12,7 @@ use async_trait::async_trait;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::ChainEventContent;
 use obzenflow_core::ChainEvent;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// State wrapper that includes handler state and emission tracking
 #[derive(Clone, Debug)]
@@ -142,10 +142,16 @@ where
         self.handler.create_events(&state.handler_state)
     }
 
-    fn should_emit(&self, state: &Self::State) -> bool {
-        // Use emission strategy
-        let mut emission = state.emission.clone();
-        emission.should_emit(state.events_seen, state.last_emit)
+    fn emit_interval_hint(&self) -> Option<Duration> {
+        self.initial_emission
+            .emit_interval_hint()
+            .or_else(|| self.handler.emit_interval_hint())
+    }
+
+    fn should_emit(&self, state: &mut Self::State) -> bool {
+        state
+            .emission
+            .should_emit(state.events_seen, state.last_emit)
     }
 
     fn emit(&self, state: &mut Self::State) -> std::result::Result<Vec<ChainEvent>, HandlerError> {

@@ -42,8 +42,7 @@ impl ChainEventFactory {
     ) -> ChainEvent {
         let mut event = Self::create_event(writer_id, content);
 
-        event.correlation_id = parent.correlation_id;
-        event.correlation_payload = parent.correlation_payload.clone();
+        event.correlation = parent.correlation.clone();
         event.replay_context = parent.replay_context.clone();
         event.ingress_context = parent.ingress_context.clone();
         event.cycle_depth = parent.cycle_depth;
@@ -117,6 +116,7 @@ impl ChainEventFactory {
 mod tests {
     use super::*;
     use crate::event::ingestion::IngressContext;
+    use crate::event::CorrelationId;
     use crate::id::StageId;
     use crate::WriterId;
     use serde_json::json;
@@ -135,5 +135,18 @@ mod tests {
             ChainEventFactory::derived_data_event(writer_id, &parent, "child.event", json!({}));
 
         assert_eq!(child.ingress_context, parent.ingress_context);
+    }
+
+    #[test]
+    fn derived_event_propagates_mixed_correlation_sample_metadata() {
+        let writer_id = WriterId::from(StageId::new());
+        let mut parent = ChainEventFactory::data_event(writer_id, "parent.event", json!({"id": 1}));
+        parent.set_correlation_sample(vec![CorrelationId::new()], true);
+
+        let child =
+            ChainEventFactory::derived_data_event(writer_id, &parent, "child.event", json!({}));
+
+        assert_eq!(child.correlation, parent.correlation);
+        assert!(child.correlation_ids_truncated());
     }
 }

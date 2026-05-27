@@ -148,12 +148,19 @@ where
                                 ..
                             }) => {
                                 // Only treat as terminal EOF when the EOF is authored by
-                                // the upstream stage for this reader. If writer_id is
-                                // missing, fall back to treating it as terminal.
+                                // the upstream stage for this reader.
+                                //
+                                // Some historical or forwarded EOF events may omit the payload
+                                // writer_id. In that case, fall back to the ChainEvent's
+                                // writer_id, which still distinguishes "authored here" from
+                                // "forwarded from elsewhere".
                                 let authored_by_upstream = match writer_id {
                                     Some(WriterId::Stage(eof_stage)) => *eof_stage == stage_id,
                                     Some(_) => false,
-                                    None => true,
+                                    None => match &chain_event.writer_id {
+                                        WriterId::Stage(eof_stage) => *eof_stage == stage_id,
+                                        _ => false,
+                                    },
                                 };
                                 (authored_by_upstream, false)
                             }
@@ -213,7 +220,12 @@ where
                                                 *eof_stage == stage_id
                                             }
                                             Some(_) => false,
-                                            None => true,
+                                            None => match &chain_event.writer_id {
+                                                WriterId::Stage(eof_stage) => {
+                                                    *eof_stage == stage_id
+                                                }
+                                                _ => false,
+                                            },
                                         };
 
                                         if authored_by_upstream {

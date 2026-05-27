@@ -300,9 +300,8 @@ fn propagate_stream_lineage(parent: &ChainEvent, outputs: &mut [ChainEvent]) {
             continue;
         }
 
-        if event.correlation_id.is_none() {
-            event.correlation_id = parent.correlation_id;
-            event.correlation_payload = parent.correlation_payload.clone();
+        if event.correlation.is_none() {
+            event.correlation = parent.correlation.clone();
         }
 
         if event.replay_context.is_none() {

@@ -9,7 +9,9 @@
 // and "hottest items" scenarios. This is an exact algorithm (not probabilistic).
 
 use super::Accumulator;
+use crate::stages::stateful::strategies::accumulators::trace::TraceState;
 use obzenflow_core::event::chain_event::ChainEventFactory;
+use obzenflow_core::event::context::causality_context::CausalityContext;
 use obzenflow_core::id::StageId;
 use obzenflow_core::{ChainEvent, TypedPayload, WriterId};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
@@ -127,6 +129,7 @@ pub struct TopNState {
     items: BinaryHeap<Reverse<ScoredItem>>,
     /// Maximum number of items to keep
     capacity: usize,
+    trace: TraceState,
 }
 
 impl<F> Accumulator for TopN<F>
@@ -146,6 +149,7 @@ where
 
             // Add to heap
             state.items.push(Reverse(item));
+            state.trace.record_event(&event);
 
             // If we exceed capacity, remove the lowest score item
             if state.items.len() > state.capacity {
@@ -158,10 +162,18 @@ where
         TopNState {
             items: BinaryHeap::new(),
             capacity: self.n,
+            trace: TraceState::default(),
         }
     }
 
     fn emit(&self, state: &Self::State) -> Vec<ChainEvent> {
+        if state.items.is_empty() {
+            return Vec::new();
+        }
+        if state.trace.is_empty() {
+            return Vec::new();
+        }
+
         // Extract items from heap and sort by score (descending)
         let mut items: Vec<_> = state
             .items
@@ -173,7 +185,7 @@ where
         items.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(Ordering::Equal));
 
         // Create a single event with the top N list
-        vec![ChainEventFactory::data_event(
+        let mut out = ChainEventFactory::data_event(
             self.writer_id,
             "top_n_result",
             json!({
@@ -188,11 +200,20 @@ where
                 "capacity": state.capacity,
                 "count": state.items.len(),
             }),
-        )]
+        );
+
+        out.causality = CausalityContext {
+            parent_ids: state.trace.parent_ids(),
+        };
+
+        state.trace.apply_correlation_to_event(&mut out);
+
+        vec![out]
     }
 
     fn reset(&self, state: &mut Self::State) {
         state.items.clear();
+        state.trace.reset();
     }
 }
 
@@ -500,6 +521,7 @@ pub struct TopNTypedState {
     items: HashMap<String, (f64, Value, Value)>, // serialized_key -> (score, key_value, item_metadata)
     /// Maximum number of items to keep
     capacity: usize,
+    trace: TraceState,
 }
 
 impl<T, K, FKey, FScore> Accumulator for TopNTyped<T, K, FKey, FScore>
@@ -536,6 +558,7 @@ where
 
         // Step 4: Insert/replace in the map (deduplication)
         state.items.insert(key_str, (score, key_value, serialized));
+        state.trace.record_event(&event);
 
         // Step 5: If we exceed capacity, remove the item with lowest score
         if state.items.len() > state.capacity {
@@ -557,10 +580,18 @@ where
         TopNTypedState {
             items: HashMap::new(),
             capacity: self.n,
+            trace: TraceState::default(),
         }
     }
 
     fn emit(&self, state: &Self::State) -> Vec<ChainEvent> {
+        if state.items.is_empty() {
+            return Vec::new();
+        }
+        if state.trace.is_empty() {
+            return Vec::new();
+        }
+
         // Convert to vec and sort by score descending
         let mut items: Vec<_> = state
             .items
@@ -573,7 +604,7 @@ where
         });
 
         // Create result event
-        vec![ChainEventFactory::data_event(
+        let mut out = ChainEventFactory::data_event(
             self.writer_id,
             T::EVENT_TYPE,
             json!({
@@ -588,11 +619,20 @@ where
                 "capacity": state.capacity,
                 "count": state.items.len(),
             }),
-        )]
+        );
+
+        out.causality = CausalityContext {
+            parent_ids: state.trace.parent_ids(),
+        };
+
+        state.trace.apply_correlation_to_event(&mut out);
+
+        vec![out]
     }
 
     fn reset(&self, state: &mut Self::State) {
         state.items.clear();
+        state.trace.reset();
     }
 }
 

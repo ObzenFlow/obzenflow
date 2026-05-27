@@ -8,10 +8,12 @@
 // This is the most common aggregation pattern in stream processing.
 
 use super::Accumulator;
+use crate::stages::stateful::strategies::accumulators::trace::TraceState;
 use crate::stages::stateful::strategies::accumulators::wrapper::StatefulWithEmission;
 use crate::stages::stateful::strategies::emissions::{
     EmissionStrategy, EmitAlways, EveryN, OnEOF, TimeWindow,
 };
+use obzenflow_core::event::context::causality_context::CausalityContext;
 use obzenflow_core::event::ChainEventFactory;
 use obzenflow_core::id::StageId;
 use obzenflow_core::{ChainEvent, TypedPayload, WriterId};
@@ -22,6 +24,25 @@ use std::fmt::Debug;
 use std::hash::Hash;
 use std::marker::PhantomData;
 use std::time::Duration;
+
+#[doc(hidden)]
+#[derive(Clone, Debug)]
+pub struct GroupBucket<S> {
+    value: S,
+    trace: TraceState,
+}
+
+impl<S> GroupBucket<S>
+where
+    S: Default,
+{
+    fn new() -> Self {
+        Self {
+            value: S::default(),
+            trace: TraceState::default(),
+        }
+    }
+}
 
 /// Groups events by a key and maintains per-group state.
 ///
@@ -103,16 +124,19 @@ where
     F: Fn(&ChainEvent, &mut S) + Send + Sync + Clone,
     S: Clone + Send + Sync + Debug + Default + Serialize,
 {
-    type State = HashMap<String, S>;
+    type State = HashMap<String, GroupBucket<S>>;
 
     fn accumulate(&self, state: &mut Self::State, event: ChainEvent) {
         // Extract key from event
         if let Some(key_value) = event.payload().get(&self.key_field) {
             if let Some(key) = key_value.as_str() {
                 // Get or create group state
-                let group_state = state.entry(key.to_string()).or_default();
+                let bucket = state
+                    .entry(key.to_string())
+                    .or_insert_with(GroupBucket::new);
                 // Apply reduce function
-                (self.reduce_fn)(&event, group_state);
+                (self.reduce_fn)(&event, &mut bucket.value);
+                bucket.trace.record_event(&event);
             }
             // If key is not a string, we could support other types in the future
             // For now, we silently skip non-string keys
@@ -125,19 +149,29 @@ where
     }
 
     fn emit(&self, state: &Self::State) -> Vec<ChainEvent> {
-        state
+        let mut events: Vec<ChainEvent> = state
             .iter()
-            .map(|(key, group_state)| {
-                ChainEventFactory::data_event(
+            .map(|(key, bucket)| {
+                let mut out = ChainEventFactory::data_event(
                     self.writer_id,
                     "aggregated",
                     json!({
                         "key": key,
-                        "result": group_state,
+                        "result": &bucket.value,
                     }),
-                )
+                );
+
+                out.causality = CausalityContext {
+                    parent_ids: bucket.trace.parent_ids(),
+                };
+
+                bucket.trace.apply_correlation_to_event(&mut out);
+
+                out
             })
-            .collect()
+            .collect();
+        super::sort_emitted_by_first_parent(&mut events);
+        events
     }
 
     fn reset(&self, state: &mut Self::State) {
@@ -176,7 +210,8 @@ where
     /// Emit within a time window.
     ///
     /// Results are emitted periodically based on wall-clock time.
-    /// Note: This should only be used for observability, not correctness.
+    /// This is processing-time (wall-clock) tumbling behaviour, not an event-time
+    /// window model.
     pub fn emit_within(self, duration: Duration) -> StatefulWithEmission<Self, TimeWindow> {
         self.with_emission(TimeWindow::new(duration))
     }
@@ -233,8 +268,8 @@ mod tests {
 
         assert_eq!(state.len(), 1);
         assert!(state.contains_key("electronics"));
-        assert_eq!(state["electronics"].count, 1);
-        assert_eq!(state["electronics"].total, 100);
+        assert_eq!(state["electronics"].value.count, 1);
+        assert_eq!(state["electronics"].value.total, 100);
     }
 
     #[test]
@@ -268,12 +303,12 @@ mod tests {
         }
 
         assert_eq!(state.len(), 3);
-        assert_eq!(state["electronics"].count, 2);
-        assert_eq!(state["electronics"].total, 300);
-        assert_eq!(state["books"].count, 2);
-        assert_eq!(state["books"].total, 80);
-        assert_eq!(state["clothing"].count, 1);
-        assert_eq!(state["clothing"].total, 75);
+        assert_eq!(state["electronics"].value.count, 2);
+        assert_eq!(state["electronics"].value.total, 300);
+        assert_eq!(state["books"].value.count, 2);
+        assert_eq!(state["books"].value.total, 80);
+        assert_eq!(state["clothing"].value.count, 1);
+        assert_eq!(state["clothing"].value.total, 75);
     }
 
     #[test]
@@ -308,6 +343,42 @@ mod tests {
             assert!(payload.get("key").is_some());
             assert!(payload.get("result").is_some());
         }
+    }
+
+    #[test]
+    fn test_groupby_emit_order_is_deterministic_by_first_parent() {
+        let accumulator = GroupBy::new("category", |_e: &ChainEvent, stats: &mut TestStats| {
+            stats.count += 1;
+        });
+        let mut state = accumulator.initial_state();
+
+        // Insert keys out of order; emission must not depend on HashMap iteration.
+        for category in ["d", "a", "c", "b", "a", "d"] {
+            let event = ChainEventFactory::data_event(
+                WriterId::from(StageId::new()),
+                "test",
+                json!({ "category": category }),
+            );
+            accumulator.accumulate(&mut state, event);
+        }
+
+        let emitted = accumulator.emit(&state);
+        assert_eq!(emitted.len(), 4);
+
+        let firsts: Vec<_> = emitted
+            .iter()
+            .map(|e| e.causality.parent_ids.first().copied())
+            .collect();
+        let mut sorted = firsts.clone();
+        sorted.sort();
+        assert_eq!(
+            firsts, sorted,
+            "aggregates must be emitted sorted by oldest contributing event id"
+        );
+        assert!(
+            firsts.iter().all(|f| f.is_some()),
+            "every aggregate must carry at least one parent id"
+        );
     }
 
     #[test]
@@ -449,7 +520,7 @@ where
     FKey: Fn(&T) -> K + Send + Sync + Clone + 'static,
     FUpdate: Fn(&mut S, &T) + Send + Sync + Clone + 'static, // CORRECTED: state first, value second
 {
-    type State = HashMap<K, S>;
+    type State = HashMap<K, GroupBucket<S>>;
 
     fn accumulate(&self, state: &mut Self::State, event: ChainEvent) {
         // Step 1: Deserialize ChainEvent → T
@@ -465,8 +536,9 @@ where
         let key = (self.key_fn)(&input);
 
         // Step 3: Update state using typed function (CORRECTED: state first, value second)
-        let group_state = state.entry(key).or_default();
-        (self.update_fn)(group_state, &input);
+        let bucket = state.entry(key).or_insert_with(GroupBucket::new);
+        (self.update_fn)(&mut bucket.value, &input);
+        bucket.trace.record_event(&event);
     }
 
     fn initial_state(&self) -> Self::State {
@@ -474,21 +546,31 @@ where
     }
 
     fn emit(&self, state: &Self::State) -> Vec<ChainEvent> {
-        state
+        let mut events: Vec<ChainEvent> = state
             .iter()
-            .map(|(key, group_state)| {
+            .map(|(key, bucket)| {
                 let key_json = serde_json::to_value(key).unwrap_or(serde_json::Value::Null);
 
-                ChainEventFactory::data_event(
+                let mut out = ChainEventFactory::data_event(
                     self.writer_id,
                     S::EVENT_TYPE,
                     json!({
                         "key": key_json,
-                        "result": group_state,
+                        "result": &bucket.value,
                     }),
-                )
+                );
+
+                out.causality = CausalityContext {
+                    parent_ids: bucket.trace.parent_ids(),
+                };
+
+                bucket.trace.apply_correlation_to_event(&mut out);
+
+                out
             })
-            .collect()
+            .collect();
+        super::sort_emitted_by_first_parent(&mut events);
+        events
     }
 
     fn reset(&self, state: &mut Self::State) {
@@ -530,7 +612,8 @@ where
     /// Emit within a time window.
     ///
     /// Results are emitted periodically based on wall-clock time.
-    /// Note: This should only be used for observability, not correctness.
+    /// This is processing-time (wall-clock) tumbling behaviour, not an event-time
+    /// window model.
     pub fn emit_within(self, duration: Duration) -> StatefulWithEmission<Self, TimeWindow> {
         self.with_emission(TimeWindow::new(duration))
     }
@@ -648,8 +731,8 @@ mod typed_tests {
 
         assert_eq!(state.len(), 1);
         assert!(state.contains_key("electronics"));
-        assert_eq!(state["electronics"].total_items, 2);
-        assert_eq!(state["electronics"].total_revenue, 200);
+        assert_eq!(state["electronics"].value.total_items, 2);
+        assert_eq!(state["electronics"].value.total_revenue, 200);
     }
 
     #[test]
@@ -689,16 +772,16 @@ mod typed_tests {
         assert_eq!(state.len(), 3);
 
         // electronics: 2 items @ $100 + 1 item @ $150 = 3 items, $350 revenue
-        assert_eq!(state["electronics"].total_items, 3);
-        assert_eq!(state["electronics"].total_revenue, 350);
+        assert_eq!(state["electronics"].value.total_items, 3);
+        assert_eq!(state["electronics"].value.total_revenue, 350);
 
         // books: 3 items @ $20 + 2 items @ $15 = 5 items, $90 revenue
-        assert_eq!(state["books"].total_items, 5);
-        assert_eq!(state["books"].total_revenue, 90);
+        assert_eq!(state["books"].value.total_items, 5);
+        assert_eq!(state["books"].value.total_revenue, 90);
 
         // clothing: 5 items @ $50 = 5 items, $250 revenue
-        assert_eq!(state["clothing"].total_items, 5);
-        assert_eq!(state["clothing"].total_revenue, 250);
+        assert_eq!(state["clothing"].value.total_items, 5);
+        assert_eq!(state["clothing"].value.total_revenue, 250);
     }
 
     #[test]
@@ -742,6 +825,40 @@ mod typed_tests {
             assert!(result.get("total_items").is_some());
             assert!(result.get("total_revenue").is_some());
         }
+    }
+
+    #[test]
+    fn test_groupby_typed_emit_order_is_deterministic_by_first_parent() {
+        let accumulator = GroupByTyped::new(
+            |product: &Product| product.category.clone(),
+            |stats: &mut CategoryStats, product: &Product| {
+                stats.total_items += product.quantity as u64;
+            },
+        );
+        let mut state = accumulator.initial_state();
+
+        for category in ["d", "a", "c", "b"] {
+            let event = ChainEventFactory::data_event(
+                WriterId::from(StageId::new()),
+                "product",
+                json!({ "category": category, "price": 1, "quantity": 1 }),
+            );
+            accumulator.accumulate(&mut state, event);
+        }
+
+        let emitted = accumulator.emit(&state);
+        assert_eq!(emitted.len(), 4);
+
+        let firsts: Vec<_> = emitted
+            .iter()
+            .map(|e| e.causality.parent_ids.first().copied())
+            .collect();
+        let mut sorted = firsts.clone();
+        sorted.sort();
+        assert_eq!(
+            firsts, sorted,
+            "typed aggregates must be emitted sorted by oldest contributing event id"
+        );
     }
 
     #[test]
@@ -856,11 +973,11 @@ mod typed_tests {
         }
 
         assert_eq!(state.len(), 3);
-        assert_eq!(state[&1].transaction_count, 2);
-        assert_eq!(state[&1].total_sales, 175.0);
-        assert_eq!(state[&2].transaction_count, 2);
-        assert_eq!(state[&2].total_sales, 75.0);
-        assert_eq!(state[&3].transaction_count, 1);
-        assert_eq!(state[&3].total_sales, 200.0);
+        assert_eq!(state[&1].value.transaction_count, 2);
+        assert_eq!(state[&1].value.total_sales, 175.0);
+        assert_eq!(state[&2].value.transaction_count, 2);
+        assert_eq!(state[&2].value.total_sales, 75.0);
+        assert_eq!(state[&3].value.transaction_count, 1);
+        assert_eq!(state[&3].value.total_sales, 200.0);
     }
 }

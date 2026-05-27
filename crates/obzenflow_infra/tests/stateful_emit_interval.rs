@@ -51,7 +51,7 @@ impl StatefulHandler for TimerEmitHandler {
         }
     }
 
-    fn should_emit(&self, state: &Self::State) -> bool {
+    fn should_emit(&self, state: &mut Self::State) -> bool {
         state
             .first_seen
             .is_some_and(|first_seen| first_seen.elapsed() >= self.emit_after)

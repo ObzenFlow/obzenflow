@@ -118,7 +118,7 @@ impl Middleware for SystemEnrichmentMiddleware {
             match self.stage_type {
                 StageType::FiniteSource | StageType::InfiniteSource => {
                     // Sources always generate new correlation IDs (journey start)
-                    if event.correlation_id.is_none() {
+                    if event.correlation.is_none() {
                         let correlation_id = CorrelationId::new();
                         let mut correlation_payload =
                             CorrelationPayload::new(&self.stage_name, event.id);
@@ -130,8 +130,7 @@ impl Middleware for SystemEnrichmentMiddleware {
                             "source_event_id": event.id.to_string(),
                         }));
 
-                        event.correlation_id = Some(correlation_id);
-                        event.correlation_payload = Some(correlation_payload);
+                        event.set_single_correlation(correlation_id, Some(correlation_payload));
 
                         tracing::trace!(
                             "SystemEnrichmentMiddleware: Generated correlation_id {} for source event {}", 
@@ -142,7 +141,7 @@ impl Middleware for SystemEnrichmentMiddleware {
                 }
                 StageType::Transform | StageType::Stateful | StageType::Sink | StageType::Join => {
                     // stages (transform, stateful, join) and sinks preserve correlation IDs
-                    if event.correlation_id.is_none() {
+                    if event.correlation.is_none() {
                         // If this is a *root* event (no parent lineage), it's reasonable to
                         // treat it as a journey start and generate correlation. This keeps
                         // observability useful for aggregates and other synthetic outputs.
@@ -157,8 +156,7 @@ impl Middleware for SystemEnrichmentMiddleware {
                                 "source_event_id": event.id.to_string(),
                             }));
 
-                            event.correlation_id = Some(correlation_id);
-                            event.correlation_payload = Some(correlation_payload);
+                            event.set_single_correlation(correlation_id, Some(correlation_payload));
 
                             tracing::trace!(
                                 "SystemEnrichmentMiddleware: Generated correlation_id {} for root event {} in stage {}",
@@ -317,16 +315,16 @@ mod tests {
         );
 
         // Initially no correlation ID
-        assert!(event.correlation_id.is_none());
+        assert!(event.correlation.is_none());
 
         // Pre-write should add correlation ID for source
         middleware.pre_write(&mut event, &ctx);
 
         // Check that correlation was added
-        assert!(event.correlation_id.is_some());
-        assert!(event.correlation_payload.is_some());
+        assert!(event.correlation_id().is_some());
+        assert!(event.correlation_payload().is_some());
 
-        let payload = event.correlation_payload.as_ref().unwrap();
+        let payload = event.correlation_payload().unwrap();
         assert_eq!(payload.entry_stage, "http_source");
         assert_eq!(payload.metadata.as_ref().unwrap()["flow_name"], "test_flow");
         assert_eq!(payload.metadata.as_ref().unwrap()["flow_id"], "flow-123");
@@ -351,13 +349,13 @@ mod tests {
 
         // Set existing correlation
         let correlation_id = CorrelationId::new();
-        event.correlation_id = Some(correlation_id);
+        event.set_single_correlation(correlation_id, None);
 
         // Pre-write should preserve correlation ID
         middleware.pre_write(&mut event, &ctx);
 
         // Correlation should be unchanged
-        assert_eq!(event.correlation_id, Some(correlation_id));
+        assert_eq!(event.correlation_id(), Some(correlation_id));
     }
 
     #[test]
@@ -377,15 +375,14 @@ mod tests {
             json!({"id": "T-1"}),
         );
 
-        assert!(event.correlation_id.is_none());
+        assert!(event.correlation.is_none());
         assert!(event.causality.is_root());
 
         middleware.pre_write(&mut event, &ctx);
 
-        assert!(event.correlation_id.is_some());
+        assert!(event.correlation_id().is_some());
         let payload = event
-            .correlation_payload
-            .as_ref()
+            .correlation_payload()
             .expect("generated correlation payload should be present");
         assert_eq!(payload.entry_stage, "enricher");
         assert_eq!(payload.metadata.as_ref().unwrap()["flow_name"], "test_flow");
@@ -416,8 +413,8 @@ mod tests {
         middleware.pre_write(&mut event, &ctx);
 
         // Control events should not have correlation
-        assert!(event.correlation_id.is_none());
-        assert!(event.correlation_payload.is_none());
+        assert!(event.correlation.is_none());
+        assert!(event.correlation_payload().is_none());
     }
 
     #[test]
@@ -444,16 +441,15 @@ mod tests {
             "flow_name": "test_flow",
             "source_event_id": "src-123"
         }));
-        event.correlation_id = Some(correlation_id);
-        event.correlation_payload = Some(correlation_payload.clone());
+        event.set_single_correlation(correlation_id, Some(correlation_payload.clone()));
 
         // Pre-write should preserve everything
         middleware.pre_write(&mut event, &ctx);
 
         // Correlation should be completely unchanged
-        assert_eq!(event.correlation_id, Some(correlation_id));
+        assert_eq!(event.correlation_id(), Some(correlation_id));
         assert_eq!(
-            event.correlation_payload.as_ref().unwrap().entry_stage,
+            event.correlation_payload().unwrap().entry_stage,
             "http_source"
         );
     }

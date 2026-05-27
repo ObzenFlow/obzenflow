@@ -9,6 +9,7 @@
 use crate::stages::common::handler_error::HandlerError;
 use async_trait::async_trait;
 use obzenflow_core::ChainEvent;
+use std::time::Duration;
 
 /// Handler for stateful processing stages
 ///
@@ -53,7 +54,7 @@ use obzenflow_core::ChainEvent;
 ///         state.events_since_emit += 1;
 ///     }
 ///
-///     fn should_emit(&self, state: &Self::State) -> bool {
+///     fn should_emit(&self, state: &mut Self::State) -> bool {
 ///         state.events_since_emit >= self.window_size
 ///     }
 ///
@@ -120,11 +121,19 @@ pub trait StatefulHandler: Send + Sync {
 
     // --- Advanced methods with sensible defaults ---
 
+    /// Optional idle tick interval hint for the supervisor.
+    ///
+    /// When set, the supervisor may periodically call `should_emit` even when no new input events
+    /// arrive, enabling time-based emission.
+    fn emit_interval_hint(&self) -> Option<Duration> {
+        None
+    }
+
     /// Check if we should transition from Accumulating to Emitting
     ///
     /// Default: false (only emit on drain, i.e., OnEOF behavior)
     /// Override this OR use .with_emission() for other strategies
-    fn should_emit(&self, _state: &Self::State) -> bool {
+    fn should_emit(&self, _state: &mut Self::State) -> bool {
         false
     }
 

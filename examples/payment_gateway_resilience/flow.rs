@@ -99,8 +99,7 @@ impl TransformHandler for ValidationTransform {
         out.flow_context = event.flow_context.clone();
         out.processing_info = event.processing_info.clone();
         out.causality = event.causality.clone();
-        out.correlation_id = event.correlation_id;
-        out.correlation_payload = event.correlation_payload.clone();
+        out.correlation = event.correlation.clone();
         out.runtime_context = event.runtime_context.clone();
         out.observability = event.observability.clone();
 
@@ -169,8 +168,7 @@ impl AsyncTransformHandler for GatewayTransform {
                 out.flow_context = event.flow_context.clone();
                 out.processing_info = event.processing_info.clone();
                 out.causality = event.causality.clone();
-                out.correlation_id = event.correlation_id;
-                out.correlation_payload = event.correlation_payload.clone();
+                out.correlation = event.correlation.clone();
                 out.runtime_context = event.runtime_context.clone();
                 out.observability = event.observability.clone();
 

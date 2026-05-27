@@ -271,7 +271,7 @@ impl CycleGuard {
         debug!(
             stage_name = %self.stage_name,
             event_id = %event.id,
-            correlation_id = ?event.correlation_id,
+            correlation_id = ?event.correlation_id(),
             cycle_depth = %depth,
             max_iterations = %self.max_iterations,
             scc_id = %self.scc_id,
@@ -282,7 +282,7 @@ impl CycleGuard {
             warn!(
                 stage_name = %self.stage_name,
                 event_id = %event.id,
-                correlation_id = ?event.correlation_id,
+                correlation_id = ?event.correlation_id(),
                 cycle_depth = %depth,
                 max_iterations = %self.max_iterations,
                 scc_id = %self.scc_id,

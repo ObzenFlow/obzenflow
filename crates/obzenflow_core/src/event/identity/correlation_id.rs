@@ -9,7 +9,7 @@ use std::fmt;
 use ulid::Ulid;
 
 /// Unique identifier for correlating events through a flow
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct CorrelationId(Ulid);
 

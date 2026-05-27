@@ -154,6 +154,16 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Super
                     })
                 };
 
+                on StatefulEvent::BeginDrain => |_state: &StatefulState<H>, _event: &StatefulEvent<H>, ctx: &mut StatefulContext<H>| {
+                    Box::pin(async move {
+                        ctx.instrumentation.transition_to_state("Draining");
+                        Ok(Transition {
+                            next_state: StatefulState::Draining,
+                            actions: vec![],
+                        })
+                    })
+                };
+
                 on StatefulEvent::Error => |_state: &StatefulState<H>, event: &StatefulEvent<H>, ctx: &mut StatefulContext<H>| {
                     let event = event.clone();
                     Box::pin(async move {
@@ -197,6 +207,16 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Super
                     })
                 };
 
+                on StatefulEvent::BeginDrain => |_state: &StatefulState<H>, _event: &StatefulEvent<H>, ctx: &mut StatefulContext<H>| {
+                    Box::pin(async move {
+                        ctx.instrumentation.transition_to_state("Draining");
+                        Ok(Transition {
+                            next_state: StatefulState::Draining,
+                            actions: vec![],
+                        })
+                    })
+                };
+
                 // Fallback error handling for Emitting (matches original from_any behaviour)
                 on StatefulEvent::Error => |_state: &StatefulState<H>, event: &StatefulEvent<H>, _ctx: &mut StatefulContext<H>| {
                     let event = event.clone();
@@ -228,6 +248,15 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Super
                                 StatefulAction::SendCompletion,
                                 StatefulAction::Cleanup,
                             ],
+                        })
+                    })
+                };
+
+                on StatefulEvent::BeginDrain => |_state: &StatefulState<H>, _event: &StatefulEvent<H>, _ctx: &mut StatefulContext<H>| {
+                    Box::pin(async move {
+                        Ok(Transition {
+                            next_state: StatefulState::Draining,
+                            actions: vec![],
                         })
                     })
                 };

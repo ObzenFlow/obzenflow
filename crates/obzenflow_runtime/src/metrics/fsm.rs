@@ -2252,8 +2252,10 @@ mod tests {
             "test.event",
             serde_json::json!({"data": "test"}),
         );
-        event.correlation_id = Some(correlation_id);
-        event.correlation_payload = Some(CorrelationPayload::new("test_source", event.id));
+        event.set_single_correlation(
+            correlation_id,
+            Some(CorrelationPayload::new("test_source", event.id)),
+        );
 
         // Simulate what the sink supervisor does when creating a delivery event
         let payload = DeliveryPayload::success("test_sink", DeliveryMethod::Noop, Some(1));
@@ -2261,14 +2263,10 @@ mod tests {
             ChainEventFactory::delivery_event(writer_id, payload).with_correlation_from(&event);
 
         // Verify correlation is preserved
-        assert_eq!(delivery_event.correlation_id, Some(correlation_id));
-        assert!(delivery_event.correlation_payload.is_some());
+        assert_eq!(delivery_event.correlation_id(), Some(correlation_id));
+        assert!(delivery_event.correlation_payload().is_some());
         assert_eq!(
-            delivery_event
-                .correlation_payload
-                .as_ref()
-                .unwrap()
-                .entry_stage,
+            delivery_event.correlation_payload().unwrap().entry_stage,
             "test_source"
         );
     }

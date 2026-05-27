@@ -130,7 +130,7 @@ impl StatefulHandler for MultiSourceAggregator {
         state.current_event = Some(event);
     }
 
-    fn should_emit(&self, state: &Self::State) -> bool {
+    fn should_emit(&self, state: &mut Self::State) -> bool {
         // Emit after every event (immediate enrichment pattern)
         state.current_event.is_some()
     }

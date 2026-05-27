@@ -21,6 +21,47 @@ use crate::id::{CycleDepth, SccId};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+/// Correlation metadata carried through a flow.
+///
+/// `ids` contains one id for ordinary 1:1 or fan-out lineage, and multiple ids
+/// for fan-in aggregates. When `truncated` is true, `ids` is a bounded sample.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CorrelationContext {
+    pub ids: Vec<CorrelationId>,
+
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub truncated: bool,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub payload: Option<CorrelationPayload>,
+}
+
+impl CorrelationContext {
+    pub fn single(id: CorrelationId, payload: Option<CorrelationPayload>) -> Self {
+        Self {
+            ids: vec![id],
+            truncated: false,
+            payload,
+        }
+    }
+
+    pub fn sample(ids: Vec<CorrelationId>, truncated: bool) -> Self {
+        Self {
+            ids,
+            truncated,
+            payload: None,
+        }
+    }
+
+    pub fn single_id(&self) -> Option<CorrelationId> {
+        if self.ids.len() == 1 && !self.truncated {
+            self.ids.first().copied()
+        } else {
+            None
+        }
+    }
+}
+
 /// The definitive event structure for ObzenFlow
 /// Lives inside EventEnvelope.data as serialized bytes
 /// Focuses on application concerns, NOT infrastructure concerns
@@ -53,13 +94,9 @@ pub struct ChainEvent {
     pub intent: Option<IntentContext>,
 
     // === Flow-Level Correlation (FLOWIP-054d) ===
-    /// Correlation ID that flows through all derived events
+    /// Correlation metadata for flow-level provenance and fan-in inspection.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub correlation_id: Option<CorrelationId>,
-
-    /// Metadata about when/where this correlation entered the flow
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub correlation_payload: Option<CorrelationPayload>,
+    pub correlation: Option<CorrelationContext>,
 
     /// Provenance for replayed events (FLOWIP-095a).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -113,6 +150,10 @@ pub enum ChainEventContent {
     /// Stage lifecycle and observability events
     #[serde(rename = "lifecycle")]
     Observability(ObservabilityPayload),
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 impl ChainEvent {

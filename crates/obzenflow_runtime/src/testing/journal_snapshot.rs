@@ -879,7 +879,7 @@ mod tests {
         let corr = CorrelationId::new();
         let mut parent =
             ChainEventFactory::data_event(writer, "parent", serde_json::json!({ "k": "v" }));
-        parent.correlation_id = Some(corr);
+        parent.set_single_correlation(corr, None);
         let parent_env = journal.append(parent, None).await.expect("append parent");
 
         let child_a = ChainEventFactory::derived_data_event(
@@ -905,11 +905,12 @@ mod tests {
             .expect("append child.b");
 
         assert_eq!(
-            child_a_env.event.correlation_id, child_b_env.event.correlation_id,
+            child_a_env.event.correlation_id(),
+            child_b_env.event.correlation_id(),
             "under fan-out, multiple derived children intentionally share correlation_id"
         );
         assert_eq!(
-            child_a_env.event.correlation_id,
+            child_a_env.event.correlation_id(),
             Some(corr),
             "derived children should inherit parent's correlation_id"
         );

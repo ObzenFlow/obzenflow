@@ -104,7 +104,6 @@ mod hints;
 pub mod ai;
 pub mod control;
 pub mod observability;
-pub mod state;
 mod system;
 // Dangerous middleware examples moved to examples/dangerous_examples.rs
 // Factory tests moved to tests/factory_tests.rs
@@ -142,7 +141,6 @@ pub use context::MiddlewareContext;
 pub use function::{middleware_fn, FnMiddleware};
 pub use hints::{Attempts, BackoffKind, BatchingHint, MiddlewareHints, RetryHint};
 pub use observability::timing::TimingMiddleware;
-pub use state::windowing::{WindowingMiddleware, WindowingMiddlewareFactory};
 
 // Control middleware
 pub use control::{

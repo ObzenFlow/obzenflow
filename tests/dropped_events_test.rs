@@ -225,7 +225,7 @@ async fn test_dropped_events_detection() -> Result<()> {
         println!(
             "Event {}: correlation_id = {:?}",
             i,
-            event.correlation_id.is_some()
+            event.correlation_id().is_some()
         );
     }
 

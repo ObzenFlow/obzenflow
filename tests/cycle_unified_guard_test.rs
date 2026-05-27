@@ -4,6 +4,7 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
+use obzenflow::typed::stateful as typed_stateful;
 use obzenflow_core::event::chain_event::ChainEventFactory;
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
 use obzenflow_core::event::CorrelationId;
@@ -101,7 +102,7 @@ impl AsyncFiniteSourceHandler for CorrelatedEventSource {
         if !self.emitted {
             self.emitted = true;
             let mut event = ChainEventFactory::data_event(self.writer_id, "test.event", json!({}));
-            event.correlation_id = Some(self.correlation_id);
+            event.set_single_correlation(self.correlation_id, None);
             return Ok(Some(vec![event]));
         }
 
@@ -258,6 +259,49 @@ async fn cycle_guard_rejects_cycles_with_non_transform_members() {
     };
     assert!(err.contains("Unsupported cycle topology"), "error: {err}");
     assert!(err.contains("agg (stateful)"), "error: {err}");
+}
+
+#[tokio::test]
+async fn cycle_guard_rejects_stateful_emit_within_cycle() {
+    #[derive(Clone, Debug, Default, Serialize, Deserialize)]
+    struct WindowCount {
+        count: u64,
+    }
+
+    impl TypedPayload for WindowCount {
+        const EVENT_TYPE: &'static str = "cycle.stateful_emit_within.count";
+    }
+
+    let result = flow! {
+        name: "cycle_guard_reject_emit_within",
+        journals: disk_journals(std::path::PathBuf::from("target/cycle_guard_reject_emit_within")),
+        middleware: [],
+
+        stages: {
+            src = source!(SeedEvent => TestEventSource::new(1));
+            win = stateful!(SeedEvent -> WindowCount => typed_stateful::reduce(
+                WindowCount::default(),
+                |acc: &mut WindowCount, _ev: &SeedEvent| { acc.count += 1; }
+            ).emit_within(Duration::from_millis(10)));
+            tr = transform!(WindowCount -> WindowCount => IdentityTransform);
+            snk = sink!(WindowCount => EventCounterSink::new().0);
+        },
+
+        topology: {
+            src |> win;
+            win |> tr;
+            win <| tr;
+            tr |> snk;
+        }
+    }
+    .await;
+
+    let err = match result {
+        Ok(_) => panic!("expected cycle topology validation to fail"),
+        Err(err) => err.to_string(),
+    };
+    assert!(err.contains("Unsupported cycle topology"), "error: {err}");
+    assert!(err.contains("win (stateful)"), "error: {err}");
 }
 
 #[tokio::test]

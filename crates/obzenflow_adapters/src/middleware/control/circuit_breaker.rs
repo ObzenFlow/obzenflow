@@ -1364,8 +1364,7 @@ fn copy_metadata_from(target: &mut ChainEvent, source: &ChainEvent) {
     target.flow_context = source.flow_context.clone();
     target.processing_info = source.processing_info.clone();
     target.causality = source.causality.clone();
-    target.correlation_id = source.correlation_id;
-    target.correlation_payload = source.correlation_payload.clone();
+    target.correlation = source.correlation.clone();
     target.runtime_context = source.runtime_context.clone();
     target.observability = source.observability.clone();
 }

@@ -188,8 +188,46 @@ pub(crate) fn is_terminal_eof(
         }) => match writer_id {
             Some(obzenflow_core::WriterId::Stage(eof_stage)) => *eof_stage == upstream,
             Some(_) => false,
-            None => true,
+            None => match envelope.event.writer_id {
+                obzenflow_core::WriterId::Stage(stage) => stage == upstream,
+                _ => false,
+            },
         },
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use obzenflow_core::event::chain_event::ChainEventFactory;
+    use obzenflow_core::event::JournalWriterId;
+    use obzenflow_core::id::StageId;
+    use obzenflow_core::WriterId;
+
+    #[test]
+    fn is_terminal_eof_missing_payload_writer_falls_back_to_top_level_writer() {
+        let upstream = StageId::new();
+        let other = StageId::new();
+
+        let mut eof = ChainEventFactory::eof_event(WriterId::Stage(upstream), true);
+        if let obzenflow_core::event::ChainEventContent::FlowControl(FlowControlPayload::Eof {
+            writer_id,
+            ..
+        }) = &mut eof.content
+        {
+            *writer_id = None;
+        }
+
+        let env = EventEnvelope::new(JournalWriterId::new(), eof);
+
+        assert!(
+            is_terminal_eof(&env, Some(upstream)),
+            "expected missing payload writer to fall back to top-level writer"
+        );
+        assert!(
+            !is_terminal_eof(&env, Some(other)),
+            "expected missing payload writer to be non-terminal for other upstream stages"
+        );
     }
 }

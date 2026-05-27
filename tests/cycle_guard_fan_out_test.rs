@@ -130,7 +130,7 @@ impl FiniteSourceHandler for SingleSeedFanOutSource {
             "test.seed",
             json!({ "fan_out": self.fan_out, "target": self.target }),
         );
-        event.correlation_id = Some(self.correlation_id);
+        event.set_single_correlation(self.correlation_id, None);
         Ok(Some(vec![event]))
     }
 }

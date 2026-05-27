@@ -13,9 +13,13 @@ use crate::stages::stateful::strategies::emissions::{
     EmissionStrategy, EmitAlways, EveryN, OnEOF, TimeWindow,
 };
 use crate::typing::StatefulTyping;
+use obzenflow_core::event::context::causality_context::CausalityContext;
+use obzenflow_core::event::context::ReplayContext;
+use obzenflow_core::event::ChainEventContent;
 use obzenflow_core::event::ChainEventFactory;
+use obzenflow_core::event::CorrelationContext;
 use obzenflow_core::id::StageId;
-use obzenflow_core::{ChainEvent, TypedPayload, WriterId};
+use obzenflow_core::{ChainEvent, EventId, TypedPayload, WriterId};
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::time::Duration;
@@ -79,8 +83,27 @@ impl Accumulator for Conflate {
     }
 
     fn emit(&self, state: &Self::State) -> Vec<ChainEvent> {
-        // Emit all latest values
-        state.values().cloned().collect()
+        let mut events: Vec<ChainEvent> = state
+            .values()
+            .filter_map(|event| match &event.content {
+                ChainEventContent::Data {
+                    event_type,
+                    payload,
+                } => {
+                    let mut out =
+                        ChainEventFactory::data_event(self.writer_id, event_type, payload.clone());
+
+                    out.causality = CausalityContext::with_parent(event.id);
+                    out.correlation = event.correlation.clone();
+                    out.replay_context = event.replay_context.clone();
+
+                    Some(out)
+                }
+                _ => None,
+            })
+            .collect();
+        super::sort_emitted_by_first_parent(&mut events);
+        events
     }
 
     fn reset(&self, state: &mut Self::State) {
@@ -245,6 +268,36 @@ mod tests {
     }
 
     #[test]
+    fn test_conflate_emit_order_is_deterministic_by_first_parent() {
+        let accumulator = Conflate::new("sensor_id");
+        let mut state = accumulator.initial_state();
+
+        for sensor in ["s_d", "s_a", "s_c", "s_b"] {
+            let event = ChainEventFactory::data_event(
+                WriterId::from(StageId::new()),
+                "reading",
+                json!({ "sensor_id": sensor, "value": 1 }),
+            );
+            accumulator.accumulate(&mut state, event);
+        }
+
+        let emitted = accumulator.emit(&state);
+        assert_eq!(emitted.len(), 4);
+
+        let firsts: Vec<_> = emitted
+            .iter()
+            .map(|e| e.causality.parent_ids.first().copied())
+            .collect();
+        let mut sorted = firsts.clone();
+        sorted.sort();
+        assert_eq!(
+            firsts, sorted,
+            "conflated snapshots must be emitted sorted by retained event id"
+        );
+        assert!(firsts.iter().all(|f| f.is_some()));
+    }
+
+    #[test]
     fn test_conflate_reset() {
         let accumulator = Conflate::new("sensor_id");
         let mut state = accumulator.initial_state();
@@ -388,7 +441,7 @@ where
     K: Hash + Eq + Clone + Debug + Serialize + Send + Sync + 'static,
     FKey: Fn(&T) -> K + Send + Sync + Clone + 'static,
 {
-    type State = HashMap<K, T>;
+    type State = HashMap<K, ConflateTypedBucket<T>>;
 
     fn accumulate(&self, state: &mut Self::State, event: ChainEvent) {
         // Step 1: Deserialize ChainEvent → T
@@ -404,7 +457,15 @@ where
         let key = (self.key_fn)(&input);
 
         // Step 3: Store latest value (overwrites previous)
-        state.insert(key, input);
+        state.insert(
+            key,
+            ConflateTypedBucket {
+                value: input,
+                source_event_id: event.id,
+                correlation: event.correlation.clone(),
+                replay_context: event.replay_context.clone(),
+            },
+        );
     }
 
     fn initial_state(&self) -> Self::State {
@@ -412,19 +473,39 @@ where
     }
 
     fn emit(&self, state: &Self::State) -> Vec<ChainEvent> {
-        // Emit all latest values as typed events
-        state
+        // Emit all latest values as derived typed events, parented to the
+        // originating input for each key.
+        let mut events: Vec<ChainEvent> = state
             .values()
             .map(|value| {
-                let payload = serde_json::to_value(value).unwrap_or(serde_json::Value::Null);
-                ChainEventFactory::data_event(self.writer_id, T::EVENT_TYPE, payload)
+                let payload = serde_json::to_value(&value.value).unwrap_or(serde_json::Value::Null);
+                let mut out = ChainEventFactory::data_event(self.writer_id, T::EVENT_TYPE, payload);
+
+                out.causality = CausalityContext::with_parent(value.source_event_id);
+                out.correlation = value.correlation.clone();
+                out.replay_context = value.replay_context.clone();
+
+                out
             })
-            .collect()
+            .collect();
+        super::sort_emitted_by_first_parent(&mut events);
+        events
     }
 
     fn reset(&self, state: &mut Self::State) {
         state.clear();
     }
+}
+
+#[derive(Clone, Debug)]
+pub struct ConflateTypedBucket<T>
+where
+    T: Clone + Send + Sync + Debug,
+{
+    value: T,
+    source_event_id: EventId,
+    correlation: Option<CorrelationContext>,
+    replay_context: Option<ReplayContext>,
 }
 
 /// Builder pattern methods for combining with emission strategies
@@ -545,7 +626,7 @@ mod typed_tests {
         accumulator.accumulate(&mut state, event1);
 
         assert_eq!(state.len(), 1);
-        assert_eq!(state["sensor_1"].temperature, 20.5);
+        assert_eq!(state["sensor_1"].value.temperature, 20.5);
 
         // Second reading for sensor_1 (should overwrite)
         let reading2 = SensorReading {
@@ -562,8 +643,8 @@ mod typed_tests {
 
         // Should still have 1 entry, but with updated value
         assert_eq!(state.len(), 1);
-        assert_eq!(state["sensor_1"].temperature, 21.0);
-        assert_eq!(state["sensor_1"].timestamp, 2000);
+        assert_eq!(state["sensor_1"].value.temperature, 21.0);
+        assert_eq!(state["sensor_1"].value.timestamp, 2000);
     }
 
     #[test]
@@ -595,12 +676,12 @@ mod typed_tests {
 
         // Should have 3 sensors with their latest values
         assert_eq!(state.len(), 3);
-        assert_eq!(state["sensor_1"].temperature, 21.0);
-        assert_eq!(state["sensor_1"].timestamp, 2000);
-        assert_eq!(state["sensor_2"].temperature, 19.0);
-        assert_eq!(state["sensor_2"].timestamp, 3000);
-        assert_eq!(state["sensor_3"].temperature, 22.5);
-        assert_eq!(state["sensor_3"].timestamp, 2001);
+        assert_eq!(state["sensor_1"].value.temperature, 21.0);
+        assert_eq!(state["sensor_1"].value.timestamp, 2000);
+        assert_eq!(state["sensor_2"].value.temperature, 19.0);
+        assert_eq!(state["sensor_2"].value.timestamp, 3000);
+        assert_eq!(state["sensor_3"].value.temperature, 22.5);
+        assert_eq!(state["sensor_3"].value.timestamp, 2001);
     }
 
     #[test]
@@ -636,6 +717,40 @@ mod typed_tests {
         assert!(temperatures.contains(&10.0));
         assert!(temperatures.contains(&20.0));
         assert!(temperatures.contains(&30.0));
+    }
+
+    #[test]
+    fn test_conflate_typed_emit_order_is_deterministic_by_first_parent() {
+        let accumulator = ConflateTyped::new(|r: &SensorReading| r.sensor_id.clone());
+        let mut state = accumulator.initial_state();
+
+        for sensor in ["s_d", "s_a", "s_c", "s_b"] {
+            let reading = SensorReading {
+                sensor_id: sensor.to_string(),
+                temperature: 1.0,
+                timestamp: 1,
+            };
+            let event = ChainEventFactory::data_event(
+                WriterId::from(StageId::new()),
+                "reading",
+                serde_json::to_value(&reading).unwrap(),
+            );
+            accumulator.accumulate(&mut state, event);
+        }
+
+        let emitted = accumulator.emit(&state);
+        assert_eq!(emitted.len(), 4);
+
+        let firsts: Vec<_> = emitted
+            .iter()
+            .map(|e| e.causality.parent_ids.first().copied())
+            .collect();
+        let mut sorted = firsts.clone();
+        sorted.sort();
+        assert_eq!(
+            firsts, sorted,
+            "typed conflated snapshots must be emitted sorted by retained event id"
+        );
     }
 
     #[test]
@@ -732,11 +847,11 @@ mod typed_tests {
 
         // Should have 3 users with their latest status
         assert_eq!(state.len(), 3);
-        assert_eq!(state[&1].status, "away");
-        assert_eq!(state[&1].last_seen, 2000);
-        assert_eq!(state[&2].status, "online");
-        assert_eq!(state[&2].last_seen, 3000);
-        assert_eq!(state[&3].status, "online");
-        assert_eq!(state[&3].last_seen, 2001);
+        assert_eq!(state[&1].value.status, "away");
+        assert_eq!(state[&1].value.last_seen, 2000);
+        assert_eq!(state[&2].value.status, "online");
+        assert_eq!(state[&2].value.last_seen, 3000);
+        assert_eq!(state[&3].value.status, "online");
+        assert_eq!(state[&3].value.last_seen, 2001);
     }
 }

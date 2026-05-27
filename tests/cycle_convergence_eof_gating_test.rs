@@ -129,7 +129,7 @@ impl FiniteSourceHandler for SingleSeedSource {
             "test.seed",
             json!({ "depth": 0u64, "target": self.target }),
         );
-        event.correlation_id = Some(self.correlation_id);
+        event.set_single_correlation(self.correlation_id, None);
         Ok(Some(vec![event]))
     }
 }
@@ -413,7 +413,7 @@ impl AsyncFiniteSourceHandler for SeedThenDrainSource {
                     "test.seed",
                     json!({ "depth": 0u64, "target": self.target }),
                 );
-                event.correlation_id = Some(self.correlation_id);
+                event.set_single_correlation(self.correlation_id, None);
                 Ok(Some(vec![event]))
             }
             1 => {
@@ -468,7 +468,7 @@ impl FiniteSourceHandler for DualSeedSource {
             "test.seed",
             json!({ "depth": 0u64, "target": target }),
         );
-        event.correlation_id = Some(correlation_id);
+        event.set_single_correlation(correlation_id, None);
         Ok(Some(vec![event]))
     }
 }

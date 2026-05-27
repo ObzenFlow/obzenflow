@@ -211,12 +211,15 @@ pub(super) async fn dispatch_accumulating<
                         }
                         ControlResolution::Suppress => EventLoopDirective::Continue,
                         ControlResolution::BufferAtEntryPoint { .. } => {
-                            tracing::warn!(
+                            tracing::error!(
                                 stage_name = %ctx.stage_name,
                                 event_type = envelope.event.event_type(),
                                 "Stateful stage received entry-point buffering resolution without cycle config"
                             );
-                            EventLoopDirective::Continue
+                            EventLoopDirective::Transition(StatefulEvent::Error(format!(
+                                "Stateful stage reached cycle-entry buffering without cycle config: {}",
+                                envelope.event.event_type()
+                            )))
                         }
                         ControlResolution::Delay(_) => {
                             unreachable!("Delay is handled before executing the resolution")
@@ -294,21 +297,21 @@ pub(super) async fn dispatch_accumulating<
                         );
                     }
 
-                    // Check if we should emit based on updated state
-                    if handler.should_emit(&ctx.current_state) {
+                    // Backpressure ack: upstream input was consumed into state.
+                    //
+                    // Note: This is intentionally independent of emission. Emission is driven by
+                    // accumulator state (and can also be timer-driven), whereas backpressure acks
+                    // reflect input consumption on the upstream edge.
+                    if let Some(upstream) = upstream_stage {
+                        if let Some(reader) = ctx.backpressure_readers.get(&upstream) {
+                            reader.ack_consumed(1);
+                        }
+                    }
+
+                    // Check if we should emit based on updated state.
+                    if handler.should_emit(&mut ctx.current_state) {
                         EventLoopDirective::Transition(StatefulEvent::ShouldEmit)
                     } else {
-                        // Backpressure ack: upstream input was consumed into state.
-                        let upstream_stage = sup
-                            .subscription
-                            .as_ref()
-                            .and_then(|subscription| subscription.last_delivered_upstream_stage());
-                        if let Some(upstream) = upstream_stage {
-                            if let Some(reader) = ctx.backpressure_readers.get(&upstream) {
-                                reader.ack_consumed(1);
-                            }
-                        }
-
                         EventLoopDirective::Continue
                     }
                 }
@@ -397,7 +400,7 @@ pub(super) async fn dispatch_accumulating<
             {
                 if baseline.elapsed() >= interval {
                     let handler = (*ctx.handler).clone();
-                    if handler.should_emit(&ctx.current_state) {
+                    if handler.should_emit(&mut ctx.current_state) {
                         directive = EventLoopDirective::Transition(StatefulEvent::ShouldEmit);
                     }
 

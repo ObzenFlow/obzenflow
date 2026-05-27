@@ -114,7 +114,7 @@ where
         Ok(results)
     }
 
-    fn should_emit(&self, state: &Self::State) -> bool {
+    fn should_emit(&self, state: &mut Self::State) -> bool {
         // Delegate to inner handler - middleware doesn't affect emission strategy
         self.inner.should_emit(state)
     }
@@ -242,7 +242,7 @@ mod tests {
             )])
         }
 
-        fn should_emit(&self, state: &Self::State) -> bool {
+        fn should_emit(&self, state: &mut Self::State) -> bool {
             state.len() >= 3
         }
 

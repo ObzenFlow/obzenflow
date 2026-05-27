@@ -9,7 +9,7 @@
 // define the "what" to create flexible stateful processing patterns.
 
 use std::fmt::Debug;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 // Re-export concrete strategies
 mod emit_always;
@@ -55,6 +55,21 @@ pub trait EmissionStrategy: Send + Sync + Debug {
     /// This allows strategies to reset counters or state after emitting results.
     /// For example, EveryN resets its counter after emission.
     fn reset(&mut self);
+
+    /// Whether this strategy represents a tumbling boundary that should reset the accumulator.
+    ///
+    /// Default: false (snapshot-style emissions keep accumulating state).
+    fn resets_accumulator_on_emit(&self) -> bool {
+        false
+    }
+
+    /// Optional supervisor-driven idle tick interval for this strategy.
+    ///
+    /// When set, the stateful supervisor will periodically call `should_emit` even when no new
+    /// input events arrive, enabling time-based emission.
+    fn emit_interval_hint(&self) -> Option<Duration> {
+        None
+    }
 
     /// Check if this strategy requires EOF notification.
     ///
