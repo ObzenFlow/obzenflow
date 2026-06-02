@@ -1034,6 +1034,196 @@ macro_rules! async_transform {
 }
 
 // ============================================================================
+// effectful_async_transform!
+// ============================================================================
+
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __obzenflow_effectful_async_transform_untyped {
+    (name = $name:literal, handler = $handler:expr, middleware = [$($mw:expr),*]) => {{
+        use $crate::dsl::stage_descriptor::{EffectfulAsyncTransformDescriptor, StageDescriptor};
+        Box::new(EffectfulAsyncTransformDescriptor {
+            name: $name.to_string(),
+            handler: $handler,
+            middleware: vec![$(Box::new($mw)),*],
+        }) as Box<dyn StageDescriptor>
+    }};
+}
+
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __obzenflow_effectful_async_transform_typed {
+    (input = exact($in:ty), output = $out:ty, name = $name:literal, handler = $handler:expr, middleware = [$($mw:expr),*]) => {{
+        let __handler = $handler;
+        fn __assert_effectful_contract<H>(_handler: &H)
+        where
+            H: ::obzenflow_runtime::stages::EffectfulAsyncTransformHandler<
+                Input = $in,
+                Output = $out,
+            >,
+        {}
+        __assert_effectful_contract(&__handler);
+        let __metadata = $crate::dsl::typing::StageTypingMetadata::transform(
+            $crate::dsl::typing::TypeHint::exact::<$in>(),
+            $crate::dsl::typing::TypeHint::exact::<$out>(),
+            false,
+            None,
+        );
+        let __descriptor = $crate::__obzenflow_effectful_async_transform_untyped!(
+            name = $name,
+            handler = __handler,
+            middleware = [$($mw),*]
+        );
+        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
+    }};
+}
+
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __obzenflow_effectful_async_transform_exact_contract {
+    (name = $name:literal, $($rest:tt)+) => {
+        $crate::__obzenflow_effectful_async_transform_exact_contract!(@collect name = $name, in = (), $($rest)+)
+    };
+    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => $handler:expr) => {
+        $crate::__obzenflow_effectful_async_transform_typed!(
+            input = exact($($in)+),
+            output = $out,
+            name = $name,
+            handler = $handler,
+            middleware = []
+        )
+    };
+    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => $handler:expr, [$($mw:expr),*]) => {
+        $crate::__obzenflow_effectful_async_transform_typed!(
+            input = exact($($in)+),
+            output = $out,
+            name = $name,
+            handler = $handler,
+            middleware = [$($mw),*]
+        )
+    };
+    (@collect name = $name:literal, in = ($($in:tt)*), $tok:tt $($rest:tt)+) => {
+        $crate::__obzenflow_effectful_async_transform_exact_contract!(
+            @collect
+            name = $name,
+            in = ($($in)* $tok),
+            $($rest)+
+        )
+    };
+    (@collect name = $name:literal, in = (), -> $($rest:tt)*) => {
+        compile_error!("effectful_async_transform!: expected `InputType -> OutputType => handler`");
+    };
+    (@collect name = $name:literal, in = ($($in:tt)+), $($rest:tt)*) => {
+        compile_error!("effectful_async_transform!: expected `-> OutputType => handler` after input type");
+    };
+}
+
+#[macro_export]
+macro_rules! effectful_async_transform {
+    (name: $name:literal, $($rest:tt)+) => {
+        $crate::__obzenflow_effectful_async_transform_exact_contract!(name = $name, $($rest)+)
+    };
+    ($($rest:tt)+) => {
+        $crate::__obzenflow_effectful_async_transform_exact_contract!(
+            name = "__obzenflow_binding_derived_name__",
+            $($rest)+
+        )
+    };
+}
+
+// ============================================================================
+// effectful_sink!
+// ============================================================================
+
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __obzenflow_effectful_sink_untyped {
+    (name = $name:literal, handler = $handler:expr, middleware = [$($mw:expr),*]) => {{
+        use $crate::dsl::stage_descriptor::{EffectfulSinkDescriptor, StageDescriptor};
+        Box::new(EffectfulSinkDescriptor {
+            name: $name.to_string(),
+            handler: $handler,
+            middleware: vec![$(Box::new($mw)),*],
+        }) as Box<dyn StageDescriptor>
+    }};
+}
+
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __obzenflow_effectful_sink_typed {
+    (input = exact($in:ty), name = $name:literal, handler = $handler:expr, middleware = [$($mw:expr),*]) => {{
+        let __handler = $handler;
+        fn __assert_effectful_sink_contract<H>(_handler: &H)
+        where
+            H: ::obzenflow_runtime::stages::EffectfulAsyncSinkHandler<Input = $in>,
+        {}
+        __assert_effectful_sink_contract(&__handler);
+        let __metadata = $crate::dsl::typing::StageTypingMetadata::sink(
+            $crate::dsl::typing::TypeHint::exact::<$in>(),
+            false,
+            None,
+        );
+        let __descriptor = $crate::__obzenflow_effectful_sink_untyped!(
+            name = $name,
+            handler = __handler,
+            middleware = [$($mw),*]
+        );
+        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
+    }};
+}
+
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __obzenflow_effectful_sink_exact_contract {
+    (name = $name:literal, $($rest:tt)+) => {
+        $crate::__obzenflow_effectful_sink_exact_contract!(@collect name = $name, in = (), $($rest)+)
+    };
+    (@collect name = $name:literal, in = ($($in:tt)+), => $handler:expr) => {
+        $crate::__obzenflow_effectful_sink_typed!(
+            input = exact($($in)+),
+            name = $name,
+            handler = $handler,
+            middleware = []
+        )
+    };
+    (@collect name = $name:literal, in = ($($in:tt)+), => $handler:expr, [$($mw:expr),*]) => {
+        $crate::__obzenflow_effectful_sink_typed!(
+            input = exact($($in)+),
+            name = $name,
+            handler = $handler,
+            middleware = [$($mw),*]
+        )
+    };
+    (@collect name = $name:literal, in = ($($in:tt)*), $tok:tt $($rest:tt)+) => {
+        $crate::__obzenflow_effectful_sink_exact_contract!(
+            @collect
+            name = $name,
+            in = ($($in)* $tok),
+            $($rest)+
+        )
+    };
+    (@collect name = $name:literal, in = (), => $($rest:tt)*) => {
+        compile_error!("effectful_sink!: expected `InputType => handler`");
+    };
+    (@collect name = $name:literal, in = ($($in:tt)+), $($rest:tt)*) => {
+        compile_error!("effectful_sink!: expected `=> handler` after input type");
+    };
+}
+
+#[macro_export]
+macro_rules! effectful_sink {
+    (name: $name:literal, $($rest:tt)+) => {
+        $crate::__obzenflow_effectful_sink_exact_contract!(name = $name, $($rest)+)
+    };
+    ($($rest:tt)+) => {
+        $crate::__obzenflow_effectful_sink_exact_contract!(
+            name = "__obzenflow_binding_derived_name__",
+            $($rest)+
+        )
+    };
+}
+
+// ============================================================================
 // sink!  +  __obzenflow_sink_typed!
 // ============================================================================
 
@@ -1706,6 +1896,150 @@ macro_rules! stateful {
     };
     ($($rest:tt)+) => {
         $crate::__obzenflow_stateful_exact_contract!(
+            name = "__obzenflow_binding_derived_name__",
+            $($rest)+
+        )
+    };
+}
+
+// ============================================================================
+// effectful_stateful!
+// ============================================================================
+
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __obzenflow_effectful_stateful_untyped {
+    (name = $name:literal, handler = $handler:expr, emit = none, middleware = [$($mw:expr),*]) => {{
+        use $crate::dsl::stage_descriptor::EffectfulStatefulDescriptor;
+        EffectfulStatefulDescriptor::new($name, $handler)
+            $(.with_middleware($mw))*
+            .build()
+    }};
+    (name = $name:literal, handler = $handler:expr, emit = some($emit_interval:expr), middleware = [$($mw:expr),*]) => {{
+        use $crate::dsl::stage_descriptor::EffectfulStatefulDescriptor;
+        EffectfulStatefulDescriptor::new($name, $handler)
+            .with_emit_interval($emit_interval)
+            $(.with_middleware($mw))*
+            .build()
+    }};
+}
+
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __obzenflow_effectful_stateful_typed {
+    (input = exact($in:ty), output = $out:ty, name = $name:literal, handler = $handler:expr, emit = none, middleware = [$($mw:expr),*]) => {{
+        let __handler = $handler;
+        fn __assert_effectful_stateful_contract<H>(_handler: &H)
+        where
+            H: ::obzenflow_runtime::stages::EffectfulStatefulHandler<Input = $in>,
+        {}
+        __assert_effectful_stateful_contract(&__handler);
+        let __metadata = $crate::dsl::typing::StageTypingMetadata::stateful(
+            $crate::dsl::typing::TypeHint::exact::<$in>(),
+            $crate::dsl::typing::TypeHint::exact::<$out>(),
+            false,
+            None,
+        );
+        let __descriptor = $crate::__obzenflow_effectful_stateful_untyped!(
+            name = $name,
+            handler = __handler,
+            emit = none,
+            middleware = [$($mw),*]
+        );
+        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
+    }};
+    (input = exact($in:ty), output = $out:ty, name = $name:literal, handler = $handler:expr, emit = some($emit_interval:expr), middleware = [$($mw:expr),*]) => {{
+        let __handler = $handler;
+        fn __assert_effectful_stateful_contract<H>(_handler: &H)
+        where
+            H: ::obzenflow_runtime::stages::EffectfulStatefulHandler<Input = $in>,
+        {}
+        __assert_effectful_stateful_contract(&__handler);
+        let __metadata = $crate::dsl::typing::StageTypingMetadata::stateful(
+            $crate::dsl::typing::TypeHint::exact::<$in>(),
+            $crate::dsl::typing::TypeHint::exact::<$out>(),
+            false,
+            None,
+        );
+        let __descriptor = $crate::__obzenflow_effectful_stateful_untyped!(
+            name = $name,
+            handler = __handler,
+            emit = some($emit_interval),
+            middleware = [$($mw),*]
+        );
+        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
+    }};
+}
+
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __obzenflow_effectful_stateful_exact_contract {
+    (name = $name:literal, $($rest:tt)+) => {
+        $crate::__obzenflow_effectful_stateful_exact_contract!(@collect name = $name, in = (), $($rest)+)
+    };
+    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => $handler:expr) => {
+        $crate::__obzenflow_effectful_stateful_typed!(
+            input = exact($($in)+),
+            output = $out,
+            name = $name,
+            handler = $handler,
+            emit = none,
+            middleware = []
+        )
+    };
+    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => $handler:expr, [$($mw:expr),*]) => {
+        $crate::__obzenflow_effectful_stateful_typed!(
+            input = exact($($in)+),
+            output = $out,
+            name = $name,
+            handler = $handler,
+            emit = none,
+            middleware = [$($mw),*]
+        )
+    };
+    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => $handler:expr, emit_interval = $emit_interval:expr) => {
+        $crate::__obzenflow_effectful_stateful_typed!(
+            input = exact($($in)+),
+            output = $out,
+            name = $name,
+            handler = $handler,
+            emit = some($emit_interval),
+            middleware = []
+        )
+    };
+    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => $handler:expr, emit_interval = $emit_interval:expr, [$($mw:expr),*]) => {
+        $crate::__obzenflow_effectful_stateful_typed!(
+            input = exact($($in)+),
+            output = $out,
+            name = $name,
+            handler = $handler,
+            emit = some($emit_interval),
+            middleware = [$($mw),*]
+        )
+    };
+    (@collect name = $name:literal, in = ($($in:tt)*), $tok:tt $($rest:tt)+) => {
+        $crate::__obzenflow_effectful_stateful_exact_contract!(
+            @collect
+            name = $name,
+            in = ($($in)* $tok),
+            $($rest)+
+        )
+    };
+    (@collect name = $name:literal, in = (), -> $($rest:tt)*) => {
+        compile_error!("effectful_stateful!: expected `InputType -> OutputType => handler`");
+    };
+    (@collect name = $name:literal, in = ($($in:tt)+), $($rest:tt)*) => {
+        compile_error!("effectful_stateful!: expected `-> OutputType => handler` after input type");
+    };
+}
+
+#[macro_export]
+macro_rules! effectful_stateful {
+    (name: $name:literal, $($rest:tt)+) => {
+        $crate::__obzenflow_effectful_stateful_exact_contract!(name = $name, $($rest)+)
+    };
+    ($($rest:tt)+) => {
+        $crate::__obzenflow_effectful_stateful_exact_contract!(
             name = "__obzenflow_binding_derived_name__",
             $($rest)+
         )

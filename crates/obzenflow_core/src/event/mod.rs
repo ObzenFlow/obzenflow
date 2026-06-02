@@ -33,6 +33,9 @@ pub use chain_event::{
 };
 pub use event_envelope::EventEnvelope;
 pub use journal_event::JournalEvent;
+pub use payloads::effect_payload::{
+    EffectCursor, EffectDescriptor, EffectOutcomePayload, EffectRecord,
+};
 pub use system_event::{
     EdgeLivenessState, MetricsCoordinationEvent, PipelineLifecycleEvent, ReplayLifecycleEvent,
     StageActivity, StageLifecycleEvent, SystemEvent, SystemEventFactory, SystemEventType,

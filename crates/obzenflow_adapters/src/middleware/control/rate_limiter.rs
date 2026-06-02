@@ -588,14 +588,26 @@ impl Middleware for RateLimiterMiddleware {
                         ));
                     }
 
-                    // Block until tokens should be available
-                    // For longer waits, use block_in_place to avoid blocking tokio worker threads
+                    // Block until tokens should be available. On multi-threaded runtimes,
+                    // use block_in_place to avoid blocking tokio worker threads. On
+                    // current-thread runtimes, block_in_place panics, so sleep directly.
                     let wait_start = Instant::now();
                     if wait_time > Duration::from_millis(1) {
-                        trace!(event_id = %event_id, "Using block_in_place for wait > 1ms");
-                        tokio::task::block_in_place(|| {
+                        let use_block_in_place = tokio::runtime::Handle::try_current()
+                            .map(|handle| {
+                                handle.runtime_flavor()
+                                    == tokio::runtime::RuntimeFlavor::MultiThread
+                            })
+                            .unwrap_or(false);
+                        if use_block_in_place {
+                            trace!(event_id = %event_id, "Using block_in_place for wait > 1ms");
+                            tokio::task::block_in_place(|| {
+                                std::thread::sleep(wait_time);
+                            });
+                        } else {
+                            trace!(event_id = %event_id, "Using direct sleep for wait > 1ms");
                             std::thread::sleep(wait_time);
-                        });
+                        }
                     } else {
                         // For very short waits, just yield to scheduler
                         trace!(event_id = %event_id, "Using yield_now for wait <= 1ms");

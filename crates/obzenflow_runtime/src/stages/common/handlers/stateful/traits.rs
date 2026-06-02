@@ -6,9 +6,12 @@
 //!
 //! Examples: Aggregators, windowing operations, session tracking
 
+use crate::effects::{EffectInvocationContext, Effects};
 use crate::stages::common::handler_error::HandlerError;
 use async_trait::async_trait;
+use obzenflow_core::event::schema::TypedPayload;
 use obzenflow_core::ChainEvent;
+use std::borrow::Cow;
 use std::time::Duration;
 
 /// Handler for stateful processing stages
@@ -154,5 +157,202 @@ pub trait StatefulHandler: Send + Sync {
         state: &Self::State,
     ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
         self.create_events(state)
+    }
+}
+
+#[doc(hidden)]
+#[async_trait]
+pub trait UnifiedStatefulHandler: Send + Sync {
+    type State: Clone + Send + Sync;
+
+    async fn accumulate(
+        &mut self,
+        state: &mut Self::State,
+        event: ChainEvent,
+        effect_context: Option<EffectInvocationContext>,
+    ) -> std::result::Result<(), HandlerError>;
+
+    fn initial_state(&self) -> Self::State;
+
+    fn create_events(
+        &self,
+        state: &Self::State,
+    ) -> std::result::Result<Vec<ChainEvent>, HandlerError>;
+
+    fn emit_interval_hint(&self) -> Option<Duration> {
+        None
+    }
+
+    fn should_emit(&self, _state: &mut Self::State) -> bool {
+        false
+    }
+
+    fn emit(&self, state: &mut Self::State) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
+        self.create_events(state)
+    }
+
+    async fn drain(
+        &self,
+        state: &Self::State,
+    ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
+        self.create_events(state)
+    }
+
+    fn stage_logic_version(&self) -> Cow<'static, str> {
+        Cow::Borrowed("1")
+    }
+}
+
+#[async_trait]
+impl<T: StatefulHandler + Send + Sync> UnifiedStatefulHandler for T {
+    type State = T::State;
+
+    async fn accumulate(
+        &mut self,
+        state: &mut Self::State,
+        event: ChainEvent,
+        _effect_context: Option<EffectInvocationContext>,
+    ) -> std::result::Result<(), HandlerError> {
+        StatefulHandler::accumulate(self, state, event);
+        Ok(())
+    }
+
+    fn initial_state(&self) -> Self::State {
+        StatefulHandler::initial_state(self)
+    }
+
+    fn create_events(
+        &self,
+        state: &Self::State,
+    ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
+        StatefulHandler::create_events(self, state)
+    }
+
+    fn emit_interval_hint(&self) -> Option<Duration> {
+        StatefulHandler::emit_interval_hint(self)
+    }
+
+    fn should_emit(&self, state: &mut Self::State) -> bool {
+        StatefulHandler::should_emit(self, state)
+    }
+
+    fn emit(&self, state: &mut Self::State) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
+        StatefulHandler::emit(self, state)
+    }
+
+    async fn drain(
+        &self,
+        state: &Self::State,
+    ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
+        StatefulHandler::drain(self, state).await
+    }
+}
+
+#[async_trait]
+pub trait EffectfulStatefulHandler: Send + Sync {
+    type State: Clone + Send + Sync;
+    type Input: TypedPayload + Send + Sync + 'static;
+
+    fn initial_state(&self) -> Self::State;
+
+    async fn accumulate(
+        &mut self,
+        state: &mut Self::State,
+        input: Self::Input,
+        fx: &mut Effects,
+    ) -> std::result::Result<(), HandlerError>;
+
+    fn create_events(
+        &self,
+        state: &Self::State,
+    ) -> std::result::Result<Vec<ChainEvent>, HandlerError>;
+
+    fn emit_interval_hint(&self) -> Option<Duration> {
+        None
+    }
+
+    fn should_emit(&self, _state: &mut Self::State) -> bool {
+        false
+    }
+
+    fn emit(&self, state: &mut Self::State) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
+        self.create_events(state)
+    }
+
+    async fn drain(
+        &self,
+        state: &Self::State,
+    ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
+        self.create_events(state)
+    }
+
+    fn stage_logic_version(&self) -> Cow<'static, str> {
+        Cow::Borrowed("1")
+    }
+}
+
+#[doc(hidden)]
+#[derive(Clone, Debug)]
+pub struct EffectfulStatefulHandlerAdapter<H>(pub H);
+
+#[async_trait]
+impl<H> UnifiedStatefulHandler for EffectfulStatefulHandlerAdapter<H>
+where
+    H: EffectfulStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
+{
+    type State = H::State;
+
+    async fn accumulate(
+        &mut self,
+        state: &mut Self::State,
+        event: ChainEvent,
+        effect_context: Option<EffectInvocationContext>,
+    ) -> std::result::Result<(), HandlerError> {
+        let input = H::Input::try_from_event(&event)
+            .map_err(|e| HandlerError::Deserialization(e.to_string()))?;
+        let effect_context = effect_context.ok_or_else(|| {
+            HandlerError::Other(
+                "effectful stateful handler invoked without effect context".to_string(),
+            )
+        })?;
+        let mut draft = state.clone();
+        let mut fx = Effects::new(effect_context);
+        self.0.accumulate(&mut draft, input, &mut fx).await?;
+        *state = draft;
+        Ok(())
+    }
+
+    fn initial_state(&self) -> Self::State {
+        self.0.initial_state()
+    }
+
+    fn create_events(
+        &self,
+        state: &Self::State,
+    ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
+        self.0.create_events(state)
+    }
+
+    fn emit_interval_hint(&self) -> Option<Duration> {
+        self.0.emit_interval_hint()
+    }
+
+    fn should_emit(&self, state: &mut Self::State) -> bool {
+        self.0.should_emit(state)
+    }
+
+    fn emit(&self, state: &mut Self::State) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
+        self.0.emit(state)
+    }
+
+    async fn drain(
+        &self,
+        state: &Self::State,
+    ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
+        self.0.drain(state).await
+    }
+
+    fn stage_logic_version(&self) -> Cow<'static, str> {
+        self.0.stage_logic_version()
     }
 }

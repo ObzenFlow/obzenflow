@@ -4,7 +4,7 @@
 
 //! Handle for stateful stages
 
-use crate::stages::common::handlers::StatefulHandler;
+use crate::stages::common::handlers::UnifiedStatefulHandler;
 use crate::supervised_base::{HandleError, StandardHandle, SupervisorHandle};
 
 use super::fsm::{StatefulEvent, StatefulState};
@@ -31,7 +31,7 @@ pub trait StatefulHandleExt<H> {
     fn is_terminal(&self) -> bool;
 }
 
-impl<H: StatefulHandler + Send + Sync + 'static> StatefulHandleExt<H> for StatefulHandle<H> {
+impl<H: UnifiedStatefulHandler + Send + Sync + 'static> StatefulHandleExt<H> for StatefulHandle<H> {
     async fn initialize(&self) -> Result<(), HandleError> {
         self.send_event(StatefulEvent::<H>::Initialize).await
     }

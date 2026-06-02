@@ -11,6 +11,7 @@ use crate::event::context::{
 use crate::event::ingestion::IngressContext;
 use crate::event::payloads::correlation_payload::CorrelationPayload;
 use crate::event::payloads::delivery_payload::DeliveryPayload;
+use crate::event::payloads::effect_payload::EffectRecord;
 use crate::event::payloads::flow_control_payload::FlowControlPayload;
 use crate::event::payloads::observability_payload::{
     MetricsLifecycle, MiddlewareLifecycle, ObservabilityPayload, StageLifecycle,
@@ -147,6 +148,10 @@ pub enum ChainEventContent {
     #[serde(rename = "delivery")]
     Delivery(DeliveryPayload),
 
+    /// Private effect replay facts
+    #[serde(rename = "effect_result")]
+    EffectResult(EffectRecord),
+
     /// Stage lifecycle and observability events
     #[serde(rename = "lifecycle")]
     Observability(ObservabilityPayload),
@@ -208,6 +213,10 @@ impl ChainEvent {
 
     pub fn is_delivery(&self) -> bool {
         matches!(self.content, ChainEventContent::Delivery(_))
+    }
+
+    pub fn is_effect_result(&self) -> bool {
+        matches!(self.content, ChainEventContent::EffectResult(_))
     }
 
     pub fn is_lifecycle(&self) -> bool {
@@ -285,6 +294,7 @@ impl ChainEvent {
             },
 
             ChainEventContent::Delivery(_) => "sink.delivery".into(),
+            ChainEventContent::EffectResult(_) => "effect.result".into(),
 
             ChainEventContent::Observability(obs) => match obs {
                 ObservabilityPayload::Stage(stage) => match stage {
@@ -329,6 +339,9 @@ impl ChainEvent {
             }
             ChainEventContent::Delivery(delivery) => {
                 serde_json::to_value(delivery).unwrap_or_default()
+            }
+            ChainEventContent::EffectResult(record) => {
+                serde_json::to_value(record).unwrap_or_default()
             }
             ChainEventContent::Observability(lifecycle) => {
                 serde_json::to_value(lifecycle).unwrap_or_default()

@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use crate::metrics::instrumentation::StageInstrumentation;
 use crate::stages::common::control_strategies::{ControlEventStrategy, JonestownStrategy};
-use crate::stages::common::handlers::StatefulHandler;
+use crate::stages::common::handlers::UnifiedStatefulHandler;
 use crate::stages::common::heartbeat::{spawn_heartbeat, HeartbeatConfig, HeartbeatState};
 use crate::stages::resources_builder::StageResources;
 use crate::supervised_base::{
@@ -22,7 +22,9 @@ use super::handle::StatefulHandle;
 use super::supervisor::StatefulSupervisor;
 
 /// Builder for creating stateful stages
-pub struct StatefulBuilder<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> {
+pub struct StatefulBuilder<
+    H: UnifiedStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
+> {
     handler: H,
     config: StatefulConfig,
     resources: StageResources,
@@ -30,7 +32,9 @@ pub struct StatefulBuilder<H: StatefulHandler + Clone + std::fmt::Debug + Send +
     heartbeat_config: HeartbeatConfig,
 }
 
-impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StatefulBuilder<H> {
+impl<H: UnifiedStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
+    StatefulBuilder<H>
+{
     /// Create a new stateful builder with StageResources
     pub fn new(handler: H, config: StatefulConfig, resources: StageResources) -> Self {
         Self {
@@ -61,7 +65,7 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> State
 }
 
 #[async_trait::async_trait]
-impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> SupervisorBuilder
+impl<H: UnifiedStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> SupervisorBuilder
     for StatefulBuilder<H>
 {
     type Handle = StatefulHandle<H>;
@@ -114,6 +118,8 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Super
             flow_id: self.resources.flow_id,
             current_state: initial_state,
             data_journal: self.resources.data_journal.clone(),
+            replay_archive: self.resources.replay_archive.clone(),
+            effect_history: None,
             error_journal: self.resources.error_journal.clone(),
             system_journal: self.resources.system_journal.clone(),
             bus: self.resources.message_bus.clone(),

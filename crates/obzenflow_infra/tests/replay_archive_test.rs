@@ -32,6 +32,7 @@ fn write_manifest(dir: &Path) {
             dsl_var: "source".to_string(),
             stage_type: StageType::FiniteSource,
             stage_id: "stage_01H000000000000000000000000".to_string(),
+            stage_logic_version: "1".to_string(),
             data_journal_file: "FiniteSource_returns_stage_01H000000000000000000000000.log"
                 .to_string(),
             error_journal_file: "FiniteSource_returns_error_stage_01H000000000000000000000000.log"
@@ -163,6 +164,7 @@ fn write_manifest_with_version(dir: &Path, version: &str) {
             dsl_var: "source".to_string(),
             stage_type: StageType::FiniteSource,
             stage_id: "stage_01H000000000000000000000000".to_string(),
+            stage_logic_version: "1".to_string(),
             data_journal_file: "FiniteSource_returns_stage_01H000000000000000000000000.log"
                 .to_string(),
             error_journal_file: "FiniteSource_returns_error_stage_01H000000000000000000000000.log"

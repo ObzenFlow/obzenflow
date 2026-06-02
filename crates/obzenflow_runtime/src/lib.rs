@@ -8,6 +8,7 @@
 pub mod backpressure;
 pub mod bootstrap;
 pub mod contracts;
+pub mod effects;
 pub mod errors;
 pub mod id_conversions;
 pub mod journal;
@@ -87,6 +88,7 @@ pub mod prelude {
 
     // Handlers
     pub use crate::stages::{
+        EffectfulAsyncSinkHandler, EffectfulAsyncTransformHandler, EffectfulStatefulHandler,
         FiniteSourceHandler, InfiniteSourceHandler, ObserverHandler, ResourceManaged, SinkHandler,
         SourceError, StatefulHandler, TransformHandler,
     };
@@ -95,6 +97,10 @@ pub mod prelude {
     };
 
     // Event flow
+    pub use crate::effects::{
+        Effect, EffectContext, EffectError, EffectOutcomePayload, EffectSafety, Effects,
+        IdempotencyKey,
+    };
     pub use crate::messaging::UpstreamSubscription;
 
     // Metrics

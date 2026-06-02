@@ -4,6 +4,7 @@
 
 //! Running state event loop for the transform supervisor
 
+use crate::effects::EffectInvocationContext;
 use crate::messaging::PollResult;
 use crate::metrics::instrumentation::process_with_instrumentation;
 use crate::stages::common::handlers::transform::traits::UnifiedTransformHandler;
@@ -164,6 +165,10 @@ async fn dispatch_running_inner<
                 .subscription
                 .as_ref()
                 .and_then(|subscription| subscription.last_delivered_upstream_stage());
+            let stage_input_position = sup
+                .subscription
+                .as_ref()
+                .and_then(|subscription| subscription.last_delivered_stage_input_position());
             let last_eof_outcome = sup
                 .subscription
                 .as_ref()
@@ -383,6 +388,19 @@ async fn dispatch_running_inner<
                     let envelope_clone = envelope.clone();
                     let handler = &ctx.handler;
                     let heartbeat_state = ctx.heartbeat.as_ref().map(|h| h.state.clone());
+                    let effect_context = stage_input_position.and_then(|input_seq| {
+                        ctx.writer_id.map(|writer_id| EffectInvocationContext {
+                            flow_id: ctx.flow_id,
+                            stage_id: ctx.stage_id,
+                            stage_key: ctx.stage_name.clone(),
+                            writer_id,
+                            input_seq,
+                            stage_logic_version: handler.stage_logic_version().into_owned(),
+                            data_journal: ctx.data_journal.clone(),
+                            parent: envelope_clone.clone(),
+                            effect_history: ctx.effect_history.clone(),
+                        })
+                    });
 
                     let result =
                         process_with_instrumentation(&ctx.instrumentation, || async move {
@@ -412,7 +430,7 @@ async fn dispatch_running_inner<
                                 )
                             });
 
-                            match handler.process(event).await {
+                            match handler.process(event, effect_context).await {
                                 Ok(outputs) => {
                                     if let Some(state) = &heartbeat_state {
                                         state.record_last_consumed(event_id);
@@ -520,6 +538,14 @@ async fn dispatch_running_inner<
                         }
                     }
 
+                    EventLoopDirective::Continue
+                }
+                obzenflow_core::event::ChainEventContent::EffectResult(_) => {
+                    tracing::warn!(
+                        stage_name = %ctx.stage_name,
+                        event_id = %envelope.event.id,
+                        "Dropping transport-only EffectResult that bypassed subscription filtering"
+                    );
                     EventLoopDirective::Continue
                 }
                 _ => {

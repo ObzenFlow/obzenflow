@@ -16,7 +16,8 @@ pub mod transform;
 pub use common::handlers::source::SourceError;
 pub use common::{new_liveness_snapshots, LivenessSnapshots};
 pub use common::{
-    ControlEventAction, ControlEventStrategy, FiniteSourceHandler, HeartbeatConfig,
+    ControlEventAction, ControlEventStrategy, EffectfulAsyncSinkHandler,
+    EffectfulAsyncTransformHandler, EffectfulStatefulHandler, FiniteSourceHandler, HeartbeatConfig,
     InfiniteSourceHandler, ObserverHandler, ProcessingContext, ResourceManaged, SinkHandler,
     StatefulHandler, TransformHandler,
 };

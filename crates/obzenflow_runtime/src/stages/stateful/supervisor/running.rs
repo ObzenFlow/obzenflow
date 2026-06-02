@@ -4,9 +4,10 @@
 
 //! Accumulating and Emitting state event loops for the stateful supervisor
 
+use crate::effects::EffectInvocationContext;
 use crate::messaging::PollResult;
 use crate::metrics::instrumentation::process_with_instrumentation_no_count;
-use crate::stages::common::handlers::StatefulHandler;
+use crate::stages::common::handlers::UnifiedStatefulHandler;
 use crate::stages::common::heartbeat::HeartbeatProcessingGuard;
 use crate::stages::common::supervision::backpressure_drain::{drain_one_pending, DrainOutcome};
 use crate::stages::common::supervision::control_resolution::{
@@ -25,7 +26,7 @@ use super::super::fsm::{PendingTransition, StatefulContext, StatefulEvent, State
 use super::StatefulSupervisor;
 
 pub(super) async fn dispatch_accumulating<
-    H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
+    H: UnifiedStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
 >(
     sup: &mut StatefulSupervisor<H>,
     state: &StatefulState<H>,
@@ -113,6 +114,10 @@ pub(super) async fn dispatch_accumulating<
     match poll_result {
         PollResult::Event(envelope) => {
             use obzenflow_core::event::JournalEvent;
+            let stage_input_position = sup
+                .subscription
+                .as_ref()
+                .and_then(|subscription| subscription.last_delivered_stage_input_position());
             tracing::trace!(
                 target: "flowip-080o",
                 stage_name = %ctx.stage_name,
@@ -250,6 +255,19 @@ pub(super) async fn dispatch_accumulating<
                     }
 
                     let heartbeat_state = ctx.heartbeat.as_ref().map(|h| h.state.clone());
+                    let effect_context = stage_input_position.and_then(|input_seq| {
+                        ctx.writer_id.map(|writer_id| EffectInvocationContext {
+                            flow_id: ctx.flow_id,
+                            stage_id: ctx.stage_id,
+                            stage_key: ctx.stage_name.clone(),
+                            writer_id,
+                            input_seq,
+                            stage_logic_version: handler.stage_logic_version().into_owned(),
+                            data_journal: ctx.data_journal.clone(),
+                            parent: envelope.clone(),
+                            effect_history: ctx.effect_history.clone(),
+                        })
+                    });
 
                     ctx.instrumentation
                         .in_flight_count
@@ -263,7 +281,9 @@ pub(super) async fn dispatch_accumulating<
                         HeartbeatProcessingGuard::new(state.clone(), upstream_stage, event_id)
                     });
 
-                    handler.accumulate(&mut ctx.current_state, event);
+                    let accumulate_result = handler
+                        .accumulate(&mut ctx.current_state, event.clone(), effect_context)
+                        .await;
 
                     if let Some(state) = &heartbeat_state {
                         state.record_last_consumed(event_id);
@@ -285,6 +305,47 @@ pub(super) async fn dispatch_accumulating<
                     ctx.instrumentation
                         .events_accumulated_total
                         .fetch_add(1, Ordering::Relaxed);
+
+                    if let Err(err) = accumulate_result {
+                        ctx.instrumentation.record_error(err.kind());
+                        let reason = format!("Stateful handler error: {err:?}");
+                        let error_event = event.mark_as_error(reason, err.kind());
+
+                        if route_to_error_journal(&error_event) {
+                            ctx.error_journal
+                                .append(error_event, Some(&envelope))
+                                .await
+                                .map_err(|e| {
+                                    format!("Failed to write stateful accumulate error: {e}")
+                                })?;
+                        } else {
+                            let flow_id = ctx.flow_id.to_string();
+                            let flow_ctx = make_flow_context(
+                                &ctx.flow_name,
+                                &flow_id,
+                                &ctx.stage_name,
+                                ctx.stage_id,
+                                StageType::Stateful,
+                            );
+                            let enriched_error = error_event
+                                .with_flow_context(flow_ctx)
+                                .with_runtime_context(ctx.instrumentation.snapshot_with_control());
+                            ctx.data_journal
+                                .append(enriched_error, Some(&envelope))
+                                .await
+                                .map_err(|e| {
+                                    format!("Failed to write stateful accumulate error: {e}")
+                                })?;
+                        }
+
+                        if let Some(upstream) = upstream_stage {
+                            if let Some(reader) = ctx.backpressure_readers.get(&upstream) {
+                                reader.ack_consumed(1);
+                            }
+                        }
+
+                        return Ok(EventLoopDirective::Continue);
+                    }
 
                     // Track accumulated events for observability heartbeats.
                     ctx.events_since_last_heartbeat =
@@ -314,6 +375,14 @@ pub(super) async fn dispatch_accumulating<
                     } else {
                         EventLoopDirective::Continue
                     }
+                }
+                obzenflow_core::event::ChainEventContent::EffectResult(_) => {
+                    tracing::warn!(
+                        stage_name = %ctx.stage_name,
+                        event_id = %envelope.event.id,
+                        "Dropping transport-only EffectResult that bypassed subscription filtering"
+                    );
+                    EventLoopDirective::Continue
                 }
                 _ => {
                     // Other content types: forward.
@@ -437,7 +506,7 @@ pub(super) async fn dispatch_accumulating<
 }
 
 pub(super) async fn dispatch_emitting<
-    H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
+    H: UnifiedStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
 >(
     sup: &mut StatefulSupervisor<H>,
     _state: &StatefulState<H>,

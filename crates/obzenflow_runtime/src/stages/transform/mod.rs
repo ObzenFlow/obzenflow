@@ -22,8 +22,10 @@ pub mod strategies;
 pub mod supervisor;
 
 // Public API - only expose builder, handle, and essential types
-pub use crate::stages::common::handlers::{AsyncTransformHandler, TransformHandler};
-pub use builder::{AsyncTransformBuilder, TransformBuilder};
+pub use crate::stages::common::handlers::{
+    AsyncTransformHandler, EffectfulAsyncTransformHandler, TransformHandler,
+};
+pub use builder::{AsyncTransformBuilder, EffectfulAsyncTransformBuilder, TransformBuilder};
 pub use config::TransformConfig;
 pub use fsm::{TransformEvent, TransformState};
 pub use handle::{TransformHandle, TransformHandleExt};

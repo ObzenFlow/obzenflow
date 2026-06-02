@@ -83,6 +83,11 @@ pub trait ReplayArchive: Send + Sync {
         expected_type: StageType,
     ) -> Result<Box<dyn JournalReader<ChainEvent>>, ReplayError>;
 
+    async fn open_effect_history(
+        &self,
+        stage_key: &str,
+    ) -> Result<Box<dyn JournalReader<ChainEvent>>, ReplayError>;
+
     fn source_data_journal_path(&self, stage_key: &str) -> Result<PathBuf, ReplayError>;
 
     fn archive_flow_id(&self) -> &str;

@@ -17,7 +17,9 @@ use super::{
 use async_trait::async_trait;
 use obzenflow_core::event::status::processing_status::ProcessingStatus;
 use obzenflow_core::ChainEvent;
+use obzenflow_runtime::effects::EffectInvocationContext;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
+use obzenflow_runtime::stages::common::handlers::transform::traits::UnifiedTransformHandler;
 use obzenflow_runtime::stages::common::handlers::{AsyncTransformHandler, TransformHandler};
 use std::future::Future;
 use std::sync::Arc;
@@ -443,6 +445,139 @@ impl<H: AsyncTransformHandler> AsyncTransformMiddlewareBuilder<H> {
     }
 }
 
+/// A unified transform wrapper that applies existing middleware while preserving
+/// the effect invocation context required by replay-safe effectful transforms.
+///
+/// This intentionally does not run the async transform retry loop. Retrying
+/// around `fx.perform` would re-enter the same effect cursor and append duplicate
+/// failed effect records. 120a's v1 effect boundary supports pre-gating,
+/// fallback, post-observation, and enrichment; effect retry policy needs a
+/// cursor-aware retry mechanism.
+#[derive(Clone)]
+#[doc(hidden)]
+pub struct UnifiedMiddlewareTransform<H: UnifiedTransformHandler> {
+    inner: H,
+    middleware_chain: Arc<Vec<Arc<dyn Middleware>>>,
+}
+
+impl<H: UnifiedTransformHandler> std::fmt::Debug for UnifiedMiddlewareTransform<H> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UnifiedMiddlewareTransform")
+            .field("inner_type", &std::any::type_name::<H>())
+            .field("middleware_count", &self.middleware_chain.len())
+            .finish()
+    }
+}
+
+impl<H: UnifiedTransformHandler> UnifiedMiddlewareTransform<H> {
+    /// Create a new middleware-wrapped unified transform handler.
+    pub fn new(inner: H) -> Self {
+        Self {
+            inner,
+            middleware_chain: Arc::new(Vec::new()),
+        }
+    }
+
+    /// Add middleware to the chain.
+    pub fn with_middleware(mut self, middleware: Box<dyn Middleware>) -> Self {
+        Arc::make_mut(&mut self.middleware_chain).push(Arc::from(middleware));
+        self
+    }
+
+    async fn apply_middleware(
+        &self,
+        event: ChainEvent,
+        effect_context: Option<EffectInvocationContext>,
+    ) -> Result<Vec<ChainEvent>, HandlerError> {
+        let mut ctx = MiddlewareContext::new();
+
+        for middleware in self.middleware_chain.iter() {
+            match middleware.pre_handle(&event, &mut ctx) {
+                MiddlewareAction::Continue => continue,
+                MiddlewareAction::Skip(mut results) => {
+                    for result in &mut results {
+                        for mw in self.middleware_chain.iter() {
+                            mw.pre_write(result, &ctx);
+                        }
+                    }
+
+                    let mut control_events = ctx.take_control_events();
+                    for control_event in &mut control_events {
+                        for mw in self.middleware_chain.iter() {
+                            mw.pre_write(control_event, &ctx);
+                        }
+                    }
+                    results.extend(control_events);
+                    return Ok(results);
+                }
+                MiddlewareAction::Abort => {
+                    let mut err = event.clone();
+                    err.processing_info.status = ProcessingStatus::error("aborted by middleware");
+                    return Ok(vec![err]);
+                }
+            }
+        }
+
+        let mut results = match self.inner.process(event.clone(), effect_context).await {
+            Ok(results) => results,
+            Err(err) => {
+                let reason = format!("Transform handler error: {err:?}");
+                vec![event.clone().mark_as_error(reason, err.kind())]
+            }
+        };
+
+        for middleware in self.middleware_chain.iter().rev() {
+            middleware.post_handle(&event, &results, &mut ctx);
+        }
+
+        for result in &mut results {
+            for middleware in self.middleware_chain.iter() {
+                middleware.pre_write(result, &ctx);
+            }
+        }
+
+        let mut control_events = ctx.take_control_events();
+        for control_event in &mut control_events {
+            for middleware in self.middleware_chain.iter() {
+                middleware.pre_write(control_event, &ctx);
+            }
+        }
+        results.extend(control_events);
+
+        Ok(results)
+    }
+}
+
+#[async_trait]
+impl<H> UnifiedTransformHandler for UnifiedMiddlewareTransform<H>
+where
+    H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
+{
+    async fn process(
+        &self,
+        event: ChainEvent,
+        effect_context: Option<EffectInvocationContext>,
+    ) -> Result<Vec<ChainEvent>, HandlerError> {
+        if matches!(event.processing_info.status, ProcessingStatus::Error { .. }) {
+            tracing::debug!(
+                "UnifiedMiddlewareTransform: Skipping event with Error status: {:?}",
+                event.processing_info.status
+            );
+            return Ok(vec![event]);
+        }
+
+        self.apply_middleware(event, effect_context).await
+    }
+
+    async fn drain(&mut self) -> Result<(), HandlerError> {
+        self.inner.drain().await
+    }
+
+    fn stage_logic_version(&self) -> std::borrow::Cow<'static, str> {
+        self.inner.stage_logic_version()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -535,8 +670,7 @@ mod tests {
             json!({}),
         );
 
-        let results = handler
-            .process(event)
+        let results = TransformHandler::process(&handler, event)
             .expect("TestTransform in middleware tests should not fail");
 
         // Middleware can't modify events anymore, just verify the transform worked
@@ -613,8 +747,7 @@ mod tests {
             json!({}),
         );
 
-        let results = handler
-            .process(event)
+        let results = TransformHandler::process(&handler, event)
             .expect("handler errors should be converted to error events");
 
         assert_eq!(results.len(), 1);
@@ -738,8 +871,7 @@ mod tests {
             json!({}),
         );
 
-        let results = handler
-            .process(event)
+        let results = TransformHandler::process(&handler, event)
             .expect("TestTransform in middleware tests should not fail");
 
         // Should have 3 events: 1 from handler + 2 control events
@@ -800,8 +932,7 @@ mod tests {
             json!({}),
         );
 
-        let results = handler
-            .process(event)
+        let results = TransformHandler::process(&handler, event)
             .expect("TestTransform in middleware tests should not fail");
 
         // Should have 2 events: 1 skip result + 1 control event

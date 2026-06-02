@@ -4,9 +4,10 @@
 
 //! Running-state dispatch loop for the journal sink supervisor.
 
+use crate::effects::EffectInvocationContext;
 use crate::messaging::PollResult;
 use crate::metrics::instrumentation::process_with_instrumentation;
-use crate::stages::common::handlers::SinkHandler;
+use crate::stages::common::handlers::UnifiedSinkHandler;
 use crate::stages::common::heartbeat::HeartbeatProcessingGuard;
 use crate::stages::common::supervision::control_resolution::{
     resolve_control_event, resolve_forward_control_event, ControlResolution,
@@ -32,7 +33,7 @@ use super::super::fsm::{JournalSinkContext, JournalSinkEvent, JournalSinkState};
 use super::JournalSinkSupervisor;
 
 pub(super) async fn dispatch_running<
-    H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
+    H: UnifiedSinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
 >(
     sup: &mut JournalSinkSupervisor<H>,
     state: &JournalSinkState<H>,
@@ -94,7 +95,9 @@ pub(super) async fn dispatch_running<
                 .fetch_add(1, Ordering::Relaxed);
 
             let is_data = envelope.event.is_data();
-            let directive = dispatch_event(ctx, subscription, &envelope).await?;
+            let stage_input_position = subscription.last_delivered_stage_input_position();
+            let directive =
+                dispatch_event(ctx, subscription, &envelope, stage_input_position).await?;
             let received_eof = matches!(
                 directive,
                 EventLoopDirective::Transition(JournalSinkEvent::ReceivedEOF)
@@ -204,10 +207,11 @@ pub(super) async fn dispatch_running<
     }
 }
 
-async fn dispatch_event<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static>(
+async fn dispatch_event<H: UnifiedSinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static>(
     ctx: &mut JournalSinkContext<H>,
     subscription: &mut crate::messaging::UpstreamSubscription<ChainEvent>,
     envelope: &EventEnvelope<ChainEvent>,
+    stage_input_position: Option<crate::messaging::upstream_subscription::StageInputPosition>,
 ) -> Result<EventLoopDirective<JournalSinkEvent<H>>, Box<dyn std::error::Error + Send + Sync>> {
     tracing::trace!(stage_name = %ctx.stage_name, "Sink processing event");
 
@@ -225,14 +229,22 @@ async fn dispatch_event<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync +
             dispatch_control_event(ctx, subscription, envelope, signal).await
         }
         obzenflow_core::event::ChainEventContent::Data { .. } => {
-            dispatch_data_event(ctx, subscription, envelope).await
+            dispatch_data_event(ctx, subscription, envelope, stage_input_position).await
+        }
+        obzenflow_core::event::ChainEventContent::EffectResult(_) => {
+            tracing::warn!(
+                stage_name = %ctx.stage_name,
+                event_id = %envelope.event.id,
+                "Dropping transport-only EffectResult that bypassed subscription filtering"
+            );
+            Ok(EventLoopDirective::Continue)
         }
         _ => {
             // For other content types, just consume without instrumentation.
             let envelope_event = envelope.event.clone();
             let event_id = envelope_event.id;
             let heartbeat_state = ctx.heartbeat.as_ref().map(|h| h.state.clone());
-            if let Err(e) = ctx.handler.consume(envelope_event).await {
+            if let Err(e) = ctx.handler.consume_report(envelope_event, None).await {
                 tracing::error!(
                     stage_name = %ctx.stage_name,
                     error = ?e,
@@ -248,7 +260,7 @@ async fn dispatch_event<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync +
 }
 
 async fn dispatch_control_event<
-    H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
+    H: UnifiedSinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
 >(
     ctx: &mut JournalSinkContext<H>,
     subscription: &mut crate::messaging::UpstreamSubscription<ChainEvent>,
@@ -350,7 +362,7 @@ async fn dispatch_control_event<
 
             // For non-EOF control events, let handler consume if needed.
             let envelope_event = envelope.event.clone();
-            if let Err(e) = ctx.handler.consume(envelope_event).await {
+            if let Err(e) = ctx.handler.consume_report(envelope_event, None).await {
                 tracing::error!(
                     stage_name = %ctx.stage_name,
                     error = ?e,
@@ -415,16 +427,32 @@ async fn dispatch_control_event<
     }
 }
 
-async fn dispatch_data_event<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static>(
+async fn dispatch_data_event<
+    H: UnifiedSinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
+>(
     ctx: &mut JournalSinkContext<H>,
     subscription: &mut crate::messaging::UpstreamSubscription<ChainEvent>,
     envelope: &EventEnvelope<ChainEvent>,
+    stage_input_position: Option<crate::messaging::upstream_subscription::StageInputPosition>,
 ) -> Result<EventLoopDirective<JournalSinkEvent<H>>, Box<dyn std::error::Error + Send + Sync>> {
     let envelope_event = envelope.event.clone();
     let event_id = envelope_event.id;
     let stage_name = ctx.stage_name.clone();
     let heartbeat_state = ctx.heartbeat.as_ref().map(|h| h.state.clone());
     let upstream_stage = subscription.last_delivered_upstream_stage();
+    let effect_context = stage_input_position.and_then(|input_seq| {
+        ctx.writer_id.map(|writer_id| EffectInvocationContext {
+            flow_id: ctx.flow_id,
+            stage_id: ctx.stage_id,
+            stage_key: ctx.stage_name.clone(),
+            writer_id,
+            input_seq,
+            stage_logic_version: ctx.handler.stage_logic_version().into_owned(),
+            data_journal: ctx.data_journal.clone(),
+            parent: envelope.clone(),
+            effect_history: ctx.effect_history.clone(),
+        })
+    });
 
     // Use instrumentation wrapper but keep handler-level failures as per-record
     // outcomes instead of stage-fatal errors.
@@ -433,7 +461,7 @@ async fn dispatch_data_event<H: SinkHandler + Clone + std::fmt::Debug + Send + S
             .as_ref()
             .map(|state| HeartbeatProcessingGuard::new(state.clone(), upstream_stage, event_id));
 
-        let result = AssertUnwindSafe(ctx.handler.consume_report(envelope_event))
+        let result = AssertUnwindSafe(ctx.handler.consume_report(envelope_event, effect_context))
             .catch_unwind()
             .await;
 
@@ -593,7 +621,7 @@ async fn dispatch_data_event<H: SinkHandler + Clone + std::fmt::Debug + Send + S
 }
 
 async fn journal_delivery_receipt<
-    H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
+    H: UnifiedSinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
 >(
     ctx: &mut JournalSinkContext<H>,
     subscription: &mut crate::messaging::UpstreamSubscription<ChainEvent>,

@@ -6,8 +6,12 @@
 //!
 //! Examples: Data enrichers, filters, mappers, routers
 
+use crate::effects::{deterministic_typed_output_event, EffectInvocationContext, Effects};
+use crate::typing::TransformTyping;
 use async_trait::async_trait;
+use obzenflow_core::event::schema::TypedPayload;
 use obzenflow_core::ChainEvent;
+use std::borrow::Cow;
 
 /// Handler for stateless transform stages
 ///
@@ -95,14 +99,20 @@ pub trait AsyncTransformHandler: Send + Sync {
 /// This allows the supervisor to always `await` handler processing while preserving
 /// the existing sync `TransformHandler` API. Both sync and async handlers implement
 /// this trait (sync via blanket impl, async via `AsyncTransformHandlerAdapter` wrapper).
+#[doc(hidden)]
 #[async_trait]
-pub(crate) trait UnifiedTransformHandler: Send + Sync {
+pub trait UnifiedTransformHandler: Send + Sync {
     async fn process(
         &self,
         event: ChainEvent,
+        effect_context: Option<EffectInvocationContext>,
     ) -> std::result::Result<Vec<ChainEvent>, HandlerError>;
 
     async fn drain(&mut self) -> std::result::Result<(), HandlerError>;
+
+    fn stage_logic_version(&self) -> Cow<'static, str> {
+        Cow::Borrowed("1")
+    }
 }
 
 #[async_trait]
@@ -110,6 +120,7 @@ impl<T: TransformHandler + Send + Sync> UnifiedTransformHandler for T {
     async fn process(
         &self,
         event: ChainEvent,
+        _effect_context: Option<EffectInvocationContext>,
     ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
         TransformHandler::process(self, event)
     }
@@ -131,11 +142,92 @@ impl<T: AsyncTransformHandler + Send + Sync> UnifiedTransformHandler
     async fn process(
         &self,
         event: ChainEvent,
+        _effect_context: Option<EffectInvocationContext>,
     ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
         AsyncTransformHandler::process(&self.0, event).await
     }
 
     async fn drain(&mut self) -> std::result::Result<(), HandlerError> {
         AsyncTransformHandler::drain(&mut self.0).await
+    }
+}
+
+/// Async transform surface for replay-safe effects.
+#[async_trait]
+pub trait EffectfulAsyncTransformHandler: Send + Sync {
+    type Input: TypedPayload + Send + Sync + 'static;
+    type Output: TypedPayload + Send + Sync + 'static;
+
+    async fn process(
+        &self,
+        input: Self::Input,
+        fx: &mut Effects,
+    ) -> std::result::Result<Self::Output, HandlerError>;
+
+    async fn drain(&mut self) -> std::result::Result<(), HandlerError> {
+        Ok(())
+    }
+
+    fn stage_logic_version(&self) -> Cow<'static, str> {
+        Cow::Borrowed("1")
+    }
+}
+
+#[doc(hidden)]
+#[derive(Clone, Debug)]
+pub struct EffectfulAsyncTransformHandlerAdapter<H>(pub H);
+
+impl<H> TransformTyping for EffectfulAsyncTransformHandlerAdapter<H>
+where
+    H: EffectfulAsyncTransformHandler,
+{
+    type Input = H::Input;
+    type Output = H::Output;
+}
+
+#[async_trait]
+impl<H> UnifiedTransformHandler for EffectfulAsyncTransformHandlerAdapter<H>
+where
+    H: EffectfulAsyncTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
+{
+    async fn process(
+        &self,
+        event: ChainEvent,
+        effect_context: Option<EffectInvocationContext>,
+    ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
+        let input = H::Input::try_from_event(&event)
+            .map_err(|e| HandlerError::Deserialization(e.to_string()))?;
+        let effect_context = effect_context.ok_or_else(|| {
+            HandlerError::Other("effectful transform invoked without effect context".to_string())
+        })?;
+        let recorded_flow_id = effect_context
+            .effect_history
+            .as_ref()
+            .map(|history| history.recorded_flow_id().to_string())
+            .unwrap_or_else(|| effect_context.flow_id.to_string());
+        let writer_id = effect_context.writer_id;
+        let stage_key = effect_context.stage_key.clone();
+        let input_seq = effect_context.input_seq;
+        let mut fx = Effects::new(effect_context);
+        let output = self.0.process(input, &mut fx).await?;
+        let output_event = deterministic_typed_output_event(
+            writer_id,
+            &event,
+            output,
+            &recorded_flow_id,
+            &stage_key,
+            input_seq,
+            0,
+        )
+        .map_err(|e| HandlerError::Other(e.to_string()))?;
+        Ok(vec![output_event])
+    }
+
+    async fn drain(&mut self) -> std::result::Result<(), HandlerError> {
+        self.0.drain().await
+    }
+
+    fn stage_logic_version(&self) -> Cow<'static, str> {
+        self.0.stage_logic_version()
     }
 }

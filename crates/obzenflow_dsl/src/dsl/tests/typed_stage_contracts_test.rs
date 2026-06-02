@@ -9,13 +9,14 @@ mod tests {
     use async_trait::async_trait;
     use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
     use obzenflow_core::{ChainEvent, StageId, TypedPayload, WriterId};
+    use obzenflow_runtime::effects::Effects;
     use obzenflow_runtime::id_conversions::StageIdExt;
     use obzenflow_runtime::stages::common::handler_error::HandlerError;
     use obzenflow_runtime::stages::common::handlers::source::SourceError;
     use obzenflow_runtime::stages::common::handlers::{
         AsyncFiniteSourceHandler, AsyncInfiniteSourceHandler, AsyncTransformHandler,
-        FiniteSourceHandler, InfiniteSourceHandler, JoinHandler, SinkHandler, StatefulHandler,
-        TransformHandler,
+        EffectfulAsyncTransformHandler, FiniteSourceHandler, InfiniteSourceHandler, JoinHandler,
+        SinkHandler, StatefulHandler, TransformHandler,
     };
     use obzenflow_runtime::typing::{
         JoinTyping, SinkTyping, SourceTyping, StatefulTyping, TransformTyping,
@@ -30,7 +31,8 @@ mod tests {
     use crate::dsl::stage_descriptor::StageDescriptor;
     use crate::dsl::stage_descriptor::TransformDescriptor;
     use crate::dsl::typing::{
-        collect_stage_typing_info, validate_edge_typing, validate_stage_typing_metadata,
+        collect_stage_typing_info, validate_edge_typing,
+        validate_effectful_deterministic_input_order, validate_stage_typing_metadata,
         EdgeInputRole, TypeHint,
     };
 
@@ -164,6 +166,23 @@ mod tests {
 
         async fn drain(&mut self) -> Result<(), HandlerError> {
             Ok(())
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    struct EffectfulExactTransform;
+
+    #[async_trait]
+    impl EffectfulAsyncTransformHandler for EffectfulExactTransform {
+        type Input = OutputEvent;
+        type Output = OutputEvent;
+
+        async fn process(
+            &self,
+            input: OutputEvent,
+            _fx: &mut Effects,
+        ) -> Result<OutputEvent, HandlerError> {
+            Ok(input)
         }
     }
 
@@ -609,6 +628,82 @@ mod tests {
         assert_eq!(errors[1].input_role, EdgeInputRole::Stream);
         assert_eq!(errors[1].upstream_type, type_name::<AlternateEvent>());
         assert_eq!(errors[1].expected_type, type_name::<StreamEvent>());
+    }
+
+    #[test]
+    fn effectful_guard_rejects_transitive_nondeterministic_fan_in() {
+        let source_a_id = StageId::new();
+        let source_b_id = StageId::new();
+        let merge_id = StageId::new();
+        let effectful_id = StageId::new();
+
+        let mut descriptors: HashMap<String, Box<dyn StageDescriptor>> = HashMap::new();
+        descriptors.insert(
+            "source_a".to_string(),
+            crate::source!(name: "source_a", InputEvent => placeholder!()),
+        );
+        descriptors.insert(
+            "source_b".to_string(),
+            crate::source!(name: "source_b", InputEvent => placeholder!()),
+        );
+        descriptors.insert(
+            "merge".to_string(),
+            crate::transform!(name: "merge", InputEvent -> OutputEvent => ExactTransform),
+        );
+        descriptors.insert(
+            "effectful".to_string(),
+            crate::effectful_async_transform!(
+                name: "effectful",
+                OutputEvent -> OutputEvent => EffectfulExactTransform
+            ),
+        );
+
+        let mut name_to_id = HashMap::new();
+        name_to_id.insert("source_a".to_string(), source_a_id);
+        name_to_id.insert("source_b".to_string(), source_b_id);
+        name_to_id.insert("merge".to_string(), merge_id);
+        name_to_id.insert("effectful".to_string(), effectful_id);
+
+        let mut topology = TopologyBuilder::new();
+        topology.add_stage_with_id(
+            source_a_id.to_topology_id(),
+            Some("source_a".to_string()),
+            TopologyStageType::FiniteSource,
+        );
+        topology.reset_current();
+        topology.add_stage_with_id(
+            source_b_id.to_topology_id(),
+            Some("source_b".to_string()),
+            TopologyStageType::FiniteSource,
+        );
+        topology.reset_current();
+        topology.add_stage_with_id(
+            merge_id.to_topology_id(),
+            Some("merge".to_string()),
+            TopologyStageType::Transform,
+        );
+        topology.reset_current();
+        topology.add_stage_with_id(
+            effectful_id.to_topology_id(),
+            Some("effectful".to_string()),
+            TopologyStageType::Transform,
+        );
+        topology.reset_current();
+        topology.add_edge(source_a_id.to_topology_id(), merge_id.to_topology_id());
+        topology.add_edge(source_b_id.to_topology_id(), merge_id.to_topology_id());
+        topology.add_edge(merge_id.to_topology_id(), effectful_id.to_topology_id());
+        let topology = topology.build_unchecked().unwrap();
+
+        let err =
+            validate_effectful_deterministic_input_order(&topology, &descriptors, &name_to_id)
+                .expect_err("effectful stage below transitive fan-in must be rejected");
+
+        match err {
+            FlowBuildError::EffectfulFanInRequiresDeterministicOrder { stage_name } => {
+                assert_eq!(stage_name, "effectful");
+            }
+            other => panic!("unexpected error variant: {other:?}"),
+        }
     }
 
     // ─── FLOWIP-114c PR D closing-pass regression tests ────────────────────

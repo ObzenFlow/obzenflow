@@ -26,7 +26,7 @@ use obzenflow_runtime::typing::{
 };
 use obzenflow_topology::{EdgeKind, StageTypingInfo, Topology, TypeHintInfo};
 use std::any::{type_name, TypeId};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -942,6 +942,18 @@ impl StageDescriptor for TypedStageDescriptor {
     fn typing_metadata(&self) -> Option<&StageTypingMetadata> {
         Some(&self.metadata)
     }
+
+    fn is_effectful(&self) -> bool {
+        self.inner.is_effectful()
+    }
+
+    fn is_deterministic_input_orderer(&self) -> bool {
+        self.inner.is_deterministic_input_orderer()
+    }
+
+    fn stage_logic_version(&self) -> String {
+        self.inner.stage_logic_version()
+    }
 }
 
 fn select_downstream_input_hint<'a>(
@@ -1255,6 +1267,97 @@ pub fn validate_edge_typing(
     } else {
         Err(errors)
     }
+}
+
+pub fn validate_effectful_deterministic_input_order(
+    topology: &Topology,
+    descriptors: &HashMap<String, Box<dyn StageDescriptor>>,
+    name_to_id: &HashMap<String, StageId>,
+) -> Result<(), crate::dsl::FlowBuildError> {
+    let mut id_to_descriptor: HashMap<StageId, &dyn StageDescriptor> = HashMap::new();
+    let mut id_to_name: HashMap<StageId, String> = HashMap::new();
+    for (dsl_name, descriptor) in descriptors {
+        if let Some(stage_id) = name_to_id.get(dsl_name) {
+            id_to_descriptor.insert(*stage_id, descriptor.as_ref());
+            id_to_name.insert(*stage_id, descriptor.name().to_string());
+        }
+    }
+
+    let mut inbound: HashMap<StageId, Vec<StageId>> = HashMap::new();
+    for edge in topology.edges() {
+        if edge.kind != EdgeKind::Forward {
+            continue;
+        }
+        inbound
+            .entry(StageId::from_ulid(edge.to.ulid()))
+            .or_default()
+            .push(StageId::from_ulid(edge.from.ulid()));
+    }
+
+    fn deterministic_for_stage(
+        stage_id: StageId,
+        inbound: &HashMap<StageId, Vec<StageId>>,
+        descriptors: &HashMap<StageId, &dyn StageDescriptor>,
+        memo: &mut HashMap<StageId, bool>,
+        visiting: &mut HashSet<StageId>,
+    ) -> bool {
+        if let Some(value) = memo.get(&stage_id) {
+            return *value;
+        }
+        if !visiting.insert(stage_id) {
+            memo.insert(stage_id, false);
+            return false;
+        }
+
+        let upstreams = inbound.get(&stage_id).cloned().unwrap_or_default();
+        let deterministic = if upstreams.is_empty() {
+            true
+        } else if upstreams.len() > 1 {
+            descriptors
+                .get(&stage_id)
+                .map(|descriptor| descriptor.is_deterministic_input_orderer())
+                .unwrap_or(false)
+        } else {
+            deterministic_for_stage(upstreams[0], inbound, descriptors, memo, visiting)
+        };
+
+        visiting.remove(&stage_id);
+        memo.insert(stage_id, deterministic);
+        deterministic
+    }
+
+    let mut memo = HashMap::new();
+    let mut stage_ids: Vec<StageId> = id_to_descriptor.keys().copied().collect();
+    stage_ids.sort();
+
+    for stage_id in stage_ids {
+        let Some(descriptor) = id_to_descriptor.get(&stage_id) else {
+            continue;
+        };
+        if !descriptor.is_effectful() {
+            continue;
+        }
+
+        let mut visiting = HashSet::new();
+        if !deterministic_for_stage(
+            stage_id,
+            &inbound,
+            &id_to_descriptor,
+            &mut memo,
+            &mut visiting,
+        ) {
+            return Err(
+                crate::dsl::FlowBuildError::EffectfulFanInRequiresDeterministicOrder {
+                    stage_name: id_to_name
+                        .get(&stage_id)
+                        .cloned()
+                        .unwrap_or_else(|| descriptor.name().to_string()),
+                },
+            );
+        }
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]

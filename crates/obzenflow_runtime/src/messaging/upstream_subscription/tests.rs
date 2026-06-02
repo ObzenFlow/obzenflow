@@ -1595,6 +1595,88 @@ async fn transport_only_skips_observability_events() {
 }
 
 #[tokio::test]
+async fn transport_only_skips_effect_results_without_stage_input_position() {
+    let upstream_stage = StageId::new();
+    let upstream_owner = JournalOwner::stage(upstream_stage);
+    let upstream_journal: Arc<dyn Journal<ChainEvent>> = Arc::new(TestJournal::new(upstream_owner));
+
+    let writer_id = WriterId::Stage(upstream_stage);
+    let effect_record = obzenflow_core::event::payloads::effect_payload::EffectRecord {
+        cursor: obzenflow_core::event::payloads::effect_payload::EffectCursor {
+            recorded_flow_id: "recorded-flow".to_string(),
+            stage_key: "gateway".to_string(),
+            input_seq: 1,
+            effect_ordinal: 0,
+        },
+        descriptor_hash: "hash".to_string(),
+        descriptor: obzenflow_core::event::payloads::effect_payload::EffectDescriptor {
+            effect_type: "test.effect".to_string(),
+            label: "test".to_string(),
+            schema_version: 1,
+            stage_logic_version: "1".to_string(),
+            canonical_input_hash: "input-hash".to_string(),
+        },
+        outcome: obzenflow_core::event::payloads::effect_payload::EffectOutcomePayload::Succeeded {
+            output: json!({"ok": true}),
+        },
+    };
+
+    upstream_journal
+        .append(
+            ChainEventFactory::derived_event(
+                writer_id,
+                &ChainEventFactory::data_event(writer_id, "test.parent", json!({})),
+                ChainEventContent::EffectResult(effect_record),
+            ),
+            None,
+        )
+        .await
+        .unwrap();
+    upstream_journal
+        .append(
+            ChainEventFactory::data_event(writer_id, "test.event", json!({"n": 1})),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let upstreams = [(upstream_stage, "upstream".to_string(), upstream_journal)];
+
+    let mut subscription = UpstreamSubscription::new_with_names("test_owner", &upstreams)
+        .await
+        .unwrap()
+        .transport_only();
+    let mut reader_progress = [ReaderProgress::new(upstream_stage)];
+
+    let first = subscription
+        .poll_next_with_state("test_fsm", Some(&mut reader_progress[..]))
+        .await;
+
+    match first {
+        PollResult::Event(env) => match env.event.content {
+            ChainEventContent::Data { .. } => {}
+            other => {
+                panic!("expected EffectResult to be skipped and Data delivered, got {other:?}")
+            }
+        },
+        other => panic!("expected PollResult::Event, got {other:?}"),
+    }
+
+    assert_eq!(
+        subscription
+            .last_delivered_stage_input_position()
+            .expect("data event should receive a stage input position")
+            .0,
+        1
+    );
+
+    let second = subscription
+        .poll_next_with_state("test_fsm", Some(&mut reader_progress[..]))
+        .await;
+    assert!(matches!(second, PollResult::NoEvents));
+}
+
+#[tokio::test]
 async fn forwarded_eof_with_missing_writer_is_not_terminal() {
     let upstream_stage = StageId::new();
     let upstream_owner = JournalOwner::stage(upstream_stage);

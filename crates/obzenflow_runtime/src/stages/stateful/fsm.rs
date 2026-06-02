@@ -23,12 +23,14 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::backpressure::{BackpressureReader, BackpressureWriter};
+use crate::effects::EffectHistory;
 use crate::messaging::upstream_subscription::{ContractConfig, ContractsWiring, ReaderProgress};
 use crate::messaging::UpstreamSubscription;
 use crate::metrics::instrumentation::StageInstrumentation;
+use crate::replay::ReplayArchive;
 use crate::stages::common::backpressure_activity_pulse::BackpressureActivityPulse;
 use crate::stages::common::control_strategies::ControlEventStrategy;
-use crate::stages::common::handlers::StatefulHandler;
+use crate::stages::common::handlers::UnifiedStatefulHandler;
 use crate::stages::common::heartbeat::HeartbeatHandle;
 use crate::stages::common::supervision::lifecycle_actions;
 use crate::stages::resources_builder::BoundSubscriptionFactory;
@@ -301,7 +303,7 @@ pub(crate) enum PendingTransition {
 }
 
 /// Context for stateful handlers - contains everything actions need
-pub struct StatefulContext<H: StatefulHandler> {
+pub struct StatefulContext<H: UnifiedStatefulHandler> {
     /// The handler instance (immutable, so wrapped in Arc)
     pub handler: Arc<H>,
 
@@ -322,6 +324,12 @@ pub struct StatefulContext<H: StatefulHandler> {
 
     /// Data journal for writing chain events
     pub data_journal: Arc<dyn Journal<ChainEvent>>,
+
+    /// Replay archive for loading recorded effect outcomes.
+    pub replay_archive: Option<Arc<dyn ReplayArchive>>,
+
+    /// Recorded effect outcomes for replay suppression.
+    pub effect_history: Option<Arc<EffectHistory>>,
 
     /// Error journal for writing error events (FLOWIP-082e)
     pub error_journal: Arc<dyn Journal<ChainEvent>>,
@@ -402,14 +410,14 @@ pub struct StatefulContext<H: StatefulHandler> {
     pub(crate) heartbeat: Option<HeartbeatHandle>,
 }
 
-impl<H: StatefulHandler + 'static> FsmContext for StatefulContext<H> {}
+impl<H: UnifiedStatefulHandler + 'static> FsmContext for StatefulContext<H> {}
 
 // ============================================================================
 // FSM Action Implementation
 // ============================================================================
 
 #[async_trait::async_trait]
-impl<H: StatefulHandler + Send + Sync + 'static> FsmAction for StatefulAction<H> {
+impl<H: UnifiedStatefulHandler + Send + Sync + 'static> FsmAction for StatefulAction<H> {
     type Context = StatefulContext<H>;
 
     async fn execute(&self, ctx: &mut Self::Context) -> Result<(), obzenflow_fsm::FsmError> {
@@ -445,6 +453,18 @@ impl<H: StatefulHandler + Send + Sync + 'static> FsmAction for StatefulAction<H>
                         })?;
 
                     ctx.subscription = Some(subscription);
+
+                    if let Some(archive) = &ctx.replay_archive {
+                        let history = EffectHistory::load(archive, &ctx.stage_name)
+                            .await
+                            .map_err(|e| {
+                                obzenflow_fsm::FsmError::HandlerError(format!(
+                                    "Failed to load effect history for '{}': {e}",
+                                    ctx.stage_name
+                                ))
+                            })?;
+                        ctx.effect_history = Some(Arc::new(history));
+                    }
 
                     tracing::info!(
                         stage_name = %ctx.stage_name,

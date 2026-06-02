@@ -13,7 +13,7 @@ mod running;
 
 use crate::messaging::UpstreamSubscription;
 use crate::metrics::instrumentation::heartbeat_interval;
-use crate::stages::common::handlers::StatefulHandler;
+use crate::stages::common::handlers::UnifiedStatefulHandler;
 use crate::stages::common::supervision::flow_context_factory::make_flow_context;
 use crate::stages::common::supervision::forward_control_event::forward_control_event as forward_control_event_helper;
 use crate::supervised_base::base::Supervisor;
@@ -28,7 +28,7 @@ use super::fsm::{StatefulAction, StatefulContext, StatefulEvent, StatefulState};
 
 /// Supervisor for stateful stages
 pub(crate) struct StatefulSupervisor<
-    H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
+    H: UnifiedStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
 > {
     /// Supervisor name (for logging)
     pub(crate) name: String,
@@ -43,7 +43,7 @@ pub(crate) struct StatefulSupervisor<
     pub(crate) _marker: std::marker::PhantomData<H>,
 }
 
-impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Supervisor
+impl<H: UnifiedStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Supervisor
     for StatefulSupervisor<H>
 {
     type State = StatefulState<H>;
@@ -349,7 +349,7 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Super
 }
 
 #[async_trait::async_trait]
-impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSupervised
+impl<H: UnifiedStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSupervised
     for StatefulSupervisor<H>
 {
     type Handler = H;
@@ -392,8 +392,8 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Handl
     }
 }
 
-impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> ExternalEventPolicy
-    for StatefulSupervisor<H>
+impl<H: UnifiedStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
+    ExternalEventPolicy for StatefulSupervisor<H>
 {
     fn external_event_mode(state: &Self::State) -> ExternalEventMode {
         if matches!(state, StatefulState::Created) {
@@ -414,7 +414,9 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Exter
     }
 }
 
-impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StatefulSupervisor<H> {
+impl<H: UnifiedStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
+    StatefulSupervisor<H>
+{
     /// Forward a control event downstream by appending it to the stateful stage's data journal.
     async fn forward_control_event(
         &self,

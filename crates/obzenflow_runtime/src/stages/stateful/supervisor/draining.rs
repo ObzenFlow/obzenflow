@@ -4,8 +4,9 @@
 
 //! Draining state event loop for the stateful supervisor
 
+use crate::effects::EffectInvocationContext;
 use crate::metrics::instrumentation::process_with_instrumentation_no_count;
-use crate::stages::common::handlers::StatefulHandler;
+use crate::stages::common::handlers::UnifiedStatefulHandler;
 use crate::stages::common::heartbeat::HeartbeatProcessingGuard;
 use crate::stages::common::supervision::backpressure_drain::{drain_one_pending, DrainOutcome};
 use crate::stages::common::supervision::error_routing::route_to_error_journal;
@@ -23,7 +24,7 @@ use super::super::fsm::{PendingTransition, StatefulContext, StatefulEvent, State
 use super::StatefulSupervisor;
 
 pub(super) async fn dispatch_draining<
-    H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
+    H: UnifiedStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
 >(
     sup: &mut StatefulSupervisor<H>,
     state: &StatefulState<H>,
@@ -98,6 +99,7 @@ pub(super) async fn dispatch_draining<
             .await
         {
             PollResult::Event(envelope) => {
+                let stage_input_position = subscription.last_delivered_stage_input_position();
                 // Retain the last consumed upstream envelope (with a merged vector-clock) so that any
                 // final drain emissions can be parented and preserve happened-before via vector clocks.
                 match ctx.last_consumed_envelope.as_mut() {
@@ -114,12 +116,34 @@ pub(super) async fn dispatch_draining<
                 }
                 ctx.instrumentation.record_consumed(&envelope);
 
-                if !envelope.event.is_control() {
+                if envelope.event.is_effect_result() {
+                    tracing::warn!(
+                        stage_name = %ctx.stage_name,
+                        event_id = %envelope.event.id,
+                        "Dropping transport-only EffectResult that bypassed subscription filtering during drain"
+                    );
+                    return Ok(EventLoopDirective::Continue);
+                }
+
+                if envelope.event.is_data() {
                     // Accumulate data events during draining, synchronously.
                     let event = envelope.event.clone();
                     let event_id = event.id;
                     let upstream_stage = subscription.last_delivered_upstream_stage();
                     let mut handler = (*ctx.handler).clone();
+                    let effect_context = stage_input_position.and_then(|input_seq| {
+                        ctx.writer_id.map(|writer_id| EffectInvocationContext {
+                            flow_id: ctx.flow_id,
+                            stage_id: ctx.stage_id,
+                            stage_key: ctx.stage_name.clone(),
+                            writer_id,
+                            input_seq,
+                            stage_logic_version: handler.stage_logic_version().into_owned(),
+                            data_journal: ctx.data_journal.clone(),
+                            parent: envelope.clone(),
+                            effect_history: ctx.effect_history.clone(),
+                        })
+                    });
 
                     if let (Some(heartbeat), Some(upstream)) = (&ctx.heartbeat, upstream_stage) {
                         if event.is_data() {
@@ -137,7 +161,9 @@ pub(super) async fn dispatch_draining<
                         HeartbeatProcessingGuard::new(state.clone(), upstream_stage, event_id)
                     });
 
-                    handler.accumulate(&mut ctx.current_state, event);
+                    let accumulate_result = handler
+                        .accumulate(&mut ctx.current_state, event.clone(), effect_context)
+                        .await;
 
                     if let Some(state) = &heartbeat_state {
                         state.record_last_consumed(event_id);
@@ -159,6 +185,31 @@ pub(super) async fn dispatch_draining<
                     ctx.instrumentation
                         .events_accumulated_total
                         .fetch_add(1, Ordering::Relaxed);
+
+                    if let Err(err) = accumulate_result {
+                        ctx.instrumentation.record_error(err.kind());
+                        let reason = format!("Stateful handler error during drain: {err:?}");
+                        let error_event = event.mark_as_error(reason, err.kind());
+                        if route_to_error_journal(&error_event) {
+                            ctx.error_journal
+                                .append(error_event, Some(&envelope))
+                                .await
+                                .map_err(|e| {
+                                    format!("Failed to write stateful drain error: {e}")
+                                })?;
+                        } else {
+                            let enriched_error = error_event
+                                .with_flow_context(flow_context.clone())
+                                .with_runtime_context(ctx.instrumentation.snapshot_with_control());
+                            ctx.data_journal
+                                .append(enriched_error, Some(&envelope))
+                                .await
+                                .map_err(|e| {
+                                    format!("Failed to write stateful drain error: {e}")
+                                })?;
+                        }
+                        return Ok(EventLoopDirective::Continue);
+                    }
 
                     // Track accumulated events during drain for heartbeat visibility.
                     ctx.events_since_last_heartbeat =

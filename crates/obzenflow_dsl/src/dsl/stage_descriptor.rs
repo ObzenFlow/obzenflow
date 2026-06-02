@@ -17,7 +17,7 @@ use obzenflow_adapters::middleware::{
     AsyncTransformHandlerExt, ControlMiddlewareRole, FiniteSourceHandlerExt,
     InfiniteSourceHandlerExt, JoinHandlerMiddlewareExt, Middleware, MiddlewareFactory,
     OutcomeEnrichmentMiddleware, SinkHandlerExt, StatefulHandlerMiddlewareExt,
-    SystemEnrichmentMiddleware, TimingMiddleware, TransformHandlerExt,
+    SystemEnrichmentMiddleware, TimingMiddleware, TransformHandlerExt, UnifiedMiddlewareTransform,
 };
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::{StageId, WriterId};
@@ -32,8 +32,10 @@ use obzenflow_runtime::{
             control_strategies::{CompositeStrategy, ControlEventStrategy, JonestownStrategy},
             handlers::{
                 AsyncFiniteSourceHandler, AsyncInfiniteSourceHandler, AsyncTransformHandler,
-                FiniteSourceHandler, InfiniteSourceHandler, JoinHandler, SinkHandler,
-                StatefulHandler, TransformHandler,
+                EffectfulAsyncSinkHandler, EffectfulAsyncSinkHandlerAdapter,
+                EffectfulAsyncTransformHandler, EffectfulAsyncTransformHandlerAdapter,
+                EffectfulStatefulHandler, EffectfulStatefulHandlerAdapter, FiniteSourceHandler,
+                InfiniteSourceHandler, JoinHandler, SinkHandler, StatefulHandler, TransformHandler,
             },
             stage_handle::{BoxedStageHandle, StageEvent, FORCE_SHUTDOWN_MESSAGE},
         },
@@ -54,8 +56,8 @@ use obzenflow_runtime::{
         },
         stateful::{StatefulBuilder, StatefulConfig, StatefulEvent, StatefulState},
         transform::{
-            AsyncTransformBuilder, TransformBuilder, TransformConfig, TransformEvent,
-            TransformState,
+            AsyncTransformBuilder, EffectfulAsyncTransformBuilder, TransformBuilder,
+            TransformConfig, TransformEvent, TransformState,
         },
     },
     supervised_base::SupervisorBuilder as SupervisorBuilderTrait,
@@ -202,6 +204,20 @@ pub trait StageDescriptor: Send + Sync {
     /// Optional types-first metadata captured by typed stage macros.
     fn typing_metadata(&self) -> Option<&StageTypingMetadata> {
         None
+    }
+
+    /// Whether this stage can perform replay-suppressed user effects.
+    fn is_effectful(&self) -> bool {
+        false
+    }
+
+    /// Whether this stage imposes total deterministic order on N:1 input.
+    fn is_deterministic_input_orderer(&self) -> bool {
+        false
+    }
+
+    fn stage_logic_version(&self) -> String {
+        "1".to_string()
     }
 
     /// Whether this descriptor is a composite that must be lowered during `flow!` materialisation.
@@ -1143,6 +1159,145 @@ impl<H: AsyncTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
     }
 }
 
+/// Descriptor for replay-safe effectful async transform stages.
+pub struct EffectfulAsyncTransformDescriptor<H: EffectfulAsyncTransformHandler + 'static> {
+    pub name: String,
+    pub handler: H,
+    pub middleware: Vec<Box<dyn MiddlewareFactory>>,
+}
+
+#[async_trait]
+impl<H: EffectfulAsyncTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
+    StageDescriptor for EffectfulAsyncTransformDescriptor<H>
+{
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn set_name(&mut self, name: String) {
+        self.name = name;
+    }
+
+    fn stage_type(&self) -> StageType {
+        StageType::Transform
+    }
+
+    fn is_effectful(&self) -> bool {
+        true
+    }
+
+    fn stage_logic_version(&self) -> String {
+        self.handler.stage_logic_version().into_owned()
+    }
+
+    fn stage_middleware_names(&self) -> Vec<String> {
+        self.middleware
+            .iter()
+            .map(|f| f.label().to_string())
+            .collect()
+    }
+
+    fn stage_middleware_factories(&self) -> &[Box<dyn MiddlewareFactory>] {
+        &self.middleware
+    }
+
+    async fn create_handle_with_flow_middleware(
+        self: Box<Self>,
+        config: StageConfig,
+        resources: StageResources,
+        flow_middleware: Vec<Box<dyn MiddlewareFactory>>,
+        control_middleware: Arc<ControlMiddlewareAggregator>,
+    ) -> StageCreationResult<BoxedStageHandle> {
+        for factory in &self.middleware {
+            let validation_result =
+                validate_middleware_safety(factory.as_ref(), StageType::Transform, &self.name);
+
+            if !validation_result.is_ok() {
+                for error in &validation_result.errors {
+                    tracing::error!("{}", error);
+                }
+            }
+        }
+
+        let resolved = crate::middleware_resolution::resolve_middleware(
+            flow_middleware,
+            self.middleware,
+            &config.name,
+        )?;
+        crate::middleware_resolution::log_resolved_middleware(&config.name, &resolved);
+        let control_strategy = create_control_strategy_from_middleware_specs(&resolved.middleware);
+
+        let instrumentation_config = InstrumentationConfig::default();
+        let mut instrumentation = StageInstrumentation::new_with_config(instrumentation_config);
+        let control_provider: Arc<dyn obzenflow_core::ControlMiddlewareProvider> =
+            control_middleware.clone();
+
+        let expects_circuit_breaker = resolved
+            .middleware
+            .iter()
+            .any(|spec| spec.factory.control_role() == ControlMiddlewareRole::CircuitBreaker);
+        let expects_rate_limiter = resolved
+            .middleware
+            .iter()
+            .any(|spec| spec.factory.control_role() == ControlMiddlewareRole::RateLimiter);
+
+        let mut all_middleware = create_system_middleware(&config, StageType::Transform);
+
+        let user_middleware: Vec<Box<dyn Middleware>> = resolved
+            .middleware
+            .into_iter()
+            .map(|spec| spec.factory.create(&config, control_middleware.clone()))
+            .collect::<Result<_, _>>()?;
+        all_middleware.extend(user_middleware);
+
+        instrumentation
+            .bind_control_middleware(
+                &config.stage_id,
+                &control_provider,
+                expects_circuit_breaker,
+                expects_rate_limiter,
+            )
+            .map_err(|e| e.to_string())?;
+        let instrumentation = Arc::new(instrumentation);
+
+        let transform_config = TransformConfig {
+            stage_id: config.stage_id,
+            stage_name: config.name.clone(),
+            flow_name: config.flow_name.clone(),
+            control_strategy: Some(control_strategy),
+            upstream_stages: resources.upstream_stages.clone(),
+            cycle_guard: config.cycle_guard,
+        };
+
+        let mut handler_with_middleware =
+            UnifiedMiddlewareTransform::new(EffectfulAsyncTransformHandlerAdapter(self.handler));
+        for mw in all_middleware {
+            handler_with_middleware = handler_with_middleware.with_middleware(mw);
+        }
+
+        let handle = EffectfulAsyncTransformBuilder::new(
+            handler_with_middleware,
+            transform_config,
+            resources,
+        )
+        .with_instrumentation(instrumentation)
+        .build()
+        .await
+        .map_err(|e| format!("Failed to build effectful async transform: {e:?}"))?;
+
+        let adapter = StageHandleAdapter::new(
+            handle,
+            config.stage_id,
+            config.name,
+            StageType::Transform,
+            translate_stage_event_to_transform,
+            check_transform_state,
+        );
+
+        Ok(Box::new(adapter) as BoxedStageHandle)
+    }
+}
+
 /// Descriptor for sink stages
 pub struct SinkDescriptor<H: SinkHandler + 'static> {
     pub name: String,
@@ -1271,6 +1426,137 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
             .map_err(|e| format!("Failed to build sink: {e:?}"))?;
 
         // Create adapter to bridge to StageHandle
+        let adapter = StageHandleAdapter::new(
+            handle,
+            config.stage_id,
+            config.name,
+            StageType::Sink,
+            translate_stage_event_to_sink,
+            check_sink_state,
+        );
+
+        Ok(Box::new(adapter) as BoxedStageHandle)
+    }
+}
+
+/// Descriptor for replay-safe effectful sink stages.
+pub struct EffectfulSinkDescriptor<H: EffectfulAsyncSinkHandler + 'static> {
+    pub name: String,
+    pub handler: H,
+    pub middleware: Vec<Box<dyn MiddlewareFactory>>,
+}
+
+#[async_trait]
+impl<H: EffectfulAsyncSinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDescriptor
+    for EffectfulSinkDescriptor<H>
+{
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn set_name(&mut self, name: String) {
+        self.name = name;
+    }
+
+    fn stage_type(&self) -> StageType {
+        StageType::Sink
+    }
+
+    fn is_effectful(&self) -> bool {
+        true
+    }
+
+    fn stage_logic_version(&self) -> String {
+        self.handler.stage_logic_version().into_owned()
+    }
+
+    fn stage_middleware_names(&self) -> Vec<String> {
+        self.middleware
+            .iter()
+            .map(|f| f.label().to_string())
+            .collect()
+    }
+
+    fn stage_middleware_factories(&self) -> &[Box<dyn MiddlewareFactory>] {
+        &self.middleware
+    }
+
+    async fn create_handle_with_flow_middleware(
+        self: Box<Self>,
+        config: StageConfig,
+        resources: StageResources,
+        flow_middleware: Vec<Box<dyn MiddlewareFactory>>,
+        control_middleware: Arc<ControlMiddlewareAggregator>,
+    ) -> StageCreationResult<BoxedStageHandle> {
+        for factory in &self.middleware {
+            let validation_result =
+                validate_middleware_safety(factory.as_ref(), StageType::Sink, &self.name);
+
+            if !validation_result.is_ok() {
+                for error in &validation_result.errors {
+                    tracing::error!("{}", error);
+                }
+            }
+        }
+
+        let resolved = crate::middleware_resolution::resolve_middleware(
+            flow_middleware,
+            self.middleware,
+            &config.name,
+        )?;
+        crate::middleware_resolution::log_resolved_middleware(&config.name, &resolved);
+        let control_strategy = create_control_strategy_from_middleware_specs(&resolved.middleware);
+
+        let instrumentation_config = InstrumentationConfig::default();
+        let mut instrumentation = StageInstrumentation::new_with_config(instrumentation_config);
+        let control_provider: Arc<dyn obzenflow_core::ControlMiddlewareProvider> =
+            control_middleware.clone();
+
+        let expects_circuit_breaker = resolved
+            .middleware
+            .iter()
+            .any(|spec| spec.factory.control_role() == ControlMiddlewareRole::CircuitBreaker);
+        let expects_rate_limiter = resolved
+            .middleware
+            .iter()
+            .any(|spec| spec.factory.control_role() == ControlMiddlewareRole::RateLimiter);
+
+        let _registered_middleware: Vec<Box<dyn Middleware>> = resolved
+            .middleware
+            .into_iter()
+            .map(|spec| spec.factory.create(&config, control_middleware.clone()))
+            .collect::<Result<_, _>>()?;
+
+        instrumentation
+            .bind_control_middleware(
+                &config.stage_id,
+                &control_provider,
+                expects_circuit_breaker,
+                expects_rate_limiter,
+            )
+            .map_err(|e| e.to_string())?;
+        let instrumentation = Arc::new(instrumentation);
+
+        let sink_config = JournalSinkConfig {
+            stage_id: config.stage_id,
+            stage_name: config.name.clone(),
+            flow_name: config.flow_name.clone(),
+            upstream_stages: resources.upstream_stages.clone(),
+            buffer_size: None,
+            flush_interval_ms: None,
+            control_strategy: Some(control_strategy),
+        };
+
+        let handle = JournalSinkBuilder::new(
+            EffectfulAsyncSinkHandlerAdapter(self.handler),
+            sink_config,
+            resources,
+        )
+        .with_instrumentation(instrumentation)
+        .build()
+        .await
+        .map_err(|e| format!("Failed to build effectful sink: {e:?}"))?;
+
         let adapter = StageHandleAdapter::new(
             handle,
             config.stage_id,
@@ -1558,6 +1844,164 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Stage
             .map_err(|e| format!("Failed to build stateful stage: {e:?}"))?;
 
         // Create adapter to bridge to StageHandle
+        let adapter = StageHandleAdapter::new(
+            handle,
+            config.stage_id,
+            config.name,
+            StageType::Stateful,
+            translate_stage_event_to_stateful,
+            check_stateful_state,
+        );
+
+        Ok(Box::new(adapter) as BoxedStageHandle)
+    }
+}
+
+/// Descriptor for replay-safe effectful stateful stages.
+pub struct EffectfulStatefulDescriptor<H: EffectfulStatefulHandler + 'static> {
+    pub name: String,
+    pub handler: H,
+    pub emit_interval: Option<Duration>,
+    pub middleware: Vec<Box<dyn MiddlewareFactory>>,
+}
+
+impl<H: EffectfulStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
+    EffectfulStatefulDescriptor<H>
+{
+    pub fn new(name: impl Into<String>, handler: H) -> Self {
+        Self {
+            name: name.into(),
+            handler,
+            emit_interval: None,
+            middleware: Vec::new(),
+        }
+    }
+
+    pub fn with_emit_interval(mut self, emit_interval: Duration) -> Self {
+        self.emit_interval = Some(emit_interval);
+        self
+    }
+
+    pub fn with_middleware<M: MiddlewareFactory + 'static>(mut self, mw: M) -> Self {
+        self.middleware.push(Box::new(mw));
+        self
+    }
+
+    pub fn build(self) -> Box<dyn StageDescriptor> {
+        Box::new(self)
+    }
+}
+
+#[async_trait]
+impl<H: EffectfulStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDescriptor
+    for EffectfulStatefulDescriptor<H>
+{
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn set_name(&mut self, name: String) {
+        self.name = name;
+    }
+
+    fn stage_type(&self) -> StageType {
+        StageType::Stateful
+    }
+
+    fn is_effectful(&self) -> bool {
+        true
+    }
+
+    fn stage_logic_version(&self) -> String {
+        self.handler.stage_logic_version().into_owned()
+    }
+
+    fn stage_middleware_names(&self) -> Vec<String> {
+        self.middleware
+            .iter()
+            .map(|f| f.label().to_string())
+            .collect()
+    }
+
+    fn stage_middleware_factories(&self) -> &[Box<dyn MiddlewareFactory>] {
+        &self.middleware
+    }
+
+    async fn create_handle_with_flow_middleware(
+        self: Box<Self>,
+        config: StageConfig,
+        resources: StageResources,
+        flow_middleware: Vec<Box<dyn MiddlewareFactory>>,
+        control_middleware: Arc<ControlMiddlewareAggregator>,
+    ) -> StageCreationResult<BoxedStageHandle> {
+        for factory in &self.middleware {
+            let validation_result =
+                validate_middleware_safety(factory.as_ref(), StageType::Stateful, &self.name);
+
+            if !validation_result.is_ok() {
+                for error in &validation_result.errors {
+                    tracing::error!("{}", error);
+                }
+            }
+        }
+
+        let resolved = crate::middleware_resolution::resolve_middleware(
+            flow_middleware,
+            self.middleware,
+            &config.name,
+        )?;
+        crate::middleware_resolution::log_resolved_middleware(&config.name, &resolved);
+        let control_strategy = create_control_strategy_from_middleware_specs(&resolved.middleware);
+
+        let instrumentation_config = InstrumentationConfig::default();
+        let mut instrumentation = StageInstrumentation::new_with_config(instrumentation_config);
+        let control_provider: Arc<dyn obzenflow_core::ControlMiddlewareProvider> =
+            control_middleware.clone();
+
+        let expects_circuit_breaker = resolved
+            .middleware
+            .iter()
+            .any(|spec| spec.factory.control_role() == ControlMiddlewareRole::CircuitBreaker);
+        let expects_rate_limiter = resolved
+            .middleware
+            .iter()
+            .any(|spec| spec.factory.control_role() == ControlMiddlewareRole::RateLimiter);
+
+        let _registered_middleware: Vec<Box<dyn Middleware>> = resolved
+            .middleware
+            .into_iter()
+            .map(|spec| spec.factory.create(&config, control_middleware.clone()))
+            .collect::<Result<_, _>>()?;
+
+        instrumentation
+            .bind_control_middleware(
+                &config.stage_id,
+                &control_provider,
+                expects_circuit_breaker,
+                expects_rate_limiter,
+            )
+            .map_err(|e| e.to_string())?;
+        let instrumentation = Arc::new(instrumentation);
+
+        let stateful_config = StatefulConfig {
+            stage_id: config.stage_id,
+            stage_name: config.name.clone(),
+            flow_name: config.flow_name.clone(),
+            emit_interval: self.emit_interval,
+            control_strategy: Some(control_strategy),
+            upstream_stages: resources.upstream_stages.clone(),
+        };
+
+        let handle = StatefulBuilder::new(
+            EffectfulStatefulHandlerAdapter(self.handler),
+            stateful_config,
+            resources,
+        )
+        .with_instrumentation(instrumentation)
+        .build()
+        .await
+        .map_err(|e| format!("Failed to build effectful stateful stage: {e:?}"))?;
+
         let adapter = StageHandleAdapter::new(
             handle,
             config.stage_id,

@@ -2,16 +2,19 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! HN AI Digest Demo (FLOWIP-086r) — showcases Rig-backed LLM transforms.
+//! HN AI Digest Demo — showcases Rig-backed LLM transforms.
 //!
 //! Pipeline (batch + map-reduce):
-//! `HttpPullSource` → format stories → accumulate → split_to_budget → map (LLM) → reduce → digest (LLM) → print markdown digest
+//! `HttpPullSource` → format stories → accumulate into one batch → `ai_map_reduce!` digest → print markdown digest
 //!
-//! Oversize decomposition loop (FLOWIP-086x):
-//! `split_to_budget` emits oversize chunks when a single item exceeds the per-group token budget.
-//! These route through `oversize_sub_split`, which may emit another oversize chunk (with a higher
-//! decomposition depth) back into itself via `<|` until it can emit regular chunks.
-//! Those chunks are summarized by `oversize_map_llm` (LLM) and converted into summaries for reduction.
+//! The `digest` stage is a single `ai_map_reduce!`: a `by_budget` chunking policy splits the batch
+//! into token-budgeted chunks, the `map` arm summarizes each chunk with one LLM call, and the
+//! `reduce` arm folds the chunk summaries into the final digest with one more LLM call.
+//!
+//! Oversize handling: if a single item is larger than the whole per-group budget, the chunker's
+//! `oversize: decompose { max_depth, exhaustion }` policy re-renders it at increasing decomposition
+//! depths. On exhaustion it either fails the plan or drops and records the item; it never silently
+//! truncates. For HN headlines this never fires in practice.
 //!
 //! Tutorials: `https://obzenflow.dev/tutorials/`
 //!

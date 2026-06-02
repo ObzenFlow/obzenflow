@@ -12,10 +12,12 @@ mod tests {
     use async_trait::async_trait;
     use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
     use obzenflow_core::{ChainEvent, TypedPayload};
+    use obzenflow_runtime::effects::Effects;
     use obzenflow_runtime::stages::common::handler_error::HandlerError;
     use obzenflow_runtime::stages::common::handlers::source::SourceError;
     use obzenflow_runtime::stages::common::handlers::{
         AsyncFiniteSourceHandler, AsyncInfiniteSourceHandler, AsyncTransformHandler,
+        EffectfulAsyncSinkHandler, EffectfulAsyncTransformHandler, EffectfulStatefulHandler,
         FiniteSourceHandler, InfiniteSourceHandler, SinkHandler, StatefulHandler, TransformHandler,
     };
     use obzenflow_runtime::typing::{SinkTyping, SourceTyping, StatefulTyping, TransformTyping};
@@ -114,6 +116,18 @@ mod tests {
     }
 
     #[derive(Clone, Debug)]
+    struct FxTr;
+    #[async_trait]
+    impl EffectfulAsyncTransformHandler for FxTr {
+        type Input = In;
+        type Output = Out;
+
+        async fn process(&self, _input: In, _fx: &mut Effects) -> Result<Out, HandlerError> {
+            Ok(Out)
+        }
+    }
+
+    #[derive(Clone, Debug)]
     struct St;
     impl StatefulTyping for St {
         type Input = In;
@@ -130,6 +144,29 @@ mod tests {
     }
 
     #[derive(Clone, Debug)]
+    struct FxSt;
+    #[async_trait]
+    impl EffectfulStatefulHandler for FxSt {
+        type State = ();
+        type Input = In;
+
+        fn initial_state(&self) -> Self::State {}
+
+        async fn accumulate(
+            &mut self,
+            _state: &mut Self::State,
+            _input: In,
+            _fx: &mut Effects,
+        ) -> Result<(), HandlerError> {
+            Ok(())
+        }
+
+        fn create_events(&self, _state: &Self::State) -> Result<Vec<ChainEvent>, HandlerError> {
+            Ok(vec![])
+        }
+    }
+
+    #[derive(Clone, Debug)]
     struct Sn;
     impl SinkTyping for Sn {
         type Input = Out;
@@ -137,6 +174,21 @@ mod tests {
     #[async_trait]
     impl SinkHandler for Sn {
         async fn consume(&mut self, _e: ChainEvent) -> Result<DeliveryPayload, HandlerError> {
+            Ok(DeliveryPayload::success("sink", DeliveryMethod::Noop, None))
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    struct FxSn;
+    #[async_trait]
+    impl EffectfulAsyncSinkHandler for FxSn {
+        type Input = Out;
+
+        async fn consume(
+            &mut self,
+            _input: Out,
+            _fx: &mut Effects,
+        ) -> Result<DeliveryPayload, HandlerError> {
             Ok(DeliveryPayload::success("sink", DeliveryMethod::Noop, None))
         }
     }
@@ -249,6 +301,24 @@ mod tests {
         let _ = crate::async_transform!(name: "t", In -> Out => AsyncTr, []);
     }
 
+    // ── effectful_async_transform! ──────────────────────────────────────────
+    #[test]
+    fn effectful_async_transform_typed_bare() {
+        let _ = crate::effectful_async_transform!(In -> Out => FxTr);
+    }
+    #[test]
+    fn effectful_async_transform_typed_mw() {
+        let _ = crate::effectful_async_transform!(In -> Out => FxTr, []);
+    }
+    #[test]
+    fn effectful_async_transform_typed_name() {
+        let _ = crate::effectful_async_transform!(name: "t", In -> Out => FxTr);
+    }
+    #[test]
+    fn effectful_async_transform_typed_name_mw() {
+        let _ = crate::effectful_async_transform!(name: "t", In -> Out => FxTr, []);
+    }
+
     // ── stateful! ───────────────────────────────────────────────────────────
     #[test]
     fn stateful_typed_bare() {
@@ -267,6 +337,24 @@ mod tests {
         let _ = crate::stateful!(name: "s", In -> Out => St, []);
     }
 
+    // ── effectful_stateful! ─────────────────────────────────────────────────
+    #[test]
+    fn effectful_stateful_typed_bare() {
+        let _ = crate::effectful_stateful!(In -> Out => FxSt);
+    }
+    #[test]
+    fn effectful_stateful_typed_mw() {
+        let _ = crate::effectful_stateful!(In -> Out => FxSt, []);
+    }
+    #[test]
+    fn effectful_stateful_typed_name() {
+        let _ = crate::effectful_stateful!(name: "s", In -> Out => FxSt);
+    }
+    #[test]
+    fn effectful_stateful_typed_name_mw() {
+        let _ = crate::effectful_stateful!(name: "s", In -> Out => FxSt, []);
+    }
+
     // ── sink! ───────────────────────────────────────────────────────────────
     #[test]
     fn sink_typed_bare() {
@@ -283,5 +371,23 @@ mod tests {
     #[test]
     fn sink_typed_name_mw() {
         let _ = crate::sink!(name: "s", Out => Sn, []);
+    }
+
+    // ── effectful_sink! ─────────────────────────────────────────────────────
+    #[test]
+    fn effectful_sink_typed_bare() {
+        let _ = crate::effectful_sink!(Out => FxSn);
+    }
+    #[test]
+    fn effectful_sink_typed_mw() {
+        let _ = crate::effectful_sink!(Out => FxSn, []);
+    }
+    #[test]
+    fn effectful_sink_typed_name() {
+        let _ = crate::effectful_sink!(name: "s", Out => FxSn);
+    }
+    #[test]
+    fn effectful_sink_typed_name_mw() {
+        let _ = crate::effectful_sink!(name: "s", Out => FxSn, []);
     }
 }

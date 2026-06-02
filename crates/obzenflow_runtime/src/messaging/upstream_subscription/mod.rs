@@ -24,7 +24,7 @@ mod tests;
 pub use super::subscription_poller::{PollResult, SubscriptionPoller};
 pub use types::{
     ContractConfig, ContractStatus, ContractTracker, ContractsWiring, EofOutcome, ReaderProgress,
-    SubscriptionState,
+    StageInputPosition, SubscriptionState,
 };
 
 use crate::contracts::ContractChain;
@@ -92,6 +92,12 @@ where
     /// the envelope), and MUST NOT be derived from `envelope.event.writer_id`, which
     /// can be intentionally preserved across stages for causal attribution.
     last_delivered_upstream_stage: Option<StageId>,
+
+    /// Next stage-local data-input position to assign after transport filtering.
+    next_stage_input_position: u64,
+
+    /// Stage-local data-input position for the last delivered data event.
+    last_delivered_stage_input_position: Option<StageInputPosition>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -113,6 +119,10 @@ where
     /// Stage ID of the upstream reader that produced the last delivered event.
     pub fn last_delivered_upstream_stage(&self) -> Option<StageId> {
         self.last_delivered_upstream_stage
+    }
+
+    pub fn last_delivered_stage_input_position(&self) -> Option<StageInputPosition> {
+        self.last_delivered_stage_input_position
     }
 
     fn uses_receipt_watermark(&self) -> bool {

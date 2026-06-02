@@ -12,7 +12,7 @@ use super::handle::JournalSinkHandle;
 use super::supervisor::JournalSinkSupervisor;
 use crate::metrics::instrumentation::StageInstrumentation;
 use crate::stages::common::control_strategies::{ControlEventStrategy, JonestownStrategy};
-use crate::stages::common::handlers::SinkHandler;
+use crate::stages::common::handlers::UnifiedSinkHandler;
 use crate::stages::common::heartbeat::{spawn_heartbeat, HeartbeatConfig, HeartbeatState};
 use crate::stages::resources_builder::StageResources;
 use crate::supervised_base::{
@@ -21,7 +21,9 @@ use crate::supervised_base::{
 };
 
 /// Builder for creating journal sink stages
-pub struct JournalSinkBuilder<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> {
+pub struct JournalSinkBuilder<
+    H: UnifiedSinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
+> {
     handler: H,
     config: JournalSinkConfig,
     resources: StageResources,
@@ -29,7 +31,9 @@ pub struct JournalSinkBuilder<H: SinkHandler + Clone + std::fmt::Debug + Send + 
     heartbeat_config: HeartbeatConfig,
 }
 
-impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> JournalSinkBuilder<H> {
+impl<H: UnifiedSinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
+    JournalSinkBuilder<H>
+{
     /// Create a new journal sink builder
     pub fn new(handler: H, config: JournalSinkConfig, resources: StageResources) -> Self {
         Self {
@@ -54,7 +58,7 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> JournalSi
 }
 
 #[async_trait::async_trait]
-impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> SupervisorBuilder
+impl<H: UnifiedSinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> SupervisorBuilder
     for JournalSinkBuilder<H>
 {
     type Handle = JournalSinkHandle<H>;
@@ -99,6 +103,8 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Superviso
             flow_name: self.config.flow_name.clone(),
             flow_id: self.resources.flow_id,
             data_journal: self.resources.data_journal.clone(),
+            replay_archive: self.resources.replay_archive.clone(),
+            effect_history: None,
             error_journal: self.resources.error_journal.clone(),
             system_journal: self.resources.system_journal.clone(),
             bus: self.resources.message_bus.clone(),

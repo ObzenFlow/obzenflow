@@ -41,6 +41,12 @@ pub struct RunManifestStage {
     pub dsl_var: String,
     pub stage_type: StageType,
     pub stage_id: String,
+    #[serde(default = "default_stage_logic_version")]
+    pub stage_logic_version: String,
     pub data_journal_file: String,
     pub error_journal_file: String,
+}
+
+fn default_stage_logic_version() -> String {
+    "1".to_string()
 }
