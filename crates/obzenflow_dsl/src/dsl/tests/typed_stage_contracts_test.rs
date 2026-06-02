@@ -910,7 +910,10 @@ mod tests {
         topology.add_edge(source_a_id.to_topology_id(), orderer_id.to_topology_id());
         topology.add_edge(source_b_id.to_topology_id(), orderer_id.to_topology_id());
         topology.add_edge(orderer_id.to_topology_id(), passthrough_id.to_topology_id());
-        topology.add_edge(passthrough_id.to_topology_id(), effectful_id.to_topology_id());
+        topology.add_edge(
+            passthrough_id.to_topology_id(),
+            effectful_id.to_topology_id(),
+        );
         let topology = topology.build_unchecked().unwrap();
 
         assert!(
