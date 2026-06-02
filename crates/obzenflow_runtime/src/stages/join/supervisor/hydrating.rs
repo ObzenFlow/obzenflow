@@ -240,6 +240,18 @@ pub(super) async fn dispatch_hydrating<
 
                     EventLoopDirective::Continue
                 }
+                obzenflow_core::event::ChainEventContent::EffectResult(_) => {
+                    // FLOWIP-120a: explicit drop for transport-only effect records,
+                    // matching the transform/stateful/sink cohort. Normally removed by
+                    // the subscription TransportOnly filter; dropped here so a leaked
+                    // record never falls into the generic unexpected-content path.
+                    tracing::warn!(
+                        stage_name = %ctx.stage_name,
+                        event_id = %envelope.event.id,
+                        "Dropping transport-only EffectResult that bypassed subscription filtering"
+                    );
+                    EventLoopDirective::Continue
+                }
                 _ => {
                     tracing::warn!(
                         stage_name = %ctx.stage_name,

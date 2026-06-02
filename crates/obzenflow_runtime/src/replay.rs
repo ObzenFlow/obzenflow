@@ -172,7 +172,7 @@ impl ReplayDriver {
             };
 
             let original_event = envelope.event;
-            if !original_event.is_replayable() {
+            if !original_event.is_source_replayable() {
                 self.skipped_events = self.skipped_events.saturating_add(1);
                 continue;
             }

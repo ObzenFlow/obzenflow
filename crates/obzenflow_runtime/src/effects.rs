@@ -641,6 +641,13 @@ impl EffectHistory {
         })
     }
 
+    // FLOWIP-120a: the cursor IS the index key (populated in `from_records`), so a
+    // found record's stored cursor equals the lookup cursor by construction; a
+    // "found under a different cursor" state is unrepresentable and needs no explicit
+    // cursor-mismatch error. The two real divergence axes are handled elsewhere: an
+    // absent cursor yields `None` (a `MissingRecordedEffect` under strict replay), and
+    // a present-but-diverged record is caught by the independent `descriptor_hash`
+    // check (`DescriptorMismatch`).
     fn find(&self, cursor: &EffectCursor) -> Option<&EffectRecord> {
         self.index
             .get(cursor)
@@ -1059,6 +1066,20 @@ impl Effects {
     }
 }
 
+// FLOWIP-120a: this append is intentionally write-time-unchecked for duplicate
+// cursors. Callers reach it only after `history.find(&cursor)` returned `None`
+// (see `Effects::perform`), and the cursor is deterministic per
+// `(recorded_flow_id, stage_key, input_seq, effect_ordinal)`, where `effect_ordinal`
+// is the per-input monotonic counter, unique while it has not saturated `u32`. A
+// second append at the same cursor can therefore arise only from archive corruption,
+// a non-atomic partial write, or ordinal saturation, each of which
+// `EffectHistory::from_records` detects fail-loud on the next load (the same load
+// that feeds replay). A read-before-write duplicate check is deliberately avoided
+// here because it would add a TOCTOU window without removing one. Load-bearing
+// ordering invariant: every live append on resume is preceded by
+// `EffectHistory::load` (the transform, stateful, and sink FSMs load effect history
+// before processing); if a future stage appended live before loading history, this
+// fail-loud backstop would no longer cover it.
 async fn append_effect_record(
     data_journal: &Arc<dyn Journal<ChainEvent>>,
     writer_id: WriterId,
