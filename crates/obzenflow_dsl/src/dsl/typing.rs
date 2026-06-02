@@ -954,6 +954,10 @@ impl StageDescriptor for TypedStageDescriptor {
     fn stage_logic_version(&self) -> String {
         self.inner.stage_logic_version()
     }
+
+    fn effect_declarations(&self) -> Vec<obzenflow_runtime::effects::EffectDeclaration> {
+        self.inner.effect_declarations()
+    }
 }
 
 fn select_downstream_input_hint<'a>(
@@ -1273,7 +1277,7 @@ pub fn validate_effectful_deterministic_input_order(
     topology: &Topology,
     descriptors: &HashMap<String, Box<dyn StageDescriptor>>,
     name_to_id: &HashMap<String, StageId>,
-) -> Result<(), crate::dsl::FlowBuildError> {
+) -> Result<(), Box<crate::dsl::FlowBuildError>> {
     let mut id_to_descriptor: HashMap<StageId, &dyn StageDescriptor> = HashMap::new();
     let mut id_to_name: HashMap<StageId, String> = HashMap::new();
     for (dsl_name, descriptor) in descriptors {
@@ -1346,14 +1350,14 @@ pub fn validate_effectful_deterministic_input_order(
             &mut memo,
             &mut visiting,
         ) {
-            return Err(
+            return Err(Box::new(
                 crate::dsl::FlowBuildError::EffectfulFanInRequiresDeterministicOrder {
                     stage_name: id_to_name
                         .get(&stage_id)
                         .cloned()
                         .unwrap_or_else(|| descriptor.name().to_string()),
                 },
-            );
+            ));
         }
     }
 

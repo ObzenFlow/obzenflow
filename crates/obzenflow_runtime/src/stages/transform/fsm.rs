@@ -21,7 +21,7 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 
 use crate::backpressure::{BackpressureReader, BackpressureRegistry, BackpressureWriter};
-use crate::effects::EffectHistory;
+use crate::effects::{EffectHistory, EffectPortRegistry, EffectRuntimeMode};
 use crate::messaging::upstream_subscription::{ContractConfig, ContractsWiring, ReaderProgress};
 use crate::messaging::UpstreamSubscription;
 use crate::metrics::instrumentation::StageInstrumentation;
@@ -285,6 +285,12 @@ pub(crate) struct TransformContext<H: UnifiedTransformHandler> {
 
     /// Stage-local effect history loaded from replay archive.
     pub effect_history: Option<Arc<EffectHistory>>,
+
+    /// Effect execution mode derived from the replay archive state.
+    pub effect_runtime_mode: EffectRuntimeMode,
+
+    /// Flow-scoped typed ports available to replay-safe effects.
+    pub effect_ports: EffectPortRegistry,
 
     /// Error journal for writing error events (FLOWIP-082e)
     pub error_journal: Arc<dyn Journal<ChainEvent>>,

@@ -47,7 +47,7 @@
 //! }
 //! ```
 
-use crate::effects::{EffectInvocationContext, Effects};
+use crate::effects::{EffectDeclaration, EffectInvocationContext, Effects};
 use crate::stages::common::handler_error::HandlerError;
 use async_trait::async_trait;
 use obzenflow_core::event::payloads::delivery_payload::DeliveryPayload;
@@ -161,6 +161,10 @@ pub trait UnifiedSinkHandler: Send + Sync {
     fn stage_logic_version(&self) -> Cow<'static, str> {
         Cow::Borrowed("1")
     }
+
+    fn effect_declarations(&self) -> Vec<EffectDeclaration> {
+        Vec::new()
+    }
 }
 
 #[async_trait]
@@ -210,6 +214,10 @@ pub trait EffectfulAsyncSinkHandler: Send + Sync {
 
     fn stage_logic_version(&self) -> Cow<'static, str> {
         Cow::Borrowed("1")
+    }
+
+    fn effect_declarations(&self) -> Vec<EffectDeclaration> {
+        Vec::new()
     }
 }
 

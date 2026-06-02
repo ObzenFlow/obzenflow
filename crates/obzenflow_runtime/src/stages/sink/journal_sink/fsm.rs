@@ -9,7 +9,7 @@
 //! data is written before shutdown.
 
 use crate::backpressure::{BackpressureReader, BackpressureWriter};
-use crate::effects::EffectHistory;
+use crate::effects::{EffectHistory, EffectPortRegistry, EffectRuntimeMode};
 use crate::messaging::upstream_subscription::{ContractConfig, ContractsWiring, ReaderProgress};
 use crate::messaging::UpstreamSubscription;
 use crate::metrics::instrumentation::StageInstrumentation;
@@ -301,6 +301,12 @@ pub struct JournalSinkContext<H: UnifiedSinkHandler> {
 
     /// Recorded effect outcomes for replay suppression.
     pub effect_history: Option<Arc<EffectHistory>>,
+
+    /// Effect execution mode derived from the replay archive state.
+    pub effect_runtime_mode: EffectRuntimeMode,
+
+    /// Flow-scoped typed ports available to replay-safe effects.
+    pub effect_ports: EffectPortRegistry,
 
     /// Error journal for writing error events (FLOWIP-082e)
     pub error_journal: Arc<dyn Journal<ChainEvent>>,

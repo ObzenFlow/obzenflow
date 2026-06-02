@@ -695,7 +695,7 @@ mod tests {
         let topology = topology.build_unchecked().unwrap();
 
         let err =
-            validate_effectful_deterministic_input_order(&topology, &descriptors, &name_to_id)
+            *validate_effectful_deterministic_input_order(&topology, &descriptors, &name_to_id)
                 .expect_err("effectful stage below transitive fan-in must be rejected");
 
         match err {

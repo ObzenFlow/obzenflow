@@ -38,7 +38,7 @@ use obzenflow_dsl::{effectful_async_transform, flow, sink, source, transform};
 use obzenflow_infra::application::{FlowApplication, LogLevel, Presentation};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::effects::{
-    Effect, EffectContext, EffectError, EffectSafety, Effects, IdempotencyKey,
+    Effect, EffectContext, EffectDeclaration, EffectError, EffectSafety, Effects, IdempotencyKey,
 };
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
@@ -123,6 +123,10 @@ struct GatewayAuthorization {
     authorization_id: String,
 }
 
+impl TypedPayload for GatewayAuthorization {
+    const EVENT_TYPE: &'static str = "payment.gateway_authorization";
+}
+
 #[derive(Debug, Clone)]
 struct AuthorizePayment {
     validated: ValidatedPayment,
@@ -149,7 +153,7 @@ impl Effect for AuthorizePayment {
     }
 
     async fn execute(&self, ctx: &mut EffectContext) -> Result<Self::Output, EffectError> {
-        let latency_ms: u64 = fastrand::u64(50..=200);
+        let latency_ms: u64 = ctx.rng("gateway_latency").u64(50..=200);
         ctx.sleep(std::time::Duration::from_millis(latency_ms))
             .await;
 
@@ -217,6 +221,12 @@ impl EffectfulAsyncTransformHandler for GatewayTransform {
 
     fn stage_logic_version(&self) -> Cow<'static, str> {
         Cow::Borrowed("payment-gateway-v1")
+    }
+
+    fn effect_declarations(&self) -> Vec<EffectDeclaration> {
+        vec![EffectDeclaration::non_idempotent_with_key(
+            AuthorizePayment::EFFECT_TYPE,
+        )]
     }
 }
 
@@ -287,11 +297,7 @@ fn build_flow() -> obzenflow_dsl::FlowDefinition {
                     // Additionally count very slow calls toward opening the
                     // breaker when at least half of recent calls are slow.
                     .slow_call(std::time::Duration::from_millis(250), 0.5)
-                    .with_typed_fallback::<ValidatedPayment, AuthorizedPayment, _>(|validated| AuthorizedPayment {
-                        request_id: validated.request_id.clone(),
-                        customer_id: validated.customer_id.clone(),
-                        amount_cents: validated.amount_cents,
-                        phase: validated.phase.clone(),
+                    .with_typed_fallback::<ValidatedPayment, GatewayAuthorization, _>(|_validated| GatewayAuthorization {
                         authorization_id: AuthorizedPayment::AUTHORIZATION_ID_FALLBACK_CB_OPEN.to_string(),
                     })
                     // Make the Open/HalfOpen behaviour explicit; these match
@@ -407,11 +413,7 @@ fn build_glitchy_flow(config: GlitchyFlowConfig) -> obzenflow_dsl::FlowDefinitio
                     .cooldown(std::time::Duration::from_secs(5))
                     .rate_based_over_last_n_calls(5, 0.6)
                     .slow_call(std::time::Duration::from_millis(250), 0.5)
-                    .with_typed_fallback::<ValidatedPayment, AuthorizedPayment, _>(|validated| AuthorizedPayment {
-                        request_id: validated.request_id.clone(),
-                        customer_id: validated.customer_id.clone(),
-                        amount_cents: validated.amount_cents,
-                        phase: validated.phase.clone(),
+                    .with_typed_fallback::<ValidatedPayment, GatewayAuthorization, _>(|_validated| GatewayAuthorization {
                         authorization_id: AuthorizedPayment::AUTHORIZATION_ID_FALLBACK_CB_OPEN.to_string(),
                     })
                     .open_policy(OpenPolicy::EmitFallback)

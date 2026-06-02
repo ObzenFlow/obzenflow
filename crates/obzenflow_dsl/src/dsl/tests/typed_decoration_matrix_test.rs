@@ -149,19 +149,30 @@ mod tests {
     impl EffectfulStatefulHandler for FxSt {
         type State = ();
         type Input = In;
+        type Output = Out;
+        type Transition = ();
 
         fn initial_state(&self) -> Self::State {}
 
-        async fn accumulate(
+        async fn transition(
+            &mut self,
+            _state: &Self::State,
+            _input: &In,
+            _fx: &mut Effects,
+        ) -> Result<Self::Transition, HandlerError> {
+            Ok(())
+        }
+
+        fn apply(
             &mut self,
             _state: &mut Self::State,
             _input: In,
-            _fx: &mut Effects,
+            _transition: Self::Transition,
         ) -> Result<(), HandlerError> {
             Ok(())
         }
 
-        fn create_events(&self, _state: &Self::State) -> Result<Vec<ChainEvent>, HandlerError> {
+        fn create_outputs(&self, _state: &Self::State) -> Result<Vec<Out>, HandlerError> {
             Ok(vec![])
         }
     }

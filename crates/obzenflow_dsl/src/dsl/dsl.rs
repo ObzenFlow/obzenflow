@@ -668,7 +668,8 @@ macro_rules! build_typed_flow {
             &topology,
             &descriptors,
             &name_to_id,
-        )?;
+        )
+        .map_err(|err| *err)?;
 
         // FLOWIP-051l (P0): backflow cycles are currently only supported for transform stages.
         // Reject any topology where a cycle-member stage is not a transform so we do not silently

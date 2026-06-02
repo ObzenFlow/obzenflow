@@ -22,6 +22,7 @@ use obzenflow_adapters::middleware::{
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::{StageId, WriterId};
 use obzenflow_runtime::{
+    effects::{EffectDeclaration, EffectPortRegistry, EffectSafety, IdempotencyKeyPolicy},
     metrics::instrumentation::{InstrumentationConfig, StageInstrumentation},
     stages::StageResources,
 };
@@ -220,6 +221,10 @@ pub trait StageDescriptor: Send + Sync {
         "1".to_string()
     }
 
+    fn effect_declarations(&self) -> Vec<EffectDeclaration> {
+        Vec::new()
+    }
+
     /// Whether this descriptor is a composite that must be lowered during `flow!` materialisation.
     ///
     /// Default: `false` for ordinary stages.
@@ -237,6 +242,46 @@ pub trait StageDescriptor: Send + Sync {
     ) -> Result<Option<crate::dsl::composites::CompositeLowering>, crate::dsl::FlowBuildError> {
         Ok(None)
     }
+}
+
+fn validate_effect_declarations(
+    stage_name: &str,
+    declarations: &[EffectDeclaration],
+    effect_ports: &EffectPortRegistry,
+) -> Result<(), String> {
+    for declaration in declarations {
+        if matches!(declaration.safety, EffectSafety::NonIdempotentRequiresKey)
+            && !matches!(
+                declaration.idempotency_key_policy,
+                IdempotencyKeyPolicy::Required
+            )
+        {
+            return Err(format!(
+                "Effectful stage '{stage_name}' declares non-idempotent effect '{}' without an idempotency-key strategy",
+                declaration.effect_type
+            ));
+        }
+
+        if matches!(declaration.safety, EffectSafety::Transactional)
+            && declaration.transactional_executor.is_none()
+        {
+            return Err(format!(
+                "Effectful stage '{stage_name}' declares transactional effect '{}' without a transactional executor",
+                declaration.effect_type
+            ));
+        }
+
+        for requirement in &declaration.required_ports {
+            if !effect_ports.contains_requirement(requirement) {
+                return Err(format!(
+                    "Effectful stage '{stage_name}' requires effect port '{}' for type '{}' but it is not registered",
+                    requirement.name, requirement.type_name
+                ));
+            }
+        }
+    }
+
+    Ok(())
 }
 
 /// Descriptor for finite source stages
@@ -1190,6 +1235,10 @@ impl<H: EffectfulAsyncTransformHandler + Clone + std::fmt::Debug + Send + Sync +
         self.handler.stage_logic_version().into_owned()
     }
 
+    fn effect_declarations(&self) -> Vec<EffectDeclaration> {
+        self.handler.effect_declarations()
+    }
+
     fn stage_middleware_names(&self) -> Vec<String> {
         self.middleware
             .iter()
@@ -1208,6 +1257,12 @@ impl<H: EffectfulAsyncTransformHandler + Clone + std::fmt::Debug + Send + Sync +
         flow_middleware: Vec<Box<dyn MiddlewareFactory>>,
         control_middleware: Arc<ControlMiddlewareAggregator>,
     ) -> StageCreationResult<BoxedStageHandle> {
+        validate_effect_declarations(
+            &self.name,
+            &self.handler.effect_declarations(),
+            &resources.effect_ports,
+        )?;
+
         for factory in &self.middleware {
             let validation_result =
                 validate_middleware_safety(factory.as_ref(), StageType::Transform, &self.name);
@@ -1470,6 +1525,10 @@ impl<H: EffectfulAsyncSinkHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
         self.handler.stage_logic_version().into_owned()
     }
 
+    fn effect_declarations(&self) -> Vec<EffectDeclaration> {
+        self.handler.effect_declarations()
+    }
+
     fn stage_middleware_names(&self) -> Vec<String> {
         self.middleware
             .iter()
@@ -1488,6 +1547,12 @@ impl<H: EffectfulAsyncSinkHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
         flow_middleware: Vec<Box<dyn MiddlewareFactory>>,
         control_middleware: Arc<ControlMiddlewareAggregator>,
     ) -> StageCreationResult<BoxedStageHandle> {
+        validate_effect_declarations(
+            &self.name,
+            &self.handler.effect_declarations(),
+            &resources.effect_ports,
+        )?;
+
         for factory in &self.middleware {
             let validation_result =
                 validate_middleware_safety(factory.as_ref(), StageType::Sink, &self.name);
@@ -1916,6 +1981,10 @@ impl<H: EffectfulStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
         self.handler.stage_logic_version().into_owned()
     }
 
+    fn effect_declarations(&self) -> Vec<EffectDeclaration> {
+        self.handler.effect_declarations()
+    }
+
     fn stage_middleware_names(&self) -> Vec<String> {
         self.middleware
             .iter()
@@ -1934,6 +2003,12 @@ impl<H: EffectfulStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
         flow_middleware: Vec<Box<dyn MiddlewareFactory>>,
         control_middleware: Arc<ControlMiddlewareAggregator>,
     ) -> StageCreationResult<BoxedStageHandle> {
+        validate_effect_declarations(
+            &self.name,
+            &self.handler.effect_declarations(),
+            &resources.effect_ports,
+        )?;
+
         for factory in &self.middleware {
             let validation_result =
                 validate_middleware_safety(factory.as_ref(), StageType::Stateful, &self.name);
@@ -2270,9 +2345,117 @@ mod tests {
     use obzenflow_core::event::{JournalEvent, SystemEvent};
     use obzenflow_core::ControlMiddlewareProvider;
     use obzenflow_core::{ChainEvent, EventEnvelope, FlowId};
+    use obzenflow_runtime::effects::{
+        Effect, EffectCommitHandle, EffectContext, EffectError, TransactionalEffectPort,
+    };
     use obzenflow_runtime::message_bus::FsmMessageBus;
     use obzenflow_runtime::stages::resources_builder::SubscriptionFactory;
     use obzenflow_runtime::stages::LivenessSnapshots;
+    use serde_json::json;
+    use std::borrow::Cow;
+
+    trait DemoEffectPort: Send + Sync {}
+
+    struct DemoEffectPortImpl;
+
+    impl DemoEffectPort for DemoEffectPortImpl {}
+
+    #[derive(Clone, Debug)]
+    struct DemoTransactionalEffect;
+
+    #[async_trait]
+    impl Effect for DemoTransactionalEffect {
+        const EFFECT_TYPE: &'static str = "test.transactional_declared";
+        const SCHEMA_VERSION: u32 = 1;
+
+        type Output = u8;
+
+        fn label(&self) -> Cow<'static, str> {
+            Cow::Borrowed("declared")
+        }
+
+        fn canonical_input(&self) -> serde_json::Value {
+            json!({})
+        }
+
+        async fn execute(&self, _ctx: &mut EffectContext) -> Result<Self::Output, EffectError> {
+            Ok(0)
+        }
+    }
+
+    struct DemoTransactionalPort;
+
+    #[async_trait]
+    impl TransactionalEffectPort<DemoTransactionalEffect> for DemoTransactionalPort {
+        async fn execute_and_commit(
+            &self,
+            _effect: DemoTransactionalEffect,
+            _ctx: &mut EffectContext,
+            commit: EffectCommitHandle<u8>,
+        ) -> Result<u8, EffectError> {
+            commit.commit_success(&0).await?;
+            Ok(0)
+        }
+    }
+
+    #[test]
+    fn effect_declaration_validation_rejects_missing_key_strategy() {
+        let declaration = EffectDeclaration {
+            effect_type: "test.non_idempotent",
+            safety: EffectSafety::NonIdempotentRequiresKey,
+            idempotency_key_policy: IdempotencyKeyPolicy::NotRequired,
+            required_ports: Vec::new(),
+            transactional_executor: None,
+        };
+
+        let err =
+            validate_effect_declarations("effectful", &[declaration], &EffectPortRegistry::new())
+                .expect_err("missing key strategy must fail materialisation");
+
+        assert!(err.contains("without an idempotency-key strategy"));
+    }
+
+    #[test]
+    fn effect_declaration_validation_checks_required_ports() {
+        let declaration = EffectDeclaration::idempotent("test.ported")
+            .require_port::<dyn DemoEffectPort>("primary");
+
+        let missing = validate_effect_declarations(
+            "effectful",
+            std::slice::from_ref(&declaration),
+            &EffectPortRegistry::new(),
+        )
+        .expect_err("missing required port must fail materialisation");
+        assert!(missing.contains("requires effect port"));
+
+        let mut registry = EffectPortRegistry::new();
+        registry.insert::<dyn DemoEffectPort>("primary", Arc::new(DemoEffectPortImpl));
+
+        validate_effect_declarations("effectful", &[declaration], &registry)
+            .expect("registered required port should pass");
+    }
+
+    #[test]
+    fn effect_declaration_validation_transactional_effect_requires_typed_port() {
+        let declaration = EffectDeclaration::transactional_effect::<DemoTransactionalEffect>("tx");
+
+        let missing = validate_effect_declarations(
+            "effectful",
+            std::slice::from_ref(&declaration),
+            &EffectPortRegistry::new(),
+        )
+        .expect_err("missing transactional port must fail materialisation");
+        assert!(missing.contains("requires effect port"));
+
+        let mut registry = EffectPortRegistry::new();
+        registry.insert::<dyn TransactionalEffectPort<DemoTransactionalEffect>>(
+            "tx",
+            Arc::new(DemoTransactionalPort),
+        );
+
+        validate_effect_declarations("effectful", &[declaration], &registry)
+            .expect("registered transactional typed port should pass");
+    }
 
     #[derive(Clone, Debug)]
     struct DummyFiniteSource;
@@ -2552,6 +2735,8 @@ mod tests {
             backpressure_registry,
             liveness_snapshots: LivenessSnapshots::new(),
             replay_archive: None,
+            effect_runtime_mode: obzenflow_runtime::effects::EffectRuntimeMode::Live,
+            effect_ports: obzenflow_runtime::effects::EffectPortRegistry::new(),
         };
 
         let descriptor = FiniteSourceDescriptor {

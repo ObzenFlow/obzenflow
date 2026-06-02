@@ -6,7 +6,9 @@
 //!
 //! Examples: Data enrichers, filters, mappers, routers
 
-use crate::effects::{deterministic_typed_output_event, EffectInvocationContext, Effects};
+use crate::effects::{
+    deterministic_typed_output_event, EffectDeclaration, EffectInvocationContext, Effects,
+};
 use crate::typing::TransformTyping;
 use async_trait::async_trait;
 use obzenflow_core::event::schema::TypedPayload;
@@ -113,6 +115,10 @@ pub trait UnifiedTransformHandler: Send + Sync {
     fn stage_logic_version(&self) -> Cow<'static, str> {
         Cow::Borrowed("1")
     }
+
+    fn effect_declarations(&self) -> Vec<EffectDeclaration> {
+        Vec::new()
+    }
 }
 
 #[async_trait]
@@ -170,6 +176,10 @@ pub trait EffectfulAsyncTransformHandler: Send + Sync {
 
     fn stage_logic_version(&self) -> Cow<'static, str> {
         Cow::Borrowed("1")
+    }
+
+    fn effect_declarations(&self) -> Vec<EffectDeclaration> {
+        Vec::new()
     }
 }
 

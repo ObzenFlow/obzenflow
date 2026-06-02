@@ -10,6 +10,7 @@
 use crate::backpressure::{
     BackpressurePlan, BackpressureReader, BackpressureRegistry, BackpressureWriter,
 };
+use crate::effects::{EffectPortRegistry, EffectRuntimeMode};
 use crate::id_conversions::StageIdExt;
 use crate::message_bus::FsmMessageBus;
 use crate::messaging::upstream_subscription::{ContractsWiring, UpstreamSubscription};
@@ -187,6 +188,12 @@ pub struct StageResources {
     /// Optional replay archive injection (FLOWIP-095a). Sources use this to
     /// read archived journals instead of calling external systems.
     pub replay_archive: Option<Arc<dyn ReplayArchive>>,
+
+    /// Effect execution mode derived from the replay archive state.
+    pub effect_runtime_mode: EffectRuntimeMode,
+
+    /// Flow-scoped typed ports available to replay-safe effects.
+    pub effect_ports: EffectPortRegistry,
 }
 
 /// Builder for creating all stage resources with proper wiring
@@ -199,6 +206,7 @@ pub struct StageResourcesBuilder {
     error_journals: HashMap<StageId, Arc<dyn Journal<ChainEvent>>>,
     backpressure_plan: BackpressurePlan,
     replay_archive: Option<Arc<dyn ReplayArchive>>,
+    effect_ports: EffectPortRegistry,
 }
 
 impl StageResourcesBuilder {
@@ -220,6 +228,7 @@ impl StageResourcesBuilder {
             error_journals,
             backpressure_plan: BackpressurePlan::disabled(),
             replay_archive: None,
+            effect_ports: EffectPortRegistry::new(),
         }
     }
 
@@ -232,6 +241,12 @@ impl StageResourcesBuilder {
     /// Inject a replay archive implementation (FLOWIP-095a).
     pub fn with_replay_archive(mut self, replay_archive: Option<Arc<dyn ReplayArchive>>) -> Self {
         self.replay_archive = replay_archive;
+        self
+    }
+
+    /// Inject flow-scoped typed ports for replay-safe effects.
+    pub fn with_effect_ports(mut self, effect_ports: EffectPortRegistry) -> Self {
+        self.effect_ports = effect_ports;
         self
     }
 
@@ -418,7 +433,11 @@ impl StageResourcesBuilder {
                 backpressure_readers,
                 backpressure_registry: backpressure_registry.clone(),
                 liveness_snapshots: liveness_snapshots.clone(),
+                effect_runtime_mode: EffectRuntimeMode::from_replay_archive(
+                    self.replay_archive.as_deref(),
+                ),
                 replay_archive: self.replay_archive.clone(),
+                effect_ports: self.effect_ports.clone(),
             };
 
             tracing::debug!(

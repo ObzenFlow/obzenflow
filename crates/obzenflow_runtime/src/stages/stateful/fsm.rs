@@ -23,8 +23,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::backpressure::{BackpressureReader, BackpressureWriter};
-use crate::effects::EffectHistory;
-use crate::messaging::upstream_subscription::{ContractConfig, ContractsWiring, ReaderProgress};
+use crate::effects::{EffectHistory, EffectPortRegistry, EffectRuntimeMode};
+use crate::messaging::upstream_subscription::{
+    ContractConfig, ContractsWiring, ReaderProgress, StageInputPosition,
+};
 use crate::messaging::UpstreamSubscription;
 use crate::metrics::instrumentation::StageInstrumentation;
 use crate::replay::ReplayArchive;
@@ -330,6 +332,15 @@ pub struct StatefulContext<H: UnifiedStatefulHandler> {
 
     /// Recorded effect outcomes for replay suppression.
     pub effect_history: Option<Arc<EffectHistory>>,
+
+    /// Effect execution mode derived from the replay archive state.
+    pub effect_runtime_mode: EffectRuntimeMode,
+
+    /// Flow-scoped typed ports available to replay-safe effects.
+    pub effect_ports: EffectPortRegistry,
+
+    /// Last delivered data-input position for deterministic typed stateful emissions.
+    pub last_input_position: Option<StageInputPosition>,
 
     /// Error journal for writing error events (FLOWIP-082e)
     pub error_journal: Arc<dyn Journal<ChainEvent>>,

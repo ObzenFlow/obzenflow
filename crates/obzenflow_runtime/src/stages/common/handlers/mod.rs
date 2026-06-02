@@ -26,7 +26,7 @@ pub use source::{
 };
 pub use stateful::{
     EffectfulStatefulHandler, EffectfulStatefulHandlerAdapter, StatefulHandler, StatefulHandlerExt,
-    StatefulHandlerWithEmission, UnifiedStatefulHandler,
+    StatefulHandlerWithEmission, StatefulOutputContext, UnifiedStatefulHandler,
 };
 pub use transform::{
     AsyncTransformHandler, EffectfulAsyncTransformHandler, EffectfulAsyncTransformHandlerAdapter,

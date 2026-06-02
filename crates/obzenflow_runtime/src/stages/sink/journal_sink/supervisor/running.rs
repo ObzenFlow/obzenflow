@@ -451,6 +451,9 @@ async fn dispatch_data_event<
             data_journal: ctx.data_journal.clone(),
             parent: envelope.clone(),
             effect_history: ctx.effect_history.clone(),
+            effect_runtime_mode: ctx.effect_runtime_mode,
+            effect_ports: ctx.effect_ports.clone(),
+            effect_boundary: None,
         })
     });
 

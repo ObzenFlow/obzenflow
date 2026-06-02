@@ -6,13 +6,26 @@
 //!
 //! Examples: Aggregators, windowing operations, session tracking
 
-use crate::effects::{EffectInvocationContext, Effects};
+use crate::effects::{
+    deterministic_typed_output_event, EffectDeclaration, EffectError, EffectInvocationContext,
+    Effects,
+};
+use crate::messaging::upstream_subscription::StageInputPosition;
 use crate::stages::common::handler_error::HandlerError;
 use async_trait::async_trait;
 use obzenflow_core::event::schema::TypedPayload;
-use obzenflow_core::ChainEvent;
+use obzenflow_core::{ChainEvent, EventEnvelope, WriterId};
 use std::borrow::Cow;
 use std::time::Duration;
+
+#[derive(Clone, Copy)]
+pub struct StatefulOutputContext<'a> {
+    pub writer_id: WriterId,
+    pub parent: &'a EventEnvelope<ChainEvent>,
+    pub recorded_flow_id: &'a str,
+    pub stage_key: &'a str,
+    pub input_seq: StageInputPosition,
+}
 
 /// Handler for stateful processing stages
 ///
@@ -191,6 +204,14 @@ pub trait UnifiedStatefulHandler: Send + Sync {
         self.create_events(state)
     }
 
+    fn emit_with_context(
+        &self,
+        state: &mut Self::State,
+        _output_context: Option<StatefulOutputContext<'_>>,
+    ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
+        self.emit(state)
+    }
+
     async fn drain(
         &self,
         state: &Self::State,
@@ -198,8 +219,20 @@ pub trait UnifiedStatefulHandler: Send + Sync {
         self.create_events(state)
     }
 
+    async fn drain_with_context(
+        &self,
+        state: &Self::State,
+        _output_context: Option<StatefulOutputContext<'_>>,
+    ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
+        self.drain(state).await
+    }
+
     fn stage_logic_version(&self) -> Cow<'static, str> {
         Cow::Borrowed("1")
+    }
+
+    fn effect_declarations(&self) -> Vec<EffectDeclaration> {
+        Vec::new()
     }
 }
 
@@ -240,9 +273,25 @@ impl<T: StatefulHandler + Send + Sync> UnifiedStatefulHandler for T {
         StatefulHandler::emit(self, state)
     }
 
+    fn emit_with_context(
+        &self,
+        state: &mut Self::State,
+        _output_context: Option<StatefulOutputContext<'_>>,
+    ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
+        StatefulHandler::emit(self, state)
+    }
+
     async fn drain(
         &self,
         state: &Self::State,
+    ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
+        StatefulHandler::drain(self, state).await
+    }
+
+    async fn drain_with_context(
+        &self,
+        state: &Self::State,
+        _output_context: Option<StatefulOutputContext<'_>>,
     ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
         StatefulHandler::drain(self, state).await
     }
@@ -252,20 +301,29 @@ impl<T: StatefulHandler + Send + Sync> UnifiedStatefulHandler for T {
 pub trait EffectfulStatefulHandler: Send + Sync {
     type State: Clone + Send + Sync;
     type Input: TypedPayload + Send + Sync + 'static;
+    type Output: TypedPayload + Send + Sync + 'static;
+    type Transition: Send + Sync + 'static;
 
     fn initial_state(&self) -> Self::State;
 
-    async fn accumulate(
+    async fn transition(
+        &mut self,
+        state: &Self::State,
+        input: &Self::Input,
+        fx: &mut Effects,
+    ) -> std::result::Result<Self::Transition, HandlerError>;
+
+    fn apply(
         &mut self,
         state: &mut Self::State,
         input: Self::Input,
-        fx: &mut Effects,
+        transition: Self::Transition,
     ) -> std::result::Result<(), HandlerError>;
 
-    fn create_events(
+    fn create_outputs(
         &self,
         state: &Self::State,
-    ) -> std::result::Result<Vec<ChainEvent>, HandlerError>;
+    ) -> std::result::Result<Vec<Self::Output>, HandlerError>;
 
     fn emit_interval_hint(&self) -> Option<Duration> {
         None
@@ -275,25 +333,83 @@ pub trait EffectfulStatefulHandler: Send + Sync {
         false
     }
 
-    fn emit(&self, state: &mut Self::State) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
-        self.create_events(state)
+    fn emit(
+        &self,
+        state: &mut Self::State,
+    ) -> std::result::Result<Vec<Self::Output>, HandlerError> {
+        self.create_outputs(state)
     }
 
     async fn drain(
         &self,
         state: &Self::State,
-    ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
-        self.create_events(state)
+    ) -> std::result::Result<Vec<Self::Output>, HandlerError> {
+        self.create_outputs(state)
     }
 
     fn stage_logic_version(&self) -> Cow<'static, str> {
         Cow::Borrowed("1")
+    }
+
+    fn effect_declarations(&self) -> Vec<EffectDeclaration> {
+        Vec::new()
     }
 }
 
 #[doc(hidden)]
 #[derive(Clone, Debug)]
 pub struct EffectfulStatefulHandlerAdapter<H>(pub H);
+
+fn typed_stateful_outputs_to_events<Out>(
+    outputs: Vec<Out>,
+    output_context: Option<StatefulOutputContext<'_>>,
+) -> std::result::Result<Vec<ChainEvent>, HandlerError>
+where
+    Out: TypedPayload + Send + Sync + 'static,
+{
+    let Some(output_context) = output_context else {
+        return outputs
+            .into_iter()
+            .enumerate()
+            .map(|(ordinal, output)| {
+                let payload =
+                    serde_json::to_value(output).map_err(|e| HandlerError::Other(e.to_string()))?;
+                let mut event = obzenflow_core::event::ChainEventFactory::data_event(
+                    WriterId::from(obzenflow_core::StageId::new()),
+                    Out::versioned_event_type(),
+                    payload,
+                );
+                event.processing_info.event_time = output_contextless_event_time(ordinal as u32);
+                Ok(event)
+            })
+            .collect();
+    };
+
+    outputs
+        .into_iter()
+        .enumerate()
+        .map(|(ordinal, output)| {
+            deterministic_typed_output_event(
+                output_context.writer_id,
+                &output_context.parent.event,
+                output,
+                output_context.recorded_flow_id,
+                output_context.stage_key,
+                output_context.input_seq,
+                ordinal as u32,
+            )
+            .map_err(effect_error_to_handler_error)
+        })
+        .collect()
+}
+
+fn output_contextless_event_time(output_ordinal: u32) -> u64 {
+    u64::from(output_ordinal)
+}
+
+fn effect_error_to_handler_error(err: EffectError) -> HandlerError {
+    HandlerError::Other(err.to_string())
+}
 
 #[async_trait]
 impl<H> UnifiedStatefulHandler for EffectfulStatefulHandlerAdapter<H>
@@ -315,9 +431,10 @@ where
                 "effectful stateful handler invoked without effect context".to_string(),
             )
         })?;
-        let mut draft = state.clone();
         let mut fx = Effects::new(effect_context);
-        self.0.accumulate(&mut draft, input, &mut fx).await?;
+        let transition = self.0.transition(state, &input, &mut fx).await?;
+        let mut draft = state.clone();
+        self.0.apply(&mut draft, input, transition)?;
         *state = draft;
         Ok(())
     }
@@ -330,7 +447,7 @@ where
         &self,
         state: &Self::State,
     ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
-        self.0.create_events(state)
+        typed_stateful_outputs_to_events(self.0.create_outputs(state)?, None)
     }
 
     fn emit_interval_hint(&self) -> Option<Duration> {
@@ -342,14 +459,30 @@ where
     }
 
     fn emit(&self, state: &mut Self::State) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
-        self.0.emit(state)
+        typed_stateful_outputs_to_events(self.0.emit(state)?, None)
+    }
+
+    fn emit_with_context(
+        &self,
+        state: &mut Self::State,
+        output_context: Option<StatefulOutputContext<'_>>,
+    ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
+        typed_stateful_outputs_to_events(self.0.emit(state)?, output_context)
     }
 
     async fn drain(
         &self,
         state: &Self::State,
     ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
-        self.0.drain(state).await
+        typed_stateful_outputs_to_events(self.0.drain(state).await?, None)
+    }
+
+    async fn drain_with_context(
+        &self,
+        state: &Self::State,
+        output_context: Option<StatefulOutputContext<'_>>,
+    ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
+        typed_stateful_outputs_to_events(self.0.drain(state).await?, output_context)
     }
 
     fn stage_logic_version(&self) -> Cow<'static, str> {

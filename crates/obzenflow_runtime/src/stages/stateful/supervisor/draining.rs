@@ -6,7 +6,7 @@
 
 use crate::effects::EffectInvocationContext;
 use crate::metrics::instrumentation::process_with_instrumentation_no_count;
-use crate::stages::common::handlers::UnifiedStatefulHandler;
+use crate::stages::common::handlers::{StatefulOutputContext, UnifiedStatefulHandler};
 use crate::stages::common::heartbeat::HeartbeatProcessingGuard;
 use crate::stages::common::supervision::backpressure_drain::{drain_one_pending, DrainOutcome};
 use crate::stages::common::supervision::error_routing::route_to_error_journal;
@@ -100,6 +100,9 @@ pub(super) async fn dispatch_draining<
         {
             PollResult::Event(envelope) => {
                 let stage_input_position = subscription.last_delivered_stage_input_position();
+                if envelope.event.is_data() {
+                    ctx.last_input_position = stage_input_position;
+                }
                 // Retain the last consumed upstream envelope (with a merged vector-clock) so that any
                 // final drain emissions can be parented and preserve happened-before via vector clocks.
                 match ctx.last_consumed_envelope.as_mut() {
@@ -142,6 +145,9 @@ pub(super) async fn dispatch_draining<
                             data_journal: ctx.data_journal.clone(),
                             parent: envelope.clone(),
                             effect_history: ctx.effect_history.clone(),
+                            effect_runtime_mode: ctx.effect_runtime_mode,
+                            effect_ports: ctx.effect_ports.clone(),
+                            effect_boundary: None,
                         })
                     });
 
@@ -225,7 +231,24 @@ pub(super) async fn dispatch_draining<
                     // After accumulation, mirror Accumulating semantics: if the handler says we
                     // should emit, do so inline.
                     if handler.should_emit(&mut ctx.current_state) {
-                        match handler.emit(&mut ctx.current_state) {
+                        let output_context = ctx
+                            .writer_id
+                            .zip(ctx.last_consumed_envelope.as_ref())
+                            .map(|(writer_id, parent)| StatefulOutputContext {
+                                writer_id,
+                                parent,
+                                recorded_flow_id: ctx
+                                    .effect_history
+                                    .as_ref()
+                                    .map(|history| history.recorded_flow_id())
+                                    .unwrap_or(&flow_id),
+                                stage_key: &ctx.stage_name,
+                                input_seq: ctx.last_input_position.unwrap_or(
+                                    crate::messaging::upstream_subscription::StageInputPosition(0),
+                                ),
+                            });
+
+                        match handler.emit_with_context(&mut ctx.current_state, output_context) {
                             Ok(events_to_emit) => {
                                 if !events_to_emit.is_empty() {
                                     let stage_writer_id =
@@ -390,14 +413,31 @@ pub(super) async fn dispatch_draining<
     let final_state = ctx.current_state.clone();
     let handler = (*ctx.handler).clone();
     let instrumentation = ctx.instrumentation.clone();
+    let output_context =
+        ctx.writer_id
+            .zip(ctx.last_consumed_envelope.as_ref())
+            .map(|(writer_id, parent)| StatefulOutputContext {
+                writer_id,
+                parent,
+                recorded_flow_id: ctx
+                    .effect_history
+                    .as_ref()
+                    .map(|history| history.recorded_flow_id())
+                    .unwrap_or(&flow_id),
+                stage_key: &ctx.stage_name,
+                input_seq: ctx.last_input_position.unwrap_or(
+                    crate::messaging::upstream_subscription::StageInputPosition(0),
+                ),
+            });
 
     let drain_result = process_with_instrumentation_no_count(&ctx.instrumentation, || async move {
-        handler.drain(&final_state).await.map_err(
-            |err| -> Box<dyn std::error::Error + Send + Sync> {
+        handler
+            .drain_with_context(&final_state, output_context)
+            .await
+            .map_err(|err| -> Box<dyn std::error::Error + Send + Sync> {
                 instrumentation.record_error(err.kind());
                 err.into()
-            },
-        )
+            })
     })
     .await;
 

@@ -17,7 +17,10 @@ use super::{
 use async_trait::async_trait;
 use obzenflow_core::event::status::processing_status::ProcessingStatus;
 use obzenflow_core::ChainEvent;
-use obzenflow_runtime::effects::EffectInvocationContext;
+use obzenflow_runtime::effects::{
+    EffectBoundaryAction, EffectBoundaryContext, EffectBoundaryMiddleware, EffectBoundaryStart,
+    EffectInvocationContext,
+};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::transform::traits::UnifiedTransformHandler;
 use obzenflow_runtime::stages::common::handlers::{AsyncTransformHandler, TransformHandler};
@@ -460,6 +463,55 @@ pub struct UnifiedMiddlewareTransform<H: UnifiedTransformHandler> {
     middleware_chain: Arc<Vec<Arc<dyn Middleware>>>,
 }
 
+#[derive(Clone)]
+struct MiddlewareEffectBoundary {
+    middleware_chain: Arc<Vec<Arc<dyn Middleware>>>,
+}
+
+impl EffectBoundaryMiddleware for MiddlewareEffectBoundary {
+    fn before_effect(&self, event: &ChainEvent) -> EffectBoundaryStart {
+        let mut ctx = MiddlewareContext::new();
+
+        for middleware in self.middleware_chain.iter() {
+            match middleware.pre_handle(event, &mut ctx) {
+                MiddlewareAction::Continue => continue,
+                MiddlewareAction::Skip(results) => {
+                    return EffectBoundaryStart {
+                        action: EffectBoundaryAction::Skip(results),
+                        context: EffectBoundaryContext::new(ctx),
+                    };
+                }
+                MiddlewareAction::Abort => {
+                    return EffectBoundaryStart {
+                        action: EffectBoundaryAction::Abort,
+                        context: EffectBoundaryContext::new(ctx),
+                    };
+                }
+            }
+        }
+
+        EffectBoundaryStart {
+            action: EffectBoundaryAction::Continue,
+            context: EffectBoundaryContext::new(ctx),
+        }
+    }
+
+    fn after_effect(
+        &self,
+        context: EffectBoundaryContext,
+        event: &ChainEvent,
+        outputs: &[ChainEvent],
+    ) {
+        let Ok(mut ctx) = context.downcast::<MiddlewareContext>() else {
+            return;
+        };
+
+        for middleware in self.middleware_chain.iter().rev() {
+            middleware.post_handle(event, outputs, &mut ctx);
+        }
+    }
+}
+
 impl<H: UnifiedTransformHandler> std::fmt::Debug for UnifiedMiddlewareTransform<H> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("UnifiedMiddlewareTransform")
@@ -489,6 +541,33 @@ impl<H: UnifiedTransformHandler> UnifiedMiddlewareTransform<H> {
         event: ChainEvent,
         effect_context: Option<EffectInvocationContext>,
     ) -> Result<Vec<ChainEvent>, HandlerError> {
+        if let Some(mut effect_context) = effect_context {
+            effect_context.effect_boundary = Some(Arc::new(MiddlewareEffectBoundary {
+                middleware_chain: self.middleware_chain.clone(),
+            }));
+
+            let mut results = match self
+                .inner
+                .process(event.clone(), Some(effect_context))
+                .await
+            {
+                Ok(results) => results,
+                Err(err) => {
+                    let reason = format!("Transform handler error: {err:?}");
+                    vec![event.clone().mark_as_error(reason, err.kind())]
+                }
+            };
+
+            let ctx = MiddlewareContext::new();
+            for result in &mut results {
+                for middleware in self.middleware_chain.iter() {
+                    middleware.pre_write(result, &ctx);
+                }
+            }
+
+            return Ok(results);
+        }
+
         let mut ctx = MiddlewareContext::new();
 
         for middleware in self.middleware_chain.iter() {
