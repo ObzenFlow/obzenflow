@@ -21,6 +21,7 @@ pub mod web;
 pub use error::Result;
 pub use event::chain_event::ChainEvent;
 pub use event::context::runtime_context;
+pub use event::context::MiddlewareExecutionScope;
 pub use event::event_envelope::EventEnvelope;
 pub use event::EventId;
 pub use event::{JournalWriterId, WriterId};

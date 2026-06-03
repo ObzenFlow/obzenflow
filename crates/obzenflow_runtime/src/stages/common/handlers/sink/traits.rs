@@ -53,7 +53,6 @@ use async_trait::async_trait;
 use obzenflow_core::event::payloads::delivery_payload::DeliveryPayload;
 use obzenflow_core::event::schema::TypedPayload;
 use obzenflow_core::{ChainEvent, EventId};
-use std::borrow::Cow;
 
 #[derive(Debug, Clone)]
 pub struct CommitReceipt {
@@ -158,8 +157,8 @@ pub trait UnifiedSinkHandler: Send + Sync {
 
     async fn drain_report(&mut self) -> Result<SinkLifecycleReport, HandlerError>;
 
-    fn stage_logic_version(&self) -> Cow<'static, str> {
-        Cow::Borrowed("1")
+    fn stage_logic_version(&self) -> &str {
+        "1"
     }
 
     fn effect_declarations(&self) -> Vec<EffectDeclaration> {
@@ -212,8 +211,8 @@ pub trait EffectfulSinkHandler: Send + Sync {
         self.flush_report().await
     }
 
-    fn stage_logic_version(&self) -> Cow<'static, str> {
-        Cow::Borrowed("1")
+    fn stage_logic_version(&self) -> &str {
+        "1"
     }
 
     fn effect_declarations(&self) -> Vec<EffectDeclaration> {
@@ -252,7 +251,7 @@ where
         EffectfulSinkHandler::drain_report(&mut self.0).await
     }
 
-    fn stage_logic_version(&self) -> Cow<'static, str> {
+    fn stage_logic_version(&self) -> &str {
         self.0.stage_logic_version()
     }
 }

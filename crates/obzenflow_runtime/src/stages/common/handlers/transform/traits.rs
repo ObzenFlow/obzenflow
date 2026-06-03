@@ -13,7 +13,6 @@ use crate::typing::TransformTyping;
 use async_trait::async_trait;
 use obzenflow_core::event::schema::TypedPayload;
 use obzenflow_core::ChainEvent;
-use std::borrow::Cow;
 
 /// Handler for stateless transform stages
 ///
@@ -112,8 +111,8 @@ pub trait UnifiedTransformHandler: Send + Sync {
 
     async fn drain(&mut self) -> std::result::Result<(), HandlerError>;
 
-    fn stage_logic_version(&self) -> Cow<'static, str> {
-        Cow::Borrowed("1")
+    fn stage_logic_version(&self) -> &str {
+        "1"
     }
 
     fn effect_declarations(&self) -> Vec<EffectDeclaration> {
@@ -174,8 +173,8 @@ pub trait EffectfulTransformHandler: Send + Sync {
         Ok(())
     }
 
-    fn stage_logic_version(&self) -> Cow<'static, str> {
-        Cow::Borrowed("1")
+    fn stage_logic_version(&self) -> &str {
+        "1"
     }
 
     fn effect_declarations(&self) -> Vec<EffectDeclaration> {
@@ -237,7 +236,7 @@ where
         self.0.drain().await
     }
 
-    fn stage_logic_version(&self) -> Cow<'static, str> {
+    fn stage_logic_version(&self) -> &str {
         self.0.stage_logic_version()
     }
 }

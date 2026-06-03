@@ -9,6 +9,7 @@
 
 use obzenflow_core::ChainEvent;
 use obzenflow_core::MiddlewareContextKey;
+use obzenflow_core::MiddlewareExecutionScope;
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
 
@@ -23,12 +24,36 @@ pub struct MiddlewareContext {
     ephemeral_events: Vec<ChainEvent>,
     control_events: Vec<ChainEvent>,
     slots: HashMap<TypeId, Box<dyn Any + Send + Sync>>,
+    /// Execution scope for this event (FLOWIP-120a). Defaults to `LiveHandler`,
+    /// so any context not explicitly scoped behaves exactly as before: live, no
+    /// suppression. Handler-level control middleware reads this to suppress side
+    /// effects during deterministic replay reconstruction.
+    execution_scope: MiddlewareExecutionScope,
 }
 
 impl MiddlewareContext {
-    /// Create a new empty context
+    /// Create a new empty context (live handler scope).
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Create a new empty context bound to an explicit execution scope.
+    pub fn with_scope(scope: MiddlewareExecutionScope) -> Self {
+        Self {
+            execution_scope: scope,
+            ..Self::default()
+        }
+    }
+
+    /// The execution scope for this event (FLOWIP-120a).
+    pub fn execution_scope(&self) -> MiddlewareExecutionScope {
+        self.execution_scope
+    }
+
+    /// Bind the execution scope for this event (FLOWIP-120a). Called by the
+    /// middleware runners from the stage's replay mode before `pre_handle`.
+    pub fn set_execution_scope(&mut self, scope: MiddlewareExecutionScope) {
+        self.execution_scope = scope;
     }
 
     /// Record an ephemeral (in-memory only) event for middleware coordination.

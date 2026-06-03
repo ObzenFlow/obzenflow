@@ -447,7 +447,7 @@ async fn dispatch_data_event<
             stage_key: ctx.stage_name.clone(),
             writer_id,
             input_seq,
-            stage_logic_version: ctx.handler.stage_logic_version().into_owned(),
+            stage_logic_version: ctx.handler.stage_logic_version().to_string(),
             data_journal: ctx.data_journal.clone(),
             parent: envelope.clone(),
             effect_history: ctx.effect_history.clone(),

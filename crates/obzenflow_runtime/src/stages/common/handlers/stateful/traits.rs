@@ -15,7 +15,6 @@ use crate::stages::common::handler_error::HandlerError;
 use async_trait::async_trait;
 use obzenflow_core::event::schema::TypedPayload;
 use obzenflow_core::{ChainEvent, EventEnvelope, WriterId};
-use std::borrow::Cow;
 use std::time::Duration;
 
 #[derive(Clone, Copy)]
@@ -227,8 +226,8 @@ pub trait UnifiedStatefulHandler: Send + Sync {
         self.drain(state).await
     }
 
-    fn stage_logic_version(&self) -> Cow<'static, str> {
-        Cow::Borrowed("1")
+    fn stage_logic_version(&self) -> &str {
+        "1"
     }
 
     fn effect_declarations(&self) -> Vec<EffectDeclaration> {
@@ -347,8 +346,8 @@ pub trait EffectfulStatefulHandler: Send + Sync {
         self.create_outputs(state)
     }
 
-    fn stage_logic_version(&self) -> Cow<'static, str> {
-        Cow::Borrowed("1")
+    fn stage_logic_version(&self) -> &str {
+        "1"
     }
 
     fn effect_declarations(&self) -> Vec<EffectDeclaration> {
@@ -485,7 +484,7 @@ where
         typed_stateful_outputs_to_events(self.0.drain(state).await?, output_context)
     }
 
-    fn stage_logic_version(&self) -> Cow<'static, str> {
+    fn stage_logic_version(&self) -> &str {
         self.0.stage_logic_version()
     }
 }

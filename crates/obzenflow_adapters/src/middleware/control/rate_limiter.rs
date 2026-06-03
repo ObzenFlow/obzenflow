@@ -482,6 +482,16 @@ impl Middleware for RateLimiterMiddleware {
     }
 
     fn pre_handle(&self, event: &ChainEvent, ctx: &mut MiddlewareContext) -> MiddlewareAction {
+        // FLOWIP-120a: during deterministic replay the stage is reconstructed
+        // from recorded events and performs no live external admission, so the
+        // limiter must not consume a token, block, mark the event delayed, mutate
+        // admission state, or emit a lifecycle record. Replay reproduces identical
+        // values; pacing it would only change timing, and any delay/utilization
+        // records already exist in the archive being replayed.
+        if ctx.execution_scope().is_deterministic_replay() {
+            return MiddlewareAction::Continue;
+        }
+
         if event.is_control() || event.is_lifecycle() {
             trace!(
                 event_id = %event.id,
@@ -640,6 +650,12 @@ impl Middleware for RateLimiterMiddleware {
         _outputs: &[ChainEvent],
         ctx: &mut MiddlewareContext,
     ) {
+        // FLOWIP-120a: replay reconstruction performs no live admission, so the
+        // periodic activity-pulse and window-summary emissions (which also reset
+        // window counters and move limiter mode state) must be suppressed.
+        if ctx.execution_scope().is_deterministic_replay() {
+            return;
+        }
         self.maybe_emit_activity_pulse(ctx);
         // Check if we should emit a summary
         self.maybe_emit_summary(ctx);

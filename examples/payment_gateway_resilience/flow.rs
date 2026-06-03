@@ -44,7 +44,6 @@ use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{EffectfulTransformHandler, TransformHandler};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::borrow::Cow;
 use std::num::NonZeroU32;
 
 const BACKPRESSURE_WINDOW: u64 = 1_000;
@@ -137,8 +136,8 @@ impl Effect for AuthorizePayment {
 
     type Output = GatewayAuthorization;
 
-    fn label(&self) -> Cow<'static, str> {
-        Cow::Borrowed("authorize_payment")
+    fn label(&self) -> &str {
+        "authorize_payment"
     }
 
     fn canonical_input(&self) -> serde_json::Value {
@@ -217,8 +216,8 @@ impl EffectfulTransformHandler for GatewayTransform {
         Ok(())
     }
 
-    fn stage_logic_version(&self) -> Cow<'static, str> {
-        Cow::Borrowed("payment-gateway-v1")
+    fn stage_logic_version(&self) -> &str {
+        "payment-gateway-v1"
     }
 
     fn effect_declarations(&self) -> Vec<EffectDeclaration> {

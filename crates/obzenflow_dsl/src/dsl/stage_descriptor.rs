@@ -1031,7 +1031,11 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Stag
         for mw in all_middleware {
             builder = builder.with(mw);
         }
-        let handler_with_middleware = builder.build();
+        // FLOWIP-120a: bind the stage's replay mode so handler-level control
+        // middleware suppresses its side effects during deterministic replay.
+        let handler_with_middleware = builder
+            .build()
+            .with_execution_scope(resources.effect_runtime_mode.into());
 
         // Create the stage configuration
         let transform_config = TransformConfig {
@@ -1170,7 +1174,11 @@ impl<H: AsyncTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
         for mw in all_middleware {
             builder = builder.with(mw);
         }
-        let handler_with_middleware = builder.build();
+        // FLOWIP-120a: bind the stage's replay mode so handler-level control
+        // middleware suppresses its side effects during deterministic replay.
+        let handler_with_middleware = builder
+            .build()
+            .with_execution_scope(resources.effect_runtime_mode.into());
 
         // Create the stage configuration
         let transform_config = TransformConfig {
@@ -1232,7 +1240,7 @@ impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
     }
 
     fn stage_logic_version(&self) -> String {
-        self.handler.stage_logic_version().into_owned()
+        self.handler.stage_logic_version().to_string()
     }
 
     fn effect_declarations(&self) -> Vec<EffectDeclaration> {
@@ -1329,6 +1337,10 @@ impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
         for mw in all_middleware {
             handler_with_middleware = handler_with_middleware.with_middleware(mw);
         }
+        // FLOWIP-120a: bind the stage's replay mode so handler-level control
+        // middleware suppresses its side effects during deterministic replay.
+        let handler_with_middleware =
+            handler_with_middleware.with_execution_scope(resources.effect_runtime_mode.into());
 
         let handle =
             EffectfulTransformBuilder::new(handler_with_middleware, transform_config, resources)
@@ -1457,7 +1469,11 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
         for mw in all_middleware {
             builder = builder.with(mw);
         }
-        let handler_with_middleware = builder.build();
+        // FLOWIP-120a: bind the stage's replay mode so handler-level control
+        // middleware suppresses its side effects during deterministic replay.
+        let handler_with_middleware = builder
+            .build()
+            .with_execution_scope(resources.effect_runtime_mode.into());
 
         // Create the stage configuration
         let sink_config = JournalSinkConfig {
@@ -1519,7 +1535,7 @@ impl<H: EffectfulSinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> 
     }
 
     fn stage_logic_version(&self) -> String {
-        self.handler.stage_logic_version().into_owned()
+        self.handler.stage_logic_version().to_string()
     }
 
     fn effect_declarations(&self) -> Vec<EffectDeclaration> {
@@ -1886,7 +1902,11 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Stage
         for mw in all_middleware {
             builder = builder.with(mw);
         }
-        let handler_with_middleware = builder.build();
+        // FLOWIP-120a: bind the stage's replay mode so handler-level control
+        // middleware suppresses its side effects during deterministic replay.
+        let handler_with_middleware = builder
+            .build()
+            .with_execution_scope(resources.effect_runtime_mode.into());
 
         // Create the stage configuration
         let stateful_config = StatefulConfig {
@@ -1975,7 +1995,7 @@ impl<H: EffectfulStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
     }
 
     fn stage_logic_version(&self) -> String {
-        self.handler.stage_logic_version().into_owned()
+        self.handler.stage_logic_version().to_string()
     }
 
     fn effect_declarations(&self) -> Vec<EffectDeclaration> {
@@ -2235,7 +2255,11 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
         for mw in all_middleware {
             builder = builder.with(mw);
         }
-        let handler_with_middleware = builder.build();
+        // FLOWIP-120a: bind the stage's replay mode so handler-level control
+        // middleware suppresses its side effects during deterministic replay.
+        let handler_with_middleware = builder
+            .build()
+            .with_execution_scope(resources.effect_runtime_mode.into());
 
         // Extract join-mode configuration from the handler before moving it into the runtime.
         let reference_mode = handler_with_middleware.reference_mode();
@@ -2349,7 +2373,6 @@ mod tests {
     use obzenflow_runtime::stages::resources_builder::SubscriptionFactory;
     use obzenflow_runtime::stages::LivenessSnapshots;
     use serde_json::json;
-    use std::borrow::Cow;
 
     trait DemoEffectPort: Send + Sync {}
 
@@ -2367,8 +2390,8 @@ mod tests {
 
         type Output = u8;
 
-        fn label(&self) -> Cow<'static, str> {
-            Cow::Borrowed("declared")
+        fn label(&self) -> &str {
+            "declared"
         }
 
         fn canonical_input(&self) -> serde_json::Value {

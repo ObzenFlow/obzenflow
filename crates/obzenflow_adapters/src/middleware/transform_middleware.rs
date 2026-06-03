@@ -17,6 +17,7 @@ use super::{
 use async_trait::async_trait;
 use obzenflow_core::event::status::processing_status::ProcessingStatus;
 use obzenflow_core::ChainEvent;
+use obzenflow_core::MiddlewareExecutionScope;
 use obzenflow_runtime::effects::{
     EffectBoundaryAction, EffectBoundaryContext, EffectBoundaryMiddleware, EffectBoundaryStart,
     EffectInvocationContext,
@@ -33,6 +34,8 @@ use std::time::{Duration, Instant};
 pub struct MiddlewareTransform<H: TransformHandler> {
     inner: H,
     middleware_chain: Arc<Vec<Arc<dyn Middleware>>>,
+    /// Replay execution scope for this stage (FLOWIP-120a).
+    execution_scope: MiddlewareExecutionScope,
 }
 
 impl<H: TransformHandler> std::fmt::Debug for MiddlewareTransform<H> {
@@ -50,12 +53,19 @@ impl<H: TransformHandler> MiddlewareTransform<H> {
         Self {
             inner,
             middleware_chain: Arc::new(Vec::new()),
+            execution_scope: MiddlewareExecutionScope::LiveHandler,
         }
     }
 
     /// Add middleware to the chain
     pub fn with_middleware(mut self, middleware: Box<dyn Middleware>) -> Self {
         Arc::make_mut(&mut self.middleware_chain).push(Arc::from(middleware));
+        self
+    }
+
+    /// Bind the replay execution scope for this stage (FLOWIP-120a).
+    pub fn with_execution_scope(mut self, scope: MiddlewareExecutionScope) -> Self {
+        self.execution_scope = scope;
         self
     }
 
@@ -69,7 +79,7 @@ impl<H: TransformHandler> MiddlewareTransform<H> {
         F: FnOnce(ChainEvent) -> Result<Vec<ChainEvent>, HandlerError>,
     {
         // Create ephemeral context for this processing
-        let mut ctx = MiddlewareContext::new();
+        let mut ctx = MiddlewareContext::with_scope(self.execution_scope);
 
         // Pre-processing phase
         for middleware in self.middleware_chain.iter() {
@@ -224,6 +234,8 @@ impl<H: TransformHandler> TransformMiddlewareBuilder<H> {
 pub struct AsyncMiddlewareTransform<H: AsyncTransformHandler> {
     inner: H,
     middleware_chain: Arc<Vec<Arc<dyn Middleware>>>,
+    /// Replay execution scope for this stage (FLOWIP-120a).
+    execution_scope: MiddlewareExecutionScope,
 }
 
 impl<H: AsyncTransformHandler> std::fmt::Debug for AsyncMiddlewareTransform<H> {
@@ -241,12 +253,19 @@ impl<H: AsyncTransformHandler> AsyncMiddlewareTransform<H> {
         Self {
             inner,
             middleware_chain: Arc::new(Vec::new()),
+            execution_scope: MiddlewareExecutionScope::LiveHandler,
         }
     }
 
     /// Add middleware to the chain.
     pub fn with_middleware(mut self, middleware: Box<dyn Middleware>) -> Self {
         Arc::make_mut(&mut self.middleware_chain).push(Arc::from(middleware));
+        self
+    }
+
+    /// Bind the replay execution scope for this stage (FLOWIP-120a).
+    pub fn with_execution_scope(mut self, scope: MiddlewareExecutionScope) -> Self {
+        self.execution_scope = scope;
         self
     }
 
@@ -267,7 +286,7 @@ impl<H: AsyncTransformHandler> AsyncMiddlewareTransform<H> {
         loop {
             // Create a fresh ephemeral context per attempt so timing/observability middleware
             // can record per-attempt processing metadata cleanly.
-            let mut ctx = MiddlewareContext::new();
+            let mut ctx = MiddlewareContext::with_scope(self.execution_scope);
             ctx.insert::<CircuitBreakerAttempt>(attempt);
 
             // Pre-processing phase
@@ -461,6 +480,11 @@ impl<H: AsyncTransformHandler> AsyncTransformMiddlewareBuilder<H> {
 pub struct UnifiedMiddlewareTransform<H: UnifiedTransformHandler> {
     inner: H,
     middleware_chain: Arc<Vec<Arc<dyn Middleware>>>,
+    /// Replay execution scope for this stage (FLOWIP-120a). Used for the
+    /// non-effect-boundary handler path. Effect-boundary observation always runs
+    /// under `LiveEffectBoundary`, since the boundary is only consulted when an
+    /// effect executes live (replay returns the recorded outcome first).
+    execution_scope: MiddlewareExecutionScope,
 }
 
 #[derive(Clone)]
@@ -470,7 +494,10 @@ struct MiddlewareEffectBoundary {
 
 impl EffectBoundaryMiddleware for MiddlewareEffectBoundary {
     fn before_effect(&self, event: &ChainEvent) -> EffectBoundaryStart {
-        let mut ctx = MiddlewareContext::new();
+        // The effect boundary is reached only when the effect is executing live
+        // (strict replay returns the recorded outcome before consulting it), so
+        // control middleware here must run and protect the live call.
+        let mut ctx = MiddlewareContext::with_scope(MiddlewareExecutionScope::LiveEffectBoundary);
 
         for middleware in self.middleware_chain.iter() {
             match middleware.pre_handle(event, &mut ctx) {
@@ -527,12 +554,19 @@ impl<H: UnifiedTransformHandler> UnifiedMiddlewareTransform<H> {
         Self {
             inner,
             middleware_chain: Arc::new(Vec::new()),
+            execution_scope: MiddlewareExecutionScope::LiveHandler,
         }
     }
 
     /// Add middleware to the chain.
     pub fn with_middleware(mut self, middleware: Box<dyn Middleware>) -> Self {
         Arc::make_mut(&mut self.middleware_chain).push(Arc::from(middleware));
+        self
+    }
+
+    /// Bind the replay execution scope for this stage (FLOWIP-120a).
+    pub fn with_execution_scope(mut self, scope: MiddlewareExecutionScope) -> Self {
+        self.execution_scope = scope;
         self
     }
 
@@ -568,7 +602,7 @@ impl<H: UnifiedTransformHandler> UnifiedMiddlewareTransform<H> {
             return Ok(results);
         }
 
-        let mut ctx = MiddlewareContext::new();
+        let mut ctx = MiddlewareContext::with_scope(self.execution_scope);
 
         for middleware in self.middleware_chain.iter() {
             match middleware.pre_handle(&event, &mut ctx) {
@@ -652,7 +686,7 @@ where
         self.inner.drain().await
     }
 
-    fn stage_logic_version(&self) -> std::borrow::Cow<'static, str> {
+    fn stage_logic_version(&self) -> &str {
         self.inner.stage_logic_version()
     }
 }

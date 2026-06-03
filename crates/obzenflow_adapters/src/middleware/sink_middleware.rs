@@ -15,6 +15,7 @@ use async_trait::async_trait;
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
 use obzenflow_core::time::MetricsDuration;
 use obzenflow_core::ChainEvent;
+use obzenflow_core::MiddlewareExecutionScope;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
     SinkConsumeReport, SinkHandler, SinkLifecycleReport,
@@ -26,6 +27,10 @@ use std::sync::Arc;
 pub struct MiddlewareSink<H: SinkHandler> {
     inner: H,
     middleware_chain: Arc<Vec<Arc<dyn Middleware>>>,
+    /// Replay execution scope for this stage (FLOWIP-120a), stamped onto each
+    /// per-event `MiddlewareContext` so handler-level control middleware suppresses
+    /// its side effects during deterministic replay reconstruction.
+    execution_scope: MiddlewareExecutionScope,
 }
 
 impl<H: SinkHandler> std::fmt::Debug for MiddlewareSink<H> {
@@ -43,6 +48,7 @@ impl<H: SinkHandler> MiddlewareSink<H> {
         Self {
             inner,
             middleware_chain: Arc::new(Vec::new()),
+            execution_scope: MiddlewareExecutionScope::LiveHandler,
         }
     }
 
@@ -52,13 +58,19 @@ impl<H: SinkHandler> MiddlewareSink<H> {
         self
     }
 
+    /// Bind the replay execution scope for this stage (FLOWIP-120a).
+    pub fn with_execution_scope(mut self, scope: MiddlewareExecutionScope) -> Self {
+        self.execution_scope = scope;
+        self
+    }
+
     /// Apply middleware with error handling
     async fn apply_middleware_with_error_handling(
         &mut self,
         event: ChainEvent,
     ) -> Result<SinkConsumeReport, HandlerError> {
         // Create ephemeral context for this processing
-        let mut ctx = MiddlewareContext::new();
+        let mut ctx = MiddlewareContext::with_scope(self.execution_scope);
 
         // Pre-processing phase
         for middleware in self.middleware_chain.iter() {

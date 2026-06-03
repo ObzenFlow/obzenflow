@@ -16,7 +16,6 @@ use ring::digest::{digest, SHA256};
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::{Map, Value};
 use std::any::{Any, TypeId};
-use std::borrow::Cow;
 use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::sync::{Arc, Mutex};
@@ -415,7 +414,7 @@ pub trait Effect: Clone + std::fmt::Debug + Send + Sync + 'static {
 
     type Output: Serialize + DeserializeOwned + Send + Sync + 'static;
 
-    fn label(&self) -> Cow<'static, str>;
+    fn label(&self) -> &str;
 
     fn canonical_input(&self) -> Value;
 
@@ -711,6 +710,22 @@ impl EffectRuntimeMode {
             Self::ResumeIncomplete
         } else {
             Self::ReplayStrict
+        }
+    }
+}
+
+/// Map a stage's effect runtime mode onto the handler-level middleware execution
+/// scope (FLOWIP-120a). Live runs reconstruct nothing, so handler middleware runs
+/// live. Strict replay and incomplete-archive resume both reconstruct the handler
+/// shell from recorded events, so handler-level control middleware must suppress
+/// its side effects. Live work that resume performs happens at the effect boundary,
+/// which is scoped separately as `LiveEffectBoundary`.
+impl From<EffectRuntimeMode> for obzenflow_core::MiddlewareExecutionScope {
+    fn from(mode: EffectRuntimeMode) -> Self {
+        match mode {
+            EffectRuntimeMode::Live => Self::LiveHandler,
+            EffectRuntimeMode::ReplayStrict => Self::StrictReplayHandler,
+            EffectRuntimeMode::ResumeIncomplete => Self::ResumeHandler,
         }
     }
 }
@@ -1142,7 +1157,7 @@ where
 {
     Ok(EffectDescriptor {
         effect_type: effect_type.to_string(),
-        label: effect.label().into_owned(),
+        label: effect.label().to_string(),
         schema_version,
         stage_logic_version,
         canonical_input_hash: hash_json_value(&effect.canonical_input())?,
@@ -1376,8 +1391,8 @@ mod tests {
 
         type Output = u64;
 
-        fn label(&self) -> Cow<'static, str> {
-            Cow::Borrowed(self.label)
+        fn label(&self) -> &str {
+            self.label
         }
 
         fn canonical_input(&self) -> Value {
@@ -1404,8 +1419,8 @@ mod tests {
 
         type Output = u64;
 
-        fn label(&self) -> Cow<'static, str> {
-            Cow::Borrowed("transactional")
+        fn label(&self) -> &str {
+            "transactional"
         }
 
         fn canonical_input(&self) -> Value {
