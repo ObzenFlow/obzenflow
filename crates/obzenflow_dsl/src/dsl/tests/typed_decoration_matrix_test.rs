@@ -17,7 +17,7 @@ mod tests {
     use obzenflow_runtime::stages::common::handlers::source::SourceError;
     use obzenflow_runtime::stages::common::handlers::{
         AsyncFiniteSourceHandler, AsyncInfiniteSourceHandler, AsyncTransformHandler,
-        EffectfulSinkHandler, EffectfulTransformHandler, EffectfulStatefulHandler,
+        EffectfulSinkHandler, EffectfulStatefulHandler, EffectfulTransformHandler,
         FiniteSourceHandler, InfiniteSourceHandler, SinkHandler, StatefulHandler, TransformHandler,
     };
     use obzenflow_runtime::typing::{SinkTyping, SourceTyping, StatefulTyping, TransformTyping};

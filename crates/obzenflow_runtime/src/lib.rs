@@ -88,7 +88,7 @@ pub mod prelude {
 
     // Handlers
     pub use crate::stages::{
-        EffectfulSinkHandler, EffectfulTransformHandler, EffectfulStatefulHandler,
+        EffectfulSinkHandler, EffectfulStatefulHandler, EffectfulTransformHandler,
         FiniteSourceHandler, InfiniteSourceHandler, ObserverHandler, ResourceManaged, SinkHandler,
         SourceError, StatefulHandler, TransformHandler,
     };

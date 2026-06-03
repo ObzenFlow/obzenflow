@@ -16,10 +16,10 @@ pub mod transform;
 pub use common::handlers::source::SourceError;
 pub use common::{new_liveness_snapshots, LivenessSnapshots};
 pub use common::{
-    ControlEventAction, ControlEventStrategy, EffectfulSinkHandler,
-    EffectfulTransformHandler, EffectfulStatefulHandler, FiniteSourceHandler, HeartbeatConfig,
-    InfiniteSourceHandler, ObserverHandler, ProcessingContext, ResourceManaged, SinkHandler,
-    StatefulHandler, TransformHandler,
+    ControlEventAction, ControlEventStrategy, EffectfulSinkHandler, EffectfulStatefulHandler,
+    EffectfulTransformHandler, FiniteSourceHandler, HeartbeatConfig, InfiniteSourceHandler,
+    ObserverHandler, ProcessingContext, ResourceManaged, SinkHandler, StatefulHandler,
+    TransformHandler,
 };
 
 // Re-export JoinHandler from common::handlers

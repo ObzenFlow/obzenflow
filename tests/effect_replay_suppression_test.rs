@@ -18,7 +18,7 @@ use obzenflow_core::{
     TypedPayload, WriterId,
 };
 use obzenflow_dsl::{
-    effectful_transform, effectful_sink, effectful_stateful, flow, sink, source, transform,
+    effectful_sink, effectful_stateful, effectful_transform, flow, sink, source, transform,
     FlowDefinition,
 };
 use obzenflow_infra::application::FlowApplication;
@@ -28,8 +28,8 @@ use obzenflow_runtime::effects::{
 };
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    EffectfulSinkHandler, EffectfulTransformHandler, EffectfulStatefulHandler,
-    FiniteSourceHandler, SinkHandler, TransformHandler,
+    EffectfulSinkHandler, EffectfulStatefulHandler, EffectfulTransformHandler, FiniteSourceHandler,
+    SinkHandler, TransformHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};

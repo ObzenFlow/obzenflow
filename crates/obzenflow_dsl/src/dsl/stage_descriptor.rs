@@ -33,10 +33,10 @@ use obzenflow_runtime::{
             control_strategies::{CompositeStrategy, ControlEventStrategy, JonestownStrategy},
             handlers::{
                 AsyncFiniteSourceHandler, AsyncInfiniteSourceHandler, AsyncTransformHandler,
-                EffectfulSinkHandler, EffectfulSinkHandlerAdapter,
-                EffectfulTransformHandler, EffectfulTransformHandlerAdapter,
-                EffectfulStatefulHandler, EffectfulStatefulHandlerAdapter, FiniteSourceHandler,
-                InfiniteSourceHandler, JoinHandler, SinkHandler, StatefulHandler, TransformHandler,
+                EffectfulSinkHandler, EffectfulSinkHandlerAdapter, EffectfulStatefulHandler,
+                EffectfulStatefulHandlerAdapter, EffectfulTransformHandler,
+                EffectfulTransformHandlerAdapter, FiniteSourceHandler, InfiniteSourceHandler,
+                JoinHandler, SinkHandler, StatefulHandler, TransformHandler,
             },
             stage_handle::{BoxedStageHandle, StageEvent, FORCE_SHUTDOWN_MESSAGE},
         },
@@ -57,8 +57,8 @@ use obzenflow_runtime::{
         },
         stateful::{StatefulBuilder, StatefulConfig, StatefulEvent, StatefulState},
         transform::{
-            AsyncTransformBuilder, EffectfulTransformBuilder, TransformBuilder,
-            TransformConfig, TransformEvent, TransformState,
+            AsyncTransformBuilder, EffectfulTransformBuilder, TransformBuilder, TransformConfig,
+            TransformEvent, TransformState,
         },
     },
     supervised_base::SupervisorBuilder as SupervisorBuilderTrait,
@@ -1212,8 +1212,8 @@ pub struct EffectfulTransformDescriptor<H: EffectfulTransformHandler + 'static> 
 }
 
 #[async_trait]
-impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
-    StageDescriptor for EffectfulTransformDescriptor<H>
+impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDescriptor
+    for EffectfulTransformDescriptor<H>
 {
     fn name(&self) -> &str {
         &self.name
@@ -1330,15 +1330,12 @@ impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
             handler_with_middleware = handler_with_middleware.with_middleware(mw);
         }
 
-        let handle = EffectfulTransformBuilder::new(
-            handler_with_middleware,
-            transform_config,
-            resources,
-        )
-        .with_instrumentation(instrumentation)
-        .build()
-        .await
-        .map_err(|e| format!("Failed to build effectful async transform: {e:?}"))?;
+        let handle =
+            EffectfulTransformBuilder::new(handler_with_middleware, transform_config, resources)
+                .with_instrumentation(instrumentation)
+                .build()
+                .await
+                .map_err(|e| format!("Failed to build effectful async transform: {e:?}"))?;
 
         let adapter = StageHandleAdapter::new(
             handle,
