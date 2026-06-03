@@ -454,6 +454,7 @@ async fn dispatch_data_event<
             effect_runtime_mode: ctx.effect_runtime_mode,
             effect_ports: ctx.effect_ports.clone(),
             effect_boundary: None,
+            boundary_control_events: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         })
     });
 

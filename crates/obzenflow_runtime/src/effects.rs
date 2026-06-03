@@ -59,6 +59,7 @@ pub enum EffectBoundaryAction {
 pub struct EffectBoundaryStart {
     pub action: EffectBoundaryAction,
     pub context: EffectBoundaryContext,
+    pub control_events: Vec<ChainEvent>,
 }
 
 pub trait EffectBoundaryMiddleware: Send + Sync {
@@ -69,7 +70,7 @@ pub trait EffectBoundaryMiddleware: Send + Sync {
         context: EffectBoundaryContext,
         event: &ChainEvent,
         outputs: &[ChainEvent],
-    );
+    ) -> Vec<ChainEvent>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -685,6 +686,29 @@ pub struct EffectInvocationContext {
     pub effect_runtime_mode: EffectRuntimeMode,
     pub effect_ports: EffectPortRegistry,
     pub effect_boundary: Option<Arc<dyn EffectBoundaryMiddleware>>,
+    pub boundary_control_events: Arc<Mutex<Vec<ChainEvent>>>,
+}
+
+impl EffectInvocationContext {
+    pub fn push_boundary_control_events(&self, mut events: Vec<ChainEvent>) {
+        if events.is_empty() {
+            return;
+        }
+
+        let mut buffer = self
+            .boundary_control_events
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        buffer.append(&mut events);
+    }
+
+    pub fn drain_boundary_control_events(&self) -> Vec<ChainEvent> {
+        let mut buffer = self
+            .boundary_control_events
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        std::mem::take(&mut *buffer)
+    }
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -794,15 +818,20 @@ impl Effects {
         }
 
         let boundary_start = if let Some(boundary) = &self.ctx.effect_boundary {
-            let start = boundary.before_effect(&self.ctx.parent.event);
-            match start.action {
-                EffectBoundaryAction::Continue => Some(start.context),
+            let EffectBoundaryStart {
+                action,
+                context,
+                control_events,
+            } = boundary.before_effect(&self.ctx.parent.event);
+            match action {
+                EffectBoundaryAction::Continue => Some(context),
                 EffectBoundaryAction::Skip(results) => {
                     let output_event = results.into_iter().next().ok_or_else(|| {
                         EffectError::Execution(
                             "effect boundary skipped without a fallback output".to_string(),
                         )
                     })?;
+                    self.ctx.push_boundary_control_events(control_events);
                     let output: E::Output = serde_json::from_value(output_event.payload())
                         .map_err(|e| EffectError::Serialization(e.to_string()))?;
                     let output_value = serde_json::to_value(&output)
@@ -822,6 +851,7 @@ impl Effects {
                     return Ok(output);
                 }
                 EffectBoundaryAction::Abort => {
+                    self.ctx.push_boundary_control_events(control_events);
                     let err =
                         EffectError::Execution("effect boundary aborted execution".to_string());
                     self.append_record(
@@ -868,11 +898,12 @@ impl Effects {
                         E::EFFECT_TYPE,
                         output_value.clone(),
                     );
-                    boundary.after_effect(
+                    let control_events = boundary.after_effect(
                         boundary_context,
                         &self.ctx.parent.event,
                         std::slice::from_ref(&output_event),
                     );
+                    self.ctx.push_boundary_control_events(control_events);
                 }
                 self.append_record(
                     EffectRecord {
@@ -896,11 +927,12 @@ impl Effects {
                         err.to_string(),
                         obzenflow_core::event::status::processing_status::ErrorKind::Remote,
                     );
-                    boundary.after_effect(
+                    let control_events = boundary.after_effect(
                         boundary_context,
                         &self.ctx.parent.event,
                         std::slice::from_ref(&error_event),
                     );
+                    self.ctx.push_boundary_control_events(control_events);
                 }
                 self.append_record(
                     EffectRecord {
@@ -1531,6 +1563,7 @@ mod tests {
             effect_runtime_mode,
             effect_ports,
             effect_boundary: None,
+            boundary_control_events: Arc::new(Mutex::new(Vec::new())),
         }
     }
 

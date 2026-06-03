@@ -10,10 +10,10 @@ use obzenflow_core::{
     event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload},
     event::payloads::flow_control_payload::FlowControlPayload,
     event::payloads::observability_payload::{
-        MiddlewareLifecycle, ObservabilityPayload, RateLimiterEvent,
+        CircuitBreakerEvent, MiddlewareLifecycle, ObservabilityPayload, RateLimiterEvent,
     },
-    event::ChainEventContent,
-    id::StageId,
+    event::{ChainEventContent, SystemEvent, SystemEventType},
+    id::{StageId, SystemId},
     journal::{journal_owner::JournalOwner, Journal},
     TypedPayload, WriterId,
 };
@@ -807,6 +807,57 @@ async fn rate_limiter_delayed_events_in_stage(run_dir: &Path, stage_key: &str) -
         .count()
 }
 
+async fn circuit_breaker_events_in_stage(run_dir: &Path, stage_key: &str) -> usize {
+    read_stage_events(run_dir, stage_key)
+        .await
+        .into_iter()
+        .filter(|event| {
+            matches!(
+                event.content,
+                ChainEventContent::Observability(ObservabilityPayload::Middleware(
+                    MiddlewareLifecycle::CircuitBreaker(_)
+                ))
+            )
+        })
+        .count()
+}
+
+async fn mirrored_circuit_breaker_events_in_system(run_dir: &Path, stage_name: &str) -> usize {
+    let manifest = archive_manifest(run_dir);
+    let system_journal = manifest["system_journal_file"]
+        .as_str()
+        .expect("manifest should contain system journal file");
+    let journal: obzenflow_infra::journal::DiskJournal<SystemEvent> =
+        obzenflow_infra::journal::DiskJournal::with_owner(
+            run_dir.join(system_journal),
+            JournalOwner::system(SystemId::new()),
+        )
+        .expect("system journal should open");
+
+    journal
+        .read_causally_ordered()
+        .await
+        .expect("system journal should read")
+        .into_iter()
+        .filter(|envelope| {
+            matches!(
+                &envelope.event.event,
+                SystemEventType::MiddlewareLifecycle {
+                    stage_name: Some(name),
+                    middleware:
+                        MiddlewareLifecycle::CircuitBreaker(
+                            CircuitBreakerEvent::Opened { .. }
+                                | CircuitBreakerEvent::Closed { .. }
+                                | CircuitBreakerEvent::HalfOpen { .. }
+                                | CircuitBreakerEvent::Summary { .. }
+                        ),
+                    ..
+                } if name == stage_name
+            )
+        })
+        .count()
+}
+
 /// Count rate-limiter observability events of any variant (Delayed, ActivityPulse,
 /// ModeChange) in a stage. Used to assert the limiter was never invoked during
 /// replay: an invoked limiter under the test workload leaves a journal trace, so
@@ -1332,6 +1383,21 @@ async fn effect_boundary_breaker_fallback_replays_recorded_fallback_without_exec
     );
 
     let archive_dir = latest_run_dir(&journal_base);
+    let live_effectful_breaker_events =
+        circuit_breaker_events_in_stage(&archive_dir, "effectful").await;
+    assert!(
+        live_effectful_breaker_events > 0,
+        "live effect-boundary circuit-breaker state changes must be returned as wired \
+         middleware events in the effectful stage journal"
+    );
+    let live_mirrored_effectful_breaker_events =
+        mirrored_circuit_breaker_events_in_system(&archive_dir, "effectful").await;
+    assert!(
+        live_mirrored_effectful_breaker_events > 0,
+        "live effect-boundary circuit-breaker lifecycle must be mirrored into system.log \
+         for the effectful stage"
+    );
+
     let replay_calls = Arc::new(AtomicUsize::new(0));
     let replay_outputs = Arc::new(Mutex::new(Vec::new()));
     FlowApplication::builder()
@@ -1341,7 +1407,7 @@ async fn effect_boundary_breaker_fallback_replays_recorded_fallback_without_exec
             archive_dir.as_os_str().to_os_string(),
         ])
         .run_async(build_breaker_fallback_flow(
-            journal_base,
+            journal_base.clone(),
             replay_calls.clone(),
             replay_outputs.clone(),
         ))
@@ -1360,6 +1426,22 @@ async fn effect_boundary_breaker_fallback_replays_recorded_fallback_without_exec
             .clone(),
         live_domain_outputs,
         "replay should use recorded fallback outcomes"
+    );
+
+    let replay_archive = latest_run_dir(&journal_base);
+    let replay_effectful_breaker_events =
+        circuit_breaker_events_in_stage(&replay_archive, "effectful").await;
+    assert_eq!(
+        replay_effectful_breaker_events, 0,
+        "strict replay must not execute effect-boundary middleware or emit new \
+         effectful-stage circuit-breaker events"
+    );
+    let replay_mirrored_effectful_breaker_events =
+        mirrored_circuit_breaker_events_in_system(&replay_archive, "effectful").await;
+    assert_eq!(
+        replay_mirrored_effectful_breaker_events, 0,
+        "strict replay must not mirror new effect-boundary circuit-breaker lifecycle \
+         events for the effectful stage"
     );
 }
 

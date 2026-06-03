@@ -492,6 +492,18 @@ struct MiddlewareEffectBoundary {
     middleware_chain: Arc<Vec<Arc<dyn Middleware>>>,
 }
 
+impl MiddlewareEffectBoundary {
+    fn drain_control_events(&self, ctx: &mut MiddlewareContext) -> Vec<ChainEvent> {
+        let mut control_events = ctx.take_control_events();
+        for control_event in &mut control_events {
+            for middleware in self.middleware_chain.iter() {
+                middleware.pre_write(control_event, ctx);
+            }
+        }
+        control_events
+    }
+}
+
 impl EffectBoundaryMiddleware for MiddlewareEffectBoundary {
     fn before_effect(&self, event: &ChainEvent) -> EffectBoundaryStart {
         // The effect boundary is reached only when the effect is executing live
@@ -503,15 +515,19 @@ impl EffectBoundaryMiddleware for MiddlewareEffectBoundary {
             match middleware.pre_handle(event, &mut ctx) {
                 MiddlewareAction::Continue => continue,
                 MiddlewareAction::Skip(results) => {
+                    let control_events = self.drain_control_events(&mut ctx);
                     return EffectBoundaryStart {
                         action: EffectBoundaryAction::Skip(results),
                         context: EffectBoundaryContext::new(ctx),
+                        control_events,
                     };
                 }
                 MiddlewareAction::Abort => {
+                    let control_events = self.drain_control_events(&mut ctx);
                     return EffectBoundaryStart {
                         action: EffectBoundaryAction::Abort,
                         context: EffectBoundaryContext::new(ctx),
+                        control_events,
                     };
                 }
             }
@@ -520,6 +536,7 @@ impl EffectBoundaryMiddleware for MiddlewareEffectBoundary {
         EffectBoundaryStart {
             action: EffectBoundaryAction::Continue,
             context: EffectBoundaryContext::new(ctx),
+            control_events: Vec::new(),
         }
     }
 
@@ -528,14 +545,16 @@ impl EffectBoundaryMiddleware for MiddlewareEffectBoundary {
         context: EffectBoundaryContext,
         event: &ChainEvent,
         outputs: &[ChainEvent],
-    ) {
+    ) -> Vec<ChainEvent> {
         let Ok(mut ctx) = context.downcast::<MiddlewareContext>() else {
-            return;
+            return Vec::new();
         };
 
         for middleware in self.middleware_chain.iter().rev() {
             middleware.post_handle(event, outputs, &mut ctx);
         }
+
+        self.drain_control_events(&mut ctx)
     }
 }
 
@@ -576,6 +595,7 @@ impl<H: UnifiedTransformHandler> UnifiedMiddlewareTransform<H> {
         effect_context: Option<EffectInvocationContext>,
     ) -> Result<Vec<ChainEvent>, HandlerError> {
         if let Some(mut effect_context) = effect_context {
+            let boundary_control_events = effect_context.boundary_control_events.clone();
             effect_context.effect_boundary = Some(Arc::new(MiddlewareEffectBoundary {
                 middleware_chain: self.middleware_chain.clone(),
             }));
@@ -598,6 +618,14 @@ impl<H: UnifiedTransformHandler> UnifiedMiddlewareTransform<H> {
                     middleware.pre_write(result, &ctx);
                 }
             }
+
+            let mut boundary_events = {
+                let mut buffer = boundary_control_events
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                std::mem::take(&mut *buffer)
+            };
+            results.append(&mut boundary_events);
 
             return Ok(results);
         }
@@ -1058,6 +1086,102 @@ mod tests {
         // Second is the control event
         assert!(results[1].is_lifecycle());
         assert_eq!(results[1].event_type(), "lifecycle.metrics.state");
+    }
+
+    struct EffectBoundaryPostControlMiddleware;
+
+    impl Middleware for EffectBoundaryPostControlMiddleware {
+        fn label(&self) -> &'static str {
+            "test.effect_boundary_post_control"
+        }
+
+        fn source_phase(&self) -> crate::middleware::SourceMiddlewarePhase {
+            crate::middleware::SourceMiddlewarePhase::Ordinary
+        }
+
+        fn post_handle(
+            &self,
+            _event: &ChainEvent,
+            _results: &[ChainEvent],
+            ctx: &mut MiddlewareContext,
+        ) {
+            ctx.write_control_event(ChainEventFactory::metrics_state_snapshot(
+                obzenflow_core::WriterId::from(obzenflow_core::StageId::new()),
+                json!({"boundary": "post"}),
+            ));
+        }
+    }
+
+    struct EffectBoundarySkipControlMiddleware;
+
+    impl Middleware for EffectBoundarySkipControlMiddleware {
+        fn label(&self) -> &'static str {
+            "test.effect_boundary_skip_control"
+        }
+
+        fn source_phase(&self) -> crate::middleware::SourceMiddlewarePhase {
+            crate::middleware::SourceMiddlewarePhase::Ordinary
+        }
+
+        fn pre_handle(&self, event: &ChainEvent, ctx: &mut MiddlewareContext) -> MiddlewareAction {
+            ctx.write_control_event(ChainEventFactory::metrics_state_snapshot(
+                obzenflow_core::WriterId::from(obzenflow_core::StageId::new()),
+                json!({"boundary": "skip"}),
+            ));
+            MiddlewareAction::Skip(vec![ChainEventFactory::data_event(
+                event.writer_id,
+                "test.effect_fallback",
+                json!({"effect_value": 42}),
+            )])
+        }
+    }
+
+    #[test]
+    fn effect_boundary_after_effect_returns_control_events() {
+        let middleware: Arc<dyn Middleware> = Arc::new(EffectBoundaryPostControlMiddleware);
+        let boundary = MiddlewareEffectBoundary {
+            middleware_chain: Arc::new(vec![middleware]),
+        };
+        let writer_id = obzenflow_core::WriterId::from(obzenflow_core::StageId::new());
+        let event = ChainEventFactory::data_event(writer_id, "test.input", json!({}));
+        let output = ChainEventFactory::data_event(writer_id, "test.output", json!({}));
+
+        let start = boundary.before_effect(&event);
+        assert_eq!(start.control_events.len(), 0);
+        assert!(matches!(start.action, EffectBoundaryAction::Continue));
+
+        let control_events = boundary.after_effect(start.context, &event, &[output]);
+        assert_eq!(control_events.len(), 1);
+        assert!(control_events[0].is_lifecycle());
+        assert_eq!(control_events[0].event_type(), "lifecycle.metrics.state");
+    }
+
+    #[test]
+    fn effect_boundary_skip_returns_control_events() {
+        let middleware: Arc<dyn Middleware> = Arc::new(EffectBoundarySkipControlMiddleware);
+        let boundary = MiddlewareEffectBoundary {
+            middleware_chain: Arc::new(vec![middleware]),
+        };
+        let event = ChainEventFactory::data_event(
+            obzenflow_core::WriterId::from(obzenflow_core::StageId::new()),
+            "test.input",
+            json!({}),
+        );
+
+        let start = boundary.before_effect(&event);
+        match start.action {
+            EffectBoundaryAction::Skip(results) => {
+                assert_eq!(results.len(), 1);
+                assert_eq!(results[0].payload()["effect_value"], json!(42));
+            }
+            _ => panic!("boundary middleware should skip with fallback"),
+        }
+        assert_eq!(start.control_events.len(), 1);
+        assert!(start.control_events[0].is_lifecycle());
+        assert_eq!(
+            start.control_events[0].event_type(),
+            "lifecycle.metrics.state"
+        );
     }
 
     #[derive(Clone, Debug)]
