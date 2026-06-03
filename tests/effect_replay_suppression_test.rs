@@ -836,7 +836,10 @@ async fn rate_limiter_events_in_stage(run_dir: &Path, stage_key: &str) -> usize 
 /// `Delayed` lifecycle records are not journaled (sinks do not persist control
 /// events, which is exactly why the journal-only assertion below is blind to the
 /// admission-middleware replay bug). During strict replay all three must stay zero.
-async fn rate_limiter_runtime_activity_in_stage(run_dir: &Path, stage_key: &str) -> (u64, u64, f64) {
+async fn rate_limiter_runtime_activity_in_stage(
+    run_dir: &Path,
+    stage_key: &str,
+) -> (u64, u64, f64) {
     read_stage_events(run_dir, stage_key)
         .await
         .into_iter()
