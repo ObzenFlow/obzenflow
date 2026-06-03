@@ -1702,6 +1702,7 @@ dependencies = [
  "obzenflow-fsm",
  "obzenflow-topology",
  "obzenflow_core",
+ "ring",
  "serde",
  "serde_json",
  "thiserror 1.0.69",

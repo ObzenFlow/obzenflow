@@ -17,7 +17,13 @@ use super::{
 use async_trait::async_trait;
 use obzenflow_core::event::status::processing_status::ProcessingStatus;
 use obzenflow_core::ChainEvent;
+use obzenflow_core::MiddlewareExecutionScope;
+use obzenflow_runtime::effects::{
+    EffectBoundaryAction, EffectBoundaryContext, EffectBoundaryMiddleware, EffectBoundaryStart,
+    EffectInvocationContext,
+};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
+use obzenflow_runtime::stages::common::handlers::transform::traits::UnifiedTransformHandler;
 use obzenflow_runtime::stages::common::handlers::{AsyncTransformHandler, TransformHandler};
 use std::future::Future;
 use std::sync::Arc;
@@ -28,6 +34,8 @@ use std::time::{Duration, Instant};
 pub struct MiddlewareTransform<H: TransformHandler> {
     inner: H,
     middleware_chain: Arc<Vec<Arc<dyn Middleware>>>,
+    /// Replay execution scope for this stage (FLOWIP-120a).
+    execution_scope: MiddlewareExecutionScope,
 }
 
 impl<H: TransformHandler> std::fmt::Debug for MiddlewareTransform<H> {
@@ -45,12 +53,19 @@ impl<H: TransformHandler> MiddlewareTransform<H> {
         Self {
             inner,
             middleware_chain: Arc::new(Vec::new()),
+            execution_scope: MiddlewareExecutionScope::LiveHandler,
         }
     }
 
     /// Add middleware to the chain
     pub fn with_middleware(mut self, middleware: Box<dyn Middleware>) -> Self {
         Arc::make_mut(&mut self.middleware_chain).push(Arc::from(middleware));
+        self
+    }
+
+    /// Bind the replay execution scope for this stage (FLOWIP-120a).
+    pub fn with_execution_scope(mut self, scope: MiddlewareExecutionScope) -> Self {
+        self.execution_scope = scope;
         self
     }
 
@@ -64,7 +79,7 @@ impl<H: TransformHandler> MiddlewareTransform<H> {
         F: FnOnce(ChainEvent) -> Result<Vec<ChainEvent>, HandlerError>,
     {
         // Create ephemeral context for this processing
-        let mut ctx = MiddlewareContext::new();
+        let mut ctx = MiddlewareContext::with_scope(self.execution_scope);
 
         // Pre-processing phase
         for middleware in self.middleware_chain.iter() {
@@ -219,6 +234,8 @@ impl<H: TransformHandler> TransformMiddlewareBuilder<H> {
 pub struct AsyncMiddlewareTransform<H: AsyncTransformHandler> {
     inner: H,
     middleware_chain: Arc<Vec<Arc<dyn Middleware>>>,
+    /// Replay execution scope for this stage (FLOWIP-120a).
+    execution_scope: MiddlewareExecutionScope,
 }
 
 impl<H: AsyncTransformHandler> std::fmt::Debug for AsyncMiddlewareTransform<H> {
@@ -236,12 +253,19 @@ impl<H: AsyncTransformHandler> AsyncMiddlewareTransform<H> {
         Self {
             inner,
             middleware_chain: Arc::new(Vec::new()),
+            execution_scope: MiddlewareExecutionScope::LiveHandler,
         }
     }
 
     /// Add middleware to the chain.
     pub fn with_middleware(mut self, middleware: Box<dyn Middleware>) -> Self {
         Arc::make_mut(&mut self.middleware_chain).push(Arc::from(middleware));
+        self
+    }
+
+    /// Bind the replay execution scope for this stage (FLOWIP-120a).
+    pub fn with_execution_scope(mut self, scope: MiddlewareExecutionScope) -> Self {
+        self.execution_scope = scope;
         self
     }
 
@@ -262,7 +286,7 @@ impl<H: AsyncTransformHandler> AsyncMiddlewareTransform<H> {
         loop {
             // Create a fresh ephemeral context per attempt so timing/observability middleware
             // can record per-attempt processing metadata cleanly.
-            let mut ctx = MiddlewareContext::new();
+            let mut ctx = MiddlewareContext::with_scope(self.execution_scope);
             ctx.insert::<CircuitBreakerAttempt>(attempt);
 
             // Pre-processing phase
@@ -443,6 +467,258 @@ impl<H: AsyncTransformHandler> AsyncTransformMiddlewareBuilder<H> {
     }
 }
 
+/// A unified transform wrapper that applies existing middleware while preserving
+/// the effect invocation context required by replay-safe effectful transforms.
+///
+/// This intentionally does not run the async transform retry loop. Retrying
+/// around `fx.perform` would re-enter the same effect cursor and append duplicate
+/// failed effect records. 120a's v1 effect boundary supports pre-gating,
+/// fallback, post-observation, and enrichment; effect retry policy needs a
+/// cursor-aware retry mechanism.
+#[derive(Clone)]
+#[doc(hidden)]
+pub struct UnifiedMiddlewareTransform<H: UnifiedTransformHandler> {
+    inner: H,
+    middleware_chain: Arc<Vec<Arc<dyn Middleware>>>,
+    /// Replay execution scope for this stage (FLOWIP-120a). Used for the
+    /// non-effect-boundary handler path. Effect-boundary observation always runs
+    /// under `LiveEffectBoundary`, since the boundary is only consulted when an
+    /// effect executes live (replay returns the recorded outcome first).
+    execution_scope: MiddlewareExecutionScope,
+}
+
+#[derive(Clone)]
+struct MiddlewareEffectBoundary {
+    middleware_chain: Arc<Vec<Arc<dyn Middleware>>>,
+}
+
+impl MiddlewareEffectBoundary {
+    fn drain_control_events(&self, ctx: &mut MiddlewareContext) -> Vec<ChainEvent> {
+        let mut control_events = ctx.take_control_events();
+        for control_event in &mut control_events {
+            for middleware in self.middleware_chain.iter() {
+                middleware.pre_write(control_event, ctx);
+            }
+        }
+        control_events
+    }
+}
+
+impl EffectBoundaryMiddleware for MiddlewareEffectBoundary {
+    fn before_effect(&self, event: &ChainEvent) -> EffectBoundaryStart {
+        // The effect boundary is reached only when the effect is executing live
+        // (strict replay returns the recorded outcome before consulting it), so
+        // control middleware here must run and protect the live call.
+        let mut ctx = MiddlewareContext::with_scope(MiddlewareExecutionScope::LiveEffectBoundary);
+
+        for middleware in self.middleware_chain.iter() {
+            match middleware.pre_handle(event, &mut ctx) {
+                MiddlewareAction::Continue => continue,
+                MiddlewareAction::Skip(results) => {
+                    let control_events = self.drain_control_events(&mut ctx);
+                    return EffectBoundaryStart {
+                        action: EffectBoundaryAction::Skip(results),
+                        context: EffectBoundaryContext::new(ctx),
+                        control_events,
+                    };
+                }
+                MiddlewareAction::Abort => {
+                    let control_events = self.drain_control_events(&mut ctx);
+                    return EffectBoundaryStart {
+                        action: EffectBoundaryAction::Abort,
+                        context: EffectBoundaryContext::new(ctx),
+                        control_events,
+                    };
+                }
+            }
+        }
+
+        EffectBoundaryStart {
+            action: EffectBoundaryAction::Continue,
+            context: EffectBoundaryContext::new(ctx),
+            control_events: Vec::new(),
+        }
+    }
+
+    fn after_effect(
+        &self,
+        context: EffectBoundaryContext,
+        event: &ChainEvent,
+        outputs: &[ChainEvent],
+    ) -> Vec<ChainEvent> {
+        let Ok(mut ctx) = context.downcast::<MiddlewareContext>() else {
+            return Vec::new();
+        };
+
+        for middleware in self.middleware_chain.iter().rev() {
+            middleware.post_handle(event, outputs, &mut ctx);
+        }
+
+        self.drain_control_events(&mut ctx)
+    }
+}
+
+impl<H: UnifiedTransformHandler> std::fmt::Debug for UnifiedMiddlewareTransform<H> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UnifiedMiddlewareTransform")
+            .field("inner_type", &std::any::type_name::<H>())
+            .field("middleware_count", &self.middleware_chain.len())
+            .finish()
+    }
+}
+
+impl<H: UnifiedTransformHandler> UnifiedMiddlewareTransform<H> {
+    /// Create a new middleware-wrapped unified transform handler.
+    pub fn new(inner: H) -> Self {
+        Self {
+            inner,
+            middleware_chain: Arc::new(Vec::new()),
+            execution_scope: MiddlewareExecutionScope::LiveHandler,
+        }
+    }
+
+    /// Add middleware to the chain.
+    pub fn with_middleware(mut self, middleware: Box<dyn Middleware>) -> Self {
+        Arc::make_mut(&mut self.middleware_chain).push(Arc::from(middleware));
+        self
+    }
+
+    /// Bind the replay execution scope for this stage (FLOWIP-120a).
+    pub fn with_execution_scope(mut self, scope: MiddlewareExecutionScope) -> Self {
+        self.execution_scope = scope;
+        self
+    }
+
+    async fn apply_middleware(
+        &self,
+        event: ChainEvent,
+        effect_context: Option<EffectInvocationContext>,
+    ) -> Result<Vec<ChainEvent>, HandlerError> {
+        if let Some(mut effect_context) = effect_context {
+            let boundary_control_events = effect_context.boundary_control_events.clone();
+            effect_context.effect_boundary = Some(Arc::new(MiddlewareEffectBoundary {
+                middleware_chain: self.middleware_chain.clone(),
+            }));
+
+            let mut results = match self
+                .inner
+                .process(event.clone(), Some(effect_context))
+                .await
+            {
+                Ok(results) => results,
+                Err(err) => {
+                    let reason = format!("Transform handler error: {err:?}");
+                    vec![event.clone().mark_as_error(reason, err.kind())]
+                }
+            };
+
+            let ctx = MiddlewareContext::new();
+            for result in &mut results {
+                for middleware in self.middleware_chain.iter() {
+                    middleware.pre_write(result, &ctx);
+                }
+            }
+
+            let mut boundary_events = {
+                let mut buffer = boundary_control_events
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                std::mem::take(&mut *buffer)
+            };
+            results.append(&mut boundary_events);
+
+            return Ok(results);
+        }
+
+        let mut ctx = MiddlewareContext::with_scope(self.execution_scope);
+
+        for middleware in self.middleware_chain.iter() {
+            match middleware.pre_handle(&event, &mut ctx) {
+                MiddlewareAction::Continue => continue,
+                MiddlewareAction::Skip(mut results) => {
+                    for result in &mut results {
+                        for mw in self.middleware_chain.iter() {
+                            mw.pre_write(result, &ctx);
+                        }
+                    }
+
+                    let mut control_events = ctx.take_control_events();
+                    for control_event in &mut control_events {
+                        for mw in self.middleware_chain.iter() {
+                            mw.pre_write(control_event, &ctx);
+                        }
+                    }
+                    results.extend(control_events);
+                    return Ok(results);
+                }
+                MiddlewareAction::Abort => {
+                    let mut err = event.clone();
+                    err.processing_info.status = ProcessingStatus::error("aborted by middleware");
+                    return Ok(vec![err]);
+                }
+            }
+        }
+
+        let mut results = match self.inner.process(event.clone(), effect_context).await {
+            Ok(results) => results,
+            Err(err) => {
+                let reason = format!("Transform handler error: {err:?}");
+                vec![event.clone().mark_as_error(reason, err.kind())]
+            }
+        };
+
+        for middleware in self.middleware_chain.iter().rev() {
+            middleware.post_handle(&event, &results, &mut ctx);
+        }
+
+        for result in &mut results {
+            for middleware in self.middleware_chain.iter() {
+                middleware.pre_write(result, &ctx);
+            }
+        }
+
+        let mut control_events = ctx.take_control_events();
+        for control_event in &mut control_events {
+            for middleware in self.middleware_chain.iter() {
+                middleware.pre_write(control_event, &ctx);
+            }
+        }
+        results.extend(control_events);
+
+        Ok(results)
+    }
+}
+
+#[async_trait]
+impl<H> UnifiedTransformHandler for UnifiedMiddlewareTransform<H>
+where
+    H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
+{
+    async fn process(
+        &self,
+        event: ChainEvent,
+        effect_context: Option<EffectInvocationContext>,
+    ) -> Result<Vec<ChainEvent>, HandlerError> {
+        if matches!(event.processing_info.status, ProcessingStatus::Error { .. }) {
+            tracing::debug!(
+                "UnifiedMiddlewareTransform: Skipping event with Error status: {:?}",
+                event.processing_info.status
+            );
+            return Ok(vec![event]);
+        }
+
+        self.apply_middleware(event, effect_context).await
+    }
+
+    async fn drain(&mut self) -> Result<(), HandlerError> {
+        self.inner.drain().await
+    }
+
+    fn stage_logic_version(&self) -> &str {
+        self.inner.stage_logic_version()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -535,8 +811,7 @@ mod tests {
             json!({}),
         );
 
-        let results = handler
-            .process(event)
+        let results = TransformHandler::process(&handler, event)
             .expect("TestTransform in middleware tests should not fail");
 
         // Middleware can't modify events anymore, just verify the transform worked
@@ -613,8 +888,7 @@ mod tests {
             json!({}),
         );
 
-        let results = handler
-            .process(event)
+        let results = TransformHandler::process(&handler, event)
             .expect("handler errors should be converted to error events");
 
         assert_eq!(results.len(), 1);
@@ -738,8 +1012,7 @@ mod tests {
             json!({}),
         );
 
-        let results = handler
-            .process(event)
+        let results = TransformHandler::process(&handler, event)
             .expect("TestTransform in middleware tests should not fail");
 
         // Should have 3 events: 1 from handler + 2 control events
@@ -800,8 +1073,7 @@ mod tests {
             json!({}),
         );
 
-        let results = handler
-            .process(event)
+        let results = TransformHandler::process(&handler, event)
             .expect("TestTransform in middleware tests should not fail");
 
         // Should have 2 events: 1 skip result + 1 control event
@@ -814,6 +1086,102 @@ mod tests {
         // Second is the control event
         assert!(results[1].is_lifecycle());
         assert_eq!(results[1].event_type(), "lifecycle.metrics.state");
+    }
+
+    struct EffectBoundaryPostControlMiddleware;
+
+    impl Middleware for EffectBoundaryPostControlMiddleware {
+        fn label(&self) -> &'static str {
+            "test.effect_boundary_post_control"
+        }
+
+        fn source_phase(&self) -> crate::middleware::SourceMiddlewarePhase {
+            crate::middleware::SourceMiddlewarePhase::Ordinary
+        }
+
+        fn post_handle(
+            &self,
+            _event: &ChainEvent,
+            _results: &[ChainEvent],
+            ctx: &mut MiddlewareContext,
+        ) {
+            ctx.write_control_event(ChainEventFactory::metrics_state_snapshot(
+                obzenflow_core::WriterId::from(obzenflow_core::StageId::new()),
+                json!({"boundary": "post"}),
+            ));
+        }
+    }
+
+    struct EffectBoundarySkipControlMiddleware;
+
+    impl Middleware for EffectBoundarySkipControlMiddleware {
+        fn label(&self) -> &'static str {
+            "test.effect_boundary_skip_control"
+        }
+
+        fn source_phase(&self) -> crate::middleware::SourceMiddlewarePhase {
+            crate::middleware::SourceMiddlewarePhase::Ordinary
+        }
+
+        fn pre_handle(&self, event: &ChainEvent, ctx: &mut MiddlewareContext) -> MiddlewareAction {
+            ctx.write_control_event(ChainEventFactory::metrics_state_snapshot(
+                obzenflow_core::WriterId::from(obzenflow_core::StageId::new()),
+                json!({"boundary": "skip"}),
+            ));
+            MiddlewareAction::Skip(vec![ChainEventFactory::data_event(
+                event.writer_id,
+                "test.effect_fallback",
+                json!({"effect_value": 42}),
+            )])
+        }
+    }
+
+    #[test]
+    fn effect_boundary_after_effect_returns_control_events() {
+        let middleware: Arc<dyn Middleware> = Arc::new(EffectBoundaryPostControlMiddleware);
+        let boundary = MiddlewareEffectBoundary {
+            middleware_chain: Arc::new(vec![middleware]),
+        };
+        let writer_id = obzenflow_core::WriterId::from(obzenflow_core::StageId::new());
+        let event = ChainEventFactory::data_event(writer_id, "test.input", json!({}));
+        let output = ChainEventFactory::data_event(writer_id, "test.output", json!({}));
+
+        let start = boundary.before_effect(&event);
+        assert_eq!(start.control_events.len(), 0);
+        assert!(matches!(start.action, EffectBoundaryAction::Continue));
+
+        let control_events = boundary.after_effect(start.context, &event, &[output]);
+        assert_eq!(control_events.len(), 1);
+        assert!(control_events[0].is_lifecycle());
+        assert_eq!(control_events[0].event_type(), "lifecycle.metrics.state");
+    }
+
+    #[test]
+    fn effect_boundary_skip_returns_control_events() {
+        let middleware: Arc<dyn Middleware> = Arc::new(EffectBoundarySkipControlMiddleware);
+        let boundary = MiddlewareEffectBoundary {
+            middleware_chain: Arc::new(vec![middleware]),
+        };
+        let event = ChainEventFactory::data_event(
+            obzenflow_core::WriterId::from(obzenflow_core::StageId::new()),
+            "test.input",
+            json!({}),
+        );
+
+        let start = boundary.before_effect(&event);
+        match start.action {
+            EffectBoundaryAction::Skip(results) => {
+                assert_eq!(results.len(), 1);
+                assert_eq!(results[0].payload()["effect_value"], json!(42));
+            }
+            _ => panic!("boundary middleware should skip with fallback"),
+        }
+        assert_eq!(start.control_events.len(), 1);
+        assert!(start.control_events[0].is_lifecycle());
+        assert_eq!(
+            start.control_events[0].event_type(),
+            "lifecycle.metrics.state"
+        );
     }
 
     #[derive(Clone, Debug)]

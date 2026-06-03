@@ -47,9 +47,11 @@
 //! }
 //! ```
 
+use crate::effects::{EffectDeclaration, EffectInvocationContext, Effects};
 use crate::stages::common::handler_error::HandlerError;
 use async_trait::async_trait;
 use obzenflow_core::event::payloads::delivery_payload::DeliveryPayload;
+use obzenflow_core::event::schema::TypedPayload;
 use obzenflow_core::{ChainEvent, EventId};
 
 #[derive(Debug, Clone)]
@@ -139,5 +141,117 @@ pub trait SinkHandler: Send + Sync {
             audit_payload: self.drain().await?,
             commit_receipts: Vec::new(),
         })
+    }
+}
+
+#[doc(hidden)]
+#[async_trait]
+pub trait UnifiedSinkHandler: Send + Sync {
+    async fn consume_report(
+        &mut self,
+        event: ChainEvent,
+        effect_context: Option<EffectInvocationContext>,
+    ) -> Result<SinkConsumeReport, HandlerError>;
+
+    async fn flush_report(&mut self) -> Result<SinkLifecycleReport, HandlerError>;
+
+    async fn drain_report(&mut self) -> Result<SinkLifecycleReport, HandlerError>;
+
+    fn stage_logic_version(&self) -> &str {
+        "1"
+    }
+
+    fn effect_declarations(&self) -> Vec<EffectDeclaration> {
+        Vec::new()
+    }
+}
+
+#[async_trait]
+impl<T: SinkHandler + Send + Sync> UnifiedSinkHandler for T {
+    async fn consume_report(
+        &mut self,
+        event: ChainEvent,
+        _effect_context: Option<EffectInvocationContext>,
+    ) -> Result<SinkConsumeReport, HandlerError> {
+        SinkHandler::consume_report(self, event).await
+    }
+
+    async fn flush_report(&mut self) -> Result<SinkLifecycleReport, HandlerError> {
+        SinkHandler::flush_report(self).await
+    }
+
+    async fn drain_report(&mut self) -> Result<SinkLifecycleReport, HandlerError> {
+        SinkHandler::drain_report(self).await
+    }
+}
+
+#[async_trait]
+pub trait EffectfulSinkHandler: Send + Sync {
+    type Input: TypedPayload + Send + Sync + 'static;
+
+    async fn consume(
+        &mut self,
+        input: Self::Input,
+        fx: &mut Effects,
+    ) -> Result<DeliveryPayload, HandlerError>;
+
+    async fn consume_report(
+        &mut self,
+        input: Self::Input,
+        fx: &mut Effects,
+    ) -> Result<SinkConsumeReport, HandlerError> {
+        Ok(SinkConsumeReport::new(self.consume(input, fx).await?))
+    }
+
+    async fn flush_report(&mut self) -> Result<SinkLifecycleReport, HandlerError> {
+        Ok(SinkLifecycleReport::default())
+    }
+
+    async fn drain_report(&mut self) -> Result<SinkLifecycleReport, HandlerError> {
+        self.flush_report().await
+    }
+
+    fn stage_logic_version(&self) -> &str {
+        "1"
+    }
+
+    fn effect_declarations(&self) -> Vec<EffectDeclaration> {
+        Vec::new()
+    }
+}
+
+#[doc(hidden)]
+#[derive(Clone, Debug)]
+pub struct EffectfulSinkHandlerAdapter<H>(pub H);
+
+#[async_trait]
+impl<H> UnifiedSinkHandler for EffectfulSinkHandlerAdapter<H>
+where
+    H: EffectfulSinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
+{
+    async fn consume_report(
+        &mut self,
+        event: ChainEvent,
+        effect_context: Option<EffectInvocationContext>,
+    ) -> Result<SinkConsumeReport, HandlerError> {
+        let input = H::Input::try_from_event(&event)
+            .map_err(|e| HandlerError::Deserialization(e.to_string()))?;
+        let effect_context = effect_context.ok_or_else(|| {
+            HandlerError::Other("effectful sink invoked without effect context".to_string())
+        })?;
+        let mut fx = Effects::new(effect_context);
+        EffectfulSinkHandler::consume_report(&mut self.0, input, &mut fx).await
+    }
+
+    async fn flush_report(&mut self) -> Result<SinkLifecycleReport, HandlerError> {
+        EffectfulSinkHandler::flush_report(&mut self.0).await
+    }
+
+    async fn drain_report(&mut self) -> Result<SinkLifecycleReport, HandlerError> {
+        EffectfulSinkHandler::drain_report(&mut self.0).await
+    }
+
+    fn stage_logic_version(&self) -> &str {
+        self.0.stage_logic_version()
     }
 }

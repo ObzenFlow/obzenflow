@@ -171,6 +171,8 @@ where
             control_middleware: Arc::new(NoControlMiddleware),
             last_eof_outcome: None,
             last_delivered_upstream_stage: None,
+            next_stage_input_position: 1,
+            last_delivered_stage_input_position: None,
         })
     }
 

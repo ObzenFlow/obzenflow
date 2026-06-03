@@ -4,8 +4,9 @@
 
 //! Draining state event loop for the stateful supervisor
 
+use crate::effects::EffectInvocationContext;
 use crate::metrics::instrumentation::process_with_instrumentation_no_count;
-use crate::stages::common::handlers::StatefulHandler;
+use crate::stages::common::handlers::{StatefulOutputContext, UnifiedStatefulHandler};
 use crate::stages::common::heartbeat::HeartbeatProcessingGuard;
 use crate::stages::common::supervision::backpressure_drain::{drain_one_pending, DrainOutcome};
 use crate::stages::common::supervision::error_routing::route_to_error_journal;
@@ -23,7 +24,7 @@ use super::super::fsm::{PendingTransition, StatefulContext, StatefulEvent, State
 use super::StatefulSupervisor;
 
 pub(super) async fn dispatch_draining<
-    H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
+    H: UnifiedStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
 >(
     sup: &mut StatefulSupervisor<H>,
     state: &StatefulState<H>,
@@ -98,6 +99,10 @@ pub(super) async fn dispatch_draining<
             .await
         {
             PollResult::Event(envelope) => {
+                let stage_input_position = subscription.last_delivered_stage_input_position();
+                if envelope.event.is_data() {
+                    ctx.last_input_position = stage_input_position;
+                }
                 // Retain the last consumed upstream envelope (with a merged vector-clock) so that any
                 // final drain emissions can be parented and preserve happened-before via vector clocks.
                 match ctx.last_consumed_envelope.as_mut() {
@@ -114,12 +119,40 @@ pub(super) async fn dispatch_draining<
                 }
                 ctx.instrumentation.record_consumed(&envelope);
 
-                if !envelope.event.is_control() {
+                if envelope.event.is_effect_result() {
+                    tracing::warn!(
+                        stage_name = %ctx.stage_name,
+                        event_id = %envelope.event.id,
+                        "Dropping transport-only EffectResult that bypassed subscription filtering during drain"
+                    );
+                    return Ok(EventLoopDirective::Continue);
+                }
+
+                if envelope.event.is_data() {
                     // Accumulate data events during draining, synchronously.
                     let event = envelope.event.clone();
                     let event_id = event.id;
                     let upstream_stage = subscription.last_delivered_upstream_stage();
                     let mut handler = (*ctx.handler).clone();
+                    let effect_context = stage_input_position.and_then(|input_seq| {
+                        ctx.writer_id.map(|writer_id| EffectInvocationContext {
+                            flow_id: ctx.flow_id,
+                            stage_id: ctx.stage_id,
+                            stage_key: ctx.stage_name.clone(),
+                            writer_id,
+                            input_seq,
+                            stage_logic_version: handler.stage_logic_version().to_string(),
+                            data_journal: ctx.data_journal.clone(),
+                            parent: envelope.clone(),
+                            effect_history: ctx.effect_history.clone(),
+                            effect_runtime_mode: ctx.effect_runtime_mode,
+                            effect_ports: ctx.effect_ports.clone(),
+                            effect_boundary: None,
+                            boundary_control_events: std::sync::Arc::new(std::sync::Mutex::new(
+                                Vec::new(),
+                            )),
+                        })
+                    });
 
                     if let (Some(heartbeat), Some(upstream)) = (&ctx.heartbeat, upstream_stage) {
                         if event.is_data() {
@@ -137,7 +170,9 @@ pub(super) async fn dispatch_draining<
                         HeartbeatProcessingGuard::new(state.clone(), upstream_stage, event_id)
                     });
 
-                    handler.accumulate(&mut ctx.current_state, event);
+                    let accumulate_result = handler
+                        .accumulate(&mut ctx.current_state, event.clone(), effect_context)
+                        .await;
 
                     if let Some(state) = &heartbeat_state {
                         state.record_last_consumed(event_id);
@@ -160,6 +195,31 @@ pub(super) async fn dispatch_draining<
                         .events_accumulated_total
                         .fetch_add(1, Ordering::Relaxed);
 
+                    if let Err(err) = accumulate_result {
+                        ctx.instrumentation.record_error(err.kind());
+                        let reason = format!("Stateful handler error during drain: {err:?}");
+                        let error_event = event.mark_as_error(reason, err.kind());
+                        if route_to_error_journal(&error_event) {
+                            ctx.error_journal
+                                .append(error_event, Some(&envelope))
+                                .await
+                                .map_err(|e| {
+                                    format!("Failed to write stateful drain error: {e}")
+                                })?;
+                        } else {
+                            let enriched_error = error_event
+                                .with_flow_context(flow_context.clone())
+                                .with_runtime_context(ctx.instrumentation.snapshot_with_control());
+                            ctx.data_journal
+                                .append(enriched_error, Some(&envelope))
+                                .await
+                                .map_err(|e| {
+                                    format!("Failed to write stateful drain error: {e}")
+                                })?;
+                        }
+                        return Ok(EventLoopDirective::Continue);
+                    }
+
                     // Track accumulated events during drain for heartbeat visibility.
                     ctx.events_since_last_heartbeat =
                         ctx.events_since_last_heartbeat.saturating_add(1);
@@ -174,7 +234,24 @@ pub(super) async fn dispatch_draining<
                     // After accumulation, mirror Accumulating semantics: if the handler says we
                     // should emit, do so inline.
                     if handler.should_emit(&mut ctx.current_state) {
-                        match handler.emit(&mut ctx.current_state) {
+                        let output_context = ctx
+                            .writer_id
+                            .zip(ctx.last_consumed_envelope.as_ref())
+                            .map(|(writer_id, parent)| StatefulOutputContext {
+                                writer_id,
+                                parent,
+                                recorded_flow_id: ctx
+                                    .effect_history
+                                    .as_ref()
+                                    .map(|history| history.recorded_flow_id())
+                                    .unwrap_or(&flow_id),
+                                stage_key: &ctx.stage_name,
+                                input_seq: ctx.last_input_position.unwrap_or(
+                                    crate::messaging::upstream_subscription::StageInputPosition(0),
+                                ),
+                            });
+
+                        match handler.emit_with_context(&mut ctx.current_state, output_context) {
                             Ok(events_to_emit) => {
                                 if !events_to_emit.is_empty() {
                                     let stage_writer_id =
@@ -339,14 +416,31 @@ pub(super) async fn dispatch_draining<
     let final_state = ctx.current_state.clone();
     let handler = (*ctx.handler).clone();
     let instrumentation = ctx.instrumentation.clone();
+    let output_context =
+        ctx.writer_id
+            .zip(ctx.last_consumed_envelope.as_ref())
+            .map(|(writer_id, parent)| StatefulOutputContext {
+                writer_id,
+                parent,
+                recorded_flow_id: ctx
+                    .effect_history
+                    .as_ref()
+                    .map(|history| history.recorded_flow_id())
+                    .unwrap_or(&flow_id),
+                stage_key: &ctx.stage_name,
+                input_seq: ctx.last_input_position.unwrap_or(
+                    crate::messaging::upstream_subscription::StageInputPosition(0),
+                ),
+            });
 
     let drain_result = process_with_instrumentation_no_count(&ctx.instrumentation, || async move {
-        handler.drain(&final_state).await.map_err(
-            |err| -> Box<dyn std::error::Error + Send + Sync> {
+        handler
+            .drain_with_context(&final_state, output_context)
+            .await
+            .map_err(|err| -> Box<dyn std::error::Error + Send + Sync> {
                 instrumentation.record_error(err.kind());
                 err.into()
-            },
-        )
+            })
     })
     .await;
 

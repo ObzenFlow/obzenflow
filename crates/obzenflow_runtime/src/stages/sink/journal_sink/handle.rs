@@ -4,7 +4,7 @@
 
 //! Handle for journal sink stages
 
-use crate::stages::common::handlers::SinkHandler;
+use crate::stages::common::handlers::{SinkHandler, UnifiedSinkHandler};
 use crate::supervised_base::{HandleError, StandardHandle, SupervisorHandle};
 
 use super::fsm::{JournalSinkEvent, JournalSinkState};
@@ -40,7 +40,9 @@ pub trait JournalSinkHandleExt<H> {
     fn is_flushing(&self) -> bool;
 }
 
-impl<H: SinkHandler + Send + Sync + 'static> JournalSinkHandleExt<H> for JournalSinkHandle<H> {
+impl<H: UnifiedSinkHandler + Send + Sync + 'static> JournalSinkHandleExt<H>
+    for JournalSinkHandle<H>
+{
     async fn initialize(&self) -> Result<(), HandleError> {
         self.send_event(JournalSinkEvent::<H>::Initialize).await
     }

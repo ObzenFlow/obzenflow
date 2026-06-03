@@ -14,8 +14,8 @@
 //!   Under outages, the breaker opens and emits degraded AuthorizedPayment
 //!   events; contracts stay green and the pipeline completes successfully.
 //! - `run_strict_example_in_tests` builds a strict flow without CB; the same
-//!   outage pattern eventually causes a SeqDivergence transport violation on
-//!   `gateway → summary`, and the flow is expected to fail in tests.
+//!   outage pattern records failed gateway effects on the error rail without
+//!   emitting degraded authorizations.
 
 #[cfg(not(test))]
 use super::config::DemoConfig;
@@ -28,17 +28,21 @@ use anyhow::Result;
 use async_trait::async_trait;
 use obzenflow_adapters::middleware::circuit_breaker::{HalfOpenPolicy, OpenPolicy};
 use obzenflow_adapters::middleware::{backpressure, CircuitBreakerBuilder, RateLimiterBuilder};
-use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
+use obzenflow_core::event::status::processing_status::ErrorKind;
 use obzenflow_core::{
     event::chain_event::{ChainEvent, ChainEventFactory},
     CircuitBreakerContractMode, TypedPayload,
 };
-use obzenflow_dsl::{async_transform, flow, sink, source, transform};
+use obzenflow_dsl::{effectful_transform, flow, sink, source, transform};
 #[cfg(not(test))]
 use obzenflow_infra::application::{FlowApplication, LogLevel, Presentation};
 use obzenflow_infra::journal::disk_journals;
+use obzenflow_runtime::effects::{
+    Effect, EffectContext, EffectDeclaration, EffectError, EffectSafety, Effects, IdempotencyKey,
+};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
-use obzenflow_runtime::stages::common::handlers::{AsyncTransformHandler, TransformHandler};
+use obzenflow_runtime::stages::common::handlers::{EffectfulTransformHandler, TransformHandler};
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::num::NonZeroU32;
 
@@ -111,84 +115,124 @@ impl TransformHandler for ValidationTransform {
     }
 }
 
-/// Transform that simulates talking to an unreliable payment gateway.
-///
-/// The behaviour is intentionally simple:
-/// - Warmup: always succeeds, emits AuthorizedPayment.
-/// - Outage: returns `Err(HandlerError::Timeout(..))` so the runtime can
-///   convert it into an error-marked event (and middleware can observe the
-///   resulting `ErrorKind`).
-/// - Recovery: healthy again, succeeds when circuit allows traffic.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct GatewayAuthorization {
+    authorization_id: String,
+}
+
+impl TypedPayload for GatewayAuthorization {
+    const EVENT_TYPE: &'static str = "payment.gateway_authorization";
+}
+
+#[derive(Debug, Clone)]
+struct AuthorizePayment {
+    validated: ValidatedPayment,
+}
+
+#[async_trait]
+impl Effect for AuthorizePayment {
+    const EFFECT_TYPE: &'static str = "payment.authorize";
+    const SCHEMA_VERSION: u32 = 1;
+
+    type Output = GatewayAuthorization;
+
+    fn label(&self) -> &str {
+        "authorize_payment"
+    }
+
+    fn canonical_input(&self) -> serde_json::Value {
+        json!({
+            "request_id": self.validated.request_id,
+            "customer_id": self.validated.customer_id,
+            "amount_cents": self.validated.amount_cents,
+            "phase": self.validated.phase,
+        })
+    }
+
+    async fn execute(&self, ctx: &mut EffectContext) -> Result<Self::Output, EffectError> {
+        let latency_ms: u64 = ctx.rng("gateway_latency").u64(50..=200);
+        ctx.sleep(std::time::Duration::from_millis(latency_ms))
+            .await;
+
+        match self.validated.phase {
+            TrafficPhase::Warmup | TrafficPhase::Recovery => Ok(GatewayAuthorization {
+                authorization_id: AuthorizedPayment::AUTHORIZATION_ID_DEMO.to_string(),
+            }),
+            TrafficPhase::Outage => Err(EffectError::Execution(
+                "gateway_timeout_simulated".to_string(),
+            )),
+        }
+    }
+
+    fn safety(&self) -> EffectSafety {
+        EffectSafety::NonIdempotentRequiresKey
+    }
+
+    fn idempotency_key(&self) -> Option<IdempotencyKey> {
+        Some(IdempotencyKey(format!(
+            "payment-authorize:{}",
+            self.validated.request_id
+        )))
+    }
+}
+
+/// Transform that declares the gateway call as a replay-suppressed effect.
 #[derive(Debug, Clone)]
 struct GatewayTransform;
 
 #[async_trait]
-impl AsyncTransformHandler for GatewayTransform {
-    async fn process(&self, mut event: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> {
-        // Simulated remote call latency. We want this stage to exercise async IO
-        // semantics without blocking the tokio runtime.
-        let latency_ms: u64 = fastrand::u64(50..=200);
-        tokio::time::sleep(std::time::Duration::from_millis(latency_ms)).await;
+impl EffectfulTransformHandler for GatewayTransform {
+    type Input = ValidatedPayment;
+    type Output = AuthorizedPayment;
 
-        // If validation has already failed we leave the event alone.
-        if matches!(event.processing_info.status, ProcessingStatus::Error { .. }) {
-            return Ok(vec![event]);
+    async fn process(
+        &self,
+        validated: ValidatedPayment,
+        fx: &mut Effects,
+    ) -> Result<AuthorizedPayment, HandlerError> {
+        if validated.validation_error.is_some() {
+            return Err(HandlerError::Validation(
+                "payment_validation_failed".to_string(),
+            ));
         }
 
-        let payload = event.payload();
-        let validated: ValidatedPayment =
-            match serde_json::from_value::<ValidatedPayment>(payload.clone()) {
-                Ok(v) => v,
-                Err(_) => {
-                    event.processing_info.status =
-                        ProcessingStatus::error("failed_to_deserialize_validated_payment");
-                    return Ok(vec![event]);
-                }
-            };
+        let authorization = fx
+            .perform(AuthorizePayment {
+                validated: validated.clone(),
+            })
+            .await
+            .map_err(effect_error_to_handler_error)?;
 
-        // Simulate different behaviours depending on the scripted phase.
-        match validated.phase {
-            TrafficPhase::Warmup | TrafficPhase::Recovery => {
-                // Healthy gateway: succeed quickly. Overall throughput is
-                // shaped by the rate limiter middleware.
-                let authorized = AuthorizedPayment {
-                    request_id: validated.request_id,
-                    customer_id: validated.customer_id,
-                    amount_cents: validated.amount_cents,
-                    phase: validated.phase,
-                    authorization_id: AuthorizedPayment::AUTHORIZATION_ID_DEMO.to_string(),
-                };
-
-                let mut out = ChainEventFactory::derived_data_event(
-                    event.writer_id,
-                    &event,
-                    AuthorizedPayment::EVENT_TYPE,
-                    json!(authorized),
-                );
-                out.flow_context = event.flow_context.clone();
-                out.processing_info = event.processing_info.clone();
-                out.causality = event.causality.clone();
-                out.correlation = event.correlation.clone();
-                out.runtime_context = event.runtime_context.clone();
-                out.observability = event.observability.clone();
-
-                Ok(vec![out])
-            }
-            TrafficPhase::Outage => {
-                // Simulated remote outage: the gateway call "times out".
-                //
-                // Returning `Err(Timeout)` exercises FLOWIP-086e's per-record
-                // error mapping + routing while still allowing middleware (CB)
-                // to classify infra failures.
-                Err(HandlerError::Timeout(
-                    "gateway_timeout_simulated".to_string(),
-                ))
-            }
-        }
+        Ok(AuthorizedPayment {
+            request_id: validated.request_id,
+            customer_id: validated.customer_id,
+            amount_cents: validated.amount_cents,
+            phase: validated.phase,
+            authorization_id: authorization.authorization_id,
+        })
     }
 
     async fn drain(&mut self) -> Result<(), HandlerError> {
         Ok(())
+    }
+
+    fn stage_logic_version(&self) -> &str {
+        "payment-gateway-v1"
+    }
+
+    fn effect_declarations(&self) -> Vec<EffectDeclaration> {
+        vec![EffectDeclaration::non_idempotent_with_key(
+            AuthorizePayment::EFFECT_TYPE,
+        )]
+    }
+}
+
+fn effect_error_to_handler_error(err: EffectError) -> HandlerError {
+    match err {
+        EffectError::Execution(_) | EffectError::RecordedFailure { .. } => {
+            HandlerError::Timeout(err.to_string())
+        }
+        other => HandlerError::Other(other.to_string()),
     }
 }
 
@@ -241,7 +285,7 @@ fn build_flow() -> obzenflow_dsl::FlowDefinition {
             // - Slow-call contribution for gateway calls that take too long.
             // - Explicit Open/HalfOpen policies that still match the original
             //   semantics (emit fallback while Open; single-probe HalfOpen).
-            gateway = async_transform!(ValidatedPayment -> AuthorizedPayment => GatewayTransform, [
+            gateway = effectful_transform!(ValidatedPayment -> AuthorizedPayment => GatewayTransform, [
                 CircuitBreakerBuilder::new(3)
                     .cooldown(std::time::Duration::from_secs(5))
                     // Rate-based failure mode: open when >= 60% of the last
@@ -250,11 +294,7 @@ fn build_flow() -> obzenflow_dsl::FlowDefinition {
                     // Additionally count very slow calls toward opening the
                     // breaker when at least half of recent calls are slow.
                     .slow_call(std::time::Duration::from_millis(250), 0.5)
-                    .with_typed_fallback::<ValidatedPayment, AuthorizedPayment, _>(|validated| AuthorizedPayment {
-                        request_id: validated.request_id.clone(),
-                        customer_id: validated.customer_id.clone(),
-                        amount_cents: validated.amount_cents,
-                        phase: validated.phase.clone(),
+                    .with_typed_fallback::<ValidatedPayment, GatewayAuthorization, _>(|_validated| GatewayAuthorization {
                         authorization_id: AuthorizedPayment::AUTHORIZATION_ID_FALLBACK_CB_OPEN.to_string(),
                     })
                     // Make the Open/HalfOpen behaviour explicit; these match
@@ -365,16 +405,12 @@ fn build_glitchy_flow(config: GlitchyFlowConfig) -> obzenflow_dsl::FlowDefinitio
             validated = transform!(name: "validation", PaymentCommand -> ValidatedPayment => ValidationTransform, [
                 backpressure(BACKPRESSURE_WINDOW)
             ]);
-            gateway = async_transform!(ValidatedPayment -> AuthorizedPayment => GatewayTransform, [
+            gateway = effectful_transform!(ValidatedPayment -> AuthorizedPayment => GatewayTransform, [
                 CircuitBreakerBuilder::new(3)
                     .cooldown(std::time::Duration::from_secs(5))
                     .rate_based_over_last_n_calls(5, 0.6)
                     .slow_call(std::time::Duration::from_millis(250), 0.5)
-                    .with_typed_fallback::<ValidatedPayment, AuthorizedPayment, _>(|validated| AuthorizedPayment {
-                        request_id: validated.request_id.clone(),
-                        customer_id: validated.customer_id.clone(),
-                        amount_cents: validated.amount_cents,
-                        phase: validated.phase.clone(),
+                    .with_typed_fallback::<ValidatedPayment, GatewayAuthorization, _>(|_validated| GatewayAuthorization {
                         authorization_id: AuthorizedPayment::AUTHORIZATION_ID_FALLBACK_CB_OPEN.to_string(),
                     })
                     .open_policy(OpenPolicy::EmitFallback)
@@ -429,10 +465,8 @@ pub fn run_example_in_tests() -> Result<()> {
 
 /// Strict-mode variant of the flow used for tests.
 ///
-/// This version omits the circuit breaker entirely so that downstream
-/// contracts see the raw effects of a flaky gateway. Under the scripted
-/// outage pattern, the `gateway → summary` edge should eventually fail
-/// with a SeqDivergence transport violation.
+/// This version omits the circuit breaker entirely so the gateway stage records
+/// failed effects on the error rail instead of producing degraded authorizations.
 #[cfg(test)]
 fn build_strict_flow() -> obzenflow_dsl::FlowDefinition {
     flow! {
@@ -450,7 +484,7 @@ fn build_strict_flow() -> obzenflow_dsl::FlowDefinition {
             validated = transform!(name: "validation_strict", PaymentCommand -> ValidatedPayment => ValidationTransform, [
                 backpressure(BACKPRESSURE_WINDOW)
             ]);
-            gateway = async_transform!(name: "gateway_strict", ValidatedPayment -> AuthorizedPayment => GatewayTransform);
+            gateway = effectful_transform!(name: "gateway_strict", ValidatedPayment -> AuthorizedPayment => GatewayTransform);
             summary = sink!(name: "summary_strict", AuthorizedPayment => PaymentSummarySink::new());
         },
 
@@ -462,7 +496,7 @@ fn build_strict_flow() -> obzenflow_dsl::FlowDefinition {
     }
 }
 
-/// Test-only runner for the strict flow; expected to fail with a contract violation.
+/// Test-only runner for the strict flow.
 #[cfg(test)]
 pub fn run_strict_example_in_tests() -> Result<()> {
     run_flow_in_tests(build_strict_flow(), "Flow execution failed (strict mode)")

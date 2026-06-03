@@ -21,8 +21,9 @@ pub use heartbeat::LivenessSnapshots;
 
 // Re-export handler traits for convenience
 pub use handlers::{
-    FiniteSourceHandler, InfiniteSourceHandler, ObserverHandler, ResourceManaged, SinkHandler,
-    StatefulHandler, TransformHandler,
+    EffectfulSinkHandler, EffectfulStatefulHandler, EffectfulTransformHandler, FiniteSourceHandler,
+    InfiniteSourceHandler, ObserverHandler, ResourceManaged, SinkHandler, StatefulHandler,
+    TransformHandler,
 };
 
 // Re-export handler error type so stage code can depend on a single error enum

@@ -664,6 +664,13 @@ macro_rules! build_typed_flow {
             });
         }
 
+        $crate::dsl::typing::validate_effectful_deterministic_input_order(
+            &topology,
+            &descriptors,
+            &name_to_id,
+        )
+        .map_err(|err| *err)?;
+
         // FLOWIP-051l (P0): backflow cycles are currently only supported for transform stages.
         // Reject any topology where a cycle-member stage is not a transform so we do not silently
         // drop cycle protection for other stage types when the middleware-based guard is removed.
@@ -986,6 +993,7 @@ macro_rules! build_typed_flow {
                     dsl_var: name.clone(),
                     stage_type: descriptor.stage_type(),
                     stage_id: stage_id.to_string(),
+                    stage_logic_version: descriptor.stage_logic_version(),
                     data_journal_file,
                     error_journal_file,
                 },

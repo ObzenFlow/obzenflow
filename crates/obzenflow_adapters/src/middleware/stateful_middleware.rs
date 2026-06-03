@@ -11,6 +11,7 @@ use super::{Middleware, MiddlewareAction, MiddlewareContext};
 use async_trait::async_trait;
 use obzenflow_core::event::status::processing_status::ProcessingStatus;
 use obzenflow_core::ChainEvent;
+use obzenflow_core::MiddlewareExecutionScope;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::StatefulHandler;
 use std::sync::Arc;
@@ -20,6 +21,8 @@ use std::sync::Arc;
 pub struct MiddlewareStateful<H: StatefulHandler> {
     inner: H,
     middleware_chain: Arc<Vec<Arc<dyn Middleware>>>,
+    /// Replay execution scope for this stage (FLOWIP-120a).
+    execution_scope: MiddlewareExecutionScope,
 }
 
 impl<H: StatefulHandler> std::fmt::Debug for MiddlewareStateful<H> {
@@ -37,12 +40,19 @@ impl<H: StatefulHandler> MiddlewareStateful<H> {
         Self {
             inner,
             middleware_chain: Arc::new(Vec::new()),
+            execution_scope: MiddlewareExecutionScope::LiveHandler,
         }
     }
 
     /// Add middleware to the chain
     pub fn with_middleware(mut self, middleware: Box<dyn Middleware>) -> Self {
         Arc::make_mut(&mut self.middleware_chain).push(Arc::from(middleware));
+        self
+    }
+
+    /// Bind the replay execution scope for this stage (FLOWIP-120a).
+    pub fn with_execution_scope(mut self, scope: MiddlewareExecutionScope) -> Self {
+        self.execution_scope = scope;
         self
     }
 }
@@ -65,7 +75,7 @@ where
         }
 
         // Create ephemeral context for this processing
-        let mut ctx = MiddlewareContext::new();
+        let mut ctx = MiddlewareContext::with_scope(self.execution_scope);
 
         // Pre-processing phase
         for middleware in self.middleware_chain.iter() {

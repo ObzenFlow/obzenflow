@@ -34,6 +34,7 @@ thiserror = { workspace = true }
 fastrand = { workspace = true }
 hdrhistogram = { workspace = true }
 libc = { workspace = true }
+ring = { workspace = true }
 
 [dev-dependencies]
 tokio-test = { workspace = true }

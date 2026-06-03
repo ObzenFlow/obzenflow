@@ -189,6 +189,47 @@ impl ReplayArchive for DiskReplayArchive {
         Ok(Box::new(reader))
     }
 
+    async fn open_effect_history(
+        &self,
+        stage_key: &str,
+    ) -> Result<Box<dyn JournalReader<ChainEvent>>, ReplayError> {
+        let stage_info =
+            self.manifest
+                .stages
+                .get(stage_key)
+                .ok_or_else(|| ReplayError::StageNotInManifest {
+                    stage_key: stage_key.to_string(),
+                })?;
+
+        if !matches!(
+            self.status,
+            ArchiveStatus::Completed | ArchiveStatus::Cancelled
+        ) && !self.allow_incomplete_archive
+        {
+            return Err(ReplayError::IncompleteArchive {
+                status: self.status,
+            });
+        }
+
+        let data_path = self.archive_path.join(&stage_info.data_journal_file);
+        if !data_path.exists() {
+            return Err(ReplayError::MissingJournal { path: data_path });
+        }
+
+        let reader = DiskJournalReader::<ChainEvent>::open_existing(
+            data_path,
+            JournalId::new(),
+            self.read_write_lock.clone(),
+        )
+        .await
+        .map_err(|e| ReplayError::Io {
+            message: "Failed to open archived effect-history reader".to_string(),
+            source: std::io::Error::other(e.to_string()),
+        })?;
+
+        Ok(Box::new(reader))
+    }
+
     fn source_data_journal_path(&self, stage_key: &str) -> Result<PathBuf, ReplayError> {
         let stage_info =
             self.manifest

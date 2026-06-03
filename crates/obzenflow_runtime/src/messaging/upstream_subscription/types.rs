@@ -17,6 +17,9 @@ use tokio::time::Instant;
 
 use crate::pipeline::config::CycleGuardConfig;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct StageInputPosition(pub u64);
+
 /// Status of contract checking
 #[derive(Debug)]
 #[must_use]

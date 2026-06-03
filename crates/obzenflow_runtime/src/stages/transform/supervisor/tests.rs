@@ -6,6 +6,7 @@
 
 use super::*;
 use crate::backpressure::{BackpressurePlan, BackpressureRegistry};
+use crate::effects::{EffectPortRegistry, EffectRuntimeMode};
 use crate::id_conversions::StageIdExt;
 use crate::pipeline::config::CycleGuardConfig;
 use crate::stages::common::control_strategies::JonestownStrategy;
@@ -110,6 +111,10 @@ async fn build_cycle_entry_harness<
         flow_name: "cycle_test_flow".to_string(),
         flow_id: FlowId::new(),
         data_journal: data_journal.clone(),
+        replay_archive: None,
+        effect_history: None,
+        effect_runtime_mode: EffectRuntimeMode::Live,
+        effect_ports: EffectPortRegistry::new(),
         error_journal,
         system_journal: system_journal.clone(),
         writer_id: None,
@@ -393,6 +398,10 @@ async fn build_transform_harness<
         flow_name: "bp_test_flow".to_string(),
         flow_id: FlowId::new(),
         data_journal: data_journal.clone(),
+        replay_archive: None,
+        effect_history: None,
+        effect_runtime_mode: EffectRuntimeMode::Live,
+        effect_ports: EffectPortRegistry::new(),
         error_journal,
         system_journal: system_journal.clone(),
         writer_id: None,

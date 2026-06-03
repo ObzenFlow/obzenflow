@@ -21,10 +21,12 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 
 use crate::backpressure::{BackpressureReader, BackpressureRegistry, BackpressureWriter};
+use crate::effects::{EffectHistory, EffectPortRegistry, EffectRuntimeMode};
 use crate::messaging::upstream_subscription::{ContractConfig, ContractsWiring, ReaderProgress};
 use crate::messaging::UpstreamSubscription;
 use crate::metrics::instrumentation::StageInstrumentation;
 use crate::pipeline::config::CycleGuardConfig;
+use crate::replay::ReplayArchive;
 use crate::stages::common::backpressure_activity_pulse::BackpressureActivityPulse;
 use crate::stages::common::control_strategies::ControlEventStrategy;
 use crate::stages::common::handlers::transform::traits::UnifiedTransformHandler;
@@ -278,6 +280,18 @@ pub(crate) struct TransformContext<H: UnifiedTransformHandler> {
     /// Data journal for writing chain events
     pub data_journal: Arc<dyn Journal<ChainEvent>>,
 
+    /// Optional replay archive for effect-history loading.
+    pub replay_archive: Option<Arc<dyn ReplayArchive>>,
+
+    /// Stage-local effect history loaded from replay archive.
+    pub effect_history: Option<Arc<EffectHistory>>,
+
+    /// Effect execution mode derived from the replay archive state.
+    pub effect_runtime_mode: EffectRuntimeMode,
+
+    /// Flow-scoped typed ports available to replay-safe effects.
+    pub effect_ports: EffectPortRegistry,
+
     /// Error journal for writing error events (FLOWIP-082e)
     pub error_journal: Arc<dyn Journal<ChainEvent>>,
 
@@ -390,6 +404,18 @@ impl<H: UnifiedTransformHandler + Send + Sync + 'static> FsmAction for Transform
                     })?;
 
                 ctx.subscription = Some(subscription);
+
+                if let Some(archive) = &ctx.replay_archive {
+                    let history = EffectHistory::load(archive, &ctx.stage_name)
+                        .await
+                        .map_err(|e| {
+                            obzenflow_fsm::FsmError::HandlerError(format!(
+                                "Failed to load effect history for '{}': {e}",
+                                ctx.stage_name
+                            ))
+                        })?;
+                    ctx.effect_history = Some(Arc::new(history));
+                }
 
                 tracing::info!(
                     stage_name = %ctx.stage_name,

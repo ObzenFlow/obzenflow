@@ -83,6 +83,11 @@ pub trait ReplayArchive: Send + Sync {
         expected_type: StageType,
     ) -> Result<Box<dyn JournalReader<ChainEvent>>, ReplayError>;
 
+    async fn open_effect_history(
+        &self,
+        stage_key: &str,
+    ) -> Result<Box<dyn JournalReader<ChainEvent>>, ReplayError>;
+
     fn source_data_journal_path(&self, stage_key: &str) -> Result<PathBuf, ReplayError>;
 
     fn archive_flow_id(&self) -> &str;
@@ -167,7 +172,7 @@ impl ReplayDriver {
             };
 
             let original_event = envelope.event;
-            if !original_event.is_replayable() {
+            if !original_event.is_source_replayable() {
                 self.skipped_events = self.skipped_events.saturating_add(1);
                 continue;
             }

@@ -115,6 +115,13 @@ pub enum FlowBuildError {
          for this stage role. Declare the type via the typed macro form."
     )]
     UnspecifiedTypingOnApplicableSlot { stage_name: String, slot: String },
+
+    #[error(
+        "Effectful stage '{stage_name}' is downstream of nondeterministic fan-in. \
+         Add a deterministic orderer such as FLOWIP-095d before the effectful stage, \
+         or move the effect to a single-input deterministic path."
+    )]
+    EffectfulFanInRequiresDeterministicOrder { stage_name: String },
 }
 
 impl FlowBuildError {

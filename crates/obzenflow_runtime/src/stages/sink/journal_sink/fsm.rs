@@ -9,11 +9,13 @@
 //! data is written before shutdown.
 
 use crate::backpressure::{BackpressureReader, BackpressureWriter};
+use crate::effects::{EffectHistory, EffectPortRegistry, EffectRuntimeMode};
 use crate::messaging::upstream_subscription::{ContractConfig, ContractsWiring, ReaderProgress};
 use crate::messaging::UpstreamSubscription;
 use crate::metrics::instrumentation::StageInstrumentation;
+use crate::replay::ReplayArchive;
 use crate::stages::common::control_strategies::ControlEventStrategy;
-use crate::stages::common::handlers::SinkHandler;
+use crate::stages::common::handlers::UnifiedSinkHandler;
 use crate::stages::common::heartbeat::HeartbeatHandle;
 use crate::stages::common::supervision::lifecycle_actions;
 use crate::stages::resources_builder::BoundSubscriptionFactory;
@@ -275,7 +277,7 @@ impl<H> std::fmt::Debug for JournalSinkAction<H> {
 // ============================================================================
 
 /// Context for journal sink handlers - contains everything actions need
-pub struct JournalSinkContext<H: SinkHandler> {
+pub struct JournalSinkContext<H: UnifiedSinkHandler> {
     /// The handler instance that implements sink logic
     pub handler: H,
 
@@ -293,6 +295,18 @@ pub struct JournalSinkContext<H: SinkHandler> {
 
     /// Data journal for writing delivery events
     pub data_journal: Arc<dyn Journal<ChainEvent>>,
+
+    /// Replay archive for loading recorded effect outcomes.
+    pub replay_archive: Option<Arc<dyn ReplayArchive>>,
+
+    /// Recorded effect outcomes for replay suppression.
+    pub effect_history: Option<Arc<EffectHistory>>,
+
+    /// Effect execution mode derived from the replay archive state.
+    pub effect_runtime_mode: EffectRuntimeMode,
+
+    /// Flow-scoped typed ports available to replay-safe effects.
+    pub effect_ports: EffectPortRegistry,
 
     /// Error journal for writing error events (FLOWIP-082e)
     pub error_journal: Arc<dyn Journal<ChainEvent>>,
@@ -334,14 +348,14 @@ pub struct JournalSinkContext<H: SinkHandler> {
     pub(crate) heartbeat: Option<HeartbeatHandle>,
 }
 
-impl<H: SinkHandler + 'static> FsmContext for JournalSinkContext<H> {}
+impl<H: UnifiedSinkHandler + 'static> FsmContext for JournalSinkContext<H> {}
 
 // ============================================================================
 // FSM Action Implementation
 // ============================================================================
 
 #[async_trait::async_trait]
-impl<H: SinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAction<H> {
+impl<H: UnifiedSinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAction<H> {
     type Context = JournalSinkContext<H>;
 
     async fn execute(&self, ctx: &mut Self::Context) -> Result<(), obzenflow_fsm::FsmError> {
@@ -376,6 +390,18 @@ impl<H: SinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAction<H> 
                     })?;
 
                 ctx.subscription = Some(subscription);
+
+                if let Some(archive) = &ctx.replay_archive {
+                    let history = EffectHistory::load(archive, &ctx.stage_name)
+                        .await
+                        .map_err(|e| {
+                            obzenflow_fsm::FsmError::HandlerError(format!(
+                                "Failed to load effect history for '{}': {e}",
+                                ctx.stage_name
+                            ))
+                        })?;
+                    ctx.effect_history = Some(Arc::new(history));
+                }
 
                 tracing::info!(
                     stage_name = %ctx.stage_name,
@@ -640,7 +666,7 @@ impl<H: SinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAction<H> 
     }
 }
 
-async fn journal_commit_receipt<H: SinkHandler + Send + Sync + 'static>(
+async fn journal_commit_receipt<H: UnifiedSinkHandler + Send + Sync + 'static>(
     ctx: &mut JournalSinkContext<H>,
     parent_envelope: &EventEnvelope<ChainEvent>,
     payload: DeliveryPayload,

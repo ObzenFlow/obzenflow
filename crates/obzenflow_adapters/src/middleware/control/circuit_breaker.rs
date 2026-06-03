@@ -901,6 +901,18 @@ impl Middleware for CircuitBreakerMiddleware {
     }
 
     fn pre_handle(&self, event: &ChainEvent, ctx: &mut MiddlewareContext) -> MiddlewareAction {
+        // FLOWIP-120a: during deterministic replay the stage is reconstructed
+        // from recorded events. The guarded effect is suppressed (its recorded
+        // outcome is returned before the effect boundary is consulted), so this
+        // handler-level breaker must not reject, reserve a probe slot, transition
+        // state, or emit. The live run already recorded the breaker's decisions.
+        // Live effect execution runs through the effect boundary under
+        // `LiveEffectBoundary`, which is not deterministic replay, so this never
+        // disables protection of a live effect.
+        if ctx.execution_scope().is_deterministic_replay() {
+            return MiddlewareAction::Continue;
+        }
+
         match self.current_state() {
             CircuitState::Closed => {
                 // Normal operation
@@ -1006,6 +1018,14 @@ impl Middleware for CircuitBreakerMiddleware {
     }
 
     fn post_handle(&self, event: &ChainEvent, outputs: &[ChainEvent], ctx: &mut MiddlewareContext) {
+        // FLOWIP-120a: replay reconstruction observes recorded outputs, not a live
+        // call, so the breaker must not classify the outcome, count successes or
+        // failures, push to the rate window, transition state, run retry logic, or
+        // emit lifecycle/summary records. All of that was recorded by the live run.
+        if ctx.execution_scope().is_deterministic_replay() {
+            return;
+        }
+
         let now = Instant::now();
 
         let attempt = ctx.get::<CircuitBreakerAttempt>().copied().unwrap_or(0);

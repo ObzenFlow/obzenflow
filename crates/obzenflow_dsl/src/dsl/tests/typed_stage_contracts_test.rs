@@ -9,13 +9,14 @@ mod tests {
     use async_trait::async_trait;
     use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
     use obzenflow_core::{ChainEvent, StageId, TypedPayload, WriterId};
+    use obzenflow_runtime::effects::Effects;
     use obzenflow_runtime::id_conversions::StageIdExt;
     use obzenflow_runtime::stages::common::handler_error::HandlerError;
     use obzenflow_runtime::stages::common::handlers::source::SourceError;
     use obzenflow_runtime::stages::common::handlers::{
         AsyncFiniteSourceHandler, AsyncInfiniteSourceHandler, AsyncTransformHandler,
-        FiniteSourceHandler, InfiniteSourceHandler, JoinHandler, SinkHandler, StatefulHandler,
-        TransformHandler,
+        EffectfulTransformHandler, FiniteSourceHandler, InfiniteSourceHandler, JoinHandler,
+        SinkHandler, StatefulHandler, TransformHandler,
     };
     use obzenflow_runtime::typing::{
         JoinTyping, SinkTyping, SourceTyping, StatefulTyping, TransformTyping,
@@ -30,9 +31,19 @@ mod tests {
     use crate::dsl::stage_descriptor::StageDescriptor;
     use crate::dsl::stage_descriptor::TransformDescriptor;
     use crate::dsl::typing::{
-        collect_stage_typing_info, validate_edge_typing, validate_stage_typing_metadata,
+        collect_stage_typing_info, validate_edge_typing,
+        validate_effectful_deterministic_input_order, validate_stage_typing_metadata,
         EdgeInputRole, TypeHint,
     };
+    // FLOWIP-120a: imports for the deterministic-orderer test fixture below.
+    use crate::dsl::StageCreationResult;
+    use obzenflow_adapters::middleware::control::ControlMiddlewareAggregator;
+    use obzenflow_adapters::middleware::MiddlewareFactory;
+    use obzenflow_core::event::context::StageType as CoreStageType;
+    use obzenflow_runtime::pipeline::config::StageConfig;
+    use obzenflow_runtime::stages::common::stage_handle::BoxedStageHandle;
+    use obzenflow_runtime::stages::StageResources;
+    use std::sync::Arc;
 
     #[derive(Clone, Debug, Serialize, Deserialize)]
     struct InputEvent {
@@ -164,6 +175,23 @@ mod tests {
 
         async fn drain(&mut self) -> Result<(), HandlerError> {
             Ok(())
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    struct EffectfulExactTransform;
+
+    #[async_trait]
+    impl EffectfulTransformHandler for EffectfulExactTransform {
+        type Input = OutputEvent;
+        type Output = OutputEvent;
+
+        async fn process(
+            &self,
+            input: OutputEvent,
+            _fx: &mut Effects,
+        ) -> Result<OutputEvent, HandlerError> {
+            Ok(input)
         }
     }
 
@@ -609,6 +637,290 @@ mod tests {
         assert_eq!(errors[1].input_role, EdgeInputRole::Stream);
         assert_eq!(errors[1].upstream_type, type_name::<AlternateEvent>());
         assert_eq!(errors[1].expected_type, type_name::<StreamEvent>());
+    }
+
+    #[test]
+    fn effectful_guard_rejects_transitive_nondeterministic_fan_in() {
+        let source_a_id = StageId::new();
+        let source_b_id = StageId::new();
+        let merge_id = StageId::new();
+        let effectful_id = StageId::new();
+
+        let mut descriptors: HashMap<String, Box<dyn StageDescriptor>> = HashMap::new();
+        descriptors.insert(
+            "source_a".to_string(),
+            crate::source!(name: "source_a", InputEvent => placeholder!()),
+        );
+        descriptors.insert(
+            "source_b".to_string(),
+            crate::source!(name: "source_b", InputEvent => placeholder!()),
+        );
+        descriptors.insert(
+            "merge".to_string(),
+            crate::transform!(name: "merge", InputEvent -> OutputEvent => ExactTransform),
+        );
+        descriptors.insert(
+            "effectful".to_string(),
+            crate::effectful_transform!(
+                name: "effectful",
+                OutputEvent -> OutputEvent => EffectfulExactTransform
+            ),
+        );
+
+        let mut name_to_id = HashMap::new();
+        name_to_id.insert("source_a".to_string(), source_a_id);
+        name_to_id.insert("source_b".to_string(), source_b_id);
+        name_to_id.insert("merge".to_string(), merge_id);
+        name_to_id.insert("effectful".to_string(), effectful_id);
+
+        let mut topology = TopologyBuilder::new();
+        topology.add_stage_with_id(
+            source_a_id.to_topology_id(),
+            Some("source_a".to_string()),
+            TopologyStageType::FiniteSource,
+        );
+        topology.reset_current();
+        topology.add_stage_with_id(
+            source_b_id.to_topology_id(),
+            Some("source_b".to_string()),
+            TopologyStageType::FiniteSource,
+        );
+        topology.reset_current();
+        topology.add_stage_with_id(
+            merge_id.to_topology_id(),
+            Some("merge".to_string()),
+            TopologyStageType::Transform,
+        );
+        topology.reset_current();
+        topology.add_stage_with_id(
+            effectful_id.to_topology_id(),
+            Some("effectful".to_string()),
+            TopologyStageType::Transform,
+        );
+        topology.reset_current();
+        topology.add_edge(source_a_id.to_topology_id(), merge_id.to_topology_id());
+        topology.add_edge(source_b_id.to_topology_id(), merge_id.to_topology_id());
+        topology.add_edge(merge_id.to_topology_id(), effectful_id.to_topology_id());
+        let topology = topology.build_unchecked().unwrap();
+
+        let err =
+            *validate_effectful_deterministic_input_order(&topology, &descriptors, &name_to_id)
+                .expect_err("effectful stage below transitive fan-in must be rejected");
+
+        match err {
+            FlowBuildError::EffectfulFanInRequiresDeterministicOrder { stage_name } => {
+                assert_eq!(stage_name, "effectful");
+            }
+            other => panic!("unexpected error variant: {other:?}"),
+        }
+    }
+
+    /// FLOWIP-120a test fixture: a descriptor that declares itself a deterministic
+    /// input orderer, standing in for the runtime-enforced capability FLOWIP-095d
+    /// will supply. No production descriptor sets this flag, so this test-only stub
+    /// is the only way to exercise the guard's accept branch. It never builds a
+    /// handle, because the deterministic-order guard inspects descriptor flags only.
+    struct DeterministicOrdererStub {
+        name: String,
+    }
+
+    #[async_trait]
+    impl StageDescriptor for DeterministicOrdererStub {
+        fn name(&self) -> &str {
+            &self.name
+        }
+
+        fn stage_type(&self) -> CoreStageType {
+            CoreStageType::Transform
+        }
+
+        fn is_deterministic_input_orderer(&self) -> bool {
+            true
+        }
+
+        async fn create_handle_with_flow_middleware(
+            self: Box<Self>,
+            _config: StageConfig,
+            _resources: StageResources,
+            _flow_middleware: Vec<Box<dyn MiddlewareFactory>>,
+            _control_middleware: Arc<ControlMiddlewareAggregator>,
+        ) -> StageCreationResult<BoxedStageHandle> {
+            unimplemented!(
+                "DeterministicOrdererStub is a build-guard test fixture and never builds a handle"
+            )
+        }
+    }
+
+    /// FLOWIP-120a: the accept branch of the effectful fan-in guard. An effectful
+    /// stage whose immediate upstream is a declared deterministic orderer must pass,
+    /// because the orderer resets the propagated deterministic-input-order property
+    /// for its descendants. This pins the orderer flag as the sole discriminator: the
+    /// topology is identical to `effectful_guard_rejects_transitive_nondeterministic_fan_in`
+    /// except the merge node is an orderer, and that test is the negative control.
+    #[test]
+    fn effectful_guard_accepts_effectful_stage_below_deterministic_orderer() {
+        let source_a_id = StageId::new();
+        let source_b_id = StageId::new();
+        let orderer_id = StageId::new();
+        let effectful_id = StageId::new();
+
+        let mut descriptors: HashMap<String, Box<dyn StageDescriptor>> = HashMap::new();
+        descriptors.insert(
+            "source_a".to_string(),
+            crate::source!(name: "source_a", InputEvent => placeholder!()),
+        );
+        descriptors.insert(
+            "source_b".to_string(),
+            crate::source!(name: "source_b", InputEvent => placeholder!()),
+        );
+        descriptors.insert(
+            "orderer".to_string(),
+            Box::new(DeterministicOrdererStub {
+                name: "orderer".to_string(),
+            }),
+        );
+        descriptors.insert(
+            "effectful".to_string(),
+            crate::effectful_transform!(
+                name: "effectful",
+                OutputEvent -> OutputEvent => EffectfulExactTransform
+            ),
+        );
+
+        let mut name_to_id = HashMap::new();
+        name_to_id.insert("source_a".to_string(), source_a_id);
+        name_to_id.insert("source_b".to_string(), source_b_id);
+        name_to_id.insert("orderer".to_string(), orderer_id);
+        name_to_id.insert("effectful".to_string(), effectful_id);
+
+        let mut topology = TopologyBuilder::new();
+        topology.add_stage_with_id(
+            source_a_id.to_topology_id(),
+            Some("source_a".to_string()),
+            TopologyStageType::FiniteSource,
+        );
+        topology.reset_current();
+        topology.add_stage_with_id(
+            source_b_id.to_topology_id(),
+            Some("source_b".to_string()),
+            TopologyStageType::FiniteSource,
+        );
+        topology.reset_current();
+        topology.add_stage_with_id(
+            orderer_id.to_topology_id(),
+            Some("orderer".to_string()),
+            TopologyStageType::Transform,
+        );
+        topology.reset_current();
+        topology.add_stage_with_id(
+            effectful_id.to_topology_id(),
+            Some("effectful".to_string()),
+            TopologyStageType::Transform,
+        );
+        topology.reset_current();
+        topology.add_edge(source_a_id.to_topology_id(), orderer_id.to_topology_id());
+        topology.add_edge(source_b_id.to_topology_id(), orderer_id.to_topology_id());
+        topology.add_edge(orderer_id.to_topology_id(), effectful_id.to_topology_id());
+        let topology = topology.build_unchecked().unwrap();
+
+        assert!(
+            validate_effectful_deterministic_input_order(&topology, &descriptors, &name_to_id)
+                .is_ok(),
+            "effectful stage below a deterministic orderer must be accepted"
+        );
+    }
+
+    /// FLOWIP-120a: the single-upstream reset. An orderer followed by an ordinary
+    /// passthrough transform still yields a deterministic input order at an effectful
+    /// stage two hops below the fan-in, exercising the recursion that propagates the
+    /// orderer's reset through an intervening single-upstream node.
+    #[test]
+    fn effectful_guard_accepts_effectful_stage_two_hops_below_orderer() {
+        let source_a_id = StageId::new();
+        let source_b_id = StageId::new();
+        let orderer_id = StageId::new();
+        let passthrough_id = StageId::new();
+        let effectful_id = StageId::new();
+
+        let mut descriptors: HashMap<String, Box<dyn StageDescriptor>> = HashMap::new();
+        descriptors.insert(
+            "source_a".to_string(),
+            crate::source!(name: "source_a", InputEvent => placeholder!()),
+        );
+        descriptors.insert(
+            "source_b".to_string(),
+            crate::source!(name: "source_b", InputEvent => placeholder!()),
+        );
+        descriptors.insert(
+            "orderer".to_string(),
+            Box::new(DeterministicOrdererStub {
+                name: "orderer".to_string(),
+            }),
+        );
+        descriptors.insert(
+            "passthrough".to_string(),
+            crate::transform!(name: "passthrough", InputEvent -> OutputEvent => ExactTransform),
+        );
+        descriptors.insert(
+            "effectful".to_string(),
+            crate::effectful_transform!(
+                name: "effectful",
+                OutputEvent -> OutputEvent => EffectfulExactTransform
+            ),
+        );
+
+        let mut name_to_id = HashMap::new();
+        name_to_id.insert("source_a".to_string(), source_a_id);
+        name_to_id.insert("source_b".to_string(), source_b_id);
+        name_to_id.insert("orderer".to_string(), orderer_id);
+        name_to_id.insert("passthrough".to_string(), passthrough_id);
+        name_to_id.insert("effectful".to_string(), effectful_id);
+
+        let mut topology = TopologyBuilder::new();
+        topology.add_stage_with_id(
+            source_a_id.to_topology_id(),
+            Some("source_a".to_string()),
+            TopologyStageType::FiniteSource,
+        );
+        topology.reset_current();
+        topology.add_stage_with_id(
+            source_b_id.to_topology_id(),
+            Some("source_b".to_string()),
+            TopologyStageType::FiniteSource,
+        );
+        topology.reset_current();
+        topology.add_stage_with_id(
+            orderer_id.to_topology_id(),
+            Some("orderer".to_string()),
+            TopologyStageType::Transform,
+        );
+        topology.reset_current();
+        topology.add_stage_with_id(
+            passthrough_id.to_topology_id(),
+            Some("passthrough".to_string()),
+            TopologyStageType::Transform,
+        );
+        topology.reset_current();
+        topology.add_stage_with_id(
+            effectful_id.to_topology_id(),
+            Some("effectful".to_string()),
+            TopologyStageType::Transform,
+        );
+        topology.reset_current();
+        topology.add_edge(source_a_id.to_topology_id(), orderer_id.to_topology_id());
+        topology.add_edge(source_b_id.to_topology_id(), orderer_id.to_topology_id());
+        topology.add_edge(orderer_id.to_topology_id(), passthrough_id.to_topology_id());
+        topology.add_edge(
+            passthrough_id.to_topology_id(),
+            effectful_id.to_topology_id(),
+        );
+        let topology = topology.build_unchecked().unwrap();
+
+        assert!(
+            validate_effectful_deterministic_input_order(&topology, &descriptors, &name_to_id)
+                .is_ok(),
+            "effectful stage two hops below a deterministic orderer must be accepted"
+        );
     }
 
     // ─── FLOWIP-114c PR D closing-pass regression tests ────────────────────

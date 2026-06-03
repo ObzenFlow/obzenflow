@@ -482,6 +482,16 @@ impl Middleware for RateLimiterMiddleware {
     }
 
     fn pre_handle(&self, event: &ChainEvent, ctx: &mut MiddlewareContext) -> MiddlewareAction {
+        // FLOWIP-120a: during deterministic replay the stage is reconstructed
+        // from recorded events and performs no live external admission, so the
+        // limiter must not consume a token, block, mark the event delayed, mutate
+        // admission state, or emit a lifecycle record. Replay reproduces identical
+        // values; pacing it would only change timing, and any delay/utilization
+        // records already exist in the archive being replayed.
+        if ctx.execution_scope().is_deterministic_replay() {
+            return MiddlewareAction::Continue;
+        }
+
         if event.is_control() || event.is_lifecycle() {
             trace!(
                 event_id = %event.id,
@@ -588,14 +598,26 @@ impl Middleware for RateLimiterMiddleware {
                         ));
                     }
 
-                    // Block until tokens should be available
-                    // For longer waits, use block_in_place to avoid blocking tokio worker threads
+                    // Block until tokens should be available. On multi-threaded runtimes,
+                    // use block_in_place to avoid blocking tokio worker threads. On
+                    // current-thread runtimes, block_in_place panics, so sleep directly.
                     let wait_start = Instant::now();
                     if wait_time > Duration::from_millis(1) {
-                        trace!(event_id = %event_id, "Using block_in_place for wait > 1ms");
-                        tokio::task::block_in_place(|| {
+                        let use_block_in_place = tokio::runtime::Handle::try_current()
+                            .map(|handle| {
+                                handle.runtime_flavor()
+                                    == tokio::runtime::RuntimeFlavor::MultiThread
+                            })
+                            .unwrap_or(false);
+                        if use_block_in_place {
+                            trace!(event_id = %event_id, "Using block_in_place for wait > 1ms");
+                            tokio::task::block_in_place(|| {
+                                std::thread::sleep(wait_time);
+                            });
+                        } else {
+                            trace!(event_id = %event_id, "Using direct sleep for wait > 1ms");
                             std::thread::sleep(wait_time);
-                        });
+                        }
                     } else {
                         // For very short waits, just yield to scheduler
                         trace!(event_id = %event_id, "Using yield_now for wait <= 1ms");
@@ -628,6 +650,12 @@ impl Middleware for RateLimiterMiddleware {
         _outputs: &[ChainEvent],
         ctx: &mut MiddlewareContext,
     ) {
+        // FLOWIP-120a: replay reconstruction performs no live admission, so the
+        // periodic activity-pulse and window-summary emissions (which also reset
+        // window counters and move limiter mode state) must be suppressed.
+        if ctx.execution_scope().is_deterministic_replay() {
+            return;
+        }
         self.maybe_emit_activity_pulse(ctx);
         // Check if we should emit a summary
         self.maybe_emit_summary(ctx);

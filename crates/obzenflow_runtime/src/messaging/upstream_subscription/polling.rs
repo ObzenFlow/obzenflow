@@ -2,7 +2,10 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use super::{DeliveryFilter, EofOutcome, PollResult, ReaderProgress, UpstreamSubscription};
+use super::{
+    DeliveryFilter, EofOutcome, PollResult, ReaderProgress, StageInputPosition,
+    UpstreamSubscription,
+};
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::types::SeqNo;
 use obzenflow_core::event::{ChainEvent, ChainEventContent, JournalEvent};
@@ -111,8 +114,13 @@ where
                         if let Some(chain_event) =
                             (&envelope.event as &dyn Any).downcast_ref::<ChainEvent>()
                         {
-                            if matches!(chain_event.content, ChainEventContent::Observability(_)) {
-                                // Observability events are not part of the transport stream.
+                            if matches!(
+                                chain_event.content,
+                                ChainEventContent::Observability(_)
+                                    | ChainEventContent::EffectResult(_)
+                            ) {
+                                // Observability and effect-result events are not part of the
+                                // transport stream.
                                 // Skip delivering to the caller, but keep progressing.
                                 self.state.next_reader_index();
                                 continue;
@@ -328,9 +336,25 @@ where
                         total_readers
                     );
 
+                    let delivered_stage_input_position = if let Some(chain_event) =
+                        (&envelope.event as &dyn Any).downcast_ref::<ChainEvent>()
+                    {
+                        if chain_event.is_data() {
+                            let position = StageInputPosition(self.next_stage_input_position);
+                            self.next_stage_input_position =
+                                self.next_stage_input_position.saturating_add(1);
+                            Some(position)
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+
                     // Advance to next reader for fairness
                     self.state.next_reader_index();
                     self.last_delivered_upstream_stage = Some(stage_id);
+                    self.last_delivered_stage_input_position = delivered_stage_input_position;
 
                     return PollResult::Event(envelope);
                 }

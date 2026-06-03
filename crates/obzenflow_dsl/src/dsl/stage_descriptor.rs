@@ -17,11 +17,12 @@ use obzenflow_adapters::middleware::{
     AsyncTransformHandlerExt, ControlMiddlewareRole, FiniteSourceHandlerExt,
     InfiniteSourceHandlerExt, JoinHandlerMiddlewareExt, Middleware, MiddlewareFactory,
     OutcomeEnrichmentMiddleware, SinkHandlerExt, StatefulHandlerMiddlewareExt,
-    SystemEnrichmentMiddleware, TimingMiddleware, TransformHandlerExt,
+    SystemEnrichmentMiddleware, TimingMiddleware, TransformHandlerExt, UnifiedMiddlewareTransform,
 };
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::{StageId, WriterId};
 use obzenflow_runtime::{
+    effects::{EffectDeclaration, EffectPortRegistry, EffectSafety, IdempotencyKeyPolicy},
     metrics::instrumentation::{InstrumentationConfig, StageInstrumentation},
     stages::StageResources,
 };
@@ -32,8 +33,10 @@ use obzenflow_runtime::{
             control_strategies::{CompositeStrategy, ControlEventStrategy, JonestownStrategy},
             handlers::{
                 AsyncFiniteSourceHandler, AsyncInfiniteSourceHandler, AsyncTransformHandler,
-                FiniteSourceHandler, InfiniteSourceHandler, JoinHandler, SinkHandler,
-                StatefulHandler, TransformHandler,
+                EffectfulSinkHandler, EffectfulSinkHandlerAdapter, EffectfulStatefulHandler,
+                EffectfulStatefulHandlerAdapter, EffectfulTransformHandler,
+                EffectfulTransformHandlerAdapter, FiniteSourceHandler, InfiniteSourceHandler,
+                JoinHandler, SinkHandler, StatefulHandler, TransformHandler,
             },
             stage_handle::{BoxedStageHandle, StageEvent, FORCE_SHUTDOWN_MESSAGE},
         },
@@ -54,8 +57,8 @@ use obzenflow_runtime::{
         },
         stateful::{StatefulBuilder, StatefulConfig, StatefulEvent, StatefulState},
         transform::{
-            AsyncTransformBuilder, TransformBuilder, TransformConfig, TransformEvent,
-            TransformState,
+            AsyncTransformBuilder, EffectfulTransformBuilder, TransformBuilder, TransformConfig,
+            TransformEvent, TransformState,
         },
     },
     supervised_base::SupervisorBuilder as SupervisorBuilderTrait,
@@ -204,6 +207,24 @@ pub trait StageDescriptor: Send + Sync {
         None
     }
 
+    /// Whether this stage can perform replay-suppressed user effects.
+    fn is_effectful(&self) -> bool {
+        false
+    }
+
+    /// Whether this stage imposes total deterministic order on N:1 input.
+    fn is_deterministic_input_orderer(&self) -> bool {
+        false
+    }
+
+    fn stage_logic_version(&self) -> String {
+        "1".to_string()
+    }
+
+    fn effect_declarations(&self) -> Vec<EffectDeclaration> {
+        Vec::new()
+    }
+
     /// Whether this descriptor is a composite that must be lowered during `flow!` materialisation.
     ///
     /// Default: `false` for ordinary stages.
@@ -221,6 +242,46 @@ pub trait StageDescriptor: Send + Sync {
     ) -> Result<Option<crate::dsl::composites::CompositeLowering>, crate::dsl::FlowBuildError> {
         Ok(None)
     }
+}
+
+fn validate_effect_declarations(
+    stage_name: &str,
+    declarations: &[EffectDeclaration],
+    effect_ports: &EffectPortRegistry,
+) -> Result<(), String> {
+    for declaration in declarations {
+        if matches!(declaration.safety, EffectSafety::NonIdempotentRequiresKey)
+            && !matches!(
+                declaration.idempotency_key_policy,
+                IdempotencyKeyPolicy::Required
+            )
+        {
+            return Err(format!(
+                "Effectful stage '{stage_name}' declares non-idempotent effect '{}' without an idempotency-key strategy",
+                declaration.effect_type
+            ));
+        }
+
+        if matches!(declaration.safety, EffectSafety::Transactional)
+            && declaration.transactional_executor.is_none()
+        {
+            return Err(format!(
+                "Effectful stage '{stage_name}' declares transactional effect '{}' without a transactional executor",
+                declaration.effect_type
+            ));
+        }
+
+        for requirement in &declaration.required_ports {
+            if !effect_ports.contains_requirement(requirement) {
+                return Err(format!(
+                    "Effectful stage '{stage_name}' requires effect port '{}' for type '{}' but it is not registered",
+                    requirement.name, requirement.type_name
+                ));
+            }
+        }
+    }
+
+    Ok(())
 }
 
 /// Descriptor for finite source stages
@@ -970,7 +1031,11 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Stag
         for mw in all_middleware {
             builder = builder.with(mw);
         }
-        let handler_with_middleware = builder.build();
+        // FLOWIP-120a: bind the stage's replay mode so handler-level control
+        // middleware suppresses its side effects during deterministic replay.
+        let handler_with_middleware = builder
+            .build()
+            .with_execution_scope(resources.effect_runtime_mode.into());
 
         // Create the stage configuration
         let transform_config = TransformConfig {
@@ -1109,7 +1174,11 @@ impl<H: AsyncTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
         for mw in all_middleware {
             builder = builder.with(mw);
         }
-        let handler_with_middleware = builder.build();
+        // FLOWIP-120a: bind the stage's replay mode so handler-level control
+        // middleware suppresses its side effects during deterministic replay.
+        let handler_with_middleware = builder
+            .build()
+            .with_execution_scope(resources.effect_runtime_mode.into());
 
         // Create the stage configuration
         let transform_config = TransformConfig {
@@ -1130,6 +1199,156 @@ impl<H: AsyncTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
                 .map_err(|e| format!("Failed to build async transform: {e:?}"))?;
 
         // Create adapter to bridge to StageHandle
+        let adapter = StageHandleAdapter::new(
+            handle,
+            config.stage_id,
+            config.name,
+            StageType::Transform,
+            translate_stage_event_to_transform,
+            check_transform_state,
+        );
+
+        Ok(Box::new(adapter) as BoxedStageHandle)
+    }
+}
+
+/// Descriptor for replay-safe effectful async transform stages.
+pub struct EffectfulTransformDescriptor<H: EffectfulTransformHandler + 'static> {
+    pub name: String,
+    pub handler: H,
+    pub middleware: Vec<Box<dyn MiddlewareFactory>>,
+}
+
+#[async_trait]
+impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDescriptor
+    for EffectfulTransformDescriptor<H>
+{
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn set_name(&mut self, name: String) {
+        self.name = name;
+    }
+
+    fn stage_type(&self) -> StageType {
+        StageType::Transform
+    }
+
+    fn is_effectful(&self) -> bool {
+        true
+    }
+
+    fn stage_logic_version(&self) -> String {
+        self.handler.stage_logic_version().to_string()
+    }
+
+    fn effect_declarations(&self) -> Vec<EffectDeclaration> {
+        self.handler.effect_declarations()
+    }
+
+    fn stage_middleware_names(&self) -> Vec<String> {
+        self.middleware
+            .iter()
+            .map(|f| f.label().to_string())
+            .collect()
+    }
+
+    fn stage_middleware_factories(&self) -> &[Box<dyn MiddlewareFactory>] {
+        &self.middleware
+    }
+
+    async fn create_handle_with_flow_middleware(
+        self: Box<Self>,
+        config: StageConfig,
+        resources: StageResources,
+        flow_middleware: Vec<Box<dyn MiddlewareFactory>>,
+        control_middleware: Arc<ControlMiddlewareAggregator>,
+    ) -> StageCreationResult<BoxedStageHandle> {
+        validate_effect_declarations(
+            &self.name,
+            &self.handler.effect_declarations(),
+            &resources.effect_ports,
+        )?;
+
+        for factory in &self.middleware {
+            let validation_result =
+                validate_middleware_safety(factory.as_ref(), StageType::Transform, &self.name);
+
+            if !validation_result.is_ok() {
+                for error in &validation_result.errors {
+                    tracing::error!("{}", error);
+                }
+            }
+        }
+
+        let resolved = crate::middleware_resolution::resolve_middleware(
+            flow_middleware,
+            self.middleware,
+            &config.name,
+        )?;
+        crate::middleware_resolution::log_resolved_middleware(&config.name, &resolved);
+        let control_strategy = create_control_strategy_from_middleware_specs(&resolved.middleware);
+
+        let instrumentation_config = InstrumentationConfig::default();
+        let mut instrumentation = StageInstrumentation::new_with_config(instrumentation_config);
+        let control_provider: Arc<dyn obzenflow_core::ControlMiddlewareProvider> =
+            control_middleware.clone();
+
+        let expects_circuit_breaker = resolved
+            .middleware
+            .iter()
+            .any(|spec| spec.factory.control_role() == ControlMiddlewareRole::CircuitBreaker);
+        let expects_rate_limiter = resolved
+            .middleware
+            .iter()
+            .any(|spec| spec.factory.control_role() == ControlMiddlewareRole::RateLimiter);
+
+        let mut all_middleware = create_system_middleware(&config, StageType::Transform);
+
+        let user_middleware: Vec<Box<dyn Middleware>> = resolved
+            .middleware
+            .into_iter()
+            .map(|spec| spec.factory.create(&config, control_middleware.clone()))
+            .collect::<Result<_, _>>()?;
+        all_middleware.extend(user_middleware);
+
+        instrumentation
+            .bind_control_middleware(
+                &config.stage_id,
+                &control_provider,
+                expects_circuit_breaker,
+                expects_rate_limiter,
+            )
+            .map_err(|e| e.to_string())?;
+        let instrumentation = Arc::new(instrumentation);
+
+        let transform_config = TransformConfig {
+            stage_id: config.stage_id,
+            stage_name: config.name.clone(),
+            flow_name: config.flow_name.clone(),
+            control_strategy: Some(control_strategy),
+            upstream_stages: resources.upstream_stages.clone(),
+            cycle_guard: config.cycle_guard,
+        };
+
+        let mut handler_with_middleware =
+            UnifiedMiddlewareTransform::new(EffectfulTransformHandlerAdapter(self.handler));
+        for mw in all_middleware {
+            handler_with_middleware = handler_with_middleware.with_middleware(mw);
+        }
+        // FLOWIP-120a: bind the stage's replay mode so handler-level control
+        // middleware suppresses its side effects during deterministic replay.
+        let handler_with_middleware =
+            handler_with_middleware.with_execution_scope(resources.effect_runtime_mode.into());
+
+        let handle =
+            EffectfulTransformBuilder::new(handler_with_middleware, transform_config, resources)
+                .with_instrumentation(instrumentation)
+                .build()
+                .await
+                .map_err(|e| format!("Failed to build effectful async transform: {e:?}"))?;
+
         let adapter = StageHandleAdapter::new(
             handle,
             config.stage_id,
@@ -1250,7 +1469,11 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
         for mw in all_middleware {
             builder = builder.with(mw);
         }
-        let handler_with_middleware = builder.build();
+        // FLOWIP-120a: bind the stage's replay mode so handler-level control
+        // middleware suppresses its side effects during deterministic replay.
+        let handler_with_middleware = builder
+            .build()
+            .with_execution_scope(resources.effect_runtime_mode.into());
 
         // Create the stage configuration
         let sink_config = JournalSinkConfig {
@@ -1271,6 +1494,147 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
             .map_err(|e| format!("Failed to build sink: {e:?}"))?;
 
         // Create adapter to bridge to StageHandle
+        let adapter = StageHandleAdapter::new(
+            handle,
+            config.stage_id,
+            config.name,
+            StageType::Sink,
+            translate_stage_event_to_sink,
+            check_sink_state,
+        );
+
+        Ok(Box::new(adapter) as BoxedStageHandle)
+    }
+}
+
+/// Descriptor for replay-safe effectful sink stages.
+pub struct EffectfulSinkDescriptor<H: EffectfulSinkHandler + 'static> {
+    pub name: String,
+    pub handler: H,
+    pub middleware: Vec<Box<dyn MiddlewareFactory>>,
+}
+
+#[async_trait]
+impl<H: EffectfulSinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDescriptor
+    for EffectfulSinkDescriptor<H>
+{
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn set_name(&mut self, name: String) {
+        self.name = name;
+    }
+
+    fn stage_type(&self) -> StageType {
+        StageType::Sink
+    }
+
+    fn is_effectful(&self) -> bool {
+        true
+    }
+
+    fn stage_logic_version(&self) -> String {
+        self.handler.stage_logic_version().to_string()
+    }
+
+    fn effect_declarations(&self) -> Vec<EffectDeclaration> {
+        self.handler.effect_declarations()
+    }
+
+    fn stage_middleware_names(&self) -> Vec<String> {
+        self.middleware
+            .iter()
+            .map(|f| f.label().to_string())
+            .collect()
+    }
+
+    fn stage_middleware_factories(&self) -> &[Box<dyn MiddlewareFactory>] {
+        &self.middleware
+    }
+
+    async fn create_handle_with_flow_middleware(
+        self: Box<Self>,
+        config: StageConfig,
+        resources: StageResources,
+        flow_middleware: Vec<Box<dyn MiddlewareFactory>>,
+        control_middleware: Arc<ControlMiddlewareAggregator>,
+    ) -> StageCreationResult<BoxedStageHandle> {
+        validate_effect_declarations(
+            &self.name,
+            &self.handler.effect_declarations(),
+            &resources.effect_ports,
+        )?;
+
+        for factory in &self.middleware {
+            let validation_result =
+                validate_middleware_safety(factory.as_ref(), StageType::Sink, &self.name);
+
+            if !validation_result.is_ok() {
+                for error in &validation_result.errors {
+                    tracing::error!("{}", error);
+                }
+            }
+        }
+
+        let resolved = crate::middleware_resolution::resolve_middleware(
+            flow_middleware,
+            self.middleware,
+            &config.name,
+        )?;
+        crate::middleware_resolution::log_resolved_middleware(&config.name, &resolved);
+        let control_strategy = create_control_strategy_from_middleware_specs(&resolved.middleware);
+
+        let instrumentation_config = InstrumentationConfig::default();
+        let mut instrumentation = StageInstrumentation::new_with_config(instrumentation_config);
+        let control_provider: Arc<dyn obzenflow_core::ControlMiddlewareProvider> =
+            control_middleware.clone();
+
+        let expects_circuit_breaker = resolved
+            .middleware
+            .iter()
+            .any(|spec| spec.factory.control_role() == ControlMiddlewareRole::CircuitBreaker);
+        let expects_rate_limiter = resolved
+            .middleware
+            .iter()
+            .any(|spec| spec.factory.control_role() == ControlMiddlewareRole::RateLimiter);
+
+        let _registered_middleware: Vec<Box<dyn Middleware>> = resolved
+            .middleware
+            .into_iter()
+            .map(|spec| spec.factory.create(&config, control_middleware.clone()))
+            .collect::<Result<_, _>>()?;
+
+        instrumentation
+            .bind_control_middleware(
+                &config.stage_id,
+                &control_provider,
+                expects_circuit_breaker,
+                expects_rate_limiter,
+            )
+            .map_err(|e| e.to_string())?;
+        let instrumentation = Arc::new(instrumentation);
+
+        let sink_config = JournalSinkConfig {
+            stage_id: config.stage_id,
+            stage_name: config.name.clone(),
+            flow_name: config.flow_name.clone(),
+            upstream_stages: resources.upstream_stages.clone(),
+            buffer_size: None,
+            flush_interval_ms: None,
+            control_strategy: Some(control_strategy),
+        };
+
+        let handle = JournalSinkBuilder::new(
+            EffectfulSinkHandlerAdapter(self.handler),
+            sink_config,
+            resources,
+        )
+        .with_instrumentation(instrumentation)
+        .build()
+        .await
+        .map_err(|e| format!("Failed to build effectful sink: {e:?}"))?;
+
         let adapter = StageHandleAdapter::new(
             handle,
             config.stage_id,
@@ -1538,7 +1902,11 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Stage
         for mw in all_middleware {
             builder = builder.with(mw);
         }
-        let handler_with_middleware = builder.build();
+        // FLOWIP-120a: bind the stage's replay mode so handler-level control
+        // middleware suppresses its side effects during deterministic replay.
+        let handler_with_middleware = builder
+            .build()
+            .with_execution_scope(resources.effect_runtime_mode.into());
 
         // Create the stage configuration
         let stateful_config = StatefulConfig {
@@ -1558,6 +1926,174 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Stage
             .map_err(|e| format!("Failed to build stateful stage: {e:?}"))?;
 
         // Create adapter to bridge to StageHandle
+        let adapter = StageHandleAdapter::new(
+            handle,
+            config.stage_id,
+            config.name,
+            StageType::Stateful,
+            translate_stage_event_to_stateful,
+            check_stateful_state,
+        );
+
+        Ok(Box::new(adapter) as BoxedStageHandle)
+    }
+}
+
+/// Descriptor for replay-safe effectful stateful stages.
+pub struct EffectfulStatefulDescriptor<H: EffectfulStatefulHandler + 'static> {
+    pub name: String,
+    pub handler: H,
+    pub emit_interval: Option<Duration>,
+    pub middleware: Vec<Box<dyn MiddlewareFactory>>,
+}
+
+impl<H: EffectfulStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
+    EffectfulStatefulDescriptor<H>
+{
+    pub fn new(name: impl Into<String>, handler: H) -> Self {
+        Self {
+            name: name.into(),
+            handler,
+            emit_interval: None,
+            middleware: Vec::new(),
+        }
+    }
+
+    pub fn with_emit_interval(mut self, emit_interval: Duration) -> Self {
+        self.emit_interval = Some(emit_interval);
+        self
+    }
+
+    pub fn with_middleware<M: MiddlewareFactory + 'static>(mut self, mw: M) -> Self {
+        self.middleware.push(Box::new(mw));
+        self
+    }
+
+    pub fn build(self) -> Box<dyn StageDescriptor> {
+        Box::new(self)
+    }
+}
+
+#[async_trait]
+impl<H: EffectfulStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDescriptor
+    for EffectfulStatefulDescriptor<H>
+{
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn set_name(&mut self, name: String) {
+        self.name = name;
+    }
+
+    fn stage_type(&self) -> StageType {
+        StageType::Stateful
+    }
+
+    fn is_effectful(&self) -> bool {
+        true
+    }
+
+    fn stage_logic_version(&self) -> String {
+        self.handler.stage_logic_version().to_string()
+    }
+
+    fn effect_declarations(&self) -> Vec<EffectDeclaration> {
+        self.handler.effect_declarations()
+    }
+
+    fn stage_middleware_names(&self) -> Vec<String> {
+        self.middleware
+            .iter()
+            .map(|f| f.label().to_string())
+            .collect()
+    }
+
+    fn stage_middleware_factories(&self) -> &[Box<dyn MiddlewareFactory>] {
+        &self.middleware
+    }
+
+    async fn create_handle_with_flow_middleware(
+        self: Box<Self>,
+        config: StageConfig,
+        resources: StageResources,
+        flow_middleware: Vec<Box<dyn MiddlewareFactory>>,
+        control_middleware: Arc<ControlMiddlewareAggregator>,
+    ) -> StageCreationResult<BoxedStageHandle> {
+        validate_effect_declarations(
+            &self.name,
+            &self.handler.effect_declarations(),
+            &resources.effect_ports,
+        )?;
+
+        for factory in &self.middleware {
+            let validation_result =
+                validate_middleware_safety(factory.as_ref(), StageType::Stateful, &self.name);
+
+            if !validation_result.is_ok() {
+                for error in &validation_result.errors {
+                    tracing::error!("{}", error);
+                }
+            }
+        }
+
+        let resolved = crate::middleware_resolution::resolve_middleware(
+            flow_middleware,
+            self.middleware,
+            &config.name,
+        )?;
+        crate::middleware_resolution::log_resolved_middleware(&config.name, &resolved);
+        let control_strategy = create_control_strategy_from_middleware_specs(&resolved.middleware);
+
+        let instrumentation_config = InstrumentationConfig::default();
+        let mut instrumentation = StageInstrumentation::new_with_config(instrumentation_config);
+        let control_provider: Arc<dyn obzenflow_core::ControlMiddlewareProvider> =
+            control_middleware.clone();
+
+        let expects_circuit_breaker = resolved
+            .middleware
+            .iter()
+            .any(|spec| spec.factory.control_role() == ControlMiddlewareRole::CircuitBreaker);
+        let expects_rate_limiter = resolved
+            .middleware
+            .iter()
+            .any(|spec| spec.factory.control_role() == ControlMiddlewareRole::RateLimiter);
+
+        let _registered_middleware: Vec<Box<dyn Middleware>> = resolved
+            .middleware
+            .into_iter()
+            .map(|spec| spec.factory.create(&config, control_middleware.clone()))
+            .collect::<Result<_, _>>()?;
+
+        instrumentation
+            .bind_control_middleware(
+                &config.stage_id,
+                &control_provider,
+                expects_circuit_breaker,
+                expects_rate_limiter,
+            )
+            .map_err(|e| e.to_string())?;
+        let instrumentation = Arc::new(instrumentation);
+
+        let stateful_config = StatefulConfig {
+            stage_id: config.stage_id,
+            stage_name: config.name.clone(),
+            flow_name: config.flow_name.clone(),
+            emit_interval: self.emit_interval,
+            control_strategy: Some(control_strategy),
+            upstream_stages: resources.upstream_stages.clone(),
+        };
+
+        let handle = StatefulBuilder::new(
+            EffectfulStatefulHandlerAdapter(self.handler),
+            stateful_config,
+            resources,
+        )
+        .with_instrumentation(instrumentation)
+        .build()
+        .await
+        .map_err(|e| format!("Failed to build effectful stateful stage: {e:?}"))?;
+
         let adapter = StageHandleAdapter::new(
             handle,
             config.stage_id,
@@ -1719,7 +2255,11 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
         for mw in all_middleware {
             builder = builder.with(mw);
         }
-        let handler_with_middleware = builder.build();
+        // FLOWIP-120a: bind the stage's replay mode so handler-level control
+        // middleware suppresses its side effects during deterministic replay.
+        let handler_with_middleware = builder
+            .build()
+            .with_execution_scope(resources.effect_runtime_mode.into());
 
         // Extract join-mode configuration from the handler before moving it into the runtime.
         let reference_mode = handler_with_middleware.reference_mode();
@@ -1826,9 +2366,116 @@ mod tests {
     use obzenflow_core::event::{JournalEvent, SystemEvent};
     use obzenflow_core::ControlMiddlewareProvider;
     use obzenflow_core::{ChainEvent, EventEnvelope, FlowId};
+    use obzenflow_runtime::effects::{
+        Effect, EffectCommitHandle, EffectContext, EffectError, TransactionalEffectPort,
+    };
     use obzenflow_runtime::message_bus::FsmMessageBus;
     use obzenflow_runtime::stages::resources_builder::SubscriptionFactory;
     use obzenflow_runtime::stages::LivenessSnapshots;
+    use serde_json::json;
+
+    trait DemoEffectPort: Send + Sync {}
+
+    struct DemoEffectPortImpl;
+
+    impl DemoEffectPort for DemoEffectPortImpl {}
+
+    #[derive(Clone, Debug)]
+    struct DemoTransactionalEffect;
+
+    #[async_trait]
+    impl Effect for DemoTransactionalEffect {
+        const EFFECT_TYPE: &'static str = "test.transactional_declared";
+        const SCHEMA_VERSION: u32 = 1;
+
+        type Output = u8;
+
+        fn label(&self) -> &str {
+            "declared"
+        }
+
+        fn canonical_input(&self) -> serde_json::Value {
+            json!({})
+        }
+
+        async fn execute(&self, _ctx: &mut EffectContext) -> Result<Self::Output, EffectError> {
+            Ok(0)
+        }
+    }
+
+    struct DemoTransactionalPort;
+
+    #[async_trait]
+    impl TransactionalEffectPort<DemoTransactionalEffect> for DemoTransactionalPort {
+        async fn execute_and_commit(
+            &self,
+            _effect: DemoTransactionalEffect,
+            _ctx: &mut EffectContext,
+            commit: EffectCommitHandle<u8>,
+        ) -> Result<u8, EffectError> {
+            commit.commit_success(&0).await?;
+            Ok(0)
+        }
+    }
+
+    #[test]
+    fn effect_declaration_validation_rejects_missing_key_strategy() {
+        let declaration = EffectDeclaration {
+            effect_type: "test.non_idempotent",
+            safety: EffectSafety::NonIdempotentRequiresKey,
+            idempotency_key_policy: IdempotencyKeyPolicy::NotRequired,
+            required_ports: Vec::new(),
+            transactional_executor: None,
+        };
+
+        let err =
+            validate_effect_declarations("effectful", &[declaration], &EffectPortRegistry::new())
+                .expect_err("missing key strategy must fail materialisation");
+
+        assert!(err.contains("without an idempotency-key strategy"));
+    }
+
+    #[test]
+    fn effect_declaration_validation_checks_required_ports() {
+        let declaration = EffectDeclaration::idempotent("test.ported")
+            .require_port::<dyn DemoEffectPort>("primary");
+
+        let missing = validate_effect_declarations(
+            "effectful",
+            std::slice::from_ref(&declaration),
+            &EffectPortRegistry::new(),
+        )
+        .expect_err("missing required port must fail materialisation");
+        assert!(missing.contains("requires effect port"));
+
+        let mut registry = EffectPortRegistry::new();
+        registry.insert::<dyn DemoEffectPort>("primary", Arc::new(DemoEffectPortImpl));
+
+        validate_effect_declarations("effectful", &[declaration], &registry)
+            .expect("registered required port should pass");
+    }
+
+    #[test]
+    fn effect_declaration_validation_transactional_effect_requires_typed_port() {
+        let declaration = EffectDeclaration::transactional_effect::<DemoTransactionalEffect>("tx");
+
+        let missing = validate_effect_declarations(
+            "effectful",
+            std::slice::from_ref(&declaration),
+            &EffectPortRegistry::new(),
+        )
+        .expect_err("missing transactional port must fail materialisation");
+        assert!(missing.contains("requires effect port"));
+
+        let mut registry = EffectPortRegistry::new();
+        registry.insert::<dyn TransactionalEffectPort<DemoTransactionalEffect>>(
+            "tx",
+            Arc::new(DemoTransactionalPort),
+        );
+
+        validate_effect_declarations("effectful", &[declaration], &registry)
+            .expect("registered transactional typed port should pass");
+    }
 
     #[derive(Clone, Debug)]
     struct DummyFiniteSource;
@@ -2108,6 +2755,8 @@ mod tests {
             backpressure_registry,
             liveness_snapshots: LivenessSnapshots::new(),
             replay_archive: None,
+            effect_runtime_mode: obzenflow_runtime::effects::EffectRuntimeMode::Live,
+            effect_ports: obzenflow_runtime::effects::EffectPortRegistry::new(),
         };
 
         let descriptor = FiniteSourceDescriptor {

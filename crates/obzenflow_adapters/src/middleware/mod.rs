@@ -134,6 +134,7 @@ pub use stateful_middleware::{
 pub use transform_middleware::{
     AsyncMiddlewareTransform, AsyncTransformHandlerExt, AsyncTransformMiddlewareBuilder,
     MiddlewareTransform, TransformHandlerExt, TransformMiddlewareBuilder,
+    UnifiedMiddlewareTransform,
 };
 
 // Common utilities

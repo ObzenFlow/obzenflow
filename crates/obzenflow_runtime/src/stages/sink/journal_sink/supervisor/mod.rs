@@ -4,7 +4,7 @@
 
 //! Journal sink supervisor implementation using HandlerSupervised pattern
 
-use crate::stages::common::handlers::SinkHandler;
+use crate::stages::common::handlers::UnifiedSinkHandler;
 use crate::supervised_base::base::Supervisor;
 use crate::supervised_base::{ExternalEventMode, ExternalEventPolicy, HandlerSupervised};
 use crate::{messaging::UpstreamSubscription, supervised_base::EventLoopDirective};
@@ -18,7 +18,7 @@ mod running;
 
 /// Supervisor for journal sink stages
 pub(crate) struct JournalSinkSupervisor<
-    H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
+    H: UnifiedSinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
 > {
     /// Supervisor name (for logging)
     pub(crate) name: String,
@@ -37,7 +37,7 @@ pub(crate) struct JournalSinkSupervisor<
     pub(crate) _marker: std::marker::PhantomData<H>,
 }
 
-impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Supervisor
+impl<H: UnifiedSinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Supervisor
     for JournalSinkSupervisor<H>
 {
     type State = JournalSinkState<H>;
@@ -319,7 +319,7 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Superviso
 }
 
 #[async_trait::async_trait]
-impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSupervised
+impl<H: UnifiedSinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSupervised
     for JournalSinkSupervisor<H>
 {
     type Handler = H;
@@ -407,7 +407,7 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
     }
 }
 
-impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> ExternalEventPolicy
+impl<H: UnifiedSinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> ExternalEventPolicy
     for JournalSinkSupervisor<H>
 {
     fn external_event_mode(state: &Self::State) -> ExternalEventMode {
