@@ -8,6 +8,6 @@ pub mod traits;
 
 pub use traits::UnifiedSinkHandler;
 pub use traits::{
-    CommitReceipt, EffectfulAsyncSinkHandler, EffectfulAsyncSinkHandlerAdapter, SinkConsumeReport,
+    CommitReceipt, EffectfulSinkHandler, EffectfulSinkHandlerAdapter, SinkConsumeReport,
     SinkHandler, SinkLifecycleReport,
 };

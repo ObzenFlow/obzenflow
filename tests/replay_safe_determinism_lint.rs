@@ -6,10 +6,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 const SURFACE_MARKERS: &[&str] = &[
-    "impl EffectfulAsyncTransformHandler",
-    "impl EffectfulAsyncSinkHandler",
+    "impl EffectfulTransformHandler",
+    "impl EffectfulSinkHandler",
     "impl EffectfulStatefulHandler",
-    "effectful_async_transform!",
+    "effectful_transform!",
     "effectful_stateful!",
     "effectful_sink!",
 ];

@@ -17,7 +17,7 @@ mod tests {
     use obzenflow_runtime::stages::common::handlers::source::SourceError;
     use obzenflow_runtime::stages::common::handlers::{
         AsyncFiniteSourceHandler, AsyncInfiniteSourceHandler, AsyncTransformHandler,
-        EffectfulAsyncSinkHandler, EffectfulAsyncTransformHandler, EffectfulStatefulHandler,
+        EffectfulSinkHandler, EffectfulTransformHandler, EffectfulStatefulHandler,
         FiniteSourceHandler, InfiniteSourceHandler, SinkHandler, StatefulHandler, TransformHandler,
     };
     use obzenflow_runtime::typing::{SinkTyping, SourceTyping, StatefulTyping, TransformTyping};
@@ -118,7 +118,7 @@ mod tests {
     #[derive(Clone, Debug)]
     struct FxTr;
     #[async_trait]
-    impl EffectfulAsyncTransformHandler for FxTr {
+    impl EffectfulTransformHandler for FxTr {
         type Input = In;
         type Output = Out;
 
@@ -192,7 +192,7 @@ mod tests {
     #[derive(Clone, Debug)]
     struct FxSn;
     #[async_trait]
-    impl EffectfulAsyncSinkHandler for FxSn {
+    impl EffectfulSinkHandler for FxSn {
         type Input = Out;
 
         async fn consume(
@@ -312,22 +312,22 @@ mod tests {
         let _ = crate::async_transform!(name: "t", In -> Out => AsyncTr, []);
     }
 
-    // ── effectful_async_transform! ──────────────────────────────────────────
+    // ── effectful_transform! ──────────────────────────────────────────
     #[test]
-    fn effectful_async_transform_typed_bare() {
-        let _ = crate::effectful_async_transform!(In -> Out => FxTr);
+    fn effectful_transform_typed_bare() {
+        let _ = crate::effectful_transform!(In -> Out => FxTr);
     }
     #[test]
-    fn effectful_async_transform_typed_mw() {
-        let _ = crate::effectful_async_transform!(In -> Out => FxTr, []);
+    fn effectful_transform_typed_mw() {
+        let _ = crate::effectful_transform!(In -> Out => FxTr, []);
     }
     #[test]
-    fn effectful_async_transform_typed_name() {
-        let _ = crate::effectful_async_transform!(name: "t", In -> Out => FxTr);
+    fn effectful_transform_typed_name() {
+        let _ = crate::effectful_transform!(name: "t", In -> Out => FxTr);
     }
     #[test]
-    fn effectful_async_transform_typed_name_mw() {
-        let _ = crate::effectful_async_transform!(name: "t", In -> Out => FxTr, []);
+    fn effectful_transform_typed_name_mw() {
+        let _ = crate::effectful_transform!(name: "t", In -> Out => FxTr, []);
     }
 
     // ── stateful! ───────────────────────────────────────────────────────────

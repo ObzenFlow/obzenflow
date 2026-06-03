@@ -378,7 +378,7 @@ impl<H: AsyncTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
 }
 
 /// Builder for replay-safe effectful async transform stages.
-pub struct EffectfulAsyncTransformBuilder<
+pub struct EffectfulTransformBuilder<
     H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
 > {
     handler: H,
@@ -389,7 +389,7 @@ pub struct EffectfulAsyncTransformBuilder<
 }
 
 impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
-    EffectfulAsyncTransformBuilder<H>
+    EffectfulTransformBuilder<H>
 {
     pub fn new(handler: H, config: TransformConfig, resources: StageResources) -> Self {
         Self {
@@ -419,7 +419,7 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
 
 #[async_trait::async_trait]
 impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> SupervisorBuilder
-    for EffectfulAsyncTransformBuilder<H>
+    for EffectfulTransformBuilder<H>
 {
     type Handle = TransformHandle<H>;
     type Error = BuilderError;

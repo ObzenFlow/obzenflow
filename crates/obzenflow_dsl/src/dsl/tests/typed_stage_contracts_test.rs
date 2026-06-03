@@ -15,7 +15,7 @@ mod tests {
     use obzenflow_runtime::stages::common::handlers::source::SourceError;
     use obzenflow_runtime::stages::common::handlers::{
         AsyncFiniteSourceHandler, AsyncInfiniteSourceHandler, AsyncTransformHandler,
-        EffectfulAsyncTransformHandler, FiniteSourceHandler, InfiniteSourceHandler, JoinHandler,
+        EffectfulTransformHandler, FiniteSourceHandler, InfiniteSourceHandler, JoinHandler,
         SinkHandler, StatefulHandler, TransformHandler,
     };
     use obzenflow_runtime::typing::{
@@ -182,7 +182,7 @@ mod tests {
     struct EffectfulExactTransform;
 
     #[async_trait]
-    impl EffectfulAsyncTransformHandler for EffectfulExactTransform {
+    impl EffectfulTransformHandler for EffectfulExactTransform {
         type Input = OutputEvent;
         type Output = OutputEvent;
 
@@ -661,7 +661,7 @@ mod tests {
         );
         descriptors.insert(
             "effectful".to_string(),
-            crate::effectful_async_transform!(
+            crate::effectful_transform!(
                 name: "effectful",
                 OutputEvent -> OutputEvent => EffectfulExactTransform
             ),
@@ -781,7 +781,7 @@ mod tests {
         );
         descriptors.insert(
             "effectful".to_string(),
-            crate::effectful_async_transform!(
+            crate::effectful_transform!(
                 name: "effectful",
                 OutputEvent -> OutputEvent => EffectfulExactTransform
             ),
@@ -863,7 +863,7 @@ mod tests {
         );
         descriptors.insert(
             "effectful".to_string(),
-            crate::effectful_async_transform!(
+            crate::effectful_transform!(
                 name: "effectful",
                 OutputEvent -> OutputEvent => EffectfulExactTransform
             ),

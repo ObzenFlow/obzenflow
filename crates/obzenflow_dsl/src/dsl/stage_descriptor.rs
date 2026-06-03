@@ -33,8 +33,8 @@ use obzenflow_runtime::{
             control_strategies::{CompositeStrategy, ControlEventStrategy, JonestownStrategy},
             handlers::{
                 AsyncFiniteSourceHandler, AsyncInfiniteSourceHandler, AsyncTransformHandler,
-                EffectfulAsyncSinkHandler, EffectfulAsyncSinkHandlerAdapter,
-                EffectfulAsyncTransformHandler, EffectfulAsyncTransformHandlerAdapter,
+                EffectfulSinkHandler, EffectfulSinkHandlerAdapter,
+                EffectfulTransformHandler, EffectfulTransformHandlerAdapter,
                 EffectfulStatefulHandler, EffectfulStatefulHandlerAdapter, FiniteSourceHandler,
                 InfiniteSourceHandler, JoinHandler, SinkHandler, StatefulHandler, TransformHandler,
             },
@@ -57,7 +57,7 @@ use obzenflow_runtime::{
         },
         stateful::{StatefulBuilder, StatefulConfig, StatefulEvent, StatefulState},
         transform::{
-            AsyncTransformBuilder, EffectfulAsyncTransformBuilder, TransformBuilder,
+            AsyncTransformBuilder, EffectfulTransformBuilder, TransformBuilder,
             TransformConfig, TransformEvent, TransformState,
         },
     },
@@ -1205,15 +1205,15 @@ impl<H: AsyncTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
 }
 
 /// Descriptor for replay-safe effectful async transform stages.
-pub struct EffectfulAsyncTransformDescriptor<H: EffectfulAsyncTransformHandler + 'static> {
+pub struct EffectfulTransformDescriptor<H: EffectfulTransformHandler + 'static> {
     pub name: String,
     pub handler: H,
     pub middleware: Vec<Box<dyn MiddlewareFactory>>,
 }
 
 #[async_trait]
-impl<H: EffectfulAsyncTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
-    StageDescriptor for EffectfulAsyncTransformDescriptor<H>
+impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
+    StageDescriptor for EffectfulTransformDescriptor<H>
 {
     fn name(&self) -> &str {
         &self.name
@@ -1325,12 +1325,12 @@ impl<H: EffectfulAsyncTransformHandler + Clone + std::fmt::Debug + Send + Sync +
         };
 
         let mut handler_with_middleware =
-            UnifiedMiddlewareTransform::new(EffectfulAsyncTransformHandlerAdapter(self.handler));
+            UnifiedMiddlewareTransform::new(EffectfulTransformHandlerAdapter(self.handler));
         for mw in all_middleware {
             handler_with_middleware = handler_with_middleware.with_middleware(mw);
         }
 
-        let handle = EffectfulAsyncTransformBuilder::new(
+        let handle = EffectfulTransformBuilder::new(
             handler_with_middleware,
             transform_config,
             resources,
@@ -1495,14 +1495,14 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
 }
 
 /// Descriptor for replay-safe effectful sink stages.
-pub struct EffectfulSinkDescriptor<H: EffectfulAsyncSinkHandler + 'static> {
+pub struct EffectfulSinkDescriptor<H: EffectfulSinkHandler + 'static> {
     pub name: String,
     pub handler: H,
     pub middleware: Vec<Box<dyn MiddlewareFactory>>,
 }
 
 #[async_trait]
-impl<H: EffectfulAsyncSinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDescriptor
+impl<H: EffectfulSinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDescriptor
     for EffectfulSinkDescriptor<H>
 {
     fn name(&self) -> &str {
@@ -1613,7 +1613,7 @@ impl<H: EffectfulAsyncSinkHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
         };
 
         let handle = JournalSinkBuilder::new(
-            EffectfulAsyncSinkHandlerAdapter(self.handler),
+            EffectfulSinkHandlerAdapter(self.handler),
             sink_config,
             resources,
         )

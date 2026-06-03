@@ -33,7 +33,7 @@ use obzenflow_core::{
     event::chain_event::{ChainEvent, ChainEventFactory},
     CircuitBreakerContractMode, TypedPayload,
 };
-use obzenflow_dsl::{effectful_async_transform, flow, sink, source, transform};
+use obzenflow_dsl::{effectful_transform, flow, sink, source, transform};
 #[cfg(not(test))]
 use obzenflow_infra::application::{FlowApplication, LogLevel, Presentation};
 use obzenflow_infra::journal::disk_journals;
@@ -42,7 +42,7 @@ use obzenflow_runtime::effects::{
 };
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    EffectfulAsyncTransformHandler, TransformHandler,
+    EffectfulTransformHandler, TransformHandler,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -184,7 +184,7 @@ impl Effect for AuthorizePayment {
 struct GatewayTransform;
 
 #[async_trait]
-impl EffectfulAsyncTransformHandler for GatewayTransform {
+impl EffectfulTransformHandler for GatewayTransform {
     type Input = ValidatedPayment;
     type Output = AuthorizedPayment;
 
@@ -288,7 +288,7 @@ fn build_flow() -> obzenflow_dsl::FlowDefinition {
             // - Slow-call contribution for gateway calls that take too long.
             // - Explicit Open/HalfOpen policies that still match the original
             //   semantics (emit fallback while Open; single-probe HalfOpen).
-            gateway = effectful_async_transform!(ValidatedPayment -> AuthorizedPayment => GatewayTransform, [
+            gateway = effectful_transform!(ValidatedPayment -> AuthorizedPayment => GatewayTransform, [
                 CircuitBreakerBuilder::new(3)
                     .cooldown(std::time::Duration::from_secs(5))
                     // Rate-based failure mode: open when >= 60% of the last
@@ -408,7 +408,7 @@ fn build_glitchy_flow(config: GlitchyFlowConfig) -> obzenflow_dsl::FlowDefinitio
             validated = transform!(name: "validation", PaymentCommand -> ValidatedPayment => ValidationTransform, [
                 backpressure(BACKPRESSURE_WINDOW)
             ]);
-            gateway = effectful_async_transform!(ValidatedPayment -> AuthorizedPayment => GatewayTransform, [
+            gateway = effectful_transform!(ValidatedPayment -> AuthorizedPayment => GatewayTransform, [
                 CircuitBreakerBuilder::new(3)
                     .cooldown(std::time::Duration::from_secs(5))
                     .rate_based_over_last_n_calls(5, 0.6)
@@ -487,7 +487,7 @@ fn build_strict_flow() -> obzenflow_dsl::FlowDefinition {
             validated = transform!(name: "validation_strict", PaymentCommand -> ValidatedPayment => ValidationTransform, [
                 backpressure(BACKPRESSURE_WINDOW)
             ]);
-            gateway = effectful_async_transform!(name: "gateway_strict", ValidatedPayment -> AuthorizedPayment => GatewayTransform);
+            gateway = effectful_transform!(name: "gateway_strict", ValidatedPayment -> AuthorizedPayment => GatewayTransform);
             summary = sink!(name: "summary_strict", AuthorizedPayment => PaymentSummarySink::new());
         },
 

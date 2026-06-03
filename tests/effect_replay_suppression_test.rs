@@ -18,7 +18,7 @@ use obzenflow_core::{
     TypedPayload, WriterId,
 };
 use obzenflow_dsl::{
-    effectful_async_transform, effectful_sink, effectful_stateful, flow, sink, source, transform,
+    effectful_transform, effectful_sink, effectful_stateful, flow, sink, source, transform,
     FlowDefinition,
 };
 use obzenflow_infra::application::FlowApplication;
@@ -28,7 +28,7 @@ use obzenflow_runtime::effects::{
 };
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    EffectfulAsyncSinkHandler, EffectfulAsyncTransformHandler, EffectfulStatefulHandler,
+    EffectfulSinkHandler, EffectfulTransformHandler, EffectfulStatefulHandler,
     FiniteSourceHandler, SinkHandler, TransformHandler,
 };
 use obzenflow_runtime::stages::SourceError;
@@ -263,7 +263,7 @@ struct ReplayTransform {
 }
 
 #[async_trait]
-impl EffectfulAsyncTransformHandler for ReplayTransform {
+impl EffectfulTransformHandler for ReplayTransform {
     type Input = ReplayInput;
     type Output = ReplayOutput;
 
@@ -298,7 +298,7 @@ struct BlockingTransform {
 }
 
 #[async_trait]
-impl EffectfulAsyncTransformHandler for BlockingTransform {
+impl EffectfulTransformHandler for BlockingTransform {
     type Input = ReplayInput;
     type Output = ReplayOutput;
 
@@ -425,7 +425,7 @@ impl EffectfulStatefulHandler for ReplayStateful {
 }
 
 #[async_trait]
-impl EffectfulAsyncTransformHandler for FallbackTransform {
+impl EffectfulTransformHandler for FallbackTransform {
     type Input = ReplayInput;
     type Output = ReplayOutput;
 
@@ -483,7 +483,7 @@ struct EffectfulCollectSink {
 }
 
 #[async_trait]
-impl EffectfulAsyncSinkHandler for EffectfulCollectSink {
+impl EffectfulSinkHandler for EffectfulCollectSink {
     type Input = ReplayInput;
 
     async fn consume(
@@ -531,7 +531,7 @@ fn build_flow(
 
         stages: {
             inputs = source!(ReplayInput => ReplaySource::new());
-            effectful = effectful_async_transform!(ReplayInput -> ReplayOutput => ReplayTransform { calls });
+            effectful = effectful_transform!(ReplayInput -> ReplayOutput => ReplayTransform { calls });
             collector = sink!(ReplayOutput => CollectSink { outputs });
         },
 
@@ -556,7 +556,7 @@ fn build_flow_level_limiter_flow(
 
         stages: {
             inputs = source!(ReplayInput => ReplaySource::new());
-            effectful = effectful_async_transform!(ReplayInput -> ReplayOutput => ReplayTransform { calls });
+            effectful = effectful_transform!(ReplayInput -> ReplayOutput => ReplayTransform { calls });
             collector = sink!(ReplayOutput => CollectSink { outputs });
         },
 
@@ -580,7 +580,7 @@ fn build_blocking_flow(
 
         stages: {
             inputs = source!(ReplayInput => SingleReplaySource::new());
-            effectful = effectful_async_transform!(ReplayInput -> ReplayOutput => BlockingTransform { calls, release });
+            effectful = effectful_transform!(ReplayInput -> ReplayOutput => BlockingTransform { calls, release });
             collector = sink!(ReplayOutput => CollectSink { outputs });
         },
 
@@ -604,7 +604,7 @@ fn build_fan_out_flow(
         stages: {
             inputs = source!(ReplayInput => SingleReplaySource::new());
             fan_out = transform!(ReplayInput -> ReplayInput => FanOutTransform::new());
-            effectful = effectful_async_transform!(ReplayInput -> ReplayOutput => ReplayTransform { calls });
+            effectful = effectful_transform!(ReplayInput -> ReplayOutput => ReplayTransform { calls });
             collector = sink!(ReplayOutput => CollectSink { outputs });
         },
 
@@ -649,7 +649,7 @@ fn build_breaker_fallback_flow(
 
         stages: {
             inputs = source!(ReplayInput => ReplaySource::new());
-            effectful = effectful_async_transform!(ReplayInput -> ReplayOutput => FallbackTransform { calls }, [
+            effectful = effectful_transform!(ReplayInput -> ReplayOutput => FallbackTransform { calls }, [
                 CircuitBreakerBuilder::new(1)
                     .open_policy(OpenPolicy::EmitFallback)
                     .with_typed_fallback::<ReplayInput, ReplayEffectValue, _>(|input| ReplayEffectValue {
@@ -771,6 +771,25 @@ async fn rate_limiter_delayed_events_in_stage(run_dir: &Path, stage_key: &str) -
                 event.content,
                 ChainEventContent::Observability(ObservabilityPayload::Middleware(
                     MiddlewareLifecycle::RateLimiter(RateLimiterEvent::Delayed { .. })
+                ))
+            )
+        })
+        .count()
+}
+
+/// Count rate-limiter observability events of any variant (Delayed, ActivityPulse,
+/// ModeChange) in a stage. Used to assert the limiter was never invoked during
+/// replay: an invoked limiter under the test workload leaves a journal trace, so
+/// zero events of any kind means it consumed no tokens and moved no admission state.
+async fn rate_limiter_events_in_stage(run_dir: &Path, stage_key: &str) -> usize {
+    read_stage_events(run_dir, stage_key)
+        .await
+        .into_iter()
+        .filter(|event| {
+            matches!(
+                event.content,
+                ChainEventContent::Observability(ObservabilityPayload::Middleware(
+                    MiddlewareLifecycle::RateLimiter(_)
                 ))
             )
         })
@@ -1162,12 +1181,28 @@ async fn flow_level_admission_limiter_replay_suppresses_delay_events_and_effects
     );
 
     let replay_archive = latest_run_dir(&journal_base);
-    let delayed = rate_limiter_delayed_events_in_stage(&replay_archive, "inputs").await
-        + rate_limiter_delayed_events_in_stage(&replay_archive, "effectful").await
-        + rate_limiter_delayed_events_in_stage(&replay_archive, "collector").await;
+
+    // Directly assert the flow-level admission limiter consumed no tokens and moved no
+    // admission state during replay. The burst capacity is 1.0, so an invoked limiter
+    // must delay inputs 2 and 3 and emit Delayed events; the live run proves this,
+    // making the limiter's complete silence during replay evidence that it was never
+    // invoked (zero rate-limiter events of any variant), so no tokens were consumed.
+    let live_delayed = rate_limiter_delayed_events_in_stage(&archive_dir, "inputs").await
+        + rate_limiter_delayed_events_in_stage(&archive_dir, "effectful").await
+        + rate_limiter_delayed_events_in_stage(&archive_dir, "collector").await;
+    assert!(
+        live_delayed > 0,
+        "live run must exercise the limiter (3 inputs at burst capacity 1.0), otherwise \
+         the replay-silence assertion below is vacuous"
+    );
+
+    let replay_rate_limiter_events = rate_limiter_events_in_stage(&replay_archive, "inputs").await
+        + rate_limiter_events_in_stage(&replay_archive, "effectful").await
+        + rate_limiter_events_in_stage(&replay_archive, "collector").await;
     assert_eq!(
-        delayed, 0,
-        "strict replay should not emit flow-level admission delay events"
+        replay_rate_limiter_events, 0,
+        "strict replay must not invoke the flow-level admission limiter, so it emits no \
+         rate-limiter events of any kind and consumes no tokens or admission state"
     );
 }
 

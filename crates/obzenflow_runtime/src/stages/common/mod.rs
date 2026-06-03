@@ -21,7 +21,7 @@ pub use heartbeat::LivenessSnapshots;
 
 // Re-export handler traits for convenience
 pub use handlers::{
-    EffectfulAsyncSinkHandler, EffectfulAsyncTransformHandler, EffectfulStatefulHandler,
+    EffectfulSinkHandler, EffectfulTransformHandler, EffectfulStatefulHandler,
     FiniteSourceHandler, InfiniteSourceHandler, ObserverHandler, ResourceManaged, SinkHandler,
     StatefulHandler, TransformHandler,
 };

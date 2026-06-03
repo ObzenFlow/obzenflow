@@ -7,6 +7,6 @@
 pub mod traits;
 
 pub use traits::{
-    AsyncTransformHandler, EffectfulAsyncTransformHandler, EffectfulAsyncTransformHandlerAdapter,
+    AsyncTransformHandler, EffectfulTransformHandler, EffectfulTransformHandlerAdapter,
     TransformHandler, UnifiedTransformHandler,
 };

@@ -187,7 +187,7 @@ impl<T: SinkHandler + Send + Sync> UnifiedSinkHandler for T {
 }
 
 #[async_trait]
-pub trait EffectfulAsyncSinkHandler: Send + Sync {
+pub trait EffectfulSinkHandler: Send + Sync {
     type Input: TypedPayload + Send + Sync + 'static;
 
     async fn consume(
@@ -223,12 +223,12 @@ pub trait EffectfulAsyncSinkHandler: Send + Sync {
 
 #[doc(hidden)]
 #[derive(Clone, Debug)]
-pub struct EffectfulAsyncSinkHandlerAdapter<H>(pub H);
+pub struct EffectfulSinkHandlerAdapter<H>(pub H);
 
 #[async_trait]
-impl<H> UnifiedSinkHandler for EffectfulAsyncSinkHandlerAdapter<H>
+impl<H> UnifiedSinkHandler for EffectfulSinkHandlerAdapter<H>
 where
-    H: EffectfulAsyncSinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
+    H: EffectfulSinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
 {
     async fn consume_report(
         &mut self,
@@ -241,15 +241,15 @@ where
             HandlerError::Other("effectful sink invoked without effect context".to_string())
         })?;
         let mut fx = Effects::new(effect_context);
-        EffectfulAsyncSinkHandler::consume_report(&mut self.0, input, &mut fx).await
+        EffectfulSinkHandler::consume_report(&mut self.0, input, &mut fx).await
     }
 
     async fn flush_report(&mut self) -> Result<SinkLifecycleReport, HandlerError> {
-        EffectfulAsyncSinkHandler::flush_report(&mut self.0).await
+        EffectfulSinkHandler::flush_report(&mut self.0).await
     }
 
     async fn drain_report(&mut self) -> Result<SinkLifecycleReport, HandlerError> {
-        EffectfulAsyncSinkHandler::drain_report(&mut self.0).await
+        EffectfulSinkHandler::drain_report(&mut self.0).await
     }
 
     fn stage_logic_version(&self) -> Cow<'static, str> {

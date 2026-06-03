@@ -463,7 +463,7 @@ struct EffectCommitHandleInner<T> {
     cursor: EffectCursor,
     descriptor_hash: String,
     descriptor: EffectDescriptor,
-    committed: Mutex<bool>,
+    committed: Mutex<Option<EffectOutcomePayload>>,
     _marker: PhantomData<T>,
 }
 
@@ -487,7 +487,7 @@ where
                 cursor,
                 descriptor_hash,
                 descriptor,
-                committed: Mutex::new(false),
+                committed: Mutex::new(None),
                 _marker: PhantomData,
             }),
         }
@@ -523,12 +523,12 @@ where
                 .committed
                 .lock()
                 .expect("effect commit handle lock poisoned");
-            if *committed {
+            if committed.is_some() {
                 return Err(EffectError::Execution(
                     "transactional effect commit handle used more than once".to_string(),
                 ));
             }
-            *committed = true;
+            *committed = Some(outcome.clone());
         }
 
         let record = EffectRecord {
@@ -552,19 +552,22 @@ where
                 .committed
                 .lock()
                 .expect("effect commit handle lock poisoned");
-            *committed = false;
+            *committed = None;
             return Err(err);
         }
 
         Ok(())
     }
 
-    fn was_committed(&self) -> bool {
-        *self
-            .inner
+    /// The outcome committed through this handle, or `None` if the port never
+    /// committed. This is the source of truth for the live transactional return
+    /// value, so a live run decodes the same outcome a replay would.
+    fn committed_outcome(&self) -> Option<EffectOutcomePayload> {
+        self.inner
             .committed
             .lock()
             .expect("effect commit handle lock poisoned")
+            .clone()
     }
 }
 
@@ -994,18 +997,28 @@ impl Effects {
             descriptor,
         );
         let commit_observer = commit.clone();
-        let result = port
+        // The port commits its outcome through the handle. Its returned value is
+        // intentionally not used as the live result: the committed record is the single
+        // source of truth, so a live run decodes the same journaled outcome a replay
+        // would, and a port that commits one outcome but returns another cannot make
+        // live output diverge from replay output (FLOWIP-120a).
+        let port_result = port
             .execute_and_commit(effect, &mut effect_ctx, commit)
             .await;
 
-        if !commit_observer.was_committed() {
-            return Err(EffectError::TransactionalCommitMissing {
-                effect_type: E::EFFECT_TYPE.to_string(),
-                executor: executor.to_string(),
+        let Some(outcome) = commit_observer.committed_outcome() else {
+            // No commit through the handle. Surface the port's own error if it produced
+            // one, otherwise the contract-violation error.
+            return Err(match port_result {
+                Err(err) => err,
+                Ok(_) => EffectError::TransactionalCommitMissing {
+                    effect_type: E::EFFECT_TYPE.to_string(),
+                    executor: executor.to_string(),
+                },
             });
-        }
+        };
 
-        result
+        decode_effect_outcome::<E::Output>(&outcome)
     }
 
     fn replay_record_output<T>(
@@ -1025,19 +1038,7 @@ impl Effects {
             });
         }
 
-        match &record.outcome {
-            EffectOutcomePayload::Succeeded { output } => serde_json::from_value(output.clone())
-                .map_err(|e| EffectError::Serialization(e.to_string())),
-            EffectOutcomePayload::Failed {
-                error_type,
-                error_message,
-                retryable,
-            } => Err(EffectError::RecordedFailure {
-                error_type: error_type.clone(),
-                error_message: error_message.clone(),
-                retryable: *retryable,
-            }),
-        }
+        decode_effect_outcome(&record.outcome)
     }
 
     fn live_effect_context(&self) -> EffectContext {
@@ -1105,6 +1106,29 @@ async fn append_effect_record(
         .await
         .map_err(|e| EffectError::Journal(e.to_string()))?;
     Ok(())
+}
+
+/// FLOWIP-120a: decode a committed or recorded effect outcome into the effect's
+/// typed output. Replay and the live transactional commit share this one decode
+/// path, so a live transactional return value is byte-identical to what a replay
+/// reconstructs from the same record.
+fn decode_effect_outcome<T>(outcome: &EffectOutcomePayload) -> Result<T, EffectError>
+where
+    T: DeserializeOwned,
+{
+    match outcome {
+        EffectOutcomePayload::Succeeded { output } => serde_json::from_value(output.clone())
+            .map_err(|e| EffectError::Serialization(e.to_string())),
+        EffectOutcomePayload::Failed {
+            error_type,
+            error_message,
+            retryable,
+        } => Err(EffectError::RecordedFailure {
+            error_type: error_type.clone(),
+            error_message: error_message.clone(),
+            retryable: *retryable,
+        }),
+    }
 }
 
 fn descriptor_for_effect<E>(
@@ -1424,6 +1448,29 @@ mod tests {
         }
     }
 
+    /// FLOWIP-120a: a deliberately misbehaving port that commits one value through
+    /// the handle but returns a different value, used to prove the runtime derives
+    /// the live return from the committed record rather than the port's return value.
+    struct DivergentTransactionalPort {
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl TransactionalEffectPort<TransactionalCountingEffect> for DivergentTransactionalPort {
+        async fn execute_and_commit(
+            &self,
+            effect: TransactionalCountingEffect,
+            _ctx: &mut EffectContext,
+            commit: EffectCommitHandle<u64>,
+        ) -> Result<u64, EffectError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let committed = effect.value + 1_000;
+            commit.commit_success(&committed).await?;
+            // Return a value that disagrees with what was committed.
+            Ok(effect.value + 9_999)
+        }
+    }
+
     fn parent_envelope(writer_id: WriterId) -> EventEnvelope<ChainEvent> {
         let event = ChainEventFactory::data_event(writer_id, "test.input", json!({"id": 1}));
         EventEnvelope::new(JournalWriterId::new(), event)
@@ -1715,6 +1762,76 @@ mod tests {
         let records = effect_records(&journal);
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].cursor.effect_ordinal, 0);
+    }
+
+    #[tokio::test]
+    async fn transactional_effect_live_return_comes_from_committed_record_not_port_return() {
+        let stage_id = StageId::new();
+        let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
+        let normal_calls = Arc::new(AtomicUsize::new(0));
+        let port_calls = Arc::new(AtomicUsize::new(0));
+        let mut ports = EffectPortRegistry::new();
+        ports.insert::<dyn TransactionalEffectPort<TransactionalCountingEffect>>(
+            "tx",
+            Arc::new(DivergentTransactionalPort {
+                calls: port_calls.clone(),
+            }),
+        );
+        let mut live = Effects::new(invocation_context_with_mode(
+            journal.clone(),
+            parent_envelope(WriterId::from(stage_id)),
+            None,
+            EffectRuntimeMode::Live,
+            ports,
+        ));
+
+        let live_output = live
+            .perform(TransactionalCountingEffect {
+                value: 7,
+                normal_calls: normal_calls.clone(),
+                executor: Some("tx"),
+            })
+            .await
+            .expect("transactional effect should commit");
+
+        // The live return is the committed value (7 + 1000), NOT the value the port
+        // returned (7 + 9999). Without the structural fix this would be 10_006 live
+        // and 1_007 on replay, a divergence.
+        assert_eq!(live_output, 1_007);
+        assert_eq!(port_calls.load(Ordering::SeqCst), 1);
+
+        let records = effect_records(&journal);
+        assert_eq!(records.len(), 1);
+        let history = Arc::new(
+            EffectHistory::from_records(records[0].cursor.recorded_flow_id.clone(), records)
+                .expect("history should index"),
+        );
+        let mut replay = Effects::new(invocation_context_with_mode(
+            Arc::new(MemoryJournal::new(JournalOwner::stage(StageId::new()))),
+            parent_envelope(WriterId::from(stage_id)),
+            Some(history),
+            EffectRuntimeMode::ReplayStrict,
+            EffectPortRegistry::new(),
+        ));
+
+        let replay_output = replay
+            .perform(TransactionalCountingEffect {
+                value: 7,
+                normal_calls: normal_calls.clone(),
+                executor: Some("tx"),
+            })
+            .await
+            .expect("strict replay should reconstruct the committed value");
+
+        assert_eq!(
+            replay_output, live_output,
+            "live and replay must agree on the committed outcome"
+        );
+        assert_eq!(
+            port_calls.load(Ordering::SeqCst),
+            1,
+            "replay must not invoke the transactional port"
+        );
     }
 
     #[tokio::test]

@@ -17,7 +17,7 @@ pub use join::JoinHandler;
 pub use observer::ObserverHandler;
 pub use resource_managed::ResourceManaged;
 pub use sink::{
-    CommitReceipt, EffectfulAsyncSinkHandler, EffectfulAsyncSinkHandlerAdapter, SinkConsumeReport,
+    CommitReceipt, EffectfulSinkHandler, EffectfulSinkHandlerAdapter, SinkConsumeReport,
     SinkHandler, SinkLifecycleReport, UnifiedSinkHandler,
 };
 pub use source::{
@@ -29,6 +29,6 @@ pub use stateful::{
     StatefulHandlerWithEmission, StatefulOutputContext, UnifiedStatefulHandler,
 };
 pub use transform::{
-    AsyncTransformHandler, EffectfulAsyncTransformHandler, EffectfulAsyncTransformHandlerAdapter,
+    AsyncTransformHandler, EffectfulTransformHandler, EffectfulTransformHandlerAdapter,
     TransformHandler, UnifiedTransformHandler,
 };

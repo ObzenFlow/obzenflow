@@ -1034,15 +1034,15 @@ macro_rules! async_transform {
 }
 
 // ============================================================================
-// effectful_async_transform!
+// effectful_transform!
 // ============================================================================
 
 #[doc(hidden)]
 #[macro_export]
-macro_rules! __obzenflow_effectful_async_transform_untyped {
+macro_rules! __obzenflow_effectful_transform_untyped {
     (name = $name:literal, handler = $handler:expr, middleware = [$($mw:expr),*]) => {{
-        use $crate::dsl::stage_descriptor::{EffectfulAsyncTransformDescriptor, StageDescriptor};
-        Box::new(EffectfulAsyncTransformDescriptor {
+        use $crate::dsl::stage_descriptor::{EffectfulTransformDescriptor, StageDescriptor};
+        Box::new(EffectfulTransformDescriptor {
             name: $name.to_string(),
             handler: $handler,
             middleware: vec![$(Box::new($mw)),*],
@@ -1052,12 +1052,12 @@ macro_rules! __obzenflow_effectful_async_transform_untyped {
 
 #[doc(hidden)]
 #[macro_export]
-macro_rules! __obzenflow_effectful_async_transform_typed {
+macro_rules! __obzenflow_effectful_transform_typed {
     (input = exact($in:ty), output = $out:ty, name = $name:literal, handler = $handler:expr, middleware = [$($mw:expr),*]) => {{
         let __handler = $handler;
         fn __assert_effectful_contract<H>(_handler: &H)
         where
-            H: ::obzenflow_runtime::stages::EffectfulAsyncTransformHandler<
+            H: ::obzenflow_runtime::stages::EffectfulTransformHandler<
                 Input = $in,
                 Output = $out,
             >,
@@ -1069,7 +1069,7 @@ macro_rules! __obzenflow_effectful_async_transform_typed {
             false,
             None,
         );
-        let __descriptor = $crate::__obzenflow_effectful_async_transform_untyped!(
+        let __descriptor = $crate::__obzenflow_effectful_transform_untyped!(
             name = $name,
             handler = __handler,
             middleware = [$($mw),*]
@@ -1080,12 +1080,12 @@ macro_rules! __obzenflow_effectful_async_transform_typed {
 
 #[doc(hidden)]
 #[macro_export]
-macro_rules! __obzenflow_effectful_async_transform_exact_contract {
+macro_rules! __obzenflow_effectful_transform_exact_contract {
     (name = $name:literal, $($rest:tt)+) => {
-        $crate::__obzenflow_effectful_async_transform_exact_contract!(@collect name = $name, in = (), $($rest)+)
+        $crate::__obzenflow_effectful_transform_exact_contract!(@collect name = $name, in = (), $($rest)+)
     };
     (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => $handler:expr) => {
-        $crate::__obzenflow_effectful_async_transform_typed!(
+        $crate::__obzenflow_effectful_transform_typed!(
             input = exact($($in)+),
             output = $out,
             name = $name,
@@ -1094,7 +1094,7 @@ macro_rules! __obzenflow_effectful_async_transform_exact_contract {
         )
     };
     (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => $handler:expr, [$($mw:expr),*]) => {
-        $crate::__obzenflow_effectful_async_transform_typed!(
+        $crate::__obzenflow_effectful_transform_typed!(
             input = exact($($in)+),
             output = $out,
             name = $name,
@@ -1103,7 +1103,7 @@ macro_rules! __obzenflow_effectful_async_transform_exact_contract {
         )
     };
     (@collect name = $name:literal, in = ($($in:tt)*), $tok:tt $($rest:tt)+) => {
-        $crate::__obzenflow_effectful_async_transform_exact_contract!(
+        $crate::__obzenflow_effectful_transform_exact_contract!(
             @collect
             name = $name,
             in = ($($in)* $tok),
@@ -1111,20 +1111,20 @@ macro_rules! __obzenflow_effectful_async_transform_exact_contract {
         )
     };
     (@collect name = $name:literal, in = (), -> $($rest:tt)*) => {
-        compile_error!("effectful_async_transform!: expected `InputType -> OutputType => handler`");
+        compile_error!("effectful_transform!: expected `InputType -> OutputType => handler`");
     };
     (@collect name = $name:literal, in = ($($in:tt)+), $($rest:tt)*) => {
-        compile_error!("effectful_async_transform!: expected `-> OutputType => handler` after input type");
+        compile_error!("effectful_transform!: expected `-> OutputType => handler` after input type");
     };
 }
 
 #[macro_export]
-macro_rules! effectful_async_transform {
+macro_rules! effectful_transform {
     (name: $name:literal, $($rest:tt)+) => {
-        $crate::__obzenflow_effectful_async_transform_exact_contract!(name = $name, $($rest)+)
+        $crate::__obzenflow_effectful_transform_exact_contract!(name = $name, $($rest)+)
     };
     ($($rest:tt)+) => {
-        $crate::__obzenflow_effectful_async_transform_exact_contract!(
+        $crate::__obzenflow_effectful_transform_exact_contract!(
             name = "__obzenflow_binding_derived_name__",
             $($rest)+
         )
@@ -1155,7 +1155,7 @@ macro_rules! __obzenflow_effectful_sink_typed {
         let __handler = $handler;
         fn __assert_effectful_sink_contract<H>(_handler: &H)
         where
-            H: ::obzenflow_runtime::stages::EffectfulAsyncSinkHandler<Input = $in>,
+            H: ::obzenflow_runtime::stages::EffectfulSinkHandler<Input = $in>,
         {}
         __assert_effectful_sink_contract(&__handler);
         let __metadata = $crate::dsl::typing::StageTypingMetadata::sink(

@@ -160,7 +160,7 @@ impl<T: AsyncTransformHandler + Send + Sync> UnifiedTransformHandler
 
 /// Async transform surface for replay-safe effects.
 #[async_trait]
-pub trait EffectfulAsyncTransformHandler: Send + Sync {
+pub trait EffectfulTransformHandler: Send + Sync {
     type Input: TypedPayload + Send + Sync + 'static;
     type Output: TypedPayload + Send + Sync + 'static;
 
@@ -185,20 +185,20 @@ pub trait EffectfulAsyncTransformHandler: Send + Sync {
 
 #[doc(hidden)]
 #[derive(Clone, Debug)]
-pub struct EffectfulAsyncTransformHandlerAdapter<H>(pub H);
+pub struct EffectfulTransformHandlerAdapter<H>(pub H);
 
-impl<H> TransformTyping for EffectfulAsyncTransformHandlerAdapter<H>
+impl<H> TransformTyping for EffectfulTransformHandlerAdapter<H>
 where
-    H: EffectfulAsyncTransformHandler,
+    H: EffectfulTransformHandler,
 {
     type Input = H::Input;
     type Output = H::Output;
 }
 
 #[async_trait]
-impl<H> UnifiedTransformHandler for EffectfulAsyncTransformHandlerAdapter<H>
+impl<H> UnifiedTransformHandler for EffectfulTransformHandlerAdapter<H>
 where
-    H: EffectfulAsyncTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
+    H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
 {
     async fn process(
         &self,
