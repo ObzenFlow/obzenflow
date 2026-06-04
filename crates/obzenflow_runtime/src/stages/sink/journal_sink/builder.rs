@@ -107,6 +107,7 @@ impl<H: UnifiedSinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Su
             effect_history: None,
             effect_runtime_mode: self.resources.effect_runtime_mode,
             effect_ports: self.resources.effect_ports.clone(),
+            effect_declarations: self.resources.effect_declarations.clone(),
             error_journal: self.resources.error_journal.clone(),
             system_journal: self.resources.system_journal.clone(),
             bus: self.resources.message_bus.clone(),

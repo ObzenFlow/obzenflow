@@ -104,6 +104,17 @@ macro_rules! parse_topology_with_joins {
     };
 }
 
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __obzenflow_effect_ports_or_default {
+    () => {
+        ::obzenflow_runtime::effects::EffectPortRegistry::new()
+    };
+    ($effect_ports:expr) => {
+        $effect_ports
+    };
+}
+
 /// Declare an ObzenFlow pipeline as a single expression.
 ///
 /// `flow!` is the primary API for building pipelines. It takes five sections
@@ -153,6 +164,7 @@ macro_rules! flow {
         name: $flow_name:literal,
         journals: $journals:expr,
         middleware: [$($flow_mw:expr),*],
+        $(effect_ports: $effect_ports:expr,)?
 
         stages: {
             $($stage_name:ident = $descriptor:expr;)*
@@ -170,6 +182,7 @@ macro_rules! flow {
             use std::collections::HashMap;
 
             let journals = $journals;
+            let effect_ports = $crate::__obzenflow_effect_ports_or_default!($($effect_ports)?);
 
             // Create stages
             let mut stages: HashMap<String, Box<dyn StageDescriptor>> = HashMap::new();
@@ -216,7 +229,8 @@ macro_rules! flow {
                 stages,
                 connections,
                 create_flow_middleware,
-                lowering_artifacts
+                lowering_artifacts,
+                effect_ports = effect_ports
             )
         })
     }};
@@ -225,6 +239,7 @@ macro_rules! flow {
     {
         journals: $journals:expr,
         middleware: [$($flow_mw:expr),*],
+        $(effect_ports: $effect_ports:expr,)?
 
         stages: {
             $($stage_name:ident = $descriptor:expr;)*
@@ -242,6 +257,7 @@ macro_rules! flow {
             use std::collections::HashMap;
 
             let journals = $journals;
+            let effect_ports = $crate::__obzenflow_effect_ports_or_default!($($effect_ports)?);
 
             // Create stages
             let mut stages: HashMap<String, Box<dyn StageDescriptor>> = HashMap::new();
@@ -288,7 +304,8 @@ macro_rules! flow {
                 stages,
                 connections,
                 create_flow_middleware,
-                lowering_artifacts
+                lowering_artifacts,
+                effect_ports = effect_ports
             )
         })
     }};
@@ -307,6 +324,7 @@ macro_rules! test_flow {
         name: $flow_name:literal,
         journals: $journals:expr,
         middleware: [$($flow_mw:expr),*],
+        $(effect_ports: $effect_ports:expr,)?
 
         stages: {
             $($stage_name:ident = $descriptor:expr;)*
@@ -324,6 +342,7 @@ macro_rules! test_flow {
             use std::collections::HashMap;
 
             let journals = $journals;
+            let effect_ports = $crate::__obzenflow_effect_ports_or_default!($($effect_ports)?);
 
             let mut stages: HashMap<String, Box<dyn StageDescriptor>> = HashMap::new();
             $(
@@ -357,6 +376,7 @@ macro_rules! test_flow {
                 connections,
                 create_flow_middleware,
                 lowering_artifacts,
+                effect_ports = effect_ports,
                 finish: |handle, stage_data_journals| {
                     obzenflow_runtime::testing::FlowTestHarness::from_parts(handle, stage_data_journals)
                         .map_err(|e| $crate::dsl::FlowBuildError::StageResourcesFailed(format!(
@@ -371,6 +391,7 @@ macro_rules! test_flow {
     {
         journals: $journals:expr,
         middleware: [$($flow_mw:expr),*],
+        $(effect_ports: $effect_ports:expr,)?
 
         stages: {
             $($stage_name:ident = $descriptor:expr;)*
@@ -386,6 +407,9 @@ macro_rules! test_flow {
             name: "default",
             journals: $journals,
             middleware: [$($flow_mw),*],
+            $(
+                effect_ports: $effect_ports,
+            )?
 
             stages: {
                 $($stage_name = $descriptor;)*
@@ -420,11 +444,24 @@ macro_rules! build_typed_flow {
             $connections,
             $create_flow_middleware,
             $lowering_artifacts,
+            effect_ports = ::obzenflow_runtime::effects::EffectPortRegistry::new()
+        )
+    }};
+
+    ($flow_name:expr, $journals:expr, $stages:expr, $connections:expr, $create_flow_middleware:expr, $lowering_artifacts:expr, effect_ports = $effect_ports:expr) => {{
+        $crate::build_typed_flow!(
+            $flow_name,
+            $journals,
+            $stages,
+            $connections,
+            $create_flow_middleware,
+            $lowering_artifacts,
+            effect_ports = $effect_ports,
             finish: |handle, _stage_data_journals| Ok::<FlowHandle, FlowBuildError>(handle)
         )
     }};
 
-    ($flow_name:expr, $journals:expr, $stages:expr, $connections:expr, $create_flow_middleware:expr, $lowering_artifacts:expr, finish: $finish:expr) => {{
+    ($flow_name:expr, $journals:expr, $stages:expr, $connections:expr, $create_flow_middleware:expr, $lowering_artifacts:expr, effect_ports = $effect_ports:expr, finish: $finish:expr) => {{
         use $crate::prelude::*;
         use $crate::dsl::FlowBuildError;
         use std::collections::{HashMap, HashSet};
@@ -1069,6 +1106,7 @@ macro_rules! build_typed_flow {
             error_journals,
         )
         .with_backpressure_plan(backpressure_plan)
+        .with_effect_ports($effect_ports)
         .with_replay_archive(
             obzenflow_runtime::journal::FlowJournalFactory::replay_archive(&mut journal_factory)
                 .await

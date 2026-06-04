@@ -114,6 +114,12 @@ pub enum EffectError {
     #[error("non-idempotent effect '{effect_type}' has no idempotency key")]
     MissingIdempotencyKey { effect_type: String },
 
+    #[error("effectful stage '{stage_key}' performed undeclared effect '{effect_type}'")]
+    UndeclaredEffect {
+        stage_key: String,
+        effect_type: String,
+    },
+
     #[error("effect port '{name}' for type '{type_name}' is not registered")]
     MissingEffectPort {
         type_name: &'static str,
@@ -143,6 +149,7 @@ impl EffectError {
             | EffectError::DuplicateRecordedEffect { .. }
             | EffectError::DescriptorMismatch { .. }
             | EffectError::MissingIdempotencyKey { .. }
+            | EffectError::UndeclaredEffect { .. }
             | EffectError::MissingEffectPort { .. }
             | EffectError::TransactionalCommitMissing { .. } => false,
             EffectError::Serialization(_)
@@ -161,6 +168,7 @@ impl EffectError {
             EffectError::DescriptorMismatch { .. } => "descriptor_mismatch",
             EffectError::RecordedFailure { error_type, .. } => return error_type.clone(),
             EffectError::MissingIdempotencyKey { .. } => "missing_idempotency_key",
+            EffectError::UndeclaredEffect { .. } => "undeclared_effect",
             EffectError::MissingEffectPort { .. } => "missing_effect_port",
             EffectError::TransactionalCommitMissing { .. } => "transactional_commit_missing",
             EffectError::Execution(_) => "execution",
@@ -235,6 +243,26 @@ pub struct EffectDeclaration {
 }
 
 impl EffectDeclaration {
+    pub fn of<E>() -> Self
+    where
+        E: Effect,
+    {
+        let idempotency_key_policy = match E::SAFETY {
+            EffectSafety::Idempotent | EffectSafety::Transactional => {
+                IdempotencyKeyPolicy::NotRequired
+            }
+            EffectSafety::NonIdempotentRequiresKey => IdempotencyKeyPolicy::Required,
+        };
+
+        Self {
+            effect_type: E::EFFECT_TYPE,
+            safety: E::SAFETY,
+            idempotency_key_policy,
+            required_ports: E::required_ports(),
+            transactional_executor: None,
+        }
+    }
+
     pub fn idempotent(effect_type: &'static str) -> Self {
         Self {
             effect_type,
@@ -269,13 +297,16 @@ impl EffectDeclaration {
     where
         E: Effect,
     {
+        let mut required_ports = E::required_ports();
+        required_ports.push(EffectPortRequirement::of::<dyn TransactionalEffectPort<E>>(
+            executor,
+        ));
+
         Self {
             effect_type: E::EFFECT_TYPE,
             safety: EffectSafety::Transactional,
             idempotency_key_policy: IdempotencyKeyPolicy::NotRequired,
-            required_ports: vec![EffectPortRequirement::of::<dyn TransactionalEffectPort<E>>(
-                executor,
-            )],
+            required_ports,
             transactional_executor: Some(executor),
         }
     }
@@ -412,6 +443,7 @@ impl EffectContext {
 pub trait Effect: Clone + std::fmt::Debug + Send + Sync + 'static {
     const EFFECT_TYPE: &'static str;
     const SCHEMA_VERSION: u32;
+    const SAFETY: EffectSafety;
 
     type Output: Serialize + DeserializeOwned + Send + Sync + 'static;
 
@@ -422,15 +454,15 @@ pub trait Effect: Clone + std::fmt::Debug + Send + Sync + 'static {
     async fn execute(&self, ctx: &mut EffectContext) -> Result<Self::Output, EffectError>;
 
     fn safety(&self) -> EffectSafety {
-        EffectSafety::Idempotent
+        Self::SAFETY
     }
 
     fn idempotency_key(&self) -> Option<IdempotencyKey> {
         None
     }
 
-    fn transactional_executor(&self) -> Option<&'static str> {
-        None
+    fn required_ports() -> Vec<EffectPortRequirement> {
+        Vec::new()
     }
 }
 
@@ -685,6 +717,7 @@ pub struct EffectInvocationContext {
     pub effect_history: Option<Arc<EffectHistory>>,
     pub effect_runtime_mode: EffectRuntimeMode,
     pub effect_ports: EffectPortRegistry,
+    pub effect_declarations: Vec<EffectDeclaration>,
     pub effect_boundary: Option<Arc<dyn EffectBoundaryMiddleware>>,
     pub boundary_control_events: Arc<Mutex<Vec<ChainEvent>>>,
 }
@@ -708,6 +741,20 @@ impl EffectInvocationContext {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         std::mem::take(&mut *buffer)
+    }
+
+    pub fn effect_declaration(
+        &self,
+        effect_type: &'static str,
+    ) -> Result<EffectDeclaration, EffectError> {
+        self.effect_declarations
+            .iter()
+            .find(|declaration| declaration.effect_type == effect_type)
+            .cloned()
+            .ok_or_else(|| EffectError::UndeclaredEffect {
+                stage_key: self.stage_key.clone(),
+                effect_type: effect_type.to_string(),
+            })
     }
 }
 
@@ -775,6 +822,7 @@ impl Effects {
     where
         E: Effect,
     {
+        let declaration = self.ctx.effect_declaration(E::EFFECT_TYPE)?;
         let effect_ordinal = self.next_effect_ordinal;
         self.next_effect_ordinal = self.next_effect_ordinal.saturating_add(1);
 
@@ -811,9 +859,9 @@ impl Effects {
             }
         }
 
-        if matches!(effect.safety(), EffectSafety::Transactional) {
+        if matches!(E::SAFETY, EffectSafety::Transactional) {
             return self
-                .perform_transactional(effect, cursor, descriptor_hash, descriptor)
+                .perform_transactional(effect, declaration, cursor, descriptor_hash, descriptor)
                 .await;
         }
 
@@ -875,7 +923,7 @@ impl Effects {
             None
         };
 
-        if matches!(effect.safety(), EffectSafety::NonIdempotentRequiresKey)
+        if matches!(E::SAFETY, EffectSafety::NonIdempotentRequiresKey)
             && effect.idempotency_key().is_none()
         {
             return Err(EffectError::MissingIdempotencyKey {
@@ -1011,6 +1059,7 @@ impl Effects {
     async fn perform_transactional<E>(
         &self,
         effect: E,
+        declaration: EffectDeclaration,
         cursor: EffectCursor,
         descriptor_hash: String,
         descriptor: EffectDescriptor,
@@ -1019,8 +1068,8 @@ impl Effects {
         E: Effect,
     {
         let executor =
-            effect
-                .transactional_executor()
+            declaration
+                .transactional_executor
                 .ok_or_else(|| EffectError::MissingEffectPort {
                     type_name: std::any::type_name::<dyn TransactionalEffectPort<E>>(),
                     name: "<missing transactional executor>".to_string(),
@@ -1420,6 +1469,7 @@ mod tests {
     impl Effect for CountingEffect {
         const EFFECT_TYPE: &'static str = "test.counting";
         const SCHEMA_VERSION: u32 = 1;
+        const SAFETY: EffectSafety = EffectSafety::Idempotent;
 
         type Output = u64;
 
@@ -1441,13 +1491,13 @@ mod tests {
     struct TransactionalCountingEffect {
         value: u64,
         normal_calls: Arc<AtomicUsize>,
-        executor: Option<&'static str>,
     }
 
     #[async_trait]
     impl Effect for TransactionalCountingEffect {
         const EFFECT_TYPE: &'static str = "test.transactional_counting";
         const SCHEMA_VERSION: u32 = 1;
+        const SAFETY: EffectSafety = EffectSafety::Transactional;
 
         type Output = u64;
 
@@ -1462,14 +1512,6 @@ mod tests {
         async fn execute(&self, _ctx: &mut EffectContext) -> Result<Self::Output, EffectError> {
             self.normal_calls.fetch_add(1, Ordering::SeqCst);
             Ok(self.value + 10)
-        }
-
-        fn safety(&self) -> EffectSafety {
-            EffectSafety::Transactional
-        }
-
-        fn transactional_executor(&self) -> Option<&'static str> {
-            self.executor
         }
     }
 
@@ -1562,6 +1604,10 @@ mod tests {
             effect_history,
             effect_runtime_mode,
             effect_ports,
+            effect_declarations: vec![
+                EffectDeclaration::of::<CountingEffect>(),
+                EffectDeclaration::transactional_effect::<TransactionalCountingEffect>("tx"),
+            ],
             effect_boundary: None,
             boundary_control_events: Arc::new(Mutex::new(Vec::new())),
         }
@@ -1611,6 +1657,63 @@ mod tests {
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].cursor.input_seq, 1);
         assert_eq!(records[0].cursor.effect_ordinal, 0);
+    }
+
+    #[tokio::test]
+    async fn perform_rejects_undeclared_effect_before_execution() {
+        let stage_id = StageId::new();
+        let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut ctx = invocation_context(
+            journal.clone(),
+            parent_envelope(WriterId::from(stage_id)),
+            None,
+        );
+        ctx.effect_declarations.clear();
+        let mut effects = Effects::new(ctx);
+
+        let err = effects
+            .perform(CountingEffect {
+                value: 41,
+                label: "same",
+                calls: calls.clone(),
+            })
+            .await
+            .expect_err("undeclared effects must fail before execution");
+
+        match err {
+            EffectError::UndeclaredEffect {
+                stage_key,
+                effect_type,
+            } => {
+                assert_eq!(stage_key, "effect_stage");
+                assert_eq!(effect_type, CountingEffect::EFFECT_TYPE);
+            }
+            other => panic!("unexpected effect error: {other:?}"),
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert!(effect_records(&journal).is_empty());
+    }
+
+    #[tokio::test]
+    async fn capture_is_exempt_from_declared_effect_list() {
+        let stage_id = StageId::new();
+        let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
+        let mut ctx = invocation_context(
+            journal.clone(),
+            parent_envelope(WriterId::from(stage_id)),
+            None,
+        );
+        ctx.effect_declarations.clear();
+        let mut effects = Effects::new(ctx);
+
+        let captured: u64 = effects
+            .capture("side_value", 7)
+            .await
+            .expect("capture should not require an effect declaration");
+
+        assert_eq!(captured, 7);
+        assert_eq!(effect_records(&journal).len(), 1);
     }
 
     #[tokio::test]
@@ -1799,7 +1902,6 @@ mod tests {
             .perform(TransactionalCountingEffect {
                 value: 7,
                 normal_calls: normal_calls.clone(),
-                executor: Some("tx"),
             })
             .await
             .expect("transactional port should commit");
@@ -1837,7 +1939,6 @@ mod tests {
             .perform(TransactionalCountingEffect {
                 value: 7,
                 normal_calls: normal_calls.clone(),
-                executor: Some("tx"),
             })
             .await
             .expect("transactional effect should commit");
@@ -1866,7 +1967,6 @@ mod tests {
             .perform(TransactionalCountingEffect {
                 value: 7,
                 normal_calls: normal_calls.clone(),
-                executor: Some("tx"),
             })
             .await
             .expect("strict replay should reconstruct the committed value");
@@ -1906,7 +2006,6 @@ mod tests {
         live.perform(TransactionalCountingEffect {
             value: 7,
             normal_calls: normal_calls.clone(),
-            executor: Some("tx"),
         })
         .await
         .expect("live transactional effect should commit");
@@ -1928,7 +2027,6 @@ mod tests {
             .perform(TransactionalCountingEffect {
                 value: 7,
                 normal_calls: normal_calls.clone(),
-                executor: Some("tx"),
             })
             .await
             .expect("strict replay should use recorded transactional output");
@@ -1963,7 +2061,6 @@ mod tests {
             .perform(TransactionalCountingEffect {
                 value: 7,
                 normal_calls: normal_calls.clone(),
-                executor: Some("tx"),
             })
             .await
             .expect_err("transactional port returning without commit must fail");
@@ -1992,7 +2089,6 @@ mod tests {
             .perform(TransactionalCountingEffect {
                 value: 7,
                 normal_calls: normal_calls.clone(),
-                executor: Some("tx"),
             })
             .await
             .expect_err("missing transactional port must fail before execution");

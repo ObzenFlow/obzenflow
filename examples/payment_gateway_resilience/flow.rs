@@ -38,7 +38,7 @@ use obzenflow_dsl::{effectful_transform, flow, sink, source, transform};
 use obzenflow_infra::application::{FlowApplication, LogLevel, Presentation};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::effects::{
-    Effect, EffectContext, EffectDeclaration, EffectError, EffectSafety, Effects, IdempotencyKey,
+    Effect, EffectContext, EffectError, EffectSafety, Effects, IdempotencyKey,
 };
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{EffectfulTransformHandler, TransformHandler};
@@ -133,6 +133,7 @@ struct AuthorizePayment {
 impl Effect for AuthorizePayment {
     const EFFECT_TYPE: &'static str = "payment.authorize";
     const SCHEMA_VERSION: u32 = 1;
+    const SAFETY: EffectSafety = EffectSafety::NonIdempotentRequiresKey;
 
     type Output = GatewayAuthorization;
 
@@ -162,10 +163,6 @@ impl Effect for AuthorizePayment {
                 "gateway_timeout_simulated".to_string(),
             )),
         }
-    }
-
-    fn safety(&self) -> EffectSafety {
-        EffectSafety::NonIdempotentRequiresKey
     }
 
     fn idempotency_key(&self) -> Option<IdempotencyKey> {
@@ -218,12 +215,6 @@ impl EffectfulTransformHandler for GatewayTransform {
 
     fn stage_logic_version(&self) -> &str {
         "payment-gateway-v1"
-    }
-
-    fn effect_declarations(&self) -> Vec<EffectDeclaration> {
-        vec![EffectDeclaration::non_idempotent_with_key(
-            AuthorizePayment::EFFECT_TYPE,
-        )]
     }
 }
 
@@ -285,7 +276,10 @@ fn build_flow() -> obzenflow_dsl::FlowDefinition {
             // - Slow-call contribution for gateway calls that take too long.
             // - Explicit Open/HalfOpen policies that still match the original
             //   semantics (emit fallback while Open; single-probe HalfOpen).
-            gateway = effectful_transform!(ValidatedPayment -> AuthorizedPayment => GatewayTransform, [
+            gateway = effectful_transform!(
+                ValidatedPayment -> AuthorizedPayment => GatewayTransform,
+                effects: [AuthorizePayment],
+                middleware: [
                 CircuitBreakerBuilder::new(3)
                     .cooldown(std::time::Duration::from_secs(5))
                     // Rate-based failure mode: open when >= 60% of the last
@@ -307,7 +301,8 @@ fn build_flow() -> obzenflow_dsl::FlowDefinition {
                     ))
                     .with_contract_mode(CircuitBreakerContractMode::BreakerAware)
                     .build()
-            ]);
+                ]
+            );
 
             // Single sink that prints a concise summary at the end.
             summary = sink!(AuthorizedPayment => PaymentSummarySink::new());
@@ -405,7 +400,10 @@ fn build_glitchy_flow(config: GlitchyFlowConfig) -> obzenflow_dsl::FlowDefinitio
             validated = transform!(name: "validation", PaymentCommand -> ValidatedPayment => ValidationTransform, [
                 backpressure(BACKPRESSURE_WINDOW)
             ]);
-            gateway = effectful_transform!(ValidatedPayment -> AuthorizedPayment => GatewayTransform, [
+            gateway = effectful_transform!(
+                ValidatedPayment -> AuthorizedPayment => GatewayTransform,
+                effects: [AuthorizePayment],
+                middleware: [
                 CircuitBreakerBuilder::new(3)
                     .cooldown(std::time::Duration::from_secs(5))
                     .rate_based_over_last_n_calls(5, 0.6)
@@ -420,7 +418,8 @@ fn build_glitchy_flow(config: GlitchyFlowConfig) -> obzenflow_dsl::FlowDefinitio
                     ))
                     .with_contract_mode(CircuitBreakerContractMode::BreakerAware)
                     .build()
-            ]);
+                ]
+            );
             summary = sink!(AuthorizedPayment => PaymentSummarySink::new_compact(summary_progress_every));
         },
 
@@ -484,7 +483,12 @@ fn build_strict_flow() -> obzenflow_dsl::FlowDefinition {
             validated = transform!(name: "validation_strict", PaymentCommand -> ValidatedPayment => ValidationTransform, [
                 backpressure(BACKPRESSURE_WINDOW)
             ]);
-            gateway = effectful_transform!(name: "gateway_strict", ValidatedPayment -> AuthorizedPayment => GatewayTransform);
+            gateway = effectful_transform!(
+                name: "gateway_strict",
+                ValidatedPayment -> AuthorizedPayment => GatewayTransform,
+                effects: [AuthorizePayment],
+                middleware: []
+            );
             summary = sink!(name: "summary_strict", AuthorizedPayment => PaymentSummarySink::new());
         },
 

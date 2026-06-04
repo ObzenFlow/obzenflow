@@ -23,7 +23,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::backpressure::{BackpressureReader, BackpressureWriter};
-use crate::effects::{EffectHistory, EffectPortRegistry, EffectRuntimeMode};
+use crate::effects::{EffectDeclaration, EffectHistory, EffectPortRegistry, EffectRuntimeMode};
 use crate::messaging::upstream_subscription::{
     ContractConfig, ContractsWiring, ReaderProgress, StageInputPosition,
 };
@@ -338,6 +338,9 @@ pub struct StatefulContext<H: UnifiedStatefulHandler> {
 
     /// Flow-scoped typed ports available to replay-safe effects.
     pub effect_ports: EffectPortRegistry,
+
+    /// Descriptor-owned effect declarations for replay-safe effect invocation.
+    pub effect_declarations: Vec<EffectDeclaration>,
 
     /// Last delivered data-input position for deterministic typed stateful emissions.
     pub last_input_position: Option<StageInputPosition>,

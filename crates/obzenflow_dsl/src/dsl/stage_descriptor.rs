@@ -249,7 +249,16 @@ fn validate_effect_declarations(
     declarations: &[EffectDeclaration],
     effect_ports: &EffectPortRegistry,
 ) -> Result<(), String> {
+    let mut effect_types = std::collections::HashSet::new();
+
     for declaration in declarations {
+        if !effect_types.insert(declaration.effect_type) {
+            return Err(format!(
+                "Effectful stage '{stage_name}' declares effect '{}' more than once",
+                declaration.effect_type
+            ));
+        }
+
         if matches!(declaration.safety, EffectSafety::NonIdempotentRequiresKey)
             && !matches!(
                 declaration.idempotency_key_policy,
@@ -1216,6 +1225,7 @@ impl<H: AsyncTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
 pub struct EffectfulTransformDescriptor<H: EffectfulTransformHandler + 'static> {
     pub name: String,
     pub handler: H,
+    pub effects: Vec<EffectDeclaration>,
     pub middleware: Vec<Box<dyn MiddlewareFactory>>,
 }
 
@@ -1244,7 +1254,7 @@ impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
     }
 
     fn effect_declarations(&self) -> Vec<EffectDeclaration> {
-        self.handler.effect_declarations()
+        self.effects.clone()
     }
 
     fn stage_middleware_names(&self) -> Vec<String> {
@@ -1261,15 +1271,13 @@ impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
     async fn create_handle_with_flow_middleware(
         self: Box<Self>,
         config: StageConfig,
-        resources: StageResources,
+        mut resources: StageResources,
         flow_middleware: Vec<Box<dyn MiddlewareFactory>>,
         control_middleware: Arc<ControlMiddlewareAggregator>,
     ) -> StageCreationResult<BoxedStageHandle> {
-        validate_effect_declarations(
-            &self.name,
-            &self.handler.effect_declarations(),
-            &resources.effect_ports,
-        )?;
+        let effect_declarations = self.effects.clone();
+        validate_effect_declarations(&self.name, &effect_declarations, &resources.effect_ports)?;
+        resources.effect_declarations = effect_declarations;
 
         for factory in &self.middleware {
             let validation_result =
@@ -1511,6 +1519,7 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
 pub struct EffectfulSinkDescriptor<H: EffectfulSinkHandler + 'static> {
     pub name: String,
     pub handler: H,
+    pub effects: Vec<EffectDeclaration>,
     pub middleware: Vec<Box<dyn MiddlewareFactory>>,
 }
 
@@ -1539,7 +1548,7 @@ impl<H: EffectfulSinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> 
     }
 
     fn effect_declarations(&self) -> Vec<EffectDeclaration> {
-        self.handler.effect_declarations()
+        self.effects.clone()
     }
 
     fn stage_middleware_names(&self) -> Vec<String> {
@@ -1556,15 +1565,13 @@ impl<H: EffectfulSinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> 
     async fn create_handle_with_flow_middleware(
         self: Box<Self>,
         config: StageConfig,
-        resources: StageResources,
+        mut resources: StageResources,
         flow_middleware: Vec<Box<dyn MiddlewareFactory>>,
         control_middleware: Arc<ControlMiddlewareAggregator>,
     ) -> StageCreationResult<BoxedStageHandle> {
-        validate_effect_declarations(
-            &self.name,
-            &self.handler.effect_declarations(),
-            &resources.effect_ports,
-        )?;
+        let effect_declarations = self.effects.clone();
+        validate_effect_declarations(&self.name, &effect_declarations, &resources.effect_ports)?;
+        resources.effect_declarations = effect_declarations;
 
         for factory in &self.middleware {
             let validation_result =
@@ -1944,6 +1951,7 @@ pub struct EffectfulStatefulDescriptor<H: EffectfulStatefulHandler + 'static> {
     pub name: String,
     pub handler: H,
     pub emit_interval: Option<Duration>,
+    pub effects: Vec<EffectDeclaration>,
     pub middleware: Vec<Box<dyn MiddlewareFactory>>,
 }
 
@@ -1955,6 +1963,7 @@ impl<H: EffectfulStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
             name: name.into(),
             handler,
             emit_interval: None,
+            effects: Vec::new(),
             middleware: Vec::new(),
         }
     }
@@ -1966,6 +1975,11 @@ impl<H: EffectfulStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
 
     pub fn with_middleware<M: MiddlewareFactory + 'static>(mut self, mw: M) -> Self {
         self.middleware.push(Box::new(mw));
+        self
+    }
+
+    pub fn with_effect_declarations(mut self, effects: Vec<EffectDeclaration>) -> Self {
+        self.effects = effects;
         self
     }
 
@@ -1999,7 +2013,7 @@ impl<H: EffectfulStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
     }
 
     fn effect_declarations(&self) -> Vec<EffectDeclaration> {
-        self.handler.effect_declarations()
+        self.effects.clone()
     }
 
     fn stage_middleware_names(&self) -> Vec<String> {
@@ -2016,15 +2030,13 @@ impl<H: EffectfulStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
     async fn create_handle_with_flow_middleware(
         self: Box<Self>,
         config: StageConfig,
-        resources: StageResources,
+        mut resources: StageResources,
         flow_middleware: Vec<Box<dyn MiddlewareFactory>>,
         control_middleware: Arc<ControlMiddlewareAggregator>,
     ) -> StageCreationResult<BoxedStageHandle> {
-        validate_effect_declarations(
-            &self.name,
-            &self.handler.effect_declarations(),
-            &resources.effect_ports,
-        )?;
+        let effect_declarations = self.effects.clone();
+        validate_effect_declarations(&self.name, &effect_declarations, &resources.effect_ports)?;
+        resources.effect_declarations = effect_declarations;
 
         for factory in &self.middleware {
             let validation_result =
@@ -2387,6 +2399,7 @@ mod tests {
     impl Effect for DemoTransactionalEffect {
         const EFFECT_TYPE: &'static str = "test.transactional_declared";
         const SCHEMA_VERSION: u32 = 1;
+        const SAFETY: EffectSafety = EffectSafety::Transactional;
 
         type Output = u8;
 
@@ -2433,6 +2446,20 @@ mod tests {
                 .expect_err("missing key strategy must fail materialisation");
 
         assert!(err.contains("without an idempotency-key strategy"));
+    }
+
+    #[test]
+    fn effect_declaration_validation_rejects_duplicate_effect_type() {
+        let declarations = [
+            EffectDeclaration::idempotent("test.duplicate"),
+            EffectDeclaration::idempotent("test.duplicate"),
+        ];
+
+        let err =
+            validate_effect_declarations("effectful", &declarations, &EffectPortRegistry::new())
+                .expect_err("duplicate effect type must fail materialisation");
+
+        assert!(err.contains("more than once"));
     }
 
     #[test]
@@ -2757,6 +2784,7 @@ mod tests {
             replay_archive: None,
             effect_runtime_mode: obzenflow_runtime::effects::EffectRuntimeMode::Live,
             effect_ports: obzenflow_runtime::effects::EffectPortRegistry::new(),
+            effect_declarations: Vec::new(),
         };
 
         let descriptor = FiniteSourceDescriptor {

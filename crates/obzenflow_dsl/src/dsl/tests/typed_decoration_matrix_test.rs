@@ -12,7 +12,7 @@ mod tests {
     use async_trait::async_trait;
     use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
     use obzenflow_core::{ChainEvent, TypedPayload};
-    use obzenflow_runtime::effects::Effects;
+    use obzenflow_runtime::effects::{Effect, EffectContext, EffectError, EffectSafety, Effects};
     use obzenflow_runtime::stages::common::handler_error::HandlerError;
     use obzenflow_runtime::stages::common::handlers::source::SourceError;
     use obzenflow_runtime::stages::common::handlers::{
@@ -204,6 +204,30 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Debug)]
+    struct TxEffect;
+
+    #[async_trait]
+    impl Effect for TxEffect {
+        const EFFECT_TYPE: &'static str = "test.tx_effect";
+        const SCHEMA_VERSION: u32 = 1;
+        const SAFETY: EffectSafety = EffectSafety::Transactional;
+
+        type Output = Out;
+
+        fn label(&self) -> &str {
+            "tx_effect"
+        }
+
+        fn canonical_input(&self) -> serde_json::Value {
+            serde_json::Value::Null
+        }
+
+        async fn execute(&self, _ctx: &mut EffectContext) -> Result<Self::Output, EffectError> {
+            Ok(Out)
+        }
+    }
+
     // ── source! ─────────────────────────────────────────────────────────────
     #[test]
     fn source_typed_bare() {
@@ -315,19 +339,35 @@ mod tests {
     // ── effectful_transform! ──────────────────────────────────────────
     #[test]
     fn effectful_transform_typed_bare() {
-        let _ = crate::effectful_transform!(In -> Out => FxTr);
+        let _ = crate::effectful_transform!(In -> Out => FxTr, effects: [], middleware: []);
     }
     #[test]
     fn effectful_transform_typed_mw() {
-        let _ = crate::effectful_transform!(In -> Out => FxTr, []);
+        let _ = crate::effectful_transform!(In -> Out => FxTr, effects: [], middleware: []);
     }
     #[test]
     fn effectful_transform_typed_name() {
-        let _ = crate::effectful_transform!(name: "t", In -> Out => FxTr);
+        let _ =
+            crate::effectful_transform!(name: "t", In -> Out => FxTr, effects: [], middleware: []);
     }
     #[test]
     fn effectful_transform_typed_name_mw() {
-        let _ = crate::effectful_transform!(name: "t", In -> Out => FxTr, []);
+        let _ =
+            crate::effectful_transform!(name: "t", In -> Out => FxTr, effects: [], middleware: []);
+    }
+    #[test]
+    fn effectful_transform_transactional_effect_clause_declares_executor() {
+        let descriptor = crate::effectful_transform!(
+            In -> Out => FxTr,
+            effects: [transactional(TxEffect, "tx")],
+            middleware: []
+        );
+
+        let declarations = descriptor.effect_declarations();
+        assert_eq!(declarations.len(), 1);
+        assert_eq!(declarations[0].effect_type, TxEffect::EFFECT_TYPE);
+        assert_eq!(declarations[0].safety, EffectSafety::Transactional);
+        assert_eq!(declarations[0].transactional_executor, Some("tx"));
     }
 
     // ── stateful! ───────────────────────────────────────────────────────────
@@ -351,19 +391,21 @@ mod tests {
     // ── effectful_stateful! ─────────────────────────────────────────────────
     #[test]
     fn effectful_stateful_typed_bare() {
-        let _ = crate::effectful_stateful!(In -> Out => FxSt);
+        let _ = crate::effectful_stateful!(In -> Out => FxSt, effects: [], middleware: []);
     }
     #[test]
     fn effectful_stateful_typed_mw() {
-        let _ = crate::effectful_stateful!(In -> Out => FxSt, []);
+        let _ = crate::effectful_stateful!(In -> Out => FxSt, effects: [], middleware: []);
     }
     #[test]
     fn effectful_stateful_typed_name() {
-        let _ = crate::effectful_stateful!(name: "s", In -> Out => FxSt);
+        let _ =
+            crate::effectful_stateful!(name: "s", In -> Out => FxSt, effects: [], middleware: []);
     }
     #[test]
     fn effectful_stateful_typed_name_mw() {
-        let _ = crate::effectful_stateful!(name: "s", In -> Out => FxSt, []);
+        let _ =
+            crate::effectful_stateful!(name: "s", In -> Out => FxSt, effects: [], middleware: []);
     }
 
     // ── sink! ───────────────────────────────────────────────────────────────
@@ -387,18 +429,18 @@ mod tests {
     // ── effectful_sink! ─────────────────────────────────────────────────────
     #[test]
     fn effectful_sink_typed_bare() {
-        let _ = crate::effectful_sink!(Out => FxSn);
+        let _ = crate::effectful_sink!(Out => FxSn, effects: [], middleware: []);
     }
     #[test]
     fn effectful_sink_typed_mw() {
-        let _ = crate::effectful_sink!(Out => FxSn, []);
+        let _ = crate::effectful_sink!(Out => FxSn, effects: [], middleware: []);
     }
     #[test]
     fn effectful_sink_typed_name() {
-        let _ = crate::effectful_sink!(name: "s", Out => FxSn);
+        let _ = crate::effectful_sink!(name: "s", Out => FxSn, effects: [], middleware: []);
     }
     #[test]
     fn effectful_sink_typed_name_mw() {
-        let _ = crate::effectful_sink!(name: "s", Out => FxSn, []);
+        let _ = crate::effectful_sink!(name: "s", Out => FxSn, effects: [], middleware: []);
     }
 }

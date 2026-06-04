@@ -10,7 +10,7 @@
 use crate::backpressure::{
     BackpressurePlan, BackpressureReader, BackpressureRegistry, BackpressureWriter,
 };
-use crate::effects::{EffectPortRegistry, EffectRuntimeMode};
+use crate::effects::{EffectDeclaration, EffectPortRegistry, EffectRuntimeMode};
 use crate::id_conversions::StageIdExt;
 use crate::message_bus::FsmMessageBus;
 use crate::messaging::upstream_subscription::{ContractsWiring, UpstreamSubscription};
@@ -194,6 +194,9 @@ pub struct StageResources {
 
     /// Flow-scoped typed ports available to replay-safe effects.
     pub effect_ports: EffectPortRegistry,
+
+    /// Descriptor-owned effect declarations available to replay-safe effect invocation.
+    pub effect_declarations: Vec<EffectDeclaration>,
 }
 
 /// Builder for creating all stage resources with proper wiring
@@ -438,6 +441,7 @@ impl StageResourcesBuilder {
                 ),
                 replay_archive: self.replay_archive.clone(),
                 effect_ports: self.effect_ports.clone(),
+                effect_declarations: Vec::new(),
             };
 
             tracing::debug!(

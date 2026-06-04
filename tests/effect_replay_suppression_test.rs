@@ -185,6 +185,7 @@ struct CountingEffect {
 impl Effect for CountingEffect {
     const EFFECT_TYPE: &'static str = "effect_replay.counting";
     const SCHEMA_VERSION: u32 = 1;
+    const SAFETY: EffectSafety = EffectSafety::NonIdempotentRequiresKey;
 
     type Output = ReplayEffectValue;
 
@@ -203,10 +204,6 @@ impl Effect for CountingEffect {
         })
     }
 
-    fn safety(&self) -> EffectSafety {
-        EffectSafety::NonIdempotentRequiresKey
-    }
-
     fn idempotency_key(&self) -> Option<IdempotencyKey> {
         Some(IdempotencyKey(format!("counting:{}", self.value)))
     }
@@ -223,6 +220,7 @@ struct BlockingEffect {
 impl Effect for BlockingEffect {
     const EFFECT_TYPE: &'static str = "effect_replay.blocking";
     const SCHEMA_VERSION: u32 = 1;
+    const SAFETY: EffectSafety = EffectSafety::NonIdempotentRequiresKey;
 
     type Output = ReplayEffectValue;
 
@@ -245,10 +243,6 @@ impl Effect for BlockingEffect {
         Ok(ReplayEffectValue {
             effect_value: self.value + 100,
         })
-    }
-
-    fn safety(&self) -> EffectSafety {
-        EffectSafety::NonIdempotentRequiresKey
     }
 
     fn idempotency_key(&self) -> Option<IdempotencyKey> {
@@ -336,6 +330,7 @@ struct AlwaysFailingEffect {
 impl Effect for AlwaysFailingEffect {
     const EFFECT_TYPE: &'static str = "effect_replay.always_failing";
     const SCHEMA_VERSION: u32 = 1;
+    const SAFETY: EffectSafety = EffectSafety::NonIdempotentRequiresKey;
 
     type Output = ReplayEffectValue;
 
@@ -350,10 +345,6 @@ impl Effect for AlwaysFailingEffect {
     async fn execute(&self, _ctx: &mut EffectContext) -> Result<Self::Output, EffectError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         Err(EffectError::Execution("simulated_gateway_down".to_string()))
-    }
-
-    fn safety(&self) -> EffectSafety {
-        EffectSafety::NonIdempotentRequiresKey
     }
 
     fn idempotency_key(&self) -> Option<IdempotencyKey> {
@@ -527,10 +518,15 @@ fn build_flow(
         name: "effect_replay_suppression",
         journals: disk_journals(journal_base),
         middleware: [],
+        effect_ports: obzenflow_runtime::effects::EffectPortRegistry::new(),
 
         stages: {
             inputs = source!(ReplayInput => ReplaySource::new());
-            effectful = effectful_transform!(ReplayInput -> ReplayOutput => ReplayTransform { calls });
+            effectful = effectful_transform!(
+                ReplayInput -> ReplayOutput => ReplayTransform { calls },
+                effects: [CountingEffect],
+                middleware: []
+            );
             collector = sink!(ReplayOutput => CollectSink { outputs });
         },
 
@@ -555,7 +551,11 @@ fn build_flow_level_limiter_flow(
 
         stages: {
             inputs = source!(ReplayInput => ReplaySource::new());
-            effectful = effectful_transform!(ReplayInput -> ReplayOutput => ReplayTransform { calls });
+            effectful = effectful_transform!(
+                ReplayInput -> ReplayOutput => ReplayTransform { calls },
+                effects: [CountingEffect],
+                middleware: []
+            );
             collector = sink!(ReplayOutput => CollectSink { outputs });
         },
 
@@ -586,7 +586,11 @@ fn build_fast_limiter_flow(
 
         stages: {
             inputs = source!(ReplayInput => ReplaySource::new());
-            effectful = effectful_transform!(ReplayInput -> ReplayOutput => ReplayTransform { calls });
+            effectful = effectful_transform!(
+                ReplayInput -> ReplayOutput => ReplayTransform { calls },
+                effects: [CountingEffect],
+                middleware: []
+            );
             collector = sink!(ReplayOutput => CollectSink { outputs });
         },
 
@@ -610,7 +614,11 @@ fn build_blocking_flow(
 
         stages: {
             inputs = source!(ReplayInput => SingleReplaySource::new());
-            effectful = effectful_transform!(ReplayInput -> ReplayOutput => BlockingTransform { calls, release });
+            effectful = effectful_transform!(
+                ReplayInput -> ReplayOutput => BlockingTransform { calls, release },
+                effects: [BlockingEffect],
+                middleware: []
+            );
             collector = sink!(ReplayOutput => CollectSink { outputs });
         },
 
@@ -634,7 +642,11 @@ fn build_fan_out_flow(
         stages: {
             inputs = source!(ReplayInput => SingleReplaySource::new());
             fan_out = transform!(ReplayInput -> ReplayInput => FanOutTransform::new());
-            effectful = effectful_transform!(ReplayInput -> ReplayOutput => ReplayTransform { calls });
+            effectful = effectful_transform!(
+                ReplayInput -> ReplayOutput => ReplayTransform { calls },
+                effects: [CountingEffect],
+                middleware: []
+            );
             collector = sink!(ReplayOutput => CollectSink { outputs });
         },
 
@@ -658,7 +670,11 @@ fn build_effectful_sink_flow(
 
         stages: {
             inputs = source!(ReplayInput => ReplaySource::new());
-            collector = effectful_sink!(ReplayInput => EffectfulCollectSink { calls, receipts });
+            collector = effectful_sink!(
+                ReplayInput => EffectfulCollectSink { calls, receipts },
+                effects: [CountingEffect],
+                middleware: []
+            );
         },
 
         topology: {
@@ -679,7 +695,10 @@ fn build_breaker_fallback_flow(
 
         stages: {
             inputs = source!(ReplayInput => ReplaySource::new());
-            effectful = effectful_transform!(ReplayInput -> ReplayOutput => FallbackTransform { calls }, [
+            effectful = effectful_transform!(
+                ReplayInput -> ReplayOutput => FallbackTransform { calls },
+                effects: [AlwaysFailingEffect],
+                middleware: [
                 CircuitBreakerBuilder::new(1)
                     .open_policy(OpenPolicy::EmitFallback)
                     .with_typed_fallback::<ReplayInput, ReplayEffectValue, _>(|input| ReplayEffectValue {
@@ -709,7 +728,11 @@ fn build_stateful_flow(
 
         stages: {
             inputs = source!(ReplayInput => ReplaySource::new());
-            effectful = effectful_stateful!(ReplayInput -> ReplayOutput => ReplayStateful { calls });
+            effectful = effectful_stateful!(
+                ReplayInput -> ReplayOutput => ReplayStateful { calls },
+                effects: [CountingEffect],
+                middleware: []
+            );
             collector = sink!(ReplayOutput => CollectSink { outputs });
         },
 
