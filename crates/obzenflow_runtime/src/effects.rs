@@ -453,10 +453,6 @@ pub trait Effect: Clone + std::fmt::Debug + Send + Sync + 'static {
 
     async fn execute(&self, ctx: &mut EffectContext) -> Result<Self::Output, EffectError>;
 
-    fn safety(&self) -> EffectSafety {
-        Self::SAFETY
-    }
-
     fn idempotency_key(&self) -> Option<IdempotencyKey> {
         None
     }

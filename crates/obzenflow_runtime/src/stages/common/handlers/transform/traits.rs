@@ -7,7 +7,7 @@
 //! Examples: Data enrichers, filters, mappers, routers
 
 use crate::effects::{
-    deterministic_typed_output_event, EffectDeclaration, EffectInvocationContext, Effects,
+    deterministic_typed_output_event, EffectInvocationContext, Effects,
 };
 use crate::typing::TransformTyping;
 use async_trait::async_trait;
@@ -114,10 +114,6 @@ pub trait UnifiedTransformHandler: Send + Sync {
     fn stage_logic_version(&self) -> &str {
         "1"
     }
-
-    fn effect_declarations(&self) -> Vec<EffectDeclaration> {
-        Vec::new()
-    }
 }
 
 #[async_trait]
@@ -175,10 +171,6 @@ pub trait EffectfulTransformHandler: Send + Sync {
 
     fn stage_logic_version(&self) -> &str {
         "1"
-    }
-
-    fn effect_declarations(&self) -> Vec<EffectDeclaration> {
-        Vec::new()
     }
 }
 

@@ -24,7 +24,8 @@ use obzenflow_dsl::{
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::effects::{
-    Effect, EffectContext, EffectError, EffectSafety, Effects, IdempotencyKey,
+    Effect, EffectCommitHandle, EffectContext, EffectError, EffectPortRegistry,
+    EffectPortRequirement, EffectSafety, Effects, IdempotencyKey, TransactionalEffectPort,
 };
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
@@ -1775,5 +1776,359 @@ async fn resume_incomplete_archive_suppresses_committed_effect_records() {
             .expect("outputs lock poisoned")
             .clone(),
         live_domain_outputs
+    );
+}
+
+// ============================================================================
+// FLOWIP-120g Decision 2: end-to-end effect-port provisioning through `flow!`.
+//
+// FLOWIP-120a implemented typed and transactional effect ports in the runtime
+// but left the authoring-surface supply path unexercised end to end. These tests
+// drive a populated `EffectPortRegistry` through the `flow!` `effect_ports:`
+// clause into `build_typed_flow!` -> `with_effect_ports`, covering
+// materialisation-time `required_ports` validation and live `EffectContext::port`
+// access for both an ordinary ported effect and a transactional
+// execute-and-record port.
+// ============================================================================
+
+/// A host-provided port. The ordinary ported effect resolves it through
+/// `EffectContext::port` during live execution.
+trait GreetingPort: Send + Sync {
+    fn greet(&self, value: u64) -> u64;
+}
+
+struct DoublingGreetingPort;
+
+impl GreetingPort for DoublingGreetingPort {
+    fn greet(&self, value: u64) -> u64 {
+        value * 2
+    }
+}
+
+/// An idempotent effect that declares a required typed port and uses it.
+#[derive(Clone, Debug)]
+struct PortedEffect {
+    value: u64,
+    calls: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl Effect for PortedEffect {
+    const EFFECT_TYPE: &'static str = "effect_port_supply.ported";
+    const SCHEMA_VERSION: u32 = 1;
+    const SAFETY: EffectSafety = EffectSafety::Idempotent;
+
+    type Output = ReplayEffectValue;
+
+    fn label(&self) -> &str {
+        "ported"
+    }
+
+    fn canonical_input(&self) -> serde_json::Value {
+        json!({ "value": self.value })
+    }
+
+    async fn execute(&self, ctx: &mut EffectContext) -> Result<Self::Output, EffectError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        let port = ctx.port::<dyn GreetingPort>("primary")?;
+        Ok(ReplayEffectValue {
+            effect_value: port.greet(self.value),
+        })
+    }
+
+    fn required_ports() -> Vec<EffectPortRequirement> {
+        vec![EffectPortRequirement::of::<dyn GreetingPort>("primary")]
+    }
+}
+
+#[derive(Clone, Debug)]
+struct PortedTransform {
+    calls: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl EffectfulTransformHandler for PortedTransform {
+    type Input = ReplayInput;
+    type Output = ReplayOutput;
+
+    async fn process(
+        &self,
+        input: ReplayInput,
+        fx: &mut Effects,
+    ) -> Result<ReplayOutput, HandlerError> {
+        let effect_value = fx
+            .perform(PortedEffect {
+                value: input.value,
+                calls: self.calls.clone(),
+            })
+            .await
+            .map_err(|e| HandlerError::Other(e.to_string()))?;
+
+        Ok(ReplayOutput {
+            value: input.value,
+            effect_value: effect_value.effect_value,
+        })
+    }
+
+    fn stage_logic_version(&self) -> &str {
+        "effect-port-supply-v1"
+    }
+}
+
+fn build_ported_flow(
+    journal_base: PathBuf,
+    calls: Arc<AtomicUsize>,
+    outputs: Arc<Mutex<Vec<ReplayOutput>>>,
+    ports: EffectPortRegistry,
+) -> FlowDefinition {
+    flow! {
+        name: "effect_port_supply",
+        journals: disk_journals(journal_base),
+        middleware: [],
+        effect_ports: ports,
+
+        stages: {
+            inputs = source!(ReplayInput => ReplaySource::new());
+            ported = effectful_transform!(
+                ReplayInput -> ReplayOutput => PortedTransform { calls },
+                effects: [PortedEffect],
+                middleware: []
+            );
+            collector = sink!(ReplayOutput => CollectSink { outputs });
+        },
+
+        topology: {
+            inputs |> ported;
+            ported |> collector;
+        }
+    }
+}
+
+#[tokio::test]
+async fn flow_supplied_registry_satisfies_required_effect_port() {
+    let _guard = effect_replay_test_guard().await;
+    let temp = tempfile::tempdir().expect("tempdir");
+    let journal_base = temp.path().join("journals");
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let outputs = Arc::new(Mutex::new(Vec::new()));
+
+    let mut ports = EffectPortRegistry::new();
+    ports.insert::<dyn GreetingPort>("primary", Arc::new(DoublingGreetingPort));
+
+    FlowApplication::builder()
+        .with_cli_args(["obzenflow"])
+        .run_async(build_ported_flow(
+            journal_base,
+            calls.clone(),
+            outputs.clone(),
+            ports,
+        ))
+        .await
+        .expect("a flow that supplies the required effect port should materialise and run");
+
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
+    let domain = outputs.lock().expect("outputs lock poisoned").clone();
+    assert_eq!(
+        domain,
+        vec![
+            ReplayOutput {
+                value: 1,
+                effect_value: 2
+            },
+            ReplayOutput {
+                value: 2,
+                effect_value: 4
+            },
+            ReplayOutput {
+                value: 3,
+                effect_value: 6
+            },
+        ]
+    );
+}
+
+#[tokio::test]
+async fn flow_without_required_effect_port_fails_closed_at_materialisation() {
+    let _guard = effect_replay_test_guard().await;
+    let temp = tempfile::tempdir().expect("tempdir");
+    let journal_base = temp.path().join("journals");
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let outputs = Arc::new(Mutex::new(Vec::new()));
+
+    // No port is registered, so the descriptor's declared `required_ports`
+    // cannot be satisfied and materialisation must reject the flow.
+    let err = FlowApplication::builder()
+        .with_cli_args(["obzenflow"])
+        .run_async(build_ported_flow(
+            journal_base,
+            calls.clone(),
+            outputs.clone(),
+            EffectPortRegistry::new(),
+        ))
+        .await
+        .expect_err("a flow missing the required effect port must fail closed at materialisation");
+
+    let message = err.to_string();
+    assert!(
+        message.contains("requires effect port") && message.contains("primary"),
+        "materialisation error should name the missing port, got: {message}"
+    );
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        0,
+        "the effect must not execute when its required port is unregistered"
+    );
+}
+
+// --- Transactional execute-and-record port supplied through `flow!` ---------
+
+/// A transactional effect whose commit runs through a flow-supplied
+/// `TransactionalEffectPort`. The macro `transactional(..)` entry adds the port
+/// requirement, and the runtime reads the executor name from the descriptor.
+#[derive(Clone, Debug)]
+struct LedgerEffect {
+    value: u64,
+}
+
+#[async_trait]
+impl Effect for LedgerEffect {
+    const EFFECT_TYPE: &'static str = "effect_port_supply.ledger";
+    const SCHEMA_VERSION: u32 = 1;
+    const SAFETY: EffectSafety = EffectSafety::Transactional;
+
+    type Output = ReplayEffectValue;
+
+    fn label(&self) -> &str {
+        "ledger"
+    }
+
+    fn canonical_input(&self) -> serde_json::Value {
+        json!({ "value": self.value })
+    }
+
+    async fn execute(&self, _ctx: &mut EffectContext) -> Result<Self::Output, EffectError> {
+        // Transactional dispatch runs through the port's execute_and_commit, so
+        // this body is not exercised on the transactional path.
+        Ok(ReplayEffectValue {
+            effect_value: self.value,
+        })
+    }
+}
+
+struct LedgerPort {
+    calls: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl TransactionalEffectPort<LedgerEffect> for LedgerPort {
+    async fn execute_and_commit(
+        &self,
+        effect: LedgerEffect,
+        _ctx: &mut EffectContext,
+        commit: EffectCommitHandle<ReplayEffectValue>,
+    ) -> Result<ReplayEffectValue, EffectError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        let output = ReplayEffectValue {
+            effect_value: effect.value + 1_000,
+        };
+        commit.commit_success(&output).await?;
+        Ok(output)
+    }
+}
+
+#[derive(Clone, Debug)]
+struct LedgerTransform;
+
+#[async_trait]
+impl EffectfulTransformHandler for LedgerTransform {
+    type Input = ReplayInput;
+    type Output = ReplayOutput;
+
+    async fn process(
+        &self,
+        input: ReplayInput,
+        fx: &mut Effects,
+    ) -> Result<ReplayOutput, HandlerError> {
+        let committed = fx
+            .perform(LedgerEffect { value: input.value })
+            .await
+            .map_err(|e| HandlerError::Other(e.to_string()))?;
+
+        Ok(ReplayOutput {
+            value: input.value,
+            effect_value: committed.effect_value,
+        })
+    }
+
+    fn stage_logic_version(&self) -> &str {
+        "effect-port-supply-ledger-v1"
+    }
+}
+
+fn build_transactional_flow(
+    journal_base: PathBuf,
+    outputs: Arc<Mutex<Vec<ReplayOutput>>>,
+    ports: EffectPortRegistry,
+) -> FlowDefinition {
+    flow! {
+        name: "effect_port_supply_transactional",
+        journals: disk_journals(journal_base),
+        middleware: [],
+        effect_ports: ports,
+
+        stages: {
+            inputs = source!(ReplayInput => SingleReplaySource::new());
+            ledger = effectful_transform!(
+                ReplayInput -> ReplayOutput => LedgerTransform,
+                effects: [transactional(LedgerEffect, "ledger_tx")],
+                middleware: []
+            );
+            collector = sink!(ReplayOutput => CollectSink { outputs });
+        },
+
+        topology: {
+            inputs |> ledger;
+            ledger |> collector;
+        }
+    }
+}
+
+#[tokio::test]
+async fn flow_supplied_registry_dispatches_transactional_effect_through_port() {
+    let _guard = effect_replay_test_guard().await;
+    let temp = tempfile::tempdir().expect("tempdir");
+    let journal_base = temp.path().join("journals");
+
+    let port_calls = Arc::new(AtomicUsize::new(0));
+    let outputs = Arc::new(Mutex::new(Vec::new()));
+
+    let mut ports = EffectPortRegistry::new();
+    ports.insert::<dyn TransactionalEffectPort<LedgerEffect>>(
+        "ledger_tx",
+        Arc::new(LedgerPort {
+            calls: port_calls.clone(),
+        }),
+    );
+
+    FlowApplication::builder()
+        .with_cli_args(["obzenflow"])
+        .run_async(build_transactional_flow(journal_base, outputs.clone(), ports))
+        .await
+        .expect("a transactional flow with a supplied executor port should materialise and run");
+
+    assert_eq!(
+        port_calls.load(Ordering::SeqCst),
+        1,
+        "the transactional executor port should run exactly once"
+    );
+    let domain = outputs.lock().expect("outputs lock poisoned").clone();
+    assert_eq!(
+        domain,
+        vec![ReplayOutput {
+            value: 1,
+            effect_value: 1_001
+        }]
     );
 }

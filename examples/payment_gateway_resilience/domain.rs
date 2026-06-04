@@ -21,16 +21,6 @@ pub enum TrafficPhase {
     Recovery,
 }
 
-impl TrafficPhase {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            TrafficPhase::Warmup => "warmup",
-            TrafficPhase::Outage => "outage",
-            TrafficPhase::Recovery => "recovery",
-        }
-    }
-}
-
 /// Command coming from an upstream system asking us to charge a card.
 ///
 /// This is the "input" to the flow and models a typical payment
