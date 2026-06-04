@@ -20,7 +20,9 @@
 //! short-circuits to a typed fallback instead of hammering it. See `README.md`.
 
 use super::domain::{AuthorizedPayment, PaymentCommand, ValidatedPayment};
-use super::gateway::{AuthorizePayment, GatewayAuthorization, GatewayTransform, ValidationTransform};
+use super::gateway::{
+    AuthorizePayment, GatewayAuthorization, GatewayTransform, ValidationTransform,
+};
 use super::sinks::PaymentSummarySink;
 use super::sources::PaymentCommandSource;
 use obzenflow_adapters::middleware::circuit_breaker::{HalfOpenPolicy, OpenPolicy};

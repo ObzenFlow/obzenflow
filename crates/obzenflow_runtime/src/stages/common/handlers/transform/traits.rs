@@ -6,9 +6,7 @@
 //!
 //! Examples: Data enrichers, filters, mappers, routers
 
-use crate::effects::{
-    deterministic_typed_output_event, EffectInvocationContext, Effects,
-};
+use crate::effects::{deterministic_typed_output_event, EffectInvocationContext, Effects};
 use crate::typing::TransformTyping;
 use async_trait::async_trait;
 use obzenflow_core::event::schema::TypedPayload;

@@ -7,8 +7,7 @@
 //! Examples: Aggregators, windowing operations, session tracking
 
 use crate::effects::{
-    deterministic_typed_output_event, EffectError, EffectInvocationContext,
-    Effects,
+    deterministic_typed_output_event, EffectError, EffectInvocationContext, Effects,
 };
 use crate::messaging::upstream_subscription::StageInputPosition;
 use crate::stages::common::handler_error::HandlerError;

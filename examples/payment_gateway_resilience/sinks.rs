@@ -166,7 +166,9 @@ impl SinkHandler for PaymentSummarySink {
         println!("Key observation:");
         println!("  - Locally invalid payments still count toward errors_total;");
         println!("  - Remote outages open the circuit breaker, which protects the gateway");
-        println!("    and shows up in obzenflow_circuit_breaker_* metrics instead of spamming errors.");
+        println!(
+            "    and shows up in obzenflow_circuit_breaker_* metrics instead of spamming errors."
+        );
 
         Ok(None)
     }

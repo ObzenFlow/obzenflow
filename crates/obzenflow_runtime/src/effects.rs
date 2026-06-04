@@ -1692,6 +1692,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn strict_replay_rejects_undeclared_effect_before_history_lookup() {
+        let stage_id = StageId::new();
+        let live_journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
+        let live_calls = Arc::new(AtomicUsize::new(0));
+        let live_parent = parent_envelope(WriterId::from(stage_id));
+        let mut live = Effects::new(invocation_context(live_journal.clone(), live_parent, None));
+        live.perform(CountingEffect {
+            value: 41,
+            label: "same",
+            calls: live_calls,
+        })
+        .await
+        .expect("live effect should succeed");
+
+        let live_records = effect_records(&live_journal);
+        let history = Arc::new(
+            EffectHistory::from_records(
+                live_records[0].cursor.recorded_flow_id.clone(),
+                live_records,
+            )
+            .expect("history should index"),
+        );
+        let replay_journal = Arc::new(MemoryJournal::new(JournalOwner::stage(StageId::new())));
+        let replay_calls = Arc::new(AtomicUsize::new(0));
+        let mut ctx = invocation_context(
+            replay_journal.clone(),
+            parent_envelope(WriterId::from(stage_id)),
+            Some(history),
+        );
+        ctx.stage_logic_version = "test-v2".to_string();
+        ctx.effect_declarations.clear();
+        let mut replay = Effects::new(ctx);
+
+        let err = replay
+            .perform(CountingEffect {
+                value: 41,
+                label: "same",
+                calls: replay_calls.clone(),
+            })
+            .await
+            .expect_err("undeclared effects must fail before replay history lookup");
+
+        match err {
+            EffectError::UndeclaredEffect {
+                stage_key,
+                effect_type,
+            } => {
+                assert_eq!(stage_key, "effect_stage");
+                assert_eq!(effect_type, CountingEffect::EFFECT_TYPE);
+            }
+            other => panic!("unexpected effect error: {other:?}"),
+        }
+        assert_eq!(replay_calls.load(Ordering::SeqCst), 0);
+        assert!(effect_records(&replay_journal).is_empty());
+    }
+
+    #[tokio::test]
     async fn capture_is_exempt_from_declared_effect_list() {
         let stage_id = StageId::new();
         let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));

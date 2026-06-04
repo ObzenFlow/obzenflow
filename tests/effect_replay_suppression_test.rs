@@ -2114,7 +2114,11 @@ async fn flow_supplied_registry_dispatches_transactional_effect_through_port() {
 
     FlowApplication::builder()
         .with_cli_args(["obzenflow"])
-        .run_async(build_transactional_flow(journal_base, outputs.clone(), ports))
+        .run_async(build_transactional_flow(
+            journal_base,
+            outputs.clone(),
+            ports,
+        ))
         .await
         .expect("a transactional flow with a supplied executor port should materialise and run");
 
