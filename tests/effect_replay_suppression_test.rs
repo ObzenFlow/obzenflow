@@ -41,6 +41,12 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::Semaphore;
 
+static EFFECT_REPLAY_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+async fn effect_replay_test_guard() -> tokio::sync::MutexGuard<'static, ()> {
+    EFFECT_REPLAY_TEST_LOCK.lock().await
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct ReplayInput {
     value: u64,
@@ -929,6 +935,7 @@ async fn rate_limiter_runtime_activity_in_stage(
 
 #[tokio::test]
 async fn effectful_sink_replay_suppresses_effect_execution() {
+    let _guard = effect_replay_test_guard().await;
     let temp = tempfile::tempdir().expect("tempdir");
     let journal_base = temp.path().join("journals");
 
@@ -1001,6 +1008,7 @@ async fn effectful_sink_replay_suppresses_effect_execution() {
 
 #[tokio::test]
 async fn effectful_transform_replay_suppresses_effect_execution() {
+    let _guard = effect_replay_test_guard().await;
     let temp = tempfile::tempdir().expect("tempdir");
     let journal_base = temp.path().join("journals");
 
@@ -1070,6 +1078,7 @@ async fn effectful_transform_replay_suppresses_effect_execution() {
 
 #[tokio::test]
 async fn fan_out_sibling_effects_use_distinct_cursors_and_replay_suppresses_execution() {
+    let _guard = effect_replay_test_guard().await;
     let temp = tempfile::tempdir().expect("tempdir");
     let journal_base = temp.path().join("journals");
 
@@ -1149,6 +1158,7 @@ async fn fan_out_sibling_effects_use_distinct_cursors_and_replay_suppresses_exec
 
 #[tokio::test]
 async fn eof_writer_seq_counts_transport_data_not_effect_results() {
+    let _guard = effect_replay_test_guard().await;
     let temp = tempfile::tempdir().expect("tempdir");
     let journal_base = temp.path().join("journals");
 
@@ -1205,6 +1215,7 @@ async fn eof_writer_seq_counts_transport_data_not_effect_results() {
 
 #[tokio::test]
 async fn drain_waits_for_in_flight_effect_before_outputs_and_eof_complete() {
+    let _guard = effect_replay_test_guard().await;
     let temp = tempfile::tempdir().expect("tempdir");
     let journal_base = temp.path().join("journals");
 
@@ -1263,6 +1274,7 @@ async fn drain_waits_for_in_flight_effect_before_outputs_and_eof_complete() {
 
 #[tokio::test]
 async fn flow_level_admission_limiter_replay_suppresses_delay_events_and_effects() {
+    let _guard = effect_replay_test_guard().await;
     let temp = tempfile::tempdir().expect("tempdir");
     let journal_base = temp.path().join("journals");
 
@@ -1369,6 +1381,7 @@ async fn flow_level_admission_limiter_replay_suppresses_delay_events_and_effects
 
 #[tokio::test]
 async fn effect_boundary_breaker_fallback_replays_recorded_fallback_without_execute() {
+    let _guard = effect_replay_test_guard().await;
     let temp = tempfile::tempdir().expect("tempdir");
     let journal_base = temp.path().join("journals");
 
@@ -1470,6 +1483,7 @@ async fn effect_boundary_breaker_fallback_replays_recorded_fallback_without_exec
 
 #[tokio::test]
 async fn strict_effectful_stateful_replay_suppresses_effect_execution() {
+    let _guard = effect_replay_test_guard().await;
     let temp = tempfile::tempdir().expect("tempdir");
     let journal_base = temp.path().join("journals");
 
@@ -1538,6 +1552,7 @@ async fn strict_effectful_stateful_replay_suppresses_effect_execution() {
 
 #[tokio::test]
 async fn resume_incomplete_archive_reexecutes_missing_effect_records_with_archived_cursor() {
+    let _guard = effect_replay_test_guard().await;
     let temp = tempfile::tempdir().expect("tempdir");
     let journal_base = temp.path().join("journals");
 
@@ -1621,6 +1636,7 @@ async fn resume_incomplete_archive_reexecutes_missing_effect_records_with_archiv
 /// silent.
 #[tokio::test]
 async fn resume_incomplete_runs_effect_boundary_limiter_but_suppresses_downstream_admission() {
+    let _guard = effect_replay_test_guard().await;
     let temp = tempfile::tempdir().expect("tempdir");
     let journal_base = temp.path().join("journals");
 
@@ -1709,6 +1725,7 @@ async fn resume_incomplete_runs_effect_boundary_limiter_but_suppresses_downstrea
 
 #[tokio::test]
 async fn resume_incomplete_archive_suppresses_committed_effect_records() {
+    let _guard = effect_replay_test_guard().await;
     let temp = tempfile::tempdir().expect("tempdir");
     let journal_base = temp.path().join("journals");
 
