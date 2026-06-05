@@ -157,19 +157,29 @@ impl EffectfulTransformHandler for GatewayTransform {
 /// A simulated gateway outage is infrastructure behavior, not a local business
 /// invalid-order outcome and not a material gateway decline.
 fn authorization_unavailable_decision(err: EffectError) -> GatewayPaymentDecision {
-    let reason = match err {
+    GatewayPaymentDecision::AuthorizationUnavailable {
+        reason: authorization_unavailable_reason(err),
+    }
+}
+
+fn authorization_unavailable_reason(err: EffectError) -> String {
+    match err {
         EffectError::Execution(message) => message,
         EffectError::RecordedFailure {
             error_type,
             error_message,
             ..
-        } => {
-            format!("{error_type}: {error_message}")
-        }
+        } if error_type == "execution" => error_message
+            .strip_prefix("effect execution failed: ")
+            .unwrap_or(&error_message)
+            .to_string(),
+        EffectError::RecordedFailure {
+            error_type,
+            error_message,
+            ..
+        } => format!("{error_type}: {error_message}"),
         other => other.to_string(),
-    };
-
-    GatewayPaymentDecision::AuthorizationUnavailable { reason }
+    }
 }
 
 /// Tell the circuit breaker which scripted inputs represent dependency failure.
@@ -233,4 +243,24 @@ pub fn authorization_unavailable(
         phase: outcome.phase,
         reason,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{authorization_unavailable_reason, EffectError};
+
+    #[test]
+    fn replayed_execution_failure_preserves_live_domain_reason() {
+        let live_reason = authorization_unavailable_reason(EffectError::Execution(
+            "gateway_timeout_simulated".to_string(),
+        ));
+        let replay_reason = authorization_unavailable_reason(EffectError::RecordedFailure {
+            error_type: "execution".to_string(),
+            error_message: "effect execution failed: gateway_timeout_simulated".to_string(),
+            retryable: true,
+        });
+
+        assert_eq!(live_reason, "gateway_timeout_simulated");
+        assert_eq!(replay_reason, live_reason);
+    }
 }
