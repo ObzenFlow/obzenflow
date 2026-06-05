@@ -4,27 +4,35 @@
 
 //! The payment-gateway resilience flow.
 //!
-//! Four stages, one durable-execution lesson:
+//! One upstream event stream, four business outcome channels:
 //!
 //! ```text
-//! payments (source) -> validation (transform) -> gateway (effectful) -> summary (sink)
+//! orders (source) -> valid orders -> gateway -> authorized payments -> shipping sink
+//!                 |                       \-> gateway declines -> order-status sink
+//!                 |                       \-> unavailable authorizations -> review sink
+//!                 \-> invalid orders -> order-status sink
 //! ```
 //!
-//! The gateway stage performs the `AuthorizePayment` effect (see `gateway.rs`).
+//! Validation lives in `validation.rs`; the gateway stage performs the
+//! `AuthorizePayment` effect (see `gateway.rs`).
 //! On a live run the effect executes once and the runtime journals its result;
-//! on a replay the runtime returns that recorded authorization without calling
+//! on a replay the runtime returns that recorded gateway decision without calling
 //! the gateway again.
 //!
 //! The circuit breaker on the gateway stage is the second, independent layer:
 //! it watches the live effect boundary and, once the dependency looks unhealthy,
-//! short-circuits to a typed fallback instead of hammering it. See `README.md`.
+//! short-circuits to a typed unavailable outcome instead of hammering it. See
+//! `README.md`.
 
-use super::domain::{AuthorizedPayment, PaymentCommand, ValidatedPayment};
-use super::gateway::{
-    AuthorizePayment, GatewayAuthorization, GatewayTransform, ValidationTransform,
+use super::domain::{
+    CustomerOrderPlaced, GatewayPaymentDecision, InvalidOrder, PaymentAuthorizationOutcome,
+    PaymentAuthorizationUnavailable, PaymentAuthorized, PaymentDeclined, ValidatedOrder,
 };
-use super::sinks::PaymentSummarySink;
-use super::sources::PaymentCommandSource;
+use super::fixtures;
+use super::gateway::{self, AuthorizePayment, GatewayTransform};
+use super::sinks;
+use super::validation;
+use obzenflow::typed::{sources as typed_sources, transforms as typed_transforms};
 use obzenflow_adapters::middleware::circuit_breaker::{HalfOpenPolicy, OpenPolicy};
 use obzenflow_adapters::middleware::{backpressure, CircuitBreakerBuilder, RateLimiterBuilder};
 use obzenflow_core::CircuitBreakerContractMode;
@@ -39,6 +47,8 @@ const BACKPRESSURE_WINDOW: u64 = 1_000;
 /// A gentle flow-level rate limit keeps logs and metrics readable, so you can
 /// watch the stage metrics and circuit-breaker gauges change over time.
 pub fn build_flow() -> obzenflow_dsl::FlowDefinition {
+    let scripted_orders = fixtures::scripted_orders();
+
     flow! {
         name: "payment_gateway_resilience_demo",
         journals: disk_journals(std::path::PathBuf::from("target/payment-gateway-logs")),
@@ -48,16 +58,25 @@ pub fn build_flow() -> obzenflow_dsl::FlowDefinition {
         ],
 
         stages: {
-            // Source: a scripted stream of payment commands across three phases
-            // (warmup, outage, recovery).
-            payments = source!(PaymentCommand => PaymentCommandSource::new(), [
+            // Source: a scripted stream of upstream customer-order events
+            // across three phases (warmup, outage, recovery).
+            //
+            // The flow reacts to these facts. On replay the runtime injects
+            // journaled source events instead of polling this source again.
+            orders = source!(CustomerOrderPlaced => typed_sources::finite_from_fn(move |index| {
+                scripted_orders.get(index).cloned()
+            }), [
                 backpressure(BACKPRESSURE_WINDOW)
             ]);
 
             // Local validation: deterministic checks with no external I/O.
-            // Failures are tagged as errors and still emitted, so they count
-            // toward obzenflow_errors_total and never reach the gateway.
-            validated = transform!(name: "validation", PaymentCommand -> ValidatedPayment => ValidationTransform, [
+            // This is typed business classification, not exception handling:
+            // valid orders go to the gateway, invalid orders go to their own
+            // domain-event channel.
+            valid_orders = transform!(CustomerOrderPlaced -> ValidatedOrder => typed_transforms::filter_map(validation::valid_order), [
+                backpressure(BACKPRESSURE_WINDOW)
+            ]);
+            invalid_orders = transform!(CustomerOrderPlaced -> InvalidOrder => typed_transforms::filter_map(validation::invalid_order), [
                 backpressure(BACKPRESSURE_WINDOW)
             ]);
 
@@ -68,20 +87,22 @@ pub fn build_flow() -> obzenflow_dsl::FlowDefinition {
             // The circuit breaker is the live-run safety layer on top:
             //   - opens when >= 60% of the last 5 gateway calls fail,
             //   - also counts calls slower than 250ms toward opening,
-            //   - while open, emits a typed degraded authorization instead of
-            //     calling the gateway (EmitFallback), with a single half-open probe.
+            //   - while open, emits a typed authorization-unavailable outcome
+            //     instead of calling the gateway (EmitFallback), with a single
+            //     half-open probe.
             // BreakerAware keeps transport contracts green while the breaker is open.
             gateway = effectful_transform!(
-                ValidatedPayment -> AuthorizedPayment => GatewayTransform,
+                ValidatedOrder -> PaymentAuthorizationOutcome => GatewayTransform,
                 effects: [AuthorizePayment],
                 middleware: [
                     CircuitBreakerBuilder::new(3)
                         .cooldown(std::time::Duration::from_secs(5))
                         .rate_based_over_last_n_calls(5, 0.6)
                         .slow_call(std::time::Duration::from_millis(250), 0.5)
-                        .with_typed_fallback::<ValidatedPayment, GatewayAuthorization, _>(|_validated| GatewayAuthorization {
-                            authorization_id: AuthorizedPayment::AUTHORIZATION_ID_FALLBACK_CB_OPEN.to_string(),
+                        .with_typed_fallback::<ValidatedOrder, GatewayPaymentDecision, _>(|_order| GatewayPaymentDecision::AuthorizationUnavailable {
+                            reason: "circuit breaker open".to_string(),
                         })
+                        .with_failure_classifier(gateway::simulated_gateway_unavailability_counts_as_failure)
                         .open_policy(OpenPolicy::EmitFallback)
                         .half_open_policy(HalfOpenPolicy::new(
                             NonZeroU32::new(1).expect("permitted_probes must be non-zero"),
@@ -92,15 +113,56 @@ pub fn build_flow() -> obzenflow_dsl::FlowDefinition {
                 ]
             );
 
-            // Sink: prints a running commentary and a final summary so you can
-            // read off what validation rejected and what the breaker protected.
-            summary = sink!(AuthorizedPayment => PaymentSummarySink::new());
+            // Gateway outcomes fan out into separate business channels. Each
+            // transform is a pure filter_map that keeps its own decision variant
+            // and yields None for the others, the same mechanism the local
+            // validation split above uses. Routing stays in the domain via Option.
+            authorized_payments = transform!(PaymentAuthorizationOutcome -> PaymentAuthorized => typed_transforms::filter_map(gateway::authorized_payment), [
+                backpressure(BACKPRESSURE_WINDOW)
+            ]);
+            gateway_declines = transform!(PaymentAuthorizationOutcome -> PaymentDeclined => typed_transforms::filter_map(gateway::declined_payment), [
+                backpressure(BACKPRESSURE_WINDOW)
+            ]);
+            authorization_unavailable = transform!(PaymentAuthorizationOutcome -> PaymentAuthorizationUnavailable => typed_transforms::filter_map(gateway::authorization_unavailable), [
+                backpressure(BACKPRESSURE_WINDOW)
+            ]);
+
+            // Paid-order sink: in production this is the boundary a shipping
+            // system would subscribe to.
+            paid_orders = sink!(|authorized: PaymentAuthorized| {
+                sinks::send_to_shipping(authorized);
+            });
+
+            // Invalid-order sink: local validation failures. These are normal
+            // business events, not framework errors.
+            invalid_order_events = sink!(|invalid: InvalidOrder| {
+                sinks::record_invalid_order(invalid);
+            });
+
+            // Gateway-decline sink: material payment declines from the remote
+            // authorization boundary, separate from local validation failures.
+            declined_payments = sink!(|declined: PaymentDeclined| {
+                sinks::record_gateway_decline(declined);
+            });
+
+            // Unavailable-authorization sink: failed gateway call or breaker
+            // fallback. This means no payment decision was reached.
+            manual_review = sink!(|unavailable: PaymentAuthorizationUnavailable| {
+                sinks::record_authorization_unavailable(unavailable);
+            });
         },
 
         topology: {
-            payments |> validated;
-            validated |> gateway;
-            gateway |> summary;
+            orders |> valid_orders;
+            orders |> invalid_orders;
+            valid_orders |> gateway;
+            gateway |> authorized_payments;
+            gateway |> gateway_declines;
+            gateway |> authorization_unavailable;
+            authorized_payments |> paid_orders;
+            invalid_orders |> invalid_order_events;
+            gateway_declines |> declined_payments;
+            authorization_unavailable |> manual_review;
         }
     }
 }

@@ -28,7 +28,7 @@ mod fixtures;
 mod flow;
 mod gateway;
 mod sinks;
-mod sources;
+mod validation;
 
 use anyhow::Result;
 use obzenflow_infra::application::{Banner, FlowApplication, LogLevel, Presentation};
@@ -39,8 +39,8 @@ fn main() -> Result<()> {
         .bullets(
             "What to watch",
             [
-                "Local validation errors still show up in obzenflow_errors_total",
-                "Gateway outages open the circuit breaker (obzenflow_circuit_breaker_*) and emit degraded authorizations",
+                "Locally invalid orders and gateway declines go to separate business-event channels",
+                "Gateway outages open the circuit breaker (obzenflow_circuit_breaker_*); once open it emits authorization-unavailable events",
                 "Re-run with --replay-from target/payment-gateway-logs/flows/<flow_id> to replay with zero gateway calls",
             ],
         )
