@@ -62,6 +62,23 @@
 //! let handler = PlaceholderJoin::<Carrier, Order, Enriched>::new(None);
 //! let _ = join!(reference: Carrier, stream: Order, out: Enriched; "enricher" => with_ref!(carriers, handler));
 //! ```
+//!
+//! ## FLOWIP-120g: the `effects:` clause is mandatory on effectful macros
+//!
+//! An effectful stage must declare its effects, even when the list is empty
+//! (`effects: []`). Omitting the clause must not compile, so "no effects" stays
+//! distinct from "forgot the declaration".
+//!
+//! ```compile_fail
+//! use obzenflow_dsl::effectful_transform;
+//!
+//! struct In;
+//! struct Out;
+//! let handler = ();
+//!
+//! // Missing the mandatory `effects:` clause (jumping straight to `middleware:`).
+//! let _ = effectful_transform!(In -> Out => handler, middleware: []);
+//! ```
 
 pub mod composites;
 #[path = "dsl.rs"]

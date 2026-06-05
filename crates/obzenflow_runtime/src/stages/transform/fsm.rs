@@ -21,7 +21,7 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 
 use crate::backpressure::{BackpressureReader, BackpressureRegistry, BackpressureWriter};
-use crate::effects::{EffectHistory, EffectPortRegistry, EffectRuntimeMode};
+use crate::effects::{EffectDeclaration, EffectHistory, EffectPortRegistry, EffectRuntimeMode};
 use crate::messaging::upstream_subscription::{ContractConfig, ContractsWiring, ReaderProgress};
 use crate::messaging::UpstreamSubscription;
 use crate::metrics::instrumentation::StageInstrumentation;
@@ -291,6 +291,9 @@ pub(crate) struct TransformContext<H: UnifiedTransformHandler> {
 
     /// Flow-scoped typed ports available to replay-safe effects.
     pub effect_ports: EffectPortRegistry,
+
+    /// Descriptor-owned effect declarations for replay-safe effect invocation.
+    pub effect_declarations: Vec<EffectDeclaration>,
 
     /// Error journal for writing error events (FLOWIP-082e)
     pub error_journal: Arc<dyn Journal<ChainEvent>>,

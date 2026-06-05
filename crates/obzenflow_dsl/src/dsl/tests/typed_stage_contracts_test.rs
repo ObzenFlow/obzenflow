@@ -663,7 +663,9 @@ mod tests {
             "effectful".to_string(),
             crate::effectful_transform!(
                 name: "effectful",
-                OutputEvent -> OutputEvent => EffectfulExactTransform
+                OutputEvent -> OutputEvent => EffectfulExactTransform,
+                effects: [],
+                middleware: []
             ),
         );
 
@@ -783,7 +785,9 @@ mod tests {
             "effectful".to_string(),
             crate::effectful_transform!(
                 name: "effectful",
-                OutputEvent -> OutputEvent => EffectfulExactTransform
+                OutputEvent -> OutputEvent => EffectfulExactTransform,
+                effects: [],
+                middleware: []
             ),
         );
 
@@ -865,7 +869,9 @@ mod tests {
             "effectful".to_string(),
             crate::effectful_transform!(
                 name: "effectful",
-                OutputEvent -> OutputEvent => EffectfulExactTransform
+                OutputEvent -> OutputEvent => EffectfulExactTransform,
+                effects: [],
+                middleware: []
             ),
         );
 

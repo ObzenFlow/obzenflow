@@ -7,8 +7,7 @@
 //! Examples: Aggregators, windowing operations, session tracking
 
 use crate::effects::{
-    deterministic_typed_output_event, EffectDeclaration, EffectError, EffectInvocationContext,
-    Effects,
+    deterministic_typed_output_event, EffectError, EffectInvocationContext, Effects,
 };
 use crate::messaging::upstream_subscription::StageInputPosition;
 use crate::stages::common::handler_error::HandlerError;
@@ -229,10 +228,6 @@ pub trait UnifiedStatefulHandler: Send + Sync {
     fn stage_logic_version(&self) -> &str {
         "1"
     }
-
-    fn effect_declarations(&self) -> Vec<EffectDeclaration> {
-        Vec::new()
-    }
 }
 
 #[async_trait]
@@ -348,10 +343,6 @@ pub trait EffectfulStatefulHandler: Send + Sync {
 
     fn stage_logic_version(&self) -> &str {
         "1"
-    }
-
-    fn effect_declarations(&self) -> Vec<EffectDeclaration> {
-        Vec::new()
     }
 }
 
