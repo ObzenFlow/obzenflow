@@ -14,14 +14,16 @@ use crate::effects::{EffectDeclaration, EffectPortRegistry, EffectRuntimeMode};
 use crate::feed_plan::{FeedPlan, LogicalFeed, StageOutputContract};
 use crate::id_conversions::StageIdExt;
 use crate::message_bus::FsmMessageBus;
-use crate::messaging::upstream_subscription::{ContractsWiring, UpstreamSubscription};
+use crate::messaging::upstream_subscription::{
+    ContractsWiring, SelectedFeedMetadata, UpstreamSubscription,
+};
 use crate::replay::ReplayArchive;
 use crate::stages::LivenessSnapshots;
 use obzenflow_core::event::SystemEvent;
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{ChainEvent, FlowId, StageId, SystemId};
 use obzenflow_topology::Topology;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 /// Factory for creating subscriptions with pre-computed metadata
@@ -40,7 +42,7 @@ pub struct BoundSubscriptionFactory {
     /// Owner label for logging/attribution
     pub owner_label: String,
     journals_with_names: Vec<(StageId, String, Arc<dyn Journal<ChainEvent>>)>,
-    selected_event_types_by_stage: HashMap<StageId, HashSet<String>>,
+    selected_feeds_by_stage: HashMap<StageId, Vec<SelectedFeedMetadata>>,
 }
 
 impl SubscriptionFactory {
@@ -92,18 +94,18 @@ impl SubscriptionFactory {
         BoundSubscriptionFactory {
             owner_label: "unknown_owner".to_string(),
             journals_with_names,
-            selected_event_types_by_stage: HashMap::new(),
+            selected_feeds_by_stage: HashMap::new(),
         }
     }
 
-    /// Bind this factory and configure selected event types for each upstream.
-    pub fn bind_with_selected_event_types(
+    /// Bind this factory and configure selected logical feeds for each upstream.
+    pub fn bind_with_selected_feeds(
         &self,
         journals: &[(StageId, Arc<dyn Journal<ChainEvent>>)],
-        selected_event_types_by_stage: HashMap<StageId, HashSet<String>>,
+        selected_feeds_by_stage: HashMap<StageId, Vec<SelectedFeedMetadata>>,
     ) -> BoundSubscriptionFactory {
         let mut factory = self.bind(journals);
-        factory.selected_event_types_by_stage = selected_event_types_by_stage;
+        factory.selected_feeds_by_stage = selected_feeds_by_stage;
         factory
     }
 }
@@ -114,7 +116,7 @@ impl BoundSubscriptionFactory {
         UpstreamSubscription::new_with_names(&self.owner_label, &self.journals_with_names)
             .await
             .map(|sub| {
-                sub.with_selected_event_types(self.selected_event_types_by_stage.clone())
+                sub.with_selected_feeds(self.selected_feeds_by_stage.clone())
                     .transport_only()
             })
             .map_err(|e| format!("Failed to create subscription: {e:?}"))
@@ -129,7 +131,7 @@ impl BoundSubscriptionFactory {
             UpstreamSubscription::new_with_names(&self.owner_label, &self.journals_with_names)
                 .await
                 .map_err(|e| format!("Failed to create subscription: {e:?}"))?
-                .with_selected_event_types(self.selected_event_types_by_stage.clone())
+                .with_selected_feeds(self.selected_feeds_by_stage.clone())
                 .with_contracts(wiring)
                 .transport_only();
 
@@ -150,10 +152,10 @@ impl BoundSubscriptionFactory {
     }
 }
 
-fn selected_event_types_by_upstream(
+fn selected_feeds_by_upstream(
     input_feeds: &[LogicalFeed],
-) -> HashMap<StageId, HashSet<String>> {
-    let mut selected: HashMap<StageId, HashSet<String>> = HashMap::new();
+) -> HashMap<StageId, Vec<SelectedFeedMetadata>> {
+    let mut selected: HashMap<StageId, Vec<SelectedFeedMetadata>> = HashMap::new();
     for feed in input_feeds {
         let Some(event_type) = feed.selected_payload.event_type.clone() else {
             continue;
@@ -161,7 +163,10 @@ fn selected_event_types_by_upstream(
         selected
             .entry(feed.key.upstream_stage)
             .or_default()
-            .insert(event_type);
+            .push(SelectedFeedMetadata {
+                event_type,
+                feed_role: Some(feed.key.role.as_str().to_string()),
+            });
     }
     selected
 }
@@ -468,9 +473,9 @@ impl StageResourcesBuilder {
                 .cloned()
                 .unwrap_or_default();
             let input_feeds = self.feed_plan.input_feeds(stage_id);
-            let selected_event_types_by_stage = selected_event_types_by_upstream(&input_feeds);
+            let selected_feeds_by_stage = selected_feeds_by_upstream(&input_feeds);
             let mut upstream_subscription_factory = subscription_factory
-                .bind_with_selected_event_types(&upstream_journals, selected_event_types_by_stage);
+                .bind_with_selected_feeds(&upstream_journals, selected_feeds_by_stage);
             upstream_subscription_factory.owner_label = stage_info.name.clone();
 
             let resources = StageResources {

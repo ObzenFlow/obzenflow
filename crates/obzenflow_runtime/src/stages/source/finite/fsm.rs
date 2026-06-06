@@ -419,17 +419,20 @@ impl<H: Send + Sync + 'static> FsmAction for FiniteSourceAction<H> {
 
                 // Take a final runtime snapshot for wide-event semantics
                 let runtime_context = ctx.instrumentation.snapshot_with_control();
+                let writer_seq_by_event_type = ctx.instrumentation.data_writer_seq_by_event_type();
 
                 // Emit EOF with writer positions populated
                 let mut eof_event = ChainEventFactory::eof_event(writer_id, natural);
                 if let ChainEventContent::FlowControl(FlowControlPayload::Eof {
                     writer_id: writer_id_field,
                     writer_seq,
+                    writer_seq_by_event_type: eof_writer_seq_by_event_type,
                     ..
                 }) = &mut eof_event.content
                 {
                     *writer_id_field = Some(writer_id);
                     *writer_seq = Some(SeqNo(emitted));
+                    *eof_writer_seq_by_event_type = writer_seq_by_event_type;
                 }
 
                 // Attach flow/runtime context for downstream consumers
@@ -666,6 +669,7 @@ mod tests {
     use obzenflow_core::journal::journal_reader::JournalReader;
     use obzenflow_core::journal::Journal;
     use obzenflow_core::StageId as CoreStageId;
+    use serde_json::json;
     use std::sync::atomic::AtomicU8;
     use std::sync::{Arc, Mutex};
 
@@ -822,10 +826,9 @@ mod tests {
             Arc::new(TestJournal::new(JournalOwner::stage(stage_id)));
 
         let bus = Arc::new(FsmMessageBus::new());
-        let instrumentation = Arc::new(StageInstrumentation::new());
-
         // Helper to build a fresh context with a given control strategy
         let build_ctx = |control_strategy: Arc<dyn SourceControlStrategy>| {
+            let instrumentation = Arc::new(StageInstrumentation::new());
             FiniteSourceContext::<DummySource>::new(FiniteSourceContextInit {
                 stage_id,
                 stage_name: stage_name.clone(),
@@ -857,7 +860,26 @@ mod tests {
         // Pretend we emitted some data events
         ctx.instrumentation
             .events_processed_total
-            .store(5, std::sync::atomic::Ordering::Relaxed);
+            .store(3, std::sync::atomic::Ordering::Relaxed);
+        let source_writer_id = ctx.writer_id.expect("source should have a writer id");
+        ctx.instrumentation
+            .record_output_event(&ChainEventFactory::data_event(
+                source_writer_id,
+                "test.a",
+                json!({}),
+            ));
+        ctx.instrumentation
+            .record_output_event(&ChainEventFactory::data_event(
+                source_writer_id,
+                "test.a",
+                json!({}),
+            ));
+        ctx.instrumentation
+            .record_output_event(&ChainEventFactory::data_event(
+                source_writer_id,
+                "test.b",
+                json!({}),
+            ));
 
         // Send EOF with breaker closed
         FiniteSourceAction::<DummySource>::SendEOF
@@ -876,6 +898,18 @@ mod tests {
             eof_natural_closed,
             "Expected natural EOF when breaker is closed"
         );
+        let eof_writer_seq_by_event_type = events_closed
+            .iter()
+            .find_map(|env| match &env.event.content {
+                ChainEventContent::FlowControl(FlowControlPayload::Eof {
+                    writer_seq_by_event_type,
+                    ..
+                }) => Some(writer_seq_by_event_type),
+                _ => None,
+            })
+            .expect("expected EOF writer seq map");
+        assert_eq!(eof_writer_seq_by_event_type.get("test.a"), Some(&SeqNo(2)));
+        assert_eq!(eof_writer_seq_by_event_type.get("test.b"), Some(&SeqNo(1)));
 
         // Case 2: breaker open -> poison EOF
         let state_open = Arc::new(AtomicU8::new(1)); // Open

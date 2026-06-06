@@ -2887,6 +2887,8 @@ fn map_system_event_to_sse(
         SystemEventType::ContractStatus {
             upstream,
             reader,
+            selected_event_type,
+            feed_role,
             pass,
             reader_seq,
             advertised_writer_seq,
@@ -2909,6 +2911,12 @@ fn map_system_event_to_sse(
             if let Some(cause) = reason {
                 data["reason"] = serde_json::json!(cause);
             }
+            if let Some(selected_event_type) = selected_event_type {
+                data["selected_event_type"] = serde_json::json!(selected_event_type);
+            }
+            if let Some(feed_role) = feed_role {
+                data["feed_role"] = serde_json::json!(feed_role);
+            }
             if let Some(vc) = &vector_clock_value {
                 data["vector_clock"] = vc.clone();
             }
@@ -2929,6 +2937,8 @@ fn map_system_event_to_sse(
         SystemEventType::ContractResult {
             upstream,
             reader,
+            selected_event_type,
+            feed_role,
             contract_name,
             status,
             cause,
@@ -2952,6 +2962,12 @@ fn map_system_event_to_sse(
             }
             if let Some(seq) = advertised_writer_seq {
                 data["advertised_writer_seq"] = serde_json::json!(seq);
+            }
+            if let Some(selected_event_type) = selected_event_type {
+                data["selected_event_type"] = serde_json::json!(selected_event_type);
+            }
+            if let Some(feed_role) = feed_role {
+                data["feed_role"] = serde_json::json!(feed_role);
             }
             if let Some(vc) = &vector_clock_value {
                 data["vector_clock"] = vc.clone();
@@ -3086,6 +3102,8 @@ fn map_system_event_to_sse(
         SystemEventType::ContractOverrideByPolicy {
             upstream,
             reader,
+            selected_event_type,
+            feed_role,
             contract_name,
             original_cause,
             policy,
@@ -3099,6 +3117,12 @@ fn map_system_event_to_sse(
                 "policy": policy,
                 "timestamp_ms": event.timestamp,
             });
+            if let Some(selected_event_type) = selected_event_type {
+                data["selected_event_type"] = serde_json::json!(selected_event_type);
+            }
+            if let Some(feed_role) = feed_role {
+                data["feed_role"] = serde_json::json!(feed_role);
+            }
             if let Some(vc) = &vector_clock_value {
                 data["vector_clock"] = vc.clone();
             }

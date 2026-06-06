@@ -112,9 +112,6 @@ pub trait TypedPayload: Serialize + DeserializeOwned + Sized {
                 Err(TypedPayloadError::WrongContentType("flow_signal"))
             }
             ChainEventContent::Delivery(_) => Err(TypedPayloadError::WrongContentType("delivery")),
-            ChainEventContent::EffectResult(_) => {
-                Err(TypedPayloadError::WrongContentType("effect_result"))
-            }
             ChainEventContent::Observability(_) => {
                 Err(TypedPayloadError::WrongContentType("lifecycle"))
             }

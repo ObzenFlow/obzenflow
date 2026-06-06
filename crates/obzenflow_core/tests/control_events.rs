@@ -152,6 +152,7 @@ fn test_direct_chain_event_construction() {
             timestamp: 12345,
             writer_id: Some(WriterId::from(StageId::new())),
             writer_seq: None,
+            writer_seq_by_event_type: Default::default(),
             vector_clock: None,
             last_event_id: None,
         }),

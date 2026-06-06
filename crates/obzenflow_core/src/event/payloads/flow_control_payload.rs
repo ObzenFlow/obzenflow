@@ -12,6 +12,7 @@ use crate::StageId;
 use crate::WriterId;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "flow_control_type", rename_all = "snake_case")]
@@ -26,6 +27,8 @@ pub enum FlowControlPayload {
         writer_id: Option<WriterId>,
         #[serde(skip_serializing_if = "Option::is_none")]
         writer_seq: Option<SeqNo>,
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        writer_seq_by_event_type: BTreeMap<String, SeqNo>,
         #[serde(skip_serializing_if = "Option::is_none")]
         vector_clock: Option<VectorClock>,
         #[serde(skip_serializing_if = "Option::is_none")]

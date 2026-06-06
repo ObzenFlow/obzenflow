@@ -132,6 +132,8 @@ where
         let Some(tracker) = &self.contract_tracker else {
             return;
         };
+        let (selected_event_type, feed_role) =
+            self.unique_selected_feed_for_stage(progress.stage_id);
 
         let (Some(reader_stage), Some(chain_slot)) = (
             tracker.reader_stage,
@@ -194,6 +196,8 @@ where
                     SystemEventType::ContractResult {
                         upstream: progress.stage_id,
                         reader: reader_stage,
+                        selected_event_type: selected_event_type.clone(),
+                        feed_role: feed_role.clone(),
                         contract_name: contract_name.clone(),
                         status: status_label,
                         cause: cause_label,
@@ -264,6 +268,8 @@ where
                         SystemEventType::ContractOverrideByPolicy {
                             upstream: progress.stage_id,
                             reader: reader_stage,
+                            selected_event_type: selected_event_type.clone(),
+                            feed_role: feed_role.clone(),
                             contract_name,
                             original_cause: cause,
                             policy: "breaker_aware".to_string(),
@@ -298,6 +304,8 @@ where
                         SystemEventType::ContractStatus {
                             upstream: progress.stage_id,
                             reader: reader_stage,
+                            selected_event_type: selected_event_type.clone(),
+                            feed_role: feed_role.clone(),
                             pass: false,
                             reader_seq: Some(progress.reader_seq),
                             advertised_writer_seq: progress.advertised_writer_seq,
@@ -389,6 +397,8 @@ where
         let Some(tracker) = &self.contract_tracker else {
             return;
         };
+        let (selected_event_type, feed_role) =
+            self.unique_selected_feed_for_stage(progress.stage_id);
         let progress_seq = self.progress_seq(progress);
         let progress_last_event_id = self.progress_last_event_id(progress);
         let progress_vector_clock = self.progress_vector_clock(progress);
@@ -423,6 +433,8 @@ where
                         SystemEventType::ContractResult {
                             upstream: progress.stage_id,
                             reader: reader_stage,
+                            selected_event_type: selected_event_type.clone(),
+                            feed_role: feed_role.clone(),
                             contract_name: contract_name.clone(),
                             status: status_label,
                             cause: cause_label,
@@ -492,6 +504,8 @@ where
                                 SystemEventType::ContractOverrideByPolicy {
                                     upstream: progress.stage_id,
                                     reader: reader_stage,
+                                    selected_event_type: selected_event_type.clone(),
+                                    feed_role: feed_role.clone(),
                                     contract_name,
                                     original_cause: cause,
                                     policy: "breaker_aware".to_string(),
@@ -661,6 +675,8 @@ where
                 SystemEventType::ContractStatus {
                     upstream: progress.stage_id,
                     reader: reader_stage,
+                    selected_event_type: selected_event_type.clone(),
+                    feed_role: feed_role.clone(),
                     pass,
                     reader_seq: Some(progress_seq),
                     advertised_writer_seq: progress.advertised_writer_seq,

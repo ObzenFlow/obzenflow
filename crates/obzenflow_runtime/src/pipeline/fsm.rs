@@ -354,6 +354,41 @@ impl PipelineContext {
         });
         keys
     }
+
+    pub(crate) fn contract_keys_for_contract_event(
+        &self,
+        upstream: StageId,
+        reader: StageId,
+        selected_event_type: Option<&str>,
+        feed_role: Option<&str>,
+    ) -> Vec<FeedKey> {
+        if let Some(selected_event_type) = selected_event_type {
+            let mut keys: Vec<FeedKey> = self
+                .expected_contract_pairs
+                .iter()
+                .filter(|key| {
+                    key.matches_stage_pair(upstream, reader)
+                        && key.selected_payload_key == selected_event_type
+                        && feed_role
+                            .map(|role| key.role.as_str() == role)
+                            .unwrap_or(true)
+                })
+                .cloned()
+                .collect();
+
+            if !keys.is_empty() {
+                keys.sort_by(|left, right| {
+                    left.role
+                        .as_str()
+                        .cmp(right.role.as_str())
+                        .then_with(|| left.selected_payload_key.cmp(&right.selected_payload_key))
+                });
+                return keys;
+            }
+        }
+
+        self.contract_keys_for_stage_pair(upstream, reader)
+    }
 }
 
 impl FsmContext for PipelineContext {}

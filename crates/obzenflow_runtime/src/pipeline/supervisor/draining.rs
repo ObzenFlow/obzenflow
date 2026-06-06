@@ -90,6 +90,8 @@ pub(super) async fn dispatch_draining(
                 obzenflow_core::event::SystemEventType::ContractStatus {
                     upstream,
                     reader,
+                    selected_event_type,
+                    feed_role,
                     pass,
                     reader_seq,
                     advertised_writer_seq,
@@ -104,7 +106,12 @@ pub(super) async fn dispatch_draining(
                             *advertised_writer_seq,
                         )
                     };
-                    for key in context.contract_keys_for_stage_pair(*upstream, *reader) {
+                    for key in context.contract_keys_for_contract_event(
+                        *upstream,
+                        *reader,
+                        selected_event_type.as_deref(),
+                        feed_role.as_deref(),
+                    ) {
                         context.contract_pairs.insert(key, edge_status.clone());
                     }
 

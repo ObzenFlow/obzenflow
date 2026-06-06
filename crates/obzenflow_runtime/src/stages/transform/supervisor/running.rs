@@ -547,14 +547,6 @@ async fn dispatch_running_inner<
 
                     EventLoopDirective::Continue
                 }
-                obzenflow_core::event::ChainEventContent::EffectResult(_) => {
-                    tracing::warn!(
-                        stage_name = %ctx.stage_name,
-                        event_id = %envelope.event.id,
-                        "Dropping transport-only EffectResult that bypassed subscription filtering"
-                    );
-                    EventLoopDirective::Continue
-                }
                 _ => {
                     // Other content types: forward them.
                     sup.forward_control_event(&envelope).await?;

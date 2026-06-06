@@ -4,7 +4,7 @@
 
 use super::{
     ContractConfig, ContractStatus, ContractsWiring, PollResult, ReaderProgress,
-    UpstreamSubscription,
+    SelectedFeedMetadata, UpstreamSubscription,
 };
 use crate::messaging::upstream_subscription_policy::build_policy_stack_for_upstream;
 use async_trait::async_trait;
@@ -34,7 +34,7 @@ use obzenflow_core::{
     NoControlMiddleware, StageId, TransportContract, WriterId,
 };
 use serde_json::json;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::io;
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
@@ -1624,24 +1624,32 @@ async fn transport_only_filters_unselected_data_and_reconciles_selected_writer_s
         .unwrap();
 
     let mut eof_event = ChainEventFactory::eof_event(writer_id, true);
-    if let ChainEventContent::FlowControl(FlowControlPayload::Eof { writer_seq, .. }) =
-        &mut eof_event.content
+    if let ChainEventContent::FlowControl(FlowControlPayload::Eof {
+        writer_seq,
+        writer_seq_by_event_type,
+        ..
+    }) = &mut eof_event.content
     {
         *writer_seq = Some(SeqNo(2));
+        writer_seq_by_event_type.insert("test.ignored.v1".to_string(), SeqNo(1));
+        writer_seq_by_event_type.insert("test.selected.v1".to_string(), SeqNo(1));
     }
     upstream_journal.append(eof_event, None).await.unwrap();
 
     let upstreams = [(upstream_stage, "upstream".to_string(), upstream_journal)];
-    let mut selected_event_types = HashMap::new();
-    selected_event_types.insert(
+    let mut selected_feeds = HashMap::new();
+    selected_feeds.insert(
         upstream_stage,
-        HashSet::from(["test.selected.v1".to_string()]),
+        vec![SelectedFeedMetadata {
+            event_type: "test.selected.v1".to_string(),
+            feed_role: Some("input".to_string()),
+        }],
     );
 
     let mut subscription = UpstreamSubscription::new_with_names("test_owner", &upstreams)
         .await
         .unwrap()
-        .with_selected_event_types(selected_event_types)
+        .with_selected_feeds(selected_feeds)
         .with_contracts(ContractsWiring {
             writer_id: WriterId::from(reader_stage),
             contract_journal: contract_journal.clone(),
@@ -1725,13 +1733,16 @@ async fn transport_only_filters_unselected_data_and_reconciles_selected_writer_s
         SystemEventType::ContractStatus {
             upstream,
             reader,
+            selected_event_type,
+            feed_role,
             pass,
             reader_seq,
             advertised_writer_seq,
             reason,
-            ..
         } if *upstream == upstream_stage
             && *reader == reader_stage
+            && selected_event_type.as_deref() == Some("test.selected.v1")
+            && feed_role.as_deref() == Some("input")
             && *pass
             && *reader_seq == Some(SeqNo(1))
             && *advertised_writer_seq == Some(SeqNo(1))
@@ -1740,7 +1751,7 @@ async fn transport_only_filters_unselected_data_and_reconciles_selected_writer_s
 }
 
 #[tokio::test]
-async fn transport_only_skips_effect_results_without_stage_input_position() {
+async fn transport_only_skips_framework_effect_data_without_stage_input_position() {
     let upstream_stage = StageId::new();
     let upstream_owner = JournalOwner::stage(upstream_stage);
     let upstream_journal: Arc<dyn Journal<ChainEvent>> = Arc::new(TestJournal::new(upstream_owner));
@@ -1765,18 +1776,6 @@ async fn transport_only_skips_effect_results_without_stage_input_position() {
             output: json!({"ok": true}),
         },
     };
-
-    upstream_journal
-        .append(
-            ChainEventFactory::derived_event(
-                writer_id,
-                &ChainEventFactory::data_event(writer_id, "test.parent", json!({})),
-                ChainEventContent::EffectResult(effect_record.clone()),
-            ),
-            None,
-        )
-        .await
-        .unwrap();
 
     upstream_journal
         .append(
@@ -1816,7 +1815,7 @@ async fn transport_only_skips_effect_results_without_stage_input_position() {
         PollResult::Event(env) => match env.event.content {
             ChainEventContent::Data { .. } => {}
             other => {
-                panic!("expected EffectResult to be skipped and Data delivered, got {other:?}")
+                panic!("expected framework effect Data to be skipped and domain Data delivered, got {other:?}")
             }
         },
         other => panic!("expected PollResult::Event, got {other:?}"),

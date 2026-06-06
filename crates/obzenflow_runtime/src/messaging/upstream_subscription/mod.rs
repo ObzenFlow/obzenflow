@@ -24,7 +24,7 @@ mod tests;
 pub use super::subscription_poller::{PollResult, SubscriptionPoller};
 pub use types::{
     ContractConfig, ContractStatus, ContractTracker, ContractsWiring, EofOutcome, ReaderProgress,
-    StageInputPosition, SubscriptionState,
+    SelectedFeedMetadata, StageInputPosition, SubscriptionState,
 };
 
 use crate::contracts::ContractChain;
@@ -36,7 +36,7 @@ use obzenflow_core::event::vector_clock::VectorClock;
 use obzenflow_core::event::{ChainEvent, EventEnvelope, JournalEvent, JournalWriterId};
 use obzenflow_core::journal::journal_reader::JournalReader;
 use obzenflow_core::{EventId, StageId};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use tokio::time::Instant;
 
@@ -68,6 +68,9 @@ where
     /// When populated for a reader, non-selected Data events are consumed from
     /// the journal but not delivered to the stage handler.
     selected_event_types_by_stage: HashMap<StageId, HashSet<String>>,
+
+    /// Selected logical feed metadata by upstream reader stage.
+    selected_feeds_by_stage: HashMap<StageId, Vec<SelectedFeedMetadata>>,
 
     /// Per-reader count of Data events that survived the selected event-type
     /// filter and were delivered as stage inputs.
@@ -190,6 +193,46 @@ where
         } else {
             SeqNo(0)
         }
+    }
+
+    fn selected_writer_seq_from_eof_map(
+        &self,
+        stage_id: StageId,
+        writer_seq_by_event_type: &BTreeMap<String, SeqNo>,
+    ) -> Option<SeqNo> {
+        let selected = self.selected_event_types_by_stage.get(&stage_id)?;
+        if selected.is_empty() || writer_seq_by_event_type.is_empty() {
+            return None;
+        }
+
+        let selected_total = selected.iter().fold(0u64, |total, event_type| {
+            total.saturating_add(
+                writer_seq_by_event_type
+                    .get(event_type)
+                    .map(|seq| seq.0)
+                    .unwrap_or(0),
+            )
+        });
+        Some(SeqNo(selected_total))
+    }
+
+    fn unique_selected_feed_for_stage(
+        &self,
+        stage_id: StageId,
+    ) -> (Option<String>, Option<String>) {
+        let Some(feeds) = self.selected_feeds_by_stage.get(&stage_id) else {
+            return (None, None);
+        };
+
+        let mut unique_feeds = feeds.iter();
+        let Some(first) = unique_feeds.next() else {
+            return (None, None);
+        };
+        if unique_feeds.next().is_some() {
+            return (None, None);
+        }
+
+        (Some(first.event_type.clone()), first.feed_role.clone())
     }
 
     /// Bridge a sink delivery receipt write into the edge-scoped `ContractChain`

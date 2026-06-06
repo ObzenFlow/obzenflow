@@ -3,7 +3,8 @@
 // https://obzenflow.dev
 
 use super::{
-    ContractTracker, ContractsWiring, DeliveryFilter, SubscriptionState, UpstreamSubscription,
+    ContractTracker, ContractsWiring, DeliveryFilter, SelectedFeedMetadata, SubscriptionState,
+    UpstreamSubscription,
 };
 use crate::contracts::ContractChain;
 use crate::messaging::upstream_subscription_policy::build_policy_stack_for_upstream;
@@ -167,6 +168,7 @@ where
             selected_data_seq_by_reader: vec![SeqNo(0); readers.len()],
             readers,
             selected_event_types_by_stage: HashMap::new(),
+            selected_feeds_by_stage: HashMap::new(),
             state,
             contract_tracker: None,
             contract_chains: Vec::new(),
@@ -194,7 +196,42 @@ where
         mut self,
         selected_event_types_by_stage: HashMap<StageId, HashSet<String>>,
     ) -> Self {
+        self.selected_feeds_by_stage = selected_event_types_by_stage
+            .iter()
+            .map(|(stage_id, event_types)| {
+                let feeds = event_types
+                    .iter()
+                    .cloned()
+                    .map(|event_type| SelectedFeedMetadata {
+                        event_type,
+                        feed_role: None,
+                    })
+                    .collect();
+                (*stage_id, feeds)
+            })
+            .collect();
         self.selected_event_types_by_stage = selected_event_types_by_stage;
+        self
+    }
+
+    /// Configure selected logical feeds per upstream reader.
+    pub fn with_selected_feeds(
+        mut self,
+        selected_feeds_by_stage: HashMap<StageId, Vec<SelectedFeedMetadata>>,
+    ) -> Self {
+        self.selected_event_types_by_stage = selected_feeds_by_stage
+            .iter()
+            .map(|(stage_id, feeds)| {
+                (
+                    *stage_id,
+                    feeds
+                        .iter()
+                        .map(|feed| feed.event_type.clone())
+                        .collect::<HashSet<_>>(),
+                )
+            })
+            .collect();
+        self.selected_feeds_by_stage = selected_feeds_by_stage;
         self
     }
 

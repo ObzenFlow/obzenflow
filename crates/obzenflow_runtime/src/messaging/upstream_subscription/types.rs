@@ -140,6 +140,12 @@ pub struct EofOutcome {
     pub is_final: bool,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SelectedFeedMetadata {
+    pub event_type: String,
+    pub feed_role: Option<String>,
+}
+
 /// Progress tracking for a single upstream reader.
 ///
 /// This struct is intentionally pure contract state (no I/O handles) so that it

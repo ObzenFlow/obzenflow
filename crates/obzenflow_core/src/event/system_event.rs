@@ -123,6 +123,10 @@ pub enum SystemEventType {
     ContractStatus {
         upstream: StageId,
         reader: StageId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        selected_event_type: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        feed_role: Option<String>,
         pass: bool,
         #[serde(skip_serializing_if = "Option::is_none")]
         reader_seq: Option<crate::event::types::SeqNo>,
@@ -141,6 +145,10 @@ pub enum SystemEventType {
     ContractResult {
         upstream: StageId,
         reader: StageId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        selected_event_type: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        feed_role: Option<String>,
         contract_name: String,
         /// "passed", "failed", "pending", or "healthy" (mid-flight heartbeat)
         status: String,
@@ -158,6 +166,10 @@ pub enum SystemEventType {
     ContractOverrideByPolicy {
         upstream: StageId,
         reader: StageId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        selected_event_type: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        feed_role: Option<String>,
         contract_name: String,
         original_cause: crate::contracts::ViolationCause,
         policy: String,
@@ -592,6 +604,8 @@ impl SystemEventFactory {
             SystemEventType::ContractStatus {
                 upstream,
                 reader,
+                selected_event_type: None,
+                feed_role: None,
                 pass,
                 reader_seq,
                 advertised_writer_seq,

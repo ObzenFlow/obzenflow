@@ -1422,9 +1422,11 @@ impl PrometheusExporter {
             )?;
             writeln!(output, "# TYPE obzenflow_contract_results_total counter")?;
 
-            for ((upstream, downstream, contract, status), count) in
+            for ((upstream, downstream, contract, selected_event_type, feed_role, status), count) in
                 &snapshot.contract_metrics.results_total
             {
+                let selected_event_type = selected_event_type.as_deref().unwrap_or("");
+                let feed_role = feed_role.as_deref().unwrap_or("");
                 let upstream_id = upstream.to_string();
                 let downstream_id = downstream.to_string();
 
@@ -1447,7 +1449,7 @@ impl PrometheusExporter {
                 if let Some(flow_id) = flow_id {
                     writeln!(
                         output,
-                        "obzenflow_contract_results_total{{flow=\"{}\",flow_id=\"{}\",upstream_stage_id=\"{}\",downstream_stage_id=\"{}\",upstream=\"{}\",downstream=\"{}\",contract=\"{}\",status=\"{}\"}} {}",
+                        "obzenflow_contract_results_total{{flow=\"{}\",flow_id=\"{}\",upstream_stage_id=\"{}\",downstream_stage_id=\"{}\",upstream=\"{}\",downstream=\"{}\",contract=\"{}\",selected_event_type=\"{}\",feed_role=\"{}\",status=\"{}\"}} {}",
                         escape_label(flow_name),
                         escape_label(&flow_id.to_string()),
                         escape_label(&upstream_id),
@@ -1455,19 +1457,23 @@ impl PrometheusExporter {
                         escape_label(upstream_name),
                         escape_label(downstream_name),
                         escape_label(contract),
+                        escape_label(selected_event_type),
+                        escape_label(feed_role),
                         escape_label(status),
                         count
                     )?;
                 } else {
                     writeln!(
                         output,
-                        "obzenflow_contract_results_total{{flow=\"{}\",upstream_stage_id=\"{}\",downstream_stage_id=\"{}\",upstream=\"{}\",downstream=\"{}\",contract=\"{}\",status=\"{}\"}} {}",
+                        "obzenflow_contract_results_total{{flow=\"{}\",upstream_stage_id=\"{}\",downstream_stage_id=\"{}\",upstream=\"{}\",downstream=\"{}\",contract=\"{}\",selected_event_type=\"{}\",feed_role=\"{}\",status=\"{}\"}} {}",
                         escape_label(flow_name),
                         escape_label(&upstream_id),
                         escape_label(&downstream_id),
                         escape_label(upstream_name),
                         escape_label(downstream_name),
                         escape_label(contract),
+                        escape_label(selected_event_type),
+                        escape_label(feed_role),
                         escape_label(status),
                         count
                     )?;
@@ -1483,9 +1489,11 @@ impl PrometheusExporter {
             )?;
             writeln!(output, "# TYPE obzenflow_contract_violations_total counter")?;
 
-            for ((upstream, downstream, contract, cause), count) in
+            for ((upstream, downstream, contract, selected_event_type, feed_role, cause), count) in
                 &snapshot.contract_metrics.violations_total
             {
+                let selected_event_type = selected_event_type.as_deref().unwrap_or("");
+                let feed_role = feed_role.as_deref().unwrap_or("");
                 let upstream_id = upstream.to_string();
                 let downstream_id = downstream.to_string();
 
@@ -1508,7 +1516,7 @@ impl PrometheusExporter {
                 if let Some(flow_id) = flow_id {
                     writeln!(
                         output,
-                        "obzenflow_contract_violations_total{{flow=\"{}\",flow_id=\"{}\",upstream_stage_id=\"{}\",downstream_stage_id=\"{}\",upstream=\"{}\",downstream=\"{}\",contract=\"{}\",cause=\"{}\"}} {}",
+                        "obzenflow_contract_violations_total{{flow=\"{}\",flow_id=\"{}\",upstream_stage_id=\"{}\",downstream_stage_id=\"{}\",upstream=\"{}\",downstream=\"{}\",contract=\"{}\",selected_event_type=\"{}\",feed_role=\"{}\",cause=\"{}\"}} {}",
                         escape_label(flow_name),
                         escape_label(&flow_id.to_string()),
                         escape_label(&upstream_id),
@@ -1516,19 +1524,23 @@ impl PrometheusExporter {
                         escape_label(upstream_name),
                         escape_label(downstream_name),
                         escape_label(contract),
+                        escape_label(selected_event_type),
+                        escape_label(feed_role),
                         escape_label(cause),
                         count
                     )?;
                 } else {
                     writeln!(
                         output,
-                        "obzenflow_contract_violations_total{{flow=\"{}\",upstream_stage_id=\"{}\",downstream_stage_id=\"{}\",upstream=\"{}\",downstream=\"{}\",contract=\"{}\",cause=\"{}\"}} {}",
+                        "obzenflow_contract_violations_total{{flow=\"{}\",upstream_stage_id=\"{}\",downstream_stage_id=\"{}\",upstream=\"{}\",downstream=\"{}\",contract=\"{}\",selected_event_type=\"{}\",feed_role=\"{}\",cause=\"{}\"}} {}",
                         escape_label(flow_name),
                         escape_label(&upstream_id),
                         escape_label(&downstream_id),
                         escape_label(upstream_name),
                         escape_label(downstream_name),
                         escape_label(contract),
+                        escape_label(selected_event_type),
+                        escape_label(feed_role),
                         escape_label(cause),
                         count
                     )?;
@@ -1544,9 +1556,11 @@ impl PrometheusExporter {
             )?;
             writeln!(output, "# TYPE obzenflow_contract_overrides_total counter")?;
 
-            for ((upstream, downstream, contract, policy), count) in
+            for ((upstream, downstream, contract, selected_event_type, feed_role, policy), count) in
                 &snapshot.contract_metrics.overrides_total
             {
+                let selected_event_type = selected_event_type.as_deref().unwrap_or("");
+                let feed_role = feed_role.as_deref().unwrap_or("");
                 let upstream_id = upstream.to_string();
                 let downstream_id = downstream.to_string();
 
@@ -1569,7 +1583,7 @@ impl PrometheusExporter {
                 if let Some(flow_id) = flow_id {
                     writeln!(
                         output,
-                        "obzenflow_contract_overrides_total{{flow=\"{}\",flow_id=\"{}\",upstream_stage_id=\"{}\",downstream_stage_id=\"{}\",upstream=\"{}\",downstream=\"{}\",contract=\"{}\",policy=\"{}\"}} {}",
+                        "obzenflow_contract_overrides_total{{flow=\"{}\",flow_id=\"{}\",upstream_stage_id=\"{}\",downstream_stage_id=\"{}\",upstream=\"{}\",downstream=\"{}\",contract=\"{}\",selected_event_type=\"{}\",feed_role=\"{}\",policy=\"{}\"}} {}",
                         escape_label(flow_name),
                         escape_label(&flow_id.to_string()),
                         escape_label(&upstream_id),
@@ -1577,19 +1591,23 @@ impl PrometheusExporter {
                         escape_label(upstream_name),
                         escape_label(downstream_name),
                         escape_label(contract),
+                        escape_label(selected_event_type),
+                        escape_label(feed_role),
                         escape_label(policy),
                         count
                     )?;
                 } else {
                     writeln!(
                         output,
-                        "obzenflow_contract_overrides_total{{flow=\"{}\",upstream_stage_id=\"{}\",downstream_stage_id=\"{}\",upstream=\"{}\",downstream=\"{}\",contract=\"{}\",policy=\"{}\"}} {}",
+                        "obzenflow_contract_overrides_total{{flow=\"{}\",upstream_stage_id=\"{}\",downstream_stage_id=\"{}\",upstream=\"{}\",downstream=\"{}\",contract=\"{}\",selected_event_type=\"{}\",feed_role=\"{}\",policy=\"{}\"}} {}",
                         escape_label(flow_name),
                         escape_label(&upstream_id),
                         escape_label(&downstream_id),
                         escape_label(upstream_name),
                         escape_label(downstream_name),
                         escape_label(contract),
+                        escape_label(selected_event_type),
+                        escape_label(feed_role),
                         escape_label(policy),
                         count
                     )?;
@@ -1605,7 +1623,11 @@ impl PrometheusExporter {
             )?;
             writeln!(output, "# TYPE obzenflow_contract_reader_seq gauge")?;
 
-            for ((upstream, downstream, contract), seq) in &snapshot.contract_metrics.reader_seq {
+            for ((upstream, downstream, contract, selected_event_type, feed_role), seq) in
+                &snapshot.contract_metrics.reader_seq
+            {
+                let selected_event_type = selected_event_type.as_deref().unwrap_or("");
+                let feed_role = feed_role.as_deref().unwrap_or("");
                 let upstream_id = upstream.to_string();
                 let downstream_id = downstream.to_string();
 
@@ -1623,22 +1645,26 @@ impl PrometheusExporter {
                 if let Some(flow_id) = flow_id {
                     writeln!(
                         output,
-                        "obzenflow_contract_reader_seq{{flow=\"{}\",flow_id=\"{}\",upstream_stage_id=\"{}\",downstream_stage_id=\"{}\",contract=\"{}\"}} {}",
+                        "obzenflow_contract_reader_seq{{flow=\"{}\",flow_id=\"{}\",upstream_stage_id=\"{}\",downstream_stage_id=\"{}\",contract=\"{}\",selected_event_type=\"{}\",feed_role=\"{}\"}} {}",
                         escape_label(flow_name),
                         escape_label(&flow_id.to_string()),
                         escape_label(&upstream_id),
                         escape_label(&downstream_id),
                         escape_label(contract),
+                        escape_label(selected_event_type),
+                        escape_label(feed_role),
                         seq
                     )?;
                 } else {
                     writeln!(
                         output,
-                        "obzenflow_contract_reader_seq{{flow=\"{}\",upstream_stage_id=\"{}\",downstream_stage_id=\"{}\",contract=\"{}\"}} {}",
+                        "obzenflow_contract_reader_seq{{flow=\"{}\",upstream_stage_id=\"{}\",downstream_stage_id=\"{}\",contract=\"{}\",selected_event_type=\"{}\",feed_role=\"{}\"}} {}",
                         escape_label(flow_name),
                         escape_label(&upstream_id),
                         escape_label(&downstream_id),
                         escape_label(contract),
+                        escape_label(selected_event_type),
+                        escape_label(feed_role),
                         seq
                     )?;
                 }
@@ -1656,9 +1682,11 @@ impl PrometheusExporter {
                 "# TYPE obzenflow_contract_advertised_writer_seq gauge"
             )?;
 
-            for ((upstream, downstream, contract), seq) in
+            for ((upstream, downstream, contract, selected_event_type, feed_role), seq) in
                 &snapshot.contract_metrics.advertised_writer_seq
             {
+                let selected_event_type = selected_event_type.as_deref().unwrap_or("");
+                let feed_role = feed_role.as_deref().unwrap_or("");
                 let upstream_id = upstream.to_string();
                 let downstream_id = downstream.to_string();
 
@@ -1676,22 +1704,26 @@ impl PrometheusExporter {
                 if let Some(flow_id) = flow_id {
                     writeln!(
                         output,
-                        "obzenflow_contract_advertised_writer_seq{{flow=\"{}\",flow_id=\"{}\",upstream_stage_id=\"{}\",downstream_stage_id=\"{}\",contract=\"{}\"}} {}",
+                        "obzenflow_contract_advertised_writer_seq{{flow=\"{}\",flow_id=\"{}\",upstream_stage_id=\"{}\",downstream_stage_id=\"{}\",contract=\"{}\",selected_event_type=\"{}\",feed_role=\"{}\"}} {}",
                         escape_label(flow_name),
                         escape_label(&flow_id.to_string()),
                         escape_label(&upstream_id),
                         escape_label(&downstream_id),
                         escape_label(contract),
+                        escape_label(selected_event_type),
+                        escape_label(feed_role),
                         seq
                     )?;
                 } else {
                     writeln!(
                         output,
-                        "obzenflow_contract_advertised_writer_seq{{flow=\"{}\",upstream_stage_id=\"{}\",downstream_stage_id=\"{}\",contract=\"{}\"}} {}",
+                        "obzenflow_contract_advertised_writer_seq{{flow=\"{}\",upstream_stage_id=\"{}\",downstream_stage_id=\"{}\",contract=\"{}\",selected_event_type=\"{}\",feed_role=\"{}\"}} {}",
                         escape_label(flow_name),
                         escape_label(&upstream_id),
                         escape_label(&downstream_id),
                         escape_label(contract),
+                        escape_label(selected_event_type),
+                        escape_label(feed_role),
                         seq
                     )?;
                 }
@@ -1709,15 +1741,19 @@ impl PrometheusExporter {
             )?;
             writeln!(output, "# TYPE obzenflow_contract_lag_events gauge")?;
 
-            for ((upstream, downstream, contract), reader_seq) in
+            for ((upstream, downstream, contract, selected_event_type, feed_role), reader_seq) in
                 &snapshot.contract_metrics.reader_seq
             {
                 if let Some(advertised) = snapshot.contract_metrics.advertised_writer_seq.get(&(
                     *upstream,
                     *downstream,
                     contract.clone(),
+                    selected_event_type.clone(),
+                    feed_role.clone(),
                 )) {
                     let lag = advertised.saturating_sub(*reader_seq);
+                    let selected_event_type = selected_event_type.as_deref().unwrap_or("");
+                    let feed_role = feed_role.as_deref().unwrap_or("");
 
                     let upstream_id = upstream.to_string();
                     let downstream_id = downstream.to_string();
@@ -1736,22 +1772,26 @@ impl PrometheusExporter {
                     if let Some(flow_id) = flow_id {
                         writeln!(
                             output,
-                            "obzenflow_contract_lag_events{{flow=\"{}\",flow_id=\"{}\",upstream_stage_id=\"{}\",downstream_stage_id=\"{}\",contract=\"{}\"}} {}",
+                            "obzenflow_contract_lag_events{{flow=\"{}\",flow_id=\"{}\",upstream_stage_id=\"{}\",downstream_stage_id=\"{}\",contract=\"{}\",selected_event_type=\"{}\",feed_role=\"{}\"}} {}",
                             escape_label(flow_name),
                             escape_label(&flow_id.to_string()),
                             escape_label(&upstream_id),
                             escape_label(&downstream_id),
                             escape_label(contract),
+                            escape_label(selected_event_type),
+                            escape_label(feed_role),
                             lag
                         )?;
                     } else {
                         writeln!(
                             output,
-                            "obzenflow_contract_lag_events{{flow=\"{}\",upstream_stage_id=\"{}\",downstream_stage_id=\"{}\",contract=\"{}\"}} {}",
+                            "obzenflow_contract_lag_events{{flow=\"{}\",upstream_stage_id=\"{}\",downstream_stage_id=\"{}\",contract=\"{}\",selected_event_type=\"{}\",feed_role=\"{}\"}} {}",
                             escape_label(flow_name),
                             escape_label(&upstream_id),
                             escape_label(&downstream_id),
                             escape_label(contract),
+                            escape_label(selected_event_type),
+                            escape_label(feed_role),
                             lag
                         )?;
                     }

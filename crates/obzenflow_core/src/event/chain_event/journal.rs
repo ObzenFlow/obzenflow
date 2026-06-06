@@ -40,7 +40,6 @@ impl JournalEvent for ChainEvent {
                 }
             },
             ChainEventContent::Delivery(_) => "sink.delivery",
-            ChainEventContent::EffectResult(_) => "effect.result",
             ChainEventContent::Observability(obs) => match obs {
                 ObservabilityPayload::Stage(_) => "lifecycle.stage",
                 ObservabilityPayload::Metrics(m) => match m {

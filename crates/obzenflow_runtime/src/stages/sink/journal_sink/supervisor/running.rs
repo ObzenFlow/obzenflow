@@ -231,14 +231,6 @@ async fn dispatch_event<H: UnifiedSinkHandler + Clone + std::fmt::Debug + Send +
         obzenflow_core::event::ChainEventContent::Data { .. } => {
             dispatch_data_event(ctx, subscription, envelope, stage_input_position).await
         }
-        obzenflow_core::event::ChainEventContent::EffectResult(_) => {
-            tracing::warn!(
-                stage_name = %ctx.stage_name,
-                event_id = %envelope.event.id,
-                "Dropping transport-only EffectResult that bypassed subscription filtering"
-            );
-            Ok(EventLoopDirective::Continue)
-        }
         _ => {
             // For other content types, just consume without instrumentation.
             let envelope_event = envelope.event.clone();

@@ -115,13 +115,8 @@ where
                         if let Some(chain_event) =
                             (&envelope.event as &dyn Any).downcast_ref::<ChainEvent>()
                         {
-                            if matches!(
-                                chain_event.content,
-                                ChainEventContent::Observability(_)
-                                    | ChainEventContent::EffectResult(_)
-                            ) {
-                                // Observability and effect-result events are not part of the
-                                // transport stream.
+                            if matches!(chain_event.content, ChainEventContent::Observability(_)) {
+                                // Observability events are not part of the transport stream.
                                 // Skip delivering to the caller, but keep progressing.
                                 self.state.next_reader_index();
                                 continue;
@@ -209,10 +204,16 @@ where
                             let mut normalized = chain_event.clone();
                             if let ChainEventContent::FlowControl(FlowControlPayload::Eof {
                                 writer_seq,
+                                writer_seq_by_event_type,
                                 ..
                             }) = &mut normalized.content
                             {
-                                *writer_seq = Some(selected_writer_seq);
+                                *writer_seq = self
+                                    .selected_writer_seq_from_eof_map(
+                                        stage_id,
+                                        writer_seq_by_event_type,
+                                    )
+                                    .or(Some(selected_writer_seq));
                             }
                             normalized_contract_event = Some(normalized);
                         }

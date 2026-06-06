@@ -253,6 +253,27 @@ fn contract_keys_for_stage_pair_returns_all_matching_logical_feeds() {
 }
 
 #[test]
+fn contract_keys_for_contract_event_returns_matching_logical_feed() {
+    let system_id = SystemId::new();
+    let system_journal = Arc::new(MemoryJournal::with_owner(JournalOwner::system(system_id)));
+    let (topology, upstream, downstream) = source_sink_topology_with_source();
+    let first_key = FeedKey::new(upstream, downstream, "test.first", FeedRole::Reference);
+    let second_key = FeedKey::new(upstream, downstream, "test.second", FeedRole::Stream);
+    let mut context = test_context(topology, system_id, system_journal, None);
+    context.expected_contract_pairs.insert(first_key.clone());
+    context.expected_contract_pairs.insert(second_key.clone());
+
+    let keys = context.contract_keys_for_contract_event(
+        upstream,
+        downstream,
+        Some("test.first"),
+        Some("reference"),
+    );
+
+    assert_eq!(keys, vec![first_key]);
+}
+
+#[test]
 fn contract_keys_for_stage_pair_falls_back_for_legacy_stage_pair_status() {
     let system_id = SystemId::new();
     let system_journal = Arc::new(MemoryJournal::with_owner(JournalOwner::system(system_id)));

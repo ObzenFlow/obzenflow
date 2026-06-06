@@ -119,15 +119,6 @@ pub(super) async fn dispatch_draining<
                 }
                 ctx.instrumentation.record_consumed(&envelope);
 
-                if envelope.event.is_effect_result() {
-                    tracing::warn!(
-                        stage_name = %ctx.stage_name,
-                        event_id = %envelope.event.id,
-                        "Dropping transport-only EffectResult that bypassed subscription filtering during drain"
-                    );
-                    return Ok(EventLoopDirective::Continue);
-                }
-
                 if envelope.event.is_data() {
                     // Accumulate data events during draining, synchronously.
                     let event = envelope.event.clone();

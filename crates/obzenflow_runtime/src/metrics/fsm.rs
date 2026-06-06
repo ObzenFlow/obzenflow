@@ -1292,18 +1292,34 @@ impl FsmAction for MetricsAggregatorAction {
                     obzenflow_core::event::SystemEventType::ContractResult {
                         upstream,
                         reader,
+                        selected_event_type,
+                        feed_role,
                         contract_name,
                         status,
                         cause,
                         reader_seq,
                         advertised_writer_seq,
                     } => {
-                        let key = (*upstream, *reader, contract_name.clone(), status.clone());
+                        let key = (
+                            *upstream,
+                            *reader,
+                            contract_name.clone(),
+                            selected_event_type.clone(),
+                            feed_role.clone(),
+                            status.clone(),
+                        );
                         let counter = store.contract_metrics.results_total.entry(key).or_insert(0);
                         *counter = (*counter).saturating_add(1);
 
                         if let Some(cause) = cause {
-                            let key = (*upstream, *reader, contract_name.clone(), cause.clone());
+                            let key = (
+                                *upstream,
+                                *reader,
+                                contract_name.clone(),
+                                selected_event_type.clone(),
+                                feed_role.clone(),
+                                cause.clone(),
+                            );
                             let counter = store
                                 .contract_metrics
                                 .violations_total
@@ -1312,7 +1328,13 @@ impl FsmAction for MetricsAggregatorAction {
                             *counter = (*counter).saturating_add(1);
                         }
 
-                        let edge_key = (*upstream, *reader, contract_name.clone());
+                        let edge_key = (
+                            *upstream,
+                            *reader,
+                            contract_name.clone(),
+                            selected_event_type.clone(),
+                            feed_role.clone(),
+                        );
                         if let Some(seq) = reader_seq {
                             let gauge = store
                                 .contract_metrics
@@ -1333,11 +1355,20 @@ impl FsmAction for MetricsAggregatorAction {
                     obzenflow_core::event::SystemEventType::ContractOverrideByPolicy {
                         upstream,
                         reader,
+                        selected_event_type,
+                        feed_role,
                         contract_name,
                         policy,
                         ..
                     } => {
-                        let key = (*upstream, *reader, contract_name.clone(), policy.clone());
+                        let key = (
+                            *upstream,
+                            *reader,
+                            contract_name.clone(),
+                            selected_event_type.clone(),
+                            feed_role.clone(),
+                            policy.clone(),
+                        );
                         let counter = store
                             .contract_metrics
                             .overrides_total

@@ -432,16 +432,19 @@ impl<H: Send + Sync + 'static> FsmAction for InfiniteSourceAction<H> {
 
                 // Take a final runtime snapshot for wide-event semantics
                 let runtime_context = ctx.instrumentation.snapshot_with_control();
+                let writer_seq_by_event_type = ctx.instrumentation.data_writer_seq_by_event_type();
 
                 let mut eof_event = ChainEventFactory::eof_event(writer_id, natural);
                 if let ChainEventContent::FlowControl(FlowControlPayload::Eof {
                     writer_id: writer_id_field,
                     writer_seq,
+                    writer_seq_by_event_type: eof_writer_seq_by_event_type,
                     ..
                 }) = &mut eof_event.content
                 {
                     *writer_id_field = Some(writer_id);
                     *writer_seq = Some(SeqNo(emitted));
+                    *eof_writer_seq_by_event_type = writer_seq_by_event_type;
                 }
 
                 // Attach flow/runtime context so the final journal record is a wide snapshot

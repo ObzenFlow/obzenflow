@@ -22,6 +22,7 @@ impl ChainEventFactory {
                 timestamp: current_timestamp(),
                 writer_id: Some(writer_id),
                 writer_seq: None,
+                writer_seq_by_event_type: Default::default(),
                 vector_clock: None,
                 last_event_id: None,
             }),

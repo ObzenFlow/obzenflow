@@ -617,15 +617,6 @@ pub trait EffectHistoryStore: Send + Sync {
     ) -> Result<Box<dyn EffectHistoryReader>, EffectError>;
 }
 
-#[async_trait]
-pub trait EffectResultWriter: Send + Sync {
-    async fn append_effect_result(
-        &self,
-        record: EffectRecord,
-        parent: Option<&EventEnvelope<ChainEvent>>,
-    ) -> Result<(), EffectError>;
-}
-
 #[derive(Clone, Debug)]
 pub struct EffectHistory {
     recorded_flow_id: String,
@@ -1206,7 +1197,6 @@ async fn append_effect_record(
 
 fn effect_record_from_event(event: &ChainEvent) -> Result<Option<EffectRecord>, EffectError> {
     match &event.content {
-        ChainEventContent::EffectResult(record) => Ok(Some(record.clone())),
         ChainEventContent::Data {
             event_type,
             payload,

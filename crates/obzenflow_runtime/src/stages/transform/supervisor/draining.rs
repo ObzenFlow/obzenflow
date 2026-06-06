@@ -167,15 +167,6 @@ async fn dispatch_draining_inner<
                 return Ok(EventLoopDirective::Continue);
             }
 
-            if envelope.event.is_effect_result() {
-                tracing::warn!(
-                    stage_name = %ctx.stage_name,
-                    event_id = %envelope.event.id,
-                    "Dropping transport-only EffectResult that bypassed subscription filtering during drain"
-                );
-                return Ok(EventLoopDirective::Continue);
-            }
-
             // Process data events (or pass through error-marked events).
             let envelope_clone = envelope.clone();
             let handler = &ctx.handler;

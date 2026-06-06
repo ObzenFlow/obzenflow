@@ -554,6 +554,7 @@ impl<H: JoinHandler + Send + Sync + 'static> FsmAction for JoinAction<H> {
                 let mut upstream_vector_clock = None;
                 let mut upstream_last_event = None;
                 let runtime_context = ctx.instrumentation.snapshot_with_control();
+                let writer_seq_by_event_type = ctx.instrumentation.data_writer_seq_by_event_type();
 
                 if let Some(buffered_event) = buffered {
                     if let obzenflow_core::event::ChainEventContent::FlowControl(
@@ -580,6 +581,7 @@ impl<H: JoinHandler + Send + Sync + 'static> FsmAction for JoinAction<H> {
                     FlowControlPayload::Eof {
                         writer_id: ref mut eof_writer,
                         writer_seq,
+                        writer_seq_by_event_type: eof_writer_seq_by_event_type,
                         vector_clock,
                         last_event_id,
                         ..
@@ -588,6 +590,7 @@ impl<H: JoinHandler + Send + Sync + 'static> FsmAction for JoinAction<H> {
                 {
                     *eof_writer = Some(writer_id);
                     *writer_seq = Some(SeqNo(runtime_context.writer_seq));
+                    *eof_writer_seq_by_event_type = writer_seq_by_event_type;
                     if let Some(vc) = upstream_vector_clock {
                         *vector_clock = Some(vc);
                     }
