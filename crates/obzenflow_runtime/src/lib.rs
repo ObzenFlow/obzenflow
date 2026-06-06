@@ -10,6 +10,7 @@ pub mod bootstrap;
 pub mod contracts;
 pub mod effects;
 pub mod errors;
+pub mod feed_plan;
 pub mod id_conversions;
 pub mod journal;
 pub mod message_bus;

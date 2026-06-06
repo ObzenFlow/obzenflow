@@ -11,6 +11,7 @@ use crate::backpressure::{
     BackpressurePlan, BackpressureReader, BackpressureRegistry, BackpressureWriter,
 };
 use crate::effects::{EffectDeclaration, EffectPortRegistry, EffectRuntimeMode};
+use crate::feed_plan::{FeedPlan, LogicalFeed, StageOutputContract};
 use crate::id_conversions::StageIdExt;
 use crate::message_bus::FsmMessageBus;
 use crate::messaging::upstream_subscription::{ContractsWiring, UpstreamSubscription};
@@ -152,6 +153,12 @@ pub struct StageResources {
     /// Friendly upstream stage names keyed by StageId (for diagnostics/instrumentation)
     pub upstream_stage_names: std::collections::HashMap<StageId, String>,
 
+    /// Stage output contract selected by the flow build (FLOWIP-120b).
+    pub output_contract: StageOutputContract,
+
+    /// Logical feeds selected for this stage's inbound edges (FLOWIP-120b).
+    pub input_feeds: Vec<LogicalFeed>,
+
     /// Factory for creating subscriptions with pre-computed metadata
     /// All stages must use this factory to create their subscriptions
     pub subscription_factory: SubscriptionFactory,
@@ -210,6 +217,7 @@ pub struct StageResourcesBuilder {
     backpressure_plan: BackpressurePlan,
     replay_archive: Option<Arc<dyn ReplayArchive>>,
     effect_ports: EffectPortRegistry,
+    feed_plan: FeedPlan,
 }
 
 impl StageResourcesBuilder {
@@ -232,6 +240,7 @@ impl StageResourcesBuilder {
             backpressure_plan: BackpressurePlan::disabled(),
             replay_archive: None,
             effect_ports: EffectPortRegistry::new(),
+            feed_plan: FeedPlan::default(),
         }
     }
 
@@ -250,6 +259,12 @@ impl StageResourcesBuilder {
     /// Inject flow-scoped typed ports for replay-safe effects.
     pub fn with_effect_ports(mut self, effect_ports: EffectPortRegistry) -> Self {
         self.effect_ports = effect_ports;
+        self
+    }
+
+    /// Inject flow-scoped logical feed metadata derived by the DSL.
+    pub fn with_feed_plan(mut self, feed_plan: FeedPlan) -> Self {
+        self.feed_plan = feed_plan;
         self
     }
 
@@ -417,6 +432,13 @@ impl StageResourcesBuilder {
             let mut upstream_subscription_factory = subscription_factory.bind(&upstream_journals);
             upstream_subscription_factory.owner_label = stage_info.name.clone();
 
+            let output_contract = self
+                .feed_plan
+                .output_contract(stage_id)
+                .cloned()
+                .unwrap_or_default();
+            let input_feeds = self.feed_plan.input_feeds(stage_id);
+
             let resources = StageResources {
                 flow_id: self.flow_id,
                 data_journal,
@@ -424,6 +446,8 @@ impl StageResourcesBuilder {
                 system_journal: self.system_journal.clone(),
                 upstream_journals: upstream_journals.clone(),
                 upstream_stage_names,
+                output_contract,
+                input_feeds,
                 subscription_factory,
                 upstream_subscription_factory,
                 message_bus: message_bus.clone(),
@@ -469,6 +493,7 @@ impl StageResourcesBuilder {
             error_journals: all_error_journals,
             stage_resources,
             message_bus,
+            feed_plan: self.feed_plan,
         })
     }
 }
@@ -501,6 +526,9 @@ pub struct StageResourcesSet {
 
     /// Shared message bus
     pub message_bus: Arc<FsmMessageBus>,
+
+    /// Flow-scoped logical feed plan derived by the DSL (FLOWIP-120b).
+    pub feed_plan: FeedPlan,
 }
 
 impl StageResourcesSet {

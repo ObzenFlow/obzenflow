@@ -23,6 +23,7 @@ mod terminal;
 mod tests;
 
 use super::fsm::{FlowStopMode, PipelineAction, PipelineContext, PipelineEvent, PipelineState};
+use crate::feed_plan::FeedKey;
 use crate::id_conversions::StageIdExt;
 use crate::supervised_base::{
     EventLoopDirective, ExternalEventMode, ExternalEventPolicy, SelfSupervised,
@@ -270,22 +271,20 @@ impl PipelineSupervisor {
         let seen = &context.contract_pairs;
 
         // Find any edge with an explicit failure (contract violated).
-        if let Some(((upstream, reader), status)) =
-            seen.iter().find(|((upstream, _reader), status)| {
-                let is_source = context.expected_sources.contains(upstream);
-                let mode = source_contract_mode();
-                let is_gating = is_gating_edge_for_contract(is_source, mode);
-                is_gating && !status.is_passed()
-            })
-        {
+        if let Some((key, status)) = seen.iter().find(|(key, status)| {
+            let is_source = context.expected_sources.contains(&key.upstream_stage);
+            let mode = source_contract_mode();
+            let is_gating = is_gating_edge_for_contract(is_source, mode);
+            is_gating && !status.is_passed()
+        }) {
             let upstream_name = context
                 .topology
-                .stage_name(upstream.to_topology_id())
+                .stage_name(key.upstream_stage.to_topology_id())
                 .unwrap_or("unknown")
                 .to_string();
             let reader_name = context
                 .topology
-                .stage_name(reader.to_topology_id())
+                .stage_name(key.downstream_stage.to_topology_id())
                 .unwrap_or("unknown")
                 .to_string();
 
@@ -296,8 +295,10 @@ impl PipelineSupervisor {
                 .unwrap_or_else(|| ViolationCause::Other("contract_failed".into()));
 
             tracing::error!(
-                ?upstream,
-                ?reader,
+                upstream = ?key.upstream_stage,
+                reader = ?key.downstream_stage,
+                selected_payload_key = %key.selected_payload_key,
+                role = %key.role,
                 upstream_name,
                 reader_name,
                 "Contract edge recorded as failed; aborting pipeline based on explicit contract violation"
@@ -305,7 +306,7 @@ impl PipelineSupervisor {
 
             Some(EventLoopDirective::Transition(PipelineEvent::Abort {
                 reason,
-                upstream: Some(*upstream),
+                upstream: Some(key.upstream_stage),
             }))
         } else {
             None
@@ -328,18 +329,15 @@ impl PipelineSupervisor {
         // explicit pass evidence before synthesising AllStagesCompleted.
         // Source edges configured in warn-only mode are treated as non-gating
         // for this check.
-        context
-            .expected_contract_pairs
-            .iter()
-            .all(|(upstream, reader)| {
-                let is_source = context.expected_sources.contains(upstream);
-                let mode = source_contract_mode();
-                let is_gating = is_gating_edge_for_contract(is_source, mode);
-                if !is_gating {
-                    return true;
-                }
-                matches!(seen.get(&(*upstream, *reader)), Some(status) if status.is_passed())
-            })
+        context.expected_contract_pairs.iter().all(|key| {
+            let is_source = context.expected_sources.contains(&key.upstream_stage);
+            let mode = source_contract_mode();
+            let is_gating = is_gating_edge_for_contract(is_source, mode);
+            if !is_gating {
+                return true;
+            }
+            matches!(seen.get(key), Some(status) if status.is_passed())
+        })
     }
 
     /// Synthesize and write AllStagesCompleted when we know we are done.
@@ -373,31 +371,31 @@ impl PipelineSupervisor {
 
         let expected_contracts = context.expected_contract_pairs.clone();
         let seen = &context.contract_pairs;
-        let missing_contracts: Vec<(StageId, StageId)> = expected_contracts
+        let missing_contracts: Vec<FeedKey> = expected_contracts
             .iter()
-            .filter(|(upstream, reader)| {
-                let is_source = context.expected_sources.contains(upstream);
+            .filter(|key| {
+                let is_source = context.expected_sources.contains(&key.upstream_stage);
                 let mode = source_contract_mode();
                 let is_gating = is_gating_edge_for_contract(is_source, mode);
                 if !is_gating {
                     return false;
                 }
-                !matches!(seen.get(&(*upstream, *reader)), Some(status) if status.is_passed())
+                !matches!(seen.get(*key), Some(status) if status.is_passed())
             })
-            .copied()
+            .cloned()
             .collect();
 
         let total_contracts = expected_contracts.len();
         let satisfied_contracts = expected_contracts
             .iter()
-            .filter(|(upstream, reader)| {
-                let is_source = context.expected_sources.contains(upstream);
+            .filter(|key| {
+                let is_source = context.expected_sources.contains(&key.upstream_stage);
                 let mode = source_contract_mode();
                 let is_gating = is_gating_edge_for_contract(is_source, mode);
                 if !is_gating {
                     return false;
                 }
-                matches!(seen.get(&(*upstream, *reader)), Some(status) if status.is_passed())
+                matches!(seen.get(*key), Some(status) if status.is_passed())
             })
             .count();
 
@@ -440,7 +438,7 @@ impl PipelineSupervisor {
 #[derive(Debug)]
 struct BarrierSnapshot {
     pending_stages: Vec<StageId>,
-    missing_contracts: Vec<(StageId, StageId)>,
+    missing_contracts: Vec<FeedKey>,
     completed: usize,
     total: usize,
     satisfied_contracts: usize,

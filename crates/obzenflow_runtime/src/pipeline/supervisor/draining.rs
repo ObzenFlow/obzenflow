@@ -95,20 +95,17 @@ pub(super) async fn dispatch_draining(
                     advertised_writer_seq,
                     reason,
                 } => {
-                    if *pass {
-                        context.contract_pairs.insert(
-                            (*upstream, *reader),
-                            ContractEdgeStatus::passed(*reader_seq, *advertised_writer_seq),
-                        );
+                    let edge_status = if *pass {
+                        ContractEdgeStatus::passed(*reader_seq, *advertised_writer_seq)
                     } else {
-                        context.contract_pairs.insert(
-                            (*upstream, *reader),
-                            ContractEdgeStatus::failed(
-                                reason.clone(),
-                                *reader_seq,
-                                *advertised_writer_seq,
-                            ),
-                        );
+                        ContractEdgeStatus::failed(
+                            reason.clone(),
+                            *reader_seq,
+                            *advertised_writer_seq,
+                        )
+                    };
+                    for key in context.contract_keys_for_stage_pair(*upstream, *reader) {
+                        context.contract_pairs.insert(key, edge_status.clone());
                     }
 
                     if !pass {

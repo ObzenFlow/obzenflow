@@ -10,6 +10,7 @@ mod tests {
     use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
     use obzenflow_core::{ChainEvent, StageId, TypedPayload, WriterId};
     use obzenflow_runtime::effects::Effects;
+    use obzenflow_runtime::feed_plan::{payload_key_from_type_hint, FactVisibility, FeedRole};
     use obzenflow_runtime::id_conversions::StageIdExt;
     use obzenflow_runtime::stages::common::handler_error::HandlerError;
     use obzenflow_runtime::stages::common::handlers::source::SourceError;
@@ -31,7 +32,7 @@ mod tests {
     use crate::dsl::stage_descriptor::StageDescriptor;
     use crate::dsl::stage_descriptor::TransformDescriptor;
     use crate::dsl::typing::{
-        collect_stage_typing_info, validate_edge_typing,
+        collect_stage_typing_info, derive_feed_plan, validate_edge_typing,
         validate_effectful_deterministic_input_order, validate_stage_typing_metadata,
         EdgeInputRole, TypeHint,
     };
@@ -316,6 +317,12 @@ mod tests {
         TypeHint::exact::<T>()
     }
 
+    fn assert_one_member_output_contract<T: 'static>(
+        metadata: &crate::dsl::typing::StageTypingMetadata,
+    ) {
+        assert_eq!(metadata.output_contract, vec![exact::<T>()]);
+    }
+
     #[test]
     fn typed_macros_attach_metadata_for_exact_handlers() {
         let source = crate::source!(name: "source", InputEvent => SyncExactSource);
@@ -323,6 +330,7 @@ mod tests {
             source.typing_metadata().unwrap().output_type,
             exact::<InputEvent>()
         );
+        assert_one_member_output_contract::<InputEvent>(source.typing_metadata().unwrap());
 
         let async_source =
             crate::async_source!(name: "async_source", InputEvent => AsyncExactSource);
@@ -351,6 +359,7 @@ mod tests {
         let transform_meta = transform.typing_metadata().unwrap();
         assert_eq!(transform_meta.input_type, exact::<InputEvent>());
         assert_eq!(transform_meta.output_type, exact::<OutputEvent>());
+        assert_one_member_output_contract::<OutputEvent>(transform_meta);
 
         let untyped_transform = crate::transform!(
             name: "untyped_transform",
@@ -392,10 +401,9 @@ mod tests {
         assert_eq!(stateful_meta.output_type, exact::<OutputEvent>());
 
         let sink = crate::sink!(name: "sink", OutputEvent => ExactSink);
-        assert_eq!(
-            sink.typing_metadata().unwrap().input_type,
-            exact::<OutputEvent>()
-        );
+        let sink_meta = sink.typing_metadata().unwrap();
+        assert_eq!(sink_meta.input_type, exact::<OutputEvent>());
+        assert!(sink_meta.output_contract.is_empty());
 
         let join = crate::join!(
             name: "join",
@@ -406,6 +414,7 @@ mod tests {
         assert_eq!(join_meta.reference_type, exact::<ReferenceEvent>());
         assert_eq!(join_meta.stream_type, exact::<StreamEvent>());
         assert_eq!(join_meta.output_type, exact::<JoinedEvent>());
+        assert_one_member_output_contract::<JoinedEvent>(join_meta);
         assert!(!join_meta.is_placeholder);
     }
 
@@ -567,6 +576,63 @@ mod tests {
         assert_eq!(errors[0].upstream_type, type_name::<InputEvent>());
         assert_eq!(errors[0].expected_type, type_name::<OutputEvent>());
         assert_eq!(errors[0].input_role, EdgeInputRole::Input);
+    }
+
+    #[test]
+    fn validate_edge_typing_accepts_member_of_upstream_output_contract() {
+        use crate::dsl::typing::{wrap_typed_descriptor, StageTypingMetadata};
+
+        let transform_id = StageId::new();
+        let sink_id = StageId::new();
+
+        let transform_inner: Box<dyn StageDescriptor> = Box::new(TransformDescriptor {
+            name: "transform".to_string(),
+            handler: ExactTransform,
+            middleware: vec![],
+        });
+        let transform_metadata = StageTypingMetadata::transform(
+            TypeHint::exact::<InputEvent>(),
+            TypeHint::exact::<OutputEvent>(),
+            false,
+            None,
+        )
+        .with_output_contract(vec![
+            TypeHint::exact::<OutputEvent>(),
+            TypeHint::exact::<InputEvent>(),
+        ]);
+
+        let mut descriptors: HashMap<String, Box<dyn StageDescriptor>> = HashMap::new();
+        descriptors.insert(
+            "transform".to_string(),
+            wrap_typed_descriptor(transform_inner, transform_metadata),
+        );
+        descriptors.insert(
+            "sink".to_string(),
+            crate::sink!(name: "sink", InputEvent => placeholder!()),
+        );
+
+        let mut name_to_id = HashMap::new();
+        name_to_id.insert("transform".to_string(), transform_id);
+        name_to_id.insert("sink".to_string(), sink_id);
+
+        let mut topology = TopologyBuilder::new();
+        topology.add_stage_with_id(
+            transform_id.to_topology_id(),
+            Some("transform".to_string()),
+            TopologyStageType::Transform,
+        );
+        topology.reset_current();
+        topology.add_stage_with_id(
+            sink_id.to_topology_id(),
+            Some("sink".to_string()),
+            TopologyStageType::Sink,
+        );
+        topology.reset_current();
+        topology.add_edge(transform_id.to_topology_id(), sink_id.to_topology_id());
+        let topology = topology.build_unchecked().unwrap();
+
+        validate_edge_typing(&topology, &descriptors, &name_to_id)
+            .expect("downstream selected type is a member of upstream output contract");
     }
 
     #[test]
@@ -994,6 +1060,39 @@ mod tests {
         }
     }
 
+    #[test]
+    fn validate_stage_typing_metadata_rejects_empty_output_contract_for_output_stage() {
+        use crate::dsl::typing::{wrap_typed_descriptor, StageTypingMetadata};
+
+        let inner: Box<dyn StageDescriptor> = Box::new(TransformDescriptor {
+            name: "synthetic".to_string(),
+            handler: ExactTransform,
+            middleware: vec![],
+        });
+        let bad_metadata = StageTypingMetadata::transform(
+            TypeHint::exact::<InputEvent>(),
+            TypeHint::exact::<OutputEvent>(),
+            false,
+            None,
+        )
+        .with_output_contract(Vec::new());
+        let wrapped = wrap_typed_descriptor(inner, bad_metadata);
+
+        let mut descriptors: HashMap<String, Box<dyn StageDescriptor>> = HashMap::new();
+        descriptors.insert("transform".to_string(), wrapped);
+
+        let err = validate_stage_typing_metadata(&descriptors).expect_err(
+            "expected UnspecifiedTypingOnApplicableSlot for transform with empty output contract",
+        );
+        match err {
+            FlowBuildError::UnspecifiedTypingOnApplicableSlot { stage_name, slot } => {
+                assert_eq!(stage_name, "transform");
+                assert_eq!(slot, "output");
+            }
+            other => panic!("unexpected error variant: {other:?}"),
+        }
+    }
+
     /// Three upstreams of three different Exact types feeding the same
     /// non-join downstream slot must produce a HeterogeneousFanIn error
     /// listing the other conflicting upstreams in `other_upstream_stages`.
@@ -1278,6 +1377,93 @@ mod tests {
             "homogeneous fan-in on a join stream leg with matching reference leg must \
              validate cleanly under FLOWIP-114c",
         );
+    }
+
+    /// FLOWIP-120b: the runtime feed plan must preserve the same logical edge
+    /// grain as output contracts and metrics. A join gives a compact regression
+    /// case because two feeds enter one downstream stage but select different
+    /// downstream slots and payload types.
+    #[test]
+    fn derive_feed_plan_keys_join_feeds_by_selected_type_and_role() {
+        let reference_id = StageId::new();
+        let stream_id = StageId::new();
+        let join_id = StageId::new();
+
+        let mut join = crate::join!(
+            name: "join",
+            catalog reference: ReferenceEvent,
+            StreamEvent -> JoinedEvent => placeholder!()
+        );
+        join.set_reference_stage_id(reference_id);
+
+        let mut descriptors: HashMap<String, Box<dyn StageDescriptor>> = HashMap::new();
+        descriptors.insert(
+            "reference".to_string(),
+            crate::source!(name: "reference", ReferenceEvent => placeholder!()),
+        );
+        descriptors.insert(
+            "stream".to_string(),
+            crate::source!(name: "stream", StreamEvent => placeholder!()),
+        );
+        descriptors.insert("join".to_string(), join);
+
+        let mut name_to_id = HashMap::new();
+        name_to_id.insert("reference".to_string(), reference_id);
+        name_to_id.insert("stream".to_string(), stream_id);
+        name_to_id.insert("join".to_string(), join_id);
+
+        let mut topology = TopologyBuilder::new();
+        for (stage_id, name, stage_type) in [
+            (reference_id, "reference", TopologyStageType::FiniteSource),
+            (stream_id, "stream", TopologyStageType::FiniteSource),
+            (join_id, "join", TopologyStageType::Join),
+        ] {
+            topology.add_stage_with_id(
+                stage_id.to_topology_id(),
+                Some(name.to_string()),
+                stage_type,
+            );
+            topology.reset_current();
+        }
+        topology.add_edge(reference_id.to_topology_id(), join_id.to_topology_id());
+        topology.add_edge(stream_id.to_topology_id(), join_id.to_topology_id());
+        let topology = topology.build_unchecked().unwrap();
+
+        let plan = derive_feed_plan(&topology, &descriptors, &name_to_id);
+        assert_eq!(plan.all_feeds().len(), 2);
+
+        let reference_type = TypeHintInfo::exact(type_name::<ReferenceEvent>());
+        let reference_key = payload_key_from_type_hint(&reference_type);
+        let reference_feed = plan
+            .all_feeds()
+            .iter()
+            .find(|feed| feed.key.role == FeedRole::Reference)
+            .expect("reference feed");
+        assert_eq!(reference_feed.key.upstream_stage, reference_id);
+        assert_eq!(reference_feed.key.downstream_stage, join_id);
+        assert_eq!(reference_feed.key.selected_payload_key, reference_key);
+        assert_eq!(reference_feed.selected_payload.type_hint, reference_type);
+
+        let stream_type = TypeHintInfo::exact(type_name::<StreamEvent>());
+        let stream_key = payload_key_from_type_hint(&stream_type);
+        let stream_feed = plan
+            .all_feeds()
+            .iter()
+            .find(|feed| feed.key.role == FeedRole::Stream)
+            .expect("stream feed");
+        assert_eq!(stream_feed.key.upstream_stage, stream_id);
+        assert_eq!(stream_feed.key.downstream_stage, join_id);
+        assert_eq!(stream_feed.key.selected_payload_key, stream_key);
+        assert_eq!(stream_feed.selected_payload.type_hint, stream_type);
+
+        let join_type = TypeHintInfo::exact(type_name::<JoinedEvent>());
+        let join_output_key = payload_key_from_type_hint(&join_type);
+        let join_output = plan
+            .output_contract(join_id)
+            .and_then(|contract| contract.output_by_key(&join_output_key))
+            .expect("join output contract member");
+        assert_eq!(join_output.type_hint, join_type);
+        assert_eq!(join_output.visibility, FactVisibility::Unrouted);
     }
 
     /// FLOWIP-114c Acceptance #4 + #25, failing case: a join whose stream slot

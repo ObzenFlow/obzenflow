@@ -187,6 +187,7 @@ fn make_context(
         contract_status: HashMap::new(),
         contract_pairs: HashMap::new(),
         expected_contract_pairs: HashSet::new(),
+        feed_plan: Default::default(),
         expected_sources: Vec::new(),
         stage_lifecycle_metrics: HashMap::new(),
         flow_start_time: None,

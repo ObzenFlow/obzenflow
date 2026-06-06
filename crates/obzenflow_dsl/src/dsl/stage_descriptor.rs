@@ -2769,6 +2769,8 @@ mod tests {
             system_journal,
             upstream_journals: Vec::new(),
             upstream_stage_names: std::collections::HashMap::new(),
+            output_contract: Default::default(),
+            input_feeds: Vec::new(),
             subscription_factory: SubscriptionFactory::new(std::collections::HashMap::new()),
             upstream_subscription_factory: SubscriptionFactory::new(
                 std::collections::HashMap::new(),

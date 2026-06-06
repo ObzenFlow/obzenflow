@@ -11,6 +11,10 @@ use obzenflow_adapters::middleware::{control::ControlMiddlewareAggregator, Middl
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
 use obzenflow_core::{ChainEvent, StageId, WriterId};
+use obzenflow_runtime::feed_plan::{
+    payload_key_from_type_hint, FactVisibility, FeedKey, FeedPlan, FeedRole, LogicalFeed,
+    PayloadTypeDescriptor, StageOutputContract,
+};
 use obzenflow_runtime::pipeline::config::StageConfig;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::source::SourceError;
@@ -79,6 +83,7 @@ impl From<&TypeHint> for TypeHintInfo {
 pub struct StageTypingMetadata {
     pub input_type: TypeHint,
     pub output_type: TypeHint,
+    pub output_contract: Vec<TypeHint>,
     pub boundary_in_type: TypeHint,
     pub boundary_out_type: TypeHint,
     pub reference_type: TypeHint,
@@ -89,8 +94,10 @@ pub struct StageTypingMetadata {
 
 impl StageTypingMetadata {
     pub fn source(output_type: TypeHint, is_placeholder: bool, message: Option<String>) -> Self {
+        let output_contract = output_contract_from_output_type(&output_type);
         Self {
             input_type: TypeHint::Unspecified,
+            output_contract,
             output_type,
             boundary_in_type: TypeHint::Unspecified,
             boundary_out_type: TypeHint::Unspecified,
@@ -107,8 +114,10 @@ impl StageTypingMetadata {
         is_placeholder: bool,
         message: Option<String>,
     ) -> Self {
+        let output_contract = output_contract_from_output_type(&output_type);
         Self {
             input_type,
+            output_contract,
             output_type,
             boundary_in_type: TypeHint::Unspecified,
             boundary_out_type: TypeHint::Unspecified,
@@ -132,6 +141,7 @@ impl StageTypingMetadata {
         Self {
             input_type,
             output_type: TypeHint::Unspecified,
+            output_contract: Vec::new(),
             boundary_in_type: TypeHint::Unspecified,
             boundary_out_type: TypeHint::Unspecified,
             reference_type: TypeHint::Unspecified,
@@ -148,8 +158,10 @@ impl StageTypingMetadata {
         is_placeholder: bool,
         message: Option<String>,
     ) -> Self {
+        let output_contract = output_contract_from_output_type(&output_type);
         Self {
             input_type: TypeHint::Unspecified,
+            output_contract,
             output_type,
             boundary_in_type: TypeHint::Unspecified,
             boundary_out_type: TypeHint::Unspecified,
@@ -158,6 +170,18 @@ impl StageTypingMetadata {
             is_placeholder,
             placeholder_message: message,
         }
+    }
+
+    pub fn with_output_contract(mut self, output_contract: Vec<TypeHint>) -> Self {
+        self.output_contract = output_contract;
+        self
+    }
+}
+
+fn output_contract_from_output_type(output_type: &TypeHint) -> Vec<TypeHint> {
+    match output_type {
+        TypeHint::Unspecified => Vec::new(),
+        output_type => vec![output_type.clone()],
     }
 }
 
@@ -218,6 +242,16 @@ impl EdgeInputRole {
 impl fmt::Display for EdgeInputRole {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
+    }
+}
+
+impl From<EdgeInputRole> for FeedRole {
+    fn from(value: EdgeInputRole) -> Self {
+        match value {
+            EdgeInputRole::Input => Self::Input,
+            EdgeInputRole::Reference => Self::Reference,
+            EdgeInputRole::Stream => Self::Stream,
+        }
     }
 }
 
@@ -979,6 +1013,152 @@ fn select_downstream_input_hint<'a>(
     (EdgeInputRole::Input, &downstream_metadata.input_type)
 }
 
+/// Derive the runtime-owned feed plan from DSL descriptors and forward edges.
+///
+/// This is the authoritative runtime projection for FLOWIP-120b. It deliberately
+/// does not read `obzenflow-topology` edge typing annotations; those are
+/// render-only metadata for clients.
+pub fn derive_feed_plan(
+    topology: &Topology,
+    descriptors: &HashMap<String, Box<dyn StageDescriptor>>,
+    name_to_id: &HashMap<String, StageId>,
+) -> FeedPlan {
+    let mut id_to_descriptor: HashMap<StageId, &dyn StageDescriptor> = HashMap::new();
+    let mut stage_output_contracts: HashMap<StageId, StageOutputContract> = HashMap::new();
+
+    for (dsl_name, descriptor) in descriptors {
+        let Some(stage_id) = name_to_id.get(dsl_name).copied() else {
+            continue;
+        };
+        id_to_descriptor.insert(stage_id, descriptor.as_ref());
+
+        let Some(metadata) = descriptor.typing_metadata() else {
+            continue;
+        };
+        stage_output_contracts.insert(stage_id, output_contract_from_metadata(metadata));
+    }
+
+    let mut feeds = Vec::new();
+    for edge in topology.edges() {
+        if edge.kind != EdgeKind::Forward {
+            continue;
+        }
+
+        let upstream_stage_id = StageId::from_ulid(edge.from.ulid());
+        let downstream_stage_id = StageId::from_ulid(edge.to.ulid());
+
+        let Some(upstream_descriptor) = id_to_descriptor.get(&upstream_stage_id) else {
+            continue;
+        };
+        if upstream_descriptor.typing_metadata().is_none() {
+            continue;
+        }
+
+        let Some(downstream_descriptor) = id_to_descriptor.get(&downstream_stage_id) else {
+            continue;
+        };
+        let Some(downstream_metadata) = downstream_descriptor.typing_metadata() else {
+            continue;
+        };
+
+        let (input_role, downstream_input_hint) = select_downstream_input_hint(
+            upstream_stage_id,
+            *downstream_descriptor,
+            downstream_metadata,
+        );
+        if matches!(downstream_input_hint, TypeHint::Unspecified) {
+            continue;
+        }
+
+        let selected_type_hint = TypeHintInfo::from(downstream_input_hint);
+        let selected_payload_key = payload_key_from_type_hint(&selected_type_hint);
+        let selected_payload =
+            PayloadTypeDescriptor::from_type_hint(selected_type_hint, FactVisibility::Routable);
+
+        feeds.push(LogicalFeed {
+            key: FeedKey::new(
+                upstream_stage_id,
+                downstream_stage_id,
+                selected_payload_key,
+                FeedRole::from(input_role),
+            ),
+            selected_payload,
+        });
+    }
+
+    FeedPlan::new(stage_output_contracts, feeds)
+}
+
+fn output_contract_from_metadata(metadata: &StageTypingMetadata) -> StageOutputContract {
+    let outputs: Vec<PayloadTypeDescriptor> = metadata
+        .output_contract
+        .iter()
+        .filter(|output_type| !matches!(output_type, TypeHint::Unspecified))
+        .map(|output_type| {
+            PayloadTypeDescriptor::from_type_hint(
+                TypeHintInfo::from(output_type),
+                FactVisibility::Unrouted,
+            )
+        })
+        .collect();
+
+    if outputs.is_empty() {
+        StageOutputContract::empty()
+    } else {
+        StageOutputContract { outputs }
+    }
+}
+
+fn exact_output_contract_members(metadata: &StageTypingMetadata) -> Vec<(TypeId, String)> {
+    metadata
+        .output_contract
+        .iter()
+        .filter_map(|output_type| match output_type {
+            TypeHint::Exact {
+                type_id,
+                display_name,
+            } => Some((*type_id, display_name.clone())),
+            TypeHint::Unspecified => None,
+        })
+        .collect()
+}
+
+fn output_contract_display(metadata: &StageTypingMetadata) -> String {
+    let members = exact_output_contract_members(metadata);
+    if members.is_empty() {
+        return "unspecified".to_string();
+    }
+
+    members
+        .into_iter()
+        .map(|(_, display_name)| display_name)
+        .collect::<Vec<_>>()
+        .join(" | ")
+}
+
+fn selected_or_single_output_for_fan_in(
+    metadata: &StageTypingMetadata,
+    downstream_input_hint: &TypeHint,
+) -> Option<(TypeId, String)> {
+    let members = exact_output_contract_members(metadata);
+
+    if let TypeHint::Exact {
+        type_id: expected_id,
+        display_name: expected_name,
+    } = downstream_input_hint
+    {
+        if members.iter().any(|(type_id, _)| type_id == expected_id) {
+            return Some((*expected_id, expected_name.clone()));
+        }
+    }
+
+    if members.len() == 1 {
+        return members.into_iter().next();
+    }
+
+    None
+}
+
 /// FLOWIP-114c per-stage typing-metadata check. Returns an error if any
 /// descriptor lacks `typing_metadata()` or carries `Unspecified` on a slot
 /// that is applicable for the descriptor's stage role.
@@ -1003,10 +1183,12 @@ pub fn validate_stage_typing_metadata(
 
         let stage_type = descriptor.stage_type();
         let unspecified = |hint: &TypeHint| matches!(hint, TypeHint::Unspecified);
+        let invalid_output_contract =
+            || meta.output_contract.is_empty() || meta.output_contract.iter().any(unspecified);
 
         match stage_type {
             StageType::FiniteSource | StageType::InfiniteSource => {
-                if unspecified(&meta.output_type) {
+                if unspecified(&meta.output_type) || invalid_output_contract() {
                     return Err(FlowBuildError::UnspecifiedTypingOnApplicableSlot {
                         stage_name: name.clone(),
                         slot: "output".to_string(),
@@ -1020,7 +1202,7 @@ pub fn validate_stage_typing_metadata(
                         slot: "input".to_string(),
                     });
                 }
-                if unspecified(&meta.output_type) {
+                if unspecified(&meta.output_type) || invalid_output_contract() {
                     return Err(FlowBuildError::UnspecifiedTypingOnApplicableSlot {
                         stage_name: name.clone(),
                         slot: "output".to_string(),
@@ -1048,7 +1230,7 @@ pub fn validate_stage_typing_metadata(
                         slot: "stream".to_string(),
                     });
                 }
-                if unspecified(&meta.output_type) {
+                if unspecified(&meta.output_type) || invalid_output_contract() {
                     return Err(FlowBuildError::UnspecifiedTypingOnApplicableSlot {
                         stage_name: name.clone(),
                         slot: "output".to_string(),
@@ -1150,26 +1332,25 @@ pub fn validate_edge_typing(
             downstream_metadata,
         );
 
-        // (1) Per-edge SingleEdge mismatch.
-        if let (
-            TypeHint::Exact {
-                type_id: upstream_id,
-                display_name: upstream_name,
-            },
-            TypeHint::Exact {
-                type_id: expected_id,
-                display_name: expected_name,
-            },
-        ) = (&upstream_metadata.output_type, downstream_input_hint)
+        // (1) Per-edge SingleEdge mismatch. The downstream-selected type must
+        // be a member of the upstream output contract.
+        if let TypeHint::Exact {
+            type_id: expected_id,
+            display_name: expected_name,
+        } = downstream_input_hint
         {
-            if upstream_id != expected_id {
+            let upstream_members = exact_output_contract_members(upstream_metadata);
+            if !upstream_members
+                .iter()
+                .any(|(upstream_id, _)| upstream_id == expected_id)
+            {
                 single_edge_errors
                     .entry((downstream_stage_id, input_role))
                     .or_default()
                     .push(EdgeError {
                         upstream_stage: upstream_descriptor.name().to_string(),
                         downstream_stage: downstream_descriptor.name().to_string(),
-                        upstream_type: upstream_name.clone(),
+                        upstream_type: output_contract_display(upstream_metadata),
                         expected_type: expected_name.clone(),
                         input_role,
                         kind: EdgeTypingMismatchKind::SingleEdge,
@@ -1178,18 +1359,16 @@ pub fn validate_edge_typing(
         }
 
         // (2) Collect for fan-in grouping.
-        if let TypeHint::Exact {
-            type_id: u_id,
-            display_name: u_name,
-        } = &upstream_metadata.output_type
+        if let Some((u_id, u_name)) =
+            selected_or_single_output_for_fan_in(upstream_metadata, downstream_input_hint)
         {
             fan_in
                 .entry((downstream_stage_id, input_role))
                 .or_default()
                 .push((
                     upstream_descriptor.name().to_string(),
-                    *u_id,
-                    u_name.clone(),
+                    u_id,
+                    u_name,
                     downstream_descriptor.name().to_string(),
                 ));
         }

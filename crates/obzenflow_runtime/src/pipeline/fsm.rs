@@ -6,6 +6,7 @@
 //!
 //! This defines the pipeline state machine without the supervision logic
 
+use crate::feed_plan::{FeedKey, FeedPlan};
 use crate::id_conversions::StageIdExt;
 use crate::message_bus::FsmMessageBus;
 use crate::messaging::system_subscription::SystemSubscription;
@@ -302,12 +303,14 @@ pub struct PipelineContext {
     /// Per-source contract status (pass/fail) keyed by source StageId
     pub contract_status: HashMap<StageId, bool>,
 
-    /// Per-edge contract status (upstream, reader) keyed by topology edge
-    pub contract_pairs:
-        HashMap<(StageId, StageId), crate::pipeline::supervisor::ContractEdgeStatus>,
+    /// Per-feed contract status keyed by logical feed.
+    pub contract_pairs: HashMap<FeedKey, crate::pipeline::supervisor::ContractEdgeStatus>,
 
-    /// Expected contract edges derived from the topology (upstream -> reader)
-    pub expected_contract_pairs: HashSet<(StageId, StageId)>,
+    /// Expected contract feeds derived from topology shape and runtime feed plan.
+    pub expected_contract_pairs: HashSet<FeedKey>,
+
+    /// Flow-scoped logical feed plan used by runtime contract gating.
+    pub feed_plan: FeedPlan,
 
     /// Expected source stages (used to decide when to drain on success)
     pub expected_sources: Vec<StageId>,
@@ -324,6 +327,33 @@ pub struct PipelineContext {
     pub last_system_event_id_seen: Option<obzenflow_core::EventId>,
 
     pub stop_intent: StopIntent,
+}
+
+impl PipelineContext {
+    pub(crate) fn contract_keys_for_stage_pair(
+        &self,
+        upstream: StageId,
+        reader: StageId,
+    ) -> Vec<FeedKey> {
+        let mut keys: Vec<FeedKey> = self
+            .expected_contract_pairs
+            .iter()
+            .filter(|key| key.matches_stage_pair(upstream, reader))
+            .cloned()
+            .collect();
+
+        if keys.is_empty() {
+            keys.push(FeedKey::legacy_stage_pair(upstream, reader));
+        }
+
+        keys.sort_by(|left, right| {
+            left.role
+                .as_str()
+                .cmp(right.role.as_str())
+                .then_with(|| left.selected_payload_key.cmp(&right.selected_payload_key))
+        });
+        keys
+    }
 }
 
 impl FsmContext for PipelineContext {}
