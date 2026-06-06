@@ -21,7 +21,7 @@ use obzenflow_core::event::SystemEvent;
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{ChainEvent, FlowId, StageId, SystemId};
 use obzenflow_topology::Topology;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 /// Factory for creating subscriptions with pre-computed metadata
@@ -40,6 +40,7 @@ pub struct BoundSubscriptionFactory {
     /// Owner label for logging/attribution
     pub owner_label: String,
     journals_with_names: Vec<(StageId, String, Arc<dyn Journal<ChainEvent>>)>,
+    selected_event_types_by_stage: HashMap<StageId, HashSet<String>>,
 }
 
 impl SubscriptionFactory {
@@ -91,7 +92,19 @@ impl SubscriptionFactory {
         BoundSubscriptionFactory {
             owner_label: "unknown_owner".to_string(),
             journals_with_names,
+            selected_event_types_by_stage: HashMap::new(),
         }
+    }
+
+    /// Bind this factory and configure selected event types for each upstream.
+    pub fn bind_with_selected_event_types(
+        &self,
+        journals: &[(StageId, Arc<dyn Journal<ChainEvent>>)],
+        selected_event_types_by_stage: HashMap<StageId, HashSet<String>>,
+    ) -> BoundSubscriptionFactory {
+        let mut factory = self.bind(journals);
+        factory.selected_event_types_by_stage = selected_event_types_by_stage;
+        factory
     }
 }
 
@@ -100,7 +113,10 @@ impl BoundSubscriptionFactory {
     pub async fn build(&self) -> Result<UpstreamSubscription<ChainEvent>, String> {
         UpstreamSubscription::new_with_names(&self.owner_label, &self.journals_with_names)
             .await
-            .map(|sub| sub.transport_only())
+            .map(|sub| {
+                sub.with_selected_event_types(self.selected_event_types_by_stage.clone())
+                    .transport_only()
+            })
             .map_err(|e| format!("Failed to create subscription: {e:?}"))
     }
 
@@ -113,6 +129,7 @@ impl BoundSubscriptionFactory {
             UpstreamSubscription::new_with_names(&self.owner_label, &self.journals_with_names)
                 .await
                 .map_err(|e| format!("Failed to create subscription: {e:?}"))?
+                .with_selected_event_types(self.selected_event_types_by_stage.clone())
                 .with_contracts(wiring)
                 .transport_only();
 
@@ -131,6 +148,22 @@ impl BoundSubscriptionFactory {
             .map(|(id, _, _)| *id)
             .collect()
     }
+}
+
+fn selected_event_types_by_upstream(
+    input_feeds: &[LogicalFeed],
+) -> HashMap<StageId, HashSet<String>> {
+    let mut selected: HashMap<StageId, HashSet<String>> = HashMap::new();
+    for feed in input_feeds {
+        let Some(event_type) = feed.selected_payload.event_type.clone() else {
+            continue;
+        };
+        selected
+            .entry(feed.key.upstream_stage)
+            .or_default()
+            .insert(event_type);
+    }
+    selected
 }
 
 /// Resources provided to stage creation
@@ -429,15 +462,16 @@ impl StageResourcesBuilder {
             // Keep a copy for logging before moving into the factory
             let all_stage_names_for_log = all_stage_names.clone();
             let subscription_factory = SubscriptionFactory::new(all_stage_names);
-            let mut upstream_subscription_factory = subscription_factory.bind(&upstream_journals);
-            upstream_subscription_factory.owner_label = stage_info.name.clone();
-
             let output_contract = self
                 .feed_plan
                 .output_contract(stage_id)
                 .cloned()
                 .unwrap_or_default();
             let input_feeds = self.feed_plan.input_feeds(stage_id);
+            let selected_event_types_by_stage = selected_event_types_by_upstream(&input_feeds);
+            let mut upstream_subscription_factory = subscription_factory
+                .bind_with_selected_event_types(&upstream_journals, selected_event_types_by_stage);
+            upstream_subscription_factory.owner_label = stage_info.name.clone();
 
             let resources = StageResources {
                 flow_id: self.flow_id,

@@ -15,6 +15,7 @@ use obzenflow_core::journal::journal_error::JournalError;
 use obzenflow_core::journal::journal_reader::JournalReader;
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{DeliveryContract, EventEnvelope, Result, StageId, TransportContract};
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 /// Fallback reader used when a real journal reader cannot be created.
@@ -163,7 +164,9 @@ where
         Ok(Self {
             delivery_filter: DeliveryFilter::All,
             owner_label: owner_label.to_string(),
+            selected_data_seq_by_reader: vec![SeqNo(0); readers.len()],
             readers,
+            selected_event_types_by_stage: HashMap::new(),
             state,
             contract_tracker: None,
             contract_chains: Vec::new(),
@@ -183,6 +186,15 @@ where
     /// as part of normal draining / shutdown.
     pub fn transport_only(mut self) -> Self {
         self.delivery_filter = DeliveryFilter::TransportOnly;
+        self
+    }
+
+    /// Configure selected Data event types per upstream reader.
+    pub fn with_selected_event_types(
+        mut self,
+        selected_event_types_by_stage: HashMap<StageId, HashSet<String>>,
+    ) -> Self {
+        self.selected_event_types_by_stage = selected_event_types_by_stage;
         self
     }
 

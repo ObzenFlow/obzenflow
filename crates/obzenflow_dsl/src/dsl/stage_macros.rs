@@ -70,7 +70,7 @@ macro_rules! placeholder {
 macro_rules! __obzenflow_source_typed {
     (output = $out:ty, name = $name:literal, handler = placeholder!(), middleware = [$($mw:expr),*]) => {{
         let __metadata = $crate::dsl::typing::StageTypingMetadata::source(
-            $crate::dsl::typing::TypeHint::exact::<$out>(),
+            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
             true,
             None,
         );
@@ -83,7 +83,7 @@ macro_rules! __obzenflow_source_typed {
     }};
     (output = $out:ty, name = $name:literal, handler = placeholder!($msg:expr), middleware = [$($mw:expr),*]) => {{
         let __metadata = $crate::dsl::typing::StageTypingMetadata::source(
-            $crate::dsl::typing::TypeHint::exact::<$out>(),
+            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
             true,
             Some(($msg).to_string()),
         );
@@ -98,7 +98,7 @@ macro_rules! __obzenflow_source_typed {
         let __handler = $handler;
         // FLOWIP-114c PR D: assert_source_output dropped, see sink rationale.
         let __metadata = $crate::dsl::typing::StageTypingMetadata::source(
-            $crate::dsl::typing::TypeHint::exact::<$out>(),
+            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
             false,
             None,
         );
@@ -223,7 +223,7 @@ macro_rules! __obzenflow_async_source_untyped {
 macro_rules! __obzenflow_async_source_typed {
     (output = $out:ty, name = $name:literal, handler = placeholder!(), middleware = [$($mw:expr),*]) => {{
         let __metadata = $crate::dsl::typing::StageTypingMetadata::source(
-            $crate::dsl::typing::TypeHint::exact::<$out>(),
+            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
             true,
             None,
         );
@@ -236,7 +236,7 @@ macro_rules! __obzenflow_async_source_typed {
     }};
     (output = $out:ty, name = $name:literal, handler = placeholder!($msg:expr), middleware = [$($mw:expr),*]) => {{
         let __metadata = $crate::dsl::typing::StageTypingMetadata::source(
-            $crate::dsl::typing::TypeHint::exact::<$out>(),
+            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
             true,
             Some(($msg).to_string()),
         );
@@ -251,7 +251,7 @@ macro_rules! __obzenflow_async_source_typed {
         let __handler = $handler;
         // FLOWIP-114c PR D: assert_source_output dropped, see sink rationale.
         let __metadata = $crate::dsl::typing::StageTypingMetadata::source(
-            $crate::dsl::typing::TypeHint::exact::<$out>(),
+            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
             false,
             None,
         );
@@ -266,7 +266,7 @@ macro_rules! __obzenflow_async_source_typed {
         let __handler = $handler;
         // FLOWIP-114c PR D: assert_source_output dropped, see sink rationale.
         let __metadata = $crate::dsl::typing::StageTypingMetadata::source(
-            $crate::dsl::typing::TypeHint::exact::<$out>(),
+            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
             false,
             None,
         );
@@ -357,7 +357,7 @@ macro_rules! __obzenflow_infinite_source_untyped {
 macro_rules! __obzenflow_infinite_source_typed {
     (output = $out:ty, name = $name:literal, handler = placeholder!(), middleware = [$($mw:expr),*]) => {{
         let __metadata = $crate::dsl::typing::StageTypingMetadata::source(
-            $crate::dsl::typing::TypeHint::exact::<$out>(),
+            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
             true,
             None,
         );
@@ -370,7 +370,7 @@ macro_rules! __obzenflow_infinite_source_typed {
     }};
     (output = $out:ty, name = $name:literal, handler = placeholder!($msg:expr), middleware = [$($mw:expr),*]) => {{
         let __metadata = $crate::dsl::typing::StageTypingMetadata::source(
-            $crate::dsl::typing::TypeHint::exact::<$out>(),
+            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
             true,
             Some(($msg).to_string()),
         );
@@ -385,7 +385,7 @@ macro_rules! __obzenflow_infinite_source_typed {
         let __handler = $handler;
         // FLOWIP-114c PR D: assert_source_output dropped, see sink rationale.
         let __metadata = $crate::dsl::typing::StageTypingMetadata::source(
-            $crate::dsl::typing::TypeHint::exact::<$out>(),
+            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
             false,
             None,
         );
@@ -527,7 +527,7 @@ macro_rules! __obzenflow_async_infinite_source_untyped {
 macro_rules! __obzenflow_async_infinite_source_typed {
     (output = $out:ty, name = $name:literal, handler = placeholder!(), middleware = [$($mw:expr),*]) => {{
         let __metadata = $crate::dsl::typing::StageTypingMetadata::source(
-            $crate::dsl::typing::TypeHint::exact::<$out>(),
+            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
             true,
             None,
         );
@@ -540,7 +540,7 @@ macro_rules! __obzenflow_async_infinite_source_typed {
     }};
     (output = $out:ty, name = $name:literal, handler = placeholder!($msg:expr), middleware = [$($mw:expr),*]) => {{
         let __metadata = $crate::dsl::typing::StageTypingMetadata::source(
-            $crate::dsl::typing::TypeHint::exact::<$out>(),
+            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
             true,
             Some(($msg).to_string()),
         );
@@ -555,7 +555,7 @@ macro_rules! __obzenflow_async_infinite_source_typed {
         let __handler = $handler;
         // FLOWIP-114c PR D: assert_source_output dropped, see sink rationale.
         let __metadata = $crate::dsl::typing::StageTypingMetadata::source(
-            $crate::dsl::typing::TypeHint::exact::<$out>(),
+            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
             false,
             None,
         );
@@ -570,7 +570,7 @@ macro_rules! __obzenflow_async_infinite_source_typed {
         let __handler = $handler;
         // FLOWIP-114c PR D: assert_source_output dropped, see sink rationale.
         let __metadata = $crate::dsl::typing::StageTypingMetadata::source(
-            $crate::dsl::typing::TypeHint::exact::<$out>(),
+            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
             false,
             None,
         );
@@ -742,8 +742,8 @@ macro_rules! __obzenflow_transform_typed {
     // ── exact input, placeholder ──
     (input = exact($in:ty), output = $out:ty, name = $name:literal, handler = placeholder!(), middleware = [$($mw:expr),*]) => {{
         let __metadata = $crate::dsl::typing::StageTypingMetadata::transform(
-            $crate::dsl::typing::TypeHint::exact::<$in>(),
-            $crate::dsl::typing::TypeHint::exact::<$out>(),
+            $crate::dsl::typing::TypeHint::exact_payload::<$in>(),
+            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
             true,
             None,
         );
@@ -756,8 +756,8 @@ macro_rules! __obzenflow_transform_typed {
     }};
     (input = exact($in:ty), output = $out:ty, name = $name:literal, handler = placeholder!($msg:expr), middleware = [$($mw:expr),*]) => {{
         let __metadata = $crate::dsl::typing::StageTypingMetadata::transform(
-            $crate::dsl::typing::TypeHint::exact::<$in>(),
-            $crate::dsl::typing::TypeHint::exact::<$out>(),
+            $crate::dsl::typing::TypeHint::exact_payload::<$in>(),
+            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
             true,
             Some(($msg).to_string()),
         );
@@ -775,8 +775,8 @@ macro_rules! __obzenflow_transform_typed {
             $crate::dsl::typing::BoundTransform::<$in, $out, _>::new(__handler);
         ::obzenflow_runtime::typing::assert_transform_contract::<_, $in, $out>(&__handler);
         let __metadata = $crate::dsl::typing::StageTypingMetadata::transform(
-            $crate::dsl::typing::TypeHint::exact::<$in>(),
-            $crate::dsl::typing::TypeHint::exact::<$out>(),
+            $crate::dsl::typing::TypeHint::exact_payload::<$in>(),
+            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
             false,
             None,
         );
@@ -899,8 +899,8 @@ macro_rules! __obzenflow_async_transform_typed {
     // ── exact input, placeholder ──
     (input = exact($in:ty), output = $out:ty, name = $name:literal, handler = placeholder!(), middleware = [$($mw:expr),*]) => {{
         let __metadata = $crate::dsl::typing::StageTypingMetadata::transform(
-            $crate::dsl::typing::TypeHint::exact::<$in>(),
-            $crate::dsl::typing::TypeHint::exact::<$out>(),
+            $crate::dsl::typing::TypeHint::exact_payload::<$in>(),
+            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
             true,
             None,
         );
@@ -913,8 +913,8 @@ macro_rules! __obzenflow_async_transform_typed {
     }};
     (input = exact($in:ty), output = $out:ty, name = $name:literal, handler = placeholder!($msg:expr), middleware = [$($mw:expr),*]) => {{
         let __metadata = $crate::dsl::typing::StageTypingMetadata::transform(
-            $crate::dsl::typing::TypeHint::exact::<$in>(),
-            $crate::dsl::typing::TypeHint::exact::<$out>(),
+            $crate::dsl::typing::TypeHint::exact_payload::<$in>(),
+            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
             true,
             Some(($msg).to_string()),
         );
@@ -932,8 +932,8 @@ macro_rules! __obzenflow_async_transform_typed {
             $crate::dsl::typing::BoundAsyncTransform::<$in, $out, _>::new(__handler);
         ::obzenflow_runtime::typing::assert_transform_contract::<_, $in, $out>(&__handler);
         let __metadata = $crate::dsl::typing::StageTypingMetadata::transform(
-            $crate::dsl::typing::TypeHint::exact::<$in>(),
-            $crate::dsl::typing::TypeHint::exact::<$out>(),
+            $crate::dsl::typing::TypeHint::exact_payload::<$in>(),
+            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
             false,
             None,
         );
@@ -1084,8 +1084,8 @@ macro_rules! __obzenflow_effectful_transform_typed {
         {}
         __assert_effectful_contract(&__handler);
         let __metadata = $crate::dsl::typing::StageTypingMetadata::transform(
-            $crate::dsl::typing::TypeHint::exact::<$in>(),
-            $crate::dsl::typing::TypeHint::exact::<$out>(),
+            $crate::dsl::typing::TypeHint::exact_payload::<$in>(),
+            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
             false,
             None,
         );
@@ -1173,7 +1173,7 @@ macro_rules! __obzenflow_effectful_sink_typed {
         {}
         __assert_effectful_sink_contract(&__handler);
         let __metadata = $crate::dsl::typing::StageTypingMetadata::sink(
-            $crate::dsl::typing::TypeHint::exact::<$in>(),
+            $crate::dsl::typing::TypeHint::exact_payload::<$in>(),
             false,
             None,
         );
@@ -1276,7 +1276,7 @@ macro_rules! __obzenflow_sink_typed {
     // ── exact input, placeholder ──
     (input = exact($in:ty), name = $name:literal, handler = placeholder!(), middleware = [$($mw:expr),*]) => {{
         let __metadata = $crate::dsl::typing::StageTypingMetadata::sink(
-            $crate::dsl::typing::TypeHint::exact::<$in>(),
+            $crate::dsl::typing::TypeHint::exact_payload::<$in>(),
             true,
             None,
         );
@@ -1289,7 +1289,7 @@ macro_rules! __obzenflow_sink_typed {
     }};
     (input = exact($in:ty), name = $name:literal, handler = placeholder!($msg:expr), middleware = [$($mw:expr),*]) => {{
         let __metadata = $crate::dsl::typing::StageTypingMetadata::sink(
-            $crate::dsl::typing::TypeHint::exact::<$in>(),
+            $crate::dsl::typing::TypeHint::exact_payload::<$in>(),
             true,
             Some(($msg).to_string()),
         );
@@ -1355,7 +1355,7 @@ macro_rules! __obzenflow_sink_typed {
     (input = exact($in:ty), name = $name:literal, handler = $handler:expr, middleware = [$($mw:expr),*]) => {{
         let __handler = $handler;
         let __metadata = $crate::dsl::typing::StageTypingMetadata::sink(
-            $crate::dsl::typing::TypeHint::exact::<$in>(),
+            $crate::dsl::typing::TypeHint::exact_payload::<$in>(),
             false,
             None,
         );
@@ -1664,8 +1664,8 @@ macro_rules! __obzenflow_stateful_typed {
     // ── exact input, placeholder, no emit ──
     (input = exact($in:ty), output = $out:ty, name = $name:literal, handler = placeholder!(), emit = none, middleware = [$($mw:expr),*]) => {{
         let __metadata = $crate::dsl::typing::StageTypingMetadata::stateful(
-            $crate::dsl::typing::TypeHint::exact::<$in>(),
-            $crate::dsl::typing::TypeHint::exact::<$out>(),
+            $crate::dsl::typing::TypeHint::exact_payload::<$in>(),
+            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
             true,
             None,
         );
@@ -1680,8 +1680,8 @@ macro_rules! __obzenflow_stateful_typed {
     // ── exact input, placeholder, with emit ──
     (input = exact($in:ty), output = $out:ty, name = $name:literal, handler = placeholder!(), emit = some($emit_interval:expr), middleware = [$($mw:expr),*]) => {{
         let __metadata = $crate::dsl::typing::StageTypingMetadata::stateful(
-            $crate::dsl::typing::TypeHint::exact::<$in>(),
-            $crate::dsl::typing::TypeHint::exact::<$out>(),
+            $crate::dsl::typing::TypeHint::exact_payload::<$in>(),
+            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
             true,
             None,
         );
@@ -1696,8 +1696,8 @@ macro_rules! __obzenflow_stateful_typed {
     // ── exact input, placeholder msg, no emit ──
     (input = exact($in:ty), output = $out:ty, name = $name:literal, handler = placeholder!($msg:expr), emit = none, middleware = [$($mw:expr),*]) => {{
         let __metadata = $crate::dsl::typing::StageTypingMetadata::stateful(
-            $crate::dsl::typing::TypeHint::exact::<$in>(),
-            $crate::dsl::typing::TypeHint::exact::<$out>(),
+            $crate::dsl::typing::TypeHint::exact_payload::<$in>(),
+            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
             true,
             Some(($msg).to_string()),
         );
@@ -1712,8 +1712,8 @@ macro_rules! __obzenflow_stateful_typed {
     // ── exact input, placeholder msg, with emit ──
     (input = exact($in:ty), output = $out:ty, name = $name:literal, handler = placeholder!($msg:expr), emit = some($emit_interval:expr), middleware = [$($mw:expr),*]) => {{
         let __metadata = $crate::dsl::typing::StageTypingMetadata::stateful(
-            $crate::dsl::typing::TypeHint::exact::<$in>(),
-            $crate::dsl::typing::TypeHint::exact::<$out>(),
+            $crate::dsl::typing::TypeHint::exact_payload::<$in>(),
+            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
             true,
             Some(($msg).to_string()),
         );
@@ -1730,8 +1730,8 @@ macro_rules! __obzenflow_stateful_typed {
         let __handler = $handler;
         // FLOWIP-114c PR D: assert_stateful_contract dropped, see sink rationale.
         let __metadata = $crate::dsl::typing::StageTypingMetadata::stateful(
-            $crate::dsl::typing::TypeHint::exact::<$in>(),
-            $crate::dsl::typing::TypeHint::exact::<$out>(),
+            $crate::dsl::typing::TypeHint::exact_payload::<$in>(),
+            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
             false,
             None,
         );
@@ -1743,8 +1743,8 @@ macro_rules! __obzenflow_stateful_typed {
         let __handler = $handler;
         // FLOWIP-114c PR D: assert_stateful_contract dropped, see sink rationale.
         let __metadata = $crate::dsl::typing::StageTypingMetadata::stateful(
-            $crate::dsl::typing::TypeHint::exact::<$in>(),
-            $crate::dsl::typing::TypeHint::exact::<$out>(),
+            $crate::dsl::typing::TypeHint::exact_payload::<$in>(),
+            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
             false,
             None,
         );
@@ -1945,8 +1945,8 @@ macro_rules! __obzenflow_effectful_stateful_typed {
         {}
         __assert_effectful_stateful_contract(&__handler);
         let __metadata = $crate::dsl::typing::StageTypingMetadata::stateful(
-            $crate::dsl::typing::TypeHint::exact::<$in>(),
-            $crate::dsl::typing::TypeHint::exact::<$out>(),
+            $crate::dsl::typing::TypeHint::exact_payload::<$in>(),
+            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
             false,
             None,
         );
@@ -1967,8 +1967,8 @@ macro_rules! __obzenflow_effectful_stateful_typed {
         {}
         __assert_effectful_stateful_contract(&__handler);
         let __metadata = $crate::dsl::typing::StageTypingMetadata::stateful(
-            $crate::dsl::typing::TypeHint::exact::<$in>(),
-            $crate::dsl::typing::TypeHint::exact::<$out>(),
+            $crate::dsl::typing::TypeHint::exact_payload::<$in>(),
+            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
             false,
             None,
         );
@@ -2071,7 +2071,7 @@ macro_rules! __obzenflow_join_typed {
         let __metadata = $crate::dsl::typing::StageTypingMetadata::join(
             $crate::__obzenflow_join_hint!($ref_hint $(, $ref_ty)?),
             $crate::__obzenflow_join_hint!($str_hint $(, $str_ty)?),
-            $crate::dsl::typing::TypeHint::exact::<$out>(),
+            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
             true,
             None,
         );
@@ -2094,7 +2094,7 @@ macro_rules! __obzenflow_join_typed {
         let __metadata = $crate::dsl::typing::StageTypingMetadata::join(
             $crate::__obzenflow_join_hint!($ref_hint $(, $ref_ty)?),
             $crate::__obzenflow_join_hint!($str_hint $(, $str_ty)?),
-            $crate::dsl::typing::TypeHint::exact::<$out>(),
+            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
             true,
             Some(($msg).to_string()),
         );
@@ -2224,9 +2224,9 @@ macro_rules! __obzenflow_join_typed {
      middleware = [$($mw:expr),*]) => {{
         let __handler = $handler;
         let __metadata = $crate::dsl::typing::StageTypingMetadata::join(
-            $crate::dsl::typing::TypeHint::exact::<$ref_ty>(),
-            $crate::dsl::typing::TypeHint::exact::<$str_ty>(),
-            $crate::dsl::typing::TypeHint::exact::<$out>(),
+            $crate::dsl::typing::TypeHint::exact_payload::<$ref_ty>(),
+            $crate::dsl::typing::TypeHint::exact_payload::<$str_ty>(),
+            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
             false,
             None,
         );
@@ -2245,7 +2245,7 @@ macro_rules! __obzenflow_join_typed {
 #[macro_export]
 macro_rules! __obzenflow_join_hint {
     (exact, $ty:ty) => {
-        $crate::dsl::typing::TypeHint::exact::<$ty>()
+        $crate::dsl::typing::TypeHint::exact_payload::<$ty>()
     };
     (exact) => {
         compile_error!(
@@ -2917,8 +2917,8 @@ macro_rules! __obzenflow_ai_map_reduce_cadillac_typed_default {
         middleware = [ $($mw_role:ident : $mw_expr:expr),* $(,)? ]
     ) => {{
         let __metadata = $crate::dsl::typing::StageTypingMetadata::transform(
-            $crate::dsl::typing::TypeHint::exact::<$($seed_ty)+>(),
-            $crate::dsl::typing::TypeHint::exact::<$out_ty>(),
+            $crate::dsl::typing::TypeHint::exact_payload::<$($seed_ty)+>(),
+            $crate::dsl::typing::TypeHint::exact_payload::<$out_ty>(),
             false,
             None,
         );
@@ -2995,8 +2995,8 @@ macro_rules! __obzenflow_ai_map_reduce_cadillac_typed_collect {
         middleware = [ $($mw_role:ident : $mw_expr:expr),* $(,)? ]
     ) => {{
         let __metadata = $crate::dsl::typing::StageTypingMetadata::transform(
-            $crate::dsl::typing::TypeHint::exact::<$($seed_ty)+>(),
-            $crate::dsl::typing::TypeHint::exact::<$out_ty>(),
+            $crate::dsl::typing::TypeHint::exact_payload::<$($seed_ty)+>(),
+            $crate::dsl::typing::TypeHint::exact_payload::<$out_ty>(),
             false,
             None,
         );
@@ -3171,8 +3171,8 @@ macro_rules! __obzenflow_ai_map_reduce_typed {
         middleware = [ $($mw_role:ident : $mw_expr:expr),* $(,)? ]
     ) => {{
         let __metadata = $crate::dsl::typing::StageTypingMetadata::transform(
-            $crate::dsl::typing::TypeHint::exact::<$($in)+>(),
-            $crate::dsl::typing::TypeHint::exact::<$out>(),
+            $crate::dsl::typing::TypeHint::exact_payload::<$($in)+>(),
+            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
             false,
             None,
         );

@@ -14,6 +14,7 @@ use obzenflow_core::event::event_envelope::EventEnvelope;
 use obzenflow_core::event::identity::JournalWriterId;
 use obzenflow_core::event::journal_event::JournalEvent;
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
+use obzenflow_core::event::payloads::effect_payload::{EffectProvenance, EFFECT_RECORD_EVENT_TYPE};
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::system_event::{
     ContractResultStatusLabel, SystemEvent, SystemEventType,
@@ -33,7 +34,7 @@ use obzenflow_core::{
     NoControlMiddleware, StageId, TransportContract, WriterId,
 };
 use serde_json::json;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
@@ -1595,6 +1596,150 @@ async fn transport_only_skips_observability_events() {
 }
 
 #[tokio::test]
+async fn transport_only_filters_unselected_data_and_reconciles_selected_writer_seq() {
+    let upstream_stage = StageId::new();
+    let reader_stage = StageId::new();
+    let upstream_owner = JournalOwner::stage(upstream_stage);
+    let reader_owner = JournalOwner::stage(reader_stage);
+    let upstream_journal: Arc<dyn Journal<ChainEvent>> = Arc::new(TestJournal::new(upstream_owner));
+    let contract_journal: Arc<dyn Journal<ChainEvent>> =
+        Arc::new(TestJournal::new(reader_owner.clone()));
+    let system_journal: Arc<dyn Journal<SystemEvent>> = Arc::new(TestJournal::new(reader_owner));
+
+    let writer_id = WriterId::Stage(upstream_stage);
+
+    upstream_journal
+        .append(
+            ChainEventFactory::data_event(writer_id, "test.ignored.v1", json!({"n": 1})),
+            None,
+        )
+        .await
+        .unwrap();
+    upstream_journal
+        .append(
+            ChainEventFactory::data_event(writer_id, "test.selected.v1", json!({"n": 2})),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let mut eof_event = ChainEventFactory::eof_event(writer_id, true);
+    if let ChainEventContent::FlowControl(FlowControlPayload::Eof { writer_seq, .. }) =
+        &mut eof_event.content
+    {
+        *writer_seq = Some(SeqNo(2));
+    }
+    upstream_journal.append(eof_event, None).await.unwrap();
+
+    let upstreams = [(upstream_stage, "upstream".to_string(), upstream_journal)];
+    let mut selected_event_types = HashMap::new();
+    selected_event_types.insert(
+        upstream_stage,
+        HashSet::from(["test.selected.v1".to_string()]),
+    );
+
+    let mut subscription = UpstreamSubscription::new_with_names("test_owner", &upstreams)
+        .await
+        .unwrap()
+        .with_selected_event_types(selected_event_types)
+        .with_contracts(ContractsWiring {
+            writer_id: WriterId::from(reader_stage),
+            contract_journal: contract_journal.clone(),
+            config: ContractConfig::default(),
+            system_journal: Some(system_journal.clone()),
+            reader_stage: Some(reader_stage),
+            control_middleware: Arc::new(NoControlMiddleware),
+            include_delivery_contract: false,
+            cycle_guard_config: None,
+        })
+        .transport_only();
+
+    let mut reader_progress = [ReaderProgress::new(upstream_stage)];
+
+    let first = subscription
+        .poll_next_with_state("test_fsm", Some(&mut reader_progress[..]))
+        .await;
+    match first {
+        PollResult::Event(env) => match env.event.content {
+            ChainEventContent::Data { event_type, .. } => {
+                assert_eq!(event_type, "test.selected.v1");
+            }
+            other => panic!("expected selected Data event, got {other:?}"),
+        },
+        other => panic!("expected PollResult::Event, got {other:?}"),
+    }
+
+    assert_eq!(reader_progress[0].reader_seq, SeqNo(1));
+    assert_eq!(
+        subscription
+            .last_delivered_stage_input_position()
+            .expect("selected data should receive a stage input position")
+            .0,
+        1
+    );
+
+    drive_subscription_to_eof(&mut subscription, &mut reader_progress).await;
+
+    assert_eq!(reader_progress[0].reader_seq, SeqNo(1));
+    assert_eq!(reader_progress[0].advertised_writer_seq, Some(SeqNo(1)));
+
+    let status = subscription.check_contracts(&mut reader_progress).await;
+    assert!(
+        matches!(
+            status,
+            ContractStatus::ProgressEmitted | ContractStatus::Healthy
+        ),
+        "selected feed should reconcile successfully, got {status:?}"
+    );
+    assert!(!reader_progress[0].contract_violated);
+
+    let contract_events = contract_journal.read_causally_ordered().await.unwrap();
+    let mut final_found = false;
+    for env in &contract_events {
+        match &env.event.content {
+            ChainEventContent::FlowControl(FlowControlPayload::ConsumptionFinal {
+                pass,
+                reader_seq,
+                advertised_writer_seq,
+                failure_reason,
+                ..
+            }) => {
+                final_found = true;
+                assert!(*pass);
+                assert_eq!(*reader_seq, SeqNo(1));
+                assert_eq!(*advertised_writer_seq, Some(SeqNo(1)));
+                assert!(failure_reason.is_none());
+            }
+            ChainEventContent::FlowControl(
+                FlowControlPayload::ConsumptionGap { .. }
+                | FlowControlPayload::AtLeastOnceViolation { .. },
+            ) => panic!("selected feed should not emit gap or violation events"),
+            _ => {}
+        }
+    }
+    assert!(final_found, "expected a selected-feed ConsumptionFinal");
+
+    let system_events = system_journal.read_causally_ordered().await.unwrap();
+    assert!(system_events.iter().any(|env| matches!(
+        &env.event.event,
+        SystemEventType::ContractStatus {
+            upstream,
+            reader,
+            pass,
+            reader_seq,
+            advertised_writer_seq,
+            reason,
+            ..
+        } if *upstream == upstream_stage
+            && *reader == reader_stage
+            && *pass
+            && *reader_seq == Some(SeqNo(1))
+            && *advertised_writer_seq == Some(SeqNo(1))
+            && reason.is_none()
+    )));
+}
+
+#[tokio::test]
 async fn transport_only_skips_effect_results_without_stage_input_position() {
     let upstream_stage = StageId::new();
     let upstream_owner = JournalOwner::stage(upstream_stage);
@@ -1626,12 +1771,27 @@ async fn transport_only_skips_effect_results_without_stage_input_position() {
             ChainEventFactory::derived_event(
                 writer_id,
                 &ChainEventFactory::data_event(writer_id, "test.parent", json!({})),
-                ChainEventContent::EffectResult(effect_record),
+                ChainEventContent::EffectResult(effect_record.clone()),
             ),
             None,
         )
         .await
         .unwrap();
+
+    upstream_journal
+        .append(
+            ChainEventFactory::derived_data_event(
+                writer_id,
+                &ChainEventFactory::data_event(writer_id, "test.parent", json!({})),
+                EFFECT_RECORD_EVENT_TYPE,
+                serde_json::to_value(&effect_record).expect("serialize effect record"),
+            )
+            .with_effect_provenance(EffectProvenance::from_record(&effect_record, true)),
+            None,
+        )
+        .await
+        .unwrap();
+
     upstream_journal
         .append(
             ChainEventFactory::data_event(writer_id, "test.event", json!({"n": 1})),

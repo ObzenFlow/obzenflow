@@ -36,6 +36,7 @@ use obzenflow_core::event::vector_clock::VectorClock;
 use obzenflow_core::event::{ChainEvent, EventEnvelope, JournalEvent, JournalWriterId};
 use obzenflow_core::journal::journal_reader::JournalReader;
 use obzenflow_core::{EventId, StageId};
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::time::Instant;
 
@@ -61,6 +62,16 @@ where
 
     /// Readers for each upstream journal
     readers: Vec<(StageId, String, Box<dyn JournalReader<T>>)>,
+
+    /// Selected Data event types by upstream reader stage.
+    ///
+    /// When populated for a reader, non-selected Data events are consumed from
+    /// the journal but not delivered to the stage handler.
+    selected_event_types_by_stage: HashMap<StageId, HashSet<String>>,
+
+    /// Per-reader count of Data events that survived the selected event-type
+    /// filter and were delivered as stage inputs.
+    selected_data_seq_by_reader: Vec<SeqNo>,
 
     /// Subscription state (mechanism)
     state: SubscriptionState,
@@ -153,6 +164,31 @@ where
             progress.last_receipted_vector_clock.clone()
         } else {
             progress.last_vector_clock.clone()
+        }
+    }
+
+    fn has_selected_event_type_filter(&self, stage_id: StageId) -> bool {
+        self.selected_event_types_by_stage
+            .get(&stage_id)
+            .is_some_and(|selected| !selected.is_empty())
+    }
+
+    fn data_event_selected_for_stage(&self, stage_id: StageId, event_type: &str) -> bool {
+        self.selected_event_types_by_stage
+            .get(&stage_id)
+            .filter(|selected| !selected.is_empty())
+            .map(|selected| selected.contains(event_type))
+            .unwrap_or(true)
+    }
+
+    fn selected_writer_seq_for_reader(&self, reader_index: usize, stage_id: StageId) -> SeqNo {
+        if self.has_selected_event_type_filter(stage_id) {
+            self.selected_data_seq_by_reader
+                .get(reader_index)
+                .copied()
+                .unwrap_or(SeqNo(0))
+        } else {
+            SeqNo(0)
         }
     }
 

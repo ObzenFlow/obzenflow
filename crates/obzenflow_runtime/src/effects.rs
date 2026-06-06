@@ -6,7 +6,9 @@
 
 use async_trait::async_trait;
 pub use obzenflow_core::event::payloads::effect_payload::{
-    EffectCursor, EffectDescriptor, EffectOutcomePayload, EffectRecord,
+    framework_effect_event_type, is_framework_effect_event_type, EffectCursor, EffectDescriptor,
+    EffectOutcomePayload, EffectProvenance, EffectRecord, CAPTURE_EVENT_TYPE,
+    EFFECT_RECORD_EVENT_TYPE,
 };
 use obzenflow_core::event::schema::TypedPayload;
 use obzenflow_core::event::{ChainEventContent, ChainEventFactory};
@@ -644,7 +646,7 @@ impl EffectHistory {
             .await
             .map_err(|e| EffectError::ReplayArchive(e.to_string()))?
         {
-            if let ChainEventContent::EffectResult(record) = envelope.event.content {
+            if let Some(record) = effect_record_from_event(&envelope.event)? {
                 records.push(record);
             }
         }
@@ -1180,11 +1182,13 @@ async fn append_effect_record(
     record: EffectRecord,
     source_error: Option<&EffectError>,
 ) -> Result<(), EffectError> {
-    let mut event = ChainEventFactory::derived_event(
-        writer_id,
-        &parent.event,
-        ChainEventContent::EffectResult(record),
-    );
+    let event_type = framework_effect_event_type(&record.descriptor.effect_type);
+    let provenance = EffectProvenance::from_record(&record, true);
+    let payload =
+        serde_json::to_value(&record).map_err(|e| EffectError::Serialization(e.to_string()))?;
+    let mut event =
+        ChainEventFactory::derived_data_event(writer_id, &parent.event, event_type, payload)
+            .with_effect_provenance(provenance);
     if let Some(err) = source_error {
         event.processing_info.status =
             obzenflow_core::event::status::processing_status::ProcessingStatus::error_with_kind(
@@ -1198,6 +1202,26 @@ async fn append_effect_record(
         .await
         .map_err(|e| EffectError::Journal(e.to_string()))?;
     Ok(())
+}
+
+fn effect_record_from_event(event: &ChainEvent) -> Result<Option<EffectRecord>, EffectError> {
+    match &event.content {
+        ChainEventContent::EffectResult(record) => Ok(Some(record.clone())),
+        ChainEventContent::Data {
+            event_type,
+            payload,
+        } if event
+            .effect_provenance
+            .as_ref()
+            .is_some_and(|provenance| provenance.framework_owned)
+            && is_framework_effect_event_type(event_type) =>
+        {
+            serde_json::from_value(payload.clone())
+                .map(Some)
+                .map_err(|e| EffectError::Serialization(e.to_string()))
+        }
+        _ => Ok(None),
+    }
 }
 
 /// FLOWIP-120a: decode a committed or recorded effect outcome into the effect's
@@ -1613,15 +1637,14 @@ mod tests {
         journal
             .events()
             .into_iter()
-            .filter_map(|envelope| match envelope.event.content {
-                ChainEventContent::EffectResult(record) => Some(record),
-                _ => None,
+            .filter_map(|envelope| {
+                effect_record_from_event(&envelope.event).expect("effect record decode")
             })
             .collect()
     }
 
     #[tokio::test]
-    async fn live_perform_records_effect_result() {
+    async fn live_perform_records_effect_data_fact() {
         let stage_id = StageId::new();
         let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
         let calls = Arc::new(AtomicUsize::new(0));
@@ -1642,14 +1665,13 @@ mod tests {
 
         assert_eq!(output, 42);
         assert_eq!(calls.load(Ordering::SeqCst), 1);
-        let records: Vec<_> = journal
-            .events()
-            .into_iter()
-            .filter_map(|envelope| match envelope.event.content {
-                ChainEventContent::EffectResult(record) => Some(record),
-                _ => None,
-            })
-            .collect();
+        let events = journal.events();
+        assert!(matches!(
+            events[0].event.content,
+            ChainEventContent::Data { .. }
+        ));
+        assert!(events[0].event.effect_provenance.is_some());
+        let records = effect_records(&journal);
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].cursor.input_seq, 1);
         assert_eq!(records[0].cursor.effect_ordinal, 0);
@@ -1766,6 +1788,12 @@ mod tests {
             .expect("capture should not require an effect declaration");
 
         assert_eq!(captured, 7);
+        let events = journal.events();
+        assert!(matches!(
+            &events[0].event.content,
+            ChainEventContent::Data { event_type, .. } if event_type == CAPTURE_EVENT_TYPE
+        ));
+        assert!(events[0].event.effect_provenance.is_some());
         assert_eq!(effect_records(&journal).len(), 1);
     }
 
@@ -1786,14 +1814,7 @@ mod tests {
             .expect("live effect should succeed");
         assert_eq!(output, 10);
 
-        let records: Vec<_> = journal
-            .events()
-            .into_iter()
-            .filter_map(|envelope| match envelope.event.content {
-                ChainEventContent::EffectResult(record) => Some(record),
-                _ => None,
-            })
-            .collect();
+        let records = effect_records(&journal);
         let history = Arc::new(
             EffectHistory::from_records(records[0].cursor.recorded_flow_id.clone(), records)
                 .expect("history should index"),
@@ -2167,14 +2188,7 @@ mod tests {
         })
         .await
         .expect("live effect should succeed");
-        let records: Vec<_> = journal
-            .events()
-            .into_iter()
-            .filter_map(|envelope| match envelope.event.content {
-                ChainEventContent::EffectResult(record) => Some(record),
-                _ => None,
-            })
-            .collect();
+        let records = effect_records(&journal);
         let history = Arc::new(
             EffectHistory::from_records(records[0].cursor.recorded_flow_id.clone(), records)
                 .expect("history should index"),
@@ -2214,14 +2228,7 @@ mod tests {
         .await
         .expect("live effect should succeed");
 
-        let mut records: Vec<_> = journal
-            .events()
-            .into_iter()
-            .filter_map(|envelope| match envelope.event.content {
-                ChainEventContent::EffectResult(record) => Some(record),
-                _ => None,
-            })
-            .collect();
+        let mut records = effect_records(&journal);
         records.push(records[0].clone());
 
         let err = EffectHistory::from_records(records[0].cursor.recorded_flow_id.clone(), records)
@@ -2277,14 +2284,7 @@ mod tests {
         let captured: u64 = live.capture("side_value", 7).await.expect("capture");
         assert_eq!(captured, 7);
 
-        let records: Vec<_> = journal
-            .events()
-            .into_iter()
-            .filter_map(|envelope| match envelope.event.content {
-                ChainEventContent::EffectResult(record) => Some(record),
-                _ => None,
-            })
-            .collect();
+        let records = effect_records(&journal);
         let history = Arc::new(
             EffectHistory::from_records(records[0].cursor.recorded_flow_id.clone(), records)
                 .expect("history should index"),

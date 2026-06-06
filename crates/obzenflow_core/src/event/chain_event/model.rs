@@ -11,7 +11,9 @@ use crate::event::context::{
 use crate::event::ingestion::IngressContext;
 use crate::event::payloads::correlation_payload::CorrelationPayload;
 use crate::event::payloads::delivery_payload::DeliveryPayload;
-use crate::event::payloads::effect_payload::EffectRecord;
+use crate::event::payloads::effect_payload::{
+    is_framework_effect_event_type, EffectProvenance, EffectRecord,
+};
 use crate::event::payloads::flow_control_payload::FlowControlPayload;
 use crate::event::payloads::observability_payload::{
     MetricsLifecycle, MiddlewareLifecycle, ObservabilityPayload, StageLifecycle,
@@ -127,6 +129,14 @@ pub struct ChainEvent {
     /// Can be attached to ANY event type (Data, FlowSignal, or Delivery)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub observability: Option<ObservabilityContext>,
+
+    /// Framework-owned provenance for effect outcome and replay facts.
+    ///
+    /// Domain facts remain domain-shaped in `ChainEventContent::Data`; this
+    /// metadata records the effect cursor and descriptor context without putting
+    /// framework fields inside the domain payload.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effect_provenance: Option<EffectProvenance>,
 }
 
 /// The core event content - what kind of event this is
@@ -165,6 +175,11 @@ impl ChainEvent {
     /// Attach observability context to any event (wide events pattern)
     pub fn with_observability_context(mut self, observability: ObservabilityContext) -> Self {
         self.observability = Some(observability);
+        self
+    }
+
+    pub fn with_effect_provenance(mut self, provenance: EffectProvenance) -> Self {
+        self.effect_provenance = Some(provenance);
         self
     }
 
@@ -228,17 +243,23 @@ impl ChainEvent {
     /// only original source-level data and watermark events are re-injected at the
     /// top of the flow.
     ///
-    /// Effect records (`EffectResult`) are deliberately excluded. They are re-admitted
-    /// on replay only through the separate persisted-history path, `EffectHistory::load`
-    /// (FLOWIP-120a, in `obzenflow_runtime`), which filters effect records inline by
-    /// content type and cursor. The two admission paths are distinct by construction,
-    /// this method gating source re-injection plus the inline filter in the
-    /// effect-history reader, so no second predicate method is required.
+    /// Effect records are deliberately excluded, whether stored as legacy
+    /// `EffectResult` content or as framework-owned `Data` facts with
+    /// `effect_provenance`. They are re-admitted on replay only through the
+    /// separate persisted-history path, `EffectHistory::load` (FLOWIP-120a/120b,
+    /// in `obzenflow_runtime`), which filters effect records inline by cursor.
     pub fn is_source_replayable(&self) -> bool {
         matches!(
             &self.content,
-            ChainEventContent::Data { .. }
-                | ChainEventContent::FlowControl(FlowControlPayload::Watermark { .. })
+            ChainEventContent::FlowControl(FlowControlPayload::Watermark { .. })
+        ) || matches!(
+            &self.content,
+            ChainEventContent::Data { event_type, .. }
+                if !(self
+                    .effect_provenance
+                    .as_ref()
+                    .is_some_and(|provenance| provenance.framework_owned)
+                    && is_framework_effect_event_type(event_type))
         )
     }
 

@@ -4,6 +4,9 @@
 
 use super::*;
 use crate::event::ingestion::IngressContext;
+use crate::event::payloads::effect_payload::{
+    EffectCursor, EffectDescriptor, EffectProvenance, EFFECT_RECORD_EVENT_TYPE,
+};
 use crate::event::types::CorrelationId;
 use crate::id::StageId;
 use crate::WriterId;
@@ -46,6 +49,33 @@ fn test_derived_event() {
     assert_eq!(child.correlation, parent.correlation);
     assert_eq!(child.causality.parent_ids, vec![parent.id]);
     assert_eq!(child.ingress_context, parent.ingress_context);
+}
+
+#[test]
+fn framework_effect_data_is_not_source_replayable() {
+    let writer_id = WriterId::from(StageId::new());
+    let mut event = ChainEventFactory::data_event(writer_id, EFFECT_RECORD_EVENT_TYPE, json!({}));
+    event.effect_provenance = Some(EffectProvenance {
+        cursor: EffectCursor {
+            recorded_flow_id: "flow".to_string(),
+            stage_key: "stage".to_string(),
+            input_seq: 1,
+            effect_ordinal: 0,
+        },
+        descriptor_hash: "hash".to_string(),
+        descriptor: EffectDescriptor {
+            effect_type: "test.effect".to_string(),
+            label: "test".to_string(),
+            schema_version: 1,
+            stage_logic_version: "v1".to_string(),
+            canonical_input_hash: "input".to_string(),
+        },
+        outcome_fact_ordinal: None,
+        group_id: None,
+        framework_owned: true,
+    });
+
+    assert!(!event.is_source_replayable());
 }
 
 #[test]

@@ -166,6 +166,7 @@ fn test_direct_chain_event_construction() {
         cycle_scc_id: None,
         runtime_context: None,
         observability: None,
+        effect_provenance: None,
     };
 
     assert!(event.is_control());

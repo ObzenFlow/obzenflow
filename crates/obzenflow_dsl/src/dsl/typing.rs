@@ -10,10 +10,11 @@ use async_trait::async_trait;
 use obzenflow_adapters::middleware::{control::ControlMiddlewareAggregator, MiddlewareFactory};
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
+use obzenflow_core::TypedPayload;
 use obzenflow_core::{ChainEvent, StageId, WriterId};
 use obzenflow_runtime::feed_plan::{
-    payload_key_from_type_hint, FactVisibility, FeedKey, FeedPlan, FeedRole, LogicalFeed,
-    PayloadTypeDescriptor, StageOutputContract,
+    FactVisibility, FeedKey, FeedPlan, FeedRole, LogicalFeed, PayloadTypeDescriptor,
+    StageOutputContract,
 };
 use obzenflow_runtime::pipeline::config::StageConfig;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
@@ -51,6 +52,8 @@ pub enum TypeHint {
     Exact {
         type_id: TypeId,
         display_name: String,
+        event_type: Option<String>,
+        schema_version: Option<u32>,
     },
 }
 
@@ -63,6 +66,17 @@ impl TypeHint {
         Self::Exact {
             type_id: TypeId::of::<T>(),
             display_name: type_name::<T>().to_string(),
+            event_type: None,
+            schema_version: None,
+        }
+    }
+
+    pub fn exact_payload<T: TypedPayload + 'static>() -> Self {
+        Self::Exact {
+            type_id: TypeId::of::<T>(),
+            display_name: type_name::<T>().to_string(),
+            event_type: Some(T::versioned_event_type()),
+            schema_version: Some(T::SCHEMA_VERSION),
         }
     }
 }
@@ -1070,10 +1084,9 @@ pub fn derive_feed_plan(
             continue;
         }
 
-        let selected_type_hint = TypeHintInfo::from(downstream_input_hint);
-        let selected_payload_key = payload_key_from_type_hint(&selected_type_hint);
         let selected_payload =
-            PayloadTypeDescriptor::from_type_hint(selected_type_hint, FactVisibility::Routable);
+            payload_descriptor_from_type_hint(downstream_input_hint, FactVisibility::Routable);
+        let selected_payload_key = selected_payload.payload_key();
 
         feeds.push(LogicalFeed {
             key: FeedKey::new(
@@ -1094,12 +1107,7 @@ fn output_contract_from_metadata(metadata: &StageTypingMetadata) -> StageOutputC
         .output_contract
         .iter()
         .filter(|output_type| !matches!(output_type, TypeHint::Unspecified))
-        .map(|output_type| {
-            PayloadTypeDescriptor::from_type_hint(
-                TypeHintInfo::from(output_type),
-                FactVisibility::Unrouted,
-            )
-        })
+        .map(|output_type| payload_descriptor_from_type_hint(output_type, FactVisibility::Unrouted))
         .collect();
 
     if outputs.is_empty() {
@@ -1107,6 +1115,24 @@ fn output_contract_from_metadata(metadata: &StageTypingMetadata) -> StageOutputC
     } else {
         StageOutputContract { outputs }
     }
+}
+
+fn payload_descriptor_from_type_hint(
+    output_type: &TypeHint,
+    visibility: FactVisibility,
+) -> PayloadTypeDescriptor {
+    let mut descriptor =
+        PayloadTypeDescriptor::from_type_hint(TypeHintInfo::from(output_type), visibility);
+    if let TypeHint::Exact {
+        event_type,
+        schema_version,
+        ..
+    } = output_type
+    {
+        descriptor.event_type = event_type.clone();
+        descriptor.schema_version = *schema_version;
+    }
+    descriptor
 }
 
 fn exact_output_contract_members(metadata: &StageTypingMetadata) -> Vec<(TypeId, String)> {
@@ -1117,6 +1143,7 @@ fn exact_output_contract_members(metadata: &StageTypingMetadata) -> Vec<(TypeId,
             TypeHint::Exact {
                 type_id,
                 display_name,
+                ..
             } => Some((*type_id, display_name.clone())),
             TypeHint::Unspecified => None,
         })
@@ -1145,6 +1172,7 @@ fn selected_or_single_output_for_fan_in(
     if let TypeHint::Exact {
         type_id: expected_id,
         display_name: expected_name,
+        ..
     } = downstream_input_hint
     {
         if members.iter().any(|(type_id, _)| type_id == expected_id) {
@@ -1337,6 +1365,7 @@ pub fn validate_edge_typing(
         if let TypeHint::Exact {
             type_id: expected_id,
             display_name: expected_name,
+            ..
         } = downstream_input_hint
         {
             let upstream_members = exact_output_contract_members(upstream_metadata);

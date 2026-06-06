@@ -107,11 +107,19 @@ mod tests {
         }
     }
 
-    #[derive(Debug, Clone)]
+    #[derive(Debug, Clone, Serialize, Deserialize)]
     struct TestIn;
 
-    #[derive(Debug, Clone)]
+    impl TypedPayload for TestIn {
+        const EVENT_TYPE: &'static str = "test.ai_map_reduce.in";
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
     struct TestOut;
+
+    impl TypedPayload for TestOut {
+        const EVENT_TYPE: &'static str = "test.ai_map_reduce.out";
+    }
 
     #[derive(Debug, Clone, Default, Serialize, Deserialize)]
     struct TestSeed {

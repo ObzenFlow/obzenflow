@@ -352,12 +352,12 @@ impl<In, Chunk, Partial, Collected, Out> AiMapReduceBuilder<In, Chunk, Partial, 
 
     pub fn build(self) -> Box<dyn StageDescriptor>
     where
-        In: Clone + Send + Sync + 'static,
+        In: Clone + TypedPayload + Send + Sync + 'static,
         Chunk: Clone + TypedPayload + Send + Sync + 'static,
         Partial: TypedPayload + serde::de::DeserializeOwned + Clone + Send + Sync + 'static,
         Collected:
             Clone + serde::Serialize + TypedPayload + std::fmt::Debug + Send + Sync + 'static,
-        Out: Clone + Send + Sync + 'static,
+        Out: Clone + TypedPayload + Send + Sync + 'static,
     {
         Box::new(
             AiMapReduceCompositeDescriptor::<In, Chunk, Partial, Collected, Out> {
@@ -395,11 +395,11 @@ struct AiMapReduceCompositeDescriptor<In, Chunk, Partial, Collected, Out> {
 impl<In, Chunk, Partial, Collected, Out> StageDescriptor
     for AiMapReduceCompositeDescriptor<In, Chunk, Partial, Collected, Out>
 where
-    In: Clone + Send + Sync + 'static,
+    In: Clone + TypedPayload + Send + Sync + 'static,
     Chunk: Clone + TypedPayload + Send + Sync + 'static,
     Partial: TypedPayload + serde::de::DeserializeOwned + Clone + Send + Sync + 'static,
     Collected: Clone + serde::Serialize + TypedPayload + std::fmt::Debug + Send + Sync + 'static,
-    Out: Clone + Send + Sync + 'static,
+    Out: Clone + TypedPayload + Send + Sync + 'static,
 {
     fn name(&self) -> &str {
         &self.name
@@ -443,8 +443,8 @@ where
         let chunk_descriptor = wrap_typed_descriptor(
             Box::new(chunk_descriptor),
             StageTypingMetadata::transform(
-                TypeHint::exact::<In>(),
-                TypeHint::exact::<Chunk>(),
+                TypeHint::exact_payload::<In>(),
+                TypeHint::exact_payload::<Chunk>(),
                 false,
                 None,
             ),
@@ -466,8 +466,8 @@ where
         let map_descriptor = wrap_typed_descriptor(
             Box::new(map_descriptor),
             StageTypingMetadata::transform(
-                TypeHint::exact::<Chunk>(),
-                TypeHint::exact::<Partial>(),
+                TypeHint::exact_payload::<Chunk>(),
+                TypeHint::exact_payload::<Partial>(),
                 false,
                 None,
             ),
@@ -485,8 +485,8 @@ where
         let collect_descriptor = wrap_typed_descriptor(
             Box::new(collect_descriptor),
             StageTypingMetadata::stateful(
-                TypeHint::exact::<Partial>(),
-                TypeHint::exact::<Collected>(),
+                TypeHint::exact_payload::<Partial>(),
+                TypeHint::exact_payload::<Collected>(),
                 false,
                 None,
             ),
@@ -504,8 +504,8 @@ where
         let finalize_descriptor = wrap_typed_descriptor(
             Box::new(finalize_descriptor),
             StageTypingMetadata::transform(
-                TypeHint::exact::<Collected>(),
-                TypeHint::exact::<Out>(),
+                TypeHint::exact_payload::<Collected>(),
+                TypeHint::exact_payload::<Out>(),
                 false,
                 None,
             ),
