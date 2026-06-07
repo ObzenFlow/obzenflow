@@ -200,7 +200,7 @@ where
         })?;
         let mut fx = Effects::new(effect_context);
         self.0.process(input, &mut fx).await?;
-        Ok(fx.drain_emitted_outputs())
+        Ok(Vec::new())
     }
 
     async fn drain(&mut self) -> std::result::Result<(), HandlerError> {

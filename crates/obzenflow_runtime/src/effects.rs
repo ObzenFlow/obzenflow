@@ -5,13 +5,14 @@
 //! Replay-safe user effects.
 
 use async_trait::async_trait;
+use obzenflow_core::event::context::FlowContext;
 pub use obzenflow_core::event::payloads::effect_payload::{
     effect_outcome_group_id, framework_effect_event_type, is_framework_effect_event_type,
     EffectCursor, EffectDescriptor, EffectOutcomePayload, EffectProvenance, EffectRecord,
     CAPTURE_EVENT_TYPE, EFFECT_RECORD_EVENT_TYPE,
 };
 use obzenflow_core::event::schema::TypedPayload;
-use obzenflow_core::event::{ChainEventContent, ChainEventFactory};
+use obzenflow_core::event::{ChainEventContent, ChainEventFactory, SystemEvent};
 use obzenflow_core::journal::{ArchiveStatus, Journal};
 use obzenflow_core::{ChainEvent, EventEnvelope, EventId, FlowId, StageId, WriterId};
 use ring::digest::{digest, SHA256};
@@ -26,7 +27,9 @@ use thiserror::Error;
 
 use crate::feed_plan::StageOutputContract;
 use crate::messaging::upstream_subscription::StageInputPosition;
+use crate::metrics::instrumentation::StageInstrumentation;
 use crate::replay::{ReplayArchive, ReplayError};
+use crate::stages::common::heartbeat::HeartbeatState;
 use crate::stages::common::supervision::output_committer::{CommitOptions, OutputCommitter};
 
 pub struct EffectBoundaryContext {
@@ -722,6 +725,10 @@ pub struct EffectInvocationContext {
     pub input_seq: StageInputPosition,
     pub stage_logic_version: String,
     pub data_journal: Arc<dyn Journal<ChainEvent>>,
+    pub flow_context: Option<FlowContext>,
+    pub system_journal: Option<Arc<dyn Journal<SystemEvent>>>,
+    pub instrumentation: Option<Arc<StageInstrumentation>>,
+    pub heartbeat_state: Option<Arc<HeartbeatState>>,
     pub parent: EventEnvelope<ChainEvent>,
     pub effect_history: Option<Arc<EffectHistory>>,
     pub effect_runtime_mode: EffectRuntimeMode,
@@ -816,7 +823,6 @@ pub struct Effects {
     ctx: EffectInvocationContext,
     next_effect_ordinal: u32,
     next_output_ordinal: u32,
-    emitted_outputs: Vec<ChainEvent>,
 }
 
 impl Effects {
@@ -825,7 +831,6 @@ impl Effects {
             ctx,
             next_effect_ordinal: 0,
             next_output_ordinal: 0,
-            emitted_outputs: Vec::new(),
         }
     }
 
@@ -870,12 +875,26 @@ impl Effects {
             self.ctx.input_seq,
             output_ordinal,
         )?;
-        self.emitted_outputs.push(event);
+        let committer = OutputCommitter {
+            data_journal: &self.ctx.data_journal,
+            flow_context: self.ctx.flow_context.as_ref(),
+            system_journal: self.ctx.system_journal.as_ref(),
+            instrumentation: self.ctx.instrumentation.as_ref(),
+            heartbeat_state: self.ctx.heartbeat_state.as_ref(),
+            output_contract: Some(&self.ctx.output_contract),
+        };
+        committer
+            .commit_prebuilt(
+                event,
+                Some(&self.ctx.parent),
+                CommitOptions {
+                    count_output: true,
+                    validate_output_contract: true,
+                },
+            )
+            .await
+            .map_err(|e| EffectError::Journal(e.to_string()))?;
         Ok(())
-    }
-
-    pub(crate) fn drain_emitted_outputs(&mut self) -> Vec<ChainEvent> {
-        std::mem::take(&mut self.emitted_outputs)
     }
 
     pub async fn perform<E>(&mut self, effect: E) -> Result<E::Output, EffectError>
@@ -1826,6 +1845,10 @@ mod tests {
             input_seq: StageInputPosition(1),
             stage_logic_version: "test-v1".to_string(),
             data_journal: journal,
+            flow_context: None,
+            system_journal: None,
+            instrumentation: None,
+            heartbeat_state: None,
             parent,
             effect_history,
             effect_runtime_mode,
@@ -1860,7 +1883,6 @@ mod tests {
             err,
             EffectError::EmitUnsupported { stage_key } if stage_key == "effect_stage"
         ));
-        assert!(effects.drain_emitted_outputs().is_empty());
         assert!(journal.events().is_empty());
     }
 
@@ -1891,12 +1913,11 @@ mod tests {
                 event_type,
             } if stage_key == "effect_stage" && event_type == SecondOutput::versioned_event_type()
         ));
-        assert!(effects.drain_emitted_outputs().is_empty());
         assert!(journal.events().is_empty());
     }
 
     #[tokio::test]
-    async fn emit_buffers_declared_fact_type() {
+    async fn emit_commits_declared_fact_type_immediately() {
         let stage_id = StageId::new();
         let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
         let mut ctx = invocation_context(
@@ -1913,14 +1934,13 @@ mod tests {
             .await
             .expect("declared output fact should be accepted");
 
-        let outputs = effects.drain_emitted_outputs();
-        assert_eq!(outputs.len(), 1);
+        let events = journal.events();
+        assert_eq!(events.len(), 1);
         assert!(matches!(
-            &outputs[0].content,
+            &events[0].event.content,
             ChainEventContent::Data { event_type, .. }
                 if event_type == &FirstOutput::versioned_event_type()
         ));
-        assert!(journal.events().is_empty());
     }
 
     fn effect_records(journal: &MemoryJournal<ChainEvent>) -> Vec<EffectRecord> {

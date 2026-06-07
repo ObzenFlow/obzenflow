@@ -2,37 +2,35 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Stage-authored output commit chokepoint (FLOWIP-120b, Step 1).
+//! Stage-authored output commit chokepoint (FLOWIP-120b).
 //!
 //! `OutputCommitter` is the single place a stage-authored event is written to
-//! the stage data journal. Two append paths exist today: the supervisor
-//! pending-output drain (`backpressure_drain`) and the effects-layer effect and
-//! capture record append (`effects::append_effect_record`, also reached by the
-//! transactional `EffectCommitHandle`). Step 1 routes both through this one type
-//! so the commit core (wide-event enrichment, per-type instrumentation, journal
-//! append, heartbeat tracking, and the middleware mirror) lives in one place
-//! instead of drifting between two appenders.
+//! the stage data journal. It is used by the supervisor pending-output drain,
+//! the effects-layer reserved framework effect/capture record append, and the
+//! immediate `fx.emit` path for typed derived facts. The commit core
+//! (wide-event enrichment, per-type instrumentation, journal append, heartbeat
+//! tracking, and the middleware mirror) lives here instead of drifting between
+//! appenders.
 //!
 //! The caller still owns the decisions this committer does not yet absorb:
 //!
-//! * Backpressure credit and requeue stay in the drain. They move to input
-//!   admission plus routed-output debt in Step 2, at which point the effects
-//!   layer gains the handles to build a fully-featured committer.
+//! * Backpressure credit and requeue stay in the drain for legacy returned
+//!   handler outputs. `fx.emit` commits immediately after input admission; full
+//!   input-admission debt and bounded-fanout enforcement are still a later
+//!   120b slice.
 //! * The pending-output drain still calls validation before credit reservation,
 //!   preserving the fail-before-backpressure-ordering rule. The validation rule
 //!   itself now lives here so every committer-based authoring path has one
 //!   contract check.
-//! * Deterministic output identity is not assigned here yet. Handler outputs
-//!   already carry a deterministic id from `deterministic_typed_output_event`;
-//!   effect records still carry their inherited derived-event id. Unifying both
-//!   under one per-input `output_ordinal` counter is Step 4. It cannot be done
-//!   here because an effect record keyed by `effect_ordinal = 0` would collide
-//!   with a handler output keyed by `output_ordinal = 0`; the shared counter
-//!   that separates those namespaces is the Step 4 deliverable.
+//! * Deterministic output identity is assigned before commit by the authoring
+//!   surface. `fx.emit` already uses a per-input output ordinal; returned
+//!   handler outputs and reserved framework effect records still arrive
+//!   prebuilt.
 //!
 //! Behaviour is selected by which handles are present and by [`CommitOptions`].
-//! The drain supplies every handle; the effects layer supplies only the journal,
-//! which reproduces today's bare, credit-free, unenriched effect-record append.
+//! The drain and `fx.emit` supply the stage handles they have; the reserved
+//! framework effect/capture record path supplies only the journal, preserving
+//! its compatibility append until typed outcome facts replace it.
 
 use std::sync::Arc;
 
