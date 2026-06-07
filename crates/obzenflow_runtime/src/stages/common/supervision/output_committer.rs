@@ -13,15 +13,15 @@
 //! append, heartbeat tracking, and the middleware mirror) lives in one place
 //! instead of drifting between two appenders.
 //!
-//! Step 1 is deliberately behaviour-preserving. The caller still owns the
-//! decisions this committer does not yet absorb:
+//! The caller still owns the decisions this committer does not yet absorb:
 //!
 //! * Backpressure credit and requeue stay in the drain. They move to input
 //!   admission plus routed-output debt in Step 2, at which point the effects
 //!   layer gains the handles to build a fully-featured committer.
-//! * Output-contract membership validation stays in the drain, where it runs
-//!   before credit reservation. Routing `perform` and `emit` through the
-//!   contract check is Step 3 and Step 4 work.
+//! * The pending-output drain still calls validation before credit reservation,
+//!   preserving the fail-before-backpressure-ordering rule. The validation rule
+//!   itself now lives here so every committer-based authoring path has one
+//!   contract check.
 //! * Deterministic output identity is not assigned here yet. Handler outputs
 //!   already carry a deterministic id from `deterministic_typed_output_event`;
 //!   effect records still carry their inherited derived-event id. Unifying both
@@ -41,6 +41,7 @@ use obzenflow_core::event::{EventEnvelope, SystemEvent};
 use obzenflow_core::journal::Journal;
 use obzenflow_core::ChainEvent;
 
+use crate::feed_plan::StageOutputContract;
 use crate::metrics::instrumentation::StageInstrumentation;
 use crate::stages::common::heartbeat::HeartbeatState;
 use crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal;
@@ -58,6 +59,12 @@ pub(crate) struct CommitOptions {
     /// drain's non-data branch and the unrouted effect-record path leave it
     /// `false`, matching their behaviour before Step 1.
     pub count_output: bool,
+    /// Validate `Data` event types against the stage output contract before
+    /// committing. The pending-output drain enables this and runs the same
+    /// validation before credit reservation. Framework-owned effect/capture
+    /// compatibility facts leave it disabled until typed domain outcome facts
+    /// replace that compatibility path.
+    pub validate_output_contract: bool,
 }
 
 /// The single stage-authored-output commit path (FLOWIP-120b, Step 1).
@@ -80,6 +87,9 @@ pub(crate) struct OutputCommitter<'a> {
     /// Heartbeat state, updated with the last committed output id. Absent on the
     /// effects-layer path.
     pub heartbeat_state: Option<&'a Arc<HeartbeatState>>,
+    /// Runtime output contract for stage-authored domain `Data` facts. Absent
+    /// on reserved framework append paths and legacy callers.
+    pub output_contract: Option<&'a StageOutputContract>,
 }
 
 impl OutputCommitter<'_> {
@@ -99,6 +109,8 @@ impl OutputCommitter<'_> {
         parent: Option<&EventEnvelope<ChainEvent>>,
         options: CommitOptions,
     ) -> Result<EventEnvelope<ChainEvent>, CommitError> {
+        self.validate_prebuilt(&event, options)?;
+
         let mut event = event;
 
         if let Some(flow_context) = self.flow_context {
@@ -127,5 +139,34 @@ impl OutputCommitter<'_> {
         }
 
         Ok(written)
+    }
+
+    /// Validate a prebuilt event before a caller performs any external gating
+    /// such as backpressure reservation.
+    pub(crate) fn validate_prebuilt(
+        &self,
+        event: &ChainEvent,
+        options: CommitOptions,
+    ) -> Result<(), CommitError> {
+        if !options.validate_output_contract || !event.is_data() {
+            return Ok(());
+        }
+
+        let Some(output_contract) = self.output_contract else {
+            return Ok(());
+        };
+        if output_contract.is_empty() {
+            return Ok(());
+        }
+
+        let event_type = event.event_type();
+        if output_contract.contains_event_type(&event_type) {
+            return Ok(());
+        }
+
+        Err(format!(
+            "Data output event type `{event_type}` is not declared in the stage output contract"
+        )
+        .into())
     }
 }

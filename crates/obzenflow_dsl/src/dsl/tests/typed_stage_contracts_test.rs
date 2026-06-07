@@ -8,7 +8,7 @@
 mod tests {
     use async_trait::async_trait;
     use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
-    use obzenflow_core::{ChainEvent, StageId, TypedPayload, WriterId};
+    use obzenflow_core::{ChainEvent, Facts2, StageId, TypedPayload, WriterId};
     use obzenflow_runtime::effects::Effects;
     use obzenflow_runtime::feed_plan::{FactVisibility, FeedRole};
     use obzenflow_runtime::id_conversions::StageIdExt;
@@ -207,6 +207,28 @@ mod tests {
     }
 
     #[derive(Clone, Debug)]
+    struct EffectfulProductTransform;
+
+    #[async_trait]
+    impl EffectfulTransformHandler for EffectfulProductTransform {
+        type Input = OutputEvent;
+        type Output = Facts2<OutputEvent, AlternateEvent>;
+
+        async fn process(
+            &self,
+            input: OutputEvent,
+            _fx: &mut Effects,
+        ) -> Result<Self::Output, HandlerError> {
+            Ok(Facts2(
+                input,
+                AlternateEvent {
+                    value: "alternate".to_string(),
+                },
+            ))
+        }
+    }
+
+    #[derive(Clone, Debug)]
     struct UntypedTransform;
 
     #[async_trait]
@@ -271,6 +293,50 @@ mod tests {
 
         fn create_events(&self, _state: &Self::State) -> Result<Vec<ChainEvent>, HandlerError> {
             Ok(vec![])
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    struct EffectfulProductStateful;
+
+    #[async_trait]
+    impl obzenflow_runtime::stages::common::handlers::EffectfulStatefulHandler
+        for EffectfulProductStateful
+    {
+        type State = ();
+        type Input = InputEvent;
+        type Output = Facts2<OutputEvent, AlternateEvent>;
+        type Transition = ();
+
+        fn initial_state(&self) -> Self::State {}
+
+        async fn transition(
+            &mut self,
+            _state: &Self::State,
+            _input: &Self::Input,
+            _fx: &mut Effects,
+        ) -> Result<Self::Transition, HandlerError> {
+            Ok(())
+        }
+
+        fn apply(
+            &mut self,
+            _state: &mut Self::State,
+            _input: Self::Input,
+            _transition: Self::Transition,
+        ) -> Result<(), HandlerError> {
+            Ok(())
+        }
+
+        fn create_outputs(&self, _state: &Self::State) -> Result<Vec<Self::Output>, HandlerError> {
+            Ok(vec![Facts2(
+                OutputEvent {
+                    value: "output".to_string(),
+                },
+                AlternateEvent {
+                    value: "alternate".to_string(),
+                },
+            )])
         }
     }
 
@@ -469,6 +535,40 @@ mod tests {
         assert_eq!(effectful_transform_meta.output_type, exact::<OutputEvent>());
         assert_output_contract(
             effectful_transform_meta,
+            vec![exact::<OutputEvent>(), exact::<AlternateEvent>()],
+        );
+    }
+
+    #[test]
+    fn effectful_transform_fact_set_output_lowers_all_members_to_output_contract() {
+        let effectful_transform = crate::effectful_transform!(
+            name: "effectful_product_transform",
+            OutputEvent -> Facts2<OutputEvent, AlternateEvent> => EffectfulProductTransform,
+            effects: [],
+            middleware: []
+        );
+        let metadata = effectful_transform.typing_metadata().unwrap();
+
+        assert_eq!(metadata.output_type, exact::<OutputEvent>());
+        assert_output_contract(
+            metadata,
+            vec![exact::<OutputEvent>(), exact::<AlternateEvent>()],
+        );
+    }
+
+    #[test]
+    fn effectful_stateful_fact_set_output_lowers_all_members_to_output_contract() {
+        let effectful_stateful = crate::effectful_stateful!(
+            name: "effectful_product_stateful",
+            InputEvent -> Facts2<OutputEvent, AlternateEvent> => EffectfulProductStateful,
+            effects: [],
+            middleware: []
+        );
+        let metadata = effectful_stateful.typing_metadata().unwrap();
+
+        assert_eq!(metadata.output_type, exact::<OutputEvent>());
+        assert_output_contract(
+            metadata,
             vec![exact::<OutputEvent>(), exact::<AlternateEvent>()],
         );
     }

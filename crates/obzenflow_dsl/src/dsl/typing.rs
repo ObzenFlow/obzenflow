@@ -10,8 +10,8 @@ use async_trait::async_trait;
 use obzenflow_adapters::middleware::{control::ControlMiddlewareAggregator, MiddlewareFactory};
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
-use obzenflow_core::TypedPayload;
 use obzenflow_core::{ChainEvent, StageId, WriterId};
+use obzenflow_core::{TypedFactSet, TypedFactType, TypedPayload};
 use obzenflow_runtime::feed_plan::{
     FactVisibility, FeedKey, FeedPlan, FeedRole, LogicalFeed, PayloadTypeDescriptor,
     StageOutputContract,
@@ -77,6 +77,29 @@ impl TypeHint {
             display_name: type_name::<T>().to_string(),
             event_type: Some(T::versioned_event_type()),
             schema_version: Some(T::SCHEMA_VERSION),
+        }
+    }
+
+    pub fn fact_set_primary<T: TypedFactSet>() -> Self {
+        Self::fact_set_output_contract::<T>()
+            .into_iter()
+            .next()
+            .unwrap_or(Self::Unspecified)
+    }
+
+    pub fn fact_set_output_contract<T: TypedFactSet>() -> Vec<Self> {
+        T::fact_types()
+            .into_iter()
+            .map(Self::from_typed_fact_type)
+            .collect()
+    }
+
+    fn from_typed_fact_type(fact_type: TypedFactType) -> Self {
+        Self::Exact {
+            type_id: fact_type.type_id,
+            display_name: fact_type.display_name,
+            event_type: Some(fact_type.event_type),
+            schema_version: Some(fact_type.schema_version),
         }
     }
 }
@@ -192,7 +215,11 @@ impl StageTypingMetadata {
     }
 
     pub fn with_additional_output_contract(mut self, additional_members: Vec<TypeHint>) -> Self {
-        let mut output_contract = output_contract_from_output_type(&self.output_type);
+        let mut output_contract = if self.output_contract.is_empty() {
+            output_contract_from_output_type(&self.output_type)
+        } else {
+            self.output_contract.clone()
+        };
         for member in additional_members {
             if matches!(member, TypeHint::Unspecified) || output_contract.contains(&member) {
                 continue;

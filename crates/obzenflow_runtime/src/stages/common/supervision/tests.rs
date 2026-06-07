@@ -746,6 +746,62 @@ async fn drain_one_pending_reserves_before_journal_append_and_records_output_for
 }
 
 #[tokio::test]
+async fn drain_one_pending_accepts_semantic_event_for_versioned_output_contract() {
+    let (stage_id, writer) = make_writer_with_window(NonZeroU64::new(1).expect("window"));
+
+    let flow_context = make_flow_context(
+        "flow",
+        "flow_id",
+        "stage",
+        stage_id,
+        obzenflow_core::event::context::StageType::Transform,
+    );
+
+    let data_journal: Arc<dyn Journal<ChainEvent>> = Arc::new(CreditCheckingJournal::new(
+        JournalOwner::stage(stage_id),
+        writer.clone(),
+        /* expected_credit_at_append */ 0,
+    ));
+    let system_journal: Arc<dyn Journal<SystemEvent>> =
+        Arc::new(NoopJournal::new(JournalOwner::stage(stage_id)));
+
+    let instrumentation = Arc::new(StageInstrumentation::new());
+    let mut pulse = BackpressureActivityPulse::new();
+    let mut backoff = IdleBackoff::exponential_with_cap(Duration::ZERO, Duration::ZERO);
+    let mut pending_outputs = VecDeque::new();
+    let output_contract = output_contract_for_event_type("semantic.test.v1");
+
+    let event =
+        ChainEventFactory::data_event(WriterId::from(stage_id), "semantic.test", json!({"n": 1}));
+
+    let outcome = drain_one_pending(
+        event,
+        &flow_context,
+        stage_id,
+        None,
+        &data_journal,
+        &system_journal,
+        None,
+        &instrumentation,
+        &writer,
+        &mut pulse,
+        &mut backoff,
+        Some(&output_contract),
+        &mut pending_outputs,
+    )
+    .await
+    .expect("semantic event should satisfy versioned contract");
+
+    assert_eq!(outcome, DrainOutcome::Committed { was_data: true });
+    assert_eq!(
+        instrumentation
+            .events_emitted_total
+            .load(std::sync::atomic::Ordering::Relaxed),
+        1
+    );
+}
+
+#[tokio::test]
 async fn drain_one_pending_rejects_undeclared_data_output() {
     let (stage_id, writer) = make_writer_with_window(NonZeroU64::new(1).expect("window"));
 

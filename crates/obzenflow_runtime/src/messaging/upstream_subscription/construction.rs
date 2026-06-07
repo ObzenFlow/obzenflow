@@ -3,8 +3,8 @@
 // https://obzenflow.dev
 
 use super::{
-    ContractTracker, ContractsWiring, DeliveryFilter, SelectedFeedMetadata, SubscriptionState,
-    UpstreamSubscription,
+    ContractTracker, ContractsWiring, DeliveryFilter, FeedContractChain, SelectedFeedMetadata,
+    SubscriptionState, UpstreamSubscription,
 };
 use crate::contracts::ContractChain;
 use crate::messaging::upstream_subscription_policy::build_policy_stack_for_upstream;
@@ -174,6 +174,7 @@ where
             state,
             contract_tracker: None,
             contract_chains: Vec::new(),
+            contract_feed_chains: Vec::new(),
             contract_policies: Vec::new(),
             control_middleware: Arc::new(NoControlMiddleware),
             last_eof_outcome: None,
@@ -342,6 +343,34 @@ where
                         }
                     }
                     Some(chain)
+                })
+                .collect();
+
+            // Selected-feed chains intentionally start with the transport
+            // contract only. Delivery receipts and divergence predicates still
+            // use the physical edge chain until those contracts gain explicit
+            // selected-feed semantics.
+            self.contract_feed_chains = self
+                .readers
+                .iter()
+                .map(|(upstream_stage, _, _)| {
+                    let Some(feeds) = self.selected_feeds_by_stage.get(upstream_stage) else {
+                        return Vec::new();
+                    };
+                    if feeds.len() <= 1 {
+                        return Vec::new();
+                    }
+
+                    feeds
+                        .iter()
+                        .cloned()
+                        .map(|feed| {
+                            FeedContractChain::new(
+                                feed,
+                                ContractChain::new().with_contract(TransportContract::new()),
+                            )
+                        })
+                        .collect()
                 })
                 .collect();
 

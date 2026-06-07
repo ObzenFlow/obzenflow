@@ -41,6 +41,22 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use tokio::time::Instant;
 
+struct FeedContractChain {
+    metadata: SelectedFeedMetadata,
+    chain: ContractChain,
+    last_contract_result_seq: SeqNo,
+}
+
+impl FeedContractChain {
+    fn new(metadata: SelectedFeedMetadata, chain: ContractChain) -> Self {
+        Self {
+            metadata,
+            chain,
+            last_contract_result_seq: SeqNo(0),
+        }
+    }
+}
+
 /// Subscription coordinator that manages reading from multiple upstream journals
 ///
 /// This struct coordinates subscription mechanics without owning control flow.
@@ -95,6 +111,13 @@ where
     /// When `with_contracts` is used, this vector is sized to match `readers`
     /// and each entry holds the contract chain for the corresponding edge.
     contract_chains: Vec<Option<ContractChain>>,
+
+    /// Optional selected-feed contract chains for each upstream reader.
+    ///
+    /// Multi-selected-feed readers need one transport contract state per
+    /// logical feed so two selected event types between the same stage pair do
+    /// not collapse into one aggregate contract chain.
+    contract_feed_chains: Vec<Vec<FeedContractChain>>,
 
     /// Optional contract policies for each upstream reader (edge-scoped policies).
     ///
@@ -234,6 +257,45 @@ where
             }
         }
         Some(SeqNo(selected_total))
+    }
+
+    fn selected_feed_matches_event_type(feed: &SelectedFeedMetadata, event_type: &str) -> bool {
+        declared_event_type_matches(&feed.event_type, event_type, None)
+    }
+
+    fn selected_reader_seq_for_feed(
+        &self,
+        reader_index: usize,
+        feed: &SelectedFeedMetadata,
+    ) -> SeqNo {
+        self.selected_data_seq_by_reader_event_type
+            .get(reader_index)
+            .and_then(|reader_by_type| {
+                reader_by_type
+                    .iter()
+                    .find(|(event_type, _)| {
+                        Self::selected_feed_matches_event_type(feed, event_type)
+                    })
+                    .map(|(_, seq)| *seq)
+            })
+            .unwrap_or(SeqNo(0))
+    }
+
+    fn advertised_writer_seq_for_feed(
+        &self,
+        reader_index: usize,
+        feed: &SelectedFeedMetadata,
+    ) -> Option<SeqNo> {
+        self.advertised_writer_seq_by_reader_event_type
+            .get(reader_index)
+            .and_then(|advertised_by_type| {
+                advertised_by_type
+                    .iter()
+                    .find(|(event_type, _)| {
+                        Self::selected_feed_matches_event_type(feed, event_type)
+                    })
+                    .map(|(_, seq)| *seq)
+            })
     }
 
     fn unique_selected_feed_for_stage(

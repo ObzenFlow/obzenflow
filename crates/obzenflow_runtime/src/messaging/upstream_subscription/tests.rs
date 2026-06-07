@@ -1901,6 +1901,220 @@ async fn multi_selected_feeds_emit_direct_contract_status_per_feed() {
 }
 
 #[tokio::test]
+async fn multi_selected_feeds_emit_midflight_contract_results_per_feed() {
+    let upstream_stage = StageId::new();
+    let reader_stage = StageId::new();
+    let upstream_owner = JournalOwner::stage(upstream_stage);
+    let reader_owner = JournalOwner::stage(reader_stage);
+    let upstream_journal: Arc<dyn Journal<ChainEvent>> = Arc::new(TestJournal::new(upstream_owner));
+    let contract_journal: Arc<dyn Journal<ChainEvent>> =
+        Arc::new(TestJournal::new(reader_owner.clone()));
+    let system_journal: Arc<dyn Journal<SystemEvent>> = Arc::new(TestJournal::new(reader_owner));
+
+    let writer_id = WriterId::Stage(upstream_stage);
+    upstream_journal
+        .append(
+            ChainEventFactory::data_event(writer_id, "test.first.v1", json!({"n": 1})),
+            None,
+        )
+        .await
+        .unwrap();
+    upstream_journal
+        .append(
+            ChainEventFactory::data_event(writer_id, "test.second.v1", json!({"n": 2})),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let upstreams = [(upstream_stage, "upstream".to_string(), upstream_journal)];
+    let mut selected_feeds = HashMap::new();
+    selected_feeds.insert(
+        upstream_stage,
+        vec![
+            SelectedFeedMetadata {
+                event_type: "test.first.v1".to_string(),
+                feed_role: Some("input".to_string()),
+            },
+            SelectedFeedMetadata {
+                event_type: "test.second.v1".to_string(),
+                feed_role: Some("reference".to_string()),
+            },
+        ],
+    );
+
+    let mut subscription = UpstreamSubscription::new_with_names("test_owner", &upstreams)
+        .await
+        .unwrap()
+        .with_selected_feeds(selected_feeds)
+        .with_contracts(ContractsWiring {
+            writer_id: WriterId::from(reader_stage),
+            contract_journal,
+            config: ContractConfig::default(),
+            system_journal: Some(system_journal.clone()),
+            reader_stage: Some(reader_stage),
+            control_middleware: Arc::new(NoControlMiddleware),
+            include_delivery_contract: false,
+            cycle_guard_config: None,
+        })
+        .transport_only();
+
+    let mut reader_progress = [ReaderProgress::new(upstream_stage)];
+
+    let first = subscription
+        .poll_next_with_state("test_fsm", Some(&mut reader_progress[..]))
+        .await;
+    assert!(matches!(
+        first,
+        PollResult::Event(EventEnvelope {
+            event: ChainEvent {
+                content: ChainEventContent::Data { ref event_type, .. },
+                ..
+            },
+            ..
+        }) if event_type == "test.first.v1"
+    ));
+
+    let status = subscription.check_contracts(&mut reader_progress).await;
+    assert!(matches!(
+        status,
+        ContractStatus::ProgressEmitted | ContractStatus::Healthy
+    ));
+
+    let events_after_first = system_journal.read_causally_ordered().await.unwrap();
+    let first_feed_results = events_after_first
+        .iter()
+        .filter(|env| {
+            matches!(
+                &env.event.event,
+                SystemEventType::ContractResult {
+                    upstream,
+                    reader,
+                    selected_event_type,
+                    feed_role,
+                    contract_name,
+                    status,
+                    reader_seq,
+                    advertised_writer_seq,
+                    ..
+                } if *upstream == upstream_stage
+                    && *reader == reader_stage
+                    && selected_event_type.as_deref() == Some("test.first.v1")
+                    && feed_role.as_deref() == Some("input")
+                    && contract_name == TransportContract::NAME
+                    && status == ContractResultStatusLabel::Healthy.as_str()
+                    && *reader_seq == Some(SeqNo(1))
+                    && advertised_writer_seq.is_none()
+            )
+        })
+        .count();
+    let second_feed_results_after_first = events_after_first
+        .iter()
+        .filter(|env| {
+            matches!(
+                &env.event.event,
+                SystemEventType::ContractResult {
+                    upstream,
+                    reader,
+                    selected_event_type,
+                    feed_role,
+                    ..
+                } if *upstream == upstream_stage
+                    && *reader == reader_stage
+                    && selected_event_type.as_deref() == Some("test.second.v1")
+                    && feed_role.as_deref() == Some("reference")
+            )
+        })
+        .count();
+    let aggregate_results_after_first = events_after_first
+        .iter()
+        .filter(|env| {
+            matches!(
+                &env.event.event,
+                SystemEventType::ContractResult {
+                    upstream,
+                    reader,
+                    selected_event_type: None,
+                    feed_role: None,
+                    ..
+                } if *upstream == upstream_stage && *reader == reader_stage
+            )
+        })
+        .count();
+    assert_eq!(first_feed_results, 1);
+    assert_eq!(second_feed_results_after_first, 0);
+    assert_eq!(aggregate_results_after_first, 0);
+
+    let second = subscription
+        .poll_next_with_state("test_fsm", Some(&mut reader_progress[..]))
+        .await;
+    assert!(matches!(
+        second,
+        PollResult::Event(EventEnvelope {
+            event: ChainEvent {
+                content: ChainEventContent::Data { ref event_type, .. },
+                ..
+            },
+            ..
+        }) if event_type == "test.second.v1"
+    ));
+
+    let status = subscription.check_contracts(&mut reader_progress).await;
+    assert!(matches!(
+        status,
+        ContractStatus::ProgressEmitted | ContractStatus::Healthy
+    ));
+
+    let events_after_second = system_journal.read_causally_ordered().await.unwrap();
+    let first_feed_results_after_second = events_after_second
+        .iter()
+        .filter(|env| {
+            matches!(
+                &env.event.event,
+                SystemEventType::ContractResult {
+                    upstream,
+                    reader,
+                    selected_event_type,
+                    feed_role,
+                    ..
+                } if *upstream == upstream_stage
+                    && *reader == reader_stage
+                    && selected_event_type.as_deref() == Some("test.first.v1")
+                    && feed_role.as_deref() == Some("input")
+            )
+        })
+        .count();
+    let second_feed_results = events_after_second
+        .iter()
+        .filter(|env| {
+            matches!(
+                &env.event.event,
+                SystemEventType::ContractResult {
+                    upstream,
+                    reader,
+                    selected_event_type,
+                    feed_role,
+                    contract_name,
+                    status,
+                    reader_seq,
+                    advertised_writer_seq,
+                    ..
+                } if *upstream == upstream_stage
+                    && *reader == reader_stage
+                    && selected_event_type.as_deref() == Some("test.second.v1")
+                    && feed_role.as_deref() == Some("reference")
+                    && contract_name == TransportContract::NAME
+                    && status == ContractResultStatusLabel::Healthy.as_str()
+                    && *reader_seq == Some(SeqNo(1))
+                    && advertised_writer_seq.is_none()
+            )
+        })
+        .count();
+    assert_eq!(first_feed_results_after_second, 1);
+    assert_eq!(second_feed_results, 1);
+}
+
+#[tokio::test]
 async fn transport_only_skips_framework_effect_data_without_stage_input_position() {
     let upstream_stage = StageId::new();
     let upstream_owner = JournalOwner::stage(upstream_stage);

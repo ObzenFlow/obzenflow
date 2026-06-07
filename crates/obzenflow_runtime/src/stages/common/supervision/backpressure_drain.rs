@@ -140,10 +140,17 @@ pub(crate) async fn drain_one_pending_resolve(
         system_journal: Some(system_journal),
         instrumentation: Some(instrumentation),
         heartbeat_state: heartbeat_state.as_ref(),
+        output_contract,
     };
 
     if is_data {
-        validate_output_contract_membership(&pending, output_contract)?;
+        committer.validate_prebuilt(
+            &pending,
+            CommitOptions {
+                count_output: true,
+                validate_output_contract: true,
+            },
+        )?;
 
         // Debug-only: emit activity pulses even when bypass is enabled, so
         // operators can see what *would* have blocked (FLOWIP-086k).
@@ -182,7 +189,10 @@ pub(crate) async fn drain_one_pending_resolve(
             .commit_prebuilt(
                 pending,
                 pending_parent,
-                CommitOptions { count_output: true },
+                CommitOptions {
+                    count_output: true,
+                    validate_output_contract: false,
+                },
             )
             .await
             .map_err(|e| format!("Failed to write pending output: {e}"))?;
@@ -199,6 +209,7 @@ pub(crate) async fn drain_one_pending_resolve(
                 pending_parent,
                 CommitOptions {
                     count_output: false,
+                    validate_output_contract: false,
                 },
             )
             .await
@@ -206,28 +217,6 @@ pub(crate) async fn drain_one_pending_resolve(
 
         Ok(DrainAttempt::Committed { was_data: false })
     }
-}
-
-fn validate_output_contract_membership(
-    event: &ChainEvent,
-    output_contract: Option<&StageOutputContract>,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let Some(output_contract) = output_contract else {
-        return Ok(());
-    };
-    if output_contract.is_empty() {
-        return Ok(());
-    }
-
-    let event_type = event.event_type();
-    if output_contract.contains_event_type(&event_type) {
-        return Ok(());
-    }
-
-    Err(format!(
-        "Data output event type `{event_type}` is not declared in the stage output contract"
-    )
-    .into())
 }
 
 /// Emit a bypass-mode activity pulse when credit would have been zero.

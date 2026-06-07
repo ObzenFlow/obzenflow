@@ -10,7 +10,7 @@ pub use obzenflow_core::event::payloads::effect_payload::{
     EffectCursor, EffectDescriptor, EffectOutcomePayload, EffectProvenance, EffectRecord,
     CAPTURE_EVENT_TYPE, EFFECT_RECORD_EVENT_TYPE,
 };
-use obzenflow_core::event::schema::TypedPayload;
+use obzenflow_core::event::schema::{TypedFactSet, TypedPayload};
 use obzenflow_core::event::{ChainEventContent, ChainEventFactory};
 use obzenflow_core::journal::{ArchiveStatus, Journal};
 use obzenflow_core::{ChainEvent, EventEnvelope, EventId, FlowId, StageId, WriterId};
@@ -114,6 +114,9 @@ pub enum EffectError {
         retryable: bool,
     },
 
+    #[error("effect provenance mismatch: {0}")]
+    EffectProvenanceMismatch(String),
+
     #[error("non-idempotent effect '{effect_type}' has no idempotency key")]
     MissingIdempotencyKey { effect_type: String },
 
@@ -148,6 +151,7 @@ impl EffectError {
     pub fn retryable(&self) -> bool {
         match self {
             EffectError::RecordedFailure { retryable, .. } => *retryable,
+            EffectError::EffectProvenanceMismatch(_) => false,
             EffectError::MissingRecordedEffect { .. }
             | EffectError::DuplicateRecordedEffect { .. }
             | EffectError::DescriptorMismatch { .. }
@@ -170,6 +174,7 @@ impl EffectError {
             EffectError::DuplicateRecordedEffect { .. } => "duplicate_recorded_effect",
             EffectError::DescriptorMismatch { .. } => "descriptor_mismatch",
             EffectError::RecordedFailure { error_type, .. } => return error_type.clone(),
+            EffectError::EffectProvenanceMismatch(_) => "effect_provenance_mismatch",
             EffectError::MissingIdempotencyKey { .. } => "missing_idempotency_key",
             EffectError::UndeclaredEffect { .. } => "undeclared_effect",
             EffectError::MissingEffectPort { .. } => "missing_effect_port",
@@ -1199,6 +1204,7 @@ async fn append_effect_record(
         system_journal: None,
         instrumentation: None,
         heartbeat_state: None,
+        output_contract: None,
     };
     committer
         .commit_prebuilt(event, Some(parent), CommitOptions::default())
@@ -1212,18 +1218,71 @@ fn effect_record_from_event(event: &ChainEvent) -> Result<Option<EffectRecord>, 
         ChainEventContent::Data {
             event_type,
             payload,
-        } if event
-            .effect_provenance
-            .as_ref()
-            .is_some_and(|provenance| provenance.framework_owned)
-            && is_framework_effect_event_type(event_type) =>
-        {
-            serde_json::from_value(payload.clone())
-                .map(Some)
-                .map_err(|e| EffectError::Serialization(e.to_string()))
+        } if is_framework_effect_event_type(event_type) => {
+            let provenance = event.effect_provenance.as_ref().ok_or_else(|| {
+                EffectError::EffectProvenanceMismatch(format!(
+                    "reserved framework effect event `{event_type}` is missing effect_provenance"
+                ))
+            })?;
+            if !provenance.framework_owned {
+                return Err(EffectError::EffectProvenanceMismatch(format!(
+                    "reserved framework effect event `{event_type}` is not marked framework_owned"
+                )));
+            }
+
+            let record: EffectRecord = serde_json::from_value(payload.clone())
+                .map_err(|e| EffectError::Serialization(e.to_string()))?;
+            validate_effect_record_provenance(event_type, &record, provenance)?;
+            Ok(Some(record))
         }
         _ => Ok(None),
     }
+}
+
+fn validate_effect_record_provenance(
+    event_type: &str,
+    record: &EffectRecord,
+    provenance: &EffectProvenance,
+) -> Result<(), EffectError> {
+    let expected_event_type = framework_effect_event_type(&record.descriptor.effect_type);
+    if event_type != expected_event_type {
+        return Err(EffectError::EffectProvenanceMismatch(format!(
+            "reserved framework effect event type `{event_type}` does not match record descriptor `{}` (expected `{expected_event_type}`)",
+            record.descriptor.effect_type
+        )));
+    }
+
+    if provenance.cursor != record.cursor {
+        return Err(EffectError::EffectProvenanceMismatch(
+            "effect_provenance cursor does not match effect record cursor".to_string(),
+        ));
+    }
+    if provenance.descriptor_hash != record.descriptor_hash {
+        return Err(EffectError::EffectProvenanceMismatch(
+            "effect_provenance descriptor_hash does not match effect record descriptor_hash"
+                .to_string(),
+        ));
+    }
+    if provenance.descriptor != record.descriptor {
+        return Err(EffectError::EffectProvenanceMismatch(
+            "effect_provenance descriptor does not match effect record descriptor".to_string(),
+        ));
+    }
+
+    let expected_group_id = effect_outcome_group_id(&record.cursor);
+    if provenance.group_id.as_deref() != Some(expected_group_id.as_str()) {
+        return Err(EffectError::EffectProvenanceMismatch(format!(
+            "effect_provenance group_id does not match deterministic group id `{expected_group_id}`"
+        )));
+    }
+    if provenance.outcome_fact_ordinal.is_some() {
+        return Err(EffectError::EffectProvenanceMismatch(
+            "framework effect record compatibility facts must not set outcome_fact_ordinal"
+                .to_string(),
+        ));
+    }
+
+    Ok(())
 }
 
 /// FLOWIP-120a: decode a committed or recorded effect outcome into the effect's
@@ -1355,12 +1414,45 @@ where
     Ok(event)
 }
 
+pub fn deterministic_fact_set_output_events<Out>(
+    writer_id: WriterId,
+    parent: &ChainEvent,
+    output: Out,
+    recorded_flow_id: &str,
+    stage_key: &str,
+    input_seq: StageInputPosition,
+    first_output_ordinal: u32,
+) -> Result<Vec<ChainEvent>, EffectError>
+where
+    Out: TypedFactSet,
+{
+    output
+        .into_facts()
+        .map_err(|e| EffectError::Serialization(e.to_string()))?
+        .into_iter()
+        .enumerate()
+        .map(|(ordinal, fact)| {
+            let output_ordinal = first_output_ordinal.saturating_add(ordinal as u32);
+            let mut event = ChainEventFactory::derived_data_event(
+                writer_id,
+                parent,
+                &fact.event_type,
+                fact.payload,
+            );
+            event.id =
+                deterministic_event_id(recorded_flow_id, stage_key, input_seq, output_ordinal);
+            event.processing_info.event_time = deterministic_event_time(input_seq, output_ordinal);
+            Ok(event)
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use obzenflow_core::event::{EventEnvelope, JournalEvent};
     use obzenflow_core::journal::{JournalError, JournalReader};
-    use obzenflow_core::{JournalId, JournalOwner, JournalWriterId};
+    use obzenflow_core::{Facts2, JournalId, JournalOwner, JournalWriterId, TypedPayload};
     use serde_json::json;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
@@ -1535,6 +1627,66 @@ mod tests {
             self.normal_calls.fetch_add(1, Ordering::SeqCst);
             Ok(self.value + 10)
         }
+    }
+
+    #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+    struct FirstOutput {
+        value: u64,
+    }
+
+    impl TypedPayload for FirstOutput {
+        const EVENT_TYPE: &'static str = "test.first_output";
+    }
+
+    #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+    struct SecondOutput {
+        value: String,
+    }
+
+    impl TypedPayload for SecondOutput {
+        const EVENT_TYPE: &'static str = "test.second_output";
+    }
+
+    #[test]
+    fn deterministic_fact_set_output_events_preserve_member_order_and_ordinals() {
+        let writer_id = WriterId::from(StageId::new());
+        let parent = ChainEventFactory::data_event(writer_id, "test.input.v1", json!({ "id": 1 }));
+
+        let events = deterministic_fact_set_output_events(
+            writer_id,
+            &parent,
+            Facts2(
+                FirstOutput { value: 1 },
+                SecondOutput {
+                    value: "two".to_string(),
+                },
+            ),
+            "flow-a",
+            "stage-a",
+            StageInputPosition(4),
+            2,
+        )
+        .expect("fact-set output events");
+
+        assert_eq!(events.len(), 2);
+        assert!(matches!(
+            &events[0].content,
+            ChainEventContent::Data { event_type, .. } if event_type == "test.first_output.v1"
+        ));
+        assert!(matches!(
+            &events[1].content,
+            ChainEventContent::Data { event_type, .. } if event_type == "test.second_output.v1"
+        ));
+        assert_eq!(
+            events[0].id,
+            deterministic_event_id("flow-a", "stage-a", StageInputPosition(4), 2)
+        );
+        assert_eq!(
+            events[1].id,
+            deterministic_event_id("flow-a", "stage-a", StageInputPosition(4), 3)
+        );
+        assert_eq!(events[0].processing_info.event_time, 4_002);
+        assert_eq!(events[1].processing_info.event_time, 4_003);
     }
 
     struct TransactionalCountingPort {
@@ -2245,6 +2397,72 @@ mod tests {
             .expect_err("duplicate cursors must fail loud");
 
         assert!(matches!(err, EffectError::DuplicateRecordedEffect { .. }));
+    }
+
+    #[tokio::test]
+    async fn effect_record_decode_rejects_payload_provenance_cursor_mismatch() {
+        let stage_id = StageId::new();
+        let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
+        let mut live = Effects::new(invocation_context(
+            journal.clone(),
+            parent_envelope(WriterId::from(stage_id)),
+            None,
+        ));
+        live.perform(CountingEffect {
+            value: 1,
+            label: "same",
+            calls: Arc::new(AtomicUsize::new(0)),
+        })
+        .await
+        .expect("live effect should succeed");
+
+        let mut event = journal.events()[0].event.clone();
+        event
+            .effect_provenance
+            .as_mut()
+            .expect("effect event should carry provenance")
+            .cursor
+            .effect_ordinal = 99;
+
+        let err = effect_record_from_event(&event)
+            .expect_err("payload/provenance cursor mismatch must fail loud");
+
+        assert!(matches!(err, EffectError::EffectProvenanceMismatch(_)));
+    }
+
+    #[test]
+    fn effect_record_decode_rejects_reserved_event_without_provenance() {
+        let stage_id = StageId::new();
+        let cursor = EffectCursor {
+            recorded_flow_id: "flow".to_string(),
+            stage_key: "effect_stage".to_string(),
+            input_seq: 1,
+            effect_ordinal: 0,
+        };
+        let record = EffectRecord {
+            cursor,
+            descriptor_hash: "hash".to_string(),
+            descriptor: EffectDescriptor {
+                effect_type: CountingEffect::EFFECT_TYPE.to_string(),
+                label: "same".to_string(),
+                schema_version: CountingEffect::SCHEMA_VERSION,
+                stage_logic_version: "test-v1".to_string(),
+                canonical_input_hash: "input".to_string(),
+            },
+            outcome: EffectOutcomePayload::Succeeded {
+                output: json!(2_u64),
+            },
+        };
+        let event = ChainEventFactory::data_event(
+            WriterId::from(stage_id),
+            EFFECT_RECORD_EVENT_TYPE,
+            serde_json::to_value(record).expect("record should serialize"),
+        );
+
+        let err = effect_record_from_event(&event)
+            .expect_err("reserved effect record without provenance must fail loud");
+
+        assert!(matches!(err, EffectError::EffectProvenanceMismatch(_)));
     }
 
     trait DemoPort: Send + Sync {

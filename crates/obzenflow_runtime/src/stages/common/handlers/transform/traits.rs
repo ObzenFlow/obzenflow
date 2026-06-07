@@ -6,10 +6,10 @@
 //!
 //! Examples: Data enrichers, filters, mappers, routers
 
-use crate::effects::{deterministic_typed_output_event, EffectInvocationContext, Effects};
+use crate::effects::{deterministic_fact_set_output_events, EffectInvocationContext, Effects};
 use crate::typing::TransformTyping;
 use async_trait::async_trait;
-use obzenflow_core::event::schema::TypedPayload;
+use obzenflow_core::event::schema::{TypedFactSet, TypedPayload};
 use obzenflow_core::ChainEvent;
 
 /// Handler for stateless transform stages
@@ -155,7 +155,7 @@ impl<T: AsyncTransformHandler + Send + Sync> UnifiedTransformHandler
 #[async_trait]
 pub trait EffectfulTransformHandler: Send + Sync {
     type Input: TypedPayload + Send + Sync + 'static;
-    type Output: TypedPayload + Send + Sync + 'static;
+    type Output: TypedFactSet;
 
     async fn process(
         &self,
@@ -209,7 +209,7 @@ where
         let input_seq = effect_context.input_seq;
         let mut fx = Effects::new(effect_context);
         let output = self.0.process(input, &mut fx).await?;
-        let output_event = deterministic_typed_output_event(
+        let output_events = deterministic_fact_set_output_events(
             writer_id,
             &event,
             output,
@@ -219,7 +219,7 @@ where
             0,
         )
         .map_err(|e| HandlerError::Other(e.to_string()))?;
-        Ok(vec![output_event])
+        Ok(output_events)
     }
 
     async fn drain(&mut self) -> std::result::Result<(), HandlerError> {

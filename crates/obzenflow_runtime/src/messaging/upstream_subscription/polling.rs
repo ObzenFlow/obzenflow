@@ -19,6 +19,99 @@ impl<T> UpstreamSubscription<T>
 where
     T: JournalEvent + 'static,
 {
+    fn feed_selected_contract_chains_on_event(
+        &mut self,
+        reader_index: usize,
+        upstream_stage: obzenflow_core::StageId,
+        event: &ChainEvent,
+        reader_stage: obzenflow_core::StageId,
+    ) {
+        if self
+            .contract_feed_chains
+            .get(reader_index)
+            .is_none_or(Vec::is_empty)
+        {
+            return;
+        }
+
+        match &event.content {
+            ChainEventContent::Data { event_type, .. } => {
+                let feed_reads: Vec<(usize, SeqNo)> = self
+                    .contract_feed_chains
+                    .get(reader_index)
+                    .into_iter()
+                    .flat_map(|chains| chains.iter().enumerate())
+                    .filter_map(|(feed_index, feed_chain)| {
+                        Self::selected_feed_matches_event_type(&feed_chain.metadata, event_type)
+                            .then(|| {
+                                (
+                                    feed_index,
+                                    self.selected_reader_seq_for_feed(
+                                        reader_index,
+                                        &feed_chain.metadata,
+                                    ),
+                                )
+                            })
+                    })
+                    .collect();
+
+                if let Some(chains) = self.contract_feed_chains.get_mut(reader_index) {
+                    for (feed_index, reader_seq) in feed_reads {
+                        if let Some(feed_chain) = chains.get_mut(feed_index) {
+                            feed_chain.chain.on_read(
+                                event,
+                                reader_stage,
+                                reader_seq,
+                                upstream_stage,
+                            );
+                        }
+                    }
+                }
+            }
+            ChainEventContent::FlowControl(FlowControlPayload::Eof {
+                writer_seq_by_event_type,
+                ..
+            }) if !writer_seq_by_event_type.is_empty() => {
+                let feed_writes: Vec<(usize, SeqNo)> = self
+                    .contract_feed_chains
+                    .get(reader_index)
+                    .into_iter()
+                    .flat_map(|chains| chains.iter().enumerate())
+                    .filter_map(|(feed_index, feed_chain)| {
+                        writer_seq_by_event_type
+                            .iter()
+                            .find(|(event_type, _)| {
+                                Self::selected_feed_matches_event_type(
+                                    &feed_chain.metadata,
+                                    event_type,
+                                )
+                            })
+                            .map(|(_, writer_seq)| (feed_index, *writer_seq))
+                    })
+                    .collect();
+
+                if let Some(chains) = self.contract_feed_chains.get_mut(reader_index) {
+                    for (feed_index, writer_seq) in feed_writes {
+                        if let Some(feed_chain) = chains.get_mut(feed_index) {
+                            let mut feed_event = event.clone();
+                            if let ChainEventContent::FlowControl(FlowControlPayload::Eof {
+                                writer_seq: eof_writer_seq,
+                                ..
+                            }) = &mut feed_event.content
+                            {
+                                *eof_writer_seq = Some(writer_seq);
+                            }
+                            feed_chain
+                                .chain
+                                .on_write(&feed_event, upstream_stage, SeqNo(0));
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
     /// Poll for the next event without blocking
     ///
     /// This method tries once through all readers and returns immediately.
@@ -341,6 +434,13 @@ where
                                 chain.on_write(chain_event, stage_id, SeqNo(0));
                             }
                         }
+
+                        self.feed_selected_contract_chains_on_event(
+                            current_index,
+                            stage_id,
+                            chain_event,
+                            reader_stage,
+                        );
                     }
 
                     tracing::debug!(

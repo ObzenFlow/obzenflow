@@ -3,7 +3,6 @@
 // https://obzenflow.dev
 
 use super::{ContractStatus, ContractTracker, ReaderProgress, UpstreamSubscription};
-use crate::feed_plan::declared_event_type_matches;
 use crate::messaging::upstream_subscription_policy::{
     EdgeContext, EdgeContractDecision, PolicyHints,
 };
@@ -16,7 +15,9 @@ use obzenflow_core::event::types::{
 use obzenflow_core::event::{
     ChainEventFactory, ConsumptionFinalEventParams, ConsumptionProgressEventParams, JournalEvent,
 };
-use obzenflow_core::{ContractResult, TransportContract, ViolationCause};
+use obzenflow_core::journal::Journal;
+use obzenflow_core::{ContractResult, ViolationCause};
+use std::sync::Arc;
 use tokio::time::Instant;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -46,6 +47,21 @@ struct DirectFeedContractEvidence {
     reader_seq: SeqNo,
     advertised_writer_seq: SeqNo,
     pass: bool,
+    reason: Option<EventViolationCause>,
+    raw_failure: Option<(String, ViolationCause)>,
+    overridden_by_policy: bool,
+    contract_results: Vec<(String, ContractResult)>,
+}
+
+#[derive(Clone, Debug)]
+struct DirectFeedProgressEvidence {
+    feed_index: usize,
+    event_type: String,
+    feed_role: Option<String>,
+    reader_seq: SeqNo,
+    advertised_writer_seq: Option<SeqNo>,
+    contract_results: Vec<(String, ContractResult)>,
+    should_record_heartbeat: bool,
 }
 
 impl<T> UpstreamSubscription<T>
@@ -56,49 +72,106 @@ where
         &self,
         progress: &ReaderProgress,
         index: usize,
+        reader_stage: obzenflow_core::StageId,
     ) -> Vec<DirectFeedContractEvidence> {
-        let Some(feeds) = self.selected_feeds_by_stage.get(&progress.stage_id) else {
+        let Some(feed_chains) = self.contract_feed_chains.get(index) else {
             return Vec::new();
         };
-        if feeds.len() <= 1 {
-            return Vec::new();
-        }
 
         let Some(advertised_by_type) = self.advertised_writer_seq_by_reader_event_type.get(index)
         else {
             return Vec::new();
         };
-        if advertised_by_type.is_empty() {
+        if advertised_by_type.is_empty() || feed_chains.is_empty() {
             return Vec::new();
         }
 
-        let Some(reader_by_type) = self.selected_data_seq_by_reader_event_type.get(index) else {
-            return Vec::new();
-        };
-
-        feeds
+        feed_chains
             .iter()
-            .map(|feed| {
-                let reader_seq = reader_by_type
-                    .iter()
-                    .find(|(event_type, _)| {
-                        declared_event_type_matches(&feed.event_type, event_type, None)
-                    })
-                    .map(|(_, seq)| *seq)
+            .map(|feed_chain| {
+                let reader_seq = self.selected_reader_seq_for_feed(index, &feed_chain.metadata);
+                let advertised_writer_seq = self
+                    .advertised_writer_seq_for_feed(index, &feed_chain.metadata)
                     .unwrap_or(SeqNo(0));
-                let advertised_writer_seq = advertised_by_type
+                let contract_results = feed_chain.chain.verify_all(progress.stage_id, reader_stage);
+                let raw_failure = contract_results.iter().find_map(|(contract_name, result)| {
+                    let ContractResult::Failed(violation) = result else {
+                        return None;
+                    };
+                    Some((contract_name.clone(), violation.cause.clone()))
+                });
+                let raw_reason = raw_failure.as_ref().map(|(_, cause)| match cause {
+                    ViolationCause::SeqDivergence { advertised, reader } => {
+                        EventViolationCause::SeqDivergence {
+                            advertised: *advertised,
+                            reader: *reader,
+                        }
+                    }
+                    ViolationCause::ContentMismatch { .. } => {
+                        EventViolationCause::Other("content_mismatch".into())
+                    }
+                    ViolationCause::DeliveryMismatch { .. } => {
+                        EventViolationCause::Other("delivery_mismatch".into())
+                    }
+                    ViolationCause::AccountingMismatch { .. } => {
+                        EventViolationCause::Other("accounting_mismatch".into())
+                    }
+                    ViolationCause::Divergence {
+                        predicate,
+                        observed,
+                        threshold,
+                        window_seconds,
+                    } => EventViolationCause::Divergence {
+                        predicate: predicate.clone(),
+                        observed: *observed,
+                        threshold: *threshold,
+                        window_seconds: *window_seconds,
+                    },
+                    ViolationCause::Other(message) => EventViolationCause::Other(message.clone()),
+                });
+                let results_only: Vec<ContractResult> = contract_results
                     .iter()
-                    .find(|(event_type, _)| {
-                        declared_event_type_matches(&feed.event_type, event_type, None)
-                    })
-                    .map(|(_, seq)| *seq)
-                    .unwrap_or(SeqNo(0));
+                    .map(|(_, result)| result.clone())
+                    .collect();
+                let edge = EdgeContext {
+                    upstream_stage: progress.stage_id,
+                    downstream_stage: reader_stage,
+                    advertised_writer_seq: Some(advertised_writer_seq),
+                    reader_seq,
+                };
+                let cb_info = self
+                    .control_middleware
+                    .circuit_breaker_contract_info(&progress.stage_id);
+                let hints = PolicyHints {
+                    breaker_mode: cb_info.map(|i| i.mode),
+                    has_opened_since_registration: cb_info
+                        .map(|i| i.has_opened_since_registration)
+                        .unwrap_or(false),
+                    has_fallback_configured: cb_info
+                        .map(|i| i.has_fallback_configured)
+                        .unwrap_or(false),
+                };
+                let decision = self
+                    .contract_policies
+                    .get(index)
+                    .and_then(|policy| policy.as_ref())
+                    .map(|policy| policy.decide(&results_only, &edge, &hints));
+                let (pass, reason, overridden_by_policy) = match decision {
+                    Some(EdgeContractDecision::Pass) => (true, None, raw_failure.is_some()),
+                    Some(EdgeContractDecision::Fail(cause)) => (false, Some(cause), false),
+                    None if raw_failure.is_some() => (false, raw_reason.clone(), false),
+                    None => (true, None, false),
+                };
                 DirectFeedContractEvidence {
-                    event_type: feed.event_type.clone(),
-                    feed_role: feed.feed_role.clone(),
+                    event_type: feed_chain.metadata.event_type.clone(),
+                    feed_role: feed_chain.metadata.feed_role.clone(),
                     reader_seq,
                     advertised_writer_seq,
-                    pass: reader_seq == advertised_writer_seq,
+                    pass,
+                    reason,
+                    raw_failure,
+                    overridden_by_policy,
+                    contract_results,
                 }
             })
             .collect()
@@ -117,45 +190,69 @@ where
 
         let mut append_ok = true;
         for feed in evidence {
-            let reason = (!feed.pass).then_some(EventViolationCause::SeqDivergence {
-                advertised: Some(feed.advertised_writer_seq),
-                reader: feed.reader_seq,
-            });
-            let (status_label, cause_label) = if feed.pass {
-                (ContractResultStatusLabel::Passed.to_string(), None)
-            } else {
-                (
-                    ContractResultStatusLabel::Failed.to_string(),
-                    Some("seq_divergence".to_string()),
-                )
-            };
+            for (contract_name, result) in &feed.contract_results {
+                let (status_label, cause_label) =
+                    contract_result_labels_for_emission(result, ContractResultStatusLabel::Pending);
 
-            let result_event = SystemEvent::new(
-                tracker.writer_id,
-                SystemEventType::ContractResult {
-                    upstream,
-                    reader,
-                    selected_event_type: Some(feed.event_type.clone()),
-                    feed_role: feed.feed_role.clone(),
-                    contract_name: TransportContract::NAME.to_string(),
-                    status: status_label,
-                    cause: cause_label,
-                    reader_seq: Some(feed.reader_seq),
-                    advertised_writer_seq: Some(feed.advertised_writer_seq),
-                },
-            );
-            if let Err(e) = system_journal.append(result_event, None).await {
-                append_ok = false;
-                tracing::error!(
-                    target: "flowip-105",
-                    owner = %self.owner_label,
-                    upstream = ?upstream,
-                    reader = ?reader,
-                    selected_event_type = %feed.event_type,
-                    feed_role = ?feed.feed_role,
-                    error = %e,
-                    "Failed to append direct feed contract result event; skipping emission"
+                let result_event = SystemEvent::new(
+                    tracker.writer_id,
+                    SystemEventType::ContractResult {
+                        upstream,
+                        reader,
+                        selected_event_type: Some(feed.event_type.clone()),
+                        feed_role: feed.feed_role.clone(),
+                        contract_name: contract_name.clone(),
+                        status: status_label,
+                        cause: cause_label,
+                        reader_seq: Some(feed.reader_seq),
+                        advertised_writer_seq: Some(feed.advertised_writer_seq),
+                    },
                 );
+                if let Err(e) = system_journal.append(result_event, None).await {
+                    append_ok = false;
+                    tracing::error!(
+                        target: "flowip-105",
+                        owner = %self.owner_label,
+                        upstream = ?upstream,
+                        reader = ?reader,
+                        selected_event_type = %feed.event_type,
+                        feed_role = ?feed.feed_role,
+                        contract = %contract_name,
+                        error = %e,
+                        "Failed to append direct feed contract result event; skipping emission"
+                    );
+                }
+            }
+
+            if feed.overridden_by_policy {
+                if let Some((contract_name, cause)) = &feed.raw_failure {
+                    let override_event = SystemEvent::new(
+                        tracker.writer_id,
+                        SystemEventType::ContractOverrideByPolicy {
+                            upstream,
+                            reader,
+                            selected_event_type: Some(feed.event_type.clone()),
+                            feed_role: feed.feed_role.clone(),
+                            contract_name: contract_name.clone(),
+                            original_cause: cause.clone(),
+                            policy: "breaker_aware".to_string(),
+                        },
+                    );
+                    if let Err(e) = system_journal.append(override_event, None).await {
+                        append_ok = false;
+                        tracing::error!(
+                            target: "flowip-105",
+                            owner = %self.owner_label,
+                            upstream = ?upstream,
+                            reader = ?reader,
+                            selected_event_type = %feed.event_type,
+                            feed_role = ?feed.feed_role,
+                            contract = %contract_name,
+                            error = %e,
+                            "Failed to append direct feed contract override event; skipping emission"
+                        );
+                    }
+                }
             }
 
             let status_event = SystemEvent::new(
@@ -168,7 +265,7 @@ where
                     pass: feed.pass,
                     reader_seq: Some(feed.reader_seq),
                     advertised_writer_seq: Some(feed.advertised_writer_seq),
-                    reason,
+                    reason: feed.reason.clone(),
                 },
             );
             if let Err(e) = system_journal.append(status_event, None).await {
@@ -187,6 +284,123 @@ where
         }
 
         append_ok
+    }
+
+    fn direct_feed_progress_evidence_for_reader(
+        &self,
+        progress: &ReaderProgress,
+        index: usize,
+        reader_stage: obzenflow_core::StageId,
+    ) -> Vec<DirectFeedProgressEvidence> {
+        let Some(feed_chains) = self.contract_feed_chains.get(index) else {
+            return Vec::new();
+        };
+        if feed_chains.is_empty() {
+            return Vec::new();
+        }
+
+        feed_chains
+            .iter()
+            .enumerate()
+            .filter_map(|(feed_index, feed_chain)| {
+                let reader_seq = self.selected_reader_seq_for_feed(index, &feed_chain.metadata);
+                if reader_seq.0 == 0 {
+                    return None;
+                }
+
+                let contract_results = feed_chain
+                    .chain
+                    .check_progress_all(progress.stage_id, reader_stage);
+                let has_failure = contract_results
+                    .iter()
+                    .any(|(_, result)| matches!(result, ContractResult::Failed(_)));
+                let should_emit_healthy = reader_seq != feed_chain.last_contract_result_seq;
+                if !has_failure && !should_emit_healthy {
+                    return None;
+                }
+
+                Some(DirectFeedProgressEvidence {
+                    feed_index,
+                    event_type: feed_chain.metadata.event_type.clone(),
+                    feed_role: feed_chain.metadata.feed_role.clone(),
+                    reader_seq,
+                    advertised_writer_seq: self
+                        .advertised_writer_seq_for_feed(index, &feed_chain.metadata),
+                    contract_results,
+                    should_record_heartbeat: should_emit_healthy,
+                })
+            })
+            .collect()
+    }
+
+    async fn emit_direct_feed_progress_contract_results(
+        &mut self,
+        writer_id: obzenflow_core::WriterId,
+        system_journal: Option<Arc<dyn Journal<SystemEvent>>>,
+        progress: &ReaderProgress,
+        index: usize,
+        reader_stage: obzenflow_core::StageId,
+    ) {
+        let Some(system_journal) = system_journal else {
+            return;
+        };
+
+        let evidence = self.direct_feed_progress_evidence_for_reader(progress, index, reader_stage);
+        if evidence.is_empty() {
+            return;
+        }
+
+        let mut completed_heartbeats = Vec::new();
+        for feed in &evidence {
+            let mut emitted_any_for_feed = false;
+            for (contract_name, result) in &feed.contract_results {
+                let (status_label, cause_label) =
+                    contract_result_labels_for_emission(result, ContractResultStatusLabel::Healthy);
+
+                let result_event = SystemEvent::new(
+                    writer_id,
+                    SystemEventType::ContractResult {
+                        upstream: progress.stage_id,
+                        reader: reader_stage,
+                        selected_event_type: Some(feed.event_type.clone()),
+                        feed_role: feed.feed_role.clone(),
+                        contract_name: contract_name.clone(),
+                        status: status_label,
+                        cause: cause_label,
+                        reader_seq: Some(feed.reader_seq),
+                        advertised_writer_seq: feed.advertised_writer_seq,
+                    },
+                );
+                if let Err(e) = system_journal.append(result_event, None).await {
+                    tracing::error!(
+                        target: "flowip-105",
+                        owner = %self.owner_label,
+                        upstream = ?progress.stage_id,
+                        reader = ?reader_stage,
+                        reader_index = index,
+                        selected_event_type = %feed.event_type,
+                        feed_role = ?feed.feed_role,
+                        contract = %contract_name,
+                        error = %e,
+                        "Failed to append direct feed progress contract result event; skipping emission"
+                    );
+                } else {
+                    emitted_any_for_feed = true;
+                }
+            }
+
+            if emitted_any_for_feed && feed.should_record_heartbeat {
+                completed_heartbeats.push((feed.feed_index, feed.reader_seq));
+            }
+        }
+
+        if let Some(feed_chains) = self.contract_feed_chains.get_mut(index) {
+            for (feed_index, reader_seq) in completed_heartbeats {
+                if let Some(feed_chain) = feed_chains.get_mut(feed_index) {
+                    feed_chain.last_contract_result_seq = reader_seq;
+                }
+            }
+        }
     }
 
     /// Check contracts and emit progress/stall/final events as needed.
@@ -276,16 +490,17 @@ where
         index: usize,
         status: &mut ContractStatus,
     ) {
-        let Some(tracker) = &self.contract_tracker else {
-            return;
-        };
-        let (selected_event_type, feed_role) =
-            self.unique_selected_feed_for_stage(progress.stage_id);
-
-        let (Some(reader_stage), Some(chain_slot)) = (
-            tracker.reader_stage,
-            self.contract_chains.get(index).and_then(|c| c.as_ref()),
-        ) else {
+        let Some((reader_stage, writer_id, system_journal)) =
+            self.contract_tracker.as_ref().and_then(|tracker| {
+                tracker.reader_stage.map(|reader_stage| {
+                    (
+                        reader_stage,
+                        tracker.writer_id,
+                        tracker.system_journal.clone(),
+                    )
+                })
+            })
+        else {
             return;
         };
 
@@ -295,6 +510,32 @@ where
         if self.state.is_reader_eof(index) {
             return;
         }
+
+        if self
+            .contract_feed_chains
+            .get(index)
+            .is_some_and(|chains| !chains.is_empty())
+        {
+            self.emit_direct_feed_progress_contract_results(
+                writer_id,
+                system_journal,
+                progress,
+                index,
+                reader_stage,
+            )
+            .await;
+            return;
+        }
+
+        let Some(tracker) = &self.contract_tracker else {
+            return;
+        };
+        let (selected_event_type, feed_role) =
+            self.unique_selected_feed_for_stage(progress.stage_id);
+
+        let Some(chain_slot) = self.contract_chains.get(index).and_then(|c| c.as_ref()) else {
+            return;
+        };
 
         // Avoid emitting contract "healthy" heartbeats before we've observed any
         // data events on this edge.
@@ -549,7 +790,12 @@ where
         let progress_seq = self.progress_seq(progress);
         let progress_last_event_id = self.progress_last_event_id(progress);
         let progress_vector_clock = self.progress_vector_clock(progress);
-        let direct_feed_evidence = self.direct_feed_contract_evidence_for_reader(progress, index);
+        let direct_feed_evidence = tracker
+            .reader_stage
+            .map(|reader_stage| {
+                self.direct_feed_contract_evidence_for_reader(progress, index, reader_stage)
+            })
+            .unwrap_or_default();
 
         let mut pass = true;
         let mut failure_reason = None;
@@ -757,10 +1003,13 @@ where
         }
 
         if let Some(feed_failure) = direct_feed_evidence.iter().find(|feed| !feed.pass) {
-            let cause = EventViolationCause::SeqDivergence {
-                advertised: Some(feed_failure.advertised_writer_seq),
-                reader: feed_failure.reader_seq,
-            };
+            let cause = feed_failure
+                .reason
+                .clone()
+                .unwrap_or(EventViolationCause::SeqDivergence {
+                    advertised: Some(feed_failure.advertised_writer_seq),
+                    reader: feed_failure.reader_seq,
+                });
             pass = false;
             failure_reason = Some(cause.clone());
             if !matches!(status, ContractStatus::Violated { .. }) {

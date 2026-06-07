@@ -790,10 +790,11 @@ macro_rules! __obzenflow_transform_typed {
         ::obzenflow_runtime::typing::assert_transform_contract::<_, $in, $out>(&__handler);
         let __metadata = $crate::dsl::typing::StageTypingMetadata::transform(
             $crate::dsl::typing::TypeHint::exact_payload::<$in>(),
-            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
+            $crate::dsl::typing::TypeHint::fact_set_primary::<$out>(),
             false,
             None,
         )
+        .with_output_contract($crate::dsl::typing::TypeHint::fact_set_output_contract::<$out>())
         .with_additional_output_contract($crate::__obzenflow_output_contract_members!($($member),+));
         let __descriptor = $crate::__obzenflow_transform_untyped!(name = $name, handler = __handler, middleware = [$($mw),*]);
         $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
@@ -835,10 +836,11 @@ macro_rules! __obzenflow_transform_typed {
         ::obzenflow_runtime::typing::assert_transform_contract::<_, $in, $out>(&__handler);
         let __metadata = $crate::dsl::typing::StageTypingMetadata::transform(
             $crate::dsl::typing::TypeHint::exact_payload::<$in>(),
-            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
+            $crate::dsl::typing::TypeHint::fact_set_primary::<$out>(),
             false,
             None,
-        );
+        )
+        .with_output_contract($crate::dsl::typing::TypeHint::fact_set_output_contract::<$out>());
         let __descriptor = $crate::__obzenflow_transform_untyped!(name = $name, handler = __handler, middleware = [$($mw),*]);
         $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
     }};
@@ -1054,10 +1056,11 @@ macro_rules! __obzenflow_async_transform_typed {
         ::obzenflow_runtime::typing::assert_transform_contract::<_, $in, $out>(&__handler);
         let __metadata = $crate::dsl::typing::StageTypingMetadata::transform(
             $crate::dsl::typing::TypeHint::exact_payload::<$in>(),
-            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
+            $crate::dsl::typing::TypeHint::fact_set_primary::<$out>(),
             false,
             None,
         )
+        .with_output_contract($crate::dsl::typing::TypeHint::fact_set_output_contract::<$out>())
         .with_additional_output_contract($crate::__obzenflow_output_contract_members!($($member),+));
         let __descriptor = $crate::__obzenflow_async_transform_untyped!(name = $name, handler = __handler, middleware = [$($mw),*]);
         $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
@@ -1099,10 +1102,11 @@ macro_rules! __obzenflow_async_transform_typed {
         ::obzenflow_runtime::typing::assert_transform_contract::<_, $in, $out>(&__handler);
         let __metadata = $crate::dsl::typing::StageTypingMetadata::transform(
             $crate::dsl::typing::TypeHint::exact_payload::<$in>(),
-            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
+            $crate::dsl::typing::TypeHint::fact_set_primary::<$out>(),
             false,
             None,
-        );
+        )
+        .with_output_contract($crate::dsl::typing::TypeHint::fact_set_output_contract::<$out>());
         let __descriptor = $crate::__obzenflow_async_transform_untyped!(name = $name, handler = __handler, middleware = [$($mw),*]);
         $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
     }};
@@ -1311,10 +1315,11 @@ macro_rules! __obzenflow_effectful_transform_typed {
         __assert_effectful_contract(&__handler);
         let __metadata = $crate::dsl::typing::StageTypingMetadata::transform(
             $crate::dsl::typing::TypeHint::exact_payload::<$in>(),
-            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
+            $crate::dsl::typing::TypeHint::fact_set_primary::<$out>(),
             false,
             None,
         )
+        .with_output_contract($crate::dsl::typing::TypeHint::fact_set_output_contract::<$out>())
         .with_additional_output_contract($crate::__obzenflow_output_contract_members!($($member),+));
         let __descriptor = $crate::__obzenflow_effectful_transform_untyped!(
             name = $name,
@@ -1336,10 +1341,11 @@ macro_rules! __obzenflow_effectful_transform_typed {
         __assert_effectful_contract(&__handler);
         let __metadata = $crate::dsl::typing::StageTypingMetadata::transform(
             $crate::dsl::typing::TypeHint::exact_payload::<$in>(),
-            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
+            $crate::dsl::typing::TypeHint::fact_set_primary::<$out>(),
             false,
             None,
-        );
+        )
+        .with_output_contract($crate::dsl::typing::TypeHint::fact_set_output_contract::<$out>());
         let __descriptor = $crate::__obzenflow_effectful_transform_untyped!(
             name = $name,
             handler = __handler,
@@ -1993,10 +1999,11 @@ macro_rules! __obzenflow_stateful_typed {
         // FLOWIP-114c PR D: assert_stateful_contract dropped, see sink rationale.
         let __metadata = $crate::dsl::typing::StageTypingMetadata::stateful(
             $crate::dsl::typing::TypeHint::exact_payload::<$in>(),
-            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
+            $crate::dsl::typing::TypeHint::fact_set_primary::<$out>(),
             false,
             None,
-        );
+        )
+        .with_output_contract($crate::dsl::typing::TypeHint::fact_set_output_contract::<$out>());
         let __descriptor = $crate::__obzenflow_stateful_untyped!(name = $name, handler = __handler, emit = none, middleware = [$($mw),*]);
         $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
     }};
@@ -2006,10 +2013,11 @@ macro_rules! __obzenflow_stateful_typed {
         // FLOWIP-114c PR D: assert_stateful_contract dropped, see sink rationale.
         let __metadata = $crate::dsl::typing::StageTypingMetadata::stateful(
             $crate::dsl::typing::TypeHint::exact_payload::<$in>(),
-            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
+            $crate::dsl::typing::TypeHint::fact_set_primary::<$out>(),
             false,
             None,
-        );
+        )
+        .with_output_contract($crate::dsl::typing::TypeHint::fact_set_output_contract::<$out>());
         let __descriptor = $crate::__obzenflow_stateful_untyped!(name = $name, handler = __handler, emit = some($emit_interval), middleware = [$($mw),*]);
         $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
     }};
@@ -2208,10 +2216,11 @@ macro_rules! __obzenflow_effectful_stateful_typed {
         __assert_effectful_stateful_contract(&__handler);
         let __metadata = $crate::dsl::typing::StageTypingMetadata::stateful(
             $crate::dsl::typing::TypeHint::exact_payload::<$in>(),
-            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
+            $crate::dsl::typing::TypeHint::fact_set_primary::<$out>(),
             false,
             None,
-        );
+        )
+        .with_output_contract($crate::dsl::typing::TypeHint::fact_set_output_contract::<$out>());
         let __descriptor = $crate::__obzenflow_effectful_stateful_untyped!(
             name = $name,
             handler = __handler,
@@ -2230,10 +2239,11 @@ macro_rules! __obzenflow_effectful_stateful_typed {
         __assert_effectful_stateful_contract(&__handler);
         let __metadata = $crate::dsl::typing::StageTypingMetadata::stateful(
             $crate::dsl::typing::TypeHint::exact_payload::<$in>(),
-            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
+            $crate::dsl::typing::TypeHint::fact_set_primary::<$out>(),
             false,
             None,
-        );
+        )
+        .with_output_contract($crate::dsl::typing::TypeHint::fact_set_output_contract::<$out>());
         let __descriptor = $crate::__obzenflow_effectful_stateful_untyped!(
             name = $name,
             handler = __handler,

@@ -8,9 +8,13 @@
 //! enabling compile-time event type checking.
 
 mod middleware_context_key;
+mod typed_fact_set;
 mod typed_middleware_event;
 mod typed_payload;
 
 pub use middleware_context_key::MiddlewareContextKey;
+pub use typed_fact_set::{
+    Facts2, Facts3, TypedFact, TypedFactSet, TypedFactSetError, TypedFactType,
+};
 pub use typed_middleware_event::TypedMiddlewareEvent;
 pub use typed_payload::TypedPayload;
