@@ -92,7 +92,7 @@ pub fn build_flow() -> obzenflow_dsl::FlowDefinition {
             //     half-open probe.
             // BreakerAware keeps transport contracts green while the breaker is open.
             gateway = effectful_transform!(
-                ValidatedOrder -> PaymentAuthorizationOutcome => GatewayTransform,
+                ValidatedOrder -> { PaymentAuthorizationOutcome, GatewayPaymentDecision } => GatewayTransform,
                 effects: [AuthorizePayment],
                 middleware: [
                     CircuitBreakerBuilder::new(3)

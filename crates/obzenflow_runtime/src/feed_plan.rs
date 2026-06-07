@@ -120,6 +120,22 @@ impl StageOutputContract {
         })
     }
 
+    pub fn is_routable_event_type(&self, event_type: &str) -> bool {
+        self.outputs.iter().any(|output| {
+            output.visibility == FactVisibility::Routable
+                && output.event_type.as_deref().is_some_and(|declared| {
+                    declared_event_type_matches(declared, event_type, output.schema_version)
+                })
+        })
+    }
+
+    pub fn routable_member_count(&self) -> usize {
+        self.outputs
+            .iter()
+            .filter(|output| output.visibility == FactVisibility::Routable)
+            .count()
+    }
+
     pub fn is_empty(&self) -> bool {
         self.outputs.is_empty()
     }

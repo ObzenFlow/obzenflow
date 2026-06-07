@@ -33,6 +33,11 @@ pub enum EffectOutcomePayload {
     Succeeded {
         output: Value,
     },
+    SucceededFact {
+        event_type: String,
+        output: Value,
+        outcome_fact_ordinal: u32,
+    },
     Failed {
         error_type: String,
         error_message: String,

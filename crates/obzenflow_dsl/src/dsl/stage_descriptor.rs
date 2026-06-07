@@ -33,10 +33,9 @@ use obzenflow_runtime::{
             control_strategies::{CompositeStrategy, ControlEventStrategy, JonestownStrategy},
             handlers::{
                 AsyncFiniteSourceHandler, AsyncInfiniteSourceHandler, AsyncTransformHandler,
-                EffectfulSinkHandler, EffectfulSinkHandlerAdapter, EffectfulStatefulHandler,
-                EffectfulStatefulHandlerAdapter, EffectfulTransformHandler,
-                EffectfulTransformHandlerAdapter, FiniteSourceHandler, InfiniteSourceHandler,
-                JoinHandler, SinkHandler, StatefulHandler, TransformHandler,
+                EffectfulSinkHandler, EffectfulStatefulHandler, EffectfulStatefulHandlerAdapter,
+                EffectfulTransformHandler, EffectfulTransformHandlerAdapter, FiniteSourceHandler,
+                InfiniteSourceHandler, JoinHandler, SinkHandler, StatefulHandler, TransformHandler,
             },
             stage_handle::{BoxedStageHandle, StageEvent, FORCE_SHUTDOWN_MESSAGE},
         },
@@ -1565,93 +1564,15 @@ impl<H: EffectfulSinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> 
     async fn create_handle_with_flow_middleware(
         self: Box<Self>,
         config: StageConfig,
-        mut resources: StageResources,
-        flow_middleware: Vec<Box<dyn MiddlewareFactory>>,
-        control_middleware: Arc<ControlMiddlewareAggregator>,
+        _resources: StageResources,
+        _flow_middleware: Vec<Box<dyn MiddlewareFactory>>,
+        _control_middleware: Arc<ControlMiddlewareAggregator>,
     ) -> StageCreationResult<BoxedStageHandle> {
-        let effect_declarations = self.effects.clone();
-        validate_effect_declarations(&self.name, &effect_declarations, &resources.effect_ports)?;
-        resources.effect_declarations = effect_declarations;
-
-        for factory in &self.middleware {
-            let validation_result =
-                validate_middleware_safety(factory.as_ref(), StageType::Sink, &self.name);
-
-            if !validation_result.is_ok() {
-                for error in &validation_result.errors {
-                    tracing::error!("{}", error);
-                }
-            }
-        }
-
-        let resolved = crate::middleware_resolution::resolve_middleware(
-            flow_middleware,
-            self.middleware,
-            &config.name,
-        )?;
-        crate::middleware_resolution::log_resolved_middleware(&config.name, &resolved);
-        let control_strategy = create_control_strategy_from_middleware_specs(&resolved.middleware);
-
-        let instrumentation_config = InstrumentationConfig::default();
-        let mut instrumentation = StageInstrumentation::new_with_config(instrumentation_config);
-        let control_provider: Arc<dyn obzenflow_core::ControlMiddlewareProvider> =
-            control_middleware.clone();
-
-        let expects_circuit_breaker = resolved
-            .middleware
-            .iter()
-            .any(|spec| spec.factory.control_role() == ControlMiddlewareRole::CircuitBreaker);
-        let expects_rate_limiter = resolved
-            .middleware
-            .iter()
-            .any(|spec| spec.factory.control_role() == ControlMiddlewareRole::RateLimiter);
-
-        let _registered_middleware: Vec<Box<dyn Middleware>> = resolved
-            .middleware
-            .into_iter()
-            .map(|spec| spec.factory.create(&config, control_middleware.clone()))
-            .collect::<Result<_, _>>()?;
-
-        instrumentation
-            .bind_control_middleware(
-                &config.stage_id,
-                &control_provider,
-                expects_circuit_breaker,
-                expects_rate_limiter,
-            )
-            .map_err(|e| e.to_string())?;
-        let instrumentation = Arc::new(instrumentation);
-
-        let sink_config = JournalSinkConfig {
-            stage_id: config.stage_id,
-            stage_name: config.name.clone(),
-            flow_name: config.flow_name.clone(),
-            upstream_stages: resources.upstream_stages.clone(),
-            buffer_size: None,
-            flush_interval_ms: None,
-            control_strategy: Some(control_strategy),
-        };
-
-        let handle = JournalSinkBuilder::new(
-            EffectfulSinkHandlerAdapter(self.handler),
-            sink_config,
-            resources,
+        Err(format!(
+            "effectful sink stage `{}` is retired by FLOWIP-120b; use an effectful transform or effectful stateful stage to author facts, then consume them with a non-effectful sink",
+            config.name
         )
-        .with_instrumentation(instrumentation)
-        .build()
-        .await
-        .map_err(|e| format!("Failed to build effectful sink: {e:?}"))?;
-
-        let adapter = StageHandleAdapter::new(
-            handle,
-            config.stage_id,
-            config.name,
-            StageType::Sink,
-            translate_stage_event_to_sink,
-            check_sink_state,
-        );
-
-        Ok(Box::new(adapter) as BoxedStageHandle)
+        .into())
     }
 }
 
@@ -2377,7 +2298,7 @@ mod tests {
     use obzenflow_adapters::middleware::control::circuit_breaker::circuit_breaker;
     use obzenflow_core::event::{JournalEvent, SystemEvent};
     use obzenflow_core::ControlMiddlewareProvider;
-    use obzenflow_core::{ChainEvent, EventEnvelope, FlowId};
+    use obzenflow_core::{ChainEvent, EventEnvelope, FlowId, TypedPayload};
     use obzenflow_runtime::effects::{
         Effect, EffectCommitHandle, EffectContext, EffectError, TransactionalEffectPort,
     };
@@ -2395,13 +2316,20 @@ mod tests {
     #[derive(Clone, Debug)]
     struct DemoTransactionalEffect;
 
+    #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+    struct DemoTransactionalOutput;
+
+    impl TypedPayload for DemoTransactionalOutput {
+        const EVENT_TYPE: &'static str = "test.transactional_declared_output";
+    }
+
     #[async_trait]
     impl Effect for DemoTransactionalEffect {
         const EFFECT_TYPE: &'static str = "test.transactional_declared";
         const SCHEMA_VERSION: u32 = 1;
         const SAFETY: EffectSafety = EffectSafety::Transactional;
 
-        type Output = u8;
+        type Output = DemoTransactionalOutput;
 
         fn label(&self) -> &str {
             "declared"
@@ -2412,7 +2340,7 @@ mod tests {
         }
 
         async fn execute(&self, _ctx: &mut EffectContext) -> Result<Self::Output, EffectError> {
-            Ok(0)
+            Ok(DemoTransactionalOutput)
         }
     }
 
@@ -2424,10 +2352,11 @@ mod tests {
             &self,
             _effect: DemoTransactionalEffect,
             _ctx: &mut EffectContext,
-            commit: EffectCommitHandle<u8>,
-        ) -> Result<u8, EffectError> {
-            commit.commit_success(&0).await?;
-            Ok(0)
+            commit: EffectCommitHandle<DemoTransactionalOutput>,
+        ) -> Result<DemoTransactionalOutput, EffectError> {
+            let output = DemoTransactionalOutput;
+            commit.commit_success(&output).await?;
+            Ok(output)
         }
     }
 

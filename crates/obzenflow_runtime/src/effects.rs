@@ -11,7 +11,7 @@ pub use obzenflow_core::event::payloads::effect_payload::{
     EffectCursor, EffectDescriptor, EffectOutcomePayload, EffectProvenance, EffectRecord,
     CAPTURE_EVENT_TYPE, EFFECT_RECORD_EVENT_TYPE,
 };
-use obzenflow_core::event::schema::TypedPayload;
+use obzenflow_core::event::schema::{TypedFact, TypedFactSet, TypedFactSetError, TypedPayload};
 use obzenflow_core::event::{ChainEventContent, ChainEventFactory, SystemEvent};
 use obzenflow_core::journal::{ArchiveStatus, Journal};
 use obzenflow_core::{ChainEvent, EventEnvelope, EventId, FlowId, StageId, WriterId};
@@ -25,6 +25,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use thiserror::Error;
 
+use crate::backpressure::BackpressureWriter;
 use crate::feed_plan::StageOutputContract;
 use crate::messaging::upstream_subscription::StageInputPosition;
 use crate::metrics::instrumentation::StageInstrumentation;
@@ -470,7 +471,7 @@ pub trait Effect: Clone + std::fmt::Debug + Send + Sync + 'static {
     const SCHEMA_VERSION: u32;
     const SAFETY: EffectSafety;
 
-    type Output: Serialize + DeserializeOwned + Send + Sync + 'static;
+    type Output: TypedFactSet + Clone + Send + Sync + 'static;
 
     fn label(&self) -> &str;
 
@@ -512,34 +513,62 @@ impl<T> Clone for EffectCommitHandle<T> {
 struct EffectCommitHandleInner<T> {
     writer_id: WriterId,
     data_journal: Arc<dyn Journal<ChainEvent>>,
+    flow_context: Option<FlowContext>,
+    system_journal: Option<Arc<dyn Journal<SystemEvent>>>,
+    instrumentation: Option<Arc<StageInstrumentation>>,
+    heartbeat_state: Option<Arc<HeartbeatState>>,
+    output_contract: StageOutputContract,
     parent: EventEnvelope<ChainEvent>,
     cursor: EffectCursor,
     descriptor_hash: String,
     descriptor: EffectDescriptor,
-    committed: Mutex<Option<EffectOutcomePayload>>,
+    output_ordinal: u32,
+    committed: Mutex<Option<CommittedEffectOutcome<T>>>,
     _marker: PhantomData<T>,
+}
+
+#[derive(Clone)]
+enum CommittedEffectOutcome<T> {
+    Success {
+        output: T,
+        fact_count: usize,
+        events: Vec<ChainEvent>,
+    },
+    Failure(EffectOutcomePayload),
 }
 
 impl<T> EffectCommitHandle<T>
 where
-    T: Serialize + Send + Sync + 'static,
+    T: TypedFactSet + Clone + Send + Sync + 'static,
 {
     fn new(
         writer_id: WriterId,
         data_journal: Arc<dyn Journal<ChainEvent>>,
+        flow_context: Option<FlowContext>,
+        system_journal: Option<Arc<dyn Journal<SystemEvent>>>,
+        instrumentation: Option<Arc<StageInstrumentation>>,
+        heartbeat_state: Option<Arc<HeartbeatState>>,
+        output_contract: StageOutputContract,
         parent: EventEnvelope<ChainEvent>,
         cursor: EffectCursor,
         descriptor_hash: String,
         descriptor: EffectDescriptor,
+        output_ordinal: u32,
     ) -> Self {
         Self {
             inner: Arc::new(EffectCommitHandleInner {
                 writer_id,
                 data_journal,
+                flow_context,
+                system_journal,
+                instrumentation,
+                heartbeat_state,
+                output_contract,
                 parent,
                 cursor,
                 descriptor_hash,
                 descriptor,
+                output_ordinal,
                 committed: Mutex::new(None),
                 _marker: PhantomData,
             }),
@@ -547,10 +576,59 @@ where
     }
 
     pub async fn commit_success(&self, output: &T) -> Result<(), EffectError> {
-        let output =
-            serde_json::to_value(output).map_err(|e| EffectError::Serialization(e.to_string()))?;
-        self.commit_outcome(EffectOutcomePayload::Succeeded { output }, None)
-            .await
+        {
+            let committed = self
+                .inner
+                .committed
+                .lock()
+                .expect("effect commit handle lock poisoned");
+            if committed.is_some() {
+                return Err(EffectError::Execution(
+                    "transactional effect commit handle used more than once".to_string(),
+                ));
+            }
+        }
+
+        let facts = output.clone().into_facts().map_err(effect_fact_set_error)?;
+        if facts.is_empty() {
+            return Err(EffectError::Execution(
+                "effect success output must author at least one fact".to_string(),
+            ));
+        }
+        let fact_count = facts.len();
+        let committed_events = append_domain_effect_success_facts(
+            &self.inner.data_journal,
+            self.inner.flow_context.as_ref(),
+            self.inner.system_journal.as_ref(),
+            self.inner.instrumentation.as_ref(),
+            self.inner.heartbeat_state.as_ref(),
+            Some(&self.inner.output_contract),
+            self.inner.writer_id,
+            &self.inner.parent,
+            self.inner.cursor.clone(),
+            self.inner.descriptor_hash.clone(),
+            self.inner.descriptor.clone(),
+            facts,
+            self.inner.output_ordinal,
+        )
+        .await?;
+
+        let mut committed = self
+            .inner
+            .committed
+            .lock()
+            .expect("effect commit handle lock poisoned");
+        if committed.is_some() {
+            return Err(EffectError::Execution(
+                "transactional effect commit handle used more than once".to_string(),
+            ));
+        }
+        *committed = Some(CommittedEffectOutcome::Success {
+            output: output.clone(),
+            fact_count,
+            events: committed_events,
+        });
+        Ok(())
     }
 
     pub async fn commit_failure(&self, error: &EffectError) -> Result<(), EffectError> {
@@ -581,25 +659,31 @@ where
                     "transactional effect commit handle used more than once".to_string(),
                 ));
             }
-            *committed = Some(outcome.clone());
+            *committed = Some(CommittedEffectOutcome::Failure(outcome.clone()));
         }
 
         let record = EffectRecord {
             cursor: self.inner.cursor.clone(),
             descriptor_hash: self.inner.descriptor_hash.clone(),
             descriptor: self.inner.descriptor.clone(),
-            outcome,
+            outcome: outcome.clone(),
         };
 
-        if let Err(err) = append_effect_record(
+        let Some(err) = source_error else {
+            return Err(EffectError::Execution(
+                "domain success outcomes must be committed through commit_success".to_string(),
+            ));
+        };
+        let append_result = append_effect_record(
             &self.inner.data_journal,
             self.inner.writer_id,
             &self.inner.parent,
             record,
-            source_error,
+            Some(err),
         )
-        .await
-        {
+        .await;
+
+        if let Err(err) = append_result {
             let mut committed = self
                 .inner
                 .committed
@@ -615,7 +699,7 @@ where
     /// The outcome committed through this handle, or `None` if the port never
     /// committed. This is the source of truth for the live transactional return
     /// value, so a live run decodes the same outcome a replay would.
-    fn committed_outcome(&self) -> Option<EffectOutcomePayload> {
+    fn committed_outcome(&self) -> Option<CommittedEffectOutcome<T>> {
         self.inner
             .committed
             .lock()
@@ -644,7 +728,7 @@ pub trait EffectHistoryStore: Send + Sync {
 pub struct EffectHistory {
     recorded_flow_id: String,
     records: Arc<Vec<EffectRecord>>,
-    index: Arc<HashMap<EffectCursor, usize>>,
+    index: Arc<HashMap<EffectCursor, Vec<usize>>>,
 }
 
 impl EffectHistory {
@@ -674,11 +758,18 @@ impl EffectHistory {
     ) -> Result<Self, EffectError> {
         let mut index = HashMap::new();
         for (position, record) in records.iter().enumerate() {
-            if index.insert(record.cursor.clone(), position).is_some() {
-                return Err(EffectError::DuplicateRecordedEffect {
-                    cursor: record.cursor.clone(),
-                });
-            }
+            index
+                .entry(record.cursor.clone())
+                .or_insert_with(Vec::new)
+                .push(position);
+        }
+
+        for positions in index.values() {
+            let group = positions
+                .iter()
+                .filter_map(|position| records.get(*position))
+                .collect::<Vec<_>>();
+            validate_effect_outcome_group(&group)?;
         }
 
         Ok(Self {
@@ -698,7 +789,17 @@ impl EffectHistory {
     fn find(&self, cursor: &EffectCursor) -> Option<&EffectRecord> {
         self.index
             .get(cursor)
+            .and_then(|positions| positions.first())
             .and_then(|position| self.records.get(*position))
+    }
+
+    fn find_group(&self, cursor: &EffectCursor) -> Option<Vec<&EffectRecord>> {
+        self.index.get(cursor).map(|positions| {
+            positions
+                .iter()
+                .filter_map(|position| self.records.get(*position))
+                .collect()
+        })
     }
 
     pub fn recorded_flow_id(&self) -> &str {
@@ -735,6 +836,7 @@ pub struct EffectInvocationContext {
     pub effect_ports: EffectPortRegistry,
     pub effect_declarations: Vec<EffectDeclaration>,
     pub output_contract: StageOutputContract,
+    pub backpressure_writer: BackpressureWriter,
     pub emit_enabled: bool,
     pub effect_boundary: Option<Arc<dyn EffectBoundaryMiddleware>>,
     pub boundary_control_events: Arc<Mutex<Vec<ChainEvent>>>,
@@ -823,6 +925,8 @@ pub struct Effects {
     ctx: EffectInvocationContext,
     next_effect_ordinal: u32,
     next_output_ordinal: u32,
+    routed_output_fact_count: usize,
+    committed_facts: Vec<ChainEvent>,
 }
 
 impl Effects {
@@ -831,11 +935,88 @@ impl Effects {
             ctx,
             next_effect_ordinal: 0,
             next_output_ordinal: 0,
+            routed_output_fact_count: 0,
+            committed_facts: Vec::new(),
         }
     }
 
     pub fn is_replaying(&self) -> bool {
         !matches!(self.ctx.effect_runtime_mode, EffectRuntimeMode::Live)
+    }
+
+    pub fn drain_committed_facts(&mut self) -> Vec<ChainEvent> {
+        std::mem::take(&mut self.committed_facts)
+    }
+
+    fn reserve_output_ordinal(&mut self) -> u32 {
+        let output_ordinal = self.next_output_ordinal;
+        self.next_output_ordinal = self.next_output_ordinal.saturating_add(1);
+        output_ordinal
+    }
+
+    fn reserve_output_ordinals(&mut self, count: usize) -> Result<u32, EffectError> {
+        let count = u32::try_from(count).map_err(|_| {
+            EffectError::Execution("effect output fact count exceeds u32 range".to_string())
+        })?;
+        let output_ordinal = self.next_output_ordinal;
+        self.next_output_ordinal = self
+            .next_output_ordinal
+            .checked_add(count)
+            .ok_or_else(|| EffectError::Execution("effect output ordinal overflow".to_string()))?;
+        Ok(output_ordinal)
+    }
+
+    fn advance_output_ordinals_after_reserved_base(
+        &mut self,
+        reserved_base: u32,
+        fact_count: usize,
+    ) -> Result<(), EffectError> {
+        let fact_count = u32::try_from(fact_count).map_err(|_| {
+            EffectError::Execution("effect output fact count exceeds u32 range".to_string())
+        })?;
+        if fact_count == 0 {
+            return Ok(());
+        }
+        let next = reserved_base
+            .checked_add(fact_count)
+            .ok_or_else(|| EffectError::Execution("effect output ordinal overflow".to_string()))?;
+        if self.next_output_ordinal < next {
+            self.next_output_ordinal = next;
+        }
+        Ok(())
+    }
+
+    fn ensure_routed_fanout_capacity(&self, additional_routed: usize) -> Result<(), EffectError> {
+        if additional_routed == 0 {
+            return Ok(());
+        }
+
+        let limit = self.ctx.output_contract.routable_member_count();
+        if limit == 0 {
+            return Ok(());
+        }
+
+        let next = self
+            .routed_output_fact_count
+            .checked_add(additional_routed)
+            .ok_or_else(|| EffectError::Execution("routed output fanout overflow".to_string()))?;
+        if next > limit {
+            return Err(EffectError::Execution(format!(
+                "stage `{}` authored {next} routed facts for one input, exceeding the FLOWIP-120b v1 bounded fanout limit of {limit} routable output contract members",
+                self.ctx.stage_key
+            )));
+        }
+
+        Ok(())
+    }
+
+    fn count_routed_facts(&self, facts: &[TypedFact]) -> usize {
+        facts
+            .iter()
+            .filter(|fact| {
+                is_routable_output_fact(Some(&self.ctx.output_contract), &fact.event_type)
+            })
+            .count()
     }
 
     pub async fn emit<T>(&mut self, fact: T) -> Result<(), EffectError>
@@ -857,6 +1038,9 @@ impl Effects {
                 event_type,
             });
         }
+        let routed_fact =
+            is_routable_output_fact(Some(&self.ctx.output_contract), &event_type) as usize;
+        self.ensure_routed_fanout_capacity(routed_fact)?;
 
         let recorded_flow_id = self
             .ctx
@@ -864,8 +1048,7 @@ impl Effects {
             .as_ref()
             .map(|history| history.recorded_flow_id().to_string())
             .unwrap_or_else(|| self.ctx.flow_id.to_string());
-        let output_ordinal = self.next_output_ordinal;
-        self.next_output_ordinal = self.next_output_ordinal.saturating_add(1);
+        let output_ordinal = self.reserve_output_ordinal();
         let event = deterministic_typed_output_event(
             self.ctx.writer_id,
             &self.ctx.parent.event,
@@ -875,6 +1058,7 @@ impl Effects {
             self.ctx.input_seq,
             output_ordinal,
         )?;
+        let committed_event = event.clone();
         let committer = OutputCommitter {
             data_journal: &self.ctx.data_journal,
             flow_context: self.ctx.flow_context.as_ref(),
@@ -894,6 +1078,11 @@ impl Effects {
             )
             .await
             .map_err(|e| EffectError::Journal(e.to_string()))?;
+        self.routed_output_fact_count = self
+            .routed_output_fact_count
+            .checked_add(routed_fact)
+            .ok_or_else(|| EffectError::Execution("routed output fanout overflow".to_string()))?;
+        self.committed_facts.push(committed_event);
         Ok(())
     }
 
@@ -926,8 +1115,16 @@ impl Effects {
         };
 
         if let Some(history) = &self.ctx.effect_history {
-            if let Some(record) = history.find(&cursor) {
-                return self.replay_record_output(record, cursor, descriptor_hash);
+            if let Some(records) = history.find_group(&cursor) {
+                let output =
+                    self.replay_records_output::<E::Output>(&records, cursor, descriptor_hash)?;
+                let events = effect_record_group_to_events::<E::Output>(
+                    &records,
+                    self.ctx.writer_id,
+                    &self.ctx.parent.event,
+                )?;
+                self.committed_facts.extend(events);
+                return Ok(output);
             }
 
             if matches!(
@@ -953,28 +1150,27 @@ impl Effects {
             match action {
                 EffectBoundaryAction::Continue => Some(context),
                 EffectBoundaryAction::Skip(results) => {
-                    let output_event = results.into_iter().next().ok_or_else(|| {
-                        EffectError::Execution(
-                            "effect boundary skipped without a fallback output".to_string(),
-                        )
-                    })?;
+                    if results.is_empty() {
+                        return Err(EffectError::Execution(
+                            "effect boundary skipped without fallback output facts".to_string(),
+                        ));
+                    }
+                    let facts = results
+                        .iter()
+                        .map(|event| {
+                            TypedFact::from_event(event).ok_or_else(|| {
+                                EffectError::Execution(
+                                    "effect boundary fallback output must be Data facts"
+                                        .to_string(),
+                                )
+                            })
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
                     self.ctx.push_boundary_control_events(control_events);
-                    let output: E::Output = serde_json::from_value(output_event.payload())
-                        .map_err(|e| EffectError::Serialization(e.to_string()))?;
-                    let output_value = serde_json::to_value(&output)
-                        .map_err(|e| EffectError::Serialization(e.to_string()))?;
-                    self.append_record(
-                        EffectRecord {
-                            cursor,
-                            descriptor_hash,
-                            descriptor,
-                            outcome: EffectOutcomePayload::Succeeded {
-                                output: output_value,
-                            },
-                        },
-                        None,
-                    )
-                    .await?;
+                    let output =
+                        E::Output::try_from_facts(&facts).map_err(effect_fact_set_error)?;
+                    self.append_success_facts::<E>(cursor, descriptor_hash, descriptor, facts)
+                        .await?;
                     return Ok(output);
                 }
                 EffectBoundaryAction::Abort => {
@@ -1014,36 +1210,35 @@ impl Effects {
 
         match effect.execute(&mut effect_ctx).await {
             Ok(output) => {
-                let output_value = serde_json::to_value(&output)
-                    .map_err(|e| EffectError::Serialization(e.to_string()))?;
+                let facts = output.clone().into_facts().map_err(effect_fact_set_error)?;
+                if facts.is_empty() {
+                    return Err(EffectError::Execution(
+                        "effect success output must author at least one fact".to_string(),
+                    ));
+                }
                 if let (Some(boundary), Some(boundary_context)) =
                     (&self.ctx.effect_boundary, boundary_start)
                 {
-                    let output_event = ChainEventFactory::derived_data_event(
-                        self.ctx.writer_id,
-                        &self.ctx.parent.event,
-                        E::EFFECT_TYPE,
-                        output_value.clone(),
-                    );
+                    let output_events = facts
+                        .iter()
+                        .map(|fact| {
+                            ChainEventFactory::derived_data_event(
+                                self.ctx.writer_id,
+                                &self.ctx.parent.event,
+                                &fact.event_type,
+                                fact.payload.clone(),
+                            )
+                        })
+                        .collect::<Vec<_>>();
                     let control_events = boundary.after_effect(
                         boundary_context,
                         &self.ctx.parent.event,
-                        std::slice::from_ref(&output_event),
+                        &output_events,
                     );
                     self.ctx.push_boundary_control_events(control_events);
                 }
-                self.append_record(
-                    EffectRecord {
-                        cursor,
-                        descriptor_hash,
-                        descriptor,
-                        outcome: EffectOutcomePayload::Succeeded {
-                            output: output_value,
-                        },
-                    },
-                    None,
-                )
-                .await?;
+                self.append_success_facts::<E>(cursor, descriptor_hash, descriptor, facts)
+                    .await?;
                 Ok(output)
             }
             Err(err) => {
@@ -1108,8 +1303,8 @@ impl Effects {
         };
 
         if let Some(history) = &self.ctx.effect_history {
-            if let Some(record) = history.find(&cursor) {
-                return self.replay_record_output(record, cursor, descriptor_hash);
+            if let Some(records) = history.find_group(&cursor) {
+                return self.replay_capture_output(&records, cursor, descriptor_hash);
             }
 
             if matches!(
@@ -1136,7 +1331,7 @@ impl Effects {
     }
 
     async fn perform_transactional<E>(
-        &self,
+        &mut self,
         effect: E,
         declaration: EffectDeclaration,
         cursor: EffectCursor,
@@ -1163,13 +1358,20 @@ impl Effects {
             })?;
 
         let mut effect_ctx = self.live_effect_context();
+        let output_ordinal = self.reserve_output_ordinal();
         let commit = EffectCommitHandle::new(
             self.ctx.writer_id,
             self.ctx.data_journal.clone(),
+            self.ctx.flow_context.clone(),
+            self.ctx.system_journal.clone(),
+            self.ctx.instrumentation.clone(),
+            self.ctx.heartbeat_state.clone(),
+            self.ctx.output_contract.clone(),
             self.ctx.parent.clone(),
             cursor,
             descriptor_hash,
             descriptor,
+            output_ordinal,
         );
         let commit_observer = commit.clone();
         // The port commits its outcome through the handle. Its returned value is
@@ -1193,18 +1395,57 @@ impl Effects {
             });
         };
 
-        decode_effect_outcome::<E::Output>(&outcome)
+        match outcome {
+            CommittedEffectOutcome::Success {
+                output,
+                fact_count,
+                events,
+            } => {
+                self.advance_output_ordinals_after_reserved_base(output_ordinal, fact_count)?;
+                self.committed_facts.extend(events);
+                Ok(output)
+            }
+            CommittedEffectOutcome::Failure(outcome) => recorded_failure_from_outcome(&outcome),
+        }
     }
 
-    fn replay_record_output<T>(
+    fn replay_records_output<T>(
         &self,
-        record: &EffectRecord,
+        records: &[&EffectRecord],
+        cursor: EffectCursor,
+        descriptor_hash: String,
+    ) -> Result<T, EffectError>
+    where
+        T: TypedFactSet,
+    {
+        for record in records {
+            if record.descriptor_hash != descriptor_hash {
+                return Err(EffectError::DescriptorMismatch {
+                    cursor,
+                    expected: descriptor_hash,
+                    recorded: record.descriptor_hash.clone(),
+                });
+            }
+        }
+
+        decode_effect_outcome_group::<T>(records)
+    }
+
+    fn replay_capture_output<T>(
+        &self,
+        records: &[&EffectRecord],
         cursor: EffectCursor,
         descriptor_hash: String,
     ) -> Result<T, EffectError>
     where
         T: DeserializeOwned,
     {
+        let [record] = records else {
+            return Err(EffectError::EffectProvenanceMismatch(format!(
+                "capture cursor {cursor:?} recorded {} outcome records",
+                records.len()
+            )));
+        };
         if record.descriptor_hash != descriptor_hash {
             return Err(EffectError::DescriptorMismatch {
                 cursor,
@@ -1240,6 +1481,133 @@ impl Effects {
         )
         .await
     }
+
+    async fn append_success_facts<E>(
+        &mut self,
+        cursor: EffectCursor,
+        descriptor_hash: String,
+        descriptor: EffectDescriptor,
+        facts: Vec<TypedFact>,
+    ) -> Result<(), EffectError>
+    where
+        E: Effect,
+    {
+        if facts.is_empty() {
+            return Err(EffectError::Execution(
+                "effect success output must author at least one fact".to_string(),
+            ));
+        }
+        let routed_fact_count = self.count_routed_facts(&facts);
+        self.ensure_routed_fanout_capacity(routed_fact_count)?;
+        let output_ordinal = self.reserve_output_ordinals(facts.len())?;
+        let committed_events = append_domain_effect_success_facts(
+            &self.ctx.data_journal,
+            self.ctx.flow_context.as_ref(),
+            self.ctx.system_journal.as_ref(),
+            self.ctx.instrumentation.as_ref(),
+            self.ctx.heartbeat_state.as_ref(),
+            Some(&self.ctx.output_contract),
+            self.ctx.writer_id,
+            &self.ctx.parent,
+            cursor,
+            descriptor_hash,
+            descriptor,
+            facts,
+            output_ordinal,
+        )
+        .await?;
+        self.routed_output_fact_count = self
+            .routed_output_fact_count
+            .checked_add(routed_fact_count)
+            .ok_or_else(|| EffectError::Execution("routed output fanout overflow".to_string()))?;
+        self.committed_facts.extend(committed_events);
+        Ok(())
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn append_domain_effect_success_facts(
+    data_journal: &Arc<dyn Journal<ChainEvent>>,
+    flow_context: Option<&FlowContext>,
+    system_journal: Option<&Arc<dyn Journal<SystemEvent>>>,
+    instrumentation: Option<&Arc<StageInstrumentation>>,
+    heartbeat_state: Option<&Arc<HeartbeatState>>,
+    output_contract: Option<&StageOutputContract>,
+    writer_id: WriterId,
+    parent: &EventEnvelope<ChainEvent>,
+    cursor: EffectCursor,
+    descriptor_hash: String,
+    descriptor: EffectDescriptor,
+    facts: Vec<TypedFact>,
+    base_output_ordinal: u32,
+) -> Result<Vec<ChainEvent>, EffectError> {
+    if facts.is_empty() {
+        return Err(EffectError::Execution(
+            "domain effect outcome append requires at least one fact".to_string(),
+        ));
+    }
+
+    let committer = OutputCommitter {
+        data_journal,
+        flow_context,
+        system_journal,
+        instrumentation,
+        heartbeat_state,
+        output_contract,
+    };
+
+    let mut committed_events = Vec::new();
+    for (index, fact) in facts.into_iter().enumerate() {
+        let ordinal = u32::try_from(index).map_err(|_| {
+            EffectError::Execution("effect outcome fact ordinal exceeds u32 range".to_string())
+        })?;
+        let output_ordinal = base_output_ordinal
+            .checked_add(ordinal)
+            .ok_or_else(|| EffectError::Execution("effect output ordinal overflow".to_string()))?;
+        let record = EffectRecord {
+            cursor: cursor.clone(),
+            descriptor_hash: descriptor_hash.clone(),
+            descriptor: descriptor.clone(),
+            outcome: EffectOutcomePayload::SucceededFact {
+                event_type: fact.event_type.clone(),
+                output: fact.payload.clone(),
+                outcome_fact_ordinal: ordinal,
+            },
+        };
+
+        let mut event = ChainEventFactory::derived_data_event(
+            writer_id,
+            &parent.event,
+            &fact.event_type,
+            fact.payload,
+        );
+        event.id = deterministic_event_id(
+            &record.cursor.recorded_flow_id,
+            &record.cursor.stage_key,
+            StageInputPosition(record.cursor.input_seq),
+            output_ordinal,
+        );
+        event.processing_info.event_time =
+            deterministic_event_time(StageInputPosition(record.cursor.input_seq), output_ordinal);
+        let mut provenance = EffectProvenance::from_record(&record, false);
+        provenance.outcome_fact_ordinal = Some(ordinal);
+        event = event.with_effect_provenance(provenance);
+
+        let committed_event = event.clone();
+        committer
+            .commit_prebuilt(
+                event,
+                Some(parent),
+                CommitOptions {
+                    count_output: true,
+                    validate_output_contract: true,
+                },
+            )
+            .await
+            .map_err(|e| EffectError::Journal(e.to_string()))?;
+        committed_events.push(committed_event);
+    }
+    Ok(committed_events)
 }
 
 // FLOWIP-120a: this append is intentionally write-time-unchecked for duplicate
@@ -1319,8 +1687,82 @@ fn effect_record_from_event(event: &ChainEvent) -> Result<Option<EffectRecord>, 
             validate_effect_record_provenance(event_type, &record, provenance)?;
             Ok(Some(record))
         }
+        ChainEventContent::Data {
+            event_type,
+            payload,
+        } => {
+            let Some(provenance) = event.effect_provenance.as_ref() else {
+                return Ok(None);
+            };
+            if provenance.framework_owned {
+                return Err(EffectError::EffectProvenanceMismatch(
+                    "framework-owned effect provenance must use a reserved framework effect event type"
+                        .to_string(),
+                ));
+            }
+
+            let record = EffectRecord {
+                cursor: provenance.cursor.clone(),
+                descriptor_hash: provenance.descriptor_hash.clone(),
+                descriptor: provenance.descriptor.clone(),
+                outcome: EffectOutcomePayload::SucceededFact {
+                    event_type: event_type.clone(),
+                    output: payload.clone(),
+                    outcome_fact_ordinal: provenance.outcome_fact_ordinal.unwrap_or(0),
+                },
+            };
+            validate_domain_effect_record_provenance(&record, provenance)?;
+            Ok(Some(record))
+        }
         _ => Ok(None),
     }
+}
+
+fn validate_domain_effect_record_provenance(
+    record: &EffectRecord,
+    provenance: &EffectProvenance,
+) -> Result<(), EffectError> {
+    if provenance.cursor != record.cursor {
+        return Err(EffectError::EffectProvenanceMismatch(
+            "effect_provenance cursor does not match domain effect record cursor".to_string(),
+        ));
+    }
+    if provenance.descriptor_hash != record.descriptor_hash {
+        return Err(EffectError::EffectProvenanceMismatch(
+            "effect_provenance descriptor_hash does not match domain effect record descriptor_hash"
+                .to_string(),
+        ));
+    }
+    if provenance.descriptor != record.descriptor {
+        return Err(EffectError::EffectProvenanceMismatch(
+            "effect_provenance descriptor does not match domain effect record descriptor"
+                .to_string(),
+        ));
+    }
+
+    let expected_group_id = effect_outcome_group_id(&record.cursor);
+    if provenance.group_id.as_deref() != Some(expected_group_id.as_str()) {
+        return Err(EffectError::EffectProvenanceMismatch(format!(
+            "effect_provenance group_id does not match deterministic group id `{expected_group_id}`"
+        )));
+    }
+    let EffectOutcomePayload::SucceededFact {
+        outcome_fact_ordinal,
+        ..
+    } = &record.outcome
+    else {
+        return Err(EffectError::EffectProvenanceMismatch(
+            "domain effect outcome facts must use SucceededFact records".to_string(),
+        ));
+    };
+    if provenance.outcome_fact_ordinal != Some(*outcome_fact_ordinal) {
+        return Err(EffectError::EffectProvenanceMismatch(
+            "effect_provenance outcome_fact_ordinal does not match domain effect record ordinal"
+                .to_string(),
+        ));
+    }
+
+    Ok(())
 }
 
 fn validate_effect_record_provenance(
@@ -1369,6 +1811,261 @@ fn validate_effect_record_provenance(
     Ok(())
 }
 
+fn validate_effect_outcome_group(records: &[&EffectRecord]) -> Result<(), EffectError> {
+    let Some(first) = records.first() else {
+        return Ok(());
+    };
+    if records.len() == 1 {
+        match &first.outcome {
+            EffectOutcomePayload::Succeeded { .. } | EffectOutcomePayload::Failed { .. } => {
+                return Ok(());
+            }
+            EffectOutcomePayload::SucceededFact {
+                outcome_fact_ordinal,
+                ..
+            } if *outcome_fact_ordinal == 0 => return Ok(()),
+            EffectOutcomePayload::SucceededFact {
+                outcome_fact_ordinal,
+                ..
+            } => {
+                return Err(EffectError::EffectProvenanceMismatch(format!(
+                    "single domain effect outcome fact for cursor {:?} must use ordinal 0, found {outcome_fact_ordinal}",
+                    first.cursor
+                )));
+            }
+        }
+    }
+
+    let cursor = first.cursor.clone();
+    let descriptor_hash = first.descriptor_hash.clone();
+    let descriptor = first.descriptor.clone();
+    let mut seen = vec![false; records.len()];
+    for record in records {
+        if record.cursor != cursor {
+            return Err(EffectError::EffectProvenanceMismatch(
+                "effect outcome group contains multiple cursors".to_string(),
+            ));
+        }
+        if record.descriptor_hash != descriptor_hash {
+            return Err(EffectError::EffectProvenanceMismatch(format!(
+                "effect outcome group for cursor {cursor:?} contains multiple descriptor hashes"
+            )));
+        }
+        if record.descriptor != descriptor {
+            return Err(EffectError::EffectProvenanceMismatch(format!(
+                "effect outcome group for cursor {cursor:?} contains multiple descriptors"
+            )));
+        }
+
+        let EffectOutcomePayload::SucceededFact {
+            outcome_fact_ordinal,
+            ..
+        } = &record.outcome
+        else {
+            return Err(EffectError::EffectProvenanceMismatch(format!(
+                "multi-fact effect outcome group for cursor {cursor:?} contains a non-domain-success record"
+            )));
+        };
+        let ordinal = usize::try_from(*outcome_fact_ordinal).map_err(|_| {
+            EffectError::EffectProvenanceMismatch(format!(
+                "effect outcome fact ordinal for cursor {cursor:?} exceeds usize range"
+            ))
+        })?;
+        let Some(slot) = seen.get_mut(ordinal) else {
+            return Err(EffectError::EffectProvenanceMismatch(format!(
+                "effect outcome group for cursor {cursor:?} has non-contiguous ordinal {outcome_fact_ordinal}"
+            )));
+        };
+        if *slot {
+            return Err(EffectError::EffectProvenanceMismatch(format!(
+                "effect outcome group for cursor {cursor:?} has duplicate ordinal {outcome_fact_ordinal}"
+            )));
+        }
+        *slot = true;
+    }
+
+    if seen.iter().any(|present| !present) {
+        return Err(EffectError::EffectProvenanceMismatch(format!(
+            "effect outcome group for cursor {cursor:?} has missing outcome fact ordinals"
+        )));
+    }
+
+    Ok(())
+}
+
+fn decode_effect_outcome_group<T>(records: &[&EffectRecord]) -> Result<T, EffectError>
+where
+    T: TypedFactSet,
+{
+    validate_effect_outcome_group(records)?;
+    let [single] = records else {
+        let mut ordered = records.to_vec();
+        ordered.sort_by_key(|record| match &record.outcome {
+            EffectOutcomePayload::SucceededFact {
+                outcome_fact_ordinal,
+                ..
+            } => *outcome_fact_ordinal,
+            _ => u32::MAX,
+        });
+        let facts = ordered
+            .iter()
+            .map(|record| match &record.outcome {
+                EffectOutcomePayload::SucceededFact {
+                    event_type, output, ..
+                } => Ok(TypedFact {
+                    event_type: event_type.clone(),
+                    payload: output.clone(),
+                }),
+                _ => Err(EffectError::EffectProvenanceMismatch(
+                    "multi-fact effect outcome group contains a non-domain-success record"
+                        .to_string(),
+                )),
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        return T::try_from_facts(&facts).map_err(effect_fact_set_error);
+    };
+
+    match &single.outcome {
+        EffectOutcomePayload::SucceededFact {
+            event_type, output, ..
+        } => T::try_from_facts(&[TypedFact {
+            event_type: event_type.clone(),
+            payload: output.clone(),
+        }])
+        .map_err(effect_fact_set_error),
+        EffectOutcomePayload::Succeeded { output } => {
+            let fact_types = T::fact_types();
+            let [fact_type] = fact_types.as_slice() else {
+                return Err(EffectError::EffectProvenanceMismatch(
+                    "legacy single-payload effect success cannot reconstruct a multi-fact output"
+                        .to_string(),
+                ));
+            };
+            T::try_from_facts(&[TypedFact {
+                event_type: fact_type.event_type.clone(),
+                payload: output.clone(),
+            }])
+            .map_err(effect_fact_set_error)
+        }
+        EffectOutcomePayload::Failed { .. } => recorded_failure_from_outcome(&single.outcome),
+    }
+}
+
+fn effect_record_group_to_events<T>(
+    records: &[&EffectRecord],
+    writer_id: WriterId,
+    parent: &ChainEvent,
+) -> Result<Vec<ChainEvent>, EffectError>
+where
+    T: TypedFactSet,
+{
+    validate_effect_outcome_group(records)?;
+    let mut events = Vec::new();
+    let [single] = records else {
+        let mut ordered = records.to_vec();
+        ordered.sort_by_key(|record| match &record.outcome {
+            EffectOutcomePayload::SucceededFact {
+                outcome_fact_ordinal,
+                ..
+            } => *outcome_fact_ordinal,
+            _ => u32::MAX,
+        });
+        for record in ordered {
+            let EffectOutcomePayload::SucceededFact {
+                event_type,
+                output,
+                outcome_fact_ordinal,
+            } = &record.outcome
+            else {
+                return Err(EffectError::EffectProvenanceMismatch(
+                    "multi-fact effect outcome group contains a non-domain-success record"
+                        .to_string(),
+                ));
+            };
+            events.push(effect_record_fact_event(
+                writer_id,
+                parent,
+                record,
+                event_type,
+                output.clone(),
+                *outcome_fact_ordinal,
+            )?);
+        }
+        return Ok(events);
+    };
+
+    match &single.outcome {
+        EffectOutcomePayload::SucceededFact {
+            event_type,
+            output,
+            outcome_fact_ordinal,
+        } => {
+            events.push(effect_record_fact_event(
+                writer_id,
+                parent,
+                single,
+                event_type,
+                output.clone(),
+                *outcome_fact_ordinal,
+            )?);
+            Ok(events)
+        }
+        EffectOutcomePayload::Succeeded { output } => {
+            let fact_types = T::fact_types();
+            let [fact_type] = fact_types.as_slice() else {
+                return Err(EffectError::EffectProvenanceMismatch(
+                    "legacy single-payload effect success cannot materialize a multi-fact output"
+                        .to_string(),
+                ));
+            };
+            events.push(effect_record_fact_event(
+                writer_id,
+                parent,
+                single,
+                &fact_type.event_type,
+                output.clone(),
+                0,
+            )?);
+            Ok(events)
+        }
+        EffectOutcomePayload::Failed { .. } => Ok(Vec::new()),
+    }
+}
+
+fn effect_record_fact_event(
+    writer_id: WriterId,
+    parent: &ChainEvent,
+    record: &EffectRecord,
+    event_type: &str,
+    output: Value,
+    outcome_fact_ordinal: u32,
+) -> Result<ChainEvent, EffectError> {
+    let mut event = ChainEventFactory::derived_data_event(writer_id, parent, event_type, output);
+    event.id = deterministic_event_id(
+        &record.cursor.recorded_flow_id,
+        &record.cursor.stage_key,
+        StageInputPosition(record.cursor.input_seq),
+        outcome_fact_ordinal,
+    );
+    event.processing_info.event_time = deterministic_event_time(
+        StageInputPosition(record.cursor.input_seq),
+        outcome_fact_ordinal,
+    );
+    let mut provenance = EffectProvenance::from_record(record, false);
+    provenance.outcome_fact_ordinal = Some(outcome_fact_ordinal);
+    Ok(event.with_effect_provenance(provenance))
+}
+
+fn is_routable_output_fact(
+    output_contract: Option<&StageOutputContract>,
+    event_type: &str,
+) -> bool {
+    match output_contract {
+        Some(contract) if !contract.is_empty() => contract.is_routable_event_type(event_type),
+        _ => false,
+    }
+}
+
 /// FLOWIP-120a: decode a committed or recorded effect outcome into the effect's
 /// typed output. Replay and the live transactional commit share this one decode
 /// path, so a live transactional return value is byte-identical to what a replay
@@ -1380,6 +2077,10 @@ where
     match outcome {
         EffectOutcomePayload::Succeeded { output } => serde_json::from_value(output.clone())
             .map_err(|e| EffectError::Serialization(e.to_string())),
+        EffectOutcomePayload::SucceededFact { output, .. } => {
+            serde_json::from_value(output.clone())
+                .map_err(|e| EffectError::Serialization(e.to_string()))
+        }
         EffectOutcomePayload::Failed {
             error_type,
             error_message,
@@ -1389,6 +2090,38 @@ where
             error_message: error_message.clone(),
             retryable: *retryable,
         }),
+    }
+}
+
+fn recorded_failure_from_outcome<T>(outcome: &EffectOutcomePayload) -> Result<T, EffectError> {
+    match outcome {
+        EffectOutcomePayload::Failed {
+            error_type,
+            error_message,
+            retryable,
+        } => Err(EffectError::RecordedFailure {
+            error_type: error_type.clone(),
+            error_message: error_message.clone(),
+            retryable: *retryable,
+        }),
+        _ => Err(EffectError::EffectProvenanceMismatch(
+            "expected recorded effect failure".to_string(),
+        )),
+    }
+}
+
+fn effect_fact_set_error(error: TypedFactSetError) -> EffectError {
+    match error {
+        TypedFactSetError::SerializationFailed(message) => EffectError::Serialization(message),
+        TypedFactSetError::DeserializationFailed { event_type, error } => {
+            EffectError::Serialization(format!("{event_type}: {error}"))
+        }
+        TypedFactSetError::MissingFact { event_type } => EffectError::EffectProvenanceMismatch(
+            format!("effect outcome group is missing fact `{event_type}`"),
+        ),
+        TypedFactSetError::DuplicateFact { event_type } => EffectError::EffectProvenanceMismatch(
+            format!("effect outcome group has duplicate fact `{event_type}`"),
+        ),
     }
 }
 
@@ -1631,13 +2364,22 @@ mod tests {
         calls: Arc<AtomicUsize>,
     }
 
+    #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    struct CountingOutput {
+        value: u64,
+    }
+
+    impl TypedPayload for CountingOutput {
+        const EVENT_TYPE: &'static str = "test.counting_output";
+    }
+
     #[async_trait]
     impl Effect for CountingEffect {
         const EFFECT_TYPE: &'static str = "test.counting";
         const SCHEMA_VERSION: u32 = 1;
         const SAFETY: EffectSafety = EffectSafety::Idempotent;
 
-        type Output = u64;
+        type Output = CountingOutput;
 
         fn label(&self) -> &str {
             self.label
@@ -1649,7 +2391,9 @@ mod tests {
 
         async fn execute(&self, _ctx: &mut EffectContext) -> Result<Self::Output, EffectError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
-            Ok(self.value + 1)
+            Ok(CountingOutput {
+                value: self.value + 1,
+            })
         }
     }
 
@@ -1665,7 +2409,7 @@ mod tests {
         const SCHEMA_VERSION: u32 = 1;
         const SAFETY: EffectSafety = EffectSafety::Transactional;
 
-        type Output = u64;
+        type Output = CountingOutput;
 
         fn label(&self) -> &str {
             "transactional"
@@ -1677,11 +2421,13 @@ mod tests {
 
         async fn execute(&self, _ctx: &mut EffectContext) -> Result<Self::Output, EffectError> {
             self.normal_calls.fetch_add(1, Ordering::SeqCst);
-            Ok(self.value + 10)
+            Ok(CountingOutput {
+                value: self.value + 10,
+            })
         }
     }
 
-    #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+    #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     struct FirstOutput {
         value: u64,
     }
@@ -1690,13 +2436,74 @@ mod tests {
         const EVENT_TYPE: &'static str = "test.first_output";
     }
 
-    #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+    #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     struct SecondOutput {
         value: String,
     }
 
     impl TypedPayload for SecondOutput {
         const EVENT_TYPE: &'static str = "test.second_output";
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct MultiFactOutcome {
+        first: FirstOutput,
+        second: SecondOutput,
+    }
+
+    impl TypedFactSet for MultiFactOutcome {
+        fn fact_types() -> Vec<obzenflow_core::event::schema::TypedFactType> {
+            vec![
+                obzenflow_core::event::schema::TypedFactType::of::<FirstOutput>(),
+                obzenflow_core::event::schema::TypedFactType::of::<SecondOutput>(),
+            ]
+        }
+
+        fn into_facts(self) -> Result<Vec<TypedFact>, TypedFactSetError> {
+            Ok(vec![
+                TypedFact::from_payload(self.first)?,
+                TypedFact::from_payload(self.second)?,
+            ])
+        }
+
+        fn try_from_facts(facts: &[TypedFact]) -> Result<Self, TypedFactSetError> {
+            Ok(Self {
+                first: <FirstOutput as TypedFactSet>::try_from_facts(facts)?,
+                second: <SecondOutput as TypedFactSet>::try_from_facts(facts)?,
+            })
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    struct MultiFactEffect {
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl Effect for MultiFactEffect {
+        const EFFECT_TYPE: &'static str = "test.multi_fact";
+        const SCHEMA_VERSION: u32 = 1;
+        const SAFETY: EffectSafety = EffectSafety::Idempotent;
+
+        type Output = MultiFactOutcome;
+
+        fn label(&self) -> &str {
+            "multi"
+        }
+
+        fn canonical_input(&self) -> Value {
+            json!({ "kind": "multi" })
+        }
+
+        async fn execute(&self, _ctx: &mut EffectContext) -> Result<Self::Output, EffectError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(MultiFactOutcome {
+                first: FirstOutput { value: 10 },
+                second: SecondOutput {
+                    value: "twenty".to_string(),
+                },
+            })
+        }
     }
 
     fn output_contract_for<T: TypedPayload>() -> StageOutputContract {
@@ -1708,6 +2515,23 @@ mod tests {
             schema_version: Some(T::SCHEMA_VERSION),
             visibility: crate::feed_plan::FactVisibility::Routable,
         })
+    }
+
+    fn output_contract_for_many(
+        outputs: Vec<crate::feed_plan::PayloadTypeDescriptor>,
+    ) -> StageOutputContract {
+        StageOutputContract { outputs }
+    }
+
+    fn output_descriptor_for<T: TypedPayload>() -> crate::feed_plan::PayloadTypeDescriptor {
+        crate::feed_plan::PayloadTypeDescriptor {
+            type_hint: TypeHintInfo::Exact {
+                name: std::any::type_name::<T>().to_string(),
+            },
+            event_type: Some(T::versioned_event_type()),
+            schema_version: Some(T::SCHEMA_VERSION),
+            visibility: crate::feed_plan::FactVisibility::Routable,
+        }
     }
 
     #[test]
@@ -1771,10 +2595,12 @@ mod tests {
             &self,
             effect: TransactionalCountingEffect,
             _ctx: &mut EffectContext,
-            commit: EffectCommitHandle<u64>,
-        ) -> Result<u64, EffectError> {
+            commit: EffectCommitHandle<CountingOutput>,
+        ) -> Result<CountingOutput, EffectError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
-            let output = effect.value + 1_000;
+            let output = CountingOutput {
+                value: effect.value + 1_000,
+            };
             if self.commit {
                 commit.commit_success(&output).await?;
             }
@@ -1795,13 +2621,17 @@ mod tests {
             &self,
             effect: TransactionalCountingEffect,
             _ctx: &mut EffectContext,
-            commit: EffectCommitHandle<u64>,
-        ) -> Result<u64, EffectError> {
+            commit: EffectCommitHandle<CountingOutput>,
+        ) -> Result<CountingOutput, EffectError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
-            let committed = effect.value + 1_000;
+            let committed = CountingOutput {
+                value: effect.value + 1_000,
+            };
             commit.commit_success(&committed).await?;
             // Return a value that disagrees with what was committed.
-            Ok(effect.value + 9_999)
+            Ok(CountingOutput {
+                value: effect.value + 9_999,
+            })
         }
     }
 
@@ -1855,9 +2685,11 @@ mod tests {
             effect_ports,
             effect_declarations: vec![
                 EffectDeclaration::of::<CountingEffect>(),
+                EffectDeclaration::of::<MultiFactEffect>(),
                 EffectDeclaration::transactional_effect::<TransactionalCountingEffect>("tx"),
             ],
             output_contract: StageOutputContract::empty(),
+            backpressure_writer: BackpressureWriter::disabled(),
             emit_enabled: false,
             effect_boundary: None,
             boundary_control_events: Arc::new(Mutex::new(Vec::new())),
@@ -1943,6 +2775,34 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn emit_rejects_routed_fanout_beyond_contract_member_bound() {
+        let stage_id = StageId::new();
+        let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
+        let mut ctx = invocation_context(
+            journal.clone(),
+            parent_envelope(WriterId::from(stage_id)),
+            None,
+        );
+        ctx.emit_enabled = true;
+        ctx.output_contract = output_contract_for::<FirstOutput>();
+        let mut effects = Effects::new(ctx);
+
+        effects
+            .emit(FirstOutput { value: 1 })
+            .await
+            .expect("first routed fact should be accepted");
+        let err = effects
+            .emit(FirstOutput { value: 2 })
+            .await
+            .expect_err("second routed fact should exceed strict v1 fanout bound");
+
+        assert!(
+            matches!(err, EffectError::Execution(message) if message.contains("bounded fanout limit"))
+        );
+        assert_eq!(journal.events().len(), 1);
+    }
+
     fn effect_records(journal: &MemoryJournal<ChainEvent>) -> Vec<EffectRecord> {
         journal
             .events()
@@ -1973,7 +2833,7 @@ mod tests {
             .await
             .expect("effect should succeed");
 
-        assert_eq!(output, 42);
+        assert_eq!(output.value, 42);
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         let events = journal.events();
         assert!(matches!(
@@ -1993,6 +2853,153 @@ mod tests {
             provenance.group_id.as_deref(),
             Some(effect_outcome_group_id(&records[0].cursor).as_str())
         );
+    }
+
+    #[tokio::test]
+    async fn perform_records_and_replays_multi_fact_effect_outcome_group() {
+        let stage_id = StageId::new();
+        let live_journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
+        let parent = parent_envelope(WriterId::from(stage_id));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut live_ctx = invocation_context(live_journal.clone(), parent.clone(), None);
+        live_ctx.output_contract = output_contract_for_many(vec![
+            output_descriptor_for::<FirstOutput>(),
+            output_descriptor_for::<SecondOutput>(),
+        ]);
+        let live_flow_id = live_ctx.flow_id.to_string();
+        let mut live_effects = Effects::new(live_ctx);
+
+        let live_output = live_effects
+            .perform(MultiFactEffect {
+                calls: calls.clone(),
+            })
+            .await
+            .expect("live multi-fact effect succeeds");
+
+        assert_eq!(
+            live_output,
+            MultiFactOutcome {
+                first: FirstOutput { value: 10 },
+                second: SecondOutput {
+                    value: "twenty".to_string()
+                },
+            }
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        let events = live_journal.events();
+        assert_eq!(events.len(), 2);
+        assert!(matches!(
+            &events[0].event.content,
+            ChainEventContent::Data { event_type, .. } if event_type == "test.first_output.v1"
+        ));
+        assert!(matches!(
+            &events[1].event.content,
+            ChainEventContent::Data { event_type, .. } if event_type == "test.second_output.v1"
+        ));
+        assert_eq!(
+            events[0]
+                .event
+                .effect_provenance
+                .as_ref()
+                .and_then(|provenance| provenance.outcome_fact_ordinal),
+            Some(0)
+        );
+        assert_eq!(
+            events[1]
+                .event
+                .effect_provenance
+                .as_ref()
+                .and_then(|provenance| provenance.outcome_fact_ordinal),
+            Some(1)
+        );
+        assert_eq!(
+            events[0]
+                .event
+                .effect_provenance
+                .as_ref()
+                .and_then(|provenance| provenance.group_id.as_deref()),
+            events[1]
+                .event
+                .effect_provenance
+                .as_ref()
+                .and_then(|provenance| provenance.group_id.as_deref())
+        );
+        assert_eq!(
+            events[0].event.id,
+            deterministic_event_id(&live_flow_id, "effect_stage", StageInputPosition(1), 0)
+        );
+        assert_eq!(
+            events[1].event.id,
+            deterministic_event_id(&live_flow_id, "effect_stage", StageInputPosition(1), 1)
+        );
+
+        let records = effect_records(&live_journal);
+        let history = Arc::new(
+            EffectHistory::from_records(live_flow_id, records).expect("grouped history loads"),
+        );
+        let replay_journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
+        let mut replay_ctx = invocation_context(replay_journal.clone(), parent, Some(history));
+        replay_ctx.output_contract = output_contract_for_many(vec![
+            output_descriptor_for::<FirstOutput>(),
+            output_descriptor_for::<SecondOutput>(),
+        ]);
+        let mut replay_effects = Effects::new(replay_ctx);
+
+        let replay_output = replay_effects
+            .perform(MultiFactEffect {
+                calls: calls.clone(),
+            })
+            .await
+            .expect("replay reconstructs multi-fact effect output");
+
+        assert_eq!(replay_output, live_output);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(replay_journal.events().is_empty());
+    }
+
+    #[test]
+    fn effect_history_rejects_partial_multi_fact_outcome_group() {
+        let cursor = EffectCursor {
+            recorded_flow_id: "flow".to_string(),
+            stage_key: "effect_stage".to_string(),
+            input_seq: 1,
+            effect_ordinal: 0,
+        };
+        let descriptor = EffectDescriptor {
+            effect_type: MultiFactEffect::EFFECT_TYPE.to_string(),
+            label: "multi".to_string(),
+            schema_version: MultiFactEffect::SCHEMA_VERSION,
+            stage_logic_version: "test-v1".to_string(),
+            canonical_input_hash: "input".to_string(),
+        };
+        let records = vec![
+            EffectRecord {
+                cursor: cursor.clone(),
+                descriptor_hash: "hash".to_string(),
+                descriptor: descriptor.clone(),
+                outcome: EffectOutcomePayload::SucceededFact {
+                    event_type: FirstOutput::versioned_event_type(),
+                    output: json!({ "value": 10 }),
+                    outcome_fact_ordinal: 0,
+                },
+            },
+            EffectRecord {
+                cursor,
+                descriptor_hash: "hash".to_string(),
+                descriptor,
+                outcome: EffectOutcomePayload::SucceededFact {
+                    event_type: SecondOutput::versioned_event_type(),
+                    output: json!({ "value": "twenty" }),
+                    outcome_fact_ordinal: 2,
+                },
+            },
+        ];
+
+        let err = EffectHistory::from_records("flow".to_string(), records)
+            .expect_err("missing ordinal 1 must fail loud");
+
+        assert!(matches!(err, EffectError::EffectProvenanceMismatch(_)));
     }
 
     #[tokio::test]
@@ -2130,7 +3137,7 @@ mod tests {
             })
             .await
             .expect("live effect should succeed");
-        assert_eq!(output, 10);
+        assert_eq!(output.value, 10);
 
         let records = effect_records(&journal);
         let history = Arc::new(
@@ -2153,7 +3160,7 @@ mod tests {
             .await
             .expect("replay should read recorded output");
 
-        assert_eq!(replayed, 10);
+        assert_eq!(replayed.value, 10);
         assert_eq!(replay_calls.load(Ordering::SeqCst), 0);
     }
 
@@ -2214,7 +3221,7 @@ mod tests {
             .await
             .expect("resume should execute missing effect live");
 
-        assert_eq!(output, 10);
+        assert_eq!(output.value, 10);
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         let records = effect_records(&journal);
         assert_eq!(records.len(), 1);
@@ -2264,7 +3271,7 @@ mod tests {
             .await
             .expect("resume should use recorded output");
 
-        assert_eq!(output, 10);
+        assert_eq!(output.value, 10);
         assert_eq!(replay_calls.load(Ordering::SeqCst), 0);
     }
 
@@ -2298,7 +3305,7 @@ mod tests {
             .await
             .expect("transactional port should commit");
 
-        assert_eq!(output, 1_007);
+        assert_eq!(output.value, 1_007);
         assert_eq!(normal_calls.load(Ordering::SeqCst), 0);
         assert_eq!(transactional_calls.load(Ordering::SeqCst), 1);
         let records = effect_records(&journal);
@@ -2338,7 +3345,7 @@ mod tests {
         // The live return is the committed value (7 + 1000), NOT the value the port
         // returned (7 + 9999). Without the structural fix this would be 10_006 live
         // and 1_007 on replay, a divergence.
-        assert_eq!(live_output, 1_007);
+        assert_eq!(live_output.value, 1_007);
         assert_eq!(port_calls.load(Ordering::SeqCst), 1);
 
         let records = effect_records(&journal);
@@ -2423,7 +3430,7 @@ mod tests {
             .await
             .expect("strict replay should use recorded transactional output");
 
-        assert_eq!(output, 1_007);
+        assert_eq!(output.value, 1_007);
         assert_eq!(normal_calls.load(Ordering::SeqCst), 0);
     }
 
@@ -2530,7 +3537,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn effect_history_fails_loud_on_duplicate_cursor() {
+    async fn effect_history_fails_loud_on_duplicate_scalar_cursor_record() {
         let stage_id = StageId::new();
         let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
         let mut live = Effects::new(invocation_context(
@@ -2550,9 +3557,9 @@ mod tests {
         records.push(records[0].clone());
 
         let err = EffectHistory::from_records(records[0].cursor.recorded_flow_id.clone(), records)
-            .expect_err("duplicate cursors must fail loud");
+            .expect_err("duplicate scalar cursor records must fail loud");
 
-        assert!(matches!(err, EffectError::DuplicateRecordedEffect { .. }));
+        assert!(matches!(err, EffectError::EffectProvenanceMismatch(_)));
     }
 
     #[tokio::test]

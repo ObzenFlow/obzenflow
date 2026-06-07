@@ -3144,7 +3144,7 @@ macro_rules! __obzenflow_effectful_stateful_typed {
         let __handler = $handler;
         fn __assert_effectful_stateful_contract<H>(_handler: &H)
         where
-            H: ::obzenflow_runtime::stages::EffectfulStatefulHandler<Input = $in, Output = $out>,
+            H: ::obzenflow_runtime::stages::EffectfulStatefulHandler<Input = $in>,
         {}
         __assert_effectful_stateful_contract(&__handler);
         let __metadata = $crate::dsl::typing::StageTypingMetadata::stateful(
@@ -3167,7 +3167,7 @@ macro_rules! __obzenflow_effectful_stateful_typed {
         let __handler = $handler;
         fn __assert_effectful_stateful_contract<H>(_handler: &H)
         where
-            H: ::obzenflow_runtime::stages::EffectfulStatefulHandler<Input = $in, Output = $out>,
+            H: ::obzenflow_runtime::stages::EffectfulStatefulHandler<Input = $in>,
         {}
         __assert_effectful_stateful_contract(&__handler);
         let __metadata = $crate::dsl::typing::StageTypingMetadata::stateful(
@@ -3190,7 +3190,7 @@ macro_rules! __obzenflow_effectful_stateful_typed {
         let __handler = $handler;
         fn __assert_effectful_stateful_contract<H>(_handler: &H)
         where
-            H: ::obzenflow_runtime::stages::EffectfulStatefulHandler<Input = $in, Output = $out>,
+            H: ::obzenflow_runtime::stages::EffectfulStatefulHandler<Input = $in>,
         {}
         __assert_effectful_stateful_contract(&__handler);
         let __metadata = $crate::dsl::typing::StageTypingMetadata::stateful(
@@ -3212,7 +3212,7 @@ macro_rules! __obzenflow_effectful_stateful_typed {
         let __handler = $handler;
         fn __assert_effectful_stateful_contract<H>(_handler: &H)
         where
-            H: ::obzenflow_runtime::stages::EffectfulStatefulHandler<Input = $in, Output = $out>,
+            H: ::obzenflow_runtime::stages::EffectfulStatefulHandler<Input = $in>,
         {}
         __assert_effectful_stateful_contract(&__handler);
         let __metadata = $crate::dsl::typing::StageTypingMetadata::stateful(

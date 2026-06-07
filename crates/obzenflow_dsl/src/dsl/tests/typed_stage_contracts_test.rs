@@ -301,33 +301,25 @@ mod tests {
     {
         type State = ();
         type Input = InputEvent;
-        type Output = OutputEvent;
-        type Transition = ();
+        type Fact = OutputEvent;
 
         fn initial_state(&self) -> Self::State {}
 
-        async fn transition(
+        async fn decide(
             &mut self,
             _state: &Self::State,
             _input: &Self::Input,
             _fx: &mut Effects,
-        ) -> Result<Self::Transition, HandlerError> {
+        ) -> Result<(), HandlerError> {
             Ok(())
         }
 
         fn apply(
             &mut self,
             _state: &mut Self::State,
-            _input: Self::Input,
-            _transition: Self::Transition,
+            _fact: Self::Fact,
         ) -> Result<(), HandlerError> {
             Ok(())
-        }
-
-        fn create_outputs(&self, _state: &Self::State) -> Result<Vec<Self::Output>, HandlerError> {
-            Ok(vec![OutputEvent {
-                value: "output".to_string(),
-            }])
         }
     }
 

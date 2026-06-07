@@ -4,6 +4,7 @@
 
 //! Running-state dispatch loop for the journal sink supervisor.
 
+use crate::backpressure::BackpressureWriter;
 use crate::effects::EffectInvocationContext;
 use crate::feed_plan::StageOutputContract;
 use crate::messaging::PollResult;
@@ -452,6 +453,7 @@ async fn dispatch_data_event<
             effect_ports: ctx.effect_ports.clone(),
             effect_declarations: ctx.effect_declarations.clone(),
             output_contract: StageOutputContract::empty(),
+            backpressure_writer: BackpressureWriter::disabled(),
             emit_enabled: false,
             effect_boundary: None,
             boundary_control_events: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
