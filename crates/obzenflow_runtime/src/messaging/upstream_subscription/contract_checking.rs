@@ -3,6 +3,7 @@
 // https://obzenflow.dev
 
 use super::{ContractStatus, ContractTracker, ReaderProgress, UpstreamSubscription};
+use crate::feed_plan::declared_event_type_matches;
 use crate::messaging::upstream_subscription_policy::{
     EdgeContext, EdgeContractDecision, PolicyHints,
 };
@@ -79,12 +80,18 @@ where
             .iter()
             .map(|feed| {
                 let reader_seq = reader_by_type
-                    .get(&feed.event_type)
-                    .copied()
+                    .iter()
+                    .find(|(event_type, _)| {
+                        declared_event_type_matches(&feed.event_type, event_type, None)
+                    })
+                    .map(|(_, seq)| *seq)
                     .unwrap_or(SeqNo(0));
                 let advertised_writer_seq = advertised_by_type
-                    .get(&feed.event_type)
-                    .copied()
+                    .iter()
+                    .find(|(event_type, _)| {
+                        declared_event_type_matches(&feed.event_type, event_type, None)
+                    })
+                    .map(|(_, seq)| *seq)
                     .unwrap_or(SeqNo(0));
                 DirectFeedContractEvidence {
                     event_type: feed.event_type.clone(),

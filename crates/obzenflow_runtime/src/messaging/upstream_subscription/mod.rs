@@ -28,6 +28,7 @@ pub use types::{
 };
 
 use crate::contracts::ContractChain;
+use crate::feed_plan::declared_event_type_matches;
 use crate::messaging::upstream_subscription_policy::ContractPolicyStack;
 use obzenflow_core::control_middleware::ControlMiddlewareProvider;
 use obzenflow_core::event::payloads::delivery_payload::DeliveryResult;
@@ -187,7 +188,11 @@ where
         self.selected_event_types_by_stage
             .get(&stage_id)
             .filter(|selected| !selected.is_empty())
-            .map(|selected| selected.contains(event_type))
+            .map(|selected| {
+                selected.iter().any(|selected_event_type| {
+                    declared_event_type_matches(selected_event_type, event_type, None)
+                })
+            })
             .unwrap_or(true)
     }
 
@@ -212,14 +217,22 @@ where
             return None;
         }
 
-        let selected_total = selected.iter().fold(0u64, |total, event_type| {
-            total.saturating_add(
+        let mut matched_event_types = HashSet::new();
+        let mut selected_total = 0u64;
+        for selected_event_type in selected {
+            let Some((actual_event_type, seq)) =
                 writer_seq_by_event_type
-                    .get(event_type)
-                    .map(|seq| seq.0)
-                    .unwrap_or(0),
-            )
-        });
+                    .iter()
+                    .find(|(actual_event_type, _)| {
+                        declared_event_type_matches(selected_event_type, actual_event_type, None)
+                    })
+            else {
+                continue;
+            };
+            if matched_event_types.insert(actual_event_type.clone()) {
+                selected_total = selected_total.saturating_add(seq.0);
+            }
+        }
         Some(SeqNo(selected_total))
     }
 

@@ -113,9 +113,11 @@ impl StageOutputContract {
     }
 
     pub fn contains_event_type(&self, event_type: &str) -> bool {
-        self.outputs
-            .iter()
-            .any(|output| output.event_type.as_deref() == Some(event_type))
+        self.outputs.iter().any(|output| {
+            output.event_type.as_deref().is_some_and(|declared| {
+                declared_event_type_matches(declared, event_type, output.schema_version)
+            })
+        })
     }
 
     pub fn is_empty(&self) -> bool {
@@ -232,6 +234,52 @@ pub fn payload_key_from_type_hint(type_hint: &TypeHintInfo) -> String {
     }
 }
 
+pub fn declared_event_type_matches(
+    declared_event_type: &str,
+    observed_event_type: &str,
+    schema_version: Option<u32>,
+) -> bool {
+    if declared_event_type == observed_event_type {
+        return true;
+    }
+
+    let declared_semantic = schema_version
+        .and_then(|version| strip_exact_version_suffix(declared_event_type, version))
+        .unwrap_or(declared_event_type);
+    let observed_semantic = schema_version
+        .and_then(|version| strip_exact_version_suffix(observed_event_type, version))
+        .unwrap_or(observed_event_type);
+
+    if declared_semantic == observed_semantic {
+        return true;
+    }
+
+    match (
+        split_version_suffix(declared_event_type),
+        split_version_suffix(observed_event_type),
+    ) {
+        (Some((declared_base, declared_version)), Some((observed_base, observed_version))) => {
+            declared_base == observed_base && declared_version == observed_version
+        }
+        (Some((declared_base, _)), None) => declared_base == observed_event_type,
+        (None, Some((observed_base, _))) => declared_event_type == observed_base,
+        (None, None) => false,
+    }
+}
+
+fn strip_exact_version_suffix(event_type: &str, schema_version: u32) -> Option<&str> {
+    let suffix = format!(".v{schema_version}");
+    event_type.strip_suffix(&suffix)
+}
+
+fn split_version_suffix(event_type: &str) -> Option<(&str, &str)> {
+    let (base, version) = event_type.rsplit_once(".v")?;
+    if base.is_empty() || version.is_empty() || !version.chars().all(|ch| ch.is_ascii_digit()) {
+        return None;
+    }
+    Some((base, version))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -273,5 +321,20 @@ mod tests {
             .expect("selected output contract member");
         assert_eq!(output.visibility, FactVisibility::Routable);
         assert_eq!(plan.input_feeds(downstream).len(), 1);
+    }
+
+    #[test]
+    fn output_contract_accepts_semantic_and_versioned_event_type_forms() {
+        let contract = StageOutputContract::single(PayloadTypeDescriptor {
+            type_hint: TypeHintInfo::exact("crate::PaymentAuthorized"),
+            event_type: Some("payment.authorized.v1".to_string()),
+            schema_version: Some(1),
+            visibility: FactVisibility::Routable,
+        });
+
+        assert!(contract.contains_event_type("payment.authorized"));
+        assert!(contract.contains_event_type("payment.authorized.v1"));
+        assert!(!contract.contains_event_type("payment.authorized.v2"));
+        assert!(!contract.contains_event_type("payment.declined"));
     }
 }
