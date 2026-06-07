@@ -548,6 +548,119 @@ mod tests {
     }
 
     #[test]
+    fn source_output_set_syntax_lowers_to_stage_output_contract() {
+        let source = crate::source!(
+            name: "multi_output_source",
+            { InputEvent, AlternateEvent } => SyncExactSource
+        );
+        let source_meta = source.typing_metadata().unwrap();
+        assert_eq!(source_meta.output_type, exact::<InputEvent>());
+        assert_output_contract(
+            source_meta,
+            vec![exact::<InputEvent>(), exact::<AlternateEvent>()],
+        );
+
+        let async_source = crate::async_source!(
+            name: "multi_output_async_source",
+            { InputEvent, AlternateEvent } => AsyncExactSource
+        );
+        let async_source_meta = async_source.typing_metadata().unwrap();
+        assert_eq!(async_source_meta.output_type, exact::<InputEvent>());
+        assert_output_contract(
+            async_source_meta,
+            vec![exact::<InputEvent>(), exact::<AlternateEvent>()],
+        );
+
+        let infinite_source = crate::infinite_source!(
+            name: "multi_output_infinite_source",
+            { InputEvent, AlternateEvent } => InfiniteExactSource
+        );
+        let infinite_source_meta = infinite_source.typing_metadata().unwrap();
+        assert_eq!(infinite_source_meta.output_type, exact::<InputEvent>());
+        assert_output_contract(
+            infinite_source_meta,
+            vec![exact::<InputEvent>(), exact::<AlternateEvent>()],
+        );
+
+        let async_infinite_source = crate::async_infinite_source!(
+            name: "multi_output_async_infinite_source",
+            { InputEvent, AlternateEvent } => AsyncInfiniteExactSource
+        );
+        let async_infinite_source_meta = async_infinite_source.typing_metadata().unwrap();
+        assert_eq!(
+            async_infinite_source_meta.output_type,
+            exact::<InputEvent>()
+        );
+        assert_output_contract(
+            async_infinite_source_meta,
+            vec![exact::<InputEvent>(), exact::<AlternateEvent>()],
+        );
+    }
+
+    #[test]
+    fn output_set_syntax_lowers_to_stage_output_contract() {
+        let transform = crate::transform!(
+            name: "multi_output_transform",
+            InputEvent -> { OutputEvent, AlternateEvent } => ExactTransform
+        );
+        let transform_meta = transform.typing_metadata().unwrap();
+        assert_eq!(transform_meta.output_type, exact::<OutputEvent>());
+        assert_output_contract(
+            transform_meta,
+            vec![exact::<OutputEvent>(), exact::<AlternateEvent>()],
+        );
+
+        let async_transform = crate::async_transform!(
+            name: "multi_output_async_transform",
+            InputEvent -> { OutputEvent, AlternateEvent } => ExactAsyncTransform
+        );
+        let async_transform_meta = async_transform.typing_metadata().unwrap();
+        assert_eq!(async_transform_meta.output_type, exact::<OutputEvent>());
+        assert_output_contract(
+            async_transform_meta,
+            vec![exact::<OutputEvent>(), exact::<AlternateEvent>()],
+        );
+
+        let stateful = crate::stateful!(
+            name: "multi_output_stateful",
+            InputEvent -> { OutputEvent, AlternateEvent } => ExactStateful,
+            emit_interval = Duration::from_secs(1)
+        );
+        let stateful_meta = stateful.typing_metadata().unwrap();
+        assert_eq!(stateful_meta.output_type, exact::<OutputEvent>());
+        assert_output_contract(
+            stateful_meta,
+            vec![exact::<OutputEvent>(), exact::<AlternateEvent>()],
+        );
+
+        let effectful_stateful = crate::effectful_stateful!(
+            name: "multi_output_effectful_stateful",
+            InputEvent -> { OutputEvent, AlternateEvent } => EffectfulProductStateful,
+            emit_interval = Duration::from_secs(1),
+            effects: [],
+            middleware: []
+        );
+        let effectful_stateful_meta = effectful_stateful.typing_metadata().unwrap();
+        assert_eq!(effectful_stateful_meta.output_type, exact::<OutputEvent>());
+        assert_output_contract(
+            effectful_stateful_meta,
+            vec![exact::<OutputEvent>(), exact::<AlternateEvent>()],
+        );
+
+        let join = crate::join!(
+            name: "multi_output_join",
+            catalog reference: ReferenceEvent,
+            StreamEvent -> { JoinedEvent, AlternateEvent } => ExactJoin
+        );
+        let join_meta = join.typing_metadata().unwrap();
+        assert_eq!(join_meta.output_type, exact::<JoinedEvent>());
+        assert_output_contract(
+            join_meta,
+            vec![exact::<JoinedEvent>(), exact::<AlternateEvent>()],
+        );
+    }
+
+    #[test]
     fn effectful_stateful_scalar_output_contract_has_one_member() {
         let effectful_stateful = crate::effectful_stateful!(
             name: "effectful_stateful",
@@ -624,6 +737,30 @@ mod tests {
             TypeHintInfo::Exact {
                 name: type_name::<JoinedEvent>().to_string()
             }
+        );
+    }
+
+    #[test]
+    fn collect_stage_typing_info_projects_multi_output_contract_as_mixed() {
+        let source_id = StageId::new();
+
+        let mut descriptors: HashMap<String, Box<dyn StageDescriptor>> = HashMap::new();
+        descriptors.insert(
+            "source".to_string(),
+            crate::source!(
+                name: "source",
+                { InputEvent, AlternateEvent } => SyncExactSource
+            ),
+        );
+
+        let mut name_to_id = HashMap::new();
+        name_to_id.insert("source".to_string(), source_id);
+
+        let stage_typing = collect_stage_typing_info(&descriptors, &name_to_id);
+
+        assert_eq!(
+            stage_typing.get(&source_id).unwrap().output_type,
+            TypeHintInfo::Mixed
         );
     }
 
@@ -776,6 +913,48 @@ mod tests {
 
         validate_edge_typing(&topology, &descriptors, &name_to_id)
             .expect("downstream selected type is a member of upstream output contract");
+    }
+
+    #[test]
+    fn output_set_member_order_does_not_affect_edge_subscription() {
+        let source_id = StageId::new();
+        let sink_id = StageId::new();
+
+        let mut descriptors: HashMap<String, Box<dyn StageDescriptor>> = HashMap::new();
+        descriptors.insert(
+            "source".to_string(),
+            crate::source!(
+                name: "source",
+                { InputEvent, AlternateEvent } => SyncExactSource
+            ),
+        );
+        descriptors.insert(
+            "alternate_sink".to_string(),
+            crate::sink!(name: "alternate_sink", AlternateEvent => placeholder!()),
+        );
+
+        let mut name_to_id = HashMap::new();
+        name_to_id.insert("source".to_string(), source_id);
+        name_to_id.insert("alternate_sink".to_string(), sink_id);
+
+        let mut topology = TopologyBuilder::new();
+        topology.add_stage_with_id(
+            source_id.to_topology_id(),
+            Some("source".to_string()),
+            TopologyStageType::FiniteSource,
+        );
+        topology.reset_current();
+        topology.add_stage_with_id(
+            sink_id.to_topology_id(),
+            Some("alternate_sink".to_string()),
+            TopologyStageType::Sink,
+        );
+        topology.reset_current();
+        topology.add_edge(source_id.to_topology_id(), sink_id.to_topology_id());
+        let topology = topology.build_unchecked().unwrap();
+
+        validate_edge_typing(&topology, &descriptors, &name_to_id)
+            .expect("any output-set member, including a non-first member, is selectable");
     }
 
     #[test]
@@ -1599,6 +1778,72 @@ mod tests {
             .expect("join output contract member");
         assert_eq!(join_output.type_hint, join_type);
         assert_eq!(join_output.visibility, FactVisibility::Unrouted);
+    }
+
+    #[test]
+    fn derive_feed_plan_selects_non_first_output_set_member() {
+        let source_id = StageId::new();
+        let sink_id = StageId::new();
+
+        let mut descriptors: HashMap<String, Box<dyn StageDescriptor>> = HashMap::new();
+        descriptors.insert(
+            "source".to_string(),
+            crate::source!(
+                name: "source",
+                { InputEvent, AlternateEvent } => SyncExactSource
+            ),
+        );
+        descriptors.insert(
+            "alternate_sink".to_string(),
+            crate::sink!(name: "alternate_sink", AlternateEvent => placeholder!()),
+        );
+
+        let mut name_to_id = HashMap::new();
+        name_to_id.insert("source".to_string(), source_id);
+        name_to_id.insert("alternate_sink".to_string(), sink_id);
+
+        let mut topology = TopologyBuilder::new();
+        topology.add_stage_with_id(
+            source_id.to_topology_id(),
+            Some("source".to_string()),
+            TopologyStageType::FiniteSource,
+        );
+        topology.reset_current();
+        topology.add_stage_with_id(
+            sink_id.to_topology_id(),
+            Some("alternate_sink".to_string()),
+            TopologyStageType::Sink,
+        );
+        topology.reset_current();
+        topology.add_edge(source_id.to_topology_id(), sink_id.to_topology_id());
+        let topology = topology.build_unchecked().unwrap();
+
+        let plan = derive_feed_plan(&topology, &descriptors, &name_to_id);
+        assert_eq!(plan.all_feeds().len(), 1);
+
+        let alternate_key = AlternateEvent::versioned_event_type();
+        let feed = &plan.all_feeds()[0];
+        assert_eq!(feed.key.upstream_stage, source_id);
+        assert_eq!(feed.key.downstream_stage, sink_id);
+        assert_eq!(feed.key.selected_payload_key, alternate_key);
+        assert_eq!(
+            feed.selected_payload.type_hint,
+            TypeHintInfo::exact(type_name::<AlternateEvent>())
+        );
+
+        let contract = plan
+            .output_contract(source_id)
+            .expect("source output contract");
+        assert!(contract
+            .output_by_key(&InputEvent::versioned_event_type())
+            .is_some());
+        assert_eq!(
+            contract
+                .output_by_key(&alternate_key)
+                .expect("alternate output contract member")
+                .visibility,
+            FactVisibility::Routable
+        );
     }
 
     /// FLOWIP-114c Acceptance #4 + #25, failing case: a join whose stream slot

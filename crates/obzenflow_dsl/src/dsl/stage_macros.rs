@@ -88,6 +88,50 @@ macro_rules! placeholder {
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __obzenflow_source_typed {
+    (output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = placeholder!(), middleware = [$($mw:expr),*]) => {{
+        let __metadata = $crate::dsl::typing::StageTypingMetadata::source(
+            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
+            true,
+            None,
+        )
+        .with_additional_output_contract($crate::__obzenflow_output_contract_members!($($member),+));
+        let __descriptor = $crate::__obzenflow_source_untyped!(
+            name = $name,
+            handler = $crate::dsl::typing::PlaceholderFiniteSource::<$out>::new(None),
+            middleware = [$($mw),*]
+        );
+        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
+    }};
+    (output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = placeholder!($msg:expr), middleware = [$($mw:expr),*]) => {{
+        let __metadata = $crate::dsl::typing::StageTypingMetadata::source(
+            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
+            true,
+            Some(($msg).to_string()),
+        )
+        .with_additional_output_contract($crate::__obzenflow_output_contract_members!($($member),+));
+        let __descriptor = $crate::__obzenflow_source_untyped!(
+            name = $name,
+            handler = $crate::dsl::typing::PlaceholderFiniteSource::<$out>::new(Some($msg)),
+            middleware = [$($mw),*]
+        );
+        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
+    }};
+    (output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = $handler:expr, middleware = [$($mw:expr),*]) => {{
+        let __handler = $handler;
+        // FLOWIP-114c PR D: assert_source_output dropped, see sink rationale.
+        let __metadata = $crate::dsl::typing::StageTypingMetadata::source(
+            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
+            false,
+            None,
+        )
+        .with_additional_output_contract($crate::__obzenflow_output_contract_members!($($member),+));
+        let __descriptor = $crate::__obzenflow_source_untyped!(
+            name = $name,
+            handler = __handler,
+            middleware = [$($mw),*]
+        );
+        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
+    }};
     (output = $out:ty, name = $name:literal, handler = placeholder!(), middleware = [$($mw:expr),*]) => {{
         let __metadata = $crate::dsl::typing::StageTypingMetadata::source(
             $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
@@ -148,6 +192,60 @@ macro_rules! __obzenflow_source_untyped {
 #[macro_export]
 macro_rules! source {
     // ── typed (binding-derived name) ──
+    ({ $first:ty $(, $member:ty)* $(,)? } => placeholder!()) => {
+        $crate::__obzenflow_source_typed!(
+            output = $first,
+            output_contract = [$first $(, $member)*],
+            name = "__obzenflow_binding_derived_name__",
+            handler = placeholder!(),
+            middleware = []
+        )
+    };
+    ({ $first:ty $(, $member:ty)* $(,)? } => placeholder!($msg:expr)) => {
+        $crate::__obzenflow_source_typed!(
+            output = $first,
+            output_contract = [$first $(, $member)*],
+            name = "__obzenflow_binding_derived_name__",
+            handler = placeholder!($msg),
+            middleware = []
+        )
+    };
+    ({ $first:ty $(, $member:ty)* $(,)? } => placeholder!(), [$($mw:expr),*]) => {
+        $crate::__obzenflow_source_typed!(
+            output = $first,
+            output_contract = [$first $(, $member)*],
+            name = "__obzenflow_binding_derived_name__",
+            handler = placeholder!(),
+            middleware = [$($mw),*]
+        )
+    };
+    ({ $first:ty $(, $member:ty)* $(,)? } => placeholder!($msg:expr), [$($mw:expr),*]) => {
+        $crate::__obzenflow_source_typed!(
+            output = $first,
+            output_contract = [$first $(, $member)*],
+            name = "__obzenflow_binding_derived_name__",
+            handler = placeholder!($msg),
+            middleware = [$($mw),*]
+        )
+    };
+    ({ $first:ty $(, $member:ty)* $(,)? } => $handler:expr) => {
+        $crate::__obzenflow_source_typed!(
+            output = $first,
+            output_contract = [$first $(, $member)*],
+            name = "__obzenflow_binding_derived_name__",
+            handler = $handler,
+            middleware = []
+        )
+    };
+    ({ $first:ty $(, $member:ty)* $(,)? } => $handler:expr, [$($mw:expr),*]) => {
+        $crate::__obzenflow_source_typed!(
+            output = $first,
+            output_contract = [$first $(, $member)*],
+            name = "__obzenflow_binding_derived_name__",
+            handler = $handler,
+            middleware = [$($mw),*]
+        )
+    };
     ($out:ty => placeholder!()) => {
         $crate::__obzenflow_source_typed!(
             output = $out,
@@ -198,6 +296,24 @@ macro_rules! source {
     };
 
     // ── typed (explicit name override) ──
+    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => placeholder!()) => {
+        $crate::__obzenflow_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = $name, handler = placeholder!(), middleware = [])
+    };
+    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => placeholder!($msg:expr)) => {
+        $crate::__obzenflow_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = $name, handler = placeholder!($msg), middleware = [])
+    };
+    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => placeholder!(), [$($mw:expr),*]) => {
+        $crate::__obzenflow_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = $name, handler = placeholder!(), middleware = [$($mw),*])
+    };
+    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => placeholder!($msg:expr), [$($mw:expr),*]) => {
+        $crate::__obzenflow_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = $name, handler = placeholder!($msg), middleware = [$($mw),*])
+    };
+    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => $handler:expr) => {
+        $crate::__obzenflow_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = $name, handler = $handler, middleware = [])
+    };
+    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => $handler:expr, [$($mw:expr),*]) => {
+        $crate::__obzenflow_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = $name, handler = $handler, middleware = [$($mw),*])
+    };
     (name: $name:literal, $out:ty => placeholder!()) => {
         $crate::__obzenflow_source_typed!(output = $out, name = $name, handler = placeholder!(), middleware = [])
     };
@@ -241,6 +357,66 @@ macro_rules! __obzenflow_async_source_untyped {
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __obzenflow_async_source_typed {
+    (output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = placeholder!(), middleware = [$($mw:expr),*]) => {{
+        let __metadata = $crate::dsl::typing::StageTypingMetadata::source(
+            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
+            true,
+            None,
+        )
+        .with_additional_output_contract($crate::__obzenflow_output_contract_members!($($member),+));
+        let __descriptor = $crate::__obzenflow_async_source_untyped!(
+            name = $name,
+            handler = $crate::dsl::typing::PlaceholderAsyncSource::<$out>::new(None),
+            middleware = [$($mw),*]
+        );
+        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
+    }};
+    (output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = placeholder!($msg:expr), middleware = [$($mw:expr),*]) => {{
+        let __metadata = $crate::dsl::typing::StageTypingMetadata::source(
+            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
+            true,
+            Some(($msg).to_string()),
+        )
+        .with_additional_output_contract($crate::__obzenflow_output_contract_members!($($member),+));
+        let __descriptor = $crate::__obzenflow_async_source_untyped!(
+            name = $name,
+            handler = $crate::dsl::typing::PlaceholderAsyncSource::<$out>::new(Some($msg)),
+            middleware = [$($mw),*]
+        );
+        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
+    }};
+    (output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = ($handler:expr, $poll_timeout:expr), middleware = [$($mw:expr),*]) => {{
+        let __handler = $handler;
+        // FLOWIP-114c PR D: assert_source_output dropped, see sink rationale.
+        let __metadata = $crate::dsl::typing::StageTypingMetadata::source(
+            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
+            false,
+            None,
+        )
+        .with_additional_output_contract($crate::__obzenflow_output_contract_members!($($member),+));
+        let __descriptor = $crate::__obzenflow_async_source_untyped!(
+            name = $name,
+            handler = (__handler, $poll_timeout),
+            middleware = [$($mw),*]
+        );
+        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
+    }};
+    (output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = $handler:expr, middleware = [$($mw:expr),*]) => {{
+        let __handler = $handler;
+        // FLOWIP-114c PR D: assert_source_output dropped, see sink rationale.
+        let __metadata = $crate::dsl::typing::StageTypingMetadata::source(
+            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
+            false,
+            None,
+        )
+        .with_additional_output_contract($crate::__obzenflow_output_contract_members!($($member),+));
+        let __descriptor = $crate::__obzenflow_async_source_untyped!(
+            name = $name,
+            handler = __handler,
+            middleware = [$($mw),*]
+        );
+        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
+    }};
     (output = $out:ty, name = $name:literal, handler = placeholder!(), middleware = [$($mw:expr),*]) => {{
         let __metadata = $crate::dsl::typing::StageTypingMetadata::source(
             $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
@@ -303,6 +479,30 @@ macro_rules! __obzenflow_async_source_typed {
 #[macro_export]
 macro_rules! async_source {
     // ── typed (binding-derived name) ──
+    ({ $first:ty $(, $member:ty)* $(,)? } => placeholder!()) => {
+        $crate::__obzenflow_async_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = "__obzenflow_binding_derived_name__", handler = placeholder!(), middleware = [])
+    };
+    ({ $first:ty $(, $member:ty)* $(,)? } => placeholder!($msg:expr)) => {
+        $crate::__obzenflow_async_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = "__obzenflow_binding_derived_name__", handler = placeholder!($msg), middleware = [])
+    };
+    ({ $first:ty $(, $member:ty)* $(,)? } => placeholder!(), [$($mw:expr),*]) => {
+        $crate::__obzenflow_async_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = "__obzenflow_binding_derived_name__", handler = placeholder!(), middleware = [$($mw),*])
+    };
+    ({ $first:ty $(, $member:ty)* $(,)? } => placeholder!($msg:expr), [$($mw:expr),*]) => {
+        $crate::__obzenflow_async_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = "__obzenflow_binding_derived_name__", handler = placeholder!($msg), middleware = [$($mw),*])
+    };
+    ({ $first:ty $(, $member:ty)* $(,)? } => ($handler:expr, $poll_timeout:expr)) => {
+        $crate::__obzenflow_async_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = "__obzenflow_binding_derived_name__", handler = ($handler, $poll_timeout), middleware = [])
+    };
+    ({ $first:ty $(, $member:ty)* $(,)? } => ($handler:expr, $poll_timeout:expr), [$($mw:expr),*]) => {
+        $crate::__obzenflow_async_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = "__obzenflow_binding_derived_name__", handler = ($handler, $poll_timeout), middleware = [$($mw),*])
+    };
+    ({ $first:ty $(, $member:ty)* $(,)? } => $handler:expr) => {
+        $crate::__obzenflow_async_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = "__obzenflow_binding_derived_name__", handler = $handler, middleware = [])
+    };
+    ({ $first:ty $(, $member:ty)* $(,)? } => $handler:expr, [$($mw:expr),*]) => {
+        $crate::__obzenflow_async_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = "__obzenflow_binding_derived_name__", handler = $handler, middleware = [$($mw),*])
+    };
     ($out:ty => placeholder!()) => {
         $crate::__obzenflow_async_source_typed!(output = $out, name = "__obzenflow_binding_derived_name__", handler = placeholder!(), middleware = [])
     };
@@ -329,6 +529,30 @@ macro_rules! async_source {
     };
 
     // ── typed (explicit name override) ──
+    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => placeholder!()) => {
+        $crate::__obzenflow_async_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = $name, handler = placeholder!(), middleware = [])
+    };
+    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => placeholder!($msg:expr)) => {
+        $crate::__obzenflow_async_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = $name, handler = placeholder!($msg), middleware = [])
+    };
+    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => placeholder!(), [$($mw:expr),*]) => {
+        $crate::__obzenflow_async_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = $name, handler = placeholder!(), middleware = [$($mw),*])
+    };
+    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => placeholder!($msg:expr), [$($mw:expr),*]) => {
+        $crate::__obzenflow_async_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = $name, handler = placeholder!($msg), middleware = [$($mw),*])
+    };
+    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => ($handler:expr, $poll_timeout:expr)) => {
+        $crate::__obzenflow_async_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = $name, handler = ($handler, $poll_timeout), middleware = [])
+    };
+    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => ($handler:expr, $poll_timeout:expr), [$($mw:expr),*]) => {
+        $crate::__obzenflow_async_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = $name, handler = ($handler, $poll_timeout), middleware = [$($mw),*])
+    };
+    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => $handler:expr) => {
+        $crate::__obzenflow_async_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = $name, handler = $handler, middleware = [])
+    };
+    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => $handler:expr, [$($mw:expr),*]) => {
+        $crate::__obzenflow_async_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = $name, handler = $handler, middleware = [$($mw),*])
+    };
     (name: $name:literal, $out:ty => placeholder!()) => {
         $crate::__obzenflow_async_source_typed!(output = $out, name = $name, handler = placeholder!(), middleware = [])
     };
@@ -375,6 +599,50 @@ macro_rules! __obzenflow_infinite_source_untyped {
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __obzenflow_infinite_source_typed {
+    (output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = placeholder!(), middleware = [$($mw:expr),*]) => {{
+        let __metadata = $crate::dsl::typing::StageTypingMetadata::source(
+            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
+            true,
+            None,
+        )
+        .with_additional_output_contract($crate::__obzenflow_output_contract_members!($($member),+));
+        let __descriptor = $crate::__obzenflow_infinite_source_untyped!(
+            name = $name,
+            handler = $crate::dsl::typing::PlaceholderInfiniteSource::<$out>::new(None),
+            middleware = [$($mw),*]
+        );
+        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
+    }};
+    (output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = placeholder!($msg:expr), middleware = [$($mw:expr),*]) => {{
+        let __metadata = $crate::dsl::typing::StageTypingMetadata::source(
+            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
+            true,
+            Some(($msg).to_string()),
+        )
+        .with_additional_output_contract($crate::__obzenflow_output_contract_members!($($member),+));
+        let __descriptor = $crate::__obzenflow_infinite_source_untyped!(
+            name = $name,
+            handler = $crate::dsl::typing::PlaceholderInfiniteSource::<$out>::new(Some($msg)),
+            middleware = [$($mw),*]
+        );
+        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
+    }};
+    (output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = $handler:expr, middleware = [$($mw:expr),*]) => {{
+        let __handler = $handler;
+        // FLOWIP-114c PR D: assert_source_output dropped, see sink rationale.
+        let __metadata = $crate::dsl::typing::StageTypingMetadata::source(
+            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
+            false,
+            None,
+        )
+        .with_additional_output_contract($crate::__obzenflow_output_contract_members!($($member),+));
+        let __descriptor = $crate::__obzenflow_infinite_source_untyped!(
+            name = $name,
+            handler = __handler,
+            middleware = [$($mw),*]
+        );
+        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
+    }};
     (output = $out:ty, name = $name:literal, handler = placeholder!(), middleware = [$($mw:expr),*]) => {{
         let __metadata = $crate::dsl::typing::StageTypingMetadata::source(
             $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
@@ -422,6 +690,60 @@ macro_rules! __obzenflow_infinite_source_typed {
 #[macro_export]
 macro_rules! infinite_source {
     // ── typed (binding-derived name) ──
+    ({ $first:ty $(, $member:ty)* $(,)? } => placeholder!()) => {
+        $crate::__obzenflow_infinite_source_typed!(
+            output = $first,
+            output_contract = [$first $(, $member)*],
+            name = "__obzenflow_binding_derived_name__",
+            handler = placeholder!(),
+            middleware = []
+        )
+    };
+    ({ $first:ty $(, $member:ty)* $(,)? } => placeholder!($msg:expr)) => {
+        $crate::__obzenflow_infinite_source_typed!(
+            output = $first,
+            output_contract = [$first $(, $member)*],
+            name = "__obzenflow_binding_derived_name__",
+            handler = placeholder!($msg),
+            middleware = []
+        )
+    };
+    ({ $first:ty $(, $member:ty)* $(,)? } => placeholder!(), [$($mw:expr),*]) => {
+        $crate::__obzenflow_infinite_source_typed!(
+            output = $first,
+            output_contract = [$first $(, $member)*],
+            name = "__obzenflow_binding_derived_name__",
+            handler = placeholder!(),
+            middleware = [$($mw),*]
+        )
+    };
+    ({ $first:ty $(, $member:ty)* $(,)? } => placeholder!($msg:expr), [$($mw:expr),*]) => {
+        $crate::__obzenflow_infinite_source_typed!(
+            output = $first,
+            output_contract = [$first $(, $member)*],
+            name = "__obzenflow_binding_derived_name__",
+            handler = placeholder!($msg),
+            middleware = [$($mw),*]
+        )
+    };
+    ({ $first:ty $(, $member:ty)* $(,)? } => $handler:expr) => {
+        $crate::__obzenflow_infinite_source_typed!(
+            output = $first,
+            output_contract = [$first $(, $member)*],
+            name = "__obzenflow_binding_derived_name__",
+            handler = $handler,
+            middleware = []
+        )
+    };
+    ({ $first:ty $(, $member:ty)* $(,)? } => $handler:expr, [$($mw:expr),*]) => {
+        $crate::__obzenflow_infinite_source_typed!(
+            output = $first,
+            output_contract = [$first $(, $member)*],
+            name = "__obzenflow_binding_derived_name__",
+            handler = $handler,
+            middleware = [$($mw),*]
+        )
+    };
     ($out:ty => placeholder!()) => {
         $crate::__obzenflow_infinite_source_typed!(
             output = $out,
@@ -472,6 +794,60 @@ macro_rules! infinite_source {
     };
 
     // ── typed (explicit name override) ──
+    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => placeholder!()) => {
+        $crate::__obzenflow_infinite_source_typed!(
+            output = $first,
+            output_contract = [$first $(, $member)*],
+            name = $name,
+            handler = placeholder!(),
+            middleware = []
+        )
+    };
+    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => placeholder!($msg:expr)) => {
+        $crate::__obzenflow_infinite_source_typed!(
+            output = $first,
+            output_contract = [$first $(, $member)*],
+            name = $name,
+            handler = placeholder!($msg),
+            middleware = []
+        )
+    };
+    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => placeholder!(), [$($mw:expr),*]) => {
+        $crate::__obzenflow_infinite_source_typed!(
+            output = $first,
+            output_contract = [$first $(, $member)*],
+            name = $name,
+            handler = placeholder!(),
+            middleware = [$($mw),*]
+        )
+    };
+    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => placeholder!($msg:expr), [$($mw:expr),*]) => {
+        $crate::__obzenflow_infinite_source_typed!(
+            output = $first,
+            output_contract = [$first $(, $member)*],
+            name = $name,
+            handler = placeholder!($msg),
+            middleware = [$($mw),*]
+        )
+    };
+    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => $handler:expr) => {
+        $crate::__obzenflow_infinite_source_typed!(
+            output = $first,
+            output_contract = [$first $(, $member)*],
+            name = $name,
+            handler = $handler,
+            middleware = []
+        )
+    };
+    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => $handler:expr, [$($mw:expr),*]) => {
+        $crate::__obzenflow_infinite_source_typed!(
+            output = $first,
+            output_contract = [$first $(, $member)*],
+            name = $name,
+            handler = $handler,
+            middleware = [$($mw),*]
+        )
+    };
     (name: $name:literal, $out:ty => placeholder!()) => {
         $crate::__obzenflow_infinite_source_typed!(
             output = $out,
@@ -545,6 +921,66 @@ macro_rules! __obzenflow_async_infinite_source_untyped {
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __obzenflow_async_infinite_source_typed {
+    (output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = placeholder!(), middleware = [$($mw:expr),*]) => {{
+        let __metadata = $crate::dsl::typing::StageTypingMetadata::source(
+            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
+            true,
+            None,
+        )
+        .with_additional_output_contract($crate::__obzenflow_output_contract_members!($($member),+));
+        let __descriptor = $crate::__obzenflow_async_infinite_source_untyped!(
+            name = $name,
+            handler = $crate::dsl::typing::PlaceholderAsyncSource::<$out>::new(None),
+            middleware = [$($mw),*]
+        );
+        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
+    }};
+    (output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = placeholder!($msg:expr), middleware = [$($mw:expr),*]) => {{
+        let __metadata = $crate::dsl::typing::StageTypingMetadata::source(
+            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
+            true,
+            Some(($msg).to_string()),
+        )
+        .with_additional_output_contract($crate::__obzenflow_output_contract_members!($($member),+));
+        let __descriptor = $crate::__obzenflow_async_infinite_source_untyped!(
+            name = $name,
+            handler = $crate::dsl::typing::PlaceholderAsyncSource::<$out>::new(Some($msg)),
+            middleware = [$($mw),*]
+        );
+        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
+    }};
+    (output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = ($handler:expr, $poll_timeout:expr), middleware = [$($mw:expr),*]) => {{
+        let __handler = $handler;
+        // FLOWIP-114c PR D: assert_source_output dropped, see sink rationale.
+        let __metadata = $crate::dsl::typing::StageTypingMetadata::source(
+            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
+            false,
+            None,
+        )
+        .with_additional_output_contract($crate::__obzenflow_output_contract_members!($($member),+));
+        let __descriptor = $crate::__obzenflow_async_infinite_source_untyped!(
+            name = $name,
+            handler = (__handler, $poll_timeout),
+            middleware = [$($mw),*]
+        );
+        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
+    }};
+    (output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = $handler:expr, middleware = [$($mw:expr),*]) => {{
+        let __handler = $handler;
+        // FLOWIP-114c PR D: assert_source_output dropped, see sink rationale.
+        let __metadata = $crate::dsl::typing::StageTypingMetadata::source(
+            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
+            false,
+            None,
+        )
+        .with_additional_output_contract($crate::__obzenflow_output_contract_members!($($member),+));
+        let __descriptor = $crate::__obzenflow_async_infinite_source_untyped!(
+            name = $name,
+            handler = __handler,
+            middleware = [$($mw),*]
+        );
+        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
+    }};
     (output = $out:ty, name = $name:literal, handler = placeholder!(), middleware = [$($mw:expr),*]) => {{
         let __metadata = $crate::dsl::typing::StageTypingMetadata::source(
             $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
@@ -607,6 +1043,78 @@ macro_rules! __obzenflow_async_infinite_source_typed {
 #[macro_export]
 macro_rules! async_infinite_source {
     // ── typed (binding-derived name) ──
+    ({ $first:ty $(, $member:ty)* $(,)? } => placeholder!()) => {
+        $crate::__obzenflow_async_infinite_source_typed!(
+            output = $first,
+            output_contract = [$first $(, $member)*],
+            name = "__obzenflow_binding_derived_name__",
+            handler = placeholder!(),
+            middleware = []
+        )
+    };
+    ({ $first:ty $(, $member:ty)* $(,)? } => placeholder!($msg:expr)) => {
+        $crate::__obzenflow_async_infinite_source_typed!(
+            output = $first,
+            output_contract = [$first $(, $member)*],
+            name = "__obzenflow_binding_derived_name__",
+            handler = placeholder!($msg),
+            middleware = []
+        )
+    };
+    ({ $first:ty $(, $member:ty)* $(,)? } => placeholder!(), [$($mw:expr),*]) => {
+        $crate::__obzenflow_async_infinite_source_typed!(
+            output = $first,
+            output_contract = [$first $(, $member)*],
+            name = "__obzenflow_binding_derived_name__",
+            handler = placeholder!(),
+            middleware = [$($mw),*]
+        )
+    };
+    ({ $first:ty $(, $member:ty)* $(,)? } => placeholder!($msg:expr), [$($mw:expr),*]) => {
+        $crate::__obzenflow_async_infinite_source_typed!(
+            output = $first,
+            output_contract = [$first $(, $member)*],
+            name = "__obzenflow_binding_derived_name__",
+            handler = placeholder!($msg),
+            middleware = [$($mw),*]
+        )
+    };
+    ({ $first:ty $(, $member:ty)* $(,)? } => ($handler:expr, $poll_timeout:expr)) => {
+        $crate::__obzenflow_async_infinite_source_typed!(
+            output = $first,
+            output_contract = [$first $(, $member)*],
+            name = "__obzenflow_binding_derived_name__",
+            handler = ($handler, $poll_timeout),
+            middleware = []
+        )
+    };
+    ({ $first:ty $(, $member:ty)* $(,)? } => ($handler:expr, $poll_timeout:expr), [$($mw:expr),*]) => {
+        $crate::__obzenflow_async_infinite_source_typed!(
+            output = $first,
+            output_contract = [$first $(, $member)*],
+            name = "__obzenflow_binding_derived_name__",
+            handler = ($handler, $poll_timeout),
+            middleware = [$($mw),*]
+        )
+    };
+    ({ $first:ty $(, $member:ty)* $(,)? } => $handler:expr) => {
+        $crate::__obzenflow_async_infinite_source_typed!(
+            output = $first,
+            output_contract = [$first $(, $member)*],
+            name = "__obzenflow_binding_derived_name__",
+            handler = $handler,
+            middleware = []
+        )
+    };
+    ({ $first:ty $(, $member:ty)* $(,)? } => $handler:expr, [$($mw:expr),*]) => {
+        $crate::__obzenflow_async_infinite_source_typed!(
+            output = $first,
+            output_contract = [$first $(, $member)*],
+            name = "__obzenflow_binding_derived_name__",
+            handler = $handler,
+            middleware = [$($mw),*]
+        )
+    };
     ($out:ty => placeholder!()) => {
         $crate::__obzenflow_async_infinite_source_typed!(
             output = $out,
@@ -673,6 +1181,78 @@ macro_rules! async_infinite_source {
     };
 
     // ── typed (explicit name override) ──
+    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => placeholder!()) => {
+        $crate::__obzenflow_async_infinite_source_typed!(
+            output = $first,
+            output_contract = [$first $(, $member)*],
+            name = $name,
+            handler = placeholder!(),
+            middleware = []
+        )
+    };
+    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => placeholder!($msg:expr)) => {
+        $crate::__obzenflow_async_infinite_source_typed!(
+            output = $first,
+            output_contract = [$first $(, $member)*],
+            name = $name,
+            handler = placeholder!($msg),
+            middleware = []
+        )
+    };
+    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => placeholder!(), [$($mw:expr),*]) => {
+        $crate::__obzenflow_async_infinite_source_typed!(
+            output = $first,
+            output_contract = [$first $(, $member)*],
+            name = $name,
+            handler = placeholder!(),
+            middleware = [$($mw),*]
+        )
+    };
+    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => placeholder!($msg:expr), [$($mw:expr),*]) => {
+        $crate::__obzenflow_async_infinite_source_typed!(
+            output = $first,
+            output_contract = [$first $(, $member)*],
+            name = $name,
+            handler = placeholder!($msg),
+            middleware = [$($mw),*]
+        )
+    };
+    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => ($handler:expr, $poll_timeout:expr)) => {
+        $crate::__obzenflow_async_infinite_source_typed!(
+            output = $first,
+            output_contract = [$first $(, $member)*],
+            name = $name,
+            handler = ($handler, $poll_timeout),
+            middleware = []
+        )
+    };
+    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => ($handler:expr, $poll_timeout:expr), [$($mw:expr),*]) => {
+        $crate::__obzenflow_async_infinite_source_typed!(
+            output = $first,
+            output_contract = [$first $(, $member)*],
+            name = $name,
+            handler = ($handler, $poll_timeout),
+            middleware = [$($mw),*]
+        )
+    };
+    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => $handler:expr) => {
+        $crate::__obzenflow_async_infinite_source_typed!(
+            output = $first,
+            output_contract = [$first $(, $member)*],
+            name = $name,
+            handler = $handler,
+            middleware = []
+        )
+    };
+    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => $handler:expr, [$($mw:expr),*]) => {
+        $crate::__obzenflow_async_infinite_source_typed!(
+            output = $first,
+            output_contract = [$first $(, $member)*],
+            name = $name,
+            handler = $handler,
+            middleware = [$($mw),*]
+        )
+    };
     (name: $name:literal, $out:ty => placeholder!()) => {
         $crate::__obzenflow_async_infinite_source_typed!(
             output = $out,
@@ -857,6 +1437,66 @@ macro_rules! __obzenflow_transform_typed {
 macro_rules! __obzenflow_transform_exact_contract {
     (name = $name:literal, $($rest:tt)+) => {
         $crate::__obzenflow_transform_exact_contract!(@collect name = $name, in = (), $($rest)+)
+    };
+    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => placeholder!()) => {
+        $crate::__obzenflow_transform_typed!(
+            input = exact($($in)+),
+            output = $first,
+            output_contract = [$first $(, $member)*],
+            name = $name,
+            handler = placeholder!(),
+            middleware = []
+        )
+    };
+    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => placeholder!($msg:expr)) => {
+        $crate::__obzenflow_transform_typed!(
+            input = exact($($in)+),
+            output = $first,
+            output_contract = [$first $(, $member)*],
+            name = $name,
+            handler = placeholder!($msg),
+            middleware = []
+        )
+    };
+    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => placeholder!(), [$($mw:expr),*]) => {
+        $crate::__obzenflow_transform_typed!(
+            input = exact($($in)+),
+            output = $first,
+            output_contract = [$first $(, $member)*],
+            name = $name,
+            handler = placeholder!(),
+            middleware = [$($mw),*]
+        )
+    };
+    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => placeholder!($msg:expr), [$($mw:expr),*]) => {
+        $crate::__obzenflow_transform_typed!(
+            input = exact($($in)+),
+            output = $first,
+            output_contract = [$first $(, $member)*],
+            name = $name,
+            handler = placeholder!($msg),
+            middleware = [$($mw),*]
+        )
+    };
+    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => $handler:expr) => {
+        $crate::__obzenflow_transform_typed!(
+            input = exact($($in)+),
+            output = $first,
+            output_contract = [$first $(, $member)*],
+            name = $name,
+            handler = $handler,
+            middleware = []
+        )
+    };
+    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => $handler:expr, [$($mw:expr),*]) => {
+        $crate::__obzenflow_transform_typed!(
+            input = exact($($in)+),
+            output = $first,
+            output_contract = [$first $(, $member)*],
+            name = $name,
+            handler = $handler,
+            middleware = [$($mw),*]
+        )
     };
     (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty, outputs: [$($member:ty),+ $(,)?] => placeholder!()) => {
         $crate::__obzenflow_transform_typed!(
@@ -1121,6 +1761,66 @@ macro_rules! __obzenflow_async_transform_typed {
 macro_rules! __obzenflow_async_transform_exact_contract {
     (name = $name:literal, $($rest:tt)+) => {
         $crate::__obzenflow_async_transform_exact_contract!(@collect name = $name, in = (), $($rest)+)
+    };
+    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => placeholder!()) => {
+        $crate::__obzenflow_async_transform_typed!(
+            input = exact($($in)+),
+            output = $first,
+            output_contract = [$first $(, $member)*],
+            name = $name,
+            handler = placeholder!(),
+            middleware = []
+        )
+    };
+    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => placeholder!($msg:expr)) => {
+        $crate::__obzenflow_async_transform_typed!(
+            input = exact($($in)+),
+            output = $first,
+            output_contract = [$first $(, $member)*],
+            name = $name,
+            handler = placeholder!($msg),
+            middleware = []
+        )
+    };
+    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => placeholder!(), [$($mw:expr),*]) => {
+        $crate::__obzenflow_async_transform_typed!(
+            input = exact($($in)+),
+            output = $first,
+            output_contract = [$first $(, $member)*],
+            name = $name,
+            handler = placeholder!(),
+            middleware = [$($mw),*]
+        )
+    };
+    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => placeholder!($msg:expr), [$($mw:expr),*]) => {
+        $crate::__obzenflow_async_transform_typed!(
+            input = exact($($in)+),
+            output = $first,
+            output_contract = [$first $(, $member)*],
+            name = $name,
+            handler = placeholder!($msg),
+            middleware = [$($mw),*]
+        )
+    };
+    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => $handler:expr) => {
+        $crate::__obzenflow_async_transform_typed!(
+            input = exact($($in)+),
+            output = $first,
+            output_contract = [$first $(, $member)*],
+            name = $name,
+            handler = $handler,
+            middleware = []
+        )
+    };
+    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => $handler:expr, [$($mw:expr),*]) => {
+        $crate::__obzenflow_async_transform_typed!(
+            input = exact($($in)+),
+            output = $first,
+            output_contract = [$first $(, $member)*],
+            name = $name,
+            handler = $handler,
+            middleware = [$($mw),*]
+        )
     };
     (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty, outputs: [$($member:ty),+ $(,)?] => placeholder!()) => {
         $crate::__obzenflow_async_transform_typed!(
@@ -1936,6 +2636,102 @@ macro_rules! __obzenflow_stateful_untyped {
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __obzenflow_stateful_typed {
+    // -- exact input, placeholder, explicit output contract, no emit --
+    (input = exact($in:ty), output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = placeholder!(), emit = none, middleware = [$($mw:expr),*]) => {{
+        let __metadata = $crate::dsl::typing::StageTypingMetadata::stateful(
+            $crate::dsl::typing::TypeHint::exact_payload::<$in>(),
+            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
+            true,
+            None,
+        )
+        .with_additional_output_contract($crate::__obzenflow_output_contract_members!($($member),+));
+        let __descriptor = $crate::__obzenflow_stateful_untyped!(
+            name = $name,
+            handler = $crate::dsl::typing::PlaceholderStateful::<$in, $out>::new(None),
+            emit = none,
+            middleware = [$($mw),*]
+        );
+        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
+    }};
+    // -- exact input, placeholder, explicit output contract, with emit --
+    (input = exact($in:ty), output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = placeholder!(), emit = some($emit_interval:expr), middleware = [$($mw:expr),*]) => {{
+        let __metadata = $crate::dsl::typing::StageTypingMetadata::stateful(
+            $crate::dsl::typing::TypeHint::exact_payload::<$in>(),
+            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
+            true,
+            None,
+        )
+        .with_additional_output_contract($crate::__obzenflow_output_contract_members!($($member),+));
+        let __descriptor = $crate::__obzenflow_stateful_untyped!(
+            name = $name,
+            handler = $crate::dsl::typing::PlaceholderStateful::<$in, $out>::new(None),
+            emit = some($emit_interval),
+            middleware = [$($mw),*]
+        );
+        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
+    }};
+    // -- exact input, placeholder msg, explicit output contract, no emit --
+    (input = exact($in:ty), output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = placeholder!($msg:expr), emit = none, middleware = [$($mw:expr),*]) => {{
+        let __metadata = $crate::dsl::typing::StageTypingMetadata::stateful(
+            $crate::dsl::typing::TypeHint::exact_payload::<$in>(),
+            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
+            true,
+            Some(($msg).to_string()),
+        )
+        .with_additional_output_contract($crate::__obzenflow_output_contract_members!($($member),+));
+        let __descriptor = $crate::__obzenflow_stateful_untyped!(
+            name = $name,
+            handler = $crate::dsl::typing::PlaceholderStateful::<$in, $out>::new(Some($msg)),
+            emit = none,
+            middleware = [$($mw),*]
+        );
+        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
+    }};
+    // -- exact input, placeholder msg, explicit output contract, with emit --
+    (input = exact($in:ty), output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = placeholder!($msg:expr), emit = some($emit_interval:expr), middleware = [$($mw:expr),*]) => {{
+        let __metadata = $crate::dsl::typing::StageTypingMetadata::stateful(
+            $crate::dsl::typing::TypeHint::exact_payload::<$in>(),
+            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
+            true,
+            Some(($msg).to_string()),
+        )
+        .with_additional_output_contract($crate::__obzenflow_output_contract_members!($($member),+));
+        let __descriptor = $crate::__obzenflow_stateful_untyped!(
+            name = $name,
+            handler = $crate::dsl::typing::PlaceholderStateful::<$in, $out>::new(Some($msg)),
+            emit = some($emit_interval),
+            middleware = [$($mw),*]
+        );
+        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
+    }};
+    // -- exact input, real handler, explicit output contract, no emit --
+    (input = exact($in:ty), output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = $handler:expr, emit = none, middleware = [$($mw:expr),*]) => {{
+        let __handler = $handler;
+        // FLOWIP-114c PR D: assert_stateful_contract dropped, see sink rationale.
+        let __metadata = $crate::dsl::typing::StageTypingMetadata::stateful(
+            $crate::dsl::typing::TypeHint::exact_payload::<$in>(),
+            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
+            false,
+            None,
+        )
+        .with_additional_output_contract($crate::__obzenflow_output_contract_members!($($member),+));
+        let __descriptor = $crate::__obzenflow_stateful_untyped!(name = $name, handler = __handler, emit = none, middleware = [$($mw),*]);
+        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
+    }};
+    // -- exact input, real handler, explicit output contract, with emit --
+    (input = exact($in:ty), output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = $handler:expr, emit = some($emit_interval:expr), middleware = [$($mw:expr),*]) => {{
+        let __handler = $handler;
+        // FLOWIP-114c PR D: assert_stateful_contract dropped, see sink rationale.
+        let __metadata = $crate::dsl::typing::StageTypingMetadata::stateful(
+            $crate::dsl::typing::TypeHint::exact_payload::<$in>(),
+            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
+            false,
+            None,
+        )
+        .with_additional_output_contract($crate::__obzenflow_output_contract_members!($($member),+));
+        let __descriptor = $crate::__obzenflow_stateful_untyped!(name = $name, handler = __handler, emit = some($emit_interval), middleware = [$($mw),*]);
+        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
+    }};
     // ── exact input, placeholder, no emit ──
     (input = exact($in:ty), output = $out:ty, name = $name:literal, handler = placeholder!(), emit = none, middleware = [$($mw:expr),*]) => {{
         let __metadata = $crate::dsl::typing::StageTypingMetadata::stateful(
@@ -2033,6 +2829,138 @@ macro_rules! __obzenflow_stateful_typed {
 macro_rules! __obzenflow_stateful_exact_contract {
     (name = $name:literal, $($rest:tt)+) => {
         $crate::__obzenflow_stateful_exact_contract!(@collect name = $name, in = (), $($rest)+)
+    };
+    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => placeholder!()) => {
+        $crate::__obzenflow_stateful_typed!(
+            input = exact($($in)+),
+            output = $first,
+            output_contract = [$first $(, $member)*],
+            name = $name,
+            handler = placeholder!(),
+            emit = none,
+            middleware = []
+        )
+    };
+    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => placeholder!($msg:expr)) => {
+        $crate::__obzenflow_stateful_typed!(
+            input = exact($($in)+),
+            output = $first,
+            output_contract = [$first $(, $member)*],
+            name = $name,
+            handler = placeholder!($msg),
+            emit = none,
+            middleware = []
+        )
+    };
+    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => placeholder!(), [$($mw:expr),*]) => {
+        $crate::__obzenflow_stateful_typed!(
+            input = exact($($in)+),
+            output = $first,
+            output_contract = [$first $(, $member)*],
+            name = $name,
+            handler = placeholder!(),
+            emit = none,
+            middleware = [$($mw),*]
+        )
+    };
+    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => placeholder!($msg:expr), [$($mw:expr),*]) => {
+        $crate::__obzenflow_stateful_typed!(
+            input = exact($($in)+),
+            output = $first,
+            output_contract = [$first $(, $member)*],
+            name = $name,
+            handler = placeholder!($msg),
+            emit = none,
+            middleware = [$($mw),*]
+        )
+    };
+    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => placeholder!(), emit_interval = $emit_interval:expr) => {
+        $crate::__obzenflow_stateful_typed!(
+            input = exact($($in)+),
+            output = $first,
+            output_contract = [$first $(, $member)*],
+            name = $name,
+            handler = placeholder!(),
+            emit = some($emit_interval),
+            middleware = []
+        )
+    };
+    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => placeholder!($msg:expr), emit_interval = $emit_interval:expr) => {
+        $crate::__obzenflow_stateful_typed!(
+            input = exact($($in)+),
+            output = $first,
+            output_contract = [$first $(, $member)*],
+            name = $name,
+            handler = placeholder!($msg),
+            emit = some($emit_interval),
+            middleware = []
+        )
+    };
+    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => placeholder!(), emit_interval = $emit_interval:expr, [$($mw:expr),*]) => {
+        $crate::__obzenflow_stateful_typed!(
+            input = exact($($in)+),
+            output = $first,
+            output_contract = [$first $(, $member)*],
+            name = $name,
+            handler = placeholder!(),
+            emit = some($emit_interval),
+            middleware = [$($mw),*]
+        )
+    };
+    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => placeholder!($msg:expr), emit_interval = $emit_interval:expr, [$($mw:expr),*]) => {
+        $crate::__obzenflow_stateful_typed!(
+            input = exact($($in)+),
+            output = $first,
+            output_contract = [$first $(, $member)*],
+            name = $name,
+            handler = placeholder!($msg),
+            emit = some($emit_interval),
+            middleware = [$($mw),*]
+        )
+    };
+    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => $handler:expr) => {
+        $crate::__obzenflow_stateful_typed!(
+            input = exact($($in)+),
+            output = $first,
+            output_contract = [$first $(, $member)*],
+            name = $name,
+            handler = $handler,
+            emit = none,
+            middleware = []
+        )
+    };
+    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => $handler:expr, [$($mw:expr),*]) => {
+        $crate::__obzenflow_stateful_typed!(
+            input = exact($($in)+),
+            output = $first,
+            output_contract = [$first $(, $member)*],
+            name = $name,
+            handler = $handler,
+            emit = none,
+            middleware = [$($mw),*]
+        )
+    };
+    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => $handler:expr, emit_interval = $emit_interval:expr) => {
+        $crate::__obzenflow_stateful_typed!(
+            input = exact($($in)+),
+            output = $first,
+            output_contract = [$first $(, $member)*],
+            name = $name,
+            handler = $handler,
+            emit = some($emit_interval),
+            middleware = []
+        )
+    };
+    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => $handler:expr, emit_interval = $emit_interval:expr, [$($mw:expr),*]) => {
+        $crate::__obzenflow_stateful_typed!(
+            input = exact($($in)+),
+            output = $first,
+            output_contract = [$first $(, $member)*],
+            name = $name,
+            handler = $handler,
+            emit = some($emit_interval),
+            middleware = [$($mw),*]
+        )
     };
     (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => placeholder!()) => {
         $crate::__obzenflow_stateful_typed!(
@@ -2212,6 +3140,52 @@ macro_rules! __obzenflow_effectful_stateful_untyped {
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __obzenflow_effectful_stateful_typed {
+    (input = exact($in:ty), output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = $handler:expr, emit = none, effects = [$($effects:tt)*], middleware = [$($mw:expr),* $(,)?]) => {{
+        let __handler = $handler;
+        fn __assert_effectful_stateful_contract<H>(_handler: &H)
+        where
+            H: ::obzenflow_runtime::stages::EffectfulStatefulHandler<Input = $in, Output = $out>,
+        {}
+        __assert_effectful_stateful_contract(&__handler);
+        let __metadata = $crate::dsl::typing::StageTypingMetadata::stateful(
+            $crate::dsl::typing::TypeHint::exact_payload::<$in>(),
+            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
+            false,
+            None,
+        )
+        .with_additional_output_contract($crate::__obzenflow_output_contract_members!($($member),+));
+        let __descriptor = $crate::__obzenflow_effectful_stateful_untyped!(
+            name = $name,
+            handler = __handler,
+            emit = none,
+            effects = [$($effects)*],
+            middleware = [$($mw),*]
+        );
+        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
+    }};
+    (input = exact($in:ty), output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = $handler:expr, emit = some($emit_interval:expr), effects = [$($effects:tt)*], middleware = [$($mw:expr),* $(,)?]) => {{
+        let __handler = $handler;
+        fn __assert_effectful_stateful_contract<H>(_handler: &H)
+        where
+            H: ::obzenflow_runtime::stages::EffectfulStatefulHandler<Input = $in, Output = $out>,
+        {}
+        __assert_effectful_stateful_contract(&__handler);
+        let __metadata = $crate::dsl::typing::StageTypingMetadata::stateful(
+            $crate::dsl::typing::TypeHint::exact_payload::<$in>(),
+            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
+            false,
+            None,
+        )
+        .with_additional_output_contract($crate::__obzenflow_output_contract_members!($($member),+));
+        let __descriptor = $crate::__obzenflow_effectful_stateful_untyped!(
+            name = $name,
+            handler = __handler,
+            emit = some($emit_interval),
+            effects = [$($effects)*],
+            middleware = [$($mw),*]
+        );
+        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
+    }};
     (input = exact($in:ty), output = $out:ty, name = $name:literal, handler = $handler:expr, emit = none, effects = [$($effects:tt)*], middleware = [$($mw:expr),* $(,)?]) => {{
         let __handler = $handler;
         fn __assert_effectful_stateful_contract<H>(_handler: &H)
@@ -2263,6 +3237,30 @@ macro_rules! __obzenflow_effectful_stateful_typed {
 macro_rules! __obzenflow_effectful_stateful_exact_contract {
     (name = $name:literal, $($rest:tt)+) => {
         $crate::__obzenflow_effectful_stateful_exact_contract!(@collect name = $name, in = (), $($rest)+)
+    };
+    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => $handler:expr, effects: [$($effects:tt)*], middleware: [$($mw:expr),* $(,)?] $(,)?) => {
+        $crate::__obzenflow_effectful_stateful_typed!(
+            input = exact($($in)+),
+            output = $first,
+            output_contract = [$first $(, $member)*],
+            name = $name,
+            handler = $handler,
+            emit = none,
+            effects = [$($effects)*],
+            middleware = [$($mw),*]
+        )
+    };
+    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => $handler:expr, emit_interval = $emit_interval:expr, effects: [$($effects:tt)*], middleware: [$($mw:expr),* $(,)?] $(,)?) => {
+        $crate::__obzenflow_effectful_stateful_typed!(
+            input = exact($($in)+),
+            output = $first,
+            output_contract = [$first $(, $member)*],
+            name = $name,
+            handler = $handler,
+            emit = some($emit_interval),
+            effects = [$($effects)*],
+            middleware = [$($mw),*]
+        )
     };
     (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => $handler:expr, effects: [$($effects:tt)*], middleware: [$($mw:expr),* $(,)?] $(,)?) => {
         $crate::__obzenflow_effectful_stateful_typed!(
@@ -2338,6 +3336,58 @@ macro_rules! __obzenflow_join_untyped {
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __obzenflow_join_typed {
+    // -- placeholder, explicit output contract --
+    (reference = $ref_hint:tt, stream = $str_hint:tt, output = $out:ty,
+     output_contract = [$($member:ty),+ $(,)?],
+     ref_type = ($($ref_ty:ty)?), stream_type = ($($str_ty:ty)?),
+     name = $name:literal, ref_var = $ref_var:ident, handler = placeholder!(),
+     middleware = [$($mw:expr),*]) => {{
+        let __metadata = $crate::dsl::typing::StageTypingMetadata::join(
+            $crate::__obzenflow_join_hint!($ref_hint $(, $ref_ty)?),
+            $crate::__obzenflow_join_hint!($str_hint $(, $str_ty)?),
+            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
+            true,
+            None,
+        )
+        .with_additional_output_contract($crate::__obzenflow_output_contract_members!($($member),+));
+        let __descriptor = $crate::__obzenflow_join_untyped!(
+            name = $name,
+            reference_stage_var = $ref_var,
+            handler = $crate::dsl::typing::PlaceholderJoin::<
+                $crate::__obzenflow_join_phantom_type!($ref_hint $(, $ref_ty)?),
+                $crate::__obzenflow_join_phantom_type!($str_hint $(, $str_ty)?),
+                $out
+            >::new(None),
+            middleware = [$($mw),*]
+        );
+        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
+    }};
+    (reference = $ref_hint:tt, stream = $str_hint:tt, output = $out:ty,
+     output_contract = [$($member:ty),+ $(,)?],
+     ref_type = ($($ref_ty:ty)?), stream_type = ($($str_ty:ty)?),
+     name = $name:literal, ref_var = $ref_var:ident, handler = placeholder!($msg:expr),
+     middleware = [$($mw:expr),*]) => {{
+        let __metadata = $crate::dsl::typing::StageTypingMetadata::join(
+            $crate::__obzenflow_join_hint!($ref_hint $(, $ref_ty)?),
+            $crate::__obzenflow_join_hint!($str_hint $(, $str_ty)?),
+            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
+            true,
+            Some(($msg).to_string()),
+        )
+        .with_additional_output_contract($crate::__obzenflow_output_contract_members!($($member),+));
+        let __descriptor = $crate::__obzenflow_join_untyped!(
+            name = $name,
+            reference_stage_var = $ref_var,
+            handler = $crate::dsl::typing::PlaceholderJoin::<
+                $crate::__obzenflow_join_phantom_type!($ref_hint $(, $ref_ty)?),
+                $crate::__obzenflow_join_phantom_type!($str_hint $(, $str_ty)?),
+                $out
+            >::new(Some($msg)),
+            middleware = [$($mw),*]
+        );
+        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
+    }};
+
     // ── placeholder ──
     (reference = $ref_hint:tt, stream = $str_hint:tt, output = $out:ty,
      ref_type = ($($ref_ty:ty)?), stream_type = ($($str_ty:ty)?),
@@ -2494,6 +3544,29 @@ macro_rules! __obzenflow_join_typed {
     // The metadata declares ref/stream/output types; the handler does not need
     // to implement JoinTyping itself, matching the BoundTransform tautology.
     (reference = exact, stream = exact, output = $out:ty,
+     output_contract = [$($member:ty),+ $(,)?],
+     ref_type = ($ref_ty:ty), stream_type = ($str_ty:ty),
+     name = $name:literal, ref_var = $ref_var:ident, handler = $handler:expr,
+     middleware = [$($mw:expr),*]) => {{
+        let __handler = $handler;
+        let __metadata = $crate::dsl::typing::StageTypingMetadata::join(
+            $crate::dsl::typing::TypeHint::exact_payload::<$ref_ty>(),
+            $crate::dsl::typing::TypeHint::exact_payload::<$str_ty>(),
+            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
+            false,
+            None,
+        )
+        .with_additional_output_contract($crate::__obzenflow_output_contract_members!($($member),+));
+        let __descriptor = $crate::__obzenflow_join_untyped!(
+            name = $name,
+            reference_stage_var = $ref_var,
+            handler = __handler,
+            middleware = [$($mw),*]
+        );
+        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
+    }};
+
+    (reference = exact, stream = exact, output = $out:ty,
      ref_type = ($ref_ty:ty), stream_type = ($str_ty:ty),
      name = $name:literal, ref_var = $ref_var:ident, handler = $handler:expr,
      middleware = [$($mw:expr),*]) => {{
@@ -2549,6 +3622,423 @@ macro_rules! __obzenflow_join_exact_stream_contract {
             ref_type = ($reference),
             stream = (),
             $($rest)+
+        )
+    };
+    (@collect
+     name = $name:literal,
+     ref_var = $ref_var:ident,
+     reference = $ref_hint:tt,
+     ref_type = $ref_type:tt,
+     stream = ($($stream:tt)+),
+     -> { $first:ty $(, $member:ty)* $(,)? } => placeholder!()) => {
+        $crate::__obzenflow_join_typed!(
+            reference = $ref_hint,
+            stream = exact,
+            output = $first,
+            output_contract = [$first $(, $member)*],
+            ref_type = $ref_type,
+            stream_type = ($($stream)+),
+            name = $name,
+            ref_var = $ref_var,
+            handler = placeholder!(),
+            middleware = []
+        )
+    };
+    (@collect
+     name = $name:literal,
+     ref_var = $ref_var:ident,
+     reference = $ref_hint:tt,
+     ref_type = $ref_type:tt,
+     stream = ($($stream:tt)+),
+     -> { $first:ty $(, $member:ty)* $(,)? } => placeholder!($msg:expr)) => {
+        $crate::__obzenflow_join_typed!(
+            reference = $ref_hint,
+            stream = exact,
+            output = $first,
+            output_contract = [$first $(, $member)*],
+            ref_type = $ref_type,
+            stream_type = ($($stream)+),
+            name = $name,
+            ref_var = $ref_var,
+            handler = placeholder!($msg),
+            middleware = []
+        )
+    };
+    (@collect
+     name = $name:literal,
+     ref_var = $ref_var:ident,
+     reference = $ref_hint:tt,
+     ref_type = $ref_type:tt,
+     stream = ($($stream:tt)+),
+     -> { $first:ty $(, $member:ty)* $(,)? } => placeholder!(),
+     [$($mw:expr),*]) => {
+        $crate::__obzenflow_join_typed!(
+            reference = $ref_hint,
+            stream = exact,
+            output = $first,
+            output_contract = [$first $(, $member)*],
+            ref_type = $ref_type,
+            stream_type = ($($stream)+),
+            name = $name,
+            ref_var = $ref_var,
+            handler = placeholder!(),
+            middleware = [$($mw),*]
+        )
+    };
+    (@collect
+     name = $name:literal,
+     ref_var = $ref_var:ident,
+     reference = $ref_hint:tt,
+     ref_type = $ref_type:tt,
+     stream = ($($stream:tt)+),
+     -> { $first:ty $(, $member:ty)* $(,)? } => placeholder!($msg:expr),
+     [$($mw:expr),*]) => {
+        $crate::__obzenflow_join_typed!(
+            reference = $ref_hint,
+            stream = exact,
+            output = $first,
+            output_contract = [$first $(, $member)*],
+            ref_type = $ref_type,
+            stream_type = ($($stream)+),
+            name = $name,
+            ref_var = $ref_var,
+            handler = placeholder!($msg),
+            middleware = [$($mw),*]
+        )
+    };
+    (@collect
+     name = $name:literal,
+     ref_var = $ref_var:ident,
+     reference = exact,
+     ref_type = ($reference:ty),
+     stream = ($($stream:tt)+),
+     -> { $first:ty $(, $member:ty)* $(,)? } => joins::inner($catalog_key:expr, $stream_key:expr, $join_fn:expr $(,)?)) => {
+        $crate::__obzenflow_join_typed!(
+            reference = exact,
+            stream = exact,
+            output = $first,
+            output_contract = [$first $(, $member)*],
+            ref_type = ($reference),
+            stream_type = ($($stream)+),
+            name = $name,
+            ref_var = $ref_var,
+            handler = joins::inner::<$reference, $($stream)+, $first, _, _, _, _>(
+                $catalog_key,
+                $stream_key,
+                $join_fn
+            ),
+            middleware = []
+        )
+    };
+    (@collect
+     name = $name:literal,
+     ref_var = $ref_var:ident,
+     reference = exact,
+     ref_type = ($reference:ty),
+     stream = ($($stream:tt)+),
+     -> { $first:ty $(, $member:ty)* $(,)? } => joins::inner_live($catalog_key:expr, $stream_key:expr, $join_fn:expr $(,)?)) => {
+        $crate::__obzenflow_join_typed!(
+            reference = exact,
+            stream = exact,
+            output = $first,
+            output_contract = [$first $(, $member)*],
+            ref_type = ($reference),
+            stream_type = ($($stream)+),
+            name = $name,
+            ref_var = $ref_var,
+            handler = joins::inner_live::<$reference, $($stream)+, $first, _, _, _, _>(
+                $catalog_key,
+                $stream_key,
+                $join_fn
+            ),
+            middleware = []
+        )
+    };
+    (@collect
+     name = $name:literal,
+     ref_var = $ref_var:ident,
+     reference = exact,
+     ref_type = ($reference:ty),
+     stream = ($($stream:tt)+),
+     -> { $first:ty $(, $member:ty)* $(,)? } => joins::left($catalog_key:expr, $stream_key:expr, $join_fn:expr $(,)?)) => {
+        $crate::__obzenflow_join_typed!(
+            reference = exact,
+            stream = exact,
+            output = $first,
+            output_contract = [$first $(, $member)*],
+            ref_type = ($reference),
+            stream_type = ($($stream)+),
+            name = $name,
+            ref_var = $ref_var,
+            handler = joins::left::<$reference, $($stream)+, $first, _, _, _, _>(
+                $catalog_key,
+                $stream_key,
+                $join_fn
+            ),
+            middleware = []
+        )
+    };
+    (@collect
+     name = $name:literal,
+     ref_var = $ref_var:ident,
+     reference = exact,
+     ref_type = ($reference:ty),
+     stream = ($($stream:tt)+),
+     -> { $first:ty $(, $member:ty)* $(,)? } => joins::left_live($catalog_key:expr, $stream_key:expr, $join_fn:expr $(,)?)) => {
+        $crate::__obzenflow_join_typed!(
+            reference = exact,
+            stream = exact,
+            output = $first,
+            output_contract = [$first $(, $member)*],
+            ref_type = ($reference),
+            stream_type = ($($stream)+),
+            name = $name,
+            ref_var = $ref_var,
+            handler = joins::left_live::<$reference, $($stream)+, $first, _, _, _, _>(
+                $catalog_key,
+                $stream_key,
+                $join_fn
+            ),
+            middleware = []
+        )
+    };
+    (@collect
+     name = $name:literal,
+     ref_var = $ref_var:ident,
+     reference = exact,
+     ref_type = ($reference:ty),
+     stream = ($($stream:tt)+),
+     -> { $first:ty $(, $member:ty)* $(,)? } => joins::strict($catalog_key:expr, $stream_key:expr, $join_fn:expr $(,)?)) => {
+        $crate::__obzenflow_join_typed!(
+            reference = exact,
+            stream = exact,
+            output = $first,
+            output_contract = [$first $(, $member)*],
+            ref_type = ($reference),
+            stream_type = ($($stream)+),
+            name = $name,
+            ref_var = $ref_var,
+            handler = joins::strict::<$reference, $($stream)+, $first, _, _, _, _>(
+                $catalog_key,
+                $stream_key,
+                $join_fn
+            ),
+            middleware = []
+        )
+    };
+    (@collect
+     name = $name:literal,
+     ref_var = $ref_var:ident,
+     reference = exact,
+     ref_type = ($reference:ty),
+     stream = ($($stream:tt)+),
+     -> { $first:ty $(, $member:ty)* $(,)? } => joins::strict_live($catalog_key:expr, $stream_key:expr, $join_fn:expr $(,)?)) => {
+        $crate::__obzenflow_join_typed!(
+            reference = exact,
+            stream = exact,
+            output = $first,
+            output_contract = [$first $(, $member)*],
+            ref_type = ($reference),
+            stream_type = ($($stream)+),
+            name = $name,
+            ref_var = $ref_var,
+            handler = joins::strict_live::<$reference, $($stream)+, $first, _, _, _, _>(
+                $catalog_key,
+                $stream_key,
+                $join_fn
+            ),
+            middleware = []
+        )
+    };
+    (@collect
+     name = $name:literal,
+     ref_var = $ref_var:ident,
+     reference = exact,
+     ref_type = ($reference:ty),
+     stream = ($($stream:tt)+),
+     -> { $first:ty $(, $member:ty)* $(,)? } => joins::inner($catalog_key:expr, $stream_key:expr, $join_fn:expr $(,)?),
+     [$($mw:expr),*]) => {
+        $crate::__obzenflow_join_typed!(
+            reference = exact,
+            stream = exact,
+            output = $first,
+            output_contract = [$first $(, $member)*],
+            ref_type = ($reference),
+            stream_type = ($($stream)+),
+            name = $name,
+            ref_var = $ref_var,
+            handler = joins::inner::<$reference, $($stream)+, $first, _, _, _, _>(
+                $catalog_key,
+                $stream_key,
+                $join_fn
+            ),
+            middleware = [$($mw),*]
+        )
+    };
+    (@collect
+     name = $name:literal,
+     ref_var = $ref_var:ident,
+     reference = exact,
+     ref_type = ($reference:ty),
+     stream = ($($stream:tt)+),
+     -> { $first:ty $(, $member:ty)* $(,)? } => joins::inner_live($catalog_key:expr, $stream_key:expr, $join_fn:expr $(,)?),
+     [$($mw:expr),*]) => {
+        $crate::__obzenflow_join_typed!(
+            reference = exact,
+            stream = exact,
+            output = $first,
+            output_contract = [$first $(, $member)*],
+            ref_type = ($reference),
+            stream_type = ($($stream)+),
+            name = $name,
+            ref_var = $ref_var,
+            handler = joins::inner_live::<$reference, $($stream)+, $first, _, _, _, _>(
+                $catalog_key,
+                $stream_key,
+                $join_fn
+            ),
+            middleware = [$($mw),*]
+        )
+    };
+    (@collect
+     name = $name:literal,
+     ref_var = $ref_var:ident,
+     reference = exact,
+     ref_type = ($reference:ty),
+     stream = ($($stream:tt)+),
+     -> { $first:ty $(, $member:ty)* $(,)? } => joins::left($catalog_key:expr, $stream_key:expr, $join_fn:expr $(,)?),
+     [$($mw:expr),*]) => {
+        $crate::__obzenflow_join_typed!(
+            reference = exact,
+            stream = exact,
+            output = $first,
+            output_contract = [$first $(, $member)*],
+            ref_type = ($reference),
+            stream_type = ($($stream)+),
+            name = $name,
+            ref_var = $ref_var,
+            handler = joins::left::<$reference, $($stream)+, $first, _, _, _, _>(
+                $catalog_key,
+                $stream_key,
+                $join_fn
+            ),
+            middleware = [$($mw),*]
+        )
+    };
+    (@collect
+     name = $name:literal,
+     ref_var = $ref_var:ident,
+     reference = exact,
+     ref_type = ($reference:ty),
+     stream = ($($stream:tt)+),
+     -> { $first:ty $(, $member:ty)* $(,)? } => joins::left_live($catalog_key:expr, $stream_key:expr, $join_fn:expr $(,)?),
+     [$($mw:expr),*]) => {
+        $crate::__obzenflow_join_typed!(
+            reference = exact,
+            stream = exact,
+            output = $first,
+            output_contract = [$first $(, $member)*],
+            ref_type = ($reference),
+            stream_type = ($($stream)+),
+            name = $name,
+            ref_var = $ref_var,
+            handler = joins::left_live::<$reference, $($stream)+, $first, _, _, _, _>(
+                $catalog_key,
+                $stream_key,
+                $join_fn
+            ),
+            middleware = [$($mw),*]
+        )
+    };
+    (@collect
+     name = $name:literal,
+     ref_var = $ref_var:ident,
+     reference = exact,
+     ref_type = ($reference:ty),
+     stream = ($($stream:tt)+),
+     -> { $first:ty $(, $member:ty)* $(,)? } => joins::strict($catalog_key:expr, $stream_key:expr, $join_fn:expr $(,)?),
+     [$($mw:expr),*]) => {
+        $crate::__obzenflow_join_typed!(
+            reference = exact,
+            stream = exact,
+            output = $first,
+            output_contract = [$first $(, $member)*],
+            ref_type = ($reference),
+            stream_type = ($($stream)+),
+            name = $name,
+            ref_var = $ref_var,
+            handler = joins::strict::<$reference, $($stream)+, $first, _, _, _, _>(
+                $catalog_key,
+                $stream_key,
+                $join_fn
+            ),
+            middleware = [$($mw),*]
+        )
+    };
+    (@collect
+     name = $name:literal,
+     ref_var = $ref_var:ident,
+     reference = exact,
+     ref_type = ($reference:ty),
+     stream = ($($stream:tt)+),
+     -> { $first:ty $(, $member:ty)* $(,)? } => joins::strict_live($catalog_key:expr, $stream_key:expr, $join_fn:expr $(,)?),
+     [$($mw:expr),*]) => {
+        $crate::__obzenflow_join_typed!(
+            reference = exact,
+            stream = exact,
+            output = $first,
+            output_contract = [$first $(, $member)*],
+            ref_type = ($reference),
+            stream_type = ($($stream)+),
+            name = $name,
+            ref_var = $ref_var,
+            handler = joins::strict_live::<$reference, $($stream)+, $first, _, _, _, _>(
+                $catalog_key,
+                $stream_key,
+                $join_fn
+            ),
+            middleware = [$($mw),*]
+        )
+    };
+    (@collect
+     name = $name:literal,
+     ref_var = $ref_var:ident,
+     reference = $ref_hint:tt,
+     ref_type = $ref_type:tt,
+     stream = ($($stream:tt)+),
+     -> { $first:ty $(, $member:ty)* $(,)? } => $handler:expr) => {
+        $crate::__obzenflow_join_typed!(
+            reference = $ref_hint,
+            stream = exact,
+            output = $first,
+            output_contract = [$first $(, $member)*],
+            ref_type = $ref_type,
+            stream_type = ($($stream)+),
+            name = $name,
+            ref_var = $ref_var,
+            handler = $handler,
+            middleware = []
+        )
+    };
+    (@collect
+     name = $name:literal,
+     ref_var = $ref_var:ident,
+     reference = $ref_hint:tt,
+     ref_type = $ref_type:tt,
+     stream = ($($stream:tt)+),
+     -> { $first:ty $(, $member:ty)* $(,)? } => $handler:expr,
+     [$($mw:expr),*]) => {
+        $crate::__obzenflow_join_typed!(
+            reference = $ref_hint,
+            stream = exact,
+            output = $first,
+            output_contract = [$first $(, $member)*],
+            ref_type = $ref_type,
+            stream_type = ($($stream)+),
+            name = $name,
+            ref_var = $ref_var,
+            handler = $handler,
+            middleware = [$($mw),*]
         )
     };
     (@collect

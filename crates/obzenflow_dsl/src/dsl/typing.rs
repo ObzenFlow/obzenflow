@@ -96,7 +96,14 @@ impl From<&TypeHint> for TypeHintInfo {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StageTypingMetadata {
     pub input_type: TypeHint,
+    /// Legacy scalar output projection retained for the published
+    /// `obzenflow-topology` 0.4 render model and scalar handler trait anchors.
+    ///
+    /// Runtime routing and edge validation must use `output_contract`, not this
+    /// field. For `In -> { A, B, C }`, no member is semantically privileged.
     pub output_type: TypeHint,
+    /// Unordered semantic set of fact types this stage may author. Stored as a
+    /// Vec only to keep descriptor metadata simple and deterministic in tests.
     pub output_contract: Vec<TypeHint>,
     pub boundary_in_type: TypeHint,
     pub boundary_out_type: TypeHint,
@@ -215,11 +222,27 @@ fn output_contract_from_output_type(output_type: &TypeHint) -> Vec<TypeHint> {
     }
 }
 
+fn output_type_projection_for_topology(value: &StageTypingMetadata) -> TypeHintInfo {
+    let mut members = value
+        .output_contract
+        .iter()
+        .filter(|member| !matches!(member, TypeHint::Unspecified));
+    let Some(first) = members.next() else {
+        return (&value.output_type).into();
+    };
+
+    if members.next().is_some() {
+        TypeHintInfo::Mixed
+    } else {
+        first.into()
+    }
+}
+
 impl From<&StageTypingMetadata> for StageTypingInfo {
     fn from(value: &StageTypingMetadata) -> Self {
         Self {
             input_type: (&value.input_type).into(),
-            output_type: (&value.output_type).into(),
+            output_type: output_type_projection_for_topology(value),
             boundary_in_type: (&value.boundary_in_type).into(),
             boundary_out_type: (&value.boundary_out_type).into(),
             reference_type: (&value.reference_type).into(),

@@ -24,6 +24,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use thiserror::Error;
 
+use crate::feed_plan::StageOutputContract;
 use crate::messaging::upstream_subscription::StageInputPosition;
 use crate::replay::{ReplayArchive, ReplayError};
 use crate::stages::common::supervision::output_committer::{CommitOptions, OutputCommitter};
@@ -126,6 +127,15 @@ pub enum EffectError {
         effect_type: String,
     },
 
+    #[error("effectful stage '{stage_key}' emitted undeclared output fact '{event_type}'")]
+    UndeclaredOutput {
+        stage_key: String,
+        event_type: String,
+    },
+
+    #[error("effectful stage '{stage_key}' cannot emit output facts from this handler context")]
+    EmitUnsupported { stage_key: String },
+
     #[error("effect port '{name}' for type '{type_name}' is not registered")]
     MissingEffectPort {
         type_name: &'static str,
@@ -157,6 +167,8 @@ impl EffectError {
             | EffectError::DescriptorMismatch { .. }
             | EffectError::MissingIdempotencyKey { .. }
             | EffectError::UndeclaredEffect { .. }
+            | EffectError::UndeclaredOutput { .. }
+            | EffectError::EmitUnsupported { .. }
             | EffectError::MissingEffectPort { .. }
             | EffectError::TransactionalCommitMissing { .. } => false,
             EffectError::Serialization(_)
@@ -177,6 +189,8 @@ impl EffectError {
             EffectError::EffectProvenanceMismatch(_) => "effect_provenance_mismatch",
             EffectError::MissingIdempotencyKey { .. } => "missing_idempotency_key",
             EffectError::UndeclaredEffect { .. } => "undeclared_effect",
+            EffectError::UndeclaredOutput { .. } => "undeclared_output",
+            EffectError::EmitUnsupported { .. } => "emit_unsupported",
             EffectError::MissingEffectPort { .. } => "missing_effect_port",
             EffectError::TransactionalCommitMissing { .. } => "transactional_commit_missing",
             EffectError::Execution(_) => "execution",
@@ -713,6 +727,8 @@ pub struct EffectInvocationContext {
     pub effect_runtime_mode: EffectRuntimeMode,
     pub effect_ports: EffectPortRegistry,
     pub effect_declarations: Vec<EffectDeclaration>,
+    pub output_contract: StageOutputContract,
+    pub emit_enabled: bool,
     pub effect_boundary: Option<Arc<dyn EffectBoundaryMiddleware>>,
     pub boundary_control_events: Arc<Mutex<Vec<ChainEvent>>>,
 }
@@ -821,6 +837,22 @@ impl Effects {
     where
         T: TypedPayload,
     {
+        if !self.ctx.emit_enabled {
+            return Err(EffectError::EmitUnsupported {
+                stage_key: self.ctx.stage_key.clone(),
+            });
+        }
+
+        let event_type = T::versioned_event_type();
+        if !self.ctx.output_contract.is_empty()
+            && !self.ctx.output_contract.contains_event_type(&event_type)
+        {
+            return Err(EffectError::UndeclaredOutput {
+                stage_key: self.ctx.stage_key.clone(),
+                event_type,
+            });
+        }
+
         let recorded_flow_id = self
             .ctx
             .effect_history
@@ -1453,6 +1485,7 @@ mod tests {
     use obzenflow_core::event::{EventEnvelope, JournalEvent};
     use obzenflow_core::journal::{JournalError, JournalReader};
     use obzenflow_core::{JournalId, JournalOwner, JournalWriterId, TypedPayload};
+    use obzenflow_topology::TypeHintInfo;
     use serde_json::json;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
@@ -1647,6 +1680,17 @@ mod tests {
         const EVENT_TYPE: &'static str = "test.second_output";
     }
 
+    fn output_contract_for<T: TypedPayload>() -> StageOutputContract {
+        StageOutputContract::single(crate::feed_plan::PayloadTypeDescriptor {
+            type_hint: TypeHintInfo::Exact {
+                name: std::any::type_name::<T>().to_string(),
+            },
+            event_type: Some(T::versioned_event_type()),
+            schema_version: Some(T::SCHEMA_VERSION),
+            visibility: crate::feed_plan::FactVisibility::Routable,
+        })
+    }
+
     #[test]
     fn deterministic_typed_output_events_preserve_ordinals() {
         let writer_id = WriterId::from(StageId::new());
@@ -1790,9 +1834,93 @@ mod tests {
                 EffectDeclaration::of::<CountingEffect>(),
                 EffectDeclaration::transactional_effect::<TransactionalCountingEffect>("tx"),
             ],
+            output_contract: StageOutputContract::empty(),
+            emit_enabled: false,
             effect_boundary: None,
             boundary_control_events: Arc::new(Mutex::new(Vec::new())),
         }
+    }
+
+    #[tokio::test]
+    async fn emit_rejects_contexts_without_output_emission_support() {
+        let stage_id = StageId::new();
+        let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
+        let mut effects = Effects::new(invocation_context(
+            journal.clone(),
+            parent_envelope(WriterId::from(stage_id)),
+            None,
+        ));
+
+        let err = effects
+            .emit(FirstOutput { value: 1 })
+            .await
+            .expect_err("perform-only contexts must reject emitted outputs");
+
+        assert!(matches!(
+            err,
+            EffectError::EmitUnsupported { stage_key } if stage_key == "effect_stage"
+        ));
+        assert!(effects.drain_emitted_outputs().is_empty());
+        assert!(journal.events().is_empty());
+    }
+
+    #[tokio::test]
+    async fn emit_rejects_fact_type_outside_stage_output_contract() {
+        let stage_id = StageId::new();
+        let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
+        let mut ctx = invocation_context(
+            journal.clone(),
+            parent_envelope(WriterId::from(stage_id)),
+            None,
+        );
+        ctx.emit_enabled = true;
+        ctx.output_contract = output_contract_for::<FirstOutput>();
+        let mut effects = Effects::new(ctx);
+
+        let err = effects
+            .emit(SecondOutput {
+                value: "second".to_string(),
+            })
+            .await
+            .expect_err("undeclared output fact types must fail closed");
+
+        assert!(matches!(
+            err,
+            EffectError::UndeclaredOutput {
+                stage_key,
+                event_type,
+            } if stage_key == "effect_stage" && event_type == SecondOutput::versioned_event_type()
+        ));
+        assert!(effects.drain_emitted_outputs().is_empty());
+        assert!(journal.events().is_empty());
+    }
+
+    #[tokio::test]
+    async fn emit_buffers_declared_fact_type() {
+        let stage_id = StageId::new();
+        let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
+        let mut ctx = invocation_context(
+            journal.clone(),
+            parent_envelope(WriterId::from(stage_id)),
+            None,
+        );
+        ctx.emit_enabled = true;
+        ctx.output_contract = output_contract_for::<FirstOutput>();
+        let mut effects = Effects::new(ctx);
+
+        effects
+            .emit(FirstOutput { value: 7 })
+            .await
+            .expect("declared output fact should be accepted");
+
+        let outputs = effects.drain_emitted_outputs();
+        assert_eq!(outputs.len(), 1);
+        assert!(matches!(
+            &outputs[0].content,
+            ChainEventContent::Data { event_type, .. }
+                if event_type == &FirstOutput::versioned_event_type()
+        ));
+        assert!(journal.events().is_empty());
     }
 
     fn effect_records(journal: &MemoryJournal<ChainEvent>) -> Vec<EffectRecord> {

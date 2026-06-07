@@ -140,6 +140,8 @@ pub(super) async fn dispatch_draining<
                             effect_runtime_mode: ctx.effect_runtime_mode,
                             effect_ports: ctx.effect_ports.clone(),
                             effect_declarations: ctx.effect_declarations.clone(),
+                            output_contract: ctx.output_contract.clone(),
+                            emit_enabled: false,
                             effect_boundary: None,
                             boundary_control_events: std::sync::Arc::new(std::sync::Mutex::new(
                                 Vec::new(),
