@@ -160,6 +160,7 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Superviso
             reference_since_last_stream: 0,
             events_since_last_heartbeat: 0,
             backpressure_writer: self.resources.backpressure_writer.clone(),
+            output_contract: self.resources.output_contract.clone(),
             backpressure_readers: self.resources.backpressure_readers.clone(),
             pending_outputs: std::collections::VecDeque::new(),
             pending_parent: None,

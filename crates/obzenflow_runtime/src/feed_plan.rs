@@ -112,6 +112,12 @@ impl StageOutputContract {
             .find(|output| output.payload_key() == payload_key)
     }
 
+    pub fn contains_event_type(&self, event_type: &str) -> bool {
+        self.outputs
+            .iter()
+            .any(|output| output.event_type.as_deref() == Some(event_type))
+    }
+
     pub fn is_empty(&self) -> bool {
         self.outputs.is_empty()
     }

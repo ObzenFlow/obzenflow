@@ -88,6 +88,7 @@ impl<H: AsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
             instrumentation,
             control_strategy,
             backpressure_writer: self.resources.backpressure_writer.clone(),
+            output_contract: self.resources.output_contract.clone(),
         });
 
         // Ensure the handler (and any wrappers) receive the stage writer id before running (FLOWIP-081).

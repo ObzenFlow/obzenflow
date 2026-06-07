@@ -387,6 +387,7 @@ async fn write_stage_outputs_and_ack<H: JoinHandler>(
             &ctx.backpressure_writer,
             &mut ctx.backpressure_pulse,
             &mut ctx.backpressure_backoff,
+            Some(&ctx.output_contract),
             &mut outputs,
         )
         .await?

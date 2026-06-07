@@ -24,8 +24,9 @@ use obzenflow_dsl::{
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::effects::{
-    Effect, EffectCommitHandle, EffectContext, EffectError, EffectPortRegistry,
-    EffectPortRequirement, EffectSafety, Effects, IdempotencyKey, TransactionalEffectPort,
+    is_framework_effect_event_type, Effect, EffectCommitHandle, EffectContext, EffectError,
+    EffectPortRegistry, EffectPortRequirement, EffectRecord, EffectSafety, Effects, IdempotencyKey,
+    TransactionalEffectPort, EFFECT_RECORD_EVENT_TYPE,
 };
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
@@ -788,9 +789,13 @@ fn remove_effect_results_for_stage(run_dir: &Path, stage_key: &str) {
     let journal_path = run_dir.join(stage_journal);
     let original =
         std::fs::read_to_string(&journal_path).expect("stage journal should be readable");
+    // FLOWIP-120b: effect records are framework-owned `Data` facts tagged with the
+    // reserved effect-record event type, not a private `EffectResult` content
+    // variant. Drop those lines so resume sees the outcome facts as missing and
+    // re-executes; domain output facts on the same journal are retained.
     let retained = original
         .lines()
-        .filter(|line| !line.contains("\"effect_result\""))
+        .filter(|line| !line.contains(EFFECT_RECORD_EVENT_TYPE))
         .collect::<Vec<_>>()
         .join("\n");
     let retained = if retained.is_empty() {
@@ -820,6 +825,45 @@ async fn read_stage_events(run_dir: &Path, stage_key: &str) -> Vec<ChainEvent> {
         .into_iter()
         .map(|envelope| envelope.event)
         .collect()
+}
+
+/// True when an event is a framework-owned effect fact (FLOWIP-120b facts-first
+/// model). Effect outcomes and captures are no longer a private `EffectResult`
+/// content variant; they are `Data` facts whose `event_type` is one of the
+/// reserved framework types and whose `effect_provenance.framework_owned` is set.
+/// These facts are filtered from downstream transport and excluded from the EOF
+/// writer count, so tests use this predicate where they previously matched
+/// `ChainEventContent::EffectResult`.
+fn is_framework_effect_fact(event: &ChainEvent) -> bool {
+    matches!(
+        &event.content,
+        ChainEventContent::Data { event_type, .. }
+            if event
+                .effect_provenance
+                .as_ref()
+                .is_some_and(|provenance| provenance.framework_owned)
+                && is_framework_effect_event_type(event_type)
+    )
+}
+
+/// Decode the `EffectRecord` carried by a framework-owned effect-record `Data`
+/// fact, mirroring the runtime's replay-history reader. Returns `None` for any
+/// other event, including capture facts.
+fn framework_effect_record(event: &ChainEvent) -> Option<EffectRecord> {
+    match &event.content {
+        ChainEventContent::Data {
+            event_type,
+            payload,
+        } if event
+            .effect_provenance
+            .as_ref()
+            .is_some_and(|provenance| provenance.framework_owned)
+            && event_type == EFFECT_RECORD_EVENT_TYPE =>
+        {
+            serde_json::from_value(payload.clone()).ok()
+        }
+        _ => None,
+    }
 }
 
 async fn rate_limiter_delayed_events_in_stage(run_dir: &Path, stage_key: &str) -> usize {
@@ -1115,10 +1159,7 @@ async fn fan_out_sibling_effects_use_distinct_cursors_and_replay_suppresses_exec
     let effectful_events = read_stage_events(&archive_dir, "effectful").await;
     let effect_records: Vec<_> = effectful_events
         .iter()
-        .filter_map(|event| match &event.content {
-            ChainEventContent::EffectResult(record) => Some(record),
-            _ => None,
-        })
+        .filter_map(framework_effect_record)
         .collect();
     assert_eq!(effect_records.len(), 2);
     assert_eq!(effect_records[0].cursor.input_seq, 1);
@@ -1180,13 +1221,19 @@ async fn eof_writer_seq_counts_transport_data_not_effect_results() {
 
     let archive_dir = latest_run_dir(&journal_base);
     let effectful_events = read_stage_events(&archive_dir, "effectful").await;
-    let effect_results = effectful_events
+    let effect_records = effectful_events
         .iter()
-        .filter(|event| matches!(event.content, ChainEventContent::EffectResult(_)))
+        .filter(|event| is_framework_effect_fact(event))
         .count();
+    // Domain outputs are `Data` facts that are not framework effect records.
+    // Effect records are now `Data` too, so the contract membership and the
+    // writer count must distinguish them from real stage outputs.
     let data_outputs = effectful_events
         .iter()
-        .filter(|event| matches!(event.content, ChainEventContent::Data { .. }))
+        .filter(|event| {
+            matches!(event.content, ChainEventContent::Data { .. })
+                && !is_framework_effect_fact(event)
+        })
         .count();
     let eof_writer_seq = effectful_events
         .iter()
@@ -1197,20 +1244,20 @@ async fn eof_writer_seq_counts_transport_data_not_effect_results() {
             _ => None,
         });
 
-    assert_eq!(effect_results, 3);
+    assert_eq!(effect_records, 3);
     assert_eq!(data_outputs, 3);
     assert_eq!(
         eof_writer_seq,
         Some(3),
-        "EffectResult records must not inflate EOF writer_seq"
+        "framework effect-record facts must not inflate EOF writer_seq"
     );
 
     let collector_events = read_stage_events(&archive_dir, "collector").await;
     assert!(
         collector_events
             .iter()
-            .all(|event| !matches!(event.content, ChainEventContent::EffectResult(_))),
-        "downstream transport should never receive private EffectResult records"
+            .all(|event| !is_framework_effect_fact(event)),
+        "downstream transport should never receive framework effect-record facts"
     );
 }
 

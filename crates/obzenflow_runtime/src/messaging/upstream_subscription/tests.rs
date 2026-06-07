@@ -1751,6 +1751,156 @@ async fn transport_only_filters_unselected_data_and_reconciles_selected_writer_s
 }
 
 #[tokio::test]
+async fn multi_selected_feeds_emit_direct_contract_status_per_feed() {
+    let upstream_stage = StageId::new();
+    let reader_stage = StageId::new();
+    let upstream_owner = JournalOwner::stage(upstream_stage);
+    let reader_owner = JournalOwner::stage(reader_stage);
+    let upstream_journal: Arc<dyn Journal<ChainEvent>> = Arc::new(TestJournal::new(upstream_owner));
+    let contract_journal: Arc<dyn Journal<ChainEvent>> =
+        Arc::new(TestJournal::new(reader_owner.clone()));
+    let system_journal: Arc<dyn Journal<SystemEvent>> = Arc::new(TestJournal::new(reader_owner));
+
+    let writer_id = WriterId::Stage(upstream_stage);
+    upstream_journal
+        .append(
+            ChainEventFactory::data_event(writer_id, "test.first.v1", json!({"n": 1})),
+            None,
+        )
+        .await
+        .unwrap();
+    upstream_journal
+        .append(
+            ChainEventFactory::data_event(writer_id, "test.second.v1", json!({"n": 2})),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let mut eof_event = ChainEventFactory::eof_event(writer_id, true);
+    if let ChainEventContent::FlowControl(FlowControlPayload::Eof {
+        writer_seq,
+        writer_seq_by_event_type,
+        ..
+    }) = &mut eof_event.content
+    {
+        // Aggregate selected count is 2, but the per-feed evidence is deliberately
+        // inconsistent: first advertises 2 while second advertises 0.
+        *writer_seq = Some(SeqNo(2));
+        writer_seq_by_event_type.insert("test.first.v1".to_string(), SeqNo(2));
+        writer_seq_by_event_type.insert("test.second.v1".to_string(), SeqNo(0));
+    }
+    upstream_journal.append(eof_event, None).await.unwrap();
+
+    let upstreams = [(upstream_stage, "upstream".to_string(), upstream_journal)];
+    let mut selected_feeds = HashMap::new();
+    selected_feeds.insert(
+        upstream_stage,
+        vec![
+            SelectedFeedMetadata {
+                event_type: "test.first.v1".to_string(),
+                feed_role: Some("input".to_string()),
+            },
+            SelectedFeedMetadata {
+                event_type: "test.second.v1".to_string(),
+                feed_role: Some("reference".to_string()),
+            },
+        ],
+    );
+
+    let mut subscription = UpstreamSubscription::new_with_names("test_owner", &upstreams)
+        .await
+        .unwrap()
+        .with_selected_feeds(selected_feeds)
+        .with_contracts(ContractsWiring {
+            writer_id: WriterId::from(reader_stage),
+            contract_journal: contract_journal.clone(),
+            config: ContractConfig::default(),
+            system_journal: Some(system_journal.clone()),
+            reader_stage: Some(reader_stage),
+            control_middleware: Arc::new(NoControlMiddleware),
+            include_delivery_contract: false,
+            cycle_guard_config: None,
+        })
+        .transport_only();
+
+    let mut reader_progress = [ReaderProgress::new(upstream_stage)];
+    drive_subscription_to_eof(&mut subscription, &mut reader_progress).await;
+
+    let status = subscription.check_contracts(&mut reader_progress).await;
+    assert!(
+        matches!(status, ContractStatus::Violated { upstream, .. } if upstream == upstream_stage),
+        "per-feed divergence should fail even when aggregate selected counts reconcile, got {status:?}"
+    );
+
+    let system_events = system_journal.read_causally_ordered().await.unwrap();
+    let mut first_status = None;
+    let mut second_status = None;
+    let mut aggregate_status_found = false;
+
+    for env in &system_events {
+        if let SystemEventType::ContractStatus {
+            upstream,
+            reader,
+            selected_event_type,
+            feed_role,
+            pass,
+            reader_seq,
+            advertised_writer_seq,
+            reason,
+        } = &env.event.event
+        {
+            if *upstream != upstream_stage || *reader != reader_stage {
+                continue;
+            }
+            match (selected_event_type.as_deref(), feed_role.as_deref()) {
+                (Some("test.first.v1"), Some("input")) => {
+                    first_status =
+                        Some((*pass, *reader_seq, *advertised_writer_seq, reason.clone()));
+                }
+                (Some("test.second.v1"), Some("reference")) => {
+                    second_status =
+                        Some((*pass, *reader_seq, *advertised_writer_seq, reason.clone()));
+                }
+                (None, None) => {
+                    aggregate_status_found = true;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let first_status = first_status.expect("expected first feed ContractStatus");
+    assert!(!first_status.0);
+    assert_eq!(first_status.1, Some(SeqNo(1)));
+    assert_eq!(first_status.2, Some(SeqNo(2)));
+    assert!(matches!(
+        first_status.3,
+        Some(EventViolationCause::SeqDivergence {
+            advertised: Some(SeqNo(2)),
+            reader: SeqNo(1),
+        })
+    ));
+
+    let second_status = second_status.expect("expected second feed ContractStatus");
+    assert!(!second_status.0);
+    assert_eq!(second_status.1, Some(SeqNo(1)));
+    assert_eq!(second_status.2, Some(SeqNo(0)));
+    assert!(matches!(
+        second_status.3,
+        Some(EventViolationCause::SeqDivergence {
+            advertised: Some(SeqNo(0)),
+            reader: SeqNo(1),
+        })
+    ));
+
+    assert!(
+        !aggregate_status_found,
+        "direct feed status should suppress ambiguous aggregate ContractStatus"
+    );
+}
+
+#[tokio::test]
 async fn transport_only_skips_framework_effect_data_without_stage_input_position() {
     let upstream_stage = StageId::new();
     let upstream_owner = JournalOwner::stage(upstream_stage);

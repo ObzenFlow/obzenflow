@@ -166,6 +166,8 @@ where
             delivery_filter: DeliveryFilter::All,
             owner_label: owner_label.to_string(),
             selected_data_seq_by_reader: vec![SeqNo(0); readers.len()],
+            selected_data_seq_by_reader_event_type: vec![HashMap::new(); readers.len()],
+            advertised_writer_seq_by_reader_event_type: vec![Default::default(); readers.len()],
             readers,
             selected_event_types_by_stage: HashMap::new(),
             selected_feeds_by_stage: HashMap::new(),

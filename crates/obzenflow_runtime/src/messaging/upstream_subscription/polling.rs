@@ -221,11 +221,20 @@ where
                     let contract_chain_event =
                         normalized_contract_event.as_ref().or(original_chain_event);
 
-                    if original_chain_event.is_some_and(ChainEvent::is_data) {
+                    if let Some(ChainEventContent::Data { event_type, .. }) =
+                        original_chain_event.map(|event| &event.content)
+                    {
                         if let Some(selected_seq) =
                             self.selected_data_seq_by_reader.get_mut(current_index)
                         {
                             selected_seq.0 = selected_seq.0.saturating_add(1);
+                        }
+                        if let Some(by_type) = self
+                            .selected_data_seq_by_reader_event_type
+                            .get_mut(current_index)
+                        {
+                            let seq = by_type.entry(event_type.clone()).or_insert(SeqNo(0));
+                            seq.0 = seq.0.saturating_add(1);
                         }
                     }
 
@@ -264,6 +273,7 @@ where
                                         FlowControlPayload::Eof {
                                             writer_id,
                                             writer_seq,
+                                            writer_seq_by_event_type,
                                             vector_clock,
                                             ..
                                         },
@@ -285,6 +295,12 @@ where
                                         if authored_by_upstream {
                                             progress.advertised_writer_seq = *writer_seq;
                                             progress.last_vector_clock = vector_clock.clone();
+                                            if let Some(by_type) = self
+                                                .advertised_writer_seq_by_reader_event_type
+                                                .get_mut(current_index)
+                                            {
+                                                *by_type = writer_seq_by_event_type.clone();
+                                            }
                                         }
                                     }
                                 }

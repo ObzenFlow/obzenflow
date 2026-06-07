@@ -80,6 +80,7 @@ pub(super) async fn flush_pending_outputs<
             &ctx.backpressure_writer,
             &mut ctx.backpressure_pulse,
             &mut ctx.backpressure_backoff,
+            Some(&ctx.output_contract),
             &mut ctx.pending_outputs,
         )
         .await?

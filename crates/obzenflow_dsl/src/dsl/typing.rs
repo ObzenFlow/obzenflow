@@ -190,6 +190,18 @@ impl StageTypingMetadata {
         self.output_contract = output_contract;
         self
     }
+
+    pub fn with_additional_output_contract(mut self, additional_members: Vec<TypeHint>) -> Self {
+        let mut output_contract = output_contract_from_output_type(&self.output_type);
+        for member in additional_members {
+            if matches!(member, TypeHint::Unspecified) || output_contract.contains(&member) {
+                continue;
+            }
+            output_contract.push(member);
+        }
+        self.output_contract = output_contract;
+        self
+    }
 }
 
 fn output_contract_from_output_type(output_type: &TypeHint) -> Vec<TypeHint> {

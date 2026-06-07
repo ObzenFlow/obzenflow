@@ -24,6 +24,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::backpressure::BackpressureWriter;
+use crate::feed_plan::StageOutputContract;
 use crate::metrics::instrumentation::{snapshot_stage_metrics, StageInstrumentation};
 use crate::metrics::tail_read;
 use crate::replay::ReplayArchive;
@@ -288,6 +289,9 @@ pub struct InfiniteSourceContext<H> {
     /// Backpressure writer handle for this stage's journal (FLOWIP-086k).
     pub backpressure_writer: BackpressureWriter,
 
+    /// Declared stage output contract used by the shared output commit path.
+    pub output_contract: StageOutputContract,
+
     /// Pending stage outputs blocked on downstream credits (FLOWIP-086k).
     pub(crate) pending_outputs: VecDeque<ChainEvent>,
 
@@ -314,6 +318,7 @@ pub struct InfiniteSourceContextInit {
     pub instrumentation: Arc<StageInstrumentation>,
     pub control_strategy: Arc<dyn SourceControlStrategy>,
     pub backpressure_writer: BackpressureWriter,
+    pub output_contract: StageOutputContract,
 }
 
 impl<H> InfiniteSourceContext<H> {
@@ -334,6 +339,7 @@ impl<H> InfiniteSourceContext<H> {
             control_strategy: init.control_strategy,
             control_context: SourceControlContext::new(),
             backpressure_writer: init.backpressure_writer,
+            output_contract: init.output_contract,
             pending_outputs: VecDeque::new(),
             backpressure_pulse: BackpressureActivityPulse::new(),
             backpressure_backoff: IdleBackoff::exponential_with_cap(

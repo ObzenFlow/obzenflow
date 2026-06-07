@@ -8,6 +8,7 @@
 //! responsiveness and backpressure semantics.
 
 use crate::backpressure::BackpressureWriter;
+use crate::feed_plan::StageOutputContract;
 use crate::metrics::instrumentation::StageInstrumentation;
 use crate::stages::common::backpressure_activity_pulse::BackpressureActivityPulse;
 use crate::stages::common::heartbeat::HeartbeatState;
@@ -80,6 +81,7 @@ pub(crate) async fn drain_pending_outputs_sync(
     backpressure_writer: &BackpressureWriter,
     backpressure_pulse: &mut BackpressureActivityPulse,
     backpressure_backoff: &mut IdleBackoff,
+    output_contract: Option<&StageOutputContract>,
 ) -> Result<bool, BoxError> {
     while let Some(pending) = pending_outputs.pop_front() {
         if matches!(
@@ -106,6 +108,7 @@ pub(crate) async fn drain_pending_outputs_sync(
             backpressure_writer,
             backpressure_pulse,
             backpressure_backoff,
+            output_contract,
             pending_outputs,
         )
         .await?
@@ -131,6 +134,7 @@ pub(crate) async fn drain_pending_outputs_async<E>(
     backpressure_writer: &BackpressureWriter,
     backpressure_pulse: &mut BackpressureActivityPulse,
     backpressure_backoff: &mut IdleBackoff,
+    output_contract: Option<&StageOutputContract>,
     external_events: &mut EventReceiver<E>,
     on_channel_closed: impl FnOnce() -> E,
 ) -> Result<Option<EventLoopDirective<E>>, BoxError>
@@ -164,6 +168,7 @@ where
             backpressure_writer,
             backpressure_pulse,
             backpressure_backoff,
+            output_contract,
             pending_outputs,
         )
         .await?
@@ -379,6 +384,7 @@ mod tests {
                 &writer,
                 &mut backpressure_pulse,
                 &mut backpressure_backoff,
+                None,
                 &mut receiver,
                 || TestEvent::ChannelClosed,
             )

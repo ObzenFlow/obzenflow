@@ -333,6 +333,13 @@ mod tests {
         assert_eq!(metadata.output_contract, vec![exact::<T>()]);
     }
 
+    fn assert_output_contract(
+        metadata: &crate::dsl::typing::StageTypingMetadata,
+        expected: Vec<TypeHint>,
+    ) {
+        assert_eq!(metadata.output_contract, expected);
+    }
+
     #[test]
     fn typed_macros_attach_metadata_for_exact_handlers() {
         let source = crate::source!(name: "source", InputEvent => SyncExactSource);
@@ -426,6 +433,44 @@ mod tests {
         assert_eq!(join_meta.output_type, exact::<JoinedEvent>());
         assert_one_member_output_contract::<JoinedEvent>(join_meta);
         assert!(!join_meta.is_placeholder);
+    }
+
+    #[test]
+    fn transform_macros_accept_explicit_output_contract_members() {
+        let transform = crate::transform!(
+            name: "transform",
+            InputEvent -> OutputEvent, outputs: [OutputEvent, AlternateEvent] => ExactTransform
+        );
+        let transform_meta = transform.typing_metadata().unwrap();
+        assert_eq!(transform_meta.output_type, exact::<OutputEvent>());
+        assert_output_contract(
+            transform_meta,
+            vec![exact::<OutputEvent>(), exact::<AlternateEvent>()],
+        );
+
+        let async_transform = crate::async_transform!(
+            name: "async_transform",
+            InputEvent -> OutputEvent, outputs: [AlternateEvent] => ExactAsyncTransform
+        );
+        let async_transform_meta = async_transform.typing_metadata().unwrap();
+        assert_eq!(async_transform_meta.output_type, exact::<OutputEvent>());
+        assert_output_contract(
+            async_transform_meta,
+            vec![exact::<OutputEvent>(), exact::<AlternateEvent>()],
+        );
+
+        let effectful_transform = crate::effectful_transform!(
+            name: "effectful_transform",
+            OutputEvent -> OutputEvent, outputs: [OutputEvent, AlternateEvent] => EffectfulExactTransform,
+            effects: [],
+            middleware: []
+        );
+        let effectful_transform_meta = effectful_transform.typing_metadata().unwrap();
+        assert_eq!(effectful_transform_meta.output_type, exact::<OutputEvent>());
+        assert_output_contract(
+            effectful_transform_meta,
+            vec![exact::<OutputEvent>(), exact::<AlternateEvent>()],
+        );
     }
 
     #[test]

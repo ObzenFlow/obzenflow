@@ -6,9 +6,9 @@
 
 use async_trait::async_trait;
 pub use obzenflow_core::event::payloads::effect_payload::{
-    framework_effect_event_type, is_framework_effect_event_type, EffectCursor, EffectDescriptor,
-    EffectOutcomePayload, EffectProvenance, EffectRecord, CAPTURE_EVENT_TYPE,
-    EFFECT_RECORD_EVENT_TYPE,
+    effect_outcome_group_id, framework_effect_event_type, is_framework_effect_event_type,
+    EffectCursor, EffectDescriptor, EffectOutcomePayload, EffectProvenance, EffectRecord,
+    CAPTURE_EVENT_TYPE, EFFECT_RECORD_EVENT_TYPE,
 };
 use obzenflow_core::event::schema::TypedPayload;
 use obzenflow_core::event::{ChainEventContent, ChainEventFactory};
@@ -26,6 +26,7 @@ use thiserror::Error;
 
 use crate::messaging::upstream_subscription::StageInputPosition;
 use crate::replay::{ReplayArchive, ReplayError};
+use crate::stages::common::supervision::output_committer::{CommitOptions, OutputCommitter};
 
 pub struct EffectBoundaryContext {
     inner: Box<dyn Any + Send>,
@@ -1188,8 +1189,19 @@ async fn append_effect_record(
             );
     }
 
-    data_journal
-        .append(event, Some(parent))
+    // FLOWIP-120b Step 1: route the framework effect/capture record append
+    // through the shared OutputCommitter. With only the journal handle present,
+    // this is the same credit-free, unenriched, unmirrored append it was before,
+    // but it now shares the one commit path the supervisor drain uses.
+    let committer = OutputCommitter {
+        data_journal,
+        flow_context: None,
+        system_journal: None,
+        instrumentation: None,
+        heartbeat_state: None,
+    };
+    committer
+        .commit_prebuilt(event, Some(parent), CommitOptions::default())
         .await
         .map_err(|e| EffectError::Journal(e.to_string()))?;
     Ok(())
@@ -1660,11 +1672,19 @@ mod tests {
             events[0].event.content,
             ChainEventContent::Data { .. }
         ));
-        assert!(events[0].event.effect_provenance.is_some());
         let records = effect_records(&journal);
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].cursor.input_seq, 1);
         assert_eq!(records[0].cursor.effect_ordinal, 0);
+        let provenance = events[0]
+            .event
+            .effect_provenance
+            .as_ref()
+            .expect("effect data fact should carry provenance");
+        assert_eq!(
+            provenance.group_id.as_deref(),
+            Some(effect_outcome_group_id(&records[0].cursor).as_str())
+        );
     }
 
     #[tokio::test]

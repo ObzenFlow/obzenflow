@@ -358,6 +358,7 @@ impl<H: AsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
                     &ctx.backpressure_writer,
                     &mut ctx.backpressure_pulse,
                     &mut ctx.backpressure_backoff,
+                    Some(&ctx.output_contract),
                     &mut self.external_events,
                     || InfiniteSourceEvent::Error("External control channel closed".to_string()),
                 )

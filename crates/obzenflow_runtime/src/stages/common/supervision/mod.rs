@@ -15,6 +15,7 @@ pub(crate) mod error_routing;
 pub(crate) mod flow_context_factory;
 pub(crate) mod forward_control_event;
 pub(crate) mod lifecycle_actions;
+pub(crate) mod output_committer;
 
 #[cfg(test)]
 mod tests;

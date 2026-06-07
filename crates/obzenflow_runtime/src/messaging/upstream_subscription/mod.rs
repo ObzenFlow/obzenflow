@@ -76,6 +76,13 @@ where
     /// filter and were delivered as stage inputs.
     selected_data_seq_by_reader: Vec<SeqNo>,
 
+    /// Per-reader, per-event-type count of selected Data events delivered as
+    /// stage inputs.
+    selected_data_seq_by_reader_event_type: Vec<HashMap<String, SeqNo>>,
+
+    /// Per-reader producer EOF evidence keyed by event type.
+    advertised_writer_seq_by_reader_event_type: Vec<BTreeMap<String, SeqNo>>,
+
     /// Subscription state (mechanism)
     state: SubscriptionState,
 

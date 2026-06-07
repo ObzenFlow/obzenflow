@@ -363,6 +363,7 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
                     &ctx.backpressure_writer,
                     &mut ctx.backpressure_pulse,
                     &mut ctx.backpressure_backoff,
+                    Some(&ctx.output_contract),
                 )
                 .await?
                 {

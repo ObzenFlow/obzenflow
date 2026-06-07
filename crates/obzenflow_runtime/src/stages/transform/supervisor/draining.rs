@@ -71,6 +71,7 @@ async fn dispatch_draining_inner<
                 &ctx.backpressure_writer,
                 &mut ctx.backpressure_pulse,
                 &mut ctx.backpressure_backoff,
+                Some(&ctx.output_contract),
                 &mut ctx.pending_outputs,
             )
             .await?
@@ -264,6 +265,7 @@ async fn dispatch_draining_inner<
                     &ctx.backpressure_writer,
                     &mut ctx.backpressure_pulse,
                     &mut ctx.backpressure_backoff,
+                    Some(&ctx.output_contract),
                     &mut stage_outputs,
                 )
                 .await?

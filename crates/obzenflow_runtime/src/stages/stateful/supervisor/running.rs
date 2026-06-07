@@ -72,6 +72,7 @@ pub(super) async fn dispatch_accumulating<
             &ctx.backpressure_writer,
             &mut ctx.backpressure_pulse,
             &mut ctx.backpressure_backoff,
+            Some(&ctx.output_contract),
             &mut ctx.pending_outputs,
         )
         .await?
@@ -548,6 +549,7 @@ pub(super) async fn dispatch_emitting<
                 &ctx.backpressure_writer,
                 &mut ctx.backpressure_pulse,
                 &mut ctx.backpressure_backoff,
+                Some(&ctx.output_contract),
                 &mut ctx.pending_outputs,
             )
             .await?

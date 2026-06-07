@@ -44,6 +44,18 @@
 //! descriptor assembly; those are not part of the public surface and are not
 //! reachable by author code.
 
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __obzenflow_output_contract_members {
+    ($($member:ty),+ $(,)?) => {
+        vec![
+            $(
+                $crate::dsl::typing::TypeHint::exact_payload::<$member>()
+            ),+
+        ]
+    };
+}
+
 // ============================================================================
 // placeholder!
 // ============================================================================
@@ -739,6 +751,53 @@ macro_rules! __obzenflow_transform_untyped {
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __obzenflow_transform_typed {
+    // -- exact input, placeholder, explicit output contract --
+    (input = exact($in:ty), output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = placeholder!(), middleware = [$($mw:expr),*]) => {{
+        let __metadata = $crate::dsl::typing::StageTypingMetadata::transform(
+            $crate::dsl::typing::TypeHint::exact_payload::<$in>(),
+            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
+            true,
+            None,
+        )
+        .with_additional_output_contract($crate::__obzenflow_output_contract_members!($($member),+));
+        let __descriptor = $crate::__obzenflow_transform_untyped!(
+            name = $name,
+            handler = $crate::dsl::typing::PlaceholderTransform::<$in, $out>::new(None),
+            middleware = [$($mw),*]
+        );
+        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
+    }};
+    (input = exact($in:ty), output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = placeholder!($msg:expr), middleware = [$($mw:expr),*]) => {{
+        let __metadata = $crate::dsl::typing::StageTypingMetadata::transform(
+            $crate::dsl::typing::TypeHint::exact_payload::<$in>(),
+            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
+            true,
+            Some(($msg).to_string()),
+        )
+        .with_additional_output_contract($crate::__obzenflow_output_contract_members!($($member),+));
+        let __descriptor = $crate::__obzenflow_transform_untyped!(
+            name = $name,
+            handler = $crate::dsl::typing::PlaceholderTransform::<$in, $out>::new(Some($msg)),
+            middleware = [$($mw),*]
+        );
+        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
+    }};
+    // -- exact input, real handler, explicit output contract --
+    (input = exact($in:ty), output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = $handler:expr, middleware = [$($mw:expr),*]) => {{
+        let __handler = $handler;
+        let __handler =
+            $crate::dsl::typing::BoundTransform::<$in, $out, _>::new(__handler);
+        ::obzenflow_runtime::typing::assert_transform_contract::<_, $in, $out>(&__handler);
+        let __metadata = $crate::dsl::typing::StageTypingMetadata::transform(
+            $crate::dsl::typing::TypeHint::exact_payload::<$in>(),
+            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
+            false,
+            None,
+        )
+        .with_additional_output_contract($crate::__obzenflow_output_contract_members!($($member),+));
+        let __descriptor = $crate::__obzenflow_transform_untyped!(name = $name, handler = __handler, middleware = [$($mw),*]);
+        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
+    }};
     // ── exact input, placeholder ──
     (input = exact($in:ty), output = $out:ty, name = $name:literal, handler = placeholder!(), middleware = [$($mw:expr),*]) => {{
         let __metadata = $crate::dsl::typing::StageTypingMetadata::transform(
@@ -790,6 +849,66 @@ macro_rules! __obzenflow_transform_typed {
 macro_rules! __obzenflow_transform_exact_contract {
     (name = $name:literal, $($rest:tt)+) => {
         $crate::__obzenflow_transform_exact_contract!(@collect name = $name, in = (), $($rest)+)
+    };
+    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty, outputs: [$($member:ty),+ $(,)?] => placeholder!()) => {
+        $crate::__obzenflow_transform_typed!(
+            input = exact($($in)+),
+            output = $out,
+            output_contract = [$($member),+],
+            name = $name,
+            handler = placeholder!(),
+            middleware = []
+        )
+    };
+    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty, outputs: [$($member:ty),+ $(,)?] => placeholder!($msg:expr)) => {
+        $crate::__obzenflow_transform_typed!(
+            input = exact($($in)+),
+            output = $out,
+            output_contract = [$($member),+],
+            name = $name,
+            handler = placeholder!($msg),
+            middleware = []
+        )
+    };
+    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty, outputs: [$($member:ty),+ $(,)?] => placeholder!(), [$($mw:expr),*]) => {
+        $crate::__obzenflow_transform_typed!(
+            input = exact($($in)+),
+            output = $out,
+            output_contract = [$($member),+],
+            name = $name,
+            handler = placeholder!(),
+            middleware = [$($mw),*]
+        )
+    };
+    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty, outputs: [$($member:ty),+ $(,)?] => placeholder!($msg:expr), [$($mw:expr),*]) => {
+        $crate::__obzenflow_transform_typed!(
+            input = exact($($in)+),
+            output = $out,
+            output_contract = [$($member),+],
+            name = $name,
+            handler = placeholder!($msg),
+            middleware = [$($mw),*]
+        )
+    };
+    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty, outputs: [$($member:ty),+ $(,)?] => $handler:expr) => {
+        $crate::__obzenflow_transform_typed!(
+            input = exact($($in)+),
+            output = $out,
+            output_contract = [$($member),+],
+            name = $name,
+            handler = $handler,
+            middleware = []
+        )
+    };
+    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty, outputs: [$($member:ty),+ $(,)?] => $handler:expr, [$($mw:expr),*]) => {
+        $crate::__obzenflow_transform_typed!(
+            input = exact($($in)+),
+            output = $out,
+            output_contract = [$($member),+],
+            name = $name,
+            handler = $handler,
+            middleware = [$($mw),*]
+        )
     };
     (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => placeholder!()) => {
         $crate::__obzenflow_transform_typed!(
@@ -896,6 +1015,53 @@ macro_rules! __obzenflow_async_transform_untyped {
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __obzenflow_async_transform_typed {
+    // -- exact input, placeholder, explicit output contract --
+    (input = exact($in:ty), output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = placeholder!(), middleware = [$($mw:expr),*]) => {{
+        let __metadata = $crate::dsl::typing::StageTypingMetadata::transform(
+            $crate::dsl::typing::TypeHint::exact_payload::<$in>(),
+            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
+            true,
+            None,
+        )
+        .with_additional_output_contract($crate::__obzenflow_output_contract_members!($($member),+));
+        let __descriptor = $crate::__obzenflow_async_transform_untyped!(
+            name = $name,
+            handler = $crate::dsl::typing::PlaceholderAsyncTransform::<$in, $out>::new(None),
+            middleware = [$($mw),*]
+        );
+        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
+    }};
+    (input = exact($in:ty), output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = placeholder!($msg:expr), middleware = [$($mw:expr),*]) => {{
+        let __metadata = $crate::dsl::typing::StageTypingMetadata::transform(
+            $crate::dsl::typing::TypeHint::exact_payload::<$in>(),
+            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
+            true,
+            Some(($msg).to_string()),
+        )
+        .with_additional_output_contract($crate::__obzenflow_output_contract_members!($($member),+));
+        let __descriptor = $crate::__obzenflow_async_transform_untyped!(
+            name = $name,
+            handler = $crate::dsl::typing::PlaceholderAsyncTransform::<$in, $out>::new(Some($msg)),
+            middleware = [$($mw),*]
+        );
+        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
+    }};
+    // -- exact input, real handler, explicit output contract --
+    (input = exact($in:ty), output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = $handler:expr, middleware = [$($mw:expr),*]) => {{
+        let __handler = $handler;
+        let __handler =
+            $crate::dsl::typing::BoundAsyncTransform::<$in, $out, _>::new(__handler);
+        ::obzenflow_runtime::typing::assert_transform_contract::<_, $in, $out>(&__handler);
+        let __metadata = $crate::dsl::typing::StageTypingMetadata::transform(
+            $crate::dsl::typing::TypeHint::exact_payload::<$in>(),
+            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
+            false,
+            None,
+        )
+        .with_additional_output_contract($crate::__obzenflow_output_contract_members!($($member),+));
+        let __descriptor = $crate::__obzenflow_async_transform_untyped!(name = $name, handler = __handler, middleware = [$($mw),*]);
+        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
+    }};
     // ── exact input, placeholder ──
     (input = exact($in:ty), output = $out:ty, name = $name:literal, handler = placeholder!(), middleware = [$($mw:expr),*]) => {{
         let __metadata = $crate::dsl::typing::StageTypingMetadata::transform(
@@ -947,6 +1113,66 @@ macro_rules! __obzenflow_async_transform_typed {
 macro_rules! __obzenflow_async_transform_exact_contract {
     (name = $name:literal, $($rest:tt)+) => {
         $crate::__obzenflow_async_transform_exact_contract!(@collect name = $name, in = (), $($rest)+)
+    };
+    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty, outputs: [$($member:ty),+ $(,)?] => placeholder!()) => {
+        $crate::__obzenflow_async_transform_typed!(
+            input = exact($($in)+),
+            output = $out,
+            output_contract = [$($member),+],
+            name = $name,
+            handler = placeholder!(),
+            middleware = []
+        )
+    };
+    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty, outputs: [$($member:ty),+ $(,)?] => placeholder!($msg:expr)) => {
+        $crate::__obzenflow_async_transform_typed!(
+            input = exact($($in)+),
+            output = $out,
+            output_contract = [$($member),+],
+            name = $name,
+            handler = placeholder!($msg),
+            middleware = []
+        )
+    };
+    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty, outputs: [$($member:ty),+ $(,)?] => placeholder!(), [$($mw:expr),*]) => {
+        $crate::__obzenflow_async_transform_typed!(
+            input = exact($($in)+),
+            output = $out,
+            output_contract = [$($member),+],
+            name = $name,
+            handler = placeholder!(),
+            middleware = [$($mw),*]
+        )
+    };
+    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty, outputs: [$($member:ty),+ $(,)?] => placeholder!($msg:expr), [$($mw:expr),*]) => {
+        $crate::__obzenflow_async_transform_typed!(
+            input = exact($($in)+),
+            output = $out,
+            output_contract = [$($member),+],
+            name = $name,
+            handler = placeholder!($msg),
+            middleware = [$($mw),*]
+        )
+    };
+    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty, outputs: [$($member:ty),+ $(,)?] => $handler:expr) => {
+        $crate::__obzenflow_async_transform_typed!(
+            input = exact($($in)+),
+            output = $out,
+            output_contract = [$($member),+],
+            name = $name,
+            handler = $handler,
+            middleware = []
+        )
+    };
+    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty, outputs: [$($member:ty),+ $(,)?] => $handler:expr, [$($mw:expr),*]) => {
+        $crate::__obzenflow_async_transform_typed!(
+            input = exact($($in)+),
+            output = $out,
+            output_contract = [$($member),+],
+            name = $name,
+            handler = $handler,
+            middleware = [$($mw),*]
+        )
     };
     (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => placeholder!()) => {
         $crate::__obzenflow_async_transform_typed!(
@@ -1073,6 +1299,31 @@ macro_rules! __obzenflow_effectful_transform_untyped {
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __obzenflow_effectful_transform_typed {
+    (input = exact($in:ty), output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = $handler:expr, effects = [$($effects:tt)*], middleware = [$($mw:expr),* $(,)?]) => {{
+        let __handler = $handler;
+        fn __assert_effectful_contract<H>(_handler: &H)
+        where
+            H: ::obzenflow_runtime::stages::EffectfulTransformHandler<
+                Input = $in,
+                Output = $out,
+            >,
+        {}
+        __assert_effectful_contract(&__handler);
+        let __metadata = $crate::dsl::typing::StageTypingMetadata::transform(
+            $crate::dsl::typing::TypeHint::exact_payload::<$in>(),
+            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
+            false,
+            None,
+        )
+        .with_additional_output_contract($crate::__obzenflow_output_contract_members!($($member),+));
+        let __descriptor = $crate::__obzenflow_effectful_transform_untyped!(
+            name = $name,
+            handler = __handler,
+            effects = [$($effects)*],
+            middleware = [$($mw),*]
+        );
+        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
+    }};
     (input = exact($in:ty), output = $out:ty, name = $name:literal, handler = $handler:expr, effects = [$($effects:tt)*], middleware = [$($mw:expr),* $(,)?]) => {{
         let __handler = $handler;
         fn __assert_effectful_contract<H>(_handler: &H)
@@ -1104,6 +1355,17 @@ macro_rules! __obzenflow_effectful_transform_typed {
 macro_rules! __obzenflow_effectful_transform_exact_contract {
     (name = $name:literal, $($rest:tt)+) => {
         $crate::__obzenflow_effectful_transform_exact_contract!(@collect name = $name, in = (), $($rest)+)
+    };
+    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty, outputs: [$($member:ty),+ $(,)?] => $handler:expr, effects: [$($effects:tt)*], middleware: [$($mw:expr),* $(,)?] $(,)?) => {
+        $crate::__obzenflow_effectful_transform_typed!(
+            input = exact($($in)+),
+            output = $out,
+            output_contract = [$($member),+],
+            name = $name,
+            handler = $handler,
+            effects = [$($effects)*],
+            middleware = [$($mw),*]
+        )
     };
     (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => $handler:expr, effects: [$($effects:tt)*], middleware: [$($mw:expr),* $(,)?] $(,)?) => {
         $crate::__obzenflow_effectful_transform_typed!(

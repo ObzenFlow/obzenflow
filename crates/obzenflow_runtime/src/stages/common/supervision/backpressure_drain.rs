@@ -20,8 +20,10 @@ use obzenflow_core::{ChainEvent, StageId, WriterId};
 use std::sync::Arc;
 
 use crate::backpressure::BackpressureWriter;
+use crate::feed_plan::StageOutputContract;
 use crate::metrics::instrumentation::StageInstrumentation;
 use crate::stages::common::heartbeat::HeartbeatState;
+use crate::stages::common::supervision::output_committer::{CommitOptions, OutputCommitter};
 
 /// Outcome of attempting to drain a single pending event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -74,6 +76,7 @@ pub(crate) async fn drain_one_pending(
     backpressure_writer: &BackpressureWriter,
     backpressure_pulse: &mut BackpressureActivityPulse,
     backpressure_backoff: &mut IdleBackoff,
+    output_contract: Option<&StageOutputContract>,
     pending_outputs: &mut std::collections::VecDeque<ChainEvent>,
 ) -> Result<DrainOutcome, Box<dyn std::error::Error + Send + Sync>> {
     match drain_one_pending_resolve(
@@ -88,6 +91,7 @@ pub(crate) async fn drain_one_pending(
         backpressure_writer,
         backpressure_pulse,
         backpressure_backoff,
+        output_contract,
         pending_outputs,
     )
     .await?
@@ -120,11 +124,27 @@ pub(crate) async fn drain_one_pending_resolve(
     backpressure_writer: &BackpressureWriter,
     backpressure_pulse: &mut BackpressureActivityPulse,
     backpressure_backoff: &mut IdleBackoff,
+    output_contract: Option<&StageOutputContract>,
     pending_outputs: &mut std::collections::VecDeque<ChainEvent>,
 ) -> Result<DrainAttempt, Box<dyn std::error::Error + Send + Sync>> {
     let is_data = pending.is_data();
 
+    // FLOWIP-120b Step 1: the commit core (flow/runtime enrichment, per-type
+    // counting, journal append, heartbeat tracking, middleware mirror) is owned
+    // by the shared OutputCommitter so the drain and the effects-layer effect
+    // record append do not drift. The credit reservation, requeue, and pulses
+    // stay in the drain until Step 2 moves backpressure to input admission.
+    let committer = OutputCommitter {
+        data_journal,
+        flow_context: Some(flow_context),
+        system_journal: Some(system_journal),
+        instrumentation: Some(instrumentation),
+        heartbeat_state: heartbeat_state.as_ref(),
+    };
+
     if is_data {
+        validate_output_contract_membership(&pending, output_contract)?;
+
         // Debug-only: emit activity pulses even when bypass is enabled, so
         // operators can see what *would* have blocked (FLOWIP-086k).
         emit_bypass_pulse_if_needed(
@@ -158,49 +178,56 @@ pub(crate) async fn drain_one_pending_resolve(
             return Ok(DrainAttempt::BackedOff { delay });
         };
 
-        let enriched = pending.with_flow_context(flow_context.clone());
-        if enriched.is_data() {
-            instrumentation.record_output_event(&enriched);
-        }
-        let enriched = enriched.with_runtime_context(instrumentation.snapshot_with_control());
-
-        let written = data_journal
-            .append(enriched, pending_parent)
+        committer
+            .commit_prebuilt(
+                pending,
+                pending_parent,
+                CommitOptions { count_output: true },
+            )
             .await
             .map_err(|e| format!("Failed to write pending output: {e}"))?;
-        if let Some(state) = &heartbeat_state {
-            state.record_last_output(written.event.id);
-        }
+
         reservation.commit(1);
         backpressure_backoff.reset();
-        crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
-            &written,
-            system_journal,
-        )
-        .await;
 
         Ok(DrainAttempt::Committed { was_data: true })
     } else {
         // Non-data events bypass credit gating.
-        let enriched = pending
-            .with_flow_context(flow_context.clone())
-            .with_runtime_context(instrumentation.snapshot_with_control());
-
-        let written = data_journal
-            .append(enriched, pending_parent)
+        committer
+            .commit_prebuilt(
+                pending,
+                pending_parent,
+                CommitOptions {
+                    count_output: false,
+                },
+            )
             .await
             .map_err(|e| format!("Failed to write pending output: {e}"))?;
-        if let Some(state) = &heartbeat_state {
-            state.record_last_output(written.event.id);
-        }
-        crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
-            &written,
-            system_journal,
-        )
-        .await;
 
         Ok(DrainAttempt::Committed { was_data: false })
     }
+}
+
+fn validate_output_contract_membership(
+    event: &ChainEvent,
+    output_contract: Option<&StageOutputContract>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let Some(output_contract) = output_contract else {
+        return Ok(());
+    };
+    if output_contract.is_empty() {
+        return Ok(());
+    }
+
+    let event_type = event.event_type();
+    if output_contract.contains_event_type(&event_type) {
+        return Ok(());
+    }
+
+    Err(format!(
+        "Data output event type `{event_type}` is not declared in the stage output contract"
+    )
+    .into())
 }
 
 /// Emit a bypass-mode activity pulse when credit would have been zero.

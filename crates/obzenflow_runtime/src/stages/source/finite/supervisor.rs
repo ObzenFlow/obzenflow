@@ -365,6 +365,7 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> H
                     &ctx.backpressure_writer,
                     &mut ctx.backpressure_pulse,
                     &mut ctx.backpressure_backoff,
+                    Some(&ctx.output_contract),
                 )
                 .await?
                 {
