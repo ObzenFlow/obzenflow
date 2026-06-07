@@ -31,8 +31,8 @@ pub use journal::Journal;
 
 // Re-export schema types (FLOWIP-082a)
 pub use event::schema::{
-    Facts2, Facts3, MiddlewareContextKey, TypedFact, TypedFactSet, TypedFactSetError,
-    TypedFactType, TypedMiddlewareEvent, TypedPayload,
+    MiddlewareContextKey, TypedFact, TypedFactSet, TypedFactSetError, TypedFactType,
+    TypedMiddlewareEvent, TypedPayload,
 };
 
 // Re-export typed IDs

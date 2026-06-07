@@ -266,13 +266,8 @@ struct ReplayTransform {
 #[async_trait]
 impl EffectfulTransformHandler for ReplayTransform {
     type Input = ReplayInput;
-    type Output = ReplayOutput;
 
-    async fn process(
-        &self,
-        input: ReplayInput,
-        fx: &mut Effects,
-    ) -> Result<ReplayOutput, HandlerError> {
+    async fn process(&self, input: ReplayInput, fx: &mut Effects) -> Result<(), HandlerError> {
         let effect_value = fx
             .perform(CountingEffect {
                 value: input.value,
@@ -281,10 +276,13 @@ impl EffectfulTransformHandler for ReplayTransform {
             .await
             .map_err(|e| HandlerError::Other(e.to_string()))?;
 
-        Ok(ReplayOutput {
+        fx.emit(ReplayOutput {
             value: input.value,
             effect_value: effect_value.effect_value,
         })
+        .await
+        .map_err(|e| HandlerError::Other(e.to_string()))?;
+        Ok(())
     }
 
     fn stage_logic_version(&self) -> &str {
@@ -301,13 +299,8 @@ struct BlockingTransform {
 #[async_trait]
 impl EffectfulTransformHandler for BlockingTransform {
     type Input = ReplayInput;
-    type Output = ReplayOutput;
 
-    async fn process(
-        &self,
-        input: ReplayInput,
-        fx: &mut Effects,
-    ) -> Result<ReplayOutput, HandlerError> {
+    async fn process(&self, input: ReplayInput, fx: &mut Effects) -> Result<(), HandlerError> {
         let effect_value = fx
             .perform(BlockingEffect {
                 value: input.value,
@@ -317,10 +310,13 @@ impl EffectfulTransformHandler for BlockingTransform {
             .await
             .map_err(|e| HandlerError::Other(e.to_string()))?;
 
-        Ok(ReplayOutput {
+        fx.emit(ReplayOutput {
             value: input.value,
             effect_value: effect_value.effect_value,
         })
+        .await
+        .map_err(|e| HandlerError::Other(e.to_string()))?;
+        Ok(())
     }
 
     fn stage_logic_version(&self) -> &str {
@@ -425,13 +421,8 @@ impl EffectfulStatefulHandler for ReplayStateful {
 #[async_trait]
 impl EffectfulTransformHandler for FallbackTransform {
     type Input = ReplayInput;
-    type Output = ReplayOutput;
 
-    async fn process(
-        &self,
-        input: ReplayInput,
-        fx: &mut Effects,
-    ) -> Result<ReplayOutput, HandlerError> {
+    async fn process(&self, input: ReplayInput, fx: &mut Effects) -> Result<(), HandlerError> {
         let effect_value = fx
             .perform(AlwaysFailingEffect {
                 value: input.value,
@@ -440,10 +431,13 @@ impl EffectfulTransformHandler for FallbackTransform {
             .await
             .map_err(|e| HandlerError::Timeout(e.to_string()))?;
 
-        Ok(ReplayOutput {
+        fx.emit(ReplayOutput {
             value: input.value,
             effect_value: effect_value.effect_value,
         })
+        .await
+        .map_err(|e| HandlerError::Other(e.to_string()))?;
+        Ok(())
     }
 
     fn stage_logic_version(&self) -> &str {
@@ -1896,13 +1890,8 @@ struct PortedTransform {
 #[async_trait]
 impl EffectfulTransformHandler for PortedTransform {
     type Input = ReplayInput;
-    type Output = ReplayOutput;
 
-    async fn process(
-        &self,
-        input: ReplayInput,
-        fx: &mut Effects,
-    ) -> Result<ReplayOutput, HandlerError> {
+    async fn process(&self, input: ReplayInput, fx: &mut Effects) -> Result<(), HandlerError> {
         let effect_value = fx
             .perform(PortedEffect {
                 value: input.value,
@@ -1911,10 +1900,13 @@ impl EffectfulTransformHandler for PortedTransform {
             .await
             .map_err(|e| HandlerError::Other(e.to_string()))?;
 
-        Ok(ReplayOutput {
+        fx.emit(ReplayOutput {
             value: input.value,
             effect_value: effect_value.effect_value,
         })
+        .await
+        .map_err(|e| HandlerError::Other(e.to_string()))?;
+        Ok(())
     }
 
     fn stage_logic_version(&self) -> &str {
@@ -2091,22 +2083,20 @@ struct LedgerTransform;
 #[async_trait]
 impl EffectfulTransformHandler for LedgerTransform {
     type Input = ReplayInput;
-    type Output = ReplayOutput;
 
-    async fn process(
-        &self,
-        input: ReplayInput,
-        fx: &mut Effects,
-    ) -> Result<ReplayOutput, HandlerError> {
+    async fn process(&self, input: ReplayInput, fx: &mut Effects) -> Result<(), HandlerError> {
         let committed = fx
             .perform(LedgerEffect { value: input.value })
             .await
             .map_err(|e| HandlerError::Other(e.to_string()))?;
 
-        Ok(ReplayOutput {
+        fx.emit(ReplayOutput {
             value: input.value,
             effect_value: committed.effect_value,
         })
+        .await
+        .map_err(|e| HandlerError::Other(e.to_string()))?;
+        Ok(())
     }
 
     fn stage_logic_version(&self) -> &str {

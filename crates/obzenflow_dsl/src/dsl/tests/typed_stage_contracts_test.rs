@@ -8,7 +8,7 @@
 mod tests {
     use async_trait::async_trait;
     use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
-    use obzenflow_core::{ChainEvent, Facts2, StageId, TypedPayload, WriterId};
+    use obzenflow_core::{ChainEvent, StageId, TypedPayload, WriterId};
     use obzenflow_runtime::effects::Effects;
     use obzenflow_runtime::feed_plan::{FactVisibility, FeedRole};
     use obzenflow_runtime::id_conversions::StageIdExt;
@@ -195,36 +195,32 @@ mod tests {
     #[async_trait]
     impl EffectfulTransformHandler for EffectfulExactTransform {
         type Input = OutputEvent;
-        type Output = OutputEvent;
 
-        async fn process(
-            &self,
-            input: OutputEvent,
-            _fx: &mut Effects,
-        ) -> Result<OutputEvent, HandlerError> {
-            Ok(input)
+        async fn process(&self, input: OutputEvent, fx: &mut Effects) -> Result<(), HandlerError> {
+            fx.emit(input)
+                .await
+                .map_err(|e| HandlerError::Other(e.to_string()))?;
+            Ok(())
         }
     }
 
     #[derive(Clone, Debug)]
-    struct EffectfulProductTransform;
+    struct EffectfulMultiOutputTransform;
 
     #[async_trait]
-    impl EffectfulTransformHandler for EffectfulProductTransform {
+    impl EffectfulTransformHandler for EffectfulMultiOutputTransform {
         type Input = OutputEvent;
-        type Output = Facts2<OutputEvent, AlternateEvent>;
 
-        async fn process(
-            &self,
-            input: OutputEvent,
-            _fx: &mut Effects,
-        ) -> Result<Self::Output, HandlerError> {
-            Ok(Facts2(
-                input,
-                AlternateEvent {
-                    value: "alternate".to_string(),
-                },
-            ))
+        async fn process(&self, input: OutputEvent, fx: &mut Effects) -> Result<(), HandlerError> {
+            fx.emit(input)
+                .await
+                .map_err(|e| HandlerError::Other(e.to_string()))?;
+            fx.emit(AlternateEvent {
+                value: "alternate".to_string(),
+            })
+            .await
+            .map_err(|e| HandlerError::Other(e.to_string()))?;
+            Ok(())
         }
     }
 
@@ -305,7 +301,7 @@ mod tests {
     {
         type State = ();
         type Input = InputEvent;
-        type Output = Facts2<OutputEvent, AlternateEvent>;
+        type Output = OutputEvent;
         type Transition = ();
 
         fn initial_state(&self) -> Self::State {}
@@ -329,14 +325,9 @@ mod tests {
         }
 
         fn create_outputs(&self, _state: &Self::State) -> Result<Vec<Self::Output>, HandlerError> {
-            Ok(vec![Facts2(
-                OutputEvent {
-                    value: "output".to_string(),
-                },
-                AlternateEvent {
-                    value: "alternate".to_string(),
-                },
-            )])
+            Ok(vec![OutputEvent {
+                value: "output".to_string(),
+            }])
         }
     }
 
@@ -540,10 +531,10 @@ mod tests {
     }
 
     #[test]
-    fn effectful_transform_fact_set_output_lowers_all_members_to_output_contract() {
+    fn effectful_transform_output_set_lowers_all_members_to_output_contract() {
         let effectful_transform = crate::effectful_transform!(
-            name: "effectful_product_transform",
-            OutputEvent -> Facts2<OutputEvent, AlternateEvent> => EffectfulProductTransform,
+            name: "effectful_multi_output_transform",
+            OutputEvent -> { OutputEvent, AlternateEvent } => EffectfulMultiOutputTransform,
             effects: [],
             middleware: []
         );
@@ -557,20 +548,17 @@ mod tests {
     }
 
     #[test]
-    fn effectful_stateful_fact_set_output_lowers_all_members_to_output_contract() {
+    fn effectful_stateful_scalar_output_contract_has_one_member() {
         let effectful_stateful = crate::effectful_stateful!(
-            name: "effectful_product_stateful",
-            InputEvent -> Facts2<OutputEvent, AlternateEvent> => EffectfulProductStateful,
+            name: "effectful_stateful",
+            InputEvent -> OutputEvent => EffectfulProductStateful,
             effects: [],
             middleware: []
         );
         let metadata = effectful_stateful.typing_metadata().unwrap();
 
         assert_eq!(metadata.output_type, exact::<OutputEvent>());
-        assert_output_contract(
-            metadata,
-            vec![exact::<OutputEvent>(), exact::<AlternateEvent>()],
-        );
+        assert_output_contract(metadata, vec![exact::<OutputEvent>()]);
     }
 
     #[test]

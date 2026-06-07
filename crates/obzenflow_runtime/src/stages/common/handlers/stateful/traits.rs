@@ -6,13 +6,11 @@
 //!
 //! Examples: Aggregators, windowing operations, session tracking
 
-use crate::effects::{
-    deterministic_fact_set_output_events, EffectError, EffectInvocationContext, Effects,
-};
+use crate::effects::{deterministic_typed_output_event, EffectInvocationContext, Effects};
 use crate::messaging::upstream_subscription::StageInputPosition;
 use crate::stages::common::handler_error::HandlerError;
 use async_trait::async_trait;
-use obzenflow_core::event::schema::{TypedFactSet, TypedPayload};
+use obzenflow_core::event::schema::TypedPayload;
 use obzenflow_core::{ChainEvent, EventEnvelope, WriterId};
 use std::time::Duration;
 
@@ -295,7 +293,7 @@ impl<T: StatefulHandler + Send + Sync> UnifiedStatefulHandler for T {
 pub trait EffectfulStatefulHandler: Send + Sync {
     type State: Clone + Send + Sync;
     type Input: TypedPayload + Send + Sync + 'static;
-    type Output: TypedFactSet;
+    type Output: TypedPayload + Send + Sync + 'static;
     type Transition: Send + Sync + 'static;
 
     fn initial_state(&self) -> Self::State;
@@ -355,31 +353,27 @@ fn typed_stateful_outputs_to_events<Out>(
     output_context: Option<StatefulOutputContext<'_>>,
 ) -> std::result::Result<Vec<ChainEvent>, HandlerError>
 where
-    Out: TypedFactSet,
+    Out: TypedPayload,
 {
     let Some(output_context) = output_context else {
         let mut events = Vec::new();
         for output in outputs {
-            for fact in output
-                .into_facts()
-                .map_err(|e| HandlerError::Other(e.to_string()))?
-            {
-                let mut event = obzenflow_core::event::ChainEventFactory::data_event(
-                    WriterId::from(obzenflow_core::StageId::new()),
-                    &fact.event_type,
-                    fact.payload,
-                );
-                event.processing_info.event_time =
-                    output_contextless_event_time(events.len() as u32);
-                events.push(event);
-            }
+            let payload =
+                serde_json::to_value(output).map_err(|e| HandlerError::Other(e.to_string()))?;
+            let mut event = obzenflow_core::event::ChainEventFactory::data_event(
+                WriterId::from(obzenflow_core::StageId::new()),
+                Out::versioned_event_type(),
+                payload,
+            );
+            event.processing_info.event_time = output_contextless_event_time(events.len() as u32);
+            events.push(event);
         }
         return Ok(events);
     };
 
     let mut events = Vec::new();
     for output in outputs {
-        let mut output_events = deterministic_fact_set_output_events(
+        let event = deterministic_typed_output_event(
             output_context.writer_id,
             &output_context.parent.event,
             output,
@@ -388,18 +382,14 @@ where
             output_context.input_seq,
             events.len() as u32,
         )
-        .map_err(effect_error_to_handler_error)?;
-        events.append(&mut output_events);
+        .map_err(|e| HandlerError::Other(e.to_string()))?;
+        events.push(event);
     }
     Ok(events)
 }
 
 fn output_contextless_event_time(output_ordinal: u32) -> u64 {
     u64::from(output_ordinal)
-}
-
-fn effect_error_to_handler_error(err: EffectError) -> HandlerError {
-    HandlerError::Other(err.to_string())
 }
 
 #[async_trait]
@@ -485,7 +475,6 @@ where
 mod tests {
     use super::*;
     use obzenflow_core::event::ChainEventContent;
-    use obzenflow_core::Facts2;
     use serde::{Deserialize, Serialize};
 
     #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -497,27 +486,13 @@ mod tests {
         const EVENT_TYPE: &'static str = "stateful.first";
     }
 
-    #[derive(Clone, Debug, Serialize, Deserialize)]
-    struct SecondOutput {
-        value: String,
-    }
-
-    impl TypedPayload for SecondOutput {
-        const EVENT_TYPE: &'static str = "stateful.second";
-    }
-
     #[test]
-    fn typed_stateful_outputs_to_events_flattens_fact_set_outputs_without_context() {
+    fn typed_stateful_outputs_to_events_converts_scalar_outputs_without_context() {
         let events = typed_stateful_outputs_to_events(
-            vec![Facts2(
-                FirstOutput { value: 1 },
-                SecondOutput {
-                    value: "two".to_string(),
-                },
-            )],
+            vec![FirstOutput { value: 1 }, FirstOutput { value: 2 }],
             None,
         )
-        .expect("stateful fact-set output events");
+        .expect("stateful typed output events");
 
         assert_eq!(events.len(), 2);
         assert!(matches!(
@@ -526,7 +501,7 @@ mod tests {
         ));
         assert!(matches!(
             &events[1].content,
-            ChainEventContent::Data { event_type, .. } if event_type == "stateful.second.v1"
+            ChainEventContent::Data { event_type, .. } if event_type == "stateful.first.v1"
         ));
         assert_eq!(events[0].processing_info.event_time, 0);
         assert_eq!(events[1].processing_info.event_time, 1);

@@ -103,7 +103,7 @@ impl Effect for AuthorizePayment {
 /// Effectful transform that turns a `ValidatedOrder` into a gateway outcome.
 ///
 /// The handler body stays small and deterministic: it performs one effect and
-/// folds the recorded outcome into a typed output. Everything replay-sensitive
+/// emits the recorded outcome as a typed fact. Everything replay-sensitive
 /// lives inside the effect.
 #[derive(Debug, Clone)]
 pub struct GatewayTransform;
@@ -111,13 +111,8 @@ pub struct GatewayTransform;
 #[async_trait]
 impl EffectfulTransformHandler for GatewayTransform {
     type Input = ValidatedOrder;
-    type Output = PaymentAuthorizationOutcome;
 
-    async fn process(
-        &self,
-        order: ValidatedOrder,
-        fx: &mut Effects,
-    ) -> Result<PaymentAuthorizationOutcome, HandlerError> {
+    async fn process(&self, order: ValidatedOrder, fx: &mut Effects) -> Result<(), HandlerError> {
         if matches!(
             order.payment_method_state,
             PaymentMethodState::InvalidNumber
@@ -134,13 +129,16 @@ impl EffectfulTransformHandler for GatewayTransform {
             .await
             .unwrap_or_else(authorization_unavailable_decision);
 
-        Ok(PaymentAuthorizationOutcome {
+        fx.emit(PaymentAuthorizationOutcome {
             order_id: order.order_id,
             customer_id: order.customer_id,
             amount_cents: order.amount_cents,
             phase: order.phase,
             decision,
         })
+        .await
+        .map_err(|e| HandlerError::Other(e.to_string()))?;
+        Ok(())
     }
 
     async fn drain(&mut self) -> Result<(), HandlerError> {

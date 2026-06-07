@@ -120,10 +120,12 @@ mod tests {
     #[async_trait]
     impl EffectfulTransformHandler for FxTr {
         type Input = In;
-        type Output = Out;
 
-        async fn process(&self, _input: In, _fx: &mut Effects) -> Result<Out, HandlerError> {
-            Ok(Out)
+        async fn process(&self, _input: In, fx: &mut Effects) -> Result<(), HandlerError> {
+            fx.emit(Out)
+                .await
+                .map_err(|e| HandlerError::Other(e.to_string()))?;
+            Ok(())
         }
     }
 

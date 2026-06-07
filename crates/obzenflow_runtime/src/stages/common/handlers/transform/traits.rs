@@ -6,10 +6,10 @@
 //!
 //! Examples: Data enrichers, filters, mappers, routers
 
-use crate::effects::{deterministic_fact_set_output_events, EffectInvocationContext, Effects};
+use crate::effects::{EffectInvocationContext, Effects};
 use crate::typing::TransformTyping;
 use async_trait::async_trait;
-use obzenflow_core::event::schema::{TypedFactSet, TypedPayload};
+use obzenflow_core::event::schema::TypedPayload;
 use obzenflow_core::ChainEvent;
 
 /// Handler for stateless transform stages
@@ -155,13 +155,12 @@ impl<T: AsyncTransformHandler + Send + Sync> UnifiedTransformHandler
 #[async_trait]
 pub trait EffectfulTransformHandler: Send + Sync {
     type Input: TypedPayload + Send + Sync + 'static;
-    type Output: TypedFactSet;
 
     async fn process(
         &self,
         input: Self::Input,
         fx: &mut Effects,
-    ) -> std::result::Result<Self::Output, HandlerError>;
+    ) -> std::result::Result<(), HandlerError>;
 
     async fn drain(&mut self) -> std::result::Result<(), HandlerError> {
         Ok(())
@@ -181,7 +180,7 @@ where
     H: EffectfulTransformHandler,
 {
     type Input = H::Input;
-    type Output = H::Output;
+    type Output = ();
 }
 
 #[async_trait]
@@ -199,27 +198,9 @@ where
         let effect_context = effect_context.ok_or_else(|| {
             HandlerError::Other("effectful transform invoked without effect context".to_string())
         })?;
-        let recorded_flow_id = effect_context
-            .effect_history
-            .as_ref()
-            .map(|history| history.recorded_flow_id().to_string())
-            .unwrap_or_else(|| effect_context.flow_id.to_string());
-        let writer_id = effect_context.writer_id;
-        let stage_key = effect_context.stage_key.clone();
-        let input_seq = effect_context.input_seq;
         let mut fx = Effects::new(effect_context);
-        let output = self.0.process(input, &mut fx).await?;
-        let output_events = deterministic_fact_set_output_events(
-            writer_id,
-            &event,
-            output,
-            &recorded_flow_id,
-            &stage_key,
-            input_seq,
-            0,
-        )
-        .map_err(|e| HandlerError::Other(e.to_string()))?;
-        Ok(output_events)
+        self.0.process(input, &mut fx).await?;
+        Ok(fx.drain_emitted_outputs())
     }
 
     async fn drain(&mut self) -> std::result::Result<(), HandlerError> {

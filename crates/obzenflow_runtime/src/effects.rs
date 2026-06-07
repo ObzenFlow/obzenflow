@@ -10,7 +10,7 @@ pub use obzenflow_core::event::payloads::effect_payload::{
     EffectCursor, EffectDescriptor, EffectOutcomePayload, EffectProvenance, EffectRecord,
     CAPTURE_EVENT_TYPE, EFFECT_RECORD_EVENT_TYPE,
 };
-use obzenflow_core::event::schema::{TypedFactSet, TypedPayload};
+use obzenflow_core::event::schema::TypedPayload;
 use obzenflow_core::event::{ChainEventContent, ChainEventFactory};
 use obzenflow_core::journal::{ArchiveStatus, Journal};
 use obzenflow_core::{ChainEvent, EventEnvelope, EventId, FlowId, StageId, WriterId};
@@ -799,6 +799,8 @@ impl From<EffectRuntimeMode> for obzenflow_core::MiddlewareExecutionScope {
 pub struct Effects {
     ctx: EffectInvocationContext,
     next_effect_ordinal: u32,
+    next_output_ordinal: u32,
+    emitted_outputs: Vec<ChainEvent>,
 }
 
 impl Effects {
@@ -806,11 +808,42 @@ impl Effects {
         Self {
             ctx,
             next_effect_ordinal: 0,
+            next_output_ordinal: 0,
+            emitted_outputs: Vec::new(),
         }
     }
 
     pub fn is_replaying(&self) -> bool {
         !matches!(self.ctx.effect_runtime_mode, EffectRuntimeMode::Live)
+    }
+
+    pub async fn emit<T>(&mut self, fact: T) -> Result<(), EffectError>
+    where
+        T: TypedPayload,
+    {
+        let recorded_flow_id = self
+            .ctx
+            .effect_history
+            .as_ref()
+            .map(|history| history.recorded_flow_id().to_string())
+            .unwrap_or_else(|| self.ctx.flow_id.to_string());
+        let output_ordinal = self.next_output_ordinal;
+        self.next_output_ordinal = self.next_output_ordinal.saturating_add(1);
+        let event = deterministic_typed_output_event(
+            self.ctx.writer_id,
+            &self.ctx.parent.event,
+            fact,
+            &recorded_flow_id,
+            &self.ctx.stage_key,
+            self.ctx.input_seq,
+            output_ordinal,
+        )?;
+        self.emitted_outputs.push(event);
+        Ok(())
+    }
+
+    pub(crate) fn drain_emitted_outputs(&mut self) -> Vec<ChainEvent> {
+        std::mem::take(&mut self.emitted_outputs)
     }
 
     pub async fn perform<E>(&mut self, effect: E) -> Result<E::Output, EffectError>
@@ -1414,45 +1447,12 @@ where
     Ok(event)
 }
 
-pub fn deterministic_fact_set_output_events<Out>(
-    writer_id: WriterId,
-    parent: &ChainEvent,
-    output: Out,
-    recorded_flow_id: &str,
-    stage_key: &str,
-    input_seq: StageInputPosition,
-    first_output_ordinal: u32,
-) -> Result<Vec<ChainEvent>, EffectError>
-where
-    Out: TypedFactSet,
-{
-    output
-        .into_facts()
-        .map_err(|e| EffectError::Serialization(e.to_string()))?
-        .into_iter()
-        .enumerate()
-        .map(|(ordinal, fact)| {
-            let output_ordinal = first_output_ordinal.saturating_add(ordinal as u32);
-            let mut event = ChainEventFactory::derived_data_event(
-                writer_id,
-                parent,
-                &fact.event_type,
-                fact.payload,
-            );
-            event.id =
-                deterministic_event_id(recorded_flow_id, stage_key, input_seq, output_ordinal);
-            event.processing_info.event_time = deterministic_event_time(input_seq, output_ordinal);
-            Ok(event)
-        })
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use obzenflow_core::event::{EventEnvelope, JournalEvent};
     use obzenflow_core::journal::{JournalError, JournalReader};
-    use obzenflow_core::{Facts2, JournalId, JournalOwner, JournalWriterId, TypedPayload};
+    use obzenflow_core::{JournalId, JournalOwner, JournalWriterId, TypedPayload};
     use serde_json::json;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
@@ -1648,25 +1648,33 @@ mod tests {
     }
 
     #[test]
-    fn deterministic_fact_set_output_events_preserve_member_order_and_ordinals() {
+    fn deterministic_typed_output_events_preserve_ordinals() {
         let writer_id = WriterId::from(StageId::new());
         let parent = ChainEventFactory::data_event(writer_id, "test.input.v1", json!({ "id": 1 }));
 
-        let events = deterministic_fact_set_output_events(
+        let first = deterministic_typed_output_event(
             writer_id,
             &parent,
-            Facts2(
-                FirstOutput { value: 1 },
-                SecondOutput {
-                    value: "two".to_string(),
-                },
-            ),
+            FirstOutput { value: 1 },
             "flow-a",
             "stage-a",
             StageInputPosition(4),
             2,
         )
-        .expect("fact-set output events");
+        .expect("first output event");
+        let second = deterministic_typed_output_event(
+            writer_id,
+            &parent,
+            SecondOutput {
+                value: "two".to_string(),
+            },
+            "flow-a",
+            "stage-a",
+            StageInputPosition(4),
+            3,
+        )
+        .expect("second output event");
+        let events = vec![first, second];
 
         assert_eq!(events.len(), 2);
         assert!(matches!(
