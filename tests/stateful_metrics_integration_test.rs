@@ -36,6 +36,15 @@ impl TypedPayload for MetricEvent {
     const EVENT_TYPE: &'static str = "metric.event";
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct AggregateMetricEvent {
+    count: u64,
+}
+
+impl TypedPayload for AggregateMetricEvent {
+    const EVENT_TYPE: &'static str = "metric.aggregate";
+}
+
 /// The join's two legs are semantically distinct typed inputs per
 /// FLOWIP-114c, so we declare separate types even though the underlying
 /// `BurstSource` produces the same shape on both legs in this test.
@@ -75,19 +84,29 @@ struct BurstSource {
     total: usize,
     current: usize,
     writer_id: WriterId,
+    event_type: String,
 }
 
 impl BurstSource {
     fn new(total: usize) -> Self {
+        Self::with_event_type(total, MetricEvent::versioned_event_type())
+    }
+
+    fn with_event_type(total: usize, event_type: String) -> Self {
         Self {
             total,
             current: 0,
             writer_id: WriterId::from(StageId::new()),
+            event_type,
         }
     }
 }
 
 impl FiniteSourceHandler for BurstSource {
+    fn bind_writer_id(&mut self, id: WriterId) {
+        self.writer_id = id;
+    }
+
     fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
         if self.current >= self.total {
             return Ok(None);
@@ -98,7 +117,7 @@ impl FiniteSourceHandler for BurstSource {
 
         Ok(Some(vec![ChainEventFactory::data_event(
             self.writer_id,
-            "test.burst",
+            self.event_type.clone(),
             json!({ "index": idx }),
         )]))
     }
@@ -143,7 +162,7 @@ impl StatefulHandler for SlowAccumulator {
     ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
         Ok(vec![ChainEventFactory::data_event(
             self.writer_id,
-            "test.stateful.aggregate",
+            AggregateMetricEvent::versioned_event_type(),
             json!({ "count": state.count }),
         )])
     }
@@ -264,8 +283,8 @@ async fn stateful_metrics_accumulate_is_instrumented() -> Result<()> {
 
         stages: {
             src = source!(MetricEvent => BurstSource::new(total_events));
-            counter = stateful!(MetricEvent -> MetricEvent => SlowAccumulator::new(sleep_per_event));
-            snk = sink!(MetricEvent => sink_handler);
+            counter = stateful!(MetricEvent -> AggregateMetricEvent => SlowAccumulator::new(sleep_per_event));
+            snk = sink!(AggregateMetricEvent => sink_handler);
         },
 
         topology: {
@@ -357,7 +376,7 @@ async fn stateful_metrics_accumulate_is_instrumented() -> Result<()> {
     let events = sink_events.lock().unwrap();
     let aggregate_events: Vec<&ChainEvent> = events
         .iter()
-        .filter(|e| e.is_data() && e.event_type() == "test.stateful.aggregate")
+        .filter(|e| e.is_data() && AggregateMetricEvent::event_type_matches(&e.event_type()))
         .collect();
     assert_eq!(
         aggregate_events.len(),
@@ -458,8 +477,8 @@ async fn stateful_join_metrics_counts_hydration_as_accumulation() -> Result<()> 
         middleware: [],
 
         stages: {
-            ref_src = source!(RefMetricEvent => BurstSource::new(reference_events));
-            stream_src = source!(StreamMetricEvent => BurstSource::new(stream_events));
+            ref_src = source!(RefMetricEvent => BurstSource::with_event_type(reference_events, RefMetricEvent::versioned_event_type()));
+            stream_src = source!(StreamMetricEvent => BurstSource::with_event_type(stream_events, StreamMetricEvent::versioned_event_type()));
             joiner = join!(catalog ref_src: RefMetricEvent, StreamMetricEvent -> JoinedMetricEvent => NoopJoin);
             snk = sink!(JoinedMetricEvent => CollectingSink::new().0);
         },

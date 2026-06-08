@@ -75,6 +75,13 @@ mod tests {
     use std::sync::Mutex;
     use tokio::sync::oneshot;
 
+    #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+    struct IdlePayload;
+
+    impl TypedPayload for IdlePayload {
+        const EVENT_TYPE: &'static str = "flow_application.idle";
+    }
+
     #[derive(Clone, Debug)]
     struct IdleInfiniteSource;
 
@@ -170,11 +177,8 @@ enabled = false
                     middleware: [],
 
                     stages: {
-                        // allow-serde-value: runtime lifecycle test for FlowApplication launch
-                        // mechanics; the handlers are payload-agnostic by design.
-                        src = infinite_source!(serde_json::Value => IdleInfiniteSource);
-                        // allow-serde-value: runtime lifecycle test, see above.
-                        sink = sink!(serde_json::Value => NoopSink);
+                        src = infinite_source!(IdlePayload => IdleInfiniteSource);
+                        sink = sink!(IdlePayload => NoopSink);
                     },
 
                     topology: {

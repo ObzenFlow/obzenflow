@@ -101,7 +101,7 @@ impl FiniteSourceHandler for SequenceSource {
 
         let event = ChainEventFactory::data_event(
             self.writer_id,
-            "test.sequence",
+            RateLimiterTestEvent::versioned_event_type(),
             json!({ "index": self.emitted }),
         );
         self.emitted += 1;
@@ -146,7 +146,7 @@ impl FiniteSourceHandler for BatchedSource {
             .map(|index| {
                 ChainEventFactory::data_event(
                     self.writer_id,
-                    "test.batch",
+                    RateLimiterTestEvent::versioned_event_type(),
                     json!({ "index": index }),
                 )
             })
@@ -368,7 +368,7 @@ impl FiniteSourceHandler for ScriptedSyncSource {
                 self.next_event_id += 1;
                 Ok(Some(vec![ChainEventFactory::data_event(
                     self.writer_id,
-                    "test.scripted",
+                    RateLimiterTestEvent::versioned_event_type(),
                     json!({ "index": id }),
                 )]))
             }
@@ -419,7 +419,7 @@ impl AsyncFiniteSourceHandler for ScriptedAsyncSource {
                 self.next_event_id += 1;
                 Ok(Some(vec![ChainEventFactory::data_event(
                     self.writer_id,
-                    "test.scripted",
+                    RateLimiterTestEvent::versioned_event_type(),
                     json!({ "index": id }),
                 )]))
             }
