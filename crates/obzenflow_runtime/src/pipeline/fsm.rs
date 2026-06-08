@@ -6,9 +6,8 @@
 //!
 //! This defines the pipeline state machine without the supervision logic
 
-use crate::feed_plan::{FeedKey, FeedPlan};
+use crate::feed_plan::FeedKey;
 use crate::id_conversions::StageIdExt;
-use crate::message_bus::FsmMessageBus;
 use crate::messaging::system_subscription::SystemSubscription;
 use crate::metrics::MetricsHandle;
 use crate::stages::common::stage_handle::{StageError, STOP_REASON_TIMEOUT, STOP_REASON_USER_STOP};
@@ -45,14 +44,14 @@ pub enum FlowStopMode {
 /// This is an internal representation of externally-requested stop state that
 /// accompanies the pipeline FSM.
 #[derive(Clone, Debug, Default)]
-pub struct StopIntent {
-    pub requested: bool,
-    pub mode: Option<FlowStopMode>,
-    pub reason: Option<String>,
-    pub deadline: Option<std::time::Instant>,
+pub(crate) struct StopIntent {
+    pub(crate) requested: bool,
+    pub(crate) mode: Option<FlowStopMode>,
+    pub(crate) reason: Option<String>,
+    pub(crate) deadline: Option<std::time::Instant>,
 }
 
-pub enum StopRequestOutcome {
+pub(crate) enum StopRequestOutcome {
     Applied {
         mode: FlowStopMode,
         reason_label: String,
@@ -61,7 +60,7 @@ pub enum StopRequestOutcome {
 }
 
 impl StopIntent {
-    pub fn apply_request(
+    pub(crate) fn apply_request(
         &mut self,
         mode: FlowStopMode,
         reason: Option<String>,
@@ -102,15 +101,11 @@ impl StopIntent {
         }
     }
 
-    pub fn reason_label(&self) -> String {
+    pub(crate) fn reason_label(&self) -> String {
         self.reason
             .clone()
             .unwrap_or_else(|| STOP_REASON_USER_STOP.to_string())
     }
-}
-
-pub fn build_pipeline_fsm() -> PipelineFsm {
-    build_pipeline_fsm_with_initial(PipelineState::Created)
 }
 
 /// Pipeline states.
@@ -223,10 +218,9 @@ impl EventVariant for PipelineEvent {
 
 /// Pipeline actions
 #[derive(Clone, Debug)]
-pub enum PipelineAction {
+pub(crate) enum PipelineAction {
     CreateStages,
     NotifyStagesStart,
-    NotifySourceReady,
     NotifySourceStart,
     /// Publish a pipeline stop-requested lifecycle marker (Cancel vs Graceful).
     WritePipelineStopRequested {
@@ -247,86 +241,81 @@ pub enum PipelineAction {
         upstream: Option<StageId>,
     },
     StartCompletionSubscription,
-    ProcessCompletionEvents,
     HandleStageCompleted {
         envelope: Box<obzenflow_core::EventEnvelope<SystemEvent>>,
     },
 }
 
 /// Pipeline context - holds all mutable state
-pub struct PipelineContext {
+pub(crate) struct PipelineContext {
     /// System ID for this pipeline component
-    pub system_id: SystemId,
-
-    /// Message bus for communication
-    pub bus: Arc<FsmMessageBus>,
+    pub(crate) system_id: SystemId,
 
     /// Topology for structure queries
-    pub topology: Arc<obzenflow_topology::Topology>,
+    pub(crate) topology: Arc<obzenflow_topology::Topology>,
 
     /// User-specified flow name (from `flow!`)
-    pub flow_name: String,
+    pub(crate) flow_name: String,
 
     /// Flow execution ID (for metrics/observability joinability)
-    pub flow_id: FlowId,
+    pub(crate) flow_id: FlowId,
 
     /// System journal for pipeline orchestration events
-    pub system_journal: Arc<dyn Journal<SystemEvent>>,
+    pub(crate) system_journal: Arc<dyn Journal<SystemEvent>>,
 
     /// Stage supervisors by ID (non-sources only)
-    pub stage_supervisors: HashMap<StageId, crate::stages::common::stage_handle::BoxedStageHandle>,
+    pub(crate) stage_supervisors:
+        HashMap<StageId, crate::stages::common::stage_handle::BoxedStageHandle>,
 
     /// Source supervisors by ID (sources only)
-    pub source_supervisors: HashMap<StageId, crate::stages::common::stage_handle::BoxedStageHandle>,
+    pub(crate) source_supervisors:
+        HashMap<StageId, crate::stages::common::stage_handle::BoxedStageHandle>,
 
     /// Completed stages tracking
-    pub completed_stages: Vec<StageId>,
+    pub(crate) completed_stages: Vec<StageId>,
 
     /// Running stages tracking (for startup coordination)
-    pub running_stages: std::collections::HashSet<StageId>,
+    pub(crate) running_stages: std::collections::HashSet<StageId>,
 
     /// System subscription for stage completion events from system journal
-    pub completion_subscription: Option<SystemSubscription<SystemEvent>>,
+    pub(crate) completion_subscription: Option<SystemSubscription<SystemEvent>>,
 
     /// Metrics exporter for accessing aggregated metrics
-    pub metrics_exporter: Option<Arc<dyn obzenflow_core::metrics::MetricsExporter>>,
+    pub(crate) metrics_exporter: Option<Arc<dyn obzenflow_core::metrics::MetricsExporter>>,
 
     /// Stage data journals (for metrics aggregator)
-    pub stage_data_journals: Vec<(StageId, Arc<dyn Journal<ChainEvent>>)>,
+    pub(crate) stage_data_journals: Vec<(StageId, Arc<dyn Journal<ChainEvent>>)>,
 
     /// Stage error journals (for error sink) (FLOWIP-082e)
-    pub stage_error_journals: Vec<(StageId, Arc<dyn Journal<ChainEvent>>)>,
+    pub(crate) stage_error_journals: Vec<(StageId, Arc<dyn Journal<ChainEvent>>)>,
 
     /// Flow-scoped backpressure registry for observability (FLOWIP-086k).
-    pub backpressure_registry: Option<Arc<crate::backpressure::BackpressureRegistry>>,
+    pub(crate) backpressure_registry: Option<Arc<crate::backpressure::BackpressureRegistry>>,
 
     /// Per-source contract status (pass/fail) keyed by source StageId
-    pub contract_status: HashMap<StageId, bool>,
+    pub(crate) contract_status: HashMap<StageId, bool>,
 
     /// Per-feed contract status keyed by logical feed.
-    pub contract_pairs: HashMap<FeedKey, crate::pipeline::supervisor::ContractEdgeStatus>,
+    pub(crate) contract_pairs: HashMap<FeedKey, crate::pipeline::supervisor::ContractEdgeStatus>,
 
     /// Expected contract feeds derived from topology shape and runtime feed plan.
-    pub expected_contract_pairs: HashSet<FeedKey>,
-
-    /// Flow-scoped logical feed plan used by runtime contract gating.
-    pub feed_plan: FeedPlan,
+    pub(crate) expected_contract_pairs: HashSet<FeedKey>,
 
     /// Expected source stages (used to decide when to drain on success)
-    pub expected_sources: Vec<StageId>,
+    pub(crate) expected_sources: Vec<StageId>,
 
     /// Metrics aggregator handle (for coordinated shutdown/drain).
-    pub metrics_handle: Option<MetricsHandle>,
+    pub(crate) metrics_handle: Option<MetricsHandle>,
     /// Last known per-stage lifecycle metrics (for flow rollup)
-    pub stage_lifecycle_metrics: HashMap<StageId, StageMetricsSnapshot>,
+    pub(crate) stage_lifecycle_metrics: HashMap<StageId, StageMetricsSnapshot>,
 
     /// Flow start time for duration calculation
-    pub flow_start_time: Option<std::time::Instant>,
+    pub(crate) flow_start_time: Option<std::time::Instant>,
 
     /// Last system event ID observed via completion_subscription (for tail reconciliation)
-    pub last_system_event_id_seen: Option<obzenflow_core::EventId>,
+    pub(crate) last_system_event_id_seen: Option<obzenflow_core::EventId>,
 
-    pub stop_intent: StopIntent,
+    pub(crate) stop_intent: StopIntent,
 }
 
 impl PipelineContext {
@@ -568,25 +557,6 @@ impl FsmAction for PipelineAction {
                 }
 
                 tracing::debug!("NotifyStagesStart: All non-source stages started");
-            }
-
-            PipelineAction::NotifySourceReady => {
-                let supervisors = &mut context.source_supervisors;
-                for (source_id, source) in supervisors.iter_mut() {
-                    tracing::info!(
-                        "Marking source ready (WaitingForGun): {:?} ({})",
-                        source_id,
-                        source.stage_name()
-                    );
-                    source.ready().await.map_err(|e| {
-                        obzenflow_fsm::FsmError::HandlerError(format!(
-                            "Failed to ready source {}: {}",
-                            source.stage_name(),
-                            e
-                        ))
-                    })?;
-                }
-                tracing::info!("All sources moved to WaitingForGun");
             }
 
             PipelineAction::NotifySourceStart => {
@@ -1234,16 +1204,6 @@ impl FsmAction for PipelineAction {
                 tracing::info!("Started system subscription for journal events");
             }
 
-            PipelineAction::ProcessCompletionEvents => {
-                // This action processes events but doesn't directly trigger transitions
-                // The supervisor's dispatch_state will check for events and return appropriate directives
-                // For now, this is a no-op as the actual processing happens in dispatch_state
-                // In a future refactor, we could move all the logic here and use a channel to communicate back
-                tracing::debug!(
-                    "ProcessCompletionEvents action - processing handled in dispatch_state"
-                );
-            }
-
             PipelineAction::HandleStageCompleted { envelope } => {
                 let event = &envelope.event;
 
@@ -1324,13 +1284,14 @@ impl FsmAction for PipelineAction {
 }
 
 /// Type alias for our pipeline FSM
-pub type PipelineFsm = StateMachine<PipelineState, PipelineEvent, PipelineContext, PipelineAction>;
+pub(crate) type PipelineFsm =
+    StateMachine<PipelineState, PipelineEvent, PipelineContext, PipelineAction>;
 
 /// Build the pipeline FSM with all transitions.
 ///
 /// This is the single canonical pipeline FSM definition used by the
 /// pipeline supervisor.
-pub fn build_pipeline_fsm_with_initial(initial: PipelineState) -> PipelineFsm {
+pub(crate) fn build_pipeline_fsm_with_initial(initial: PipelineState) -> PipelineFsm {
     fsm! {
         state:   PipelineState;
         event:   PipelineEvent;
@@ -2149,6 +2110,10 @@ pub fn build_pipeline_fsm_with_initial(initial: PipelineState) -> PipelineFsm {
         };
     }
 }
+
+#[cfg(test)]
+#[path = "fsm_lifecycle_tests.rs"]
+mod fsm_lifecycle_tests;
 
 #[cfg(test)]
 mod tests {

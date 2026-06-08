@@ -16,7 +16,6 @@ use crate::{
     backpressure::BackpressureRegistry,
     feed_plan::{FeedKey, FeedPlan},
     id_conversions::StageIdExt,
-    message_bus::FsmMessageBus,
     stages::common::stage_handle::BoxedStageHandle,
     stages::LivenessSnapshots,
     supervised_base::{
@@ -249,9 +248,6 @@ impl SupervisorBuilder for PipelineBuilder {
         // Create unique stage ID for the pipeline supervisor
         let _stage_id = StageId::new();
 
-        // Create message bus
-        let message_bus = Arc::new(FsmMessageBus::new());
-
         // Prepare stage supervisors map
         let mut stage_map = HashMap::new();
         for stage in self.stages {
@@ -360,7 +356,6 @@ impl SupervisorBuilder for PipelineBuilder {
 
         let pipeline_context = PipelineContext {
             system_id,
-            bus: message_bus.clone(),
             topology: self.topology.clone(),
             flow_name: flow_name.clone(),
             flow_id: self.flow_id,
@@ -378,7 +373,6 @@ impl SupervisorBuilder for PipelineBuilder {
             contract_status: HashMap::new(),
             contract_pairs: HashMap::new(),
             expected_contract_pairs,
-            feed_plan: self.feed_plan,
             expected_sources,
             stage_lifecycle_metrics: HashMap::new(),
             flow_start_time: None,

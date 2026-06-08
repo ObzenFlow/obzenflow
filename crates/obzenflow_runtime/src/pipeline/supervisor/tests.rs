@@ -8,7 +8,6 @@ use crate::bootstrap::{
 };
 use crate::feed_plan::{FeedKey, FeedRole};
 use crate::id_conversions::StageIdExt;
-use crate::message_bus::FsmMessageBus;
 use crate::messaging::SystemSubscription;
 use crate::pipeline::fsm::PipelineContext;
 use crate::stages::common::stage_handle::{BoxedStageHandle, StageError, StageEvent, StageHandle};
@@ -207,7 +206,6 @@ fn test_context(
     let system_journal: Arc<dyn Journal<SystemEvent>> = system_journal;
     PipelineContext {
         system_id,
-        bus: Arc::new(FsmMessageBus::new()),
         topology,
         flow_name: "test_flow".to_string(),
         flow_id: FlowId::new(),
@@ -225,7 +223,6 @@ fn test_context(
         contract_status: HashMap::new(),
         contract_pairs: HashMap::new(),
         expected_contract_pairs: HashSet::new(),
-        feed_plan: Default::default(),
         expected_sources: Vec::new(),
         stage_lifecycle_metrics: HashMap::new(),
         flow_start_time: None,

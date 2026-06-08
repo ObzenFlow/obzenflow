@@ -16,7 +16,7 @@ use obzenflow_core::event::ChainEventContent;
 use obzenflow_core::WriterId;
 use obzenflow_dsl::{flow, sink, source, transform};
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime::pipeline::fsm::PipelineState;
+use obzenflow_runtime::pipeline::PipelineState;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
     FiniteSourceHandler, SinkHandler, TransformHandler,

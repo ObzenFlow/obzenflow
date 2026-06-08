@@ -10,7 +10,7 @@ use obzenflow_core::web::{
     EndpointMetadata, HttpEndpoint, ManagedResponse, ManagedRouteInfo, Request, WebError,
     WebSurface,
 };
-use obzenflow_runtime::pipeline::fsm::PipelineState;
+use obzenflow_runtime::pipeline::PipelineState;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
