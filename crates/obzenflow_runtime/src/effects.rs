@@ -8,8 +8,9 @@ use async_trait::async_trait;
 use obzenflow_core::event::context::FlowContext;
 pub use obzenflow_core::event::payloads::effect_payload::{
     effect_outcome_group_id, framework_effect_event_type, is_framework_effect_event_type,
-    EffectCursor, EffectDescriptor, EffectOutcomePayload, EffectProvenance, EffectRecord,
-    CAPTURE_EVENT_TYPE, EFFECT_RECORD_EVENT_TYPE,
+    EffectCursor, EffectDescriptor, EffectDescriptorHash, EffectFactOwner, EffectOutcomeGroupId,
+    EffectOutcomePayload, EffectProvenance, EffectRecord, OutcomeFactOrdinal, CAPTURE_EVENT_TYPE,
+    EFFECT_RECORD_EVENT_TYPE,
 };
 use obzenflow_core::event::schema::{TypedFact, TypedFactSet, TypedFactSetError, TypedPayload};
 use obzenflow_core::event::{ChainEventContent, ChainEventFactory, SystemEvent};
@@ -108,8 +109,8 @@ pub enum EffectError {
     #[error("effect descriptor mismatch for cursor {cursor:?}: expected {expected}, recorded {recorded}")]
     DescriptorMismatch {
         cursor: EffectCursor,
-        expected: String,
-        recorded: String,
+        expected: EffectDescriptorHash,
+        recorded: EffectDescriptorHash,
     },
 
     #[error("recorded effect failure: {error_type}: {error_message}")]
@@ -520,7 +521,7 @@ struct EffectCommitHandleInner<T> {
     output_contract: StageOutputContract,
     parent: EventEnvelope<ChainEvent>,
     cursor: EffectCursor,
-    descriptor_hash: String,
+    descriptor_hash: EffectDescriptorHash,
     descriptor: EffectDescriptor,
     output_ordinal: u32,
     committed: Mutex<Option<CommittedEffectOutcome<T>>>,
@@ -537,7 +538,7 @@ struct EffectCommitHandleParams {
     output_contract: StageOutputContract,
     parent: EventEnvelope<ChainEvent>,
     cursor: EffectCursor,
-    descriptor_hash: String,
+    descriptor_hash: EffectDescriptorHash,
     descriptor: EffectDescriptor,
     output_ordinal: u32,
 }
@@ -1337,7 +1338,7 @@ impl Effects {
         effect: E,
         declaration: EffectDeclaration,
         cursor: EffectCursor,
-        descriptor_hash: String,
+        descriptor_hash: EffectDescriptorHash,
         descriptor: EffectDescriptor,
     ) -> Result<E::Output, EffectError>
     where
@@ -1415,7 +1416,7 @@ impl Effects {
         &self,
         records: &[&EffectRecord],
         cursor: EffectCursor,
-        descriptor_hash: String,
+        descriptor_hash: EffectDescriptorHash,
     ) -> Result<T, EffectError>
     where
         T: TypedFactSet,
@@ -1424,7 +1425,7 @@ impl Effects {
             if record.descriptor_hash != descriptor_hash {
                 return Err(EffectError::DescriptorMismatch {
                     cursor,
-                    expected: descriptor_hash,
+                    expected: descriptor_hash.clone(),
                     recorded: record.descriptor_hash.clone(),
                 });
             }
@@ -1437,7 +1438,7 @@ impl Effects {
         &self,
         records: &[&EffectRecord],
         cursor: EffectCursor,
-        descriptor_hash: String,
+        descriptor_hash: EffectDescriptorHash,
     ) -> Result<T, EffectError>
     where
         T: DeserializeOwned,
@@ -1451,7 +1452,7 @@ impl Effects {
         if record.descriptor_hash != descriptor_hash {
             return Err(EffectError::DescriptorMismatch {
                 cursor,
-                expected: descriptor_hash,
+                expected: descriptor_hash.clone(),
                 recorded: record.descriptor_hash.clone(),
             });
         }
@@ -1487,7 +1488,7 @@ impl Effects {
     async fn append_success_facts(
         &mut self,
         cursor: EffectCursor,
-        descriptor_hash: String,
+        descriptor_hash: EffectDescriptorHash,
         descriptor: EffectDescriptor,
         facts: Vec<TypedFact>,
     ) -> Result<(), EffectError> {
@@ -1535,7 +1536,7 @@ async fn append_domain_effect_success_facts(
     writer_id: WriterId,
     parent: &EventEnvelope<ChainEvent>,
     cursor: EffectCursor,
-    descriptor_hash: String,
+    descriptor_hash: EffectDescriptorHash,
     descriptor: EffectDescriptor,
     facts: Vec<TypedFact>,
     base_output_ordinal: u32,
@@ -1557,11 +1558,11 @@ async fn append_domain_effect_success_facts(
 
     let mut committed_events = Vec::new();
     for (index, fact) in facts.into_iter().enumerate() {
-        let ordinal = u32::try_from(index).map_err(|_| {
+        let ordinal = OutcomeFactOrdinal::try_from(index).map_err(|_| {
             EffectError::Execution("effect outcome fact ordinal exceeds u32 range".to_string())
         })?;
         let output_ordinal = base_output_ordinal
-            .checked_add(ordinal)
+            .checked_add(ordinal.get())
             .ok_or_else(|| EffectError::Execution("effect output ordinal overflow".to_string()))?;
         let record = EffectRecord {
             cursor: cursor.clone(),
@@ -1588,7 +1589,7 @@ async fn append_domain_effect_success_facts(
         );
         event.processing_info.event_time =
             deterministic_event_time(StageInputPosition(record.cursor.input_seq), output_ordinal);
-        let mut provenance = EffectProvenance::from_record(&record, false);
+        let mut provenance = EffectProvenance::from_record(&record, EffectFactOwner::User);
         provenance.outcome_fact_ordinal = Some(ordinal);
         event = event.with_effect_provenance(provenance);
 
@@ -1631,7 +1632,7 @@ async fn append_effect_record(
     source_error: Option<&EffectError>,
 ) -> Result<(), EffectError> {
     let event_type = framework_effect_event_type(&record.descriptor.effect_type);
-    let provenance = EffectProvenance::from_record(&record, true);
+    let provenance = EffectProvenance::from_record(&record, EffectFactOwner::Framework);
     let payload =
         serde_json::to_value(&record).map_err(|e| EffectError::Serialization(e.to_string()))?;
     let mut event =
@@ -1675,9 +1676,9 @@ fn effect_record_from_event(event: &ChainEvent) -> Result<Option<EffectRecord>, 
                     "reserved framework effect event `{event_type}` is missing effect_provenance"
                 ))
             })?;
-            if !provenance.framework_owned {
+            if !provenance.fact_owner.is_framework() {
                 return Err(EffectError::EffectProvenanceMismatch(format!(
-                    "reserved framework effect event `{event_type}` is not marked framework_owned"
+                    "reserved framework effect event `{event_type}` is not marked as framework-owned"
                 )));
             }
 
@@ -1693,12 +1694,17 @@ fn effect_record_from_event(event: &ChainEvent) -> Result<Option<EffectRecord>, 
             let Some(provenance) = event.effect_provenance.as_ref() else {
                 return Ok(None);
             };
-            if provenance.framework_owned {
+            if provenance.fact_owner.is_framework() {
                 return Err(EffectError::EffectProvenanceMismatch(
                     "framework-owned effect provenance must use a reserved framework effect event type"
                         .to_string(),
                 ));
             }
+            let outcome_fact_ordinal = provenance.outcome_fact_ordinal.ok_or_else(|| {
+                EffectError::EffectProvenanceMismatch(
+                    "domain effect outcome facts must set outcome_fact_ordinal".to_string(),
+                )
+            })?;
 
             let record = EffectRecord {
                 cursor: provenance.cursor.clone(),
@@ -1707,7 +1713,7 @@ fn effect_record_from_event(event: &ChainEvent) -> Result<Option<EffectRecord>, 
                 outcome: EffectOutcomePayload::SucceededFact {
                     event_type: event_type.clone(),
                     output: payload.clone(),
-                    outcome_fact_ordinal: provenance.outcome_fact_ordinal.unwrap_or(0),
+                    outcome_fact_ordinal,
                 },
             };
             validate_domain_effect_record_provenance(&record, provenance)?;
@@ -1740,7 +1746,7 @@ fn validate_domain_effect_record_provenance(
     }
 
     let expected_group_id = effect_outcome_group_id(&record.cursor);
-    if provenance.group_id.as_deref() != Some(expected_group_id.as_str()) {
+    if provenance.group_id.as_ref() != Some(&expected_group_id) {
         return Err(EffectError::EffectProvenanceMismatch(format!(
             "effect_provenance group_id does not match deterministic group id `{expected_group_id}`"
         )));
@@ -1795,7 +1801,7 @@ fn validate_effect_record_provenance(
     }
 
     let expected_group_id = effect_outcome_group_id(&record.cursor);
-    if provenance.group_id.as_deref() != Some(expected_group_id.as_str()) {
+    if provenance.group_id.as_ref() != Some(&expected_group_id) {
         return Err(EffectError::EffectProvenanceMismatch(format!(
             "effect_provenance group_id does not match deterministic group id `{expected_group_id}`"
         )));
@@ -1822,7 +1828,7 @@ fn validate_effect_outcome_group(records: &[&EffectRecord]) -> Result<(), Effect
             EffectOutcomePayload::SucceededFact {
                 outcome_fact_ordinal,
                 ..
-            } if *outcome_fact_ordinal == 0 => return Ok(()),
+            } if outcome_fact_ordinal.get() == 0 => return Ok(()),
             EffectOutcomePayload::SucceededFact {
                 outcome_fact_ordinal,
                 ..
@@ -1865,7 +1871,7 @@ fn validate_effect_outcome_group(records: &[&EffectRecord]) -> Result<(), Effect
                 "multi-fact effect outcome group for cursor {cursor:?} contains a non-domain-success record"
             )));
         };
-        let ordinal = usize::try_from(*outcome_fact_ordinal).map_err(|_| {
+        let ordinal = usize::try_from(outcome_fact_ordinal.get()).map_err(|_| {
             EffectError::EffectProvenanceMismatch(format!(
                 "effect outcome fact ordinal for cursor {cursor:?} exceeds usize range"
             ))
@@ -1903,7 +1909,7 @@ where
             EffectOutcomePayload::SucceededFact {
                 outcome_fact_ordinal,
                 ..
-            } => *outcome_fact_ordinal,
+            } => outcome_fact_ordinal.get(),
             _ => u32::MAX,
         });
         let facts = ordered
@@ -1966,7 +1972,7 @@ where
             EffectOutcomePayload::SucceededFact {
                 outcome_fact_ordinal,
                 ..
-            } => *outcome_fact_ordinal,
+            } => outcome_fact_ordinal.get(),
             _ => u32::MAX,
         });
         for record in ordered {
@@ -2023,7 +2029,7 @@ where
                 single,
                 &fact_type.event_type,
                 output.clone(),
-                0,
+                OutcomeFactOrdinal::new(0),
             )?);
             Ok(events)
         }
@@ -2037,20 +2043,20 @@ fn effect_record_fact_event(
     record: &EffectRecord,
     event_type: &str,
     output: Value,
-    outcome_fact_ordinal: u32,
+    outcome_fact_ordinal: OutcomeFactOrdinal,
 ) -> Result<ChainEvent, EffectError> {
     let mut event = ChainEventFactory::derived_data_event(writer_id, parent, event_type, output);
     event.id = deterministic_event_id(
         &record.cursor.recorded_flow_id,
         &record.cursor.stage_key,
         StageInputPosition(record.cursor.input_seq),
-        outcome_fact_ordinal,
+        outcome_fact_ordinal.get(),
     );
     event.processing_info.event_time = deterministic_event_time(
         StageInputPosition(record.cursor.input_seq),
-        outcome_fact_ordinal,
+        outcome_fact_ordinal.get(),
     );
-    let mut provenance = EffectProvenance::from_record(record, false);
+    let mut provenance = EffectProvenance::from_record(record, EffectFactOwner::User);
     provenance.outcome_fact_ordinal = Some(outcome_fact_ordinal);
     Ok(event.with_effect_provenance(provenance))
 }
@@ -2142,10 +2148,10 @@ where
     })
 }
 
-fn descriptor_hash(descriptor: &EffectDescriptor) -> Result<String, EffectError> {
-    hash_json_value(
+fn descriptor_hash(descriptor: &EffectDescriptor) -> Result<EffectDescriptorHash, EffectError> {
+    Ok(EffectDescriptorHash::from(hash_json_value(
         &serde_json::to_value(descriptor).map_err(|e| EffectError::Serialization(e.to_string()))?,
-    )
+    )?))
 }
 
 fn hash_json_value(value: &Value) -> Result<String, EffectError> {
@@ -2849,8 +2855,8 @@ mod tests {
             .as_ref()
             .expect("effect data fact should carry provenance");
         assert_eq!(
-            provenance.group_id.as_deref(),
-            Some(effect_outcome_group_id(&records[0].cursor).as_str())
+            provenance.group_id.as_ref(),
+            Some(&effect_outcome_group_id(&records[0].cursor))
         );
     }
 
@@ -2902,7 +2908,7 @@ mod tests {
                 .effect_provenance
                 .as_ref()
                 .and_then(|provenance| provenance.outcome_fact_ordinal),
-            Some(0)
+            Some(OutcomeFactOrdinal::new(0))
         );
         assert_eq!(
             events[1]
@@ -2910,19 +2916,19 @@ mod tests {
                 .effect_provenance
                 .as_ref()
                 .and_then(|provenance| provenance.outcome_fact_ordinal),
-            Some(1)
+            Some(OutcomeFactOrdinal::new(1))
         );
         assert_eq!(
             events[0]
                 .event
                 .effect_provenance
                 .as_ref()
-                .and_then(|provenance| provenance.group_id.as_deref()),
+                .and_then(|provenance| provenance.group_id.as_ref()),
             events[1]
                 .event
                 .effect_provenance
                 .as_ref()
-                .and_then(|provenance| provenance.group_id.as_deref())
+                .and_then(|provenance| provenance.group_id.as_ref())
         );
         assert_eq!(
             events[0].event.id,
@@ -2975,22 +2981,22 @@ mod tests {
         let records = vec![
             EffectRecord {
                 cursor: cursor.clone(),
-                descriptor_hash: "hash".to_string(),
+                descriptor_hash: "hash".into(),
                 descriptor: descriptor.clone(),
                 outcome: EffectOutcomePayload::SucceededFact {
                     event_type: FirstOutput::versioned_event_type(),
                     output: json!({ "value": 10 }),
-                    outcome_fact_ordinal: 0,
+                    outcome_fact_ordinal: OutcomeFactOrdinal::new(0),
                 },
             },
             EffectRecord {
                 cursor,
-                descriptor_hash: "hash".to_string(),
+                descriptor_hash: "hash".into(),
                 descriptor,
                 outcome: EffectOutcomePayload::SucceededFact {
                     event_type: SecondOutput::versioned_event_type(),
                     output: json!({ "value": "twenty" }),
-                    outcome_fact_ordinal: 2,
+                    outcome_fact_ordinal: OutcomeFactOrdinal::new(2),
                 },
             },
         ];
@@ -3603,7 +3609,7 @@ mod tests {
         };
         let record = EffectRecord {
             cursor,
-            descriptor_hash: "hash".to_string(),
+            descriptor_hash: "hash".into(),
             descriptor: EffectDescriptor {
                 effect_type: CountingEffect::EFFECT_TYPE.to_string(),
                 label: "same".to_string(),

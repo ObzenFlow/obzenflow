@@ -10,6 +10,10 @@
 use crate::event::context::StageType;
 use crate::event::observability::HttpSurfaceRouteMetricsSnapshot;
 use crate::event::status::processing_status::ErrorKind;
+use crate::event::system_event::{
+    ContractName, ContractOverridePolicy, ContractResultStatusLabel, SystemFeedRole,
+};
+use crate::event::types::EventType;
 use crate::id::{FlowId, StageId};
 use crate::metrics::Percentile;
 use crate::time::MetricsDuration;
@@ -211,44 +215,82 @@ pub struct AppMetricsSnapshot {
 ///
 /// These are derived from contract verification events emitted by readers
 /// (e.g. via UpstreamSubscription) and are exported to Prometheus.
-pub type ContractMetricCounterKey = (
-    StageId,
-    StageId,
-    String,
-    Option<String>,
-    Option<String>,
-    String,
-);
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ContractMetricEdgeKey {
+    pub upstream: StageId,
+    pub downstream: StageId,
+    pub contract: ContractName,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selected_event_type: Option<EventType>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub feed_role: Option<SystemFeedRole>,
+}
 
-pub type ContractMetricSeqKey = (StageId, StageId, String, Option<String>, Option<String>);
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ContractMetricResultKey {
+    pub edge: ContractMetricEdgeKey,
+    pub status: ContractResultStatusLabel,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ContractViolationCauseLabel(String);
+
+impl ContractViolationCauseLabel {
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for ContractViolationCauseLabel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl From<&str> for ContractViolationCauseLabel {
+    fn from(value: &str) -> Self {
+        Self::new(value)
+    }
+}
+
+impl From<String> for ContractViolationCauseLabel {
+    fn from(value: String) -> Self {
+        Self::new(value)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ContractMetricViolationKey {
+    pub edge: ContractMetricEdgeKey,
+    pub cause: ContractViolationCauseLabel,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ContractMetricOverrideKey {
+    pub edge: ContractMetricEdgeKey,
+    pub policy: ContractOverridePolicy,
+}
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ContractMetricsSnapshot {
-    /// Contract results by
-    /// (upstream, downstream, contract_name, selected_event_type, feed_role, status).
-    ///
-    /// Status values are expected to be small/stable strings such as:
-    /// "passed", "failed", "pending".
-    pub results_total: HashMap<ContractMetricCounterKey, u64>,
+    /// Contract results by contract edge and status.
+    pub results_total: HashMap<ContractMetricResultKey, u64>,
 
-    /// Contract violations by
-    /// (upstream, downstream, contract_name, selected_event_type, feed_role, cause).
-    ///
-    /// Cause values are expected to be small/stable strings such as:
-    /// "seq_divergence", "content_mismatch", "delivery_mismatch", "accounting_mismatch", "other".
-    pub violations_total: HashMap<ContractMetricCounterKey, u64>,
+    /// Contract violations by contract edge and stable cause label.
+    pub violations_total: HashMap<ContractMetricViolationKey, u64>,
 
-    /// Contract overrides by
-    /// (upstream, downstream, contract_name, selected_event_type, feed_role, policy).
-    pub overrides_total: HashMap<ContractMetricCounterKey, u64>,
+    /// Contract overrides by contract edge and policy.
+    pub overrides_total: HashMap<ContractMetricOverrideKey, u64>,
 
-    /// Latest reader sequence per contract edge
-    /// (upstream, downstream, contract_name, selected_event_type, feed_role).
-    pub reader_seq: HashMap<ContractMetricSeqKey, u64>,
+    /// Latest reader sequence per contract edge.
+    pub reader_seq: HashMap<ContractMetricEdgeKey, u64>,
 
-    /// Latest advertised writer sequence per contract edge
-    /// (upstream, downstream, contract_name, selected_event_type, feed_role).
-    pub advertised_writer_seq: HashMap<ContractMetricSeqKey, u64>,
+    /// Latest advertised writer sequence per contract edge.
+    pub advertised_writer_seq: HashMap<ContractMetricEdgeKey, u64>,
 }
 
 /// Snapshot of infrastructure-level metrics from direct observation

@@ -14,10 +14,12 @@ use obzenflow_core::event::event_envelope::EventEnvelope;
 use obzenflow_core::event::identity::JournalWriterId;
 use obzenflow_core::event::journal_event::JournalEvent;
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
-use obzenflow_core::event::payloads::effect_payload::{EffectProvenance, EFFECT_RECORD_EVENT_TYPE};
+use obzenflow_core::event::payloads::effect_payload::{
+    EffectFactOwner, EffectProvenance, EFFECT_RECORD_EVENT_TYPE,
+};
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::system_event::{
-    ContractResultStatusLabel, SystemEvent, SystemEventType,
+    ContractOverridePolicy, ContractResultStatusLabel, SystemEvent, SystemEventType, SystemFeedRole,
 };
 use obzenflow_core::event::types::{
     Count, DurationMs, SeqNo, ViolationCause as EventViolationCause,
@@ -31,7 +33,7 @@ use obzenflow_core::journal::journal_reader::JournalReader;
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{
     CircuitBreakerContractInfo, CircuitBreakerContractMode, ControlMiddlewareProvider, EventId,
-    NoControlMiddleware, StageId, TransportContract, WriterId,
+    EventType, NoControlMiddleware, StageId, TransportContract, WriterId,
 };
 use serde_json::json;
 use std::collections::HashMap;
@@ -769,8 +771,8 @@ async fn progress_contract_heartbeats_are_suppressed_until_data_observed() {
         events.iter().any(|env| matches!(
             &env.event.event,
             SystemEventType::ContractResult { contract_name, status, cause, .. }
-                if contract_name == TransportContract::NAME
-                    && status == ContractResultStatusLabel::Healthy.as_str()
+                if contract_name.as_str() == TransportContract::NAME
+                    && *status == ContractResultStatusLabel::Healthy
                     && cause.is_none()
         )),
         "expected a healthy TransportContract ContractResult heartbeat once data is observed"
@@ -1494,7 +1496,7 @@ async fn breaker_aware_mode_overrides_seq_divergence_and_emits_override_event() 
                 override_found = true;
                 assert_eq!(*upstream, upstream_stage);
                 assert_eq!(*reader, reader_stage);
-                assert_eq!(policy, "breaker_aware");
+                assert_eq!(*policy, ContractOverridePolicy::BreakerAware);
             }
             _ => {}
         }
@@ -1641,8 +1643,8 @@ async fn transport_only_filters_unselected_data_and_reconciles_selected_writer_s
     selected_feeds.insert(
         upstream_stage,
         vec![SelectedFeedMetadata {
-            event_type: "test.selected.v1".to_string(),
-            feed_role: Some("input".to_string()),
+            event_type: EventType::from("test.selected.v1"),
+            feed_role: Some(SystemFeedRole::Input),
         }],
     );
 
@@ -1741,8 +1743,9 @@ async fn transport_only_filters_unselected_data_and_reconciles_selected_writer_s
             reason,
         } if *upstream == upstream_stage
             && *reader == reader_stage
-            && selected_event_type.as_deref() == Some("test.selected.v1")
-            && feed_role.as_deref() == Some("input")
+            && selected_event_type.as_ref().map(|event_type| event_type.as_str())
+                == Some("test.selected.v1")
+            && feed_role.as_ref().map(|role| role.as_str()) == Some("input")
             && *pass
             && *reader_seq == Some(SeqNo(1))
             && *advertised_writer_seq == Some(SeqNo(1))
@@ -1798,12 +1801,12 @@ async fn multi_selected_feeds_emit_direct_contract_status_per_feed() {
         upstream_stage,
         vec![
             SelectedFeedMetadata {
-                event_type: "test.first.v1".to_string(),
-                feed_role: Some("input".to_string()),
+                event_type: EventType::from("test.first.v1"),
+                feed_role: Some(SystemFeedRole::Input),
             },
             SelectedFeedMetadata {
-                event_type: "test.second.v1".to_string(),
-                feed_role: Some("reference".to_string()),
+                event_type: EventType::from("test.second.v1"),
+                feed_role: Some(SystemFeedRole::Reference),
             },
         ],
     );
@@ -1853,7 +1856,12 @@ async fn multi_selected_feeds_emit_direct_contract_status_per_feed() {
             if *upstream != upstream_stage || *reader != reader_stage {
                 continue;
             }
-            match (selected_event_type.as_deref(), feed_role.as_deref()) {
+            match (
+                selected_event_type
+                    .as_ref()
+                    .map(|event_type| event_type.as_str()),
+                feed_role.as_ref().map(|role| role.as_str()),
+            ) {
                 (Some("test.first.v1"), Some("input")) => {
                     first_status =
                         Some((*pass, *reader_seq, *advertised_writer_seq, reason.clone()));
@@ -1933,12 +1941,12 @@ async fn multi_selected_feeds_emit_midflight_contract_results_per_feed() {
         upstream_stage,
         vec![
             SelectedFeedMetadata {
-                event_type: "test.first.v1".to_string(),
-                feed_role: Some("input".to_string()),
+                event_type: EventType::from("test.first.v1"),
+                feed_role: Some(SystemFeedRole::Input),
             },
             SelectedFeedMetadata {
-                event_type: "test.second.v1".to_string(),
-                feed_role: Some("reference".to_string()),
+                event_type: EventType::from("test.second.v1"),
+                feed_role: Some(SystemFeedRole::Reference),
             },
         ],
     );
@@ -1999,10 +2007,11 @@ async fn multi_selected_feeds_emit_midflight_contract_results_per_feed() {
                     ..
                 } if *upstream == upstream_stage
                     && *reader == reader_stage
-                    && selected_event_type.as_deref() == Some("test.first.v1")
-                    && feed_role.as_deref() == Some("input")
-                    && contract_name == TransportContract::NAME
-                    && status == ContractResultStatusLabel::Healthy.as_str()
+                    && selected_event_type.as_ref().map(|event_type| event_type.as_str())
+                        == Some("test.first.v1")
+                    && feed_role.as_ref().map(|role| role.as_str()) == Some("input")
+                    && contract_name.as_str() == TransportContract::NAME
+                    && *status == ContractResultStatusLabel::Healthy
                     && *reader_seq == Some(SeqNo(1))
                     && advertised_writer_seq.is_none()
             )
@@ -2021,8 +2030,9 @@ async fn multi_selected_feeds_emit_midflight_contract_results_per_feed() {
                     ..
                 } if *upstream == upstream_stage
                     && *reader == reader_stage
-                    && selected_event_type.as_deref() == Some("test.second.v1")
-                    && feed_role.as_deref() == Some("reference")
+                    && selected_event_type.as_ref().map(|event_type| event_type.as_str())
+                        == Some("test.second.v1")
+                    && feed_role.as_ref().map(|role| role.as_str()) == Some("reference")
             )
         })
         .count();
@@ -2079,8 +2089,9 @@ async fn multi_selected_feeds_emit_midflight_contract_results_per_feed() {
                     ..
                 } if *upstream == upstream_stage
                     && *reader == reader_stage
-                    && selected_event_type.as_deref() == Some("test.first.v1")
-                    && feed_role.as_deref() == Some("input")
+                    && selected_event_type.as_ref().map(|event_type| event_type.as_str())
+                        == Some("test.first.v1")
+                    && feed_role.as_ref().map(|role| role.as_str()) == Some("input")
             )
         })
         .count();
@@ -2101,10 +2112,11 @@ async fn multi_selected_feeds_emit_midflight_contract_results_per_feed() {
                     ..
                 } if *upstream == upstream_stage
                     && *reader == reader_stage
-                    && selected_event_type.as_deref() == Some("test.second.v1")
-                    && feed_role.as_deref() == Some("reference")
-                    && contract_name == TransportContract::NAME
-                    && status == ContractResultStatusLabel::Healthy.as_str()
+                    && selected_event_type.as_ref().map(|event_type| event_type.as_str())
+                        == Some("test.second.v1")
+                    && feed_role.as_ref().map(|role| role.as_str()) == Some("reference")
+                    && contract_name.as_str() == TransportContract::NAME
+                    && *status == ContractResultStatusLabel::Healthy
                     && *reader_seq == Some(SeqNo(1))
                     && advertised_writer_seq.is_none()
             )
@@ -2128,7 +2140,7 @@ async fn transport_only_skips_framework_effect_data_without_stage_input_position
             input_seq: 1,
             effect_ordinal: 0,
         },
-        descriptor_hash: "hash".to_string(),
+        descriptor_hash: "hash".into(),
         descriptor: obzenflow_core::event::payloads::effect_payload::EffectDescriptor {
             effect_type: "test.effect".to_string(),
             label: "test".to_string(),
@@ -2149,7 +2161,10 @@ async fn transport_only_skips_framework_effect_data_without_stage_input_position
                 EFFECT_RECORD_EVENT_TYPE,
                 serde_json::to_value(&effect_record).expect("serialize effect record"),
             )
-            .with_effect_provenance(EffectProvenance::from_record(&effect_record, true)),
+            .with_effect_provenance(EffectProvenance::from_record(
+                &effect_record,
+                EffectFactOwner::Framework,
+            )),
             None,
         )
         .await

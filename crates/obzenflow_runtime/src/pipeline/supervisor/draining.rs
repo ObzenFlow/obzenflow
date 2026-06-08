@@ -109,8 +109,10 @@ pub(super) async fn dispatch_draining(
                     for key in context.contract_keys_for_contract_event(
                         *upstream,
                         *reader,
-                        selected_event_type.as_deref(),
-                        feed_role.as_deref(),
+                        selected_event_type
+                            .as_ref()
+                            .map(|event_type| event_type.as_str()),
+                        feed_role.as_ref().map(|role| role.as_str()),
                     ) {
                         context.contract_pairs.insert(key, edge_status.clone());
                     }

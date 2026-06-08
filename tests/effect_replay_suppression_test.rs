@@ -872,7 +872,7 @@ fn is_framework_effect_fact(event: &ChainEvent) -> bool {
             if event
                 .effect_provenance
                 .as_ref()
-                .is_some_and(|provenance| provenance.framework_owned)
+                .is_some_and(|provenance| provenance.fact_owner.is_framework())
                 && is_framework_effect_event_type(event_type)
     )
 }
@@ -885,7 +885,7 @@ fn is_domain_effect_outcome_fact(event: &ChainEvent) -> bool {
                 && event
                     .effect_provenance
                     .as_ref()
-                    .is_some_and(|provenance| !provenance.framework_owned)
+                    .is_some_and(|provenance| provenance.fact_owner.is_user())
     )
 }
 
@@ -900,7 +900,7 @@ fn framework_effect_record(event: &ChainEvent) -> Option<EffectRecord> {
         } if event
             .effect_provenance
             .as_ref()
-            .is_some_and(|provenance| provenance.framework_owned)
+            .is_some_and(|provenance| provenance.fact_owner.is_framework())
             && event_type == EFFECT_RECORD_EVENT_TYPE =>
         {
             serde_json::from_value(payload.clone()).ok()
@@ -917,7 +917,7 @@ fn recorded_effect_cursor(event: &ChainEvent) -> Option<EffectCursor> {
         return event
             .effect_provenance
             .as_ref()
-            .filter(|provenance| !provenance.framework_owned)
+            .filter(|provenance| provenance.fact_owner.is_user())
             .map(|provenance| provenance.cursor.clone());
     }
     None

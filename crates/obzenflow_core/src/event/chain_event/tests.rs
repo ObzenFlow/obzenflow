@@ -5,7 +5,7 @@
 use super::*;
 use crate::event::ingestion::IngressContext;
 use crate::event::payloads::effect_payload::{
-    EffectCursor, EffectDescriptor, EffectProvenance, EFFECT_RECORD_EVENT_TYPE,
+    EffectCursor, EffectDescriptor, EffectFactOwner, EffectProvenance, EFFECT_RECORD_EVENT_TYPE,
 };
 use crate::event::types::CorrelationId;
 use crate::id::StageId;
@@ -62,7 +62,7 @@ fn framework_effect_data_is_not_source_replayable() {
             input_seq: 1,
             effect_ordinal: 0,
         },
-        descriptor_hash: "hash".to_string(),
+        descriptor_hash: "hash".into(),
         descriptor: EffectDescriptor {
             effect_type: "test.effect".to_string(),
             label: "test".to_string(),
@@ -72,7 +72,7 @@ fn framework_effect_data_is_not_source_replayable() {
         },
         outcome_fact_ordinal: None,
         group_id: None,
-        framework_owned: true,
+        fact_owner: EffectFactOwner::Framework,
     });
 
     assert!(!event.is_source_replayable());

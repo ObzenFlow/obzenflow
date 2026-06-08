@@ -7,10 +7,12 @@ use crate::messaging::upstream_subscription_policy::{
     EdgeContext, EdgeContractDecision, PolicyHints,
 };
 use obzenflow_core::event::system_event::{
-    ContractResultStatusLabel, SystemEvent, SystemEventType,
+    ContractName, ContractOverridePolicy, ContractResultStatusLabel, SystemEvent, SystemEventType,
+    SystemFeedRole,
 };
 use obzenflow_core::event::types::{
-    Count, DurationMs, JournalIndex, JournalPath, SeqNo, ViolationCause as EventViolationCause,
+    Count, DurationMs, EventType, JournalIndex, JournalPath, SeqNo,
+    ViolationCause as EventViolationCause,
 };
 use obzenflow_core::event::{
     ChainEventFactory, ConsumptionFinalEventParams, ConsumptionProgressEventParams, JournalEvent,
@@ -29,21 +31,21 @@ enum ContractCheckMode {
 fn contract_result_labels_for_emission(
     result: &ContractResult,
     pending_label: ContractResultStatusLabel,
-) -> (String, Option<String>) {
+) -> (ContractResultStatusLabel, Option<String>) {
     match result {
-        ContractResult::Passed(_) => (ContractResultStatusLabel::Passed.to_string(), None),
+        ContractResult::Passed(_) => (ContractResultStatusLabel::Passed, None),
         ContractResult::Failed(v) => (
-            ContractResultStatusLabel::Failed.to_string(),
+            ContractResultStatusLabel::Failed,
             Some(v.cause.cause_label().to_string()),
         ),
-        ContractResult::Pending => (pending_label.to_string(), None),
+        ContractResult::Pending => (pending_label, None),
     }
 }
 
 #[derive(Clone, Debug)]
 struct DirectFeedContractEvidence {
-    event_type: String,
-    feed_role: Option<String>,
+    event_type: EventType,
+    feed_role: Option<SystemFeedRole>,
     reader_seq: SeqNo,
     advertised_writer_seq: SeqNo,
     pass: bool,
@@ -56,8 +58,8 @@ struct DirectFeedContractEvidence {
 #[derive(Clone, Debug)]
 struct DirectFeedProgressEvidence {
     feed_index: usize,
-    event_type: String,
-    feed_role: Option<String>,
+    event_type: EventType,
+    feed_role: Option<SystemFeedRole>,
     reader_seq: SeqNo,
     advertised_writer_seq: Option<SeqNo>,
     contract_results: Vec<(String, ContractResult)>,
@@ -164,7 +166,7 @@ where
                 };
                 DirectFeedContractEvidence {
                     event_type: feed_chain.metadata.event_type.clone(),
-                    feed_role: feed_chain.metadata.feed_role.clone(),
+                    feed_role: feed_chain.metadata.feed_role,
                     reader_seq,
                     advertised_writer_seq,
                     pass,
@@ -200,8 +202,8 @@ where
                         upstream,
                         reader,
                         selected_event_type: Some(feed.event_type.clone()),
-                        feed_role: feed.feed_role.clone(),
-                        contract_name: contract_name.clone(),
+                        feed_role: feed.feed_role,
+                        contract_name: ContractName::from(contract_name.clone()),
                         status: status_label,
                         cause: cause_label,
                         reader_seq: Some(feed.reader_seq),
@@ -232,10 +234,10 @@ where
                             upstream,
                             reader,
                             selected_event_type: Some(feed.event_type.clone()),
-                            feed_role: feed.feed_role.clone(),
-                            contract_name: contract_name.clone(),
+                            feed_role: feed.feed_role,
+                            contract_name: ContractName::from(contract_name.clone()),
                             original_cause: cause.clone(),
-                            policy: "breaker_aware".to_string(),
+                            policy: ContractOverridePolicy::BreakerAware,
                         },
                     );
                     if let Err(e) = system_journal.append(override_event, None).await {
@@ -261,7 +263,7 @@ where
                     upstream,
                     reader,
                     selected_event_type: Some(feed.event_type.clone()),
-                    feed_role: feed.feed_role.clone(),
+                    feed_role: feed.feed_role,
                     pass: feed.pass,
                     reader_seq: Some(feed.reader_seq),
                     advertised_writer_seq: Some(feed.advertised_writer_seq),
@@ -322,7 +324,7 @@ where
                 Some(DirectFeedProgressEvidence {
                     feed_index,
                     event_type: feed_chain.metadata.event_type.clone(),
-                    feed_role: feed_chain.metadata.feed_role.clone(),
+                    feed_role: feed_chain.metadata.feed_role,
                     reader_seq,
                     advertised_writer_seq: self
                         .advertised_writer_seq_for_feed(index, &feed_chain.metadata),
@@ -363,8 +365,8 @@ where
                         upstream: progress.stage_id,
                         reader: reader_stage,
                         selected_event_type: Some(feed.event_type.clone()),
-                        feed_role: feed.feed_role.clone(),
-                        contract_name: contract_name.clone(),
+                        feed_role: feed.feed_role,
+                        contract_name: ContractName::from(contract_name.clone()),
                         status: status_label,
                         cause: cause_label,
                         reader_seq: Some(feed.reader_seq),
@@ -585,8 +587,8 @@ where
                         upstream: progress.stage_id,
                         reader: reader_stage,
                         selected_event_type: selected_event_type.clone(),
-                        feed_role: feed_role.clone(),
-                        contract_name: contract_name.clone(),
+                        feed_role,
+                        contract_name: ContractName::from(contract_name.clone()),
                         status: status_label,
                         cause: cause_label,
                         reader_seq: Some(progress_seq),
@@ -657,10 +659,10 @@ where
                             upstream: progress.stage_id,
                             reader: reader_stage,
                             selected_event_type: selected_event_type.clone(),
-                            feed_role: feed_role.clone(),
-                            contract_name,
+                            feed_role,
+                            contract_name: ContractName::from(contract_name),
                             original_cause: cause,
-                            policy: "breaker_aware".to_string(),
+                            policy: ContractOverridePolicy::BreakerAware,
                         },
                     );
                     if let Err(e) = system_journal.append(override_event, None).await {
@@ -693,7 +695,7 @@ where
                             upstream: progress.stage_id,
                             reader: reader_stage,
                             selected_event_type: selected_event_type.clone(),
-                            feed_role: feed_role.clone(),
+                            feed_role,
                             pass: false,
                             reader_seq: Some(progress.reader_seq),
                             advertised_writer_seq: progress.advertised_writer_seq,
@@ -830,8 +832,8 @@ where
                             upstream: progress.stage_id,
                             reader: reader_stage,
                             selected_event_type: selected_event_type.clone(),
-                            feed_role: feed_role.clone(),
-                            contract_name: contract_name.clone(),
+                            feed_role,
+                            contract_name: ContractName::from(contract_name.clone()),
                             status: status_label,
                             cause: cause_label,
                             reader_seq: Some(progress_seq),
@@ -901,10 +903,10 @@ where
                                     upstream: progress.stage_id,
                                     reader: reader_stage,
                                     selected_event_type: selected_event_type.clone(),
-                                    feed_role: feed_role.clone(),
-                                    contract_name,
+                                    feed_role,
+                                    contract_name: ContractName::from(contract_name),
                                     original_cause: cause,
-                                    policy: "breaker_aware".to_string(),
+                                    policy: ContractOverridePolicy::BreakerAware,
                                 },
                             );
                             if let Err(e) = system_journal.append(override_event, None).await {
@@ -1105,7 +1107,7 @@ where
                     upstream: progress.stage_id,
                     reader: reader_stage,
                     selected_event_type: selected_event_type.clone(),
-                    feed_role: feed_role.clone(),
+                    feed_role,
                     pass,
                     reader_seq: Some(progress_seq),
                     advertised_writer_seq: progress.advertised_writer_seq,

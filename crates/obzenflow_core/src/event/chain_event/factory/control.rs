@@ -7,7 +7,9 @@ use crate::event::chain_event::{
     ChainEvent, ChainEventContent, ConsumptionFinalEventParams, ConsumptionProgressEventParams,
     SourceContractEventParams,
 };
-use crate::event::payloads::flow_control_payload::FlowControlPayload;
+use crate::event::payloads::flow_control_payload::{
+    CheckpointId, EofKind, FlowControlPayload, WatermarkStageId,
+};
 use crate::event::types::{SeqNo, ViolationCause, WriterId};
 use crate::id::StageId;
 use serde_json::Value;
@@ -15,10 +17,15 @@ use serde_json::Value;
 impl ChainEventFactory {
     /// Create an EOF signal
     pub fn eof_event(writer_id: WriterId, natural: bool) -> ChainEvent {
+        Self::eof_event_with_kind(writer_id, EofKind::from_natural(natural))
+    }
+
+    /// Create an EOF signal with explicit EOF kind.
+    pub fn eof_event_with_kind(writer_id: WriterId, kind: EofKind) -> ChainEvent {
         Self::create_event(
             writer_id,
             ChainEventContent::FlowControl(FlowControlPayload::Eof {
-                natural,
+                kind,
                 timestamp: current_timestamp(),
                 writer_id: Some(writer_id),
                 writer_seq: None,
@@ -39,7 +46,7 @@ impl ChainEventFactory {
             writer_id,
             ChainEventContent::FlowControl(FlowControlPayload::Watermark {
                 timestamp,
-                stage_id,
+                stage_id: stage_id.map(WatermarkStageId::from),
             }),
         )
     }
@@ -52,7 +59,10 @@ impl ChainEventFactory {
     ) -> ChainEvent {
         Self::create_event(
             writer_id,
-            ChainEventContent::FlowControl(FlowControlPayload::Checkpoint { id, metadata }),
+            ChainEventContent::FlowControl(FlowControlPayload::Checkpoint {
+                id: CheckpointId::from(id),
+                metadata,
+            }),
         )
     }
 

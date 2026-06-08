@@ -217,7 +217,7 @@ where
                                 if chain_event
                                     .effect_provenance
                                     .as_ref()
-                                    .is_some_and(|provenance| provenance.framework_owned)
+                                    .is_some_and(|provenance| provenance.fact_owner.is_framework())
                                     && is_framework_effect_event_type(event_type)
                                 {
                                     self.state.next_reader_index();

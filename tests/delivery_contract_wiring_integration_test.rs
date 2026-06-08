@@ -321,20 +321,11 @@ async fn assert_delivery_contract_pass(base_path: &Path) -> Result<()> {
                     contract_name,
                     status,
                     ..
-                } if contract_name == DeliveryContract::NAME => match status.as_str() {
-                    s if s == ContractResultStatusLabel::Passed.as_str() => {
-                        seen_delivery_contract_pass = true
-                    }
-                    s if s == ContractResultStatusLabel::Failed.as_str() => {
-                        seen_delivery_contract_fail = true
-                    }
-                    s if s == ContractResultStatusLabel::Healthy.as_str() => {}
-                    s if s == ContractResultStatusLabel::Pending.as_str() => {}
-                    other => {
-                        return Err(anyhow::anyhow!(
-                            "unexpected DeliveryContract status in system.log: {other}"
-                        ));
-                    }
+                } if contract_name.as_str() == DeliveryContract::NAME => match status {
+                    ContractResultStatusLabel::Passed => seen_delivery_contract_pass = true,
+                    ContractResultStatusLabel::Failed => seen_delivery_contract_fail = true,
+                    ContractResultStatusLabel::Healthy => {}
+                    ContractResultStatusLabel::Pending => {}
                 },
                 _ => {}
             }

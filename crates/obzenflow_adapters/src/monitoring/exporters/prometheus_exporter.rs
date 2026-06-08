@@ -11,9 +11,10 @@
 use obzenflow_core::event::observability::{HttpPullState, WaitReason};
 use obzenflow_core::event::status::processing_status::ErrorKind;
 use obzenflow_core::metrics::{
-    AppMetricsSnapshot, HistogramSnapshot, InfraMetricsSnapshot, MetricsExporter, StageMetadata,
+    AppMetricsSnapshot, ContractMetricEdgeKey, HistogramSnapshot, InfraMetricsSnapshot,
+    MetricsExporter, StageMetadata,
 };
-use obzenflow_core::StageId;
+use obzenflow_core::{FlowId, StageId};
 use std::error::Error;
 use std::fmt::Write;
 use std::sync::RwLock;
@@ -1422,43 +1423,23 @@ impl PrometheusExporter {
             )?;
             writeln!(output, "# TYPE obzenflow_contract_results_total counter")?;
 
-            for ((upstream, downstream, contract, selected_event_type, feed_role, status), count) in
-                &snapshot.contract_metrics.results_total
-            {
-                let selected_event_type = selected_event_type.as_deref().unwrap_or("");
-                let feed_role = feed_role.as_deref().unwrap_or("");
-                let upstream_id = upstream.to_string();
-                let downstream_id = downstream.to_string();
+            for (key, count) in &snapshot.contract_metrics.results_total {
+                let labels = ContractMetricLabels::from_edge(&key.edge, &snapshot.stage_metadata);
+                let status = key.status.as_str();
 
-                let upstream_meta = snapshot.stage_metadata.get(upstream);
-                let downstream_meta = snapshot.stage_metadata.get(downstream);
-
-                let flow_name = upstream_meta
-                    .map(|m| m.flow_name.as_str())
-                    .or_else(|| downstream_meta.map(|m| m.flow_name.as_str()))
-                    .unwrap_or("unknown");
-                let flow_id = upstream_meta
-                    .and_then(|m| m.flow_id)
-                    .or_else(|| downstream_meta.and_then(|m| m.flow_id));
-
-                let upstream_name = upstream_meta.map(|m| m.name.as_str()).unwrap_or("unknown");
-                let downstream_name = downstream_meta
-                    .map(|m| m.name.as_str())
-                    .unwrap_or("unknown");
-
-                if let Some(flow_id) = flow_id {
+                if let Some(flow_id) = labels.flow_id {
                     writeln!(
                         output,
                         "obzenflow_contract_results_total{{flow=\"{}\",flow_id=\"{}\",upstream_stage_id=\"{}\",downstream_stage_id=\"{}\",upstream=\"{}\",downstream=\"{}\",contract=\"{}\",selected_event_type=\"{}\",feed_role=\"{}\",status=\"{}\"}} {}",
-                        escape_label(flow_name),
+                        escape_label(labels.flow_name),
                         escape_label(&flow_id.to_string()),
-                        escape_label(&upstream_id),
-                        escape_label(&downstream_id),
-                        escape_label(upstream_name),
-                        escape_label(downstream_name),
-                        escape_label(contract),
-                        escape_label(selected_event_type),
-                        escape_label(feed_role),
+                        escape_label(&labels.upstream_id),
+                        escape_label(&labels.downstream_id),
+                        escape_label(labels.upstream_name),
+                        escape_label(labels.downstream_name),
+                        escape_label(labels.contract),
+                        escape_label(labels.selected_event_type),
+                        escape_label(labels.feed_role),
                         escape_label(status),
                         count
                     )?;
@@ -1466,14 +1447,14 @@ impl PrometheusExporter {
                     writeln!(
                         output,
                         "obzenflow_contract_results_total{{flow=\"{}\",upstream_stage_id=\"{}\",downstream_stage_id=\"{}\",upstream=\"{}\",downstream=\"{}\",contract=\"{}\",selected_event_type=\"{}\",feed_role=\"{}\",status=\"{}\"}} {}",
-                        escape_label(flow_name),
-                        escape_label(&upstream_id),
-                        escape_label(&downstream_id),
-                        escape_label(upstream_name),
-                        escape_label(downstream_name),
-                        escape_label(contract),
-                        escape_label(selected_event_type),
-                        escape_label(feed_role),
+                        escape_label(labels.flow_name),
+                        escape_label(&labels.upstream_id),
+                        escape_label(&labels.downstream_id),
+                        escape_label(labels.upstream_name),
+                        escape_label(labels.downstream_name),
+                        escape_label(labels.contract),
+                        escape_label(labels.selected_event_type),
+                        escape_label(labels.feed_role),
                         escape_label(status),
                         count
                     )?;
@@ -1489,43 +1470,23 @@ impl PrometheusExporter {
             )?;
             writeln!(output, "# TYPE obzenflow_contract_violations_total counter")?;
 
-            for ((upstream, downstream, contract, selected_event_type, feed_role, cause), count) in
-                &snapshot.contract_metrics.violations_total
-            {
-                let selected_event_type = selected_event_type.as_deref().unwrap_or("");
-                let feed_role = feed_role.as_deref().unwrap_or("");
-                let upstream_id = upstream.to_string();
-                let downstream_id = downstream.to_string();
+            for (key, count) in &snapshot.contract_metrics.violations_total {
+                let labels = ContractMetricLabels::from_edge(&key.edge, &snapshot.stage_metadata);
+                let cause = key.cause.as_str();
 
-                let upstream_meta = snapshot.stage_metadata.get(upstream);
-                let downstream_meta = snapshot.stage_metadata.get(downstream);
-
-                let flow_name = upstream_meta
-                    .map(|m| m.flow_name.as_str())
-                    .or_else(|| downstream_meta.map(|m| m.flow_name.as_str()))
-                    .unwrap_or("unknown");
-                let flow_id = upstream_meta
-                    .and_then(|m| m.flow_id)
-                    .or_else(|| downstream_meta.and_then(|m| m.flow_id));
-
-                let upstream_name = upstream_meta.map(|m| m.name.as_str()).unwrap_or("unknown");
-                let downstream_name = downstream_meta
-                    .map(|m| m.name.as_str())
-                    .unwrap_or("unknown");
-
-                if let Some(flow_id) = flow_id {
+                if let Some(flow_id) = labels.flow_id {
                     writeln!(
                         output,
                         "obzenflow_contract_violations_total{{flow=\"{}\",flow_id=\"{}\",upstream_stage_id=\"{}\",downstream_stage_id=\"{}\",upstream=\"{}\",downstream=\"{}\",contract=\"{}\",selected_event_type=\"{}\",feed_role=\"{}\",cause=\"{}\"}} {}",
-                        escape_label(flow_name),
+                        escape_label(labels.flow_name),
                         escape_label(&flow_id.to_string()),
-                        escape_label(&upstream_id),
-                        escape_label(&downstream_id),
-                        escape_label(upstream_name),
-                        escape_label(downstream_name),
-                        escape_label(contract),
-                        escape_label(selected_event_type),
-                        escape_label(feed_role),
+                        escape_label(&labels.upstream_id),
+                        escape_label(&labels.downstream_id),
+                        escape_label(labels.upstream_name),
+                        escape_label(labels.downstream_name),
+                        escape_label(labels.contract),
+                        escape_label(labels.selected_event_type),
+                        escape_label(labels.feed_role),
                         escape_label(cause),
                         count
                     )?;
@@ -1533,14 +1494,14 @@ impl PrometheusExporter {
                     writeln!(
                         output,
                         "obzenflow_contract_violations_total{{flow=\"{}\",upstream_stage_id=\"{}\",downstream_stage_id=\"{}\",upstream=\"{}\",downstream=\"{}\",contract=\"{}\",selected_event_type=\"{}\",feed_role=\"{}\",cause=\"{}\"}} {}",
-                        escape_label(flow_name),
-                        escape_label(&upstream_id),
-                        escape_label(&downstream_id),
-                        escape_label(upstream_name),
-                        escape_label(downstream_name),
-                        escape_label(contract),
-                        escape_label(selected_event_type),
-                        escape_label(feed_role),
+                        escape_label(labels.flow_name),
+                        escape_label(&labels.upstream_id),
+                        escape_label(&labels.downstream_id),
+                        escape_label(labels.upstream_name),
+                        escape_label(labels.downstream_name),
+                        escape_label(labels.contract),
+                        escape_label(labels.selected_event_type),
+                        escape_label(labels.feed_role),
                         escape_label(cause),
                         count
                     )?;
@@ -1556,43 +1517,23 @@ impl PrometheusExporter {
             )?;
             writeln!(output, "# TYPE obzenflow_contract_overrides_total counter")?;
 
-            for ((upstream, downstream, contract, selected_event_type, feed_role, policy), count) in
-                &snapshot.contract_metrics.overrides_total
-            {
-                let selected_event_type = selected_event_type.as_deref().unwrap_or("");
-                let feed_role = feed_role.as_deref().unwrap_or("");
-                let upstream_id = upstream.to_string();
-                let downstream_id = downstream.to_string();
+            for (key, count) in &snapshot.contract_metrics.overrides_total {
+                let labels = ContractMetricLabels::from_edge(&key.edge, &snapshot.stage_metadata);
+                let policy = key.policy.as_str();
 
-                let upstream_meta = snapshot.stage_metadata.get(upstream);
-                let downstream_meta = snapshot.stage_metadata.get(downstream);
-
-                let flow_name = upstream_meta
-                    .map(|m| m.flow_name.as_str())
-                    .or_else(|| downstream_meta.map(|m| m.flow_name.as_str()))
-                    .unwrap_or("unknown");
-                let flow_id = upstream_meta
-                    .and_then(|m| m.flow_id)
-                    .or_else(|| downstream_meta.and_then(|m| m.flow_id));
-
-                let upstream_name = upstream_meta.map(|m| m.name.as_str()).unwrap_or("unknown");
-                let downstream_name = downstream_meta
-                    .map(|m| m.name.as_str())
-                    .unwrap_or("unknown");
-
-                if let Some(flow_id) = flow_id {
+                if let Some(flow_id) = labels.flow_id {
                     writeln!(
                         output,
                         "obzenflow_contract_overrides_total{{flow=\"{}\",flow_id=\"{}\",upstream_stage_id=\"{}\",downstream_stage_id=\"{}\",upstream=\"{}\",downstream=\"{}\",contract=\"{}\",selected_event_type=\"{}\",feed_role=\"{}\",policy=\"{}\"}} {}",
-                        escape_label(flow_name),
+                        escape_label(labels.flow_name),
                         escape_label(&flow_id.to_string()),
-                        escape_label(&upstream_id),
-                        escape_label(&downstream_id),
-                        escape_label(upstream_name),
-                        escape_label(downstream_name),
-                        escape_label(contract),
-                        escape_label(selected_event_type),
-                        escape_label(feed_role),
+                        escape_label(&labels.upstream_id),
+                        escape_label(&labels.downstream_id),
+                        escape_label(labels.upstream_name),
+                        escape_label(labels.downstream_name),
+                        escape_label(labels.contract),
+                        escape_label(labels.selected_event_type),
+                        escape_label(labels.feed_role),
                         escape_label(policy),
                         count
                     )?;
@@ -1600,14 +1541,14 @@ impl PrometheusExporter {
                     writeln!(
                         output,
                         "obzenflow_contract_overrides_total{{flow=\"{}\",upstream_stage_id=\"{}\",downstream_stage_id=\"{}\",upstream=\"{}\",downstream=\"{}\",contract=\"{}\",selected_event_type=\"{}\",feed_role=\"{}\",policy=\"{}\"}} {}",
-                        escape_label(flow_name),
-                        escape_label(&upstream_id),
-                        escape_label(&downstream_id),
-                        escape_label(upstream_name),
-                        escape_label(downstream_name),
-                        escape_label(contract),
-                        escape_label(selected_event_type),
-                        escape_label(feed_role),
+                        escape_label(labels.flow_name),
+                        escape_label(&labels.upstream_id),
+                        escape_label(&labels.downstream_id),
+                        escape_label(labels.upstream_name),
+                        escape_label(labels.downstream_name),
+                        escape_label(labels.contract),
+                        escape_label(labels.selected_event_type),
+                        escape_label(labels.feed_role),
                         escape_label(policy),
                         count
                     )?;
@@ -1623,48 +1564,32 @@ impl PrometheusExporter {
             )?;
             writeln!(output, "# TYPE obzenflow_contract_reader_seq gauge")?;
 
-            for ((upstream, downstream, contract, selected_event_type, feed_role), seq) in
-                &snapshot.contract_metrics.reader_seq
-            {
-                let selected_event_type = selected_event_type.as_deref().unwrap_or("");
-                let feed_role = feed_role.as_deref().unwrap_or("");
-                let upstream_id = upstream.to_string();
-                let downstream_id = downstream.to_string();
+            for (key, seq) in &snapshot.contract_metrics.reader_seq {
+                let labels = ContractMetricLabels::from_edge(key, &snapshot.stage_metadata);
 
-                let upstream_meta = snapshot.stage_metadata.get(upstream);
-                let downstream_meta = snapshot.stage_metadata.get(downstream);
-
-                let flow_name = upstream_meta
-                    .map(|m| m.flow_name.as_str())
-                    .or_else(|| downstream_meta.map(|m| m.flow_name.as_str()))
-                    .unwrap_or("unknown");
-                let flow_id = upstream_meta
-                    .and_then(|m| m.flow_id)
-                    .or_else(|| downstream_meta.and_then(|m| m.flow_id));
-
-                if let Some(flow_id) = flow_id {
+                if let Some(flow_id) = labels.flow_id {
                     writeln!(
                         output,
                         "obzenflow_contract_reader_seq{{flow=\"{}\",flow_id=\"{}\",upstream_stage_id=\"{}\",downstream_stage_id=\"{}\",contract=\"{}\",selected_event_type=\"{}\",feed_role=\"{}\"}} {}",
-                        escape_label(flow_name),
+                        escape_label(labels.flow_name),
                         escape_label(&flow_id.to_string()),
-                        escape_label(&upstream_id),
-                        escape_label(&downstream_id),
-                        escape_label(contract),
-                        escape_label(selected_event_type),
-                        escape_label(feed_role),
+                        escape_label(&labels.upstream_id),
+                        escape_label(&labels.downstream_id),
+                        escape_label(labels.contract),
+                        escape_label(labels.selected_event_type),
+                        escape_label(labels.feed_role),
                         seq
                     )?;
                 } else {
                     writeln!(
                         output,
                         "obzenflow_contract_reader_seq{{flow=\"{}\",upstream_stage_id=\"{}\",downstream_stage_id=\"{}\",contract=\"{}\",selected_event_type=\"{}\",feed_role=\"{}\"}} {}",
-                        escape_label(flow_name),
-                        escape_label(&upstream_id),
-                        escape_label(&downstream_id),
-                        escape_label(contract),
-                        escape_label(selected_event_type),
-                        escape_label(feed_role),
+                        escape_label(labels.flow_name),
+                        escape_label(&labels.upstream_id),
+                        escape_label(&labels.downstream_id),
+                        escape_label(labels.contract),
+                        escape_label(labels.selected_event_type),
+                        escape_label(labels.feed_role),
                         seq
                     )?;
                 }
@@ -1682,48 +1607,32 @@ impl PrometheusExporter {
                 "# TYPE obzenflow_contract_advertised_writer_seq gauge"
             )?;
 
-            for ((upstream, downstream, contract, selected_event_type, feed_role), seq) in
-                &snapshot.contract_metrics.advertised_writer_seq
-            {
-                let selected_event_type = selected_event_type.as_deref().unwrap_or("");
-                let feed_role = feed_role.as_deref().unwrap_or("");
-                let upstream_id = upstream.to_string();
-                let downstream_id = downstream.to_string();
+            for (key, seq) in &snapshot.contract_metrics.advertised_writer_seq {
+                let labels = ContractMetricLabels::from_edge(key, &snapshot.stage_metadata);
 
-                let upstream_meta = snapshot.stage_metadata.get(upstream);
-                let downstream_meta = snapshot.stage_metadata.get(downstream);
-
-                let flow_name = upstream_meta
-                    .map(|m| m.flow_name.as_str())
-                    .or_else(|| downstream_meta.map(|m| m.flow_name.as_str()))
-                    .unwrap_or("unknown");
-                let flow_id = upstream_meta
-                    .and_then(|m| m.flow_id)
-                    .or_else(|| downstream_meta.and_then(|m| m.flow_id));
-
-                if let Some(flow_id) = flow_id {
+                if let Some(flow_id) = labels.flow_id {
                     writeln!(
                         output,
                         "obzenflow_contract_advertised_writer_seq{{flow=\"{}\",flow_id=\"{}\",upstream_stage_id=\"{}\",downstream_stage_id=\"{}\",contract=\"{}\",selected_event_type=\"{}\",feed_role=\"{}\"}} {}",
-                        escape_label(flow_name),
+                        escape_label(labels.flow_name),
                         escape_label(&flow_id.to_string()),
-                        escape_label(&upstream_id),
-                        escape_label(&downstream_id),
-                        escape_label(contract),
-                        escape_label(selected_event_type),
-                        escape_label(feed_role),
+                        escape_label(&labels.upstream_id),
+                        escape_label(&labels.downstream_id),
+                        escape_label(labels.contract),
+                        escape_label(labels.selected_event_type),
+                        escape_label(labels.feed_role),
                         seq
                     )?;
                 } else {
                     writeln!(
                         output,
                         "obzenflow_contract_advertised_writer_seq{{flow=\"{}\",upstream_stage_id=\"{}\",downstream_stage_id=\"{}\",contract=\"{}\",selected_event_type=\"{}\",feed_role=\"{}\"}} {}",
-                        escape_label(flow_name),
-                        escape_label(&upstream_id),
-                        escape_label(&downstream_id),
-                        escape_label(contract),
-                        escape_label(selected_event_type),
-                        escape_label(feed_role),
+                        escape_label(labels.flow_name),
+                        escape_label(&labels.upstream_id),
+                        escape_label(&labels.downstream_id),
+                        escape_label(labels.contract),
+                        escape_label(labels.selected_event_type),
+                        escape_label(labels.feed_role),
                         seq
                     )?;
                 }
@@ -1741,57 +1650,34 @@ impl PrometheusExporter {
             )?;
             writeln!(output, "# TYPE obzenflow_contract_lag_events gauge")?;
 
-            for ((upstream, downstream, contract, selected_event_type, feed_role), reader_seq) in
-                &snapshot.contract_metrics.reader_seq
-            {
-                if let Some(advertised) = snapshot.contract_metrics.advertised_writer_seq.get(&(
-                    *upstream,
-                    *downstream,
-                    contract.clone(),
-                    selected_event_type.clone(),
-                    feed_role.clone(),
-                )) {
+            for (key, reader_seq) in &snapshot.contract_metrics.reader_seq {
+                if let Some(advertised) = snapshot.contract_metrics.advertised_writer_seq.get(key) {
                     let lag = advertised.saturating_sub(*reader_seq);
-                    let selected_event_type = selected_event_type.as_deref().unwrap_or("");
-                    let feed_role = feed_role.as_deref().unwrap_or("");
+                    let labels = ContractMetricLabels::from_edge(key, &snapshot.stage_metadata);
 
-                    let upstream_id = upstream.to_string();
-                    let downstream_id = downstream.to_string();
-
-                    let upstream_meta = snapshot.stage_metadata.get(upstream);
-                    let downstream_meta = snapshot.stage_metadata.get(downstream);
-
-                    let flow_name = upstream_meta
-                        .map(|m| m.flow_name.as_str())
-                        .or_else(|| downstream_meta.map(|m| m.flow_name.as_str()))
-                        .unwrap_or("unknown");
-                    let flow_id = upstream_meta
-                        .and_then(|m| m.flow_id)
-                        .or_else(|| downstream_meta.and_then(|m| m.flow_id));
-
-                    if let Some(flow_id) = flow_id {
+                    if let Some(flow_id) = labels.flow_id {
                         writeln!(
                             output,
                             "obzenflow_contract_lag_events{{flow=\"{}\",flow_id=\"{}\",upstream_stage_id=\"{}\",downstream_stage_id=\"{}\",contract=\"{}\",selected_event_type=\"{}\",feed_role=\"{}\"}} {}",
-                            escape_label(flow_name),
+                            escape_label(labels.flow_name),
                             escape_label(&flow_id.to_string()),
-                            escape_label(&upstream_id),
-                            escape_label(&downstream_id),
-                            escape_label(contract),
-                            escape_label(selected_event_type),
-                            escape_label(feed_role),
+                            escape_label(&labels.upstream_id),
+                            escape_label(&labels.downstream_id),
+                            escape_label(labels.contract),
+                            escape_label(labels.selected_event_type),
+                            escape_label(labels.feed_role),
                             lag
                         )?;
                     } else {
                         writeln!(
                             output,
                             "obzenflow_contract_lag_events{{flow=\"{}\",upstream_stage_id=\"{}\",downstream_stage_id=\"{}\",contract=\"{}\",selected_event_type=\"{}\",feed_role=\"{}\"}} {}",
-                            escape_label(flow_name),
-                            escape_label(&upstream_id),
-                            escape_label(&downstream_id),
-                            escape_label(contract),
-                            escape_label(selected_event_type),
-                            escape_label(feed_role),
+                            escape_label(labels.flow_name),
+                            escape_label(&labels.upstream_id),
+                            escape_label(&labels.downstream_id),
+                            escape_label(labels.contract),
+                            escape_label(labels.selected_event_type),
+                            escape_label(labels.feed_role),
                             lag
                         )?;
                     }
@@ -2595,6 +2481,55 @@ impl PrometheusExporter {
 }
 
 /// Escape a label value for Prometheus
+struct ContractMetricLabels<'a> {
+    flow_name: &'a str,
+    flow_id: Option<FlowId>,
+    upstream_id: String,
+    downstream_id: String,
+    upstream_name: &'a str,
+    downstream_name: &'a str,
+    contract: &'a str,
+    selected_event_type: &'a str,
+    feed_role: &'a str,
+}
+
+impl<'a> ContractMetricLabels<'a> {
+    fn from_edge(
+        edge: &'a ContractMetricEdgeKey,
+        stage_metadata: &'a std::collections::HashMap<StageId, StageMetadata>,
+    ) -> Self {
+        let upstream_meta = stage_metadata.get(&edge.upstream);
+        let downstream_meta = stage_metadata.get(&edge.downstream);
+
+        Self {
+            flow_name: upstream_meta
+                .map(|m| m.flow_name.as_str())
+                .or_else(|| downstream_meta.map(|m| m.flow_name.as_str()))
+                .unwrap_or("unknown"),
+            flow_id: upstream_meta
+                .and_then(|m| m.flow_id)
+                .or_else(|| downstream_meta.and_then(|m| m.flow_id)),
+            upstream_id: edge.upstream.to_string(),
+            downstream_id: edge.downstream.to_string(),
+            upstream_name: upstream_meta.map(|m| m.name.as_str()).unwrap_or("unknown"),
+            downstream_name: downstream_meta
+                .map(|m| m.name.as_str())
+                .unwrap_or("unknown"),
+            contract: edge.contract.as_str(),
+            selected_event_type: edge
+                .selected_event_type
+                .as_ref()
+                .map(|event_type| event_type.as_str())
+                .unwrap_or(""),
+            feed_role: edge
+                .feed_role
+                .as_ref()
+                .map(|role| role.as_str())
+                .unwrap_or(""),
+        }
+    }
+}
+
 fn escape_label(value: &str) -> String {
     value
         .replace('\\', "\\\\")

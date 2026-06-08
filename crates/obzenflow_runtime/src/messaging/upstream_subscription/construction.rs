@@ -15,7 +15,9 @@ use obzenflow_core::event::JournalEvent;
 use obzenflow_core::journal::journal_error::JournalError;
 use obzenflow_core::journal::journal_reader::JournalReader;
 use obzenflow_core::journal::Journal;
-use obzenflow_core::{DeliveryContract, EventEnvelope, Result, StageId, TransportContract};
+use obzenflow_core::{
+    DeliveryContract, EventEnvelope, EventType, Result, StageId, TransportContract,
+};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -206,7 +208,7 @@ where
                     .iter()
                     .cloned()
                     .map(|event_type| SelectedFeedMetadata {
-                        event_type,
+                        event_type: EventType::from(event_type),
                         feed_role: None,
                     })
                     .collect();
@@ -229,7 +231,7 @@ where
                     *stage_id,
                     feeds
                         .iter()
-                        .map(|feed| feed.event_type.clone())
+                        .map(|feed| feed.event_type.to_string())
                         .collect::<HashSet<_>>(),
                 )
             })

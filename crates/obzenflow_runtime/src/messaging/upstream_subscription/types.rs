@@ -3,14 +3,14 @@
 // https://obzenflow.dev
 
 use obzenflow_core::control_middleware::ControlMiddlewareProvider;
-use obzenflow_core::event::system_event::SystemEvent;
+use obzenflow_core::event::system_event::{SystemEvent, SystemFeedRole};
 use obzenflow_core::event::types::{
     Count, DurationMs, SeqNo, ViolationCause as EventViolationCause,
 };
 use obzenflow_core::event::vector_clock::VectorClock;
 use obzenflow_core::event::ChainEvent;
 use obzenflow_core::journal::Journal;
-use obzenflow_core::{EventEnvelope, EventId, StageId, WriterId};
+use obzenflow_core::{EventEnvelope, EventId, EventType, StageId, WriterId};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::Arc;
 use tokio::time::Instant;
@@ -142,8 +142,8 @@ pub struct EofOutcome {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SelectedFeedMetadata {
-    pub event_type: String,
-    pub feed_role: Option<String>,
+    pub event_type: EventType,
+    pub feed_role: Option<SystemFeedRole>,
 }
 
 /// Progress tracking for a single upstream reader.

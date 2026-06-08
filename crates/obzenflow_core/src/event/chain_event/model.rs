@@ -128,11 +128,13 @@ pub struct ChainEvent {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub observability: Option<ObservabilityContext>,
 
-    /// Framework-owned provenance for effect outcome and replay facts.
+    /// Replay identity for facts produced by an effect boundary.
     ///
-    /// Domain facts remain domain-shaped in `ChainEventContent::Data`; this
-    /// metadata records the effect cursor and descriptor context without putting
-    /// framework fields inside the domain payload.
+    /// This is not causal ancestry. Event ancestry remains in `causality`, and
+    /// write ordering remains in the journal envelope's vector clock. This
+    /// field identifies which deterministic `fx.perform` cursor and effect
+    /// descriptor this fact satisfies during replay, without putting framework
+    /// fields inside the domain payload.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub effect_provenance: Option<EffectProvenance>,
 }
@@ -248,7 +250,7 @@ impl ChainEvent {
                 if !(self
                     .effect_provenance
                     .as_ref()
-                    .is_some_and(|provenance| provenance.framework_owned)
+                    .is_some_and(|provenance| provenance.fact_owner.is_framework())
                     && is_framework_effect_event_type(event_type))
         )
     }

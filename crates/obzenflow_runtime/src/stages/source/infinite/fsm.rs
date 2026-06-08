@@ -9,7 +9,7 @@
 //! start emitting events until the pipeline is ready.
 
 use obzenflow_core::event::context::{FlowContext, StageType};
-use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
+use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
 use obzenflow_core::event::types::{Count, SeqNo};
 use obzenflow_core::event::{
     ChainEventContent, ChainEventFactory, ConsumptionFinalEventParams, SystemEvent,
@@ -428,19 +428,25 @@ impl<H: Send + Sync + 'static> FsmAction for InfiniteSourceAction<H> {
                     )
                 })?;
 
-                let natural = match ctx.completion_reason {
-                    InfiniteSourceCompletionReason::ExternalDrain => false,
-                    InfiniteSourceCompletionReason::ArchiveExhausted => !matches!(
-                        decision,
-                        crate::stages::source::strategies::SourceShutdownDecision::PoisonEof
-                    ),
+                let eof_kind = match ctx.completion_reason {
+                    InfiniteSourceCompletionReason::ExternalDrain => EofKind::Poison,
+                    InfiniteSourceCompletionReason::ArchiveExhausted => {
+                        if matches!(
+                            decision,
+                            crate::stages::source::strategies::SourceShutdownDecision::PoisonEof
+                        ) {
+                            EofKind::Poison
+                        } else {
+                            EofKind::Natural
+                        }
+                    }
                 };
 
                 // Take a final runtime snapshot for wide-event semantics
                 let runtime_context = ctx.instrumentation.snapshot_with_control();
                 let writer_seq_by_event_type = ctx.instrumentation.data_writer_seq_by_event_type();
 
-                let mut eof_event = ChainEventFactory::eof_event(writer_id, natural);
+                let mut eof_event = ChainEventFactory::eof_event_with_kind(writer_id, eof_kind);
                 if let ChainEventContent::FlowControl(FlowControlPayload::Eof {
                     writer_id: writer_id_field,
                     writer_seq,
@@ -505,7 +511,7 @@ impl<H: Send + Sync + 'static> FsmAction for InfiniteSourceAction<H> {
                 tracing::info!(
                     stage_name = %ctx.stage_name,
                     emitted,
-                    natural,
+                    eof_kind = ?eof_kind,
                     reason = ?ctx.completion_reason,
                     "Infinite source sent EOF and consumption_final"
                 );

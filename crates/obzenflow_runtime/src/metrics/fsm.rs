@@ -17,7 +17,11 @@ use obzenflow_core::event::payloads::observability_payload::{
 use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
 use obzenflow_core::event::{JournalEvent, WriterId};
 use obzenflow_core::id::{FlowId, StageId, SystemId};
-use obzenflow_core::metrics::{ContractMetricsSnapshot, Percentile, StageMetadata};
+use obzenflow_core::metrics::{
+    ContractMetricEdgeKey, ContractMetricOverrideKey, ContractMetricResultKey,
+    ContractMetricViolationKey, ContractMetricsSnapshot, ContractViolationCauseLabel, Percentile,
+    StageMetadata,
+};
 use obzenflow_core::time::MetricsDuration;
 use obzenflow_core::web::HttpMethod;
 use obzenflow_core::{ChainEvent, EventId, Journal};
@@ -1336,41 +1340,37 @@ impl FsmAction for MetricsAggregatorAction {
                         reader_seq,
                         advertised_writer_seq,
                     } => {
-                        let key = (
-                            *upstream,
-                            *reader,
-                            contract_name.clone(),
-                            selected_event_type.clone(),
-                            feed_role.clone(),
-                            status.clone(),
-                        );
-                        let counter = store.contract_metrics.results_total.entry(key).or_insert(0);
+                        let edge_key = ContractMetricEdgeKey {
+                            upstream: *upstream,
+                            downstream: *reader,
+                            contract: contract_name.clone(),
+                            selected_event_type: selected_event_type.clone(),
+                            feed_role: *feed_role,
+                        };
+                        let result_key = ContractMetricResultKey {
+                            edge: edge_key.clone(),
+                            status: *status,
+                        };
+                        let counter = store
+                            .contract_metrics
+                            .results_total
+                            .entry(result_key)
+                            .or_insert(0);
                         *counter = (*counter).saturating_add(1);
 
                         if let Some(cause) = cause {
-                            let key = (
-                                *upstream,
-                                *reader,
-                                contract_name.clone(),
-                                selected_event_type.clone(),
-                                feed_role.clone(),
-                                cause.clone(),
-                            );
+                            let violation_key = ContractMetricViolationKey {
+                                edge: edge_key.clone(),
+                                cause: ContractViolationCauseLabel::from(cause.clone()),
+                            };
                             let counter = store
                                 .contract_metrics
                                 .violations_total
-                                .entry(key)
+                                .entry(violation_key)
                                 .or_insert(0);
                             *counter = (*counter).saturating_add(1);
                         }
 
-                        let edge_key = (
-                            *upstream,
-                            *reader,
-                            contract_name.clone(),
-                            selected_event_type.clone(),
-                            feed_role.clone(),
-                        );
                         if let Some(seq) = reader_seq {
                             let gauge = store
                                 .contract_metrics
@@ -1397,14 +1397,16 @@ impl FsmAction for MetricsAggregatorAction {
                         policy,
                         ..
                     } => {
-                        let key = (
-                            *upstream,
-                            *reader,
-                            contract_name.clone(),
-                            selected_event_type.clone(),
-                            feed_role.clone(),
-                            policy.clone(),
-                        );
+                        let key = ContractMetricOverrideKey {
+                            edge: ContractMetricEdgeKey {
+                                upstream: *upstream,
+                                downstream: *reader,
+                                contract: contract_name.clone(),
+                                selected_event_type: selected_event_type.clone(),
+                                feed_role: *feed_role,
+                            },
+                            policy: *policy,
+                        };
                         let counter = store
                             .contract_metrics
                             .overrides_total

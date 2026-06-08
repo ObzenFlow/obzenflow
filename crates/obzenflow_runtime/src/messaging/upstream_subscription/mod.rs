@@ -264,7 +264,7 @@ where
     }
 
     fn selected_feed_matches_event_type(feed: &SelectedFeedMetadata, event_type: &str) -> bool {
-        declared_event_type_matches(&feed.event_type, event_type, None)
+        declared_event_type_matches(feed.event_type.as_str(), event_type, None)
     }
 
     fn selected_reader_seq_for_feed(
@@ -305,7 +305,10 @@ where
     fn unique_selected_feed_for_stage(
         &self,
         stage_id: StageId,
-    ) -> (Option<String>, Option<String>) {
+    ) -> (
+        Option<obzenflow_core::EventType>,
+        Option<obzenflow_core::event::system_event::SystemFeedRole>,
+    ) {
         let Some(feeds) = self.selected_feeds_by_stage.get(&stage_id) else {
             return (None, None);
         };
@@ -318,7 +321,7 @@ where
             return (None, None);
         }
 
-        (Some(first.event_type.clone()), first.feed_role.clone())
+        (Some(first.event_type.clone()), first.feed_role)
     }
 
     /// Bridge a sink delivery receipt write into the edge-scoped `ContractChain`

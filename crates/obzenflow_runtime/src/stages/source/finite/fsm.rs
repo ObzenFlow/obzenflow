@@ -9,7 +9,7 @@
 //! start emitting events until the pipeline is ready.
 
 use obzenflow_core::event::context::{FlowContext, StageType};
-use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
+use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
 use obzenflow_core::event::types::{Count, JournalIndex, JournalPath, SeqNo};
 use obzenflow_core::event::{
     ChainEventContent, ChainEventFactory, ConsumptionFinalEventParams, SourceContractEventParams,
@@ -417,18 +417,22 @@ impl<H: Send + Sync + 'static> FsmAction for FiniteSourceAction<H> {
                     .events_processed_total
                     .load(std::sync::atomic::Ordering::Relaxed);
 
-                // Determine whether EOF should be natural or "poison"
-                let natural = !matches!(
+                // Determine whether EOF should be natural or poison.
+                let eof_kind = if matches!(
                     decision,
                     crate::stages::source::strategies::SourceShutdownDecision::PoisonEof
-                );
+                ) {
+                    EofKind::Poison
+                } else {
+                    EofKind::Natural
+                };
 
                 // Take a final runtime snapshot for wide-event semantics
                 let runtime_context = ctx.instrumentation.snapshot_with_control();
                 let writer_seq_by_event_type = ctx.instrumentation.data_writer_seq_by_event_type();
 
                 // Emit EOF with writer positions populated
-                let mut eof_event = ChainEventFactory::eof_event(writer_id, natural);
+                let mut eof_event = ChainEventFactory::eof_event_with_kind(writer_id, eof_kind);
                 if let ChainEventContent::FlowControl(FlowControlPayload::Eof {
                     writer_id: writer_id_field,
                     writer_seq,
@@ -898,7 +902,8 @@ mod tests {
         let eof_natural_closed = events_closed.iter().any(|env| {
             matches!(
                 env.event.content,
-                ChainEventContent::FlowControl(FlowControlPayload::Eof { natural: true, .. })
+                ChainEventContent::FlowControl(FlowControlPayload::Eof { kind, .. })
+                    if kind.is_natural()
             )
         });
         assert!(
@@ -943,7 +948,8 @@ mod tests {
         let eof_poison = events_open.iter().any(|env| {
             matches!(
                 env.event.content,
-                ChainEventContent::FlowControl(FlowControlPayload::Eof { natural: false, .. })
+                ChainEventContent::FlowControl(FlowControlPayload::Eof { kind, .. })
+                    if kind.is_poison()
             )
         });
         assert!(

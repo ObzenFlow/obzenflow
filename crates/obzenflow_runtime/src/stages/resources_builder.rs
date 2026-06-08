@@ -19,9 +19,10 @@ use crate::messaging::upstream_subscription::{
 };
 use crate::replay::ReplayArchive;
 use crate::stages::LivenessSnapshots;
+use obzenflow_core::event::system_event::SystemFeedRole;
 use obzenflow_core::event::SystemEvent;
 use obzenflow_core::journal::Journal;
-use obzenflow_core::{ChainEvent, FlowId, StageId, SystemId};
+use obzenflow_core::{ChainEvent, EventType, FlowId, StageId, SystemId};
 use obzenflow_topology::Topology;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -164,8 +165,12 @@ fn selected_feeds_by_upstream(
             .entry(feed.key.upstream_stage)
             .or_default()
             .push(SelectedFeedMetadata {
-                event_type,
-                feed_role: Some(feed.key.role.as_str().to_string()),
+                event_type: EventType::from(event_type),
+                feed_role: Some(match feed.key.role {
+                    crate::feed_plan::FeedRole::Input => SystemFeedRole::Input,
+                    crate::feed_plan::FeedRole::Reference => SystemFeedRole::Reference,
+                    crate::feed_plan::FeedRole::Stream => SystemFeedRole::Stream,
+                }),
             });
     }
     selected

@@ -276,8 +276,8 @@ async fn breaker_driven_shutdown_emits_poison_eof_and_contract() -> Result<()> {
 
         for env in envelopes {
             match env.event.content {
-                ChainEventContent::FlowControl(FlowControlPayload::Eof { natural, .. }) => {
-                    eof_natural_flags.push(natural);
+                ChainEventContent::FlowControl(FlowControlPayload::Eof { kind, .. }) => {
+                    eof_natural_flags.push(kind.is_natural());
                 }
                 ChainEventContent::FlowControl(FlowControlPayload::ConsumptionFinal { .. }) => {
                     contract_events.push(env.event.clone());
