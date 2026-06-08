@@ -2,15 +2,20 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Stage-authored output commit chokepoint (FLOWIP-120b).
+//! Shared stage-authored output commit helper (FLOWIP-120b).
 //!
-//! `OutputCommitter` is the single place a stage-authored event is written to
-//! the stage data journal. It is used by the supervisor pending-output drain,
-//! the effects-layer reserved framework effect/capture record append, and the
-//! immediate `fx.emit` path for typed derived facts. The commit core
-//! (wide-event enrichment, per-type instrumentation, journal append, heartbeat
-//! tracking, and the middleware mirror) lives here instead of drifting between
-//! appenders.
+//! `OutputCommitter` centralizes the commit core for the stage-authored output
+//! paths that have been migrated to it: the supervisor pending-output drain,
+//! the immediate `fx.emit` path for typed derived facts, domain effect outcome
+//! facts, and the effects-layer reserved framework effect/capture record append.
+//! The shared core includes wide-event enrichment, per-type instrumentation,
+//! journal append, heartbeat tracking, and the middleware mirror.
+//!
+//! This is not yet a type-system-enforced journal write boundary. Stage
+//! contexts still expose raw journal handles for control, error, delivery, and
+//! compatibility paths, so future code can still append directly. Treat this as
+//! a consolidation helper until stage data journals are wrapped in
+//! intention-specific writer types.
 //!
 //! The caller still owns the decisions this committer does not yet absorb:
 //!
@@ -82,7 +87,7 @@ pub(crate) struct CommitOptions {
     pub validate_output_contract: bool,
 }
 
-/// The single stage-authored-output commit path (FLOWIP-120b, Step 1).
+/// Shared commit path for migrated stage-authored outputs (FLOWIP-120b).
 ///
 /// Holds borrowed handles for the duration of one commit. An absent handle
 /// (`None`) skips the corresponding step, which is how the effects layer
