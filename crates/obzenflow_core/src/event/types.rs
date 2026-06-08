@@ -5,6 +5,8 @@
 //! Core type aliases and newtypes used throughout the event system
 
 use serde::{Deserialize, Serialize};
+use std::borrow::Borrow;
+use std::fmt;
 
 // Re-export identity types from their newtype modules
 pub use crate::event::identity::{CorrelationId, EventId, JournalWriterId, WriterId};
@@ -16,6 +18,47 @@ pub type FlowId = String;
 /// Domain newtype for sequence numbers to avoid raw u64 usage.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct SeqNo(pub u64);
+
+/// Canonical event-type identity used when event types are map keys.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct EventType(pub String);
+
+impl EventType {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<String> for EventType {
+    fn from(value: String) -> Self {
+        Self(value)
+    }
+}
+
+impl From<&str> for EventType {
+    fn from(value: &str) -> Self {
+        Self(value.to_string())
+    }
+}
+
+impl AsRef<str> for EventType {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl Borrow<str> for EventType {
+    fn borrow(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl fmt::Display for EventType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 
 /// Domain newtype for counts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]

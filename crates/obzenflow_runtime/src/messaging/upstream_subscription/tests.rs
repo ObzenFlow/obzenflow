@@ -1631,8 +1631,8 @@ async fn transport_only_filters_unselected_data_and_reconciles_selected_writer_s
     }) = &mut eof_event.content
     {
         *writer_seq = Some(SeqNo(2));
-        writer_seq_by_event_type.insert("test.ignored.v1".to_string(), SeqNo(1));
-        writer_seq_by_event_type.insert("test.selected.v1".to_string(), SeqNo(1));
+        writer_seq_by_event_type.insert("test.ignored.v1".into(), SeqNo(1));
+        writer_seq_by_event_type.insert("test.selected.v1".into(), SeqNo(1));
     }
     upstream_journal.append(eof_event, None).await.unwrap();
 
@@ -1787,8 +1787,8 @@ async fn multi_selected_feeds_emit_direct_contract_status_per_feed() {
         // Aggregate selected count is 2, but the per-feed evidence is deliberately
         // inconsistent: first advertises 2 while second advertises 0.
         *writer_seq = Some(SeqNo(2));
-        writer_seq_by_event_type.insert("test.first.v1".to_string(), SeqNo(2));
-        writer_seq_by_event_type.insert("test.second.v1".to_string(), SeqNo(0));
+        writer_seq_by_event_type.insert("test.first.v1".into(), SeqNo(2));
+        writer_seq_by_event_type.insert("test.second.v1".into(), SeqNo(0));
     }
     upstream_journal.append(eof_event, None).await.unwrap();
 

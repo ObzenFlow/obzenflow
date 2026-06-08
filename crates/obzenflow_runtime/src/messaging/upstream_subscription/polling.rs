@@ -80,7 +80,7 @@ where
                             .find(|(event_type, _)| {
                                 Self::selected_feed_matches_event_type(
                                     &feed_chain.metadata,
-                                    event_type,
+                                    event_type.as_str(),
                                 )
                             })
                             .map(|(_, writer_seq)| (feed_index, *writer_seq))
@@ -323,7 +323,7 @@ where
                             .selected_data_seq_by_reader_event_type
                             .get_mut(current_index)
                         {
-                            let seq = by_type.entry(event_type.clone()).or_insert(SeqNo(0));
+                            let seq = by_type.entry(event_type.clone().into()).or_insert(SeqNo(0));
                             seq.0 = seq.0.saturating_add(1);
                         }
                     }

@@ -36,7 +36,7 @@ use obzenflow_core::event::types::SeqNo;
 use obzenflow_core::event::vector_clock::VectorClock;
 use obzenflow_core::event::{ChainEvent, EventEnvelope, JournalEvent, JournalWriterId};
 use obzenflow_core::journal::journal_reader::JournalReader;
-use obzenflow_core::{EventId, StageId};
+use obzenflow_core::{EventId, EventType, StageId};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use tokio::time::Instant;
@@ -95,10 +95,10 @@ where
 
     /// Per-reader, per-event-type count of selected Data events delivered as
     /// stage inputs.
-    selected_data_seq_by_reader_event_type: Vec<HashMap<String, SeqNo>>,
+    selected_data_seq_by_reader_event_type: Vec<HashMap<EventType, SeqNo>>,
 
     /// Per-reader producer EOF evidence keyed by event type.
-    advertised_writer_seq_by_reader_event_type: Vec<BTreeMap<String, SeqNo>>,
+    advertised_writer_seq_by_reader_event_type: Vec<BTreeMap<EventType, SeqNo>>,
 
     /// Subscription state (mechanism)
     state: SubscriptionState,
@@ -233,7 +233,7 @@ where
     fn selected_writer_seq_from_eof_map(
         &self,
         stage_id: StageId,
-        writer_seq_by_event_type: &BTreeMap<String, SeqNo>,
+        writer_seq_by_event_type: &BTreeMap<EventType, SeqNo>,
     ) -> Option<SeqNo> {
         let selected = self.selected_event_types_by_stage.get(&stage_id)?;
         if selected.is_empty() || writer_seq_by_event_type.is_empty() {
@@ -247,7 +247,11 @@ where
                 writer_seq_by_event_type
                     .iter()
                     .find(|(actual_event_type, _)| {
-                        declared_event_type_matches(selected_event_type, actual_event_type, None)
+                        declared_event_type_matches(
+                            selected_event_type,
+                            actual_event_type.as_str(),
+                            None,
+                        )
                     })
             else {
                 continue;
@@ -274,7 +278,7 @@ where
                 reader_by_type
                     .iter()
                     .find(|(event_type, _)| {
-                        Self::selected_feed_matches_event_type(feed, event_type)
+                        Self::selected_feed_matches_event_type(feed, event_type.as_str())
                     })
                     .map(|(_, seq)| *seq)
             })
@@ -292,7 +296,7 @@ where
                 advertised_by_type
                     .iter()
                     .find(|(event_type, _)| {
-                        Self::selected_feed_matches_event_type(feed, event_type)
+                        Self::selected_feed_matches_event_type(feed, event_type.as_str())
                     })
                     .map(|(_, seq)| *seq)
             })

@@ -16,6 +16,7 @@ use obzenflow_core::event::JournalEvent;
 use obzenflow_core::event::{ChainEvent, ChainEventContent};
 use obzenflow_core::metrics::StageMetricsSnapshot;
 use obzenflow_core::EventId;
+use obzenflow_core::EventType;
 use obzenflow_core::StageId;
 use obzenflow_core::WriterId;
 use std::collections::{BTreeMap, HashMap};
@@ -99,7 +100,7 @@ pub struct StageInstrumentation {
     pub last_receipted_vector_clock: RwLock<Option<VectorClock>>,
     pub last_emitted_event_id: RwLock<Option<EventId>>,
     pub last_emitted_writer: RwLock<Option<WriterId>>,
-    pub data_writer_seq_by_event_type: RwLock<HashMap<String, u64>>,
+    pub data_writer_seq_by_event_type: RwLock<HashMap<EventType, u64>>,
 
     /// Error breakdown by kind
     pub errors_by_kind: RwLock<
@@ -409,14 +410,14 @@ impl StageInstrumentation {
         self.record_emitted(event);
         if let ChainEventContent::Data { event_type, .. } = &event.content {
             let mut by_type = self.data_writer_seq_by_event_type.write().unwrap();
-            *by_type.entry(event_type.clone()).or_insert(0) += 1;
+            *by_type.entry(event_type.clone().into()).or_insert(0) += 1;
         }
         self.events_emitted_total.fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn data_writer_seq_by_event_type(
         &self,
-    ) -> BTreeMap<String, obzenflow_core::event::types::SeqNo> {
+    ) -> BTreeMap<EventType, obzenflow_core::event::types::SeqNo> {
         self.data_writer_seq_by_event_type
             .read()
             .unwrap()
