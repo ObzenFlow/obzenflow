@@ -69,7 +69,7 @@ impl FiniteSourceHandler for CorrelatedSource {
 
         let event = ChainEventFactory::data_event(
             self.writer_id,
-            &CorrelatedTestEvent::versioned_event_type(),
+            CorrelatedTestEvent::versioned_event_type(),
             json!({
                 "index": self.current,
                 "data": format!("event_{}", self.current)

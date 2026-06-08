@@ -41,17 +41,14 @@ where
                     .get(reader_index)
                     .into_iter()
                     .flat_map(|chains| chains.iter().enumerate())
-                    .filter_map(|(feed_index, feed_chain)| {
+                    .filter(|(_, feed_chain)| {
                         Self::selected_feed_matches_event_type(&feed_chain.metadata, event_type)
-                            .then(|| {
-                                (
-                                    feed_index,
-                                    self.selected_reader_seq_for_feed(
-                                        reader_index,
-                                        &feed_chain.metadata,
-                                    ),
-                                )
-                            })
+                    })
+                    .map(|(feed_index, feed_chain)| {
+                        (
+                            feed_index,
+                            self.selected_reader_seq_for_feed(reader_index, &feed_chain.metadata),
+                        )
                     })
                     .collect();
 

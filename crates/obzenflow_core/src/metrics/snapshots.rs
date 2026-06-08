@@ -211,6 +211,17 @@ pub struct AppMetricsSnapshot {
 ///
 /// These are derived from contract verification events emitted by readers
 /// (e.g. via UpstreamSubscription) and are exported to Prometheus.
+pub type ContractMetricCounterKey = (
+    StageId,
+    StageId,
+    String,
+    Option<String>,
+    Option<String>,
+    String,
+);
+
+pub type ContractMetricSeqKey = (StageId, StageId, String, Option<String>, Option<String>);
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ContractMetricsSnapshot {
     /// Contract results by
@@ -218,57 +229,26 @@ pub struct ContractMetricsSnapshot {
     ///
     /// Status values are expected to be small/stable strings such as:
     /// "passed", "failed", "pending".
-    pub results_total: HashMap<
-        (
-            StageId,
-            StageId,
-            String,
-            Option<String>,
-            Option<String>,
-            String,
-        ),
-        u64,
-    >,
+    pub results_total: HashMap<ContractMetricCounterKey, u64>,
 
     /// Contract violations by
     /// (upstream, downstream, contract_name, selected_event_type, feed_role, cause).
     ///
     /// Cause values are expected to be small/stable strings such as:
     /// "seq_divergence", "content_mismatch", "delivery_mismatch", "accounting_mismatch", "other".
-    pub violations_total: HashMap<
-        (
-            StageId,
-            StageId,
-            String,
-            Option<String>,
-            Option<String>,
-            String,
-        ),
-        u64,
-    >,
+    pub violations_total: HashMap<ContractMetricCounterKey, u64>,
 
     /// Contract overrides by
     /// (upstream, downstream, contract_name, selected_event_type, feed_role, policy).
-    pub overrides_total: HashMap<
-        (
-            StageId,
-            StageId,
-            String,
-            Option<String>,
-            Option<String>,
-            String,
-        ),
-        u64,
-    >,
+    pub overrides_total: HashMap<ContractMetricCounterKey, u64>,
 
     /// Latest reader sequence per contract edge
     /// (upstream, downstream, contract_name, selected_event_type, feed_role).
-    pub reader_seq: HashMap<(StageId, StageId, String, Option<String>, Option<String>), u64>,
+    pub reader_seq: HashMap<ContractMetricSeqKey, u64>,
 
     /// Latest advertised writer sequence per contract edge
     /// (upstream, downstream, contract_name, selected_event_type, feed_role).
-    pub advertised_writer_seq:
-        HashMap<(StageId, StageId, String, Option<String>, Option<String>), u64>,
+    pub advertised_writer_seq: HashMap<ContractMetricSeqKey, u64>,
 }
 
 /// Snapshot of infrastructure-level metrics from direct observation

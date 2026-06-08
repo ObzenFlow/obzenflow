@@ -881,7 +881,7 @@ fn is_domain_effect_outcome_fact(event: &ChainEvent) -> bool {
     matches!(
         &event.content,
         ChainEventContent::Data { event_type, .. }
-            if event_type == &ReplayEffectValue::versioned_event_type()
+            if event_type == ReplayEffectValue::versioned_event_type().as_str()
                 && event
                     .effect_provenance
                     .as_ref()
@@ -1246,7 +1246,7 @@ async fn eof_writer_seq_counts_transport_data_not_effect_results() {
             matches!(
                 &event.content,
                 ChainEventContent::Data { event_type, .. }
-                    if event_type == &ReplayOutput::versioned_event_type()
+                    if event_type == ReplayOutput::versioned_event_type().as_str()
             )
         })
         .count();

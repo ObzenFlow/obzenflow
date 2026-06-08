@@ -87,7 +87,7 @@ impl FiniteSourceHandler for TestEventSource {
 
         Ok(Some(vec![ChainEventFactory::data_event(
             self.writer_id,
-            &DeliveryTestEvent::versioned_event_type(),
+            DeliveryTestEvent::versioned_event_type(),
             json!({ "index": index }),
         )]))
     }
@@ -122,7 +122,7 @@ impl FiniteSourceHandler for CorrelatedTestEventSource {
 
         let event = ChainEventFactory::data_event(
             self.writer_id,
-            &DeliveryTestEvent::versioned_event_type(),
+            DeliveryTestEvent::versioned_event_type(),
             json!({ "index": index }),
         )
         .with_new_correlation("correlated_source");
@@ -155,7 +155,7 @@ impl TransformHandler for FanOutTransform {
             out.push(ChainEventFactory::derived_data_event(
                 event.writer_id,
                 &event,
-                &FanOutTestEvent::versioned_event_type(),
+                FanOutTestEvent::versioned_event_type(),
                 json!({ "fan_out_index": index }),
             ));
         }

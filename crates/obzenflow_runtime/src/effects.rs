@@ -527,6 +527,21 @@ struct EffectCommitHandleInner<T> {
     _marker: PhantomData<T>,
 }
 
+struct EffectCommitHandleParams {
+    writer_id: WriterId,
+    data_journal: Arc<dyn Journal<ChainEvent>>,
+    flow_context: Option<FlowContext>,
+    system_journal: Option<Arc<dyn Journal<SystemEvent>>>,
+    instrumentation: Option<Arc<StageInstrumentation>>,
+    heartbeat_state: Option<Arc<HeartbeatState>>,
+    output_contract: StageOutputContract,
+    parent: EventEnvelope<ChainEvent>,
+    cursor: EffectCursor,
+    descriptor_hash: String,
+    descriptor: EffectDescriptor,
+    output_ordinal: u32,
+}
+
 #[derive(Clone)]
 enum CommittedEffectOutcome<T> {
     Success {
@@ -541,34 +556,21 @@ impl<T> EffectCommitHandle<T>
 where
     T: TypedFactSet + Clone + Send + Sync + 'static,
 {
-    fn new(
-        writer_id: WriterId,
-        data_journal: Arc<dyn Journal<ChainEvent>>,
-        flow_context: Option<FlowContext>,
-        system_journal: Option<Arc<dyn Journal<SystemEvent>>>,
-        instrumentation: Option<Arc<StageInstrumentation>>,
-        heartbeat_state: Option<Arc<HeartbeatState>>,
-        output_contract: StageOutputContract,
-        parent: EventEnvelope<ChainEvent>,
-        cursor: EffectCursor,
-        descriptor_hash: String,
-        descriptor: EffectDescriptor,
-        output_ordinal: u32,
-    ) -> Self {
+    fn new(params: EffectCommitHandleParams) -> Self {
         Self {
             inner: Arc::new(EffectCommitHandleInner {
-                writer_id,
-                data_journal,
-                flow_context,
-                system_journal,
-                instrumentation,
-                heartbeat_state,
-                output_contract,
-                parent,
-                cursor,
-                descriptor_hash,
-                descriptor,
-                output_ordinal,
+                writer_id: params.writer_id,
+                data_journal: params.data_journal,
+                flow_context: params.flow_context,
+                system_journal: params.system_journal,
+                instrumentation: params.instrumentation,
+                heartbeat_state: params.heartbeat_state,
+                output_contract: params.output_contract,
+                parent: params.parent,
+                cursor: params.cursor,
+                descriptor_hash: params.descriptor_hash,
+                descriptor: params.descriptor,
+                output_ordinal: params.output_ordinal,
                 committed: Mutex::new(None),
                 _marker: PhantomData,
             }),
@@ -1169,7 +1171,7 @@ impl Effects {
                     self.ctx.push_boundary_control_events(control_events);
                     let output =
                         E::Output::try_from_facts(&facts).map_err(effect_fact_set_error)?;
-                    self.append_success_facts::<E>(cursor, descriptor_hash, descriptor, facts)
+                    self.append_success_facts(cursor, descriptor_hash, descriptor, facts)
                         .await?;
                     return Ok(output);
                 }
@@ -1237,7 +1239,7 @@ impl Effects {
                     );
                     self.ctx.push_boundary_control_events(control_events);
                 }
-                self.append_success_facts::<E>(cursor, descriptor_hash, descriptor, facts)
+                self.append_success_facts(cursor, descriptor_hash, descriptor, facts)
                     .await?;
                 Ok(output)
             }
@@ -1359,20 +1361,20 @@ impl Effects {
 
         let mut effect_ctx = self.live_effect_context();
         let output_ordinal = self.reserve_output_ordinal();
-        let commit = EffectCommitHandle::new(
-            self.ctx.writer_id,
-            self.ctx.data_journal.clone(),
-            self.ctx.flow_context.clone(),
-            self.ctx.system_journal.clone(),
-            self.ctx.instrumentation.clone(),
-            self.ctx.heartbeat_state.clone(),
-            self.ctx.output_contract.clone(),
-            self.ctx.parent.clone(),
+        let commit = EffectCommitHandle::new(EffectCommitHandleParams {
+            writer_id: self.ctx.writer_id,
+            data_journal: self.ctx.data_journal.clone(),
+            flow_context: self.ctx.flow_context.clone(),
+            system_journal: self.ctx.system_journal.clone(),
+            instrumentation: self.ctx.instrumentation.clone(),
+            heartbeat_state: self.ctx.heartbeat_state.clone(),
+            output_contract: self.ctx.output_contract.clone(),
+            parent: self.ctx.parent.clone(),
             cursor,
             descriptor_hash,
             descriptor,
             output_ordinal,
-        );
+        });
         let commit_observer = commit.clone();
         // The port commits its outcome through the handle. Its returned value is
         // intentionally not used as the live result: the committed record is the single
@@ -1482,16 +1484,13 @@ impl Effects {
         .await
     }
 
-    async fn append_success_facts<E>(
+    async fn append_success_facts(
         &mut self,
         cursor: EffectCursor,
         descriptor_hash: String,
         descriptor: EffectDescriptor,
         facts: Vec<TypedFact>,
-    ) -> Result<(), EffectError>
-    where
-        E: Effect,
-    {
+    ) -> Result<(), EffectError> {
         if facts.is_empty() {
             return Err(EffectError::Execution(
                 "effect success output must author at least one fact".to_string(),
@@ -2561,7 +2560,7 @@ mod tests {
             3,
         )
         .expect("second output event");
-        let events = vec![first, second];
+        let events = [first, second];
 
         assert_eq!(events.len(), 2);
         assert!(matches!(
@@ -2771,7 +2770,7 @@ mod tests {
         assert!(matches!(
             &events[0].event.content,
             ChainEventContent::Data { event_type, .. }
-                if event_type == &FirstOutput::versioned_event_type()
+                if event_type == FirstOutput::versioned_event_type().as_str()
         ));
     }
 
