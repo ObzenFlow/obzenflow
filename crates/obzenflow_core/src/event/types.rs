@@ -60,6 +60,18 @@ impl fmt::Display for EventType {
     }
 }
 
+impl PartialEq<&str> for EventType {
+    fn eq(&self, other: &&str) -> bool {
+        self.as_str() == *other
+    }
+}
+
+impl PartialEq<EventType> for &str {
+    fn eq(&self, other: &EventType) -> bool {
+        *self == other.as_str()
+    }
+}
+
 /// Domain newtype for counts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct Count(pub u64);

@@ -243,8 +243,8 @@ pub(super) async fn dispatch_draining<
                                 recorded_flow_id: ctx
                                     .effect_history
                                     .as_ref()
-                                    .map(|history| history.recorded_flow_id())
-                                    .unwrap_or(&flow_id),
+                                    .map(|history| history.recorded_flow_id().as_str())
+                                    .unwrap_or(flow_id.as_str()),
                                 stage_key: &ctx.stage_name,
                                 input_seq: ctx.last_input_position.unwrap_or(
                                     crate::messaging::upstream_subscription::StageInputPosition(0),
@@ -425,8 +425,8 @@ pub(super) async fn dispatch_draining<
                 recorded_flow_id: ctx
                     .effect_history
                     .as_ref()
-                    .map(|history| history.recorded_flow_id())
-                    .unwrap_or(&flow_id),
+                    .map(|history| history.recorded_flow_id().as_str())
+                    .unwrap_or(flow_id.as_str()),
                 stage_key: &ctx.stage_name,
                 input_seq: ctx.last_input_position.unwrap_or(
                     crate::messaging::upstream_subscription::StageInputPosition(0),

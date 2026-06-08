@@ -33,10 +33,14 @@ impl EffectContext {
         self.input_seq.0
     }
 
-    pub fn deterministic_id(&self, label: &str, ordinal: u32) -> EventId {
+    pub fn deterministic_id(
+        &self,
+        label: &str,
+        ordinal: impl Into<EffectOutputOrdinal>,
+    ) -> EventId {
         deterministic_event_id(
-            &self.flow_id.to_string(),
-            &format!("{}:{label}", self.stage_key),
+            self.flow_id.to_string(),
+            format!("{}:{label}", self.stage_key),
             self.input_seq,
             ordinal,
         )

@@ -6,8 +6,8 @@ use super::*;
 
 pub struct Effects {
     ctx: EffectInvocationContext,
-    next_effect_ordinal: u32,
-    next_output_ordinal: u32,
+    next_effect_ordinal: EffectOrdinal,
+    next_output_ordinal: EffectOutputOrdinal,
     routed_output_fact_count: usize,
     committed_facts: Vec<ChainEvent>,
 }
@@ -16,8 +16,8 @@ impl Effects {
     pub fn new(ctx: EffectInvocationContext) -> Self {
         Self {
             ctx,
-            next_effect_ordinal: 0,
-            next_output_ordinal: 0,
+            next_effect_ordinal: EffectOrdinal::new(0),
+            next_output_ordinal: EffectOutputOrdinal::new(0),
             routed_output_fact_count: 0,
             committed_facts: Vec::new(),
         }
@@ -31,19 +31,35 @@ impl Effects {
         std::mem::take(&mut self.committed_facts)
     }
 
-    fn reserve_output_ordinal(&mut self) -> u32 {
-        let output_ordinal = self.next_output_ordinal;
-        self.next_output_ordinal = self.next_output_ordinal.saturating_add(1);
-        output_ordinal
+    fn reserve_effect_ordinal(&mut self) -> Result<EffectOrdinal, EffectError> {
+        let effect_ordinal = self.next_effect_ordinal;
+        self.next_effect_ordinal = EffectOrdinal::new(
+            self.next_effect_ordinal
+                .get()
+                .checked_add(1)
+                .ok_or_else(|| EffectError::Execution("effect ordinal overflow".to_string()))?,
+        );
+        Ok(effect_ordinal)
     }
 
-    fn reserve_output_ordinals(&mut self, count: usize) -> Result<u32, EffectError> {
+    fn reserve_output_ordinal(&mut self) -> Result<EffectOutputOrdinal, EffectError> {
+        let output_ordinal = self.next_output_ordinal;
+        self.next_output_ordinal = self
+            .next_output_ordinal
+            .checked_add(1)
+            .ok_or_else(|| EffectError::Execution("effect output ordinal overflow".to_string()))?;
+        Ok(output_ordinal)
+    }
+
+    fn reserve_output_ordinals(
+        &mut self,
+        count: usize,
+    ) -> Result<EffectOutputOrdinal, EffectError> {
         let count = u32::try_from(count).map_err(|_| {
             EffectError::Execution("effect output fact count exceeds u32 range".to_string())
         })?;
         let output_ordinal = self.next_output_ordinal;
-        self.next_output_ordinal = self
-            .next_output_ordinal
+        self.next_output_ordinal = output_ordinal
             .checked_add(count)
             .ok_or_else(|| EffectError::Execution("effect output ordinal overflow".to_string()))?;
         Ok(output_ordinal)
@@ -51,7 +67,7 @@ impl Effects {
 
     fn advance_output_ordinals_after_reserved_base(
         &mut self,
-        reserved_base: u32,
+        reserved_base: EffectOutputOrdinal,
         fact_count: usize,
     ) -> Result<(), EffectError> {
         let fact_count = u32::try_from(fact_count).map_err(|_| {
@@ -97,7 +113,7 @@ impl Effects {
         facts
             .iter()
             .filter(|fact| {
-                is_routable_output_fact(Some(&self.ctx.output_contract), &fact.event_type)
+                is_routable_output_fact(Some(&self.ctx.output_contract), fact.event_type.as_str())
             })
             .count()
     }
@@ -131,7 +147,7 @@ impl Effects {
             .as_ref()
             .map(|history| history.recorded_flow_id().to_string())
             .unwrap_or_else(|| self.ctx.flow_id.to_string());
-        let output_ordinal = self.reserve_output_ordinal();
+        let output_ordinal = self.reserve_output_ordinal()?;
         let event = deterministic_typed_output_event(
             self.ctx.writer_id,
             &self.ctx.parent.event,
@@ -174,8 +190,7 @@ impl Effects {
         E: Effect,
     {
         let declaration = self.ctx.effect_declaration(E::EFFECT_TYPE)?;
-        let effect_ordinal = self.next_effect_ordinal;
-        self.next_effect_ordinal = self.next_effect_ordinal.saturating_add(1);
+        let effect_ordinal = self.reserve_effect_ordinal()?;
 
         let descriptor = descriptor_for_effect(
             &effect,
@@ -190,12 +205,12 @@ impl Effects {
             .as_ref()
             .map(|history| history.recorded_flow_id().to_string())
             .unwrap_or_else(|| self.ctx.flow_id.to_string());
-        let cursor = EffectCursor {
+        let cursor = EffectCursor::new(
             recorded_flow_id,
-            stage_key: self.ctx.stage_key.clone(),
-            input_seq: self.ctx.input_seq.0,
+            self.ctx.stage_key.clone(),
+            self.ctx.input_seq.0,
             effect_ordinal,
-        };
+        );
 
         if let Some(history) = &self.ctx.effect_history {
             if let Some(records) = history.find_group(&cursor) {
@@ -268,7 +283,7 @@ impl Effects {
                             outcome: EffectOutcomePayload::Failed {
                                 error_type: err.error_type(),
                                 error_message: err.error_message(),
-                                retryable: err.retryable(),
+                                retry: err.retry_disposition(),
                             },
                         },
                         Some(&err),
@@ -308,7 +323,7 @@ impl Effects {
                             ChainEventFactory::derived_data_event(
                                 self.ctx.writer_id,
                                 &self.ctx.parent.event,
-                                &fact.event_type,
+                                fact.event_type.as_str(),
                                 fact.payload.clone(),
                             )
                         })
@@ -347,7 +362,7 @@ impl Effects {
                         outcome: EffectOutcomePayload::Failed {
                             error_type: err.error_type(),
                             error_message: err.error_message(),
-                            retryable: err.retryable(),
+                            retry: err.retry_disposition(),
                         },
                     },
                     Some(&err),
@@ -362,15 +377,14 @@ impl Effects {
     where
         T: Clone + Serialize + DeserializeOwned + Send + Sync + 'static,
     {
-        let effect_ordinal = self.next_effect_ordinal;
-        self.next_effect_ordinal = self.next_effect_ordinal.saturating_add(1);
-        let descriptor = EffectDescriptor {
-            effect_type: "obzenflow.capture".to_string(),
-            label: label.to_string(),
-            schema_version: 1,
-            stage_logic_version: self.ctx.stage_logic_version.clone(),
-            canonical_input_hash: hash_json_value(&Value::String(label.to_string()))?,
-        };
+        let effect_ordinal = self.reserve_effect_ordinal()?;
+        let descriptor = EffectDescriptor::new(
+            "obzenflow.capture",
+            label,
+            1,
+            self.ctx.stage_logic_version.clone(),
+            hash_json_value(&Value::String(label.to_string()))?,
+        );
         let descriptor_hash = descriptor_hash(&descriptor)?;
         let recorded_flow_id = self
             .ctx
@@ -378,12 +392,12 @@ impl Effects {
             .as_ref()
             .map(|history| history.recorded_flow_id().to_string())
             .unwrap_or_else(|| self.ctx.flow_id.to_string());
-        let cursor = EffectCursor {
+        let cursor = EffectCursor::new(
             recorded_flow_id,
-            stage_key: self.ctx.stage_key.clone(),
-            input_seq: self.ctx.input_seq.0,
+            self.ctx.stage_key.clone(),
+            self.ctx.input_seq.0,
             effect_ordinal,
-        };
+        );
 
         if let Some(history) = &self.ctx.effect_history {
             if let Some(records) = history.find_group(&cursor) {
@@ -441,7 +455,7 @@ impl Effects {
             })?;
 
         let mut effect_ctx = self.live_effect_context();
-        let output_ordinal = self.reserve_output_ordinal();
+        let output_ordinal = self.reserve_output_ordinal()?;
         let commit = EffectCommitHandle::new(EffectCommitHandleParams {
             writer_id: self.ctx.writer_id,
             data_journal: self.ctx.data_journal.clone(),

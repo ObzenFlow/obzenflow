@@ -28,7 +28,7 @@ struct EffectCommitHandleInner<T> {
     cursor: EffectCursor,
     descriptor_hash: EffectDescriptorHash,
     descriptor: EffectDescriptor,
-    output_ordinal: u32,
+    output_ordinal: EffectOutputOrdinal,
     committed: Mutex<Option<CommittedEffectOutcome<T>>>,
     _marker: PhantomData<T>,
 }
@@ -45,7 +45,7 @@ pub(super) struct EffectCommitHandleParams {
     pub(super) cursor: EffectCursor,
     pub(super) descriptor_hash: EffectDescriptorHash,
     pub(super) descriptor: EffectDescriptor,
-    pub(super) output_ordinal: u32,
+    pub(super) output_ordinal: EffectOutputOrdinal,
 }
 
 #[derive(Clone)]
@@ -144,7 +144,7 @@ where
             EffectOutcomePayload::Failed {
                 error_type: error.error_type(),
                 error_message: error.error_message(),
-                retryable: error.retryable(),
+                retry: error.retry_disposition(),
             },
             Some(error),
         )
@@ -230,7 +230,7 @@ pub(super) async fn append_domain_effect_success_facts(
     descriptor_hash: EffectDescriptorHash,
     descriptor: EffectDescriptor,
     facts: Vec<TypedFact>,
-    base_output_ordinal: u32,
+    base_output_ordinal: EffectOutputOrdinal,
 ) -> Result<Vec<ChainEvent>, EffectError> {
     if facts.is_empty() {
         return Err(EffectError::Execution(
@@ -269,17 +269,19 @@ pub(super) async fn append_domain_effect_success_facts(
         let mut event = ChainEventFactory::derived_data_event(
             writer_id,
             &parent.event,
-            &fact.event_type,
+            fact.event_type.as_str(),
             fact.payload,
         );
         event.id = deterministic_event_id(
-            &record.cursor.recorded_flow_id,
-            &record.cursor.stage_key,
-            StageInputPosition(record.cursor.input_seq),
+            record.cursor.recorded_flow_id.as_str(),
+            record.cursor.stage_key.as_str(),
+            StageInputPosition(record.cursor.input_seq.get()),
             output_ordinal,
         );
-        event.processing_info.event_time =
-            deterministic_event_time(StageInputPosition(record.cursor.input_seq), output_ordinal);
+        event.processing_info.event_time = deterministic_event_time(
+            StageInputPosition(record.cursor.input_seq.get()),
+            output_ordinal,
+        );
         let mut provenance = EffectProvenance::from_record(&record, EffectFactOwner::User);
         provenance.outcome_fact_ordinal = Some(ordinal);
         event = event.with_effect_provenance(provenance);

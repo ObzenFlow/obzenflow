@@ -2128,20 +2128,20 @@ async fn transport_only_skips_framework_effect_data_without_stage_input_position
 
     let writer_id = WriterId::Stage(upstream_stage);
     let effect_record = obzenflow_core::event::payloads::effect_payload::EffectRecord {
-        cursor: obzenflow_core::event::payloads::effect_payload::EffectCursor {
-            recorded_flow_id: "recorded-flow".to_string(),
-            stage_key: "gateway".to_string(),
-            input_seq: 1,
-            effect_ordinal: 0,
-        },
+        cursor: obzenflow_core::event::payloads::effect_payload::EffectCursor::new(
+            "recorded-flow",
+            "gateway",
+            1,
+            0,
+        ),
         descriptor_hash: "hash".into(),
-        descriptor: obzenflow_core::event::payloads::effect_payload::EffectDescriptor {
-            effect_type: "test.effect".to_string(),
-            label: "test".to_string(),
-            schema_version: 1,
-            stage_logic_version: "1".to_string(),
-            canonical_input_hash: "input-hash".to_string(),
-        },
+        descriptor: obzenflow_core::event::payloads::effect_payload::EffectDescriptor::new(
+            "test.effect",
+            "test",
+            1,
+            "1",
+            "input-hash",
+        ),
         outcome: obzenflow_core::event::payloads::effect_payload::EffectOutcomePayload::Succeeded {
             output: json!({"ok": true}),
         },

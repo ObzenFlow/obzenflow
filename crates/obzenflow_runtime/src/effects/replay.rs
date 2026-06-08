@@ -3,6 +3,7 @@
 // https://obzenflow.dev
 
 use super::*;
+use obzenflow_core::EventType;
 
 pub(super) fn effect_record_from_event(
     event: &ChainEvent,
@@ -52,7 +53,7 @@ pub(super) fn effect_record_from_event(
                 descriptor_hash: provenance.descriptor_hash.clone(),
                 descriptor: provenance.descriptor.clone(),
                 outcome: EffectOutcomePayload::SucceededFact {
-                    event_type: event_type.clone(),
+                    event_type: event_type.clone().into(),
                     output: payload.clone(),
                     outcome_fact_ordinal,
                 },
@@ -382,19 +383,20 @@ fn effect_record_fact_event(
     writer_id: WriterId,
     parent: &ChainEvent,
     record: &EffectRecord,
-    event_type: &str,
+    event_type: &EventType,
     output: Value,
     outcome_fact_ordinal: OutcomeFactOrdinal,
 ) -> Result<ChainEvent, EffectError> {
-    let mut event = ChainEventFactory::derived_data_event(writer_id, parent, event_type, output);
+    let mut event =
+        ChainEventFactory::derived_data_event(writer_id, parent, event_type.as_str(), output);
     event.id = deterministic_event_id(
-        &record.cursor.recorded_flow_id,
-        &record.cursor.stage_key,
-        StageInputPosition(record.cursor.input_seq),
+        record.cursor.recorded_flow_id.as_str(),
+        record.cursor.stage_key.as_str(),
+        StageInputPosition(record.cursor.input_seq.get()),
         outcome_fact_ordinal.get(),
     );
     event.processing_info.event_time = deterministic_event_time(
-        StageInputPosition(record.cursor.input_seq),
+        StageInputPosition(record.cursor.input_seq.get()),
         outcome_fact_ordinal.get(),
     );
     let mut provenance = EffectProvenance::from_record(record, EffectFactOwner::User);
@@ -430,11 +432,11 @@ where
         EffectOutcomePayload::Failed {
             error_type,
             error_message,
-            retryable,
+            retry,
         } => Err(EffectError::RecordedFailure {
             error_type: error_type.clone(),
             error_message: error_message.clone(),
-            retryable: *retryable,
+            retry: *retry,
         }),
     }
 }
@@ -446,11 +448,11 @@ pub(super) fn recorded_failure_from_outcome<T>(
         EffectOutcomePayload::Failed {
             error_type,
             error_message,
-            retryable,
+            retry,
         } => Err(EffectError::RecordedFailure {
             error_type: error_type.clone(),
             error_message: error_message.clone(),
-            retryable: *retryable,
+            retry: *retry,
         }),
         _ => Err(EffectError::EffectProvenanceMismatch(
             "expected recorded effect failure".to_string(),

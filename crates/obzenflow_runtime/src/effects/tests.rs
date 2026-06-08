@@ -726,26 +726,21 @@ async fn perform_records_and_replays_multi_fact_effect_outcome_group() {
 
 #[test]
 fn effect_history_rejects_partial_multi_fact_outcome_group() {
-    let cursor = EffectCursor {
-        recorded_flow_id: "flow".to_string(),
-        stage_key: "effect_stage".to_string(),
-        input_seq: 1,
-        effect_ordinal: 0,
-    };
-    let descriptor = EffectDescriptor {
-        effect_type: MultiFactEffect::EFFECT_TYPE.to_string(),
-        label: "multi".to_string(),
-        schema_version: MultiFactEffect::SCHEMA_VERSION,
-        stage_logic_version: "test-v1".to_string(),
-        canonical_input_hash: "input".to_string(),
-    };
+    let cursor = EffectCursor::new("flow", "effect_stage", 1, 0);
+    let descriptor = EffectDescriptor::new(
+        MultiFactEffect::EFFECT_TYPE,
+        "multi",
+        MultiFactEffect::SCHEMA_VERSION,
+        "test-v1",
+        "input",
+    );
     let records = vec![
         EffectRecord {
             cursor: cursor.clone(),
             descriptor_hash: "hash".into(),
             descriptor: descriptor.clone(),
             outcome: EffectOutcomePayload::SucceededFact {
-                event_type: FirstOutput::versioned_event_type(),
+                event_type: FirstOutput::versioned_event_type().into(),
                 output: json!({ "value": 10 }),
                 outcome_fact_ordinal: OutcomeFactOrdinal::new(0),
             },
@@ -755,7 +750,7 @@ fn effect_history_rejects_partial_multi_fact_outcome_group() {
             descriptor_hash: "hash".into(),
             descriptor,
             outcome: EffectOutcomePayload::SucceededFact {
-                event_type: SecondOutput::versioned_event_type(),
+                event_type: SecondOutput::versioned_event_type().into(),
                 output: json!({ "value": "twenty" }),
                 outcome_fact_ordinal: OutcomeFactOrdinal::new(2),
             },
@@ -1351,7 +1346,7 @@ async fn effect_record_decode_rejects_payload_provenance_cursor_mismatch() {
         .as_mut()
         .expect("effect event should carry provenance")
         .cursor
-        .effect_ordinal = 99;
+        .effect_ordinal = EffectOrdinal::new(99);
 
     let err = effect_record_from_event(&event)
         .expect_err("payload/provenance cursor mismatch must fail loud");
@@ -1362,22 +1357,17 @@ async fn effect_record_decode_rejects_payload_provenance_cursor_mismatch() {
 #[test]
 fn effect_record_decode_rejects_reserved_event_without_provenance() {
     let stage_id = StageId::new();
-    let cursor = EffectCursor {
-        recorded_flow_id: "flow".to_string(),
-        stage_key: "effect_stage".to_string(),
-        input_seq: 1,
-        effect_ordinal: 0,
-    };
+    let cursor = EffectCursor::new("flow", "effect_stage", 1, 0);
     let record = EffectRecord {
         cursor,
         descriptor_hash: "hash".into(),
-        descriptor: EffectDescriptor {
-            effect_type: CountingEffect::EFFECT_TYPE.to_string(),
-            label: "same".to_string(),
-            schema_version: CountingEffect::SCHEMA_VERSION,
-            stage_logic_version: "test-v1".to_string(),
-            canonical_input_hash: "input".to_string(),
-        },
+        descriptor: EffectDescriptor::new(
+            CountingEffect::EFFECT_TYPE,
+            "same",
+            CountingEffect::SCHEMA_VERSION,
+            "test-v1",
+            "input",
+        ),
         outcome: EffectOutcomePayload::Succeeded {
             output: json!(2_u64),
         },

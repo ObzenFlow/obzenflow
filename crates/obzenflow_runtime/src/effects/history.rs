@@ -22,7 +22,7 @@ pub trait EffectHistoryStore: Send + Sync {
 
 #[derive(Clone, Debug)]
 pub struct EffectHistory {
-    recorded_flow_id: String,
+    recorded_flow_id: RecordedFlowId,
     records: Arc<Vec<EffectRecord>>,
     index: Arc<HashMap<EffectCursor, Vec<usize>>>,
 }
@@ -49,7 +49,7 @@ impl EffectHistory {
     }
 
     pub fn from_records(
-        recorded_flow_id: String,
+        recorded_flow_id: impl Into<RecordedFlowId>,
         records: Vec<EffectRecord>,
     ) -> Result<Self, EffectError> {
         let mut index = HashMap::new();
@@ -69,7 +69,7 @@ impl EffectHistory {
         }
 
         Ok(Self {
-            recorded_flow_id,
+            recorded_flow_id: recorded_flow_id.into(),
             records: Arc::new(records),
             index: Arc::new(index),
         })
@@ -98,7 +98,7 @@ impl EffectHistory {
         })
     }
 
-    pub fn recorded_flow_id(&self) -> &str {
+    pub fn recorded_flow_id(&self) -> &RecordedFlowId {
         &self.recorded_flow_id
     }
 }

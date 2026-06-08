@@ -13,13 +13,13 @@ pub(super) fn descriptor_for_effect<E>(
 where
     E: Effect,
 {
-    Ok(EffectDescriptor {
-        effect_type: effect_type.to_string(),
-        label: effect.label().to_string(),
+    Ok(EffectDescriptor::new(
+        effect_type,
+        effect.label(),
         schema_version,
         stage_logic_version,
-        canonical_input_hash: hash_json_value(&effect.canonical_input())?,
-    })
+        hash_json_value(&effect.canonical_input())?,
+    ))
 }
 
 pub(super) fn descriptor_hash(
@@ -64,15 +64,51 @@ fn hex_digest(bytes: &[u8]) -> String {
     out
 }
 
+/// Stage-local ordinal for deterministic output event identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct EffectOutputOrdinal(u32);
+
+impl EffectOutputOrdinal {
+    pub const fn new(value: u32) -> Self {
+        Self(value)
+    }
+
+    pub const fn get(self) -> u32 {
+        self.0
+    }
+
+    pub fn checked_add(self, rhs: u32) -> Option<Self> {
+        self.0.checked_add(rhs).map(Self)
+    }
+}
+
+impl From<u32> for EffectOutputOrdinal {
+    fn from(value: u32) -> Self {
+        Self::new(value)
+    }
+}
+
+impl TryFrom<usize> for EffectOutputOrdinal {
+    type Error = std::num::TryFromIntError;
+
+    fn try_from(value: usize) -> Result<Self, Self::Error> {
+        Ok(Self::new(u32::try_from(value)?))
+    }
+}
+
 pub fn deterministic_event_id(
-    recorded_flow_id: &str,
-    stage_key: &str,
+    recorded_flow_id: impl AsRef<str>,
+    stage_key: impl AsRef<str>,
     input_seq: StageInputPosition,
-    output_ordinal: u32,
+    output_ordinal: impl Into<EffectOutputOrdinal>,
 ) -> EventId {
+    let output_ordinal = output_ordinal.into();
     let material = format!(
         "{recorded_flow_id}:{stage_key}:{}:{output_ordinal}",
-        input_seq.0
+        input_seq.0,
+        recorded_flow_id = recorded_flow_id.as_ref(),
+        stage_key = stage_key.as_ref(),
+        output_ordinal = output_ordinal.get()
     );
     let hash = digest(&SHA256, material.as_bytes());
     let mut id_bytes = [0u8; 16];
@@ -80,25 +116,30 @@ pub fn deterministic_event_id(
     EventId::from(obzenflow_core::Ulid(u128::from_be_bytes(id_bytes)))
 }
 
-pub fn deterministic_event_time(input_seq: StageInputPosition, output_ordinal: u32) -> u64 {
+pub fn deterministic_event_time(
+    input_seq: StageInputPosition,
+    output_ordinal: impl Into<EffectOutputOrdinal>,
+) -> u64 {
+    let output_ordinal = output_ordinal.into();
     input_seq
         .0
         .saturating_mul(1_000)
-        .saturating_add(u64::from(output_ordinal))
+        .saturating_add(u64::from(output_ordinal.get()))
 }
 
 pub fn deterministic_typed_output_event<Out>(
     writer_id: WriterId,
     parent: &ChainEvent,
     output: Out,
-    recorded_flow_id: &str,
-    stage_key: &str,
+    recorded_flow_id: impl AsRef<str>,
+    stage_key: impl AsRef<str>,
     input_seq: StageInputPosition,
-    output_ordinal: u32,
+    output_ordinal: impl Into<EffectOutputOrdinal>,
 ) -> Result<ChainEvent, EffectError>
 where
     Out: TypedPayload,
 {
+    let output_ordinal = output_ordinal.into();
     let payload =
         serde_json::to_value(output).map_err(|e| EffectError::Serialization(e.to_string()))?;
     let mut event = ChainEventFactory::derived_data_event(

@@ -6,6 +6,7 @@
 
 use crate::event::chain_event::{ChainEvent, ChainEventContent};
 use crate::event::schema::typed_payload::TypedPayload;
+use crate::event::types::EventType;
 use serde_json::Value;
 use std::any::{type_name, TypeId};
 
@@ -14,7 +15,7 @@ use std::any::{type_name, TypeId};
 pub struct TypedFactType {
     pub type_id: TypeId,
     pub display_name: String,
-    pub event_type: String,
+    pub event_type: EventType,
     pub schema_version: u32,
 }
 
@@ -26,7 +27,7 @@ impl TypedFactType {
         Self {
             type_id: TypeId::of::<T>(),
             display_name: type_name::<T>().to_string(),
-            event_type: T::versioned_event_type(),
+            event_type: EventType::from(T::versioned_event_type()),
             schema_version: T::SCHEMA_VERSION,
         }
     }
@@ -35,7 +36,7 @@ impl TypedFactType {
 /// Serialized fact ready for conversion into a `ChainEvent::Data` value.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TypedFact {
-    pub event_type: String,
+    pub event_type: EventType,
     pub payload: Value,
 }
 
@@ -45,7 +46,7 @@ impl TypedFact {
         T: TypedPayload,
     {
         Ok(Self {
-            event_type: T::versioned_event_type(),
+            event_type: EventType::from(T::versioned_event_type()),
             payload: serde_json::to_value(payload)
                 .map_err(|e| TypedFactSetError::SerializationFailed(e.to_string()))?,
         })
@@ -57,7 +58,7 @@ impl TypedFact {
                 event_type,
                 payload,
             } => Some(Self {
-                event_type: event_type.clone(),
+                event_type: EventType::from(event_type.clone()),
                 payload: payload.clone(),
             }),
             _ => None,
@@ -72,13 +73,16 @@ pub enum TypedFactSetError {
     SerializationFailed(String),
 
     #[error("missing typed fact `{event_type}`")]
-    MissingFact { event_type: String },
+    MissingFact { event_type: EventType },
 
     #[error("duplicate typed fact `{event_type}`")]
-    DuplicateFact { event_type: String },
+    DuplicateFact { event_type: EventType },
 
     #[error("failed to deserialize typed fact `{event_type}`: {error}")]
-    DeserializationFailed { event_type: String, error: String },
+    DeserializationFailed {
+        event_type: EventType,
+        error: String,
+    },
 }
 
 /// A typed marshalling bridge for code paths that still produce a typed value
@@ -120,15 +124,15 @@ where
 {
     let mut matches = facts
         .iter()
-        .filter(|fact| T::event_type_matches(&fact.event_type));
+        .filter(|fact| T::event_type_matches(fact.event_type.as_str()));
     let fact = matches
         .next()
         .ok_or_else(|| TypedFactSetError::MissingFact {
-            event_type: T::versioned_event_type(),
+            event_type: EventType::from(T::versioned_event_type()),
         })?;
     if matches.next().is_some() {
         return Err(TypedFactSetError::DuplicateFact {
-            event_type: T::versioned_event_type(),
+            event_type: EventType::from(T::versioned_event_type()),
         });
     }
     serde_json::from_value(fact.payload.clone()).map_err(|e| {

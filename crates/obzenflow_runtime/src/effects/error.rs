@@ -27,9 +27,9 @@ pub enum EffectError {
 
     #[error("recorded effect failure: {error_type}: {error_message}")]
     RecordedFailure {
-        error_type: String,
+        error_type: EffectFailureKind,
         error_message: String,
-        retryable: bool,
+        retry: RetryDisposition,
     },
 
     #[error("effect provenance mismatch: {0}")]
@@ -77,7 +77,7 @@ pub enum EffectError {
 impl EffectError {
     pub fn retryable(&self) -> bool {
         match self {
-            EffectError::RecordedFailure { retryable, .. } => *retryable,
+            EffectError::RecordedFailure { retry, .. } => retry.is_retryable(),
             EffectError::EffectProvenanceMismatch(_) => false,
             EffectError::MissingRecordedEffect { .. }
             | EffectError::DuplicateRecordedEffect { .. }
@@ -95,7 +95,11 @@ impl EffectError {
         }
     }
 
-    pub(super) fn error_type(&self) -> String {
+    pub(super) fn retry_disposition(&self) -> RetryDisposition {
+        RetryDisposition::from_bool(self.retryable())
+    }
+
+    pub(super) fn error_type(&self) -> EffectFailureKind {
         match self {
             EffectError::Serialization(_) => "serialization",
             EffectError::Journal(_) => "journal",
@@ -113,7 +117,7 @@ impl EffectError {
             EffectError::Execution(_) => "execution",
             EffectError::ReplayArchive(_) => "replay_archive",
         }
-        .to_string()
+        .into()
     }
 
     pub(super) fn error_message(&self) -> String {

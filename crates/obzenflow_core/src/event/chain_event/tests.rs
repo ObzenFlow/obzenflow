@@ -56,20 +56,9 @@ fn framework_effect_data_is_not_source_replayable() {
     let writer_id = WriterId::from(StageId::new());
     let mut event = ChainEventFactory::data_event(writer_id, EFFECT_RECORD_EVENT_TYPE, json!({}));
     event.effect_provenance = Some(EffectProvenance {
-        cursor: EffectCursor {
-            recorded_flow_id: "flow".to_string(),
-            stage_key: "stage".to_string(),
-            input_seq: 1,
-            effect_ordinal: 0,
-        },
+        cursor: EffectCursor::new("flow", "stage", 1, 0),
         descriptor_hash: "hash".into(),
-        descriptor: EffectDescriptor {
-            effect_type: "test.effect".to_string(),
-            label: "test".to_string(),
-            schema_version: 1,
-            stage_logic_version: "v1".to_string(),
-            canonical_input_hash: "input".to_string(),
-        },
+        descriptor: EffectDescriptor::new("test.effect", "test", 1, "v1", "input"),
         outcome_fact_ordinal: None,
         group_id: None,
         fact_owner: EffectFactOwner::Framework,

@@ -405,7 +405,8 @@ impl TypedFactSet for ReplayStatefulFact {
                 "{} or {}",
                 ReplayEffectValue::versioned_event_type(),
                 ReplayOutput::versioned_event_type()
-            ),
+            )
+            .into(),
         })
     }
 }
