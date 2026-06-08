@@ -148,7 +148,7 @@ impl FiniteSourceHandler for TimedEventSource {
 
         let event = ChainEventFactory::data_event(
             self.writer_id,
-            format!("test.{event_type}"),
+            <CircuitMetricEvent as TypedPayload>::EVENT_TYPE,
             json!({
                 "sequence": self.index,
                 "type": event_type
@@ -383,8 +383,11 @@ async fn test_circuit_breaker_summary_events() -> Result<()> {
 
             Ok(Some(vec![ChainEventFactory::data_event(
                 self.writer_id,
-                "test.rapid",
-                json!({"id": self.count}),
+                <CircuitMetricEvent as TypedPayload>::EVENT_TYPE,
+                json!({
+                    "sequence": self.count,
+                    "type": "rapid"
+                }),
             )]))
         }
     }

@@ -80,7 +80,7 @@ impl FiniteSourceHandler for TestEventSource {
             self.emitted += 1;
             Ok(Some(vec![ChainEventFactory::data_event(
                 self.writer_id,
-                "TestEvent",
+                <AsyncTransformEvent as TypedPayload>::EVENT_TYPE,
                 json!({ "index": index }),
             )]))
         } else {

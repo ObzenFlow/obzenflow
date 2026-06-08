@@ -22,16 +22,24 @@ use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-/// File-local payload for the stalled-transition test. The JSON shape
-/// matches what `OneEventSource` emits; the type fingerprints the stage
-/// contract per FLOWIP-114c.
+/// File-local payloads for the stalled-transition test. The JSON shape is
+/// shared, but the source and transform author different fact identities.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct ProbeEvent {
     value: u64,
 }
 
 impl TypedPayload for ProbeEvent {
-    const EVENT_TYPE: &'static str = "probe.event";
+    const EVENT_TYPE: &'static str = "liveness.input";
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct ProbeOutputEvent {
+    value: u64,
+}
+
+impl TypedPayload for ProbeOutputEvent {
+    const EVENT_TYPE: &'static str = "liveness.output";
 }
 use std::sync::{Arc, Mutex};
 use std::task::Poll;
@@ -60,7 +68,7 @@ impl FiniteSourceHandler for OneEventSource {
         self.emitted = true;
         Ok(Some(vec![ChainEventFactory::data_event(
             self.writer_id,
-            "liveness.input",
+            ProbeEvent::versioned_event_type(),
             json!({ "value": 1 }),
         )]))
     }
@@ -85,7 +93,7 @@ impl AsyncTransformHandler for StallingTransform {
         tokio::time::sleep(Duration::from_secs(130)).await;
         Ok(vec![ChainEventFactory::data_event(
             self.writer_id,
-            "liveness.output",
+            ProbeOutputEvent::versioned_event_type(),
             event.payload().clone(),
         )])
     }
@@ -132,8 +140,8 @@ async fn liveness_emits_stalled_transition_without_aborting_pipeline() {
 
         stages: {
             numbers = source!(ProbeEvent => OneEventSource::new());
-            slow = async_transform!(ProbeEvent -> ProbeEvent => StallingTransform::new());
-            sink = sink!(ProbeEvent => NoopSink);
+            slow = async_transform!(ProbeEvent -> ProbeOutputEvent => StallingTransform::new());
+            sink = sink!(ProbeOutputEvent => NoopSink);
         },
 
         topology: {

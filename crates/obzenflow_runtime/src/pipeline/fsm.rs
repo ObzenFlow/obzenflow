@@ -1739,10 +1739,14 @@ pub fn build_pipeline_fsm_with_initial(initial: PipelineState) -> PipelineFsm {
                 })
             };
 
-            on PipelineEvent::Error => |_state: &PipelineState, event: &PipelineEvent, _ctx: &mut PipelineContext| {
+            on PipelineEvent::Error => |_state: &PipelineState, event: &PipelineEvent, ctx: &mut PipelineContext| {
                 let event = event.clone();
                 Box::pin(async move {
                     if let PipelineEvent::Error { message } = event {
+                        ctx.stop_intent.apply_request(
+                            FlowStopMode::Cancel,
+                            Some(message.clone()),
+                        );
                         Ok(Transition {
                             next_state: PipelineState::Failed {
                                 reason: message,
@@ -1852,6 +1856,33 @@ pub fn build_pipeline_fsm_with_initial(initial: PipelineState) -> PipelineFsm {
                                 })
                             }
                         },
+                    }
+                })
+            };
+
+            on PipelineEvent::Error => |_state: &PipelineState, event: &PipelineEvent, ctx: &mut PipelineContext| {
+                let event = event.clone();
+                Box::pin(async move {
+                    if let PipelineEvent::Error { message } = event {
+                        ctx.stop_intent.apply_request(
+                            FlowStopMode::Cancel,
+                            Some(message.clone()),
+                        );
+
+                        Ok(Transition {
+                            next_state: PipelineState::Failed {
+                                reason: message,
+                                failure_cause: None,
+                            },
+                            actions: vec![
+                                PipelineAction::DrainMetrics,
+                                PipelineAction::Cleanup,
+                            ],
+                        })
+                    } else {
+                        Err(obzenflow_fsm::FsmError::HandlerError(
+                            "Invalid event".to_string(),
+                        ))
                     }
                 })
             };

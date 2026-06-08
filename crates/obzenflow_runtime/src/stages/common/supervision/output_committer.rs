@@ -44,6 +44,23 @@ use crate::metrics::instrumentation::StageInstrumentation;
 use crate::stages::common::heartbeat::HeartbeatState;
 use crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal;
 
+fn output_contract_summary(output_contract: &StageOutputContract) -> String {
+    output_contract
+        .outputs
+        .iter()
+        .map(|output| {
+            format!(
+                "{} event_type={} schema_version={:?} visibility={:?}",
+                output.payload_key(),
+                output.event_type.as_deref().unwrap_or("<none>"),
+                output.schema_version,
+                output.visibility,
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// A boxed, thread-safe error from a commit attempt. Each caller maps this onto
 /// its own error type: the drain prefixes it with `Failed to write pending
 /// output`, and the effects layer wraps it in `EffectError::Journal`.
@@ -162,8 +179,9 @@ impl OutputCommitter<'_> {
             return Ok(());
         }
 
+        let declared = output_contract_summary(output_contract);
         Err(format!(
-            "Data output event type `{event_type}` is not declared in the stage output contract"
+            "Data output event type `{event_type}` is not declared in the stage output contract (declared: [{declared}])"
         )
         .into())
     }

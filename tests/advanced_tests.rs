@@ -48,9 +48,18 @@ async fn test_dsl_pipeline() -> Result<()> {
     impl EventGenerator {
         fn new() -> Self {
             let events = vec![
-                ("Input".to_string(), json!({ "value": 10 })),
-                ("Input".to_string(), json!({ "value": 20 })),
-                ("Input".to_string(), json!({ "value": 30 })),
+                (
+                    <AdvancedTestEvent as TypedPayload>::EVENT_TYPE.to_string(),
+                    json!({ "value": 10 }),
+                ),
+                (
+                    <AdvancedTestEvent as TypedPayload>::EVENT_TYPE.to_string(),
+                    json!({ "value": 20 }),
+                ),
+                (
+                    <AdvancedTestEvent as TypedPayload>::EVENT_TYPE.to_string(),
+                    json!({ "value": 30 }),
+                ),
             ];
             Self {
                 events,
@@ -96,7 +105,7 @@ async fn test_dsl_pipeline() -> Result<()> {
             if let Some(value) = event.payload().get("value").and_then(|v| v.as_u64()) {
                 Ok(vec![ChainEventFactory::data_event(
                     event.writer_id,
-                    "Doubled",
+                    <AdvancedTestEvent as TypedPayload>::EVENT_TYPE,
                     json!({
                         "value": value,
                         "doubled": value * 2,

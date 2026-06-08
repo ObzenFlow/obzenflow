@@ -74,7 +74,7 @@ impl FiniteSourceHandler for FiniteTestSource {
 
         let event = ChainEventFactory::data_event(
             self.writer_id,
-            "breaker.test",
+            <BreakerTestEvent as TypedPayload>::EVENT_TYPE,
             json!({
                 "index": index,
             }),

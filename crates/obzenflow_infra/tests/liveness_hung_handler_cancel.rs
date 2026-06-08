@@ -59,7 +59,7 @@ impl FiniteSourceHandler for OneEventSource {
         self.emitted = true;
         Ok(Some(vec![ChainEventFactory::data_event(
             self.writer_id,
-            "liveness.input",
+            &ProbeEvent::versioned_event_type(),
             json!({ "value": 1 }),
         )]))
     }

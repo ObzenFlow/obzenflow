@@ -962,6 +962,40 @@ impl MetricsAggregatorContext {
 }
 
 impl MetricsStore {
+    /// Reconcile per-stage terminal state from the pipeline aggregate barrier.
+    ///
+    /// `PipelineLifecycle::AllStagesCompleted` is written only after the pipeline
+    /// supervisor has observed every stage completion. The metrics aggregator has
+    /// an independent system-journal reader, so this aggregate event is the
+    /// authoritative fallback when it misses an individual stage completion.
+    pub fn mark_known_stages_completed<I>(&mut self, stage_ids: I)
+    where
+        I: IntoIterator<Item = StageId>,
+    {
+        for stage_id in stage_ids {
+            let has_terminal_state = self
+                .stage_lifecycle_states
+                .get(&(stage_id, "completed".to_string()))
+                .copied()
+                .unwrap_or(false)
+                || self
+                    .stage_lifecycle_states
+                    .get(&(stage_id, "failed".to_string()))
+                    .copied()
+                    .unwrap_or(false)
+                || self
+                    .stage_lifecycle_states
+                    .get(&(stage_id, "cancelled".to_string()))
+                    .copied()
+                    .unwrap_or(false);
+
+            if !has_terminal_state {
+                self.stage_lifecycle_states
+                    .insert((stage_id, "completed".to_string()), true);
+            }
+        }
+    }
+
     /// Returns true when every known stage has reached a terminal lifecycle
     /// state (completed, failed, or cancelled) according to system.events.
     pub fn all_stages_terminal(&self, stage_metadata: &HashMap<StageId, StageMetadata>) -> bool {
@@ -1175,6 +1209,7 @@ impl FsmAction for MetricsAggregatorAction {
                     event_type = envelope.event.event_type_name(),
                     "Metrics aggregator ProcessSystemEvent action"
                 );
+                let known_stage_ids = ctx.stage_metadata.keys().copied().collect::<Vec<_>>();
                 // FLOWIP-059b: Process system journal events for lifecycle tracking
                 let store = &mut ctx.metrics_store;
 
@@ -1235,6 +1270,7 @@ impl FsmAction for MetricsAggregatorAction {
                             obzenflow_core::event::PipelineLifecycleEvent::AllStagesCompleted {
                                 ..
                             } => {
+                                store.mark_known_stages_completed(known_stage_ids);
                                 if store.pipeline_state.is_empty() {
                                     store.pipeline_state = "all_stages_completed".to_string();
                                 }
@@ -2272,6 +2308,53 @@ mod tests {
     use obzenflow_core::journal::Journal;
     use obzenflow_core::metrics::StageMetadata;
     use std::marker::PhantomData;
+
+    #[test]
+    fn all_stages_completed_reconciles_missing_stage_lifecycle_states() {
+        let observed = StageId::new();
+        let missing = StageId::new();
+        let failed = StageId::new();
+
+        let mut stage_metadata = HashMap::new();
+        for stage_id in [observed, missing, failed] {
+            stage_metadata.insert(
+                stage_id,
+                StageMetadata {
+                    name: format!("stage-{stage_id}"),
+                    stage_type: StageType::Transform,
+                    reference_mode: None,
+                    flow_name: "test_flow".to_string(),
+                    flow_id: None,
+                },
+            );
+        }
+
+        let mut store = MetricsStore::default();
+        store
+            .stage_lifecycle_states
+            .insert((observed, "completed".to_string()), true);
+        store
+            .stage_lifecycle_states
+            .insert((failed, "failed".to_string()), true);
+
+        assert!(!store.all_stages_terminal(&stage_metadata));
+
+        store.mark_known_stages_completed(stage_metadata.keys().copied());
+
+        assert!(store.all_stages_terminal(&stage_metadata));
+        assert_eq!(
+            store
+                .stage_lifecycle_states
+                .get(&(missing, "completed".to_string())),
+            Some(&true)
+        );
+        assert_eq!(
+            store
+                .stage_lifecycle_states
+                .get(&(failed, "completed".to_string())),
+            None
+        );
+    }
 
     #[tokio::test]
     async fn test_delivery_event_preserves_correlation() {

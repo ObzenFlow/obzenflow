@@ -67,7 +67,7 @@ impl FiniteSourceHandler for SimpleSource {
 
             Ok(Some(vec![ChainEventFactory::data_event(
                 self.writer_id,
-                "number",
+                StatelessSimpleEvent::versioned_event_type(),
                 json!({
                     "value": self.count + 1,
                 }),
@@ -108,7 +108,7 @@ async fn stateless_pipeline_runs_to_completion() {
                     if let Some(value) = event.payload()["value"].as_u64() {
                         ChainEventFactory::data_event(
                             WriterId::from(StageId::new()),
-                            "doubled",
+                            DoubledEvent::versioned_event_type(),
                             json!({
                                 "original": value,
                                 "doubled": value * 2,

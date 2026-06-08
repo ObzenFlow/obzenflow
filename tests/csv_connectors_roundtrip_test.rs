@@ -3,7 +3,7 @@
 // https://obzenflow.dev
 
 use obzenflow::sinks::CsvSink;
-use obzenflow::sources::CsvSource;
+use obzenflow::sources::{CsvRow, CsvSource};
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, sink, source};
 use obzenflow_infra::journal::disk_journals;
@@ -89,8 +89,8 @@ async fn csv_untyped_source_to_sink_roundtrip_preserves_strings() -> anyhow::Res
         middleware: [],
 
         stages: {
-            src = source!(FlightData => source);
-            csv = sink!(FlightData => sink);
+            src = source!(CsvRow => source);
+            csv = sink!(CsvRow => sink);
         },
 
         topology: {

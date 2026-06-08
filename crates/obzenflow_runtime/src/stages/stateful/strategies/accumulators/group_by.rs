@@ -553,7 +553,7 @@ where
 
                 let mut out = ChainEventFactory::data_event(
                     self.writer_id,
-                    S::EVENT_TYPE,
+                    S::versioned_event_type(),
                     json!({
                         "key": key_json,
                         "result": &bucket.value,
@@ -815,7 +815,7 @@ mod typed_tests {
         assert_eq!(emitted.len(), 2);
 
         for event in emitted {
-            assert_eq!(event.event_type(), CategoryStats::EVENT_TYPE);
+            assert_eq!(event.event_type(), CategoryStats::versioned_event_type());
             let payload = event.payload();
             assert!(payload.get("key").is_some());
             assert!(payload.get("result").is_some());

@@ -268,7 +268,7 @@ fn multi_source_ingest_demo_satisfies_typed_fan_in_invariants() {
         .expect("multi_source_ingest_demo: edge validator must return Ok(())");
 
     // Invariant 4: the three alignment transforms emit IngestedEvent.
-    let expected = TypeHint::exact::<IngestedEvent>();
+    let expected = TypeHint::exact_payload::<IngestedEvent>();
     for align_name in ["align_kafka", "align_webhook", "align_file"] {
         let meta = descriptors[align_name]
             .typing_metadata()

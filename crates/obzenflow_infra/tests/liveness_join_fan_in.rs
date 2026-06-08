@@ -27,6 +27,7 @@ use serde_json::json;
 /// concrete inputs.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct CatalogRecord {
+    kind: String,
     value: u64,
 }
 
@@ -36,6 +37,7 @@ impl TypedPayload for CatalogRecord {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct LiveEvent {
+    kind: String,
     value: u64,
 }
 
@@ -47,8 +49,8 @@ impl TypedPayload for LiveEvent {
 /// still needs declaring).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct EnrichedRecord {
-    ref_value: u64,
-    stream_value: u64,
+    kind: String,
+    value: u64,
 }
 
 impl TypedPayload for EnrichedRecord {
@@ -81,7 +83,7 @@ impl obzenflow_runtime::stages::common::handlers::FiniteSourceHandler for OneRef
         self.emitted = true;
         Ok(Some(vec![ChainEventFactory::data_event(
             self.writer_id,
-            "liveness.join.ref",
+            CatalogRecord::versioned_event_type(),
             json!({ "kind": "ref", "value": 1 }),
         )]))
     }
@@ -121,7 +123,7 @@ impl AsyncFiniteSourceHandler for DelayedStreamSource {
             .expect("stream writer_id should be bound by runtime");
         Ok(Some(vec![ChainEventFactory::data_event(
             writer_id,
-            "liveness.join.stream",
+            LiveEvent::versioned_event_type(),
             json!({ "kind": "stream", "value": 2 }),
         )]))
     }
@@ -155,7 +157,7 @@ impl JoinHandler for SlowJoin {
 
         Ok(vec![ChainEventFactory::data_event(
             writer_id,
-            "liveness.join.out",
+            EnrichedRecord::versioned_event_type(),
             event.payload().clone(),
         )])
     }
