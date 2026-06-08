@@ -323,8 +323,7 @@ where
                             .selected_data_seq_by_reader_event_type
                             .get_mut(current_index)
                         {
-                            let seq = by_type.entry(event_type.clone().into()).or_insert(SeqNo(0));
-                            seq.0 = seq.0.saturating_add(1);
+                            by_type.increment(event_type.clone());
                         }
                     }
 
@@ -389,7 +388,7 @@ where
                                                 .advertised_writer_seq_by_reader_event_type
                                                 .get_mut(current_index)
                                             {
-                                                *by_type = writer_seq_by_event_type.clone();
+                                                by_type.replace_from_eof(writer_seq_by_event_type);
                                             }
                                         }
                                     }

@@ -15,11 +15,10 @@ use crate::feed_plan::{FeedPlan, LogicalFeed, StageOutputContract};
 use crate::id_conversions::StageIdExt;
 use crate::message_bus::FsmMessageBus;
 use crate::messaging::upstream_subscription::{
-    ContractsWiring, SelectedFeedMetadata, UpstreamSubscription,
+    ContractsWiring, SelectedFeedMetadata, SelectedFeedRole, UpstreamSubscription,
 };
 use crate::replay::ReplayArchive;
 use crate::stages::LivenessSnapshots;
-use obzenflow_core::event::system_event::SystemFeedRole;
 use obzenflow_core::event::SystemEvent;
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{ChainEvent, EventType, FlowId, StageId, SystemId};
@@ -164,14 +163,10 @@ fn selected_feeds_by_upstream(
         selected
             .entry(feed.key.upstream_stage)
             .or_default()
-            .push(SelectedFeedMetadata {
-                event_type: EventType::from(event_type),
-                feed_role: Some(match feed.key.role {
-                    crate::feed_plan::FeedRole::Input => SystemFeedRole::Input,
-                    crate::feed_plan::FeedRole::Reference => SystemFeedRole::Reference,
-                    crate::feed_plan::FeedRole::Stream => SystemFeedRole::Stream,
-                }),
-            });
+            .push(SelectedFeedMetadata::new(
+                EventType::from(event_type),
+                SelectedFeedRole::from(feed.key.role),
+            ));
     }
     selected
 }

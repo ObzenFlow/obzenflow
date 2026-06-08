@@ -140,10 +140,125 @@ pub struct EofOutcome {
     pub is_final: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum SelectedFeedRole {
+    /// Compatibility path for callers that select only by event type and do not
+    /// distinguish input/reference/stream roles.
+    Unspecified,
+    Input,
+    Reference,
+    Stream,
+}
+
+impl SelectedFeedRole {
+    pub fn as_system_feed_role(self) -> Option<SystemFeedRole> {
+        match self {
+            Self::Unspecified => None,
+            Self::Input => Some(SystemFeedRole::Input),
+            Self::Reference => Some(SystemFeedRole::Reference),
+            Self::Stream => Some(SystemFeedRole::Stream),
+        }
+    }
+}
+
+impl From<SystemFeedRole> for SelectedFeedRole {
+    fn from(value: SystemFeedRole) -> Self {
+        match value {
+            SystemFeedRole::Input => Self::Input,
+            SystemFeedRole::Reference => Self::Reference,
+            SystemFeedRole::Stream => Self::Stream,
+        }
+    }
+}
+
+impl From<crate::feed_plan::FeedRole> for SelectedFeedRole {
+    fn from(value: crate::feed_plan::FeedRole) -> Self {
+        match value {
+            crate::feed_plan::FeedRole::Input => Self::Input,
+            crate::feed_plan::FeedRole::Reference => Self::Reference,
+            crate::feed_plan::FeedRole::Stream => Self::Stream,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SelectedFeedMetadata {
-    pub event_type: EventType,
-    pub feed_role: Option<SystemFeedRole>,
+    event_type: EventType,
+    role: SelectedFeedRole,
+}
+
+impl SelectedFeedMetadata {
+    pub fn new(event_type: EventType, role: SelectedFeedRole) -> Self {
+        Self { event_type, role }
+    }
+
+    pub fn unscoped(event_type: EventType) -> Self {
+        Self::new(event_type, SelectedFeedRole::Unspecified)
+    }
+
+    pub fn event_type(&self) -> &EventType {
+        &self.event_type
+    }
+
+    pub fn role(&self) -> SelectedFeedRole {
+        self.role
+    }
+
+    pub fn system_feed_role(&self) -> Option<SystemFeedRole> {
+        self.role.as_system_feed_role()
+    }
+
+    pub(super) fn matches_event_type(&self, event_type: &str) -> bool {
+        crate::feed_plan::declared_event_type_matches(self.event_type.as_str(), event_type, None)
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub(super) struct SelectedDataSeqByEventType {
+    by_event_type: HashMap<EventType, SeqNo>,
+}
+
+impl SelectedDataSeqByEventType {
+    pub(super) fn increment(&mut self, event_type: impl Into<EventType>) {
+        let seq = self
+            .by_event_type
+            .entry(event_type.into())
+            .or_insert(SeqNo(0));
+        seq.0 = seq.0.saturating_add(1);
+    }
+
+    pub(super) fn seq_for_feed(&self, feed: &SelectedFeedMetadata) -> SeqNo {
+        self.by_event_type
+            .iter()
+            .find(|(event_type, _)| feed.matches_event_type(event_type.as_str()))
+            .map(|(_, seq)| *seq)
+            .unwrap_or(SeqNo(0))
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub(super) struct AdvertisedWriterSeqByEventType {
+    by_event_type: BTreeMap<EventType, SeqNo>,
+}
+
+impl AdvertisedWriterSeqByEventType {
+    pub(super) fn is_empty(&self) -> bool {
+        self.by_event_type.is_empty()
+    }
+
+    pub(super) fn replace_from_eof(
+        &mut self,
+        writer_seq_by_event_type: &BTreeMap<EventType, SeqNo>,
+    ) {
+        self.by_event_type = writer_seq_by_event_type.clone();
+    }
+
+    pub(super) fn seq_for_feed(&self, feed: &SelectedFeedMetadata) -> Option<SeqNo> {
+        self.by_event_type
+            .iter()
+            .find(|(event_type, _)| feed.matches_event_type(event_type.as_str()))
+            .map(|(_, seq)| *seq)
+    }
 }
 
 /// Progress tracking for a single upstream reader.

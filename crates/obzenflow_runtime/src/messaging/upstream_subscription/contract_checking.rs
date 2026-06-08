@@ -50,9 +50,9 @@ struct DirectFeedContractEvidence {
     advertised_writer_seq: SeqNo,
     pass: bool,
     reason: Option<EventViolationCause>,
-    raw_failure: Option<(String, ViolationCause)>,
+    raw_failure: Option<(ContractName, ViolationCause)>,
     overridden_by_policy: bool,
-    contract_results: Vec<(String, ContractResult)>,
+    contract_results: Vec<(ContractName, ContractResult)>,
 }
 
 #[derive(Clone, Debug)]
@@ -62,7 +62,7 @@ struct DirectFeedProgressEvidence {
     feed_role: Option<SystemFeedRole>,
     reader_seq: SeqNo,
     advertised_writer_seq: Option<SeqNo>,
-    contract_results: Vec<(String, ContractResult)>,
+    contract_results: Vec<(ContractName, ContractResult)>,
     should_record_heartbeat: bool,
 }
 
@@ -165,8 +165,8 @@ where
                     None => (true, None, false),
                 };
                 DirectFeedContractEvidence {
-                    event_type: feed_chain.metadata.event_type.clone(),
-                    feed_role: feed_chain.metadata.feed_role,
+                    event_type: feed_chain.metadata.event_type().clone(),
+                    feed_role: feed_chain.metadata.system_feed_role(),
                     reader_seq,
                     advertised_writer_seq,
                     pass,
@@ -203,7 +203,7 @@ where
                         reader,
                         selected_event_type: Some(feed.event_type.clone()),
                         feed_role: feed.feed_role,
-                        contract_name: ContractName::from(contract_name.clone()),
+                        contract_name: contract_name.clone(),
                         status: status_label,
                         cause: cause_label,
                         reader_seq: Some(feed.reader_seq),
@@ -235,7 +235,7 @@ where
                             reader,
                             selected_event_type: Some(feed.event_type.clone()),
                             feed_role: feed.feed_role,
-                            contract_name: ContractName::from(contract_name.clone()),
+                            contract_name: contract_name.clone(),
                             original_cause: cause.clone(),
                             policy: ContractOverridePolicy::BreakerAware,
                         },
@@ -323,8 +323,8 @@ where
 
                 Some(DirectFeedProgressEvidence {
                     feed_index,
-                    event_type: feed_chain.metadata.event_type.clone(),
-                    feed_role: feed_chain.metadata.feed_role,
+                    event_type: feed_chain.metadata.event_type().clone(),
+                    feed_role: feed_chain.metadata.system_feed_role(),
                     reader_seq,
                     advertised_writer_seq: self
                         .advertised_writer_seq_for_feed(index, &feed_chain.metadata),
@@ -366,7 +366,7 @@ where
                         reader: reader_stage,
                         selected_event_type: Some(feed.event_type.clone()),
                         feed_role: feed.feed_role,
-                        contract_name: ContractName::from(contract_name.clone()),
+                        contract_name: contract_name.clone(),
                         status: status_label,
                         cause: cause_label,
                         reader_seq: Some(feed.reader_seq),
@@ -588,7 +588,7 @@ where
                         reader: reader_stage,
                         selected_event_type: selected_event_type.clone(),
                         feed_role,
-                        contract_name: ContractName::from(contract_name.clone()),
+                        contract_name: contract_name.clone(),
                         status: status_label,
                         cause: cause_label,
                         reader_seq: Some(progress_seq),
@@ -638,12 +638,13 @@ where
             return;
         };
 
-        let raw_failure: Option<(String, ViolationCause)> = results.iter().find_map(|(name, r)| {
-            let ContractResult::Failed(v) = r else {
-                return None;
-            };
-            Some((name.clone(), v.cause.clone()))
-        });
+        let raw_failure: Option<(ContractName, ViolationCause)> =
+            results.iter().find_map(|(name, r)| {
+                let ContractResult::Failed(v) = r else {
+                    return None;
+                };
+                Some((name.clone(), v.cause.clone()))
+            });
 
         let decision = policy_stack.decide(&results_only, &edge, &hints);
         match decision {
@@ -660,7 +661,7 @@ where
                             reader: reader_stage,
                             selected_event_type: selected_event_type.clone(),
                             feed_role,
-                            contract_name: ContractName::from(contract_name),
+                            contract_name,
                             original_cause: cause,
                             policy: ContractOverridePolicy::BreakerAware,
                         },
@@ -833,7 +834,7 @@ where
                             reader: reader_stage,
                             selected_event_type: selected_event_type.clone(),
                             feed_role,
-                            contract_name: ContractName::from(contract_name.clone()),
+                            contract_name: contract_name.clone(),
                             status: status_label,
                             cause: cause_label,
                             reader_seq: Some(progress_seq),
@@ -876,7 +877,7 @@ where
             };
 
             if let Some(policy_stack) = self.contract_policies.get(index).and_then(|p| p.as_ref()) {
-                let raw_failure: Option<(String, ViolationCause)> =
+                let raw_failure: Option<(ContractName, ViolationCause)> =
                     results.iter().find_map(|(name, r)| match r {
                         ContractResult::Failed(v) => Some((name.clone(), v.cause.clone())),
                         _ => None,
@@ -904,7 +905,7 @@ where
                                     reader: reader_stage,
                                     selected_event_type: selected_event_type.clone(),
                                     feed_role,
-                                    contract_name: ContractName::from(contract_name),
+                                    contract_name,
                                     original_cause: cause,
                                     policy: ContractOverridePolicy::BreakerAware,
                                 },

@@ -22,9 +22,10 @@ mod types;
 mod tests;
 
 pub use super::subscription_poller::{PollResult, SubscriptionPoller};
+use types::{AdvertisedWriterSeqByEventType, SelectedDataSeqByEventType};
 pub use types::{
     ContractConfig, ContractStatus, ContractTracker, ContractsWiring, EofOutcome, ReaderProgress,
-    SelectedFeedMetadata, StageInputPosition, SubscriptionState,
+    SelectedFeedMetadata, SelectedFeedRole, StageInputPosition, SubscriptionState,
 };
 
 use crate::contracts::ContractChain;
@@ -84,7 +85,7 @@ where
     ///
     /// When populated for a reader, non-selected Data events are consumed from
     /// the journal but not delivered to the stage handler.
-    selected_event_types_by_stage: HashMap<StageId, HashSet<String>>,
+    selected_event_types_by_stage: HashMap<StageId, HashSet<EventType>>,
 
     /// Selected logical feed metadata by upstream reader stage.
     selected_feeds_by_stage: HashMap<StageId, Vec<SelectedFeedMetadata>>,
@@ -95,10 +96,10 @@ where
 
     /// Per-reader, per-event-type count of selected Data events delivered as
     /// stage inputs.
-    selected_data_seq_by_reader_event_type: Vec<HashMap<EventType, SeqNo>>,
+    selected_data_seq_by_reader_event_type: Vec<SelectedDataSeqByEventType>,
 
     /// Per-reader producer EOF evidence keyed by event type.
-    advertised_writer_seq_by_reader_event_type: Vec<BTreeMap<EventType, SeqNo>>,
+    advertised_writer_seq_by_reader_event_type: Vec<AdvertisedWriterSeqByEventType>,
 
     /// Subscription state (mechanism)
     state: SubscriptionState,
@@ -213,7 +214,7 @@ where
             .filter(|selected| !selected.is_empty())
             .map(|selected| {
                 selected.iter().any(|selected_event_type| {
-                    declared_event_type_matches(selected_event_type, event_type, None)
+                    declared_event_type_matches(selected_event_type.as_str(), event_type, None)
                 })
             })
             .unwrap_or(true)
@@ -248,7 +249,7 @@ where
                     .iter()
                     .find(|(actual_event_type, _)| {
                         declared_event_type_matches(
-                            selected_event_type,
+                            selected_event_type.as_str(),
                             actual_event_type.as_str(),
                             None,
                         )
@@ -264,7 +265,7 @@ where
     }
 
     fn selected_feed_matches_event_type(feed: &SelectedFeedMetadata, event_type: &str) -> bool {
-        declared_event_type_matches(feed.event_type.as_str(), event_type, None)
+        feed.matches_event_type(event_type)
     }
 
     fn selected_reader_seq_for_feed(
@@ -274,14 +275,7 @@ where
     ) -> SeqNo {
         self.selected_data_seq_by_reader_event_type
             .get(reader_index)
-            .and_then(|reader_by_type| {
-                reader_by_type
-                    .iter()
-                    .find(|(event_type, _)| {
-                        Self::selected_feed_matches_event_type(feed, event_type.as_str())
-                    })
-                    .map(|(_, seq)| *seq)
-            })
+            .map(|reader_by_type| reader_by_type.seq_for_feed(feed))
             .unwrap_or(SeqNo(0))
     }
 
@@ -292,14 +286,7 @@ where
     ) -> Option<SeqNo> {
         self.advertised_writer_seq_by_reader_event_type
             .get(reader_index)
-            .and_then(|advertised_by_type| {
-                advertised_by_type
-                    .iter()
-                    .find(|(event_type, _)| {
-                        Self::selected_feed_matches_event_type(feed, event_type.as_str())
-                    })
-                    .map(|(_, seq)| *seq)
-            })
+            .and_then(|advertised_by_type| advertised_by_type.seq_for_feed(feed))
     }
 
     fn unique_selected_feed_for_stage(
@@ -321,7 +308,7 @@ where
             return (None, None);
         }
 
-        (Some(first.event_type.clone()), first.feed_role)
+        (Some(first.event_type().clone()), first.system_feed_role())
     }
 
     /// Bridge a sink delivery receipt write into the edge-scoped `ContractChain`

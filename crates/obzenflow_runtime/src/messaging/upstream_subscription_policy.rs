@@ -179,6 +179,7 @@ pub fn build_policy_stack_for_upstream(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use obzenflow_core::event::system_event::ContractName;
     use obzenflow_core::event::types::SeqNo;
     use obzenflow_core::{
         ContractEvidence, ContractResult, ContractViolation, StageId, ViolationCause,
@@ -187,7 +188,7 @@ mod tests {
 
     fn make_violation(cause: ViolationCause) -> ContractResult {
         ContractResult::Failed(ContractViolation {
-            contract_name: "transport".to_string(),
+            contract_name: ContractName::from("transport"),
             upstream_stage: StageId::new(),
             downstream_stage: StageId::new(),
             detected_at: chrono::Utc::now(),
@@ -212,7 +213,7 @@ mod tests {
         };
 
         let results = vec![ContractResult::Passed(ContractEvidence {
-            contract_name: "transport".to_string(),
+            contract_name: ContractName::from("transport"),
             upstream_stage: StageId::new(),
             downstream_stage: StageId::new(),
             verified_at: chrono::Utc::now(),

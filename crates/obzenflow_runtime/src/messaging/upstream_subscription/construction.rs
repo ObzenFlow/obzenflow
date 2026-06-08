@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
+use super::types::{AdvertisedWriterSeqByEventType, SelectedDataSeqByEventType};
 use super::{
     ContractTracker, ContractsWiring, DeliveryFilter, FeedContractChain, SelectedFeedMetadata,
     SubscriptionState, UpstreamSubscription,
@@ -168,8 +169,15 @@ where
             delivery_filter: DeliveryFilter::All,
             owner_label: owner_label.to_string(),
             selected_data_seq_by_reader: vec![SeqNo(0); readers.len()],
-            selected_data_seq_by_reader_event_type: vec![HashMap::new(); readers.len()],
-            advertised_writer_seq_by_reader_event_type: vec![Default::default(); readers.len()],
+            selected_data_seq_by_reader_event_type: vec![
+                SelectedDataSeqByEventType::default();
+                readers.len()
+            ],
+            advertised_writer_seq_by_reader_event_type: vec![
+                AdvertisedWriterSeqByEventType::default(
+                );
+                readers.len()
+            ],
             readers,
             selected_event_types_by_stage: HashMap::new(),
             selected_feeds_by_stage: HashMap::new(),
@@ -199,7 +207,7 @@ where
     /// Configure selected Data event types per upstream reader.
     pub fn with_selected_event_types(
         mut self,
-        selected_event_types_by_stage: HashMap<StageId, HashSet<String>>,
+        selected_event_types_by_stage: HashMap<StageId, HashSet<EventType>>,
     ) -> Self {
         self.selected_feeds_by_stage = selected_event_types_by_stage
             .iter()
@@ -207,10 +215,7 @@ where
                 let feeds = event_types
                     .iter()
                     .cloned()
-                    .map(|event_type| SelectedFeedMetadata {
-                        event_type: EventType::from(event_type),
-                        feed_role: None,
-                    })
+                    .map(SelectedFeedMetadata::unscoped)
                     .collect();
                 (*stage_id, feeds)
             })
@@ -231,7 +236,7 @@ where
                     *stage_id,
                     feeds
                         .iter()
-                        .map(|feed| feed.event_type.to_string())
+                        .map(|feed| feed.event_type().clone())
                         .collect::<HashSet<_>>(),
                 )
             })

@@ -4,7 +4,7 @@
 
 use super::{
     ContractConfig, ContractStatus, ContractsWiring, PollResult, ReaderProgress,
-    SelectedFeedMetadata, UpstreamSubscription,
+    SelectedFeedMetadata, SelectedFeedRole, UpstreamSubscription,
 };
 use crate::messaging::upstream_subscription_policy::build_policy_stack_for_upstream;
 use async_trait::async_trait;
@@ -19,7 +19,7 @@ use obzenflow_core::event::payloads::effect_payload::{
 };
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::system_event::{
-    ContractOverridePolicy, ContractResultStatusLabel, SystemEvent, SystemEventType, SystemFeedRole,
+    ContractOverridePolicy, ContractResultStatusLabel, SystemEvent, SystemEventType,
 };
 use obzenflow_core::event::types::{
     Count, DurationMs, SeqNo, ViolationCause as EventViolationCause,
@@ -1642,10 +1642,10 @@ async fn transport_only_filters_unselected_data_and_reconciles_selected_writer_s
     let mut selected_feeds = HashMap::new();
     selected_feeds.insert(
         upstream_stage,
-        vec![SelectedFeedMetadata {
-            event_type: EventType::from("test.selected.v1"),
-            feed_role: Some(SystemFeedRole::Input),
-        }],
+        vec![SelectedFeedMetadata::new(
+            EventType::from("test.selected.v1"),
+            SelectedFeedRole::Input,
+        )],
     );
 
     let mut subscription = UpstreamSubscription::new_with_names("test_owner", &upstreams)
@@ -1800,14 +1800,11 @@ async fn multi_selected_feeds_emit_direct_contract_status_per_feed() {
     selected_feeds.insert(
         upstream_stage,
         vec![
-            SelectedFeedMetadata {
-                event_type: EventType::from("test.first.v1"),
-                feed_role: Some(SystemFeedRole::Input),
-            },
-            SelectedFeedMetadata {
-                event_type: EventType::from("test.second.v1"),
-                feed_role: Some(SystemFeedRole::Reference),
-            },
+            SelectedFeedMetadata::new(EventType::from("test.first.v1"), SelectedFeedRole::Input),
+            SelectedFeedMetadata::new(
+                EventType::from("test.second.v1"),
+                SelectedFeedRole::Reference,
+            ),
         ],
     );
 
@@ -1940,14 +1937,11 @@ async fn multi_selected_feeds_emit_midflight_contract_results_per_feed() {
     selected_feeds.insert(
         upstream_stage,
         vec![
-            SelectedFeedMetadata {
-                event_type: EventType::from("test.first.v1"),
-                feed_role: Some(SystemFeedRole::Input),
-            },
-            SelectedFeedMetadata {
-                event_type: EventType::from("test.second.v1"),
-                feed_role: Some(SystemFeedRole::Reference),
-            },
+            SelectedFeedMetadata::new(EventType::from("test.first.v1"), SelectedFeedRole::Input),
+            SelectedFeedMetadata::new(
+                EventType::from("test.second.v1"),
+                SelectedFeedRole::Reference,
+            ),
         ],
     );
 
