@@ -1424,7 +1424,8 @@ where
     };
 
     // 4. Wrap into a ChainEvent, copying metadata
-    let mut ev = ChainEventFactory::data_event(event.writer_id, Out::EVENT_TYPE, out_value);
+    let event_type = Out::versioned_event_type();
+    let mut ev = ChainEventFactory::data_event(event.writer_id, &event_type, out_value);
     copy_metadata_from(&mut ev, event);
 
     vec![ev]

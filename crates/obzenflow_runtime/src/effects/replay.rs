@@ -3,8 +3,6 @@
 // https://obzenflow.dev
 
 use super::*;
-use obzenflow_core::EventType;
-
 pub(super) fn effect_record_from_event(
     event: &ChainEvent,
 ) -> Result<Option<EffectRecord>, EffectError> {
@@ -298,16 +296,10 @@ where
     }
 }
 
-pub(super) fn effect_record_group_to_events<T>(
+pub(super) fn effect_record_group_to_facts(
     records: &[&EffectRecord],
-    writer_id: WriterId,
-    parent: &ChainEvent,
-) -> Result<Vec<ChainEvent>, EffectError>
-where
-    T: TypedFactSet,
-{
+) -> Result<Option<Vec<TypedFact>>, EffectError> {
     validate_effect_outcome_group(records)?;
-    let mut events = Vec::new();
     let [single] = records else {
         let mut ordered = records.to_vec();
         ordered.sort_by_key(|record| match &record.outcome {
@@ -317,11 +309,12 @@ where
             } => outcome_fact_ordinal.get(),
             _ => u32::MAX,
         });
+        let mut facts = Vec::new();
         for record in ordered {
             let EffectOutcomePayload::SucceededFact {
                 event_type,
                 output,
-                outcome_fact_ordinal,
+                ..
             } = &record.outcome
             else {
                 return Err(EffectError::EffectProvenanceMismatch(
@@ -329,79 +322,28 @@ where
                         .to_string(),
                 ));
             };
-            events.push(effect_record_fact_event(
-                writer_id,
-                parent,
-                record,
-                event_type,
-                output.clone(),
-                *outcome_fact_ordinal,
-            )?);
+            facts.push(TypedFact {
+                event_type: event_type.clone(),
+                payload: output.clone(),
+            });
         }
-        return Ok(events);
+        return Ok(Some(facts));
     };
 
     match &single.outcome {
         EffectOutcomePayload::SucceededFact {
             event_type,
             output,
-            outcome_fact_ordinal,
+            ..
         } => {
-            events.push(effect_record_fact_event(
-                writer_id,
-                parent,
-                single,
-                event_type,
-                output.clone(),
-                *outcome_fact_ordinal,
-            )?);
-            Ok(events)
+            Ok(Some(vec![TypedFact {
+                event_type: event_type.clone(),
+                payload: output.clone(),
+            }]))
         }
-        EffectOutcomePayload::Succeeded { output } => {
-            let fact_types = T::fact_types();
-            let [fact_type] = fact_types.as_slice() else {
-                return Err(EffectError::EffectProvenanceMismatch(
-                    "legacy single-payload effect success cannot materialize a multi-fact output"
-                        .to_string(),
-                ));
-            };
-            events.push(effect_record_fact_event(
-                writer_id,
-                parent,
-                single,
-                &fact_type.event_type,
-                output.clone(),
-                OutcomeFactOrdinal::new(0),
-            )?);
-            Ok(events)
-        }
-        EffectOutcomePayload::Failed { .. } => Ok(Vec::new()),
+        EffectOutcomePayload::Succeeded { .. } => Ok(None),
+        EffectOutcomePayload::Failed { .. } => recorded_failure_from_outcome(&single.outcome),
     }
-}
-
-fn effect_record_fact_event(
-    writer_id: WriterId,
-    parent: &ChainEvent,
-    record: &EffectRecord,
-    event_type: &EventType,
-    output: Value,
-    outcome_fact_ordinal: OutcomeFactOrdinal,
-) -> Result<ChainEvent, EffectError> {
-    let mut event =
-        ChainEventFactory::derived_data_event(writer_id, parent, event_type.as_str(), output);
-    event.id = deterministic_event_id(
-        record.cursor.recorded_flow_id.as_str(),
-        record.cursor.stage_key.as_str(),
-        StageInputPosition(record.cursor.input_seq.get()),
-        outcome_fact_ordinal.get(),
-    );
-    event.processing_info.event_time = deterministic_event_time(
-        StageInputPosition(record.cursor.input_seq.get()),
-        outcome_fact_ordinal.get(),
-    );
-    let mut provenance = EffectProvenance::from_record(record, EffectFactOwner::User);
-    provenance.outcome_fact_ordinal = Some(outcome_fact_ordinal);
-    Ok(event.with_effect_provenance(provenance))
 }
 
 pub(super) fn is_routable_output_fact(

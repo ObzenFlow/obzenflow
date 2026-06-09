@@ -75,6 +75,6 @@ use commit::{
 use identity::{descriptor_for_effect, descriptor_hash, hash_json_value};
 use replay::{
     decode_effect_outcome, decode_effect_outcome_group, effect_fact_set_error,
-    effect_record_from_event, effect_record_group_to_events, is_routable_output_fact,
+    effect_record_from_event, effect_record_group_to_facts, is_routable_output_fact,
     recorded_failure_from_outcome, validate_effect_outcome_group,
 };

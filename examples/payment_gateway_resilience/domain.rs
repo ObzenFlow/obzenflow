@@ -139,21 +139,6 @@ impl PaymentDeclineReason {
     }
 }
 
-/// Gateway authorization outcome before the flow branches into final channels.
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct PaymentAuthorizationOutcome {
-    pub order_id: String,
-    pub customer_id: String,
-    pub amount_cents: u64,
-    pub phase: TrafficPhase,
-    pub decision: GatewayPaymentDecision,
-}
-
-impl TypedPayload for PaymentAuthorizationOutcome {
-    const EVENT_TYPE: &'static str = "payment.authorization_outcome";
-    const SCHEMA_VERSION: u32 = 1;
-}
-
 /// Result of authorizing payment at the external gateway.
 ///
 /// This is a fact produced by this flow after the gateway authorizes the order.

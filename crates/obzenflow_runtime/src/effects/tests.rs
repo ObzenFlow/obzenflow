@@ -721,7 +721,98 @@ async fn perform_records_and_replays_multi_fact_effect_outcome_group() {
 
     assert_eq!(replay_output, live_output);
     assert_eq!(calls.load(Ordering::SeqCst), 1);
-    assert!(replay_journal.events().is_empty());
+    let replay_events = replay_journal.events();
+    assert_eq!(replay_events.len(), 2);
+    assert_eq!(replay_events[0].event.id, events[0].event.id);
+    assert_eq!(replay_events[1].event.id, events[1].event.id);
+    assert_eq!(
+        replay_events[0].event.effect_provenance,
+        events[0].event.effect_provenance
+    );
+    assert_eq!(
+        replay_events[1].event.effect_provenance,
+        events[1].event.effect_provenance
+    );
+}
+
+#[tokio::test]
+async fn replay_success_effect_fact_advances_output_ordinals_before_emit() {
+    let stage_id = StageId::new();
+    let live_journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
+    let parent = parent_envelope(WriterId::from(stage_id));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut live_ctx = invocation_context(live_journal.clone(), parent.clone(), None);
+    live_ctx.emit_enabled = true;
+    live_ctx.output_contract = output_contract_for_many(vec![
+        output_descriptor_for::<CountingOutput>(),
+        output_descriptor_for::<SecondOutput>(),
+    ]);
+    let live_flow_id = live_ctx.flow_id.to_string();
+    let mut live_effects = Effects::new(live_ctx);
+
+    let live_output = live_effects
+        .perform(CountingEffect {
+            value: 41,
+            label: "count",
+            calls: calls.clone(),
+        })
+        .await
+        .expect("live effect succeeds");
+    live_effects
+        .emit(SecondOutput {
+            value: "after-effect".to_string(),
+        })
+        .await
+        .expect("live emit succeeds");
+
+    assert_eq!(live_output, CountingOutput { value: 42 });
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let live_events = live_journal.events();
+    assert_eq!(live_events.len(), 2);
+    assert_eq!(
+        live_events[0].event.id,
+        deterministic_event_id(&live_flow_id, "effect_stage", StageInputPosition(1), 0)
+    );
+    assert_eq!(
+        live_events[1].event.id,
+        deterministic_event_id(&live_flow_id, "effect_stage", StageInputPosition(1), 1)
+    );
+
+    let records = effect_records(&live_journal);
+    let history = Arc::new(
+        EffectHistory::from_records(live_flow_id, records).expect("grouped history loads"),
+    );
+    let replay_journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
+    let mut replay_ctx = invocation_context(replay_journal.clone(), parent, Some(history));
+    replay_ctx.emit_enabled = true;
+    replay_ctx.output_contract = output_contract_for_many(vec![
+        output_descriptor_for::<CountingOutput>(),
+        output_descriptor_for::<SecondOutput>(),
+    ]);
+    let mut replay_effects = Effects::new(replay_ctx);
+
+    let replay_output = replay_effects
+        .perform(CountingEffect {
+            value: 41,
+            label: "count",
+            calls: calls.clone(),
+        })
+        .await
+        .expect("replay reconstructs effect output");
+    replay_effects
+        .emit(SecondOutput {
+            value: "after-effect".to_string(),
+        })
+        .await
+        .expect("replay emit succeeds");
+
+    assert_eq!(replay_output, live_output);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let replay_events = replay_journal.events();
+    assert_eq!(replay_events.len(), 2);
+    assert_eq!(replay_events[0].event.id, live_events[0].event.id);
+    assert_eq!(replay_events[1].event.id, live_events[1].event.id);
+    assert_ne!(replay_events[1].event.id, live_events[0].event.id);
 }
 
 #[test]

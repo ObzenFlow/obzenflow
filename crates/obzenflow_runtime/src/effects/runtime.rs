@@ -214,14 +214,15 @@ impl Effects {
 
         if let Some(history) = &self.ctx.effect_history {
             if let Some(records) = history.find_group(&cursor) {
-                let output =
-                    self.replay_records_output::<E::Output>(&records, cursor, descriptor_hash)?;
-                let events = effect_record_group_to_events::<E::Output>(
+                let output = self.replay_records_output::<E::Output>(
                     &records,
-                    self.ctx.writer_id,
-                    &self.ctx.parent.event,
+                    cursor.clone(),
+                    descriptor_hash.clone(),
                 )?;
-                self.committed_facts.extend(events);
+                if let Some(facts) = effect_record_group_to_facts(&records)? {
+                    self.append_success_facts(cursor, descriptor_hash, descriptor, facts)
+                        .await?;
+                }
                 return Ok(output);
             }
 
