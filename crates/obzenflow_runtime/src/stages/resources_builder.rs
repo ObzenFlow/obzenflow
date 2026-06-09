@@ -11,14 +11,17 @@ use crate::backpressure::{
     BackpressurePlan, BackpressureReader, BackpressureRegistry, BackpressureWriter,
 };
 use crate::effects::{EffectDeclaration, EffectPortRegistry, EffectRuntimeMode};
+use crate::feed_plan::{FeedPlan, LogicalFeed, StageOutputContract};
 use crate::id_conversions::StageIdExt;
 use crate::message_bus::FsmMessageBus;
-use crate::messaging::upstream_subscription::{ContractsWiring, UpstreamSubscription};
+use crate::messaging::upstream_subscription::{
+    ContractsWiring, SelectedFeedMetadata, SelectedFeedRole, UpstreamSubscription,
+};
 use crate::replay::ReplayArchive;
 use crate::stages::LivenessSnapshots;
 use obzenflow_core::event::SystemEvent;
 use obzenflow_core::journal::Journal;
-use obzenflow_core::{ChainEvent, FlowId, StageId, SystemId};
+use obzenflow_core::{ChainEvent, EventType, FlowId, StageId, SystemId};
 use obzenflow_topology::Topology;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -39,6 +42,7 @@ pub struct BoundSubscriptionFactory {
     /// Owner label for logging/attribution
     pub owner_label: String,
     journals_with_names: Vec<(StageId, String, Arc<dyn Journal<ChainEvent>>)>,
+    selected_feeds_by_stage: HashMap<StageId, Vec<SelectedFeedMetadata>>,
 }
 
 impl SubscriptionFactory {
@@ -90,7 +94,19 @@ impl SubscriptionFactory {
         BoundSubscriptionFactory {
             owner_label: "unknown_owner".to_string(),
             journals_with_names,
+            selected_feeds_by_stage: HashMap::new(),
         }
+    }
+
+    /// Bind this factory and configure selected logical feeds for each upstream.
+    pub fn bind_with_selected_feeds(
+        &self,
+        journals: &[(StageId, Arc<dyn Journal<ChainEvent>>)],
+        selected_feeds_by_stage: HashMap<StageId, Vec<SelectedFeedMetadata>>,
+    ) -> BoundSubscriptionFactory {
+        let mut factory = self.bind(journals);
+        factory.selected_feeds_by_stage = selected_feeds_by_stage;
+        factory
     }
 }
 
@@ -99,7 +115,10 @@ impl BoundSubscriptionFactory {
     pub async fn build(&self) -> Result<UpstreamSubscription<ChainEvent>, String> {
         UpstreamSubscription::new_with_names(&self.owner_label, &self.journals_with_names)
             .await
-            .map(|sub| sub.transport_only())
+            .map(|sub| {
+                sub.with_selected_feeds(self.selected_feeds_by_stage.clone())
+                    .transport_only()
+            })
             .map_err(|e| format!("Failed to create subscription: {e:?}"))
     }
 
@@ -112,6 +131,7 @@ impl BoundSubscriptionFactory {
             UpstreamSubscription::new_with_names(&self.owner_label, &self.journals_with_names)
                 .await
                 .map_err(|e| format!("Failed to create subscription: {e:?}"))?
+                .with_selected_feeds(self.selected_feeds_by_stage.clone())
                 .with_contracts(wiring)
                 .transport_only();
 
@@ -130,6 +150,25 @@ impl BoundSubscriptionFactory {
             .map(|(id, _, _)| *id)
             .collect()
     }
+}
+
+fn selected_feeds_by_upstream(
+    input_feeds: &[LogicalFeed],
+) -> HashMap<StageId, Vec<SelectedFeedMetadata>> {
+    let mut selected: HashMap<StageId, Vec<SelectedFeedMetadata>> = HashMap::new();
+    for feed in input_feeds {
+        let Some(event_type) = feed.selected_payload.event_type.clone() else {
+            continue;
+        };
+        selected
+            .entry(feed.key.upstream_stage)
+            .or_default()
+            .push(SelectedFeedMetadata::new(
+                EventType::from(event_type),
+                SelectedFeedRole::from(feed.key.role),
+            ));
+    }
+    selected
 }
 
 /// Resources provided to stage creation
@@ -151,6 +190,12 @@ pub struct StageResources {
 
     /// Friendly upstream stage names keyed by StageId (for diagnostics/instrumentation)
     pub upstream_stage_names: std::collections::HashMap<StageId, String>,
+
+    /// Stage output contract selected by the flow build (FLOWIP-120b).
+    pub output_contract: StageOutputContract,
+
+    /// Logical feeds selected for this stage's inbound edges (FLOWIP-120b).
+    pub input_feeds: Vec<LogicalFeed>,
 
     /// Factory for creating subscriptions with pre-computed metadata
     /// All stages must use this factory to create their subscriptions
@@ -210,6 +255,7 @@ pub struct StageResourcesBuilder {
     backpressure_plan: BackpressurePlan,
     replay_archive: Option<Arc<dyn ReplayArchive>>,
     effect_ports: EffectPortRegistry,
+    feed_plan: FeedPlan,
 }
 
 impl StageResourcesBuilder {
@@ -232,6 +278,7 @@ impl StageResourcesBuilder {
             backpressure_plan: BackpressurePlan::disabled(),
             replay_archive: None,
             effect_ports: EffectPortRegistry::new(),
+            feed_plan: FeedPlan::default(),
         }
     }
 
@@ -250,6 +297,12 @@ impl StageResourcesBuilder {
     /// Inject flow-scoped typed ports for replay-safe effects.
     pub fn with_effect_ports(mut self, effect_ports: EffectPortRegistry) -> Self {
         self.effect_ports = effect_ports;
+        self
+    }
+
+    /// Inject flow-scoped logical feed metadata derived by the DSL.
+    pub fn with_feed_plan(mut self, feed_plan: FeedPlan) -> Self {
+        self.feed_plan = feed_plan;
         self
     }
 
@@ -414,7 +467,15 @@ impl StageResourcesBuilder {
             // Keep a copy for logging before moving into the factory
             let all_stage_names_for_log = all_stage_names.clone();
             let subscription_factory = SubscriptionFactory::new(all_stage_names);
-            let mut upstream_subscription_factory = subscription_factory.bind(&upstream_journals);
+            let output_contract = self
+                .feed_plan
+                .output_contract(stage_id)
+                .cloned()
+                .unwrap_or_default();
+            let input_feeds = self.feed_plan.input_feeds(stage_id);
+            let selected_feeds_by_stage = selected_feeds_by_upstream(&input_feeds);
+            let mut upstream_subscription_factory = subscription_factory
+                .bind_with_selected_feeds(&upstream_journals, selected_feeds_by_stage);
             upstream_subscription_factory.owner_label = stage_info.name.clone();
 
             let resources = StageResources {
@@ -424,6 +485,8 @@ impl StageResourcesBuilder {
                 system_journal: self.system_journal.clone(),
                 upstream_journals: upstream_journals.clone(),
                 upstream_stage_names,
+                output_contract,
+                input_feeds,
                 subscription_factory,
                 upstream_subscription_factory,
                 message_bus: message_bus.clone(),
@@ -469,6 +532,7 @@ impl StageResourcesBuilder {
             error_journals: all_error_journals,
             stage_resources,
             message_bus,
+            feed_plan: self.feed_plan,
         })
     }
 }
@@ -501,6 +565,9 @@ pub struct StageResourcesSet {
 
     /// Shared message bus
     pub message_bus: Arc<FsmMessageBus>,
+
+    /// Flow-scoped logical feed plan derived by the DSL (FLOWIP-120b).
+    pub feed_plan: FeedPlan,
 }
 
 impl StageResourcesSet {

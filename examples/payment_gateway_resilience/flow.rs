@@ -7,9 +7,9 @@
 //! One upstream event stream, four business outcome channels:
 //!
 //! ```text
-//! orders (source) -> valid orders -> gateway -> authorized payments -> shipping sink
-//!                 |                       \-> gateway declines -> order-status sink
-//!                 |                       \-> unavailable authorizations -> review sink
+//! orders (source) -> valid orders -> gateway -> paid-order sink
+//!                 |                       \-> gateway-decline sink
+//!                 |                       \-> unavailable-authorization sink
 //!                 \-> invalid orders -> order-status sink
 //! ```
 //!
@@ -17,7 +17,7 @@
 //! `AuthorizePayment` effect (see `gateway.rs`).
 //! On a live run the effect executes once and the runtime journals its result;
 //! on a replay the runtime returns that recorded gateway decision without calling
-//! the gateway again.
+//! the gateway again. The gateway then emits the named payment fact that happened.
 //!
 //! The circuit breaker on the gateway stage is the second, independent layer:
 //! it watches the live effect boundary and, once the dependency looks unhealthy,
@@ -25,8 +25,8 @@
 //! `README.md`.
 
 use super::domain::{
-    CustomerOrderPlaced, GatewayPaymentDecision, InvalidOrder, PaymentAuthorizationOutcome,
-    PaymentAuthorizationUnavailable, PaymentAuthorized, PaymentDeclined, ValidatedOrder,
+    CustomerOrderPlaced, GatewayPaymentDecision, InvalidOrder, PaymentAuthorizationUnavailable,
+    PaymentAuthorized, PaymentDeclined, ValidatedOrder,
 };
 use super::fixtures;
 use super::gateway::{self, AuthorizePayment, GatewayTransform};
@@ -92,7 +92,12 @@ pub fn build_flow() -> obzenflow_dsl::FlowDefinition {
             //     half-open probe.
             // BreakerAware keeps transport contracts green while the breaker is open.
             gateway = effectful_transform!(
-                ValidatedOrder -> PaymentAuthorizationOutcome => GatewayTransform,
+                ValidatedOrder -> {
+                    GatewayPaymentDecision,
+                    PaymentAuthorized,
+                    PaymentDeclined,
+                    PaymentAuthorizationUnavailable
+                } => GatewayTransform,
                 effects: [AuthorizePayment],
                 middleware: [
                     CircuitBreakerBuilder::new(3)
@@ -112,20 +117,6 @@ pub fn build_flow() -> obzenflow_dsl::FlowDefinition {
                         .build()
                 ]
             );
-
-            // Gateway outcomes fan out into separate business channels. Each
-            // transform is a pure filter_map that keeps its own decision variant
-            // and yields None for the others, the same mechanism the local
-            // validation split above uses. Routing stays in the domain via Option.
-            authorized_payments = transform!(PaymentAuthorizationOutcome -> PaymentAuthorized => typed_transforms::filter_map(gateway::authorized_payment), [
-                backpressure(BACKPRESSURE_WINDOW)
-            ]);
-            gateway_declines = transform!(PaymentAuthorizationOutcome -> PaymentDeclined => typed_transforms::filter_map(gateway::declined_payment), [
-                backpressure(BACKPRESSURE_WINDOW)
-            ]);
-            authorization_unavailable = transform!(PaymentAuthorizationOutcome -> PaymentAuthorizationUnavailable => typed_transforms::filter_map(gateway::authorization_unavailable), [
-                backpressure(BACKPRESSURE_WINDOW)
-            ]);
 
             // Paid-order sink: in production this is the boundary a shipping
             // system would subscribe to.
@@ -156,13 +147,10 @@ pub fn build_flow() -> obzenflow_dsl::FlowDefinition {
             orders |> valid_orders;
             orders |> invalid_orders;
             valid_orders |> gateway;
-            gateway |> authorized_payments;
-            gateway |> gateway_declines;
-            gateway |> authorization_unavailable;
-            authorized_payments |> paid_orders;
+            gateway |> paid_orders;
             invalid_orders |> invalid_order_events;
-            gateway_declines |> declined_payments;
-            authorization_unavailable |> manual_review;
+            gateway |> declined_payments;
+            gateway |> manual_review;
         }
     }
 }

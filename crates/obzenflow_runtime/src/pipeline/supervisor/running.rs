@@ -143,6 +143,8 @@ pub(super) async fn dispatch_running(
                 obzenflow_core::event::SystemEventType::ContractStatus {
                     upstream,
                     reader,
+                    selected_event_type,
+                    feed_role,
                     pass,
                     reader_seq,
                     advertised_writer_seq,
@@ -161,21 +163,26 @@ pub(super) async fn dispatch_running(
                     let is_source = context.expected_sources.contains(upstream);
                     let is_final = advertised_writer_seq.is_some();
 
-                    // Record per-edge contract status.
-                    if *pass {
-                        context.contract_pairs.insert(
-                            (*upstream, *reader),
-                            ContractEdgeStatus::passed(*reader_seq, *advertised_writer_seq),
-                        );
+                    // Record contract status for every logical feed currently
+                    // represented by this stage-pair status event.
+                    let edge_status = if *pass {
+                        ContractEdgeStatus::passed(*reader_seq, *advertised_writer_seq)
                     } else {
-                        context.contract_pairs.insert(
-                            (*upstream, *reader),
-                            ContractEdgeStatus::failed(
-                                reason.clone(),
-                                *reader_seq,
-                                *advertised_writer_seq,
-                            ),
-                        );
+                        ContractEdgeStatus::failed(
+                            reason.clone(),
+                            *reader_seq,
+                            *advertised_writer_seq,
+                        )
+                    };
+                    for key in context.contract_keys_for_contract_event(
+                        *upstream,
+                        *reader,
+                        selected_event_type
+                            .as_ref()
+                            .map(|event_type| event_type.as_str()),
+                        feed_role.as_ref().map(|role| role.as_str()),
+                    ) {
+                        context.contract_pairs.insert(key, edge_status.clone());
                     }
 
                     if !pass {

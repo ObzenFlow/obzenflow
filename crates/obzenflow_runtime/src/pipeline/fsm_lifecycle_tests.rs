@@ -2,11 +2,15 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
+use super::{
+    build_pipeline_fsm_with_initial, FlowStopMode, PipelineAction, PipelineContext, PipelineEvent,
+    PipelineState,
+};
 use async_trait::async_trait;
 use obzenflow_core::event::types::ViolationCause;
-use obzenflow_core::event::MetricsCoordinationEvent;
 use obzenflow_core::event::{
-    ChainEvent, JournalEvent, JournalWriterId, SystemEvent, SystemEventType,
+    ChainEvent, JournalEvent, JournalWriterId, MetricsCoordinationEvent, SystemEvent,
+    SystemEventType,
 };
 use obzenflow_core::id::{FlowId, JournalId, SystemId};
 use obzenflow_core::journal::journal_error::JournalError;
@@ -16,11 +20,6 @@ use obzenflow_core::journal::Journal;
 use obzenflow_core::metrics::{MetricsExporter, NoOpMetricsExporter};
 use obzenflow_core::{EventEnvelope, StageId};
 use obzenflow_fsm::FsmAction;
-use obzenflow_runtime::message_bus::FsmMessageBus;
-use obzenflow_runtime::pipeline::fsm::{
-    build_pipeline_fsm_with_initial, FlowStopMode, PipelineContext, PipelineEvent, PipelineState,
-};
-use obzenflow_runtime::pipeline::PipelineAction;
 use obzenflow_topology::TopologyBuilder;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
@@ -149,7 +148,6 @@ where
         let guard = self.events.lock().expect("MemoryJournal: poisoned lock");
         let len = guard.len();
         let start = len.saturating_sub(count);
-        // Return most recent first, matching Journal contract.
         Ok(guard[start..].iter().rev().cloned().collect())
     }
 }
@@ -169,7 +167,6 @@ fn make_context(
 ) -> PipelineContext {
     PipelineContext {
         system_id,
-        bus: Arc::new(FsmMessageBus::new()),
         topology: make_topology(),
         flow_name: "test_flow".to_string(),
         flow_id: FlowId::new(),
@@ -410,7 +407,6 @@ async fn cancel_mode_drains_and_shuts_down_metrics_aggregator() {
         "expected Cleanup to consume metrics handle"
     );
 
-    // Verify the metrics supervisor drained and wrote its shutdown marker.
     let events = system_journal.read_causally_ordered().await.unwrap();
 
     let drained = events.iter().any(|envelope| {

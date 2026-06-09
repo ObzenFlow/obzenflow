@@ -9,7 +9,7 @@
 //! (reference and stream) with different behaviors.
 
 use obzenflow_core::event::context::{FlowContext, StageType};
-use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
+use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
 use obzenflow_core::event::types::SeqNo;
 use obzenflow_core::event::vector_clock::VectorClock;
 use obzenflow_core::event::{ChainEventFactory, EventEnvelope, SystemEvent};
@@ -24,6 +24,7 @@ use std::sync::Arc;
 
 use super::config::JoinReferenceMode;
 use crate::backpressure::{BackpressureReader, BackpressureWriter};
+use crate::feed_plan::StageOutputContract;
 use crate::messaging::upstream_subscription::{ContractConfig, ContractsWiring, ReaderProgress};
 use crate::messaging::UpstreamSubscription;
 use crate::metrics::instrumentation::StageInstrumentation;
@@ -373,6 +374,9 @@ pub struct JoinContext<H: JoinHandler> {
     /// Backpressure writer handle for this stage's journal (FLOWIP-086k).
     pub backpressure_writer: BackpressureWriter,
 
+    /// Declared stage output contract used by the shared output commit path.
+    pub output_contract: StageOutputContract,
+
     /// Backpressure readers keyed by upstream stage ID (FLOWIP-086k).
     pub backpressure_readers: HashMap<StageId, BackpressureReader>,
 
@@ -550,15 +554,16 @@ impl<H: JoinHandler + Send + Sync + 'static> FsmAction for JoinAction<H> {
                 // Always emit an EOF authored by this stage, preserving upstream
                 // metadata when available.
                 let buffered = ctx.buffered_eof.take();
-                let mut natural = true;
+                let mut eof_kind = EofKind::Natural;
                 let mut upstream_vector_clock = None;
                 let mut upstream_last_event = None;
                 let runtime_context = ctx.instrumentation.snapshot_with_control();
+                let writer_seq_by_event_type = ctx.instrumentation.data_writer_seq_by_event_type();
 
                 if let Some(buffered_event) = buffered {
                     if let obzenflow_core::event::ChainEventContent::FlowControl(
                         FlowControlPayload::Eof {
-                            natural: n,
+                            kind,
                             writer_seq: _writer_seq,
                             vector_clock,
                             last_event_id,
@@ -566,7 +571,7 @@ impl<H: JoinHandler + Send + Sync + 'static> FsmAction for JoinAction<H> {
                         },
                     ) = buffered_event.content.clone()
                     {
-                        natural = n;
+                        eof_kind = kind;
                         upstream_vector_clock = vector_clock;
                         upstream_last_event = last_event_id;
                         // We intentionally ignore the upstream writer_seq and
@@ -574,12 +579,13 @@ impl<H: JoinHandler + Send + Sync + 'static> FsmAction for JoinAction<H> {
                     }
                 }
 
-                let mut eof_event = ChainEventFactory::eof_event(writer_id, natural);
+                let mut eof_event = ChainEventFactory::eof_event_with_kind(writer_id, eof_kind);
 
                 if let obzenflow_core::event::ChainEventContent::FlowControl(
                     FlowControlPayload::Eof {
                         writer_id: ref mut eof_writer,
                         writer_seq,
+                        writer_seq_by_event_type: eof_writer_seq_by_event_type,
                         vector_clock,
                         last_event_id,
                         ..
@@ -588,6 +594,7 @@ impl<H: JoinHandler + Send + Sync + 'static> FsmAction for JoinAction<H> {
                 {
                     *eof_writer = Some(writer_id);
                     *writer_seq = Some(SeqNo(runtime_context.writer_seq));
+                    *eof_writer_seq_by_event_type = writer_seq_by_event_type;
                     if let Some(vc) = upstream_vector_clock {
                         *vector_clock = Some(vc);
                     }

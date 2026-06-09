@@ -8,6 +8,7 @@ use super::control_resolution::{
 };
 use super::flow_context_factory::make_flow_context;
 use crate::backpressure::{BackpressurePlan, BackpressureRegistry, BackpressureWriter};
+use crate::feed_plan::{FactVisibility, PayloadTypeDescriptor, StageOutputContract};
 use crate::id_conversions::StageIdExt;
 use crate::messaging::upstream_subscription::EofOutcome;
 use crate::metrics::instrumentation::StageInstrumentation;
@@ -30,7 +31,7 @@ use obzenflow_core::journal::journal_owner::JournalOwner;
 use obzenflow_core::journal::journal_reader::JournalReader;
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{EventEnvelope, SccId, StageId, WriterId};
-use obzenflow_topology::TopologyBuilder;
+use obzenflow_topology::{TopologyBuilder, TypeHintInfo};
 use serde_json::json;
 use std::collections::VecDeque;
 use std::num::NonZeroU64;
@@ -678,6 +679,17 @@ fn make_writer_with_window(window: NonZeroU64) -> (StageId, BackpressureWriter) 
     (s, writer)
 }
 
+fn output_contract_for_event_type(event_type: &str) -> StageOutputContract {
+    StageOutputContract {
+        outputs: vec![PayloadTypeDescriptor {
+            type_hint: TypeHintInfo::exact("test::Declared"),
+            event_type: Some(event_type.to_string()),
+            schema_version: Some(1),
+            visibility: FactVisibility::Unrouted,
+        }],
+    }
+}
+
 #[tokio::test]
 async fn drain_one_pending_reserves_before_journal_append_and_records_output_for_data() {
     let (stage_id, writer) = make_writer_with_window(NonZeroU64::new(1).expect("window"));
@@ -702,6 +714,7 @@ async fn drain_one_pending_reserves_before_journal_append_and_records_output_for
     let mut pulse = BackpressureActivityPulse::new();
     let mut backoff = IdleBackoff::exponential_with_cap(Duration::ZERO, Duration::ZERO);
     let mut pending_outputs = VecDeque::new();
+    let output_contract = output_contract_for_event_type("x");
 
     let event = ChainEventFactory::data_event(WriterId::from(stage_id), "x", json!({"n": 1}));
 
@@ -717,6 +730,7 @@ async fn drain_one_pending_reserves_before_journal_append_and_records_output_for
         &writer,
         &mut pulse,
         &mut backoff,
+        Some(&output_contract),
         &mut pending_outputs,
     )
     .await
@@ -728,6 +742,119 @@ async fn drain_one_pending_reserves_before_journal_append_and_records_output_for
             .events_emitted_total
             .load(std::sync::atomic::Ordering::Relaxed),
         1
+    );
+}
+
+#[tokio::test]
+async fn drain_one_pending_accepts_semantic_event_for_versioned_output_contract() {
+    let (stage_id, writer) = make_writer_with_window(NonZeroU64::new(1).expect("window"));
+
+    let flow_context = make_flow_context(
+        "flow",
+        "flow_id",
+        "stage",
+        stage_id,
+        obzenflow_core::event::context::StageType::Transform,
+    );
+
+    let data_journal: Arc<dyn Journal<ChainEvent>> = Arc::new(CreditCheckingJournal::new(
+        JournalOwner::stage(stage_id),
+        writer.clone(),
+        /* expected_credit_at_append */ 0,
+    ));
+    let system_journal: Arc<dyn Journal<SystemEvent>> =
+        Arc::new(NoopJournal::new(JournalOwner::stage(stage_id)));
+
+    let instrumentation = Arc::new(StageInstrumentation::new());
+    let mut pulse = BackpressureActivityPulse::new();
+    let mut backoff = IdleBackoff::exponential_with_cap(Duration::ZERO, Duration::ZERO);
+    let mut pending_outputs = VecDeque::new();
+    let output_contract = output_contract_for_event_type("semantic.test.v1");
+
+    let event =
+        ChainEventFactory::data_event(WriterId::from(stage_id), "semantic.test", json!({"n": 1}));
+
+    let outcome = drain_one_pending(
+        event,
+        &flow_context,
+        stage_id,
+        None,
+        &data_journal,
+        &system_journal,
+        None,
+        &instrumentation,
+        &writer,
+        &mut pulse,
+        &mut backoff,
+        Some(&output_contract),
+        &mut pending_outputs,
+    )
+    .await
+    .expect("semantic event should satisfy versioned contract");
+
+    assert_eq!(outcome, DrainOutcome::Committed { was_data: true });
+    assert_eq!(
+        instrumentation
+            .events_emitted_total
+            .load(std::sync::atomic::Ordering::Relaxed),
+        1
+    );
+}
+
+#[tokio::test]
+async fn drain_one_pending_rejects_undeclared_data_output() {
+    let (stage_id, writer) = make_writer_with_window(NonZeroU64::new(1).expect("window"));
+
+    let flow_context = make_flow_context(
+        "flow",
+        "flow_id",
+        "stage",
+        stage_id,
+        obzenflow_core::event::context::StageType::Transform,
+    );
+
+    let data_journal: Arc<dyn Journal<ChainEvent>> =
+        Arc::new(NoopJournal::new(JournalOwner::stage(stage_id)));
+    let system_journal: Arc<dyn Journal<SystemEvent>> =
+        Arc::new(NoopJournal::new(JournalOwner::stage(stage_id)));
+
+    let instrumentation = Arc::new(StageInstrumentation::new());
+    let mut pulse = BackpressureActivityPulse::new();
+    let mut backoff = IdleBackoff::exponential_with_cap(Duration::ZERO, Duration::ZERO);
+    let mut pending_outputs = VecDeque::new();
+    let output_contract = output_contract_for_event_type("declared.v1");
+
+    let event =
+        ChainEventFactory::data_event(WriterId::from(stage_id), "undeclared.v1", json!({"n": 1}));
+
+    let err = drain_one_pending(
+        event,
+        &flow_context,
+        stage_id,
+        None,
+        &data_journal,
+        &system_journal,
+        None,
+        &instrumentation,
+        &writer,
+        &mut pulse,
+        &mut backoff,
+        Some(&output_contract),
+        &mut pending_outputs,
+    )
+    .await
+    .expect_err("undeclared output must fail closed");
+
+    assert!(
+        err.to_string().contains("undeclared.v1"),
+        "error should identify undeclared event type: {err}"
+    );
+    assert_eq!(writer.min_downstream_credit(), 1);
+    assert_eq!(
+        instrumentation
+            .events_emitted_total
+            .load(std::sync::atomic::Ordering::Relaxed),
+        0
     );
 }
 
@@ -770,6 +897,7 @@ async fn drain_one_pending_does_not_reserve_for_non_data() {
         &writer,
         &mut pulse,
         &mut backoff,
+        None,
         &mut pending_outputs,
     )
     .await
@@ -827,6 +955,7 @@ async fn drain_one_pending_requeues_and_returns_backed_off_when_reserve_fails() 
         &writer,
         &mut pulse,
         &mut backoff,
+        None,
         &mut pending_outputs,
     )
     .await

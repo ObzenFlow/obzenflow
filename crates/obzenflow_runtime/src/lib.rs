@@ -10,6 +10,7 @@ pub mod bootstrap;
 pub mod contracts;
 pub mod effects;
 pub mod errors;
+pub mod feed_plan;
 pub mod id_conversions;
 pub mod journal;
 pub mod message_bus;
@@ -43,10 +44,9 @@ pub mod testing;
 /// constructing flows,
 /// [`FlowHandle`](crate::pipeline::FlowHandle) for controlling a running
 /// pipeline, and
-/// [`PipelineState`](crate::pipeline::PipelineState) /
-/// [`PipelineEvent`](crate::pipeline::PipelineEvent) /
-/// [`PipelineAction`](crate::pipeline::PipelineAction) for observing
-/// lifecycle transitions.
+/// [`PipelineState`](crate::pipeline::PipelineState) and
+/// [`PipelineEvent`](crate::pipeline::PipelineEvent) for observing lifecycle
+/// transitions.
 ///
 /// **Message bus** —
 /// [`FsmMessageBus`](crate::message_bus::FsmMessageBus) (the inter-stage
@@ -79,7 +79,7 @@ pub mod prelude {
 
     // Pipeline
     pub use crate::pipeline::{
-        FlowHandle, ObserverConfig, PipelineAction, PipelineBuilder, PipelineEvent,
+        FlowHandle, FlowStopMode, ObserverConfig, PipelineBuilder, PipelineEvent,
         PipelineStageConfig, PipelineState,
     };
 

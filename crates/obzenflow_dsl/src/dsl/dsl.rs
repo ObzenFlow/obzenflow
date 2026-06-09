@@ -708,6 +708,9 @@ macro_rules! build_typed_flow {
         )
         .map_err(|err| *err)?;
 
+        let feed_plan =
+            $crate::dsl::typing::derive_feed_plan(&topology, &descriptors, &name_to_id);
+
         // FLOWIP-051l (P0): backflow cycles are currently only supported for transform stages.
         // Reject any topology where a cycle-member stage is not a transform so we do not silently
         // drop cycle protection for other stage types when the middleware-based guard is removed.
@@ -1106,6 +1109,7 @@ macro_rules! build_typed_flow {
             error_journals,
         )
         .with_backpressure_plan(backpressure_plan)
+        .with_feed_plan(feed_plan)
         .with_effect_ports($effect_ports)
         .with_replay_archive(
             obzenflow_runtime::journal::FlowJournalFactory::replay_archive(&mut journal_factory)
@@ -1468,6 +1472,7 @@ macro_rules! build_typed_flow {
             .with_stage_journals(stage_resources_set.stage_journals.clone())
             .with_error_journals(stage_resources_set.error_journals.clone())
             .with_backpressure_registry(stage_resources_set.backpressure_registry.clone())
+            .with_feed_plan(stage_resources_set.feed_plan.clone())
             .with_liveness_snapshots(stage_resources_set.liveness_snapshots.clone());
 
         let builder = if let Some(exporter) = metrics_exporter {

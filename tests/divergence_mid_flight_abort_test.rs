@@ -323,8 +323,8 @@ async fn divergence_aborts_on_mid_flight_violation() -> Result<()> {
                 cause,
                 ..
             } => {
-                contract_name == DivergenceContract::NAME
-                    && status == ContractResultStatusLabel::Failed.as_str()
+                contract_name.as_str() == DivergenceContract::NAME
+                    && *status == ContractResultStatusLabel::Failed
                     && cause.as_deref() == Some("divergence")
             }
             _ => false,
@@ -440,8 +440,8 @@ async fn divergence_emits_mid_flight_contract_health_heartbeats() -> Result<()> 
                 cause,
                 advertised_writer_seq,
                 ..
-            } if contract_name == TransportContract::NAME => {
-                if status == ContractResultStatusLabel::Healthy.as_str()
+            } if contract_name.as_str() == TransportContract::NAME => {
+                if *status == ContractResultStatusLabel::Healthy
                     && cause.is_none()
                     && advertised_writer_seq.is_none()
                 {
@@ -528,11 +528,11 @@ async fn divergence_does_not_false_positive_on_fan_in_inside_cycle() -> Result<(
                 status,
                 cause,
                 ..
-            } if contract_name == DivergenceContract::NAME => {
-                if status == ContractResultStatusLabel::Healthy.as_str() && cause.is_none() {
+            } if contract_name.as_str() == DivergenceContract::NAME => {
+                if *status == ContractResultStatusLabel::Healthy && cause.is_none() {
                     seen_divergence_healthy = true;
                 }
-                if status == ContractResultStatusLabel::Failed.as_str()
+                if *status == ContractResultStatusLabel::Failed
                     && cause.as_deref() == Some("divergence")
                 {
                     seen_divergence_violation = true;
@@ -631,8 +631,8 @@ async fn divergence_aborts_on_cycle_depth_violation() -> Result<()> {
                 status,
                 cause,
                 ..
-            } if contract_name == DivergenceContract::NAME => {
-                if status == ContractResultStatusLabel::Failed.as_str()
+            } if contract_name.as_str() == DivergenceContract::NAME => {
+                if *status == ContractResultStatusLabel::Failed
                     && cause.as_deref() == Some("divergence")
                 {
                     seen_divergence_contract_result = true;

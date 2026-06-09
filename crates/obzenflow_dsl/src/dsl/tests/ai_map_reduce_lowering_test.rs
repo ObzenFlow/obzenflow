@@ -107,11 +107,19 @@ mod tests {
         }
     }
 
-    #[derive(Debug, Clone)]
+    #[derive(Debug, Clone, Serialize, Deserialize)]
     struct TestIn;
 
-    #[derive(Debug, Clone)]
+    impl TypedPayload for TestIn {
+        const EVENT_TYPE: &'static str = "test.ai_map_reduce.in";
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
     struct TestOut;
+
+    impl TypedPayload for TestOut {
+        const EVENT_TYPE: &'static str = "test.ai_map_reduce.out";
+    }
 
     #[derive(Debug, Clone, Default, Serialize, Deserialize)]
     struct TestSeed {
@@ -279,8 +287,8 @@ mod tests {
         let metadata = digest
             .typing_metadata()
             .expect("ai_map_reduce! should return a typed descriptor wrapper");
-        assert_eq!(metadata.input_type, TypeHint::exact::<TestIn>());
-        assert_eq!(metadata.output_type, TypeHint::exact::<TestOut>());
+        assert_eq!(metadata.input_type, TypeHint::exact_payload::<TestIn>());
+        assert_eq!(metadata.output_type, TypeHint::exact_payload::<TestOut>());
 
         let mut stages: HashMap<String, Box<dyn StageDescriptor>> = HashMap::new();
         stages.insert("batch".to_string(), mk_transform("batch"));
@@ -339,8 +347,8 @@ mod tests {
         let metadata = digest
             .typing_metadata()
             .expect("ai_map_reduce! should return a typed descriptor wrapper");
-        assert_eq!(metadata.input_type, TypeHint::exact::<TestSeed>());
-        assert_eq!(metadata.output_type, TypeHint::exact::<TestOut>());
+        assert_eq!(metadata.input_type, TypeHint::exact_payload::<TestSeed>());
+        assert_eq!(metadata.output_type, TypeHint::exact_payload::<TestOut>());
 
         let mut stages: HashMap<String, Box<dyn StageDescriptor>> = HashMap::new();
         stages.insert("batch".to_string(), mk_transform("batch"));
@@ -411,7 +419,7 @@ mod tests {
             .expect("entry stage should carry typing metadata");
         assert_eq!(
             entry_meta.input_type,
-            TypeHint::exact::<TestIn>(),
+            TypeHint::exact_payload::<TestIn>(),
             "entry stage input_type must equal the composite's declared outer input"
         );
 
@@ -423,7 +431,7 @@ mod tests {
             .expect("exit stage should carry typing metadata");
         assert_eq!(
             exit_meta.output_type,
-            TypeHint::exact::<TestOut>(),
+            TypeHint::exact_payload::<TestOut>(),
             "exit stage output_type must equal the composite's declared outer output"
         );
     }

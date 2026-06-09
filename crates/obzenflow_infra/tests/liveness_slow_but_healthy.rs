@@ -22,16 +22,24 @@ use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-/// File-local payload for the slow-but-healthy test. The JSON shape
-/// matches what `TwoEventSource` emits; the type fingerprints the stage
-/// contract per FLOWIP-114c.
+/// File-local payloads for the slow-but-healthy test. The JSON shape is shared,
+/// but the source and transform author different fact identities.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct ProbeEvent {
     value: u64,
 }
 
 impl TypedPayload for ProbeEvent {
-    const EVENT_TYPE: &'static str = "probe.event";
+    const EVENT_TYPE: &'static str = "liveness.input";
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct ProbeOutputEvent {
+    value: u64,
+}
+
+impl TypedPayload for ProbeOutputEvent {
+    const EVENT_TYPE: &'static str = "liveness.output";
 }
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -67,7 +75,7 @@ impl FiniteSourceHandler for TwoEventSource {
 
         Ok(Some(vec![ChainEventFactory::data_event(
             self.writer_id,
-            "liveness.input",
+            ProbeEvent::versioned_event_type(),
             json!({ "value": value }),
         )]))
     }
@@ -100,7 +108,7 @@ impl AsyncTransformHandler for SlowAiTransform {
 
         Ok(vec![ChainEventFactory::data_event(
             self.writer_id,
-            "liveness.output",
+            ProbeOutputEvent::versioned_event_type(),
             event.payload().clone(),
         )])
     }
@@ -150,8 +158,8 @@ async fn liveness_slow_but_healthy_completes_and_emits_liveness_transitions() {
 
         stages: {
             numbers = source!(ProbeEvent => TwoEventSource::new());
-            slow_ai = async_transform!(ProbeEvent -> ProbeEvent => SlowAiTransform::new());
-            sink = sink!(ProbeEvent => NoopSink);
+            slow_ai = async_transform!(ProbeEvent -> ProbeOutputEvent => SlowAiTransform::new());
+            sink = sink!(ProbeOutputEvent => NoopSink);
         },
 
         topology: {

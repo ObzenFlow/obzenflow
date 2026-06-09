@@ -27,7 +27,8 @@ use serde_json::json;
 /// contract per FLOWIP-114c.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct CorrelatedTestEvent {
-    id: u64,
+    index: u64,
+    data: String,
 }
 
 impl TypedPayload for CorrelatedTestEvent {
@@ -68,7 +69,7 @@ impl FiniteSourceHandler for CorrelatedSource {
 
         let event = ChainEventFactory::data_event(
             self.writer_id,
-            "test.data",
+            CorrelatedTestEvent::versioned_event_type(),
             json!({
                 "index": self.current,
                 "data": format!("event_{}", self.current)

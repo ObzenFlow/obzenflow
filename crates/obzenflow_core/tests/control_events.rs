@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
+use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
 use obzenflow_core::event::{ChainEvent, ChainEventContent, ChainEventFactory, EventId, WriterId};
 use obzenflow_core::id::StageId;
 use serde_json::json;
@@ -59,23 +59,42 @@ fn test_is_control_detection() {
 fn test_flow_signal_payloads() {
     let writer_id = WriterId::from(StageId::new());
 
-    // Test EOF with natural flag
+    // Test natural EOF kind
     let natural_eof = ChainEventFactory::eof_event(writer_id, true);
     match &natural_eof.content {
-        ChainEventContent::FlowControl(FlowControlPayload::Eof { natural, .. }) => {
-            assert!(*natural);
+        ChainEventContent::FlowControl(FlowControlPayload::Eof { kind, .. }) => {
+            assert!(kind.is_natural());
         }
         _ => panic!("Expected EOF signal"),
     }
 
-    // Test EOF with forced flag
+    // Test poison EOF kind
     let forced_eof = ChainEventFactory::eof_event(writer_id, false);
     match &forced_eof.content {
-        ChainEventContent::FlowControl(FlowControlPayload::Eof { natural, .. }) => {
-            assert!(!*natural);
+        ChainEventContent::FlowControl(FlowControlPayload::Eof { kind, .. }) => {
+            assert!(kind.is_poison());
         }
         _ => panic!("Expected EOF signal"),
     }
+}
+
+#[test]
+fn test_legacy_eof_natural_bool_deserializes_to_kind() {
+    let payload: FlowControlPayload = serde_json::from_value(json!({
+        "flow_control_type": "eof",
+        "natural": false,
+        "timestamp": 12345
+    }))
+    .expect("legacy EOF natural bool should deserialize");
+
+    match &payload {
+        FlowControlPayload::Eof { kind, .. } => assert_eq!(*kind, EofKind::Poison),
+        _ => panic!("Expected EOF signal"),
+    }
+
+    let serialized = serde_json::to_value(payload).expect("EOF payload should serialize");
+    assert_eq!(serialized["kind"], "poison");
+    assert!(serialized.get("natural").is_none());
 }
 
 #[test]
@@ -148,10 +167,11 @@ fn test_direct_chain_event_construction() {
         id: EventId::new(),
         writer_id: WriterId::from(StageId::new()),
         content: ChainEventContent::FlowControl(FlowControlPayload::Eof {
-            natural: true,
+            kind: EofKind::Natural,
             timestamp: 12345,
             writer_id: Some(WriterId::from(StageId::new())),
             writer_seq: None,
+            writer_seq_by_event_type: Default::default(),
             vector_clock: None,
             last_event_id: None,
         }),
@@ -166,6 +186,7 @@ fn test_direct_chain_event_construction() {
         cycle_scc_id: None,
         runtime_context: None,
         observability: None,
+        effect_provenance: None,
     };
 
     assert!(event.is_control());

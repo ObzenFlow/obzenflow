@@ -89,6 +89,7 @@ async fn dispatch_running_inner<
                 &ctx.backpressure_writer,
                 &mut ctx.backpressure_pulse,
                 &mut ctx.backpressure_backoff,
+                Some(&ctx.output_contract),
                 &mut ctx.pending_outputs,
             )
             .await?
@@ -397,11 +398,18 @@ async fn dispatch_running_inner<
                             input_seq,
                             stage_logic_version: handler.stage_logic_version().to_string(),
                             data_journal: ctx.data_journal.clone(),
+                            flow_context: Some(flow_context.clone()),
+                            system_journal: Some(ctx.system_journal.clone()),
+                            instrumentation: Some(ctx.instrumentation.clone()),
+                            heartbeat_state: ctx.heartbeat.as_ref().map(|h| h.state.clone()),
                             parent: envelope_clone.clone(),
                             effect_history: ctx.effect_history.clone(),
                             effect_runtime_mode: ctx.effect_runtime_mode,
                             effect_ports: ctx.effect_ports.clone(),
                             effect_declarations: ctx.effect_declarations.clone(),
+                            output_contract: ctx.output_contract.clone(),
+                            backpressure_writer: ctx.backpressure_writer.clone(),
+                            emit_enabled: true,
                             effect_boundary: None,
                             boundary_control_events: std::sync::Arc::new(std::sync::Mutex::new(
                                 Vec::new(),
@@ -501,6 +509,7 @@ async fn dispatch_running_inner<
                                     &ctx.backpressure_writer,
                                     &mut ctx.backpressure_pulse,
                                     &mut ctx.backpressure_backoff,
+                                    Some(&ctx.output_contract),
                                     &mut stage_outputs,
                                 )
                                 .await?
@@ -545,14 +554,6 @@ async fn dispatch_running_inner<
                         }
                     }
 
-                    EventLoopDirective::Continue
-                }
-                obzenflow_core::event::ChainEventContent::EffectResult(_) => {
-                    tracing::warn!(
-                        stage_name = %ctx.stage_name,
-                        event_id = %envelope.event.id,
-                        "Dropping transport-only EffectResult that bypassed subscription filtering"
-                    );
                     EventLoopDirective::Continue
                 }
                 _ => {

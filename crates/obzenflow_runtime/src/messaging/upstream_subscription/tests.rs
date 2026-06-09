@@ -4,7 +4,7 @@
 
 use super::{
     ContractConfig, ContractStatus, ContractsWiring, PollResult, ReaderProgress,
-    UpstreamSubscription,
+    SelectedFeedMetadata, SelectedFeedRole, UpstreamSubscription,
 };
 use crate::messaging::upstream_subscription_policy::build_policy_stack_for_upstream;
 use async_trait::async_trait;
@@ -14,9 +14,12 @@ use obzenflow_core::event::event_envelope::EventEnvelope;
 use obzenflow_core::event::identity::JournalWriterId;
 use obzenflow_core::event::journal_event::JournalEvent;
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
+use obzenflow_core::event::payloads::effect_payload::{
+    EffectFactOwner, EffectProvenance, EFFECT_RECORD_EVENT_TYPE,
+};
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::system_event::{
-    ContractResultStatusLabel, SystemEvent, SystemEventType,
+    ContractOverridePolicy, ContractResultStatusLabel, SystemEvent, SystemEventType,
 };
 use obzenflow_core::event::types::{
     Count, DurationMs, SeqNo, ViolationCause as EventViolationCause,
@@ -30,7 +33,7 @@ use obzenflow_core::journal::journal_reader::JournalReader;
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{
     CircuitBreakerContractInfo, CircuitBreakerContractMode, ControlMiddlewareProvider, EventId,
-    NoControlMiddleware, StageId, TransportContract, WriterId,
+    EventType, NoControlMiddleware, StageId, TransportContract, WriterId,
 };
 use serde_json::json;
 use std::collections::HashMap;
@@ -768,8 +771,8 @@ async fn progress_contract_heartbeats_are_suppressed_until_data_observed() {
         events.iter().any(|env| matches!(
             &env.event.event,
             SystemEventType::ContractResult { contract_name, status, cause, .. }
-                if contract_name == TransportContract::NAME
-                    && status == ContractResultStatusLabel::Healthy.as_str()
+                if contract_name.as_str() == TransportContract::NAME
+                    && *status == ContractResultStatusLabel::Healthy
                     && cause.is_none()
         )),
         "expected a healthy TransportContract ContractResult heartbeat once data is observed"
@@ -1493,7 +1496,7 @@ async fn breaker_aware_mode_overrides_seq_divergence_and_emits_override_event() 
                 override_found = true;
                 assert_eq!(*upstream, upstream_stage);
                 assert_eq!(*reader, reader_stage);
-                assert_eq!(policy, "breaker_aware");
+                assert_eq!(*policy, ContractOverridePolicy::BreakerAware);
             }
             _ => {}
         }
@@ -1595,27 +1598,550 @@ async fn transport_only_skips_observability_events() {
 }
 
 #[tokio::test]
-async fn transport_only_skips_effect_results_without_stage_input_position() {
+async fn transport_only_filters_unselected_data_and_reconciles_selected_writer_seq() {
+    let upstream_stage = StageId::new();
+    let reader_stage = StageId::new();
+    let upstream_owner = JournalOwner::stage(upstream_stage);
+    let reader_owner = JournalOwner::stage(reader_stage);
+    let upstream_journal: Arc<dyn Journal<ChainEvent>> = Arc::new(TestJournal::new(upstream_owner));
+    let contract_journal: Arc<dyn Journal<ChainEvent>> =
+        Arc::new(TestJournal::new(reader_owner.clone()));
+    let system_journal: Arc<dyn Journal<SystemEvent>> = Arc::new(TestJournal::new(reader_owner));
+
+    let writer_id = WriterId::Stage(upstream_stage);
+
+    upstream_journal
+        .append(
+            ChainEventFactory::data_event(writer_id, "test.ignored.v1", json!({"n": 1})),
+            None,
+        )
+        .await
+        .unwrap();
+    upstream_journal
+        .append(
+            ChainEventFactory::data_event(writer_id, "test.selected.v1", json!({"n": 2})),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let mut eof_event = ChainEventFactory::eof_event(writer_id, true);
+    if let ChainEventContent::FlowControl(FlowControlPayload::Eof {
+        writer_seq,
+        writer_seq_by_event_type,
+        ..
+    }) = &mut eof_event.content
+    {
+        *writer_seq = Some(SeqNo(2));
+        writer_seq_by_event_type.insert("test.ignored.v1".into(), SeqNo(1));
+        writer_seq_by_event_type.insert("test.selected.v1".into(), SeqNo(1));
+    }
+    upstream_journal.append(eof_event, None).await.unwrap();
+
+    let upstreams = [(upstream_stage, "upstream".to_string(), upstream_journal)];
+    let mut selected_feeds = HashMap::new();
+    selected_feeds.insert(
+        upstream_stage,
+        vec![SelectedFeedMetadata::new(
+            EventType::from("test.selected.v1"),
+            SelectedFeedRole::Input,
+        )],
+    );
+
+    let mut subscription = UpstreamSubscription::new_with_names("test_owner", &upstreams)
+        .await
+        .unwrap()
+        .with_selected_feeds(selected_feeds)
+        .with_contracts(ContractsWiring {
+            writer_id: WriterId::from(reader_stage),
+            contract_journal: contract_journal.clone(),
+            config: ContractConfig::default(),
+            system_journal: Some(system_journal.clone()),
+            reader_stage: Some(reader_stage),
+            control_middleware: Arc::new(NoControlMiddleware),
+            include_delivery_contract: false,
+            cycle_guard_config: None,
+        })
+        .transport_only();
+
+    let mut reader_progress = [ReaderProgress::new(upstream_stage)];
+
+    let first = subscription
+        .poll_next_with_state("test_fsm", Some(&mut reader_progress[..]))
+        .await;
+    match first {
+        PollResult::Event(env) => match env.event.content {
+            ChainEventContent::Data { event_type, .. } => {
+                assert_eq!(event_type, "test.selected.v1");
+            }
+            other => panic!("expected selected Data event, got {other:?}"),
+        },
+        other => panic!("expected PollResult::Event, got {other:?}"),
+    }
+
+    assert_eq!(reader_progress[0].reader_seq, SeqNo(1));
+    assert_eq!(
+        subscription
+            .last_delivered_stage_input_position()
+            .expect("selected data should receive a stage input position")
+            .0,
+        1
+    );
+
+    drive_subscription_to_eof(&mut subscription, &mut reader_progress).await;
+
+    assert_eq!(reader_progress[0].reader_seq, SeqNo(1));
+    assert_eq!(reader_progress[0].advertised_writer_seq, Some(SeqNo(1)));
+
+    let status = subscription.check_contracts(&mut reader_progress).await;
+    assert!(
+        matches!(
+            status,
+            ContractStatus::ProgressEmitted | ContractStatus::Healthy
+        ),
+        "selected feed should reconcile successfully, got {status:?}"
+    );
+    assert!(!reader_progress[0].contract_violated);
+
+    let contract_events = contract_journal.read_causally_ordered().await.unwrap();
+    let mut final_found = false;
+    for env in &contract_events {
+        match &env.event.content {
+            ChainEventContent::FlowControl(FlowControlPayload::ConsumptionFinal {
+                pass,
+                reader_seq,
+                advertised_writer_seq,
+                failure_reason,
+                ..
+            }) => {
+                final_found = true;
+                assert!(*pass);
+                assert_eq!(*reader_seq, SeqNo(1));
+                assert_eq!(*advertised_writer_seq, Some(SeqNo(1)));
+                assert!(failure_reason.is_none());
+            }
+            ChainEventContent::FlowControl(
+                FlowControlPayload::ConsumptionGap { .. }
+                | FlowControlPayload::AtLeastOnceViolation { .. },
+            ) => panic!("selected feed should not emit gap or violation events"),
+            _ => {}
+        }
+    }
+    assert!(final_found, "expected a selected-feed ConsumptionFinal");
+
+    let system_events = system_journal.read_causally_ordered().await.unwrap();
+    assert!(system_events.iter().any(|env| matches!(
+        &env.event.event,
+        SystemEventType::ContractStatus {
+            upstream,
+            reader,
+            selected_event_type,
+            feed_role,
+            pass,
+            reader_seq,
+            advertised_writer_seq,
+            reason,
+        } if *upstream == upstream_stage
+            && *reader == reader_stage
+            && selected_event_type.as_ref().map(|event_type| event_type.as_str())
+                == Some("test.selected.v1")
+            && feed_role.as_ref().map(|role| role.as_str()) == Some("input")
+            && *pass
+            && *reader_seq == Some(SeqNo(1))
+            && *advertised_writer_seq == Some(SeqNo(1))
+            && reason.is_none()
+    )));
+}
+
+#[tokio::test]
+async fn multi_selected_feeds_emit_direct_contract_status_per_feed() {
+    let upstream_stage = StageId::new();
+    let reader_stage = StageId::new();
+    let upstream_owner = JournalOwner::stage(upstream_stage);
+    let reader_owner = JournalOwner::stage(reader_stage);
+    let upstream_journal: Arc<dyn Journal<ChainEvent>> = Arc::new(TestJournal::new(upstream_owner));
+    let contract_journal: Arc<dyn Journal<ChainEvent>> =
+        Arc::new(TestJournal::new(reader_owner.clone()));
+    let system_journal: Arc<dyn Journal<SystemEvent>> = Arc::new(TestJournal::new(reader_owner));
+
+    let writer_id = WriterId::Stage(upstream_stage);
+    upstream_journal
+        .append(
+            ChainEventFactory::data_event(writer_id, "test.first.v1", json!({"n": 1})),
+            None,
+        )
+        .await
+        .unwrap();
+    upstream_journal
+        .append(
+            ChainEventFactory::data_event(writer_id, "test.second.v1", json!({"n": 2})),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let mut eof_event = ChainEventFactory::eof_event(writer_id, true);
+    if let ChainEventContent::FlowControl(FlowControlPayload::Eof {
+        writer_seq,
+        writer_seq_by_event_type,
+        ..
+    }) = &mut eof_event.content
+    {
+        // Aggregate selected count is 2, but the per-feed evidence is deliberately
+        // inconsistent: first advertises 2 while second advertises 0.
+        *writer_seq = Some(SeqNo(2));
+        writer_seq_by_event_type.insert("test.first.v1".into(), SeqNo(2));
+        writer_seq_by_event_type.insert("test.second.v1".into(), SeqNo(0));
+    }
+    upstream_journal.append(eof_event, None).await.unwrap();
+
+    let upstreams = [(upstream_stage, "upstream".to_string(), upstream_journal)];
+    let mut selected_feeds = HashMap::new();
+    selected_feeds.insert(
+        upstream_stage,
+        vec![
+            SelectedFeedMetadata::new(EventType::from("test.first.v1"), SelectedFeedRole::Input),
+            SelectedFeedMetadata::new(
+                EventType::from("test.second.v1"),
+                SelectedFeedRole::Reference,
+            ),
+        ],
+    );
+
+    let mut subscription = UpstreamSubscription::new_with_names("test_owner", &upstreams)
+        .await
+        .unwrap()
+        .with_selected_feeds(selected_feeds)
+        .with_contracts(ContractsWiring {
+            writer_id: WriterId::from(reader_stage),
+            contract_journal: contract_journal.clone(),
+            config: ContractConfig::default(),
+            system_journal: Some(system_journal.clone()),
+            reader_stage: Some(reader_stage),
+            control_middleware: Arc::new(NoControlMiddleware),
+            include_delivery_contract: false,
+            cycle_guard_config: None,
+        })
+        .transport_only();
+
+    let mut reader_progress = [ReaderProgress::new(upstream_stage)];
+    drive_subscription_to_eof(&mut subscription, &mut reader_progress).await;
+
+    let status = subscription.check_contracts(&mut reader_progress).await;
+    assert!(
+        matches!(status, ContractStatus::Violated { upstream, .. } if upstream == upstream_stage),
+        "per-feed divergence should fail even when aggregate selected counts reconcile, got {status:?}"
+    );
+
+    let system_events = system_journal.read_causally_ordered().await.unwrap();
+    let mut first_status = None;
+    let mut second_status = None;
+    let mut aggregate_status_found = false;
+
+    for env in &system_events {
+        if let SystemEventType::ContractStatus {
+            upstream,
+            reader,
+            selected_event_type,
+            feed_role,
+            pass,
+            reader_seq,
+            advertised_writer_seq,
+            reason,
+        } = &env.event.event
+        {
+            if *upstream != upstream_stage || *reader != reader_stage {
+                continue;
+            }
+            match (
+                selected_event_type
+                    .as_ref()
+                    .map(|event_type| event_type.as_str()),
+                feed_role.as_ref().map(|role| role.as_str()),
+            ) {
+                (Some("test.first.v1"), Some("input")) => {
+                    first_status =
+                        Some((*pass, *reader_seq, *advertised_writer_seq, reason.clone()));
+                }
+                (Some("test.second.v1"), Some("reference")) => {
+                    second_status =
+                        Some((*pass, *reader_seq, *advertised_writer_seq, reason.clone()));
+                }
+                (None, None) => {
+                    aggregate_status_found = true;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let first_status = first_status.expect("expected first feed ContractStatus");
+    assert!(!first_status.0);
+    assert_eq!(first_status.1, Some(SeqNo(1)));
+    assert_eq!(first_status.2, Some(SeqNo(2)));
+    assert!(matches!(
+        first_status.3,
+        Some(EventViolationCause::SeqDivergence {
+            advertised: Some(SeqNo(2)),
+            reader: SeqNo(1),
+        })
+    ));
+
+    let second_status = second_status.expect("expected second feed ContractStatus");
+    assert!(!second_status.0);
+    assert_eq!(second_status.1, Some(SeqNo(1)));
+    assert_eq!(second_status.2, Some(SeqNo(0)));
+    assert!(matches!(
+        second_status.3,
+        Some(EventViolationCause::SeqDivergence {
+            advertised: Some(SeqNo(0)),
+            reader: SeqNo(1),
+        })
+    ));
+
+    assert!(
+        !aggregate_status_found,
+        "direct feed status should suppress ambiguous aggregate ContractStatus"
+    );
+}
+
+#[tokio::test]
+async fn multi_selected_feeds_emit_midflight_contract_results_per_feed() {
+    let upstream_stage = StageId::new();
+    let reader_stage = StageId::new();
+    let upstream_owner = JournalOwner::stage(upstream_stage);
+    let reader_owner = JournalOwner::stage(reader_stage);
+    let upstream_journal: Arc<dyn Journal<ChainEvent>> = Arc::new(TestJournal::new(upstream_owner));
+    let contract_journal: Arc<dyn Journal<ChainEvent>> =
+        Arc::new(TestJournal::new(reader_owner.clone()));
+    let system_journal: Arc<dyn Journal<SystemEvent>> = Arc::new(TestJournal::new(reader_owner));
+
+    let writer_id = WriterId::Stage(upstream_stage);
+    upstream_journal
+        .append(
+            ChainEventFactory::data_event(writer_id, "test.first.v1", json!({"n": 1})),
+            None,
+        )
+        .await
+        .unwrap();
+    upstream_journal
+        .append(
+            ChainEventFactory::data_event(writer_id, "test.second.v1", json!({"n": 2})),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let upstreams = [(upstream_stage, "upstream".to_string(), upstream_journal)];
+    let mut selected_feeds = HashMap::new();
+    selected_feeds.insert(
+        upstream_stage,
+        vec![
+            SelectedFeedMetadata::new(EventType::from("test.first.v1"), SelectedFeedRole::Input),
+            SelectedFeedMetadata::new(
+                EventType::from("test.second.v1"),
+                SelectedFeedRole::Reference,
+            ),
+        ],
+    );
+
+    let mut subscription = UpstreamSubscription::new_with_names("test_owner", &upstreams)
+        .await
+        .unwrap()
+        .with_selected_feeds(selected_feeds)
+        .with_contracts(ContractsWiring {
+            writer_id: WriterId::from(reader_stage),
+            contract_journal,
+            config: ContractConfig::default(),
+            system_journal: Some(system_journal.clone()),
+            reader_stage: Some(reader_stage),
+            control_middleware: Arc::new(NoControlMiddleware),
+            include_delivery_contract: false,
+            cycle_guard_config: None,
+        })
+        .transport_only();
+
+    let mut reader_progress = [ReaderProgress::new(upstream_stage)];
+
+    let first = subscription
+        .poll_next_with_state("test_fsm", Some(&mut reader_progress[..]))
+        .await;
+    assert!(matches!(
+        first,
+        PollResult::Event(EventEnvelope {
+            event: ChainEvent {
+                content: ChainEventContent::Data { ref event_type, .. },
+                ..
+            },
+            ..
+        }) if event_type == "test.first.v1"
+    ));
+
+    let status = subscription.check_contracts(&mut reader_progress).await;
+    assert!(matches!(
+        status,
+        ContractStatus::ProgressEmitted | ContractStatus::Healthy
+    ));
+
+    let events_after_first = system_journal.read_causally_ordered().await.unwrap();
+    let first_feed_results = events_after_first
+        .iter()
+        .filter(|env| {
+            matches!(
+                &env.event.event,
+                SystemEventType::ContractResult {
+                    upstream,
+                    reader,
+                    selected_event_type,
+                    feed_role,
+                    contract_name,
+                    status,
+                    reader_seq,
+                    advertised_writer_seq,
+                    ..
+                } if *upstream == upstream_stage
+                    && *reader == reader_stage
+                    && selected_event_type.as_ref().map(|event_type| event_type.as_str())
+                        == Some("test.first.v1")
+                    && feed_role.as_ref().map(|role| role.as_str()) == Some("input")
+                    && contract_name.as_str() == TransportContract::NAME
+                    && *status == ContractResultStatusLabel::Healthy
+                    && *reader_seq == Some(SeqNo(1))
+                    && advertised_writer_seq.is_none()
+            )
+        })
+        .count();
+    let second_feed_results_after_first = events_after_first
+        .iter()
+        .filter(|env| {
+            matches!(
+                &env.event.event,
+                SystemEventType::ContractResult {
+                    upstream,
+                    reader,
+                    selected_event_type,
+                    feed_role,
+                    ..
+                } if *upstream == upstream_stage
+                    && *reader == reader_stage
+                    && selected_event_type.as_ref().map(|event_type| event_type.as_str())
+                        == Some("test.second.v1")
+                    && feed_role.as_ref().map(|role| role.as_str()) == Some("reference")
+            )
+        })
+        .count();
+    let aggregate_results_after_first = events_after_first
+        .iter()
+        .filter(|env| {
+            matches!(
+                &env.event.event,
+                SystemEventType::ContractResult {
+                    upstream,
+                    reader,
+                    selected_event_type: None,
+                    feed_role: None,
+                    ..
+                } if *upstream == upstream_stage && *reader == reader_stage
+            )
+        })
+        .count();
+    assert_eq!(first_feed_results, 1);
+    assert_eq!(second_feed_results_after_first, 0);
+    assert_eq!(aggregate_results_after_first, 0);
+
+    let second = subscription
+        .poll_next_with_state("test_fsm", Some(&mut reader_progress[..]))
+        .await;
+    assert!(matches!(
+        second,
+        PollResult::Event(EventEnvelope {
+            event: ChainEvent {
+                content: ChainEventContent::Data { ref event_type, .. },
+                ..
+            },
+            ..
+        }) if event_type == "test.second.v1"
+    ));
+
+    let status = subscription.check_contracts(&mut reader_progress).await;
+    assert!(matches!(
+        status,
+        ContractStatus::ProgressEmitted | ContractStatus::Healthy
+    ));
+
+    let events_after_second = system_journal.read_causally_ordered().await.unwrap();
+    let first_feed_results_after_second = events_after_second
+        .iter()
+        .filter(|env| {
+            matches!(
+                &env.event.event,
+                SystemEventType::ContractResult {
+                    upstream,
+                    reader,
+                    selected_event_type,
+                    feed_role,
+                    ..
+                } if *upstream == upstream_stage
+                    && *reader == reader_stage
+                    && selected_event_type.as_ref().map(|event_type| event_type.as_str())
+                        == Some("test.first.v1")
+                    && feed_role.as_ref().map(|role| role.as_str()) == Some("input")
+            )
+        })
+        .count();
+    let second_feed_results = events_after_second
+        .iter()
+        .filter(|env| {
+            matches!(
+                &env.event.event,
+                SystemEventType::ContractResult {
+                    upstream,
+                    reader,
+                    selected_event_type,
+                    feed_role,
+                    contract_name,
+                    status,
+                    reader_seq,
+                    advertised_writer_seq,
+                    ..
+                } if *upstream == upstream_stage
+                    && *reader == reader_stage
+                    && selected_event_type.as_ref().map(|event_type| event_type.as_str())
+                        == Some("test.second.v1")
+                    && feed_role.as_ref().map(|role| role.as_str()) == Some("reference")
+                    && contract_name.as_str() == TransportContract::NAME
+                    && *status == ContractResultStatusLabel::Healthy
+                    && *reader_seq == Some(SeqNo(1))
+                    && advertised_writer_seq.is_none()
+            )
+        })
+        .count();
+    assert_eq!(first_feed_results_after_second, 1);
+    assert_eq!(second_feed_results, 1);
+}
+
+#[tokio::test]
+async fn transport_only_skips_framework_effect_data_without_stage_input_position() {
     let upstream_stage = StageId::new();
     let upstream_owner = JournalOwner::stage(upstream_stage);
     let upstream_journal: Arc<dyn Journal<ChainEvent>> = Arc::new(TestJournal::new(upstream_owner));
 
     let writer_id = WriterId::Stage(upstream_stage);
     let effect_record = obzenflow_core::event::payloads::effect_payload::EffectRecord {
-        cursor: obzenflow_core::event::payloads::effect_payload::EffectCursor {
-            recorded_flow_id: "recorded-flow".to_string(),
-            stage_key: "gateway".to_string(),
-            input_seq: 1,
-            effect_ordinal: 0,
-        },
-        descriptor_hash: "hash".to_string(),
-        descriptor: obzenflow_core::event::payloads::effect_payload::EffectDescriptor {
-            effect_type: "test.effect".to_string(),
-            label: "test".to_string(),
-            schema_version: 1,
-            stage_logic_version: "1".to_string(),
-            canonical_input_hash: "input-hash".to_string(),
-        },
+        cursor: obzenflow_core::event::payloads::effect_payload::EffectCursor::new(
+            "recorded-flow",
+            "gateway",
+            1,
+            0,
+        ),
+        descriptor_hash: "hash".into(),
+        descriptor: obzenflow_core::event::payloads::effect_payload::EffectDescriptor::new(
+            "test.effect",
+            "test",
+            1,
+            "1",
+            "input-hash",
+        ),
         outcome: obzenflow_core::event::payloads::effect_payload::EffectOutcomePayload::Succeeded {
             output: json!({"ok": true}),
         },
@@ -1623,15 +2149,21 @@ async fn transport_only_skips_effect_results_without_stage_input_position() {
 
     upstream_journal
         .append(
-            ChainEventFactory::derived_event(
+            ChainEventFactory::derived_data_event(
                 writer_id,
                 &ChainEventFactory::data_event(writer_id, "test.parent", json!({})),
-                ChainEventContent::EffectResult(effect_record),
-            ),
+                EFFECT_RECORD_EVENT_TYPE,
+                serde_json::to_value(&effect_record).expect("serialize effect record"),
+            )
+            .with_effect_provenance(EffectProvenance::from_record(
+                &effect_record,
+                EffectFactOwner::Framework,
+            )),
             None,
         )
         .await
         .unwrap();
+
     upstream_journal
         .append(
             ChainEventFactory::data_event(writer_id, "test.event", json!({"n": 1})),
@@ -1656,7 +2188,7 @@ async fn transport_only_skips_effect_results_without_stage_input_position() {
         PollResult::Event(env) => match env.event.content {
             ChainEventContent::Data { .. } => {}
             other => {
-                panic!("expected EffectResult to be skipped and Data delivered, got {other:?}")
+                panic!("expected framework effect Data to be skipped and domain Data delivered, got {other:?}")
             }
         },
         other => panic!("expected PollResult::Event, got {other:?}"),

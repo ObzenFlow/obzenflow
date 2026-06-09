@@ -185,8 +185,11 @@ impl<H: AsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
                     Box::pin(async move {
                         if let InfiniteSourceEvent::Error(msg) = event {
                             Ok(Transition {
-                                next_state: InfiniteSourceState::Failed(msg),
-                                actions: vec![InfiniteSourceAction::Cleanup],
+                                next_state: InfiniteSourceState::Failed(msg.clone()),
+                                actions: vec![
+                                    InfiniteSourceAction::SendError { message: msg },
+                                    InfiniteSourceAction::Cleanup,
+                                ],
                             })
                         } else {
                             Err(obzenflow_fsm::FsmError::HandlerError(
@@ -358,6 +361,7 @@ impl<H: AsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
                     &ctx.backpressure_writer,
                     &mut ctx.backpressure_pulse,
                     &mut ctx.backpressure_backoff,
+                    Some(&ctx.output_contract),
                     &mut self.external_events,
                     || InfiniteSourceEvent::Error("External control channel closed".to_string()),
                 )

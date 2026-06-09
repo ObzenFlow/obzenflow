@@ -7,6 +7,7 @@
 use super::*;
 use crate::backpressure::{BackpressurePlan, BackpressureRegistry};
 use crate::effects::{EffectPortRegistry, EffectRuntimeMode};
+use crate::feed_plan::StageOutputContract;
 use crate::id_conversions::StageIdExt;
 use crate::pipeline::config::CycleGuardConfig;
 use crate::stages::common::control_strategies::JonestownStrategy;
@@ -127,6 +128,7 @@ async fn build_cycle_entry_harness<
         instrumentation,
         upstream_subscription_factory,
         backpressure_writer: registry.writer(t),
+        output_contract: StageOutputContract::empty(),
         backpressure_readers,
         pending_outputs: std::collections::VecDeque::new(),
         pending_parent: None,
@@ -415,6 +417,7 @@ async fn build_transform_harness<
         instrumentation,
         upstream_subscription_factory,
         backpressure_writer: registry.writer(t),
+        output_contract: StageOutputContract::empty(),
         backpressure_readers,
         pending_outputs: std::collections::VecDeque::new(),
         pending_parent: None,

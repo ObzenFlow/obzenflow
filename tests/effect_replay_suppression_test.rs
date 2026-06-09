@@ -12,6 +12,7 @@ use obzenflow_core::{
     event::payloads::observability_payload::{
         CircuitBreakerEvent, MiddlewareLifecycle, ObservabilityPayload, RateLimiterEvent,
     },
+    event::schema::{TypedFact, TypedFactSet, TypedFactSetError, TypedFactType},
     event::{ChainEventContent, SystemEvent, SystemEventType},
     id::{StageId, SystemId},
     journal::{journal_owner::JournalOwner, Journal},
@@ -24,8 +25,9 @@ use obzenflow_dsl::{
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::effects::{
-    Effect, EffectCommitHandle, EffectContext, EffectError, EffectPortRegistry,
-    EffectPortRequirement, EffectSafety, Effects, IdempotencyKey, TransactionalEffectPort,
+    is_framework_effect_event_type, Effect, EffectCommitHandle, EffectContext, EffectCursor,
+    EffectError, EffectPortRegistry, EffectPortRequirement, EffectRecord, EffectSafety, Effects,
+    IdempotencyKey, TransactionalEffectPort, EFFECT_RECORD_EVENT_TYPE,
 };
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
@@ -265,13 +267,8 @@ struct ReplayTransform {
 #[async_trait]
 impl EffectfulTransformHandler for ReplayTransform {
     type Input = ReplayInput;
-    type Output = ReplayOutput;
 
-    async fn process(
-        &self,
-        input: ReplayInput,
-        fx: &mut Effects,
-    ) -> Result<ReplayOutput, HandlerError> {
+    async fn process(&self, input: ReplayInput, fx: &mut Effects) -> Result<(), HandlerError> {
         let effect_value = fx
             .perform(CountingEffect {
                 value: input.value,
@@ -280,10 +277,13 @@ impl EffectfulTransformHandler for ReplayTransform {
             .await
             .map_err(|e| HandlerError::Other(e.to_string()))?;
 
-        Ok(ReplayOutput {
+        fx.emit(ReplayOutput {
             value: input.value,
             effect_value: effect_value.effect_value,
         })
+        .await
+        .map_err(|e| HandlerError::Other(e.to_string()))?;
+        Ok(())
     }
 
     fn stage_logic_version(&self) -> &str {
@@ -300,13 +300,8 @@ struct BlockingTransform {
 #[async_trait]
 impl EffectfulTransformHandler for BlockingTransform {
     type Input = ReplayInput;
-    type Output = ReplayOutput;
 
-    async fn process(
-        &self,
-        input: ReplayInput,
-        fx: &mut Effects,
-    ) -> Result<ReplayOutput, HandlerError> {
+    async fn process(&self, input: ReplayInput, fx: &mut Effects) -> Result<(), HandlerError> {
         let effect_value = fx
             .perform(BlockingEffect {
                 value: input.value,
@@ -316,10 +311,13 @@ impl EffectfulTransformHandler for BlockingTransform {
             .await
             .map_err(|e| HandlerError::Other(e.to_string()))?;
 
-        Ok(ReplayOutput {
+        fx.emit(ReplayOutput {
             value: input.value,
             effect_value: effect_value.effect_value,
         })
+        .await
+        .map_err(|e| HandlerError::Other(e.to_string()))?;
+        Ok(())
     }
 
     fn stage_logic_version(&self) -> &str {
@@ -374,46 +372,82 @@ struct ReplayStateful {
     calls: Arc<AtomicUsize>,
 }
 
+#[derive(Clone, Debug)]
+enum ReplayStatefulFact {
+    EffectValue(ReplayEffectValue),
+    Output(ReplayOutput),
+}
+
+impl TypedFactSet for ReplayStatefulFact {
+    fn fact_types() -> Vec<TypedFactType> {
+        vec![
+            TypedFactType::of::<ReplayEffectValue>(),
+            TypedFactType::of::<ReplayOutput>(),
+        ]
+    }
+
+    fn into_facts(self) -> Result<Vec<TypedFact>, TypedFactSetError> {
+        match self {
+            ReplayStatefulFact::EffectValue(value) => Ok(vec![TypedFact::from_payload(value)?]),
+            ReplayStatefulFact::Output(output) => Ok(vec![TypedFact::from_payload(output)?]),
+        }
+    }
+
+    fn try_from_facts(facts: &[TypedFact]) -> Result<Self, TypedFactSetError> {
+        if let Ok(value) = <ReplayEffectValue as TypedFactSet>::try_from_facts(facts) {
+            return Ok(Self::EffectValue(value));
+        }
+        if let Ok(output) = <ReplayOutput as TypedFactSet>::try_from_facts(facts) {
+            return Ok(Self::Output(output));
+        }
+        Err(TypedFactSetError::MissingFact {
+            event_type: format!(
+                "{} or {}",
+                ReplayEffectValue::versioned_event_type(),
+                ReplayOutput::versioned_event_type()
+            )
+            .into(),
+        })
+    }
+}
+
 #[async_trait]
 impl EffectfulStatefulHandler for ReplayStateful {
     type State = ReplayStatefulState;
     type Input = ReplayInput;
-    type Output = ReplayOutput;
-    type Transition = ReplayEffectValue;
+    type Fact = ReplayStatefulFact;
 
     fn initial_state(&self) -> Self::State {
         ReplayStatefulState::default()
     }
 
-    async fn transition(
+    async fn decide(
         &mut self,
         _state: &Self::State,
         input: &ReplayInput,
         fx: &mut Effects,
-    ) -> Result<Self::Transition, HandlerError> {
-        fx.perform(CountingEffect {
+    ) -> Result<(), HandlerError> {
+        let effect = fx
+            .perform(CountingEffect {
+                value: input.value,
+                calls: self.calls.clone(),
+            })
+            .await
+            .map_err(|e| HandlerError::Other(e.to_string()))?;
+        fx.emit(ReplayOutput {
             value: input.value,
-            calls: self.calls.clone(),
+            effect_value: effect.effect_value,
         })
         .await
-        .map_err(|e| HandlerError::Other(e.to_string()))
-    }
-
-    fn apply(
-        &mut self,
-        state: &mut Self::State,
-        input: ReplayInput,
-        transition: Self::Transition,
-    ) -> Result<(), HandlerError> {
-        state.outputs.push(ReplayOutput {
-            value: input.value,
-            effect_value: transition.effect_value,
-        });
+        .map_err(|e| HandlerError::Other(e.to_string()))?;
         Ok(())
     }
 
-    fn create_outputs(&self, state: &Self::State) -> Result<Vec<ReplayOutput>, HandlerError> {
-        Ok(state.outputs.clone())
+    fn apply(&mut self, state: &mut Self::State, fact: Self::Fact) -> Result<(), HandlerError> {
+        if let ReplayStatefulFact::Output(output) = fact {
+            state.outputs.push(output);
+        }
+        Ok(())
     }
 
     fn stage_logic_version(&self) -> &str {
@@ -424,13 +458,8 @@ impl EffectfulStatefulHandler for ReplayStateful {
 #[async_trait]
 impl EffectfulTransformHandler for FallbackTransform {
     type Input = ReplayInput;
-    type Output = ReplayOutput;
 
-    async fn process(
-        &self,
-        input: ReplayInput,
-        fx: &mut Effects,
-    ) -> Result<ReplayOutput, HandlerError> {
+    async fn process(&self, input: ReplayInput, fx: &mut Effects) -> Result<(), HandlerError> {
         let effect_value = fx
             .perform(AlwaysFailingEffect {
                 value: input.value,
@@ -439,10 +468,13 @@ impl EffectfulTransformHandler for FallbackTransform {
             .await
             .map_err(|e| HandlerError::Timeout(e.to_string()))?;
 
-        Ok(ReplayOutput {
+        fx.emit(ReplayOutput {
             value: input.value,
             effect_value: effect_value.effect_value,
         })
+        .await
+        .map_err(|e| HandlerError::Other(e.to_string()))?;
+        Ok(())
     }
 
     fn stage_logic_version(&self) -> &str {
@@ -530,7 +562,7 @@ fn build_flow(
         stages: {
             inputs = source!(ReplayInput => ReplaySource::new());
             effectful = effectful_transform!(
-                ReplayInput -> ReplayOutput => ReplayTransform { calls },
+                ReplayInput -> { ReplayOutput, ReplayEffectValue } => ReplayTransform { calls },
                 effects: [CountingEffect],
                 middleware: []
             );
@@ -559,7 +591,7 @@ fn build_flow_level_limiter_flow(
         stages: {
             inputs = source!(ReplayInput => ReplaySource::new());
             effectful = effectful_transform!(
-                ReplayInput -> ReplayOutput => ReplayTransform { calls },
+                ReplayInput -> { ReplayOutput, ReplayEffectValue } => ReplayTransform { calls },
                 effects: [CountingEffect],
                 middleware: []
             );
@@ -594,7 +626,7 @@ fn build_fast_limiter_flow(
         stages: {
             inputs = source!(ReplayInput => ReplaySource::new());
             effectful = effectful_transform!(
-                ReplayInput -> ReplayOutput => ReplayTransform { calls },
+                ReplayInput -> { ReplayOutput, ReplayEffectValue } => ReplayTransform { calls },
                 effects: [CountingEffect],
                 middleware: []
             );
@@ -622,7 +654,7 @@ fn build_blocking_flow(
         stages: {
             inputs = source!(ReplayInput => SingleReplaySource::new());
             effectful = effectful_transform!(
-                ReplayInput -> ReplayOutput => BlockingTransform { calls, release },
+                ReplayInput -> { ReplayOutput, ReplayEffectValue } => BlockingTransform { calls, release },
                 effects: [BlockingEffect],
                 middleware: []
             );
@@ -650,7 +682,7 @@ fn build_fan_out_flow(
             inputs = source!(ReplayInput => SingleReplaySource::new());
             fan_out = transform!(ReplayInput -> ReplayInput => FanOutTransform::new());
             effectful = effectful_transform!(
-                ReplayInput -> ReplayOutput => ReplayTransform { calls },
+                ReplayInput -> { ReplayOutput, ReplayEffectValue } => ReplayTransform { calls },
                 effects: [CountingEffect],
                 middleware: []
             );
@@ -703,7 +735,7 @@ fn build_breaker_fallback_flow(
         stages: {
             inputs = source!(ReplayInput => ReplaySource::new());
             effectful = effectful_transform!(
-                ReplayInput -> ReplayOutput => FallbackTransform { calls },
+                ReplayInput -> { ReplayOutput, ReplayEffectValue } => FallbackTransform { calls },
                 effects: [AlwaysFailingEffect],
                 middleware: [
                 CircuitBreakerBuilder::new(1)
@@ -736,7 +768,7 @@ fn build_stateful_flow(
         stages: {
             inputs = source!(ReplayInput => ReplaySource::new());
             effectful = effectful_stateful!(
-                ReplayInput -> ReplayOutput => ReplayStateful { calls },
+                ReplayInput -> { ReplayOutput, ReplayEffectValue } => ReplayStateful { calls },
                 effects: [CountingEffect],
                 middleware: []
             );
@@ -788,9 +820,17 @@ fn remove_effect_results_for_stage(run_dir: &Path, stage_key: &str) {
     let journal_path = run_dir.join(stage_journal);
     let original =
         std::fs::read_to_string(&journal_path).expect("stage journal should be readable");
+    // FLOWIP-120b: successful effect outcomes are domain `Data` facts carrying
+    // non-framework effect provenance. Failure/capture compatibility rows remain
+    // framework-owned reserved event types. Drop both forms so resume sees the
+    // effect outcomes as missing and re-executes; ordinary domain outputs on the
+    // same journal are retained.
+    let effect_outcome_type = ReplayEffectValue::versioned_event_type();
     let retained = original
         .lines()
-        .filter(|line| !line.contains("\"effect_result\""))
+        .filter(|line| {
+            !line.contains(EFFECT_RECORD_EVENT_TYPE) && !line.contains(&effect_outcome_type)
+        })
         .collect::<Vec<_>>()
         .join("\n");
     let retained = if retained.is_empty() {
@@ -820,6 +860,68 @@ async fn read_stage_events(run_dir: &Path, stage_key: &str) -> Vec<ChainEvent> {
         .into_iter()
         .map(|envelope| envelope.event)
         .collect()
+}
+
+/// True when an event is a framework-owned effect fact. Successful typed effect
+/// outcomes are no longer framework-owned; they are normal domain `Data` facts
+/// tagged with non-framework effect provenance. Reserved framework rows remain
+/// for capture and failure compatibility.
+fn is_framework_effect_fact(event: &ChainEvent) -> bool {
+    matches!(
+        &event.content,
+        ChainEventContent::Data { event_type, .. }
+            if event
+                .effect_provenance
+                .as_ref()
+                .is_some_and(|provenance| provenance.fact_owner.is_framework())
+                && is_framework_effect_event_type(event_type)
+    )
+}
+
+fn is_domain_effect_outcome_fact(event: &ChainEvent) -> bool {
+    matches!(
+        &event.content,
+        ChainEventContent::Data { event_type, .. }
+            if event_type == ReplayEffectValue::versioned_event_type().as_str()
+                && event
+                    .effect_provenance
+                    .as_ref()
+                    .is_some_and(|provenance| provenance.fact_owner.is_user())
+    )
+}
+
+/// Decode the `EffectRecord` carried by a framework-owned effect-record `Data`
+/// fact, mirroring the runtime's replay-history reader. Returns `None` for any
+/// other event, including capture facts.
+fn framework_effect_record(event: &ChainEvent) -> Option<EffectRecord> {
+    match &event.content {
+        ChainEventContent::Data {
+            event_type,
+            payload,
+        } if event
+            .effect_provenance
+            .as_ref()
+            .is_some_and(|provenance| provenance.fact_owner.is_framework())
+            && event_type == EFFECT_RECORD_EVENT_TYPE =>
+        {
+            serde_json::from_value(payload.clone()).ok()
+        }
+        _ => None,
+    }
+}
+
+fn recorded_effect_cursor(event: &ChainEvent) -> Option<EffectCursor> {
+    if let Some(record) = framework_effect_record(event) {
+        return Some(record.cursor);
+    }
+    if matches!(event.content, ChainEventContent::Data { .. }) {
+        return event
+            .effect_provenance
+            .as_ref()
+            .filter(|provenance| provenance.fact_owner.is_user())
+            .map(|provenance| provenance.cursor.clone());
+    }
+    None
 }
 
 async fn rate_limiter_delayed_events_in_stage(run_dir: &Path, stage_key: &str) -> usize {
@@ -935,76 +1037,30 @@ async fn rate_limiter_runtime_activity_in_stage(
 }
 
 #[tokio::test]
-async fn effectful_sink_replay_suppresses_effect_execution() {
+async fn effectful_sink_fails_closed_at_materialisation() {
     let _guard = effect_replay_test_guard().await;
     let temp = tempfile::tempdir().expect("tempdir");
     let journal_base = temp.path().join("journals");
 
-    let live_calls = Arc::new(AtomicUsize::new(0));
-    let live_receipts = Arc::new(Mutex::new(Vec::new()));
-    FlowApplication::builder()
+    let calls = Arc::new(AtomicUsize::new(0));
+    let receipts = Arc::new(Mutex::new(Vec::new()));
+    let err = FlowApplication::builder()
         .with_cli_args(["obzenflow"])
         .run_async(build_effectful_sink_flow(
-            journal_base.clone(),
-            live_calls.clone(),
-            live_receipts.clone(),
-        ))
-        .await
-        .expect("live sink flow should complete");
-
-    assert_eq!(live_calls.load(Ordering::SeqCst), 3);
-    let live_domain_receipts = live_receipts
-        .lock()
-        .expect("receipts lock poisoned")
-        .clone();
-    assert_eq!(
-        live_domain_receipts,
-        vec![
-            ReplayOutput {
-                value: 1,
-                effect_value: 101
-            },
-            ReplayOutput {
-                value: 2,
-                effect_value: 102
-            },
-            ReplayOutput {
-                value: 3,
-                effect_value: 103
-            },
-        ]
-    );
-
-    let archive_dir = latest_run_dir(&journal_base);
-    let replay_calls = Arc::new(AtomicUsize::new(0));
-    let replay_receipts = Arc::new(Mutex::new(Vec::new()));
-    FlowApplication::builder()
-        .with_cli_args(vec![
-            OsString::from("obzenflow"),
-            OsString::from("--replay-from"),
-            archive_dir.as_os_str().to_os_string(),
-        ])
-        .run_async(build_effectful_sink_flow(
             journal_base,
-            replay_calls.clone(),
-            replay_receipts.clone(),
+            calls.clone(),
+            receipts.clone(),
         ))
         .await
-        .expect("replay sink flow should complete");
+        .expect_err("effectful sinks are retired under FLOWIP-120b");
 
-    assert_eq!(
-        replay_calls.load(Ordering::SeqCst),
-        0,
-        "sink replay must return recorded effect results without executing"
+    let message = err.to_string();
+    assert!(
+        message.contains("effectful sink") && message.contains("retired by FLOWIP-120b"),
+        "materialisation error should explain effectful sink retirement, got: {message}"
     );
-    assert_eq!(
-        replay_receipts
-            .lock()
-            .expect("receipts lock poisoned")
-            .clone(),
-        live_domain_receipts,
-        "sink replay should reconstruct equivalent consume receipts"
-    );
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert!(receipts.lock().expect("receipts lock poisoned").is_empty());
 }
 
 #[tokio::test]
@@ -1113,19 +1169,16 @@ async fn fan_out_sibling_effects_use_distinct_cursors_and_replay_suppresses_exec
 
     let archive_dir = latest_run_dir(&journal_base);
     let effectful_events = read_stage_events(&archive_dir, "effectful").await;
-    let effect_records: Vec<_> = effectful_events
+    let effect_cursors: Vec<_> = effectful_events
         .iter()
-        .filter_map(|event| match &event.content {
-            ChainEventContent::EffectResult(record) => Some(record),
-            _ => None,
-        })
+        .filter_map(recorded_effect_cursor)
         .collect();
-    assert_eq!(effect_records.len(), 2);
-    assert_eq!(effect_records[0].cursor.input_seq, 1);
-    assert_eq!(effect_records[0].cursor.effect_ordinal, 0);
-    assert_eq!(effect_records[1].cursor.input_seq, 2);
-    assert_eq!(effect_records[1].cursor.effect_ordinal, 0);
-    assert_ne!(effect_records[0].cursor, effect_records[1].cursor);
+    assert_eq!(effect_cursors.len(), 2);
+    assert_eq!(effect_cursors[0].input_seq, 1);
+    assert_eq!(effect_cursors[0].effect_ordinal, 0);
+    assert_eq!(effect_cursors[1].input_seq, 2);
+    assert_eq!(effect_cursors[1].effect_ordinal, 0);
+    assert_ne!(effect_cursors[0], effect_cursors[1]);
 
     let replay_calls = Arc::new(AtomicUsize::new(0));
     let replay_outputs = Arc::new(Mutex::new(Vec::new()));
@@ -1180,13 +1233,23 @@ async fn eof_writer_seq_counts_transport_data_not_effect_results() {
 
     let archive_dir = latest_run_dir(&journal_base);
     let effectful_events = read_stage_events(&archive_dir, "effectful").await;
-    let effect_results = effectful_events
+    let framework_effect_facts = effectful_events
         .iter()
-        .filter(|event| matches!(event.content, ChainEventContent::EffectResult(_)))
+        .filter(|event| is_framework_effect_fact(event))
         .count();
-    let data_outputs = effectful_events
+    let domain_effect_outcome_facts = effectful_events
         .iter()
-        .filter(|event| matches!(event.content, ChainEventContent::Data { .. }))
+        .filter(|event| is_domain_effect_outcome_fact(event))
+        .count();
+    let selected_replay_outputs = effectful_events
+        .iter()
+        .filter(|event| {
+            matches!(
+                &event.content,
+                ChainEventContent::Data { event_type, .. }
+                    if event_type == ReplayOutput::versioned_event_type().as_str()
+            )
+        })
         .count();
     let eof_writer_seq = effectful_events
         .iter()
@@ -1197,20 +1260,22 @@ async fn eof_writer_seq_counts_transport_data_not_effect_results() {
             _ => None,
         });
 
-    assert_eq!(effect_results, 3);
-    assert_eq!(data_outputs, 3);
+    assert_eq!(framework_effect_facts, 0);
+    assert_eq!(domain_effect_outcome_facts, 3);
+    assert_eq!(selected_replay_outputs, 3);
     assert_eq!(
         eof_writer_seq,
         Some(3),
-        "EffectResult records must not inflate EOF writer_seq"
+        "EOF writer_seq for the ReplayOutput feed must not be inflated by \
+         other authored fact types"
     );
 
     let collector_events = read_stage_events(&archive_dir, "collector").await;
     assert!(
         collector_events
             .iter()
-            .all(|event| !matches!(event.content, ChainEventContent::EffectResult(_))),
-        "downstream transport should never receive private EffectResult records"
+            .all(|event| !is_framework_effect_fact(event) && !is_domain_effect_outcome_fact(event)),
+        "downstream transport should only receive the selected ReplayOutput feed"
     );
 }
 
@@ -1849,13 +1914,8 @@ struct PortedTransform {
 #[async_trait]
 impl EffectfulTransformHandler for PortedTransform {
     type Input = ReplayInput;
-    type Output = ReplayOutput;
 
-    async fn process(
-        &self,
-        input: ReplayInput,
-        fx: &mut Effects,
-    ) -> Result<ReplayOutput, HandlerError> {
+    async fn process(&self, input: ReplayInput, fx: &mut Effects) -> Result<(), HandlerError> {
         let effect_value = fx
             .perform(PortedEffect {
                 value: input.value,
@@ -1864,10 +1924,13 @@ impl EffectfulTransformHandler for PortedTransform {
             .await
             .map_err(|e| HandlerError::Other(e.to_string()))?;
 
-        Ok(ReplayOutput {
+        fx.emit(ReplayOutput {
             value: input.value,
             effect_value: effect_value.effect_value,
         })
+        .await
+        .map_err(|e| HandlerError::Other(e.to_string()))?;
+        Ok(())
     }
 
     fn stage_logic_version(&self) -> &str {
@@ -1890,7 +1953,7 @@ fn build_ported_flow(
         stages: {
             inputs = source!(ReplayInput => ReplaySource::new());
             ported = effectful_transform!(
-                ReplayInput -> ReplayOutput => PortedTransform { calls },
+                ReplayInput -> { ReplayOutput, ReplayEffectValue } => PortedTransform { calls },
                 effects: [PortedEffect],
                 middleware: []
             );
@@ -2044,22 +2107,20 @@ struct LedgerTransform;
 #[async_trait]
 impl EffectfulTransformHandler for LedgerTransform {
     type Input = ReplayInput;
-    type Output = ReplayOutput;
 
-    async fn process(
-        &self,
-        input: ReplayInput,
-        fx: &mut Effects,
-    ) -> Result<ReplayOutput, HandlerError> {
+    async fn process(&self, input: ReplayInput, fx: &mut Effects) -> Result<(), HandlerError> {
         let committed = fx
             .perform(LedgerEffect { value: input.value })
             .await
             .map_err(|e| HandlerError::Other(e.to_string()))?;
 
-        Ok(ReplayOutput {
+        fx.emit(ReplayOutput {
             value: input.value,
             effect_value: committed.effect_value,
         })
+        .await
+        .map_err(|e| HandlerError::Other(e.to_string()))?;
+        Ok(())
     }
 
     fn stage_logic_version(&self) -> &str {
@@ -2081,7 +2142,7 @@ fn build_transactional_flow(
         stages: {
             inputs = source!(ReplayInput => SingleReplaySource::new());
             ledger = effectful_transform!(
-                ReplayInput -> ReplayOutput => LedgerTransform,
+                ReplayInput -> { ReplayOutput, ReplayEffectValue } => LedgerTransform,
                 effects: [transactional(LedgerEffect, "ledger_tx")],
                 middleware: []
             );

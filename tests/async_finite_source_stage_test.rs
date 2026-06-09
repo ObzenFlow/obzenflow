@@ -76,7 +76,7 @@ impl AsyncFiniteSourceHandler for TestAsyncEventSource {
             tokio::task::yield_now().await;
             Ok(Some(vec![ChainEventFactory::data_event(
                 self.writer_id,
-                "TestEvent",
+                <AsyncTestEvent as TypedPayload>::EVENT_TYPE,
                 json!({ "index": index }),
             )]))
         } else {

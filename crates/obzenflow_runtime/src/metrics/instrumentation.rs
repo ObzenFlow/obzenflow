@@ -13,10 +13,13 @@ use obzenflow_core::event::event_envelope::EventEnvelope;
 use obzenflow_core::event::identity::journal_writer_id::JournalWriterId;
 use obzenflow_core::event::vector_clock::VectorClock;
 use obzenflow_core::event::JournalEvent;
+use obzenflow_core::event::{ChainEvent, ChainEventContent};
 use obzenflow_core::metrics::StageMetricsSnapshot;
 use obzenflow_core::EventId;
+use obzenflow_core::EventType;
 use obzenflow_core::StageId;
 use obzenflow_core::WriterId;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{OnceLock, RwLock};
 use std::time::{Duration, Instant};
@@ -97,6 +100,7 @@ pub struct StageInstrumentation {
     pub last_receipted_vector_clock: RwLock<Option<VectorClock>>,
     pub last_emitted_event_id: RwLock<Option<EventId>>,
     pub last_emitted_writer: RwLock<Option<WriterId>>,
+    pub data_writer_seq_by_event_type: RwLock<HashMap<EventType, u64>>,
 
     /// Error breakdown by kind
     pub errors_by_kind: RwLock<
@@ -177,6 +181,7 @@ impl StageInstrumentation {
             last_receipted_vector_clock: RwLock::new(None),
             last_emitted_event_id: RwLock::new(None),
             last_emitted_writer: RwLock::new(None),
+            data_writer_seq_by_event_type: RwLock::new(HashMap::new()),
 
             errors_by_kind: RwLock::new(std::collections::HashMap::new()),
 
@@ -401,9 +406,29 @@ impl StageInstrumentation {
     ///
     /// Use this for data/delivery events that represent stage outputs. Do not
     /// use it for observability-only events (e.g. metrics heartbeats).
-    pub fn record_output_event<T: JournalEvent>(&self, event: &T) {
+    pub fn record_output_event(&self, event: &ChainEvent) {
         self.record_emitted(event);
+        if let ChainEventContent::Data { event_type, .. } = &event.content {
+            let mut by_type = self.data_writer_seq_by_event_type.write().unwrap();
+            *by_type.entry(event_type.clone().into()).or_insert(0) += 1;
+        }
         self.events_emitted_total.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn data_writer_seq_by_event_type(
+        &self,
+    ) -> BTreeMap<EventType, obzenflow_core::event::types::SeqNo> {
+        self.data_writer_seq_by_event_type
+            .read()
+            .unwrap()
+            .iter()
+            .map(|(event_type, count)| {
+                (
+                    event_type.clone(),
+                    obzenflow_core::event::types::SeqNo(*count),
+                )
+            })
+            .collect()
     }
 
     /// Record processing duration in histogram and sum.

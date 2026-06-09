@@ -14,8 +14,8 @@ use super::{
 };
 use crate::{
     backpressure::BackpressureRegistry,
+    feed_plan::{FeedKey, FeedPlan},
     id_conversions::StageIdExt,
-    message_bus::FsmMessageBus,
     stages::common::stage_handle::BoxedStageHandle,
     stages::LivenessSnapshots,
     supervised_base::{
@@ -38,6 +38,28 @@ use std::{
 
 type StageJournalList = Vec<(StageId, Arc<dyn Journal<ChainEvent>>)>;
 
+fn derive_expected_contract_keys(topology: &Topology, feed_plan: &FeedPlan) -> HashSet<FeedKey> {
+    let mut keys: HashSet<FeedKey> = feed_plan
+        .all_feeds()
+        .iter()
+        .map(|feed| feed.key.clone())
+        .collect();
+
+    for edge in topology.edges() {
+        let upstream = StageId::from_topology_id(edge.from);
+        let downstream = StageId::from_topology_id(edge.to);
+        if keys
+            .iter()
+            .any(|key| key.matches_stage_pair(upstream, downstream))
+        {
+            continue;
+        }
+        keys.insert(FeedKey::legacy_stage_pair(upstream, downstream));
+    }
+
+    keys
+}
+
 /// Builder for creating a pipeline with proper FSM lifecycle
 pub struct PipelineBuilder {
     topology: Arc<Topology>,
@@ -52,6 +74,7 @@ pub struct PipelineBuilder {
     contract_attachments: Option<HashMap<(StageId, StageId), Vec<String>>>,
     backpressure_registry: Option<Arc<BackpressureRegistry>>,
     liveness_snapshots: Option<LivenessSnapshots>,
+    feed_plan: FeedPlan,
 }
 
 impl PipelineBuilder {
@@ -74,6 +97,7 @@ impl PipelineBuilder {
             contract_attachments: None,
             backpressure_registry: None,
             liveness_snapshots: None,
+            feed_plan: FeedPlan::default(),
         }
     }
 
@@ -139,6 +163,12 @@ impl PipelineBuilder {
     /// Add flow-scoped stage liveness snapshots for continuous heartbeat metrics (FLOWIP-063e).
     pub fn with_liveness_snapshots(mut self, snapshots: LivenessSnapshots) -> Self {
         self.liveness_snapshots = Some(snapshots);
+        self
+    }
+
+    /// Add flow-scoped logical feed metadata for contract gating (FLOWIP-120b).
+    pub fn with_feed_plan(mut self, feed_plan: FeedPlan) -> Self {
+        self.feed_plan = feed_plan;
         self
     }
 }
@@ -218,9 +248,6 @@ impl SupervisorBuilder for PipelineBuilder {
         // Create unique stage ID for the pipeline supervisor
         let _stage_id = StageId::new();
 
-        // Create message bus
-        let message_bus = Arc::new(FsmMessageBus::new());
-
         // Prepare stage supervisors map
         let mut stage_map = HashMap::new();
         for stage in self.stages {
@@ -286,17 +313,14 @@ impl SupervisorBuilder for PipelineBuilder {
             .filter(|(_, downstream)| sink_stages.contains(downstream))
             .collect();
 
-        // Track every topology edge so we can require ContractStatus evidence for each upstream->reader pair
-        let expected_contract_pairs: HashSet<(StageId, StageId)> = self
-            .topology
-            .edges()
+        // Track every logical feed so we can require ContractStatus evidence for
+        // each upstream->reader selected payload/role pair. Legacy/direct
+        // callers without a feed plan get one fallback key per topology edge.
+        let expected_contract_pairs =
+            derive_expected_contract_keys(&self.topology, &self.feed_plan);
+        let expected_contract_stage_pairs: HashSet<(StageId, StageId)> = expected_contract_pairs
             .iter()
-            .map(|edge| {
-                (
-                    StageId::from_topology_id(edge.from),
-                    StageId::from_topology_id(edge.to),
-                )
-            })
+            .map(|key| (key.upstream_stage, key.downstream_stage))
             .collect();
 
         // Structural contract attachments for topology observability:
@@ -305,7 +329,7 @@ impl SupervisorBuilder for PipelineBuilder {
         // - Forward edges into sink stages also get DeliveryContract.
         let mut contract_attachments_map: HashMap<(StageId, StageId), Vec<String>> =
             self.contract_attachments.unwrap_or_default();
-        for (upstream, downstream) in &expected_contract_pairs {
+        for (upstream, downstream) in &expected_contract_stage_pairs {
             let entry = contract_attachments_map
                 .entry((*upstream, *downstream))
                 .or_default();
@@ -332,7 +356,6 @@ impl SupervisorBuilder for PipelineBuilder {
 
         let pipeline_context = PipelineContext {
             system_id,
-            bus: message_bus.clone(),
             topology: self.topology.clone(),
             flow_name: flow_name.clone(),
             flow_id: self.flow_id,
@@ -451,5 +474,88 @@ impl SupervisorBuilder for PipelineBuilder {
                 liveness_snapshots: self.liveness_snapshots.clone(),
             },
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::feed_plan::{FactVisibility, FeedRole, LogicalFeed, PayloadTypeDescriptor};
+    use obzenflow_topology::{DirectedEdge, EdgeKind, StageInfo, StageType, TypeHintInfo};
+
+    #[test]
+    fn expected_contract_keys_preserve_multiple_logical_feeds_for_stage_pair() {
+        let upstream = StageId::new();
+        let downstream = StageId::new();
+        let upstream_topology_id = upstream.to_topology_id();
+        let downstream_topology_id = downstream.to_topology_id();
+        let topology = Topology::new_unvalidated(
+            vec![
+                StageInfo::new(upstream_topology_id, "upstream", StageType::Transform),
+                StageInfo::new(downstream_topology_id, "downstream", StageType::Join),
+            ],
+            vec![DirectedEdge::new(
+                upstream_topology_id,
+                downstream_topology_id,
+                EdgeKind::Forward,
+            )],
+        )
+        .expect("topology");
+
+        let first_type = TypeHintInfo::exact("crate::FirstFact");
+        let second_type = TypeHintInfo::exact("crate::SecondFact");
+        let first_key = FeedKey::new(upstream, downstream, "test.first", FeedRole::Reference);
+        let second_key = FeedKey::new(upstream, downstream, "test.second", FeedRole::Stream);
+        let feed_plan = FeedPlan::new(
+            HashMap::new(),
+            vec![
+                LogicalFeed {
+                    key: first_key.clone(),
+                    selected_payload: PayloadTypeDescriptor::from_type_hint(
+                        first_type,
+                        FactVisibility::Routable,
+                    ),
+                },
+                LogicalFeed {
+                    key: second_key.clone(),
+                    selected_payload: PayloadTypeDescriptor::from_type_hint(
+                        second_type,
+                        FactVisibility::Routable,
+                    ),
+                },
+            ],
+        );
+
+        let keys = derive_expected_contract_keys(&topology, &feed_plan);
+
+        assert_eq!(keys.len(), 2);
+        assert!(keys.contains(&first_key));
+        assert!(keys.contains(&second_key));
+        assert!(!keys.contains(&FeedKey::legacy_stage_pair(upstream, downstream)));
+    }
+
+    #[test]
+    fn expected_contract_keys_fallback_to_legacy_stage_pair_without_feed_plan() {
+        let upstream = StageId::new();
+        let downstream = StageId::new();
+        let upstream_topology_id = upstream.to_topology_id();
+        let downstream_topology_id = downstream.to_topology_id();
+        let topology = Topology::new_unvalidated(
+            vec![
+                StageInfo::new(upstream_topology_id, "upstream", StageType::Transform),
+                StageInfo::new(downstream_topology_id, "downstream", StageType::Sink),
+            ],
+            vec![DirectedEdge::new(
+                upstream_topology_id,
+                downstream_topology_id,
+                EdgeKind::Forward,
+            )],
+        )
+        .expect("topology");
+
+        let keys = derive_expected_contract_keys(&topology, &FeedPlan::default());
+
+        assert_eq!(keys.len(), 1);
+        assert!(keys.contains(&FeedKey::legacy_stage_pair(upstream, downstream)));
     }
 }

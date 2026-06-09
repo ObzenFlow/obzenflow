@@ -30,7 +30,7 @@ struct SeedEvent {
 }
 
 impl TypedPayload for SeedEvent {
-    const EVENT_TYPE: &'static str = "cycle.seed";
+    const EVENT_TYPE: &'static str = "test.cycle";
 }
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -127,8 +127,8 @@ impl FiniteSourceHandler for SingleSeedFanOutSource {
 
         let mut event = ChainEventFactory::data_event(
             self.writer_id,
-            "test.seed",
-            json!({ "fan_out": self.fan_out, "target": self.target }),
+            SeedEvent::EVENT_TYPE,
+            json!({ "kind": "seed", "fan_out": self.fan_out, "target": self.target }),
         );
         event.set_single_correlation(self.correlation_id, None);
         Ok(Some(vec![event]))
@@ -163,7 +163,12 @@ impl TransformHandler for FanOutEntryTransform {
 
         self.processed.fetch_add(1, Ordering::Relaxed);
 
-        if event_type == "test.seed" {
+        if event_type != SeedEvent::EVENT_TYPE {
+            return Ok(Vec::new());
+        }
+
+        let kind = payload.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+        if kind == "seed" {
             let fan_out = payload.get("fan_out").and_then(|v| v.as_u64()).unwrap_or(0);
             let target = payload.get("target").and_then(|v| v.as_u64()).unwrap_or(0);
 
@@ -172,14 +177,14 @@ impl TransformHandler for FanOutEntryTransform {
                 outputs.push(ChainEventFactory::derived_data_event(
                     self.writer_id,
                     &event,
-                    "test.iter",
-                    json!({ "item": item, "iter": 0u64, "target": target }),
+                    SeedEvent::EVENT_TYPE,
+                    json!({ "kind": "iter", "item": item, "iter": 0u64, "target": target }),
                 ));
             }
             return Ok(outputs);
         }
 
-        if event_type == "test.iter" {
+        if kind == "iter" {
             let item = payload.get("item").and_then(|v| v.as_u64()).unwrap_or(0);
             let iter = payload.get("iter").and_then(|v| v.as_u64()).unwrap_or(0);
             let target = payload.get("target").and_then(|v| v.as_u64()).unwrap_or(0);
@@ -188,16 +193,16 @@ impl TransformHandler for FanOutEntryTransform {
                 return Ok(vec![ChainEventFactory::derived_data_event(
                     self.writer_id,
                     &event,
-                    "test.done",
-                    json!({ "item": item, "iter": iter, "target": target }),
+                    SeedEvent::EVENT_TYPE,
+                    json!({ "kind": "done", "item": item, "iter": iter, "target": target }),
                 )]);
             }
 
             return Ok(vec![ChainEventFactory::derived_data_event(
                 self.writer_id,
                 &event,
-                "test.iter",
-                json!({ "item": item, "iter": iter, "target": target }),
+                SeedEvent::EVENT_TYPE,
+                json!({ "kind": "iter", "item": item, "iter": iter, "target": target }),
             )]);
         }
 
@@ -249,7 +254,9 @@ impl TransformHandler for IterationTransform {
             return Ok(Vec::new());
         };
 
-        if event_type != "test.iter" {
+        if event_type != SeedEvent::EVENT_TYPE
+            || payload.get("kind").and_then(|v| v.as_str()) != Some("iter")
+        {
             return Ok(Vec::new());
         }
 
@@ -262,8 +269,8 @@ impl TransformHandler for IterationTransform {
         Ok(vec![ChainEventFactory::derived_data_event(
             self.writer_id,
             &event,
-            "test.iter",
-            json!({ "item": item, "iter": iter.saturating_add(1), "target": target }),
+            SeedEvent::EVENT_TYPE,
+            json!({ "kind": "iter", "item": item, "iter": iter.saturating_add(1), "target": target }),
         )])
     }
 
@@ -295,8 +302,14 @@ impl SinkHandler for DoneCounterSink {
         &mut self,
         event: ChainEvent,
     ) -> std::result::Result<DeliveryPayload, HandlerError> {
-        if let ChainEventContent::Data { event_type, .. } = &event.content {
-            if event_type == "test.done" {
+        if let ChainEventContent::Data {
+            event_type,
+            payload,
+        } = &event.content
+        {
+            if event_type == SeedEvent::EVENT_TYPE
+                && payload.get("kind").and_then(|v| v.as_str()) == Some("done")
+            {
                 self.done_count.fetch_add(1, Ordering::Relaxed);
             }
         }

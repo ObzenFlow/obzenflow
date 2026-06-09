@@ -6,6 +6,7 @@ use super::{
     DeliveryFilter, EofOutcome, PollResult, ReaderProgress, StageInputPosition,
     UpstreamSubscription,
 };
+use obzenflow_core::event::payloads::effect_payload::is_framework_effect_event_type;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::types::SeqNo;
 use obzenflow_core::event::{ChainEvent, ChainEventContent, JournalEvent};
@@ -18,6 +19,96 @@ impl<T> UpstreamSubscription<T>
 where
     T: JournalEvent + 'static,
 {
+    fn feed_selected_contract_chains_on_event(
+        &mut self,
+        reader_index: usize,
+        upstream_stage: obzenflow_core::StageId,
+        event: &ChainEvent,
+        reader_stage: obzenflow_core::StageId,
+    ) {
+        if self
+            .contract_feed_chains
+            .get(reader_index)
+            .is_none_or(Vec::is_empty)
+        {
+            return;
+        }
+
+        match &event.content {
+            ChainEventContent::Data { event_type, .. } => {
+                let feed_reads: Vec<(usize, SeqNo)> = self
+                    .contract_feed_chains
+                    .get(reader_index)
+                    .into_iter()
+                    .flat_map(|chains| chains.iter().enumerate())
+                    .filter(|(_, feed_chain)| {
+                        Self::selected_feed_matches_event_type(&feed_chain.metadata, event_type)
+                    })
+                    .map(|(feed_index, feed_chain)| {
+                        (
+                            feed_index,
+                            self.selected_reader_seq_for_feed(reader_index, &feed_chain.metadata),
+                        )
+                    })
+                    .collect();
+
+                if let Some(chains) = self.contract_feed_chains.get_mut(reader_index) {
+                    for (feed_index, reader_seq) in feed_reads {
+                        if let Some(feed_chain) = chains.get_mut(feed_index) {
+                            feed_chain.chain.on_read(
+                                event,
+                                reader_stage,
+                                reader_seq,
+                                upstream_stage,
+                            );
+                        }
+                    }
+                }
+            }
+            ChainEventContent::FlowControl(FlowControlPayload::Eof {
+                writer_seq_by_event_type,
+                ..
+            }) if !writer_seq_by_event_type.is_empty() => {
+                let feed_writes: Vec<(usize, SeqNo)> = self
+                    .contract_feed_chains
+                    .get(reader_index)
+                    .into_iter()
+                    .flat_map(|chains| chains.iter().enumerate())
+                    .filter_map(|(feed_index, feed_chain)| {
+                        writer_seq_by_event_type
+                            .iter()
+                            .find(|(event_type, _)| {
+                                Self::selected_feed_matches_event_type(
+                                    &feed_chain.metadata,
+                                    event_type.as_str(),
+                                )
+                            })
+                            .map(|(_, writer_seq)| (feed_index, *writer_seq))
+                    })
+                    .collect();
+
+                if let Some(chains) = self.contract_feed_chains.get_mut(reader_index) {
+                    for (feed_index, writer_seq) in feed_writes {
+                        if let Some(feed_chain) = chains.get_mut(feed_index) {
+                            let mut feed_event = event.clone();
+                            if let ChainEventContent::FlowControl(FlowControlPayload::Eof {
+                                writer_seq: eof_writer_seq,
+                                ..
+                            }) = &mut feed_event.content
+                            {
+                                *eof_writer_seq = Some(writer_seq);
+                            }
+                            feed_chain
+                                .chain
+                                .on_write(&feed_event, upstream_stage, SeqNo(0));
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
     /// Poll for the next event without blocking
     ///
     /// This method tries once through all readers and returns immediately.
@@ -114,19 +205,35 @@ where
                         if let Some(chain_event) =
                             (&envelope.event as &dyn Any).downcast_ref::<ChainEvent>()
                         {
-                            if matches!(
-                                chain_event.content,
-                                ChainEventContent::Observability(_)
-                                    | ChainEventContent::EffectResult(_)
-                            ) {
-                                // Observability and effect-result events are not part of the
-                                // transport stream.
+                            if matches!(chain_event.content, ChainEventContent::Observability(_)) {
+                                // Observability events are not part of the transport stream.
                                 // Skip delivering to the caller, but keep progressing.
                                 self.state.next_reader_index();
                                 continue;
                             }
+
+                            if let ChainEventContent::Data { event_type, .. } = &chain_event.content
+                            {
+                                if chain_event
+                                    .effect_provenance
+                                    .as_ref()
+                                    .is_some_and(|provenance| provenance.fact_owner.is_framework())
+                                    && is_framework_effect_event_type(event_type)
+                                {
+                                    self.state.next_reader_index();
+                                    continue;
+                                }
+
+                                if !self.data_event_selected_for_stage(stage_id, event_type) {
+                                    self.state.next_reader_index();
+                                    continue;
+                                }
+                            }
                         }
                     }
+
+                    let original_chain_event =
+                        (&envelope.event as &dyn Any).downcast_ref::<ChainEvent>();
 
                     tracing::debug!(
                         target: "flowip-080o",
@@ -147,9 +254,7 @@ where
                     //   EOFs authored by the upstream stage associated with this reader as
                     //   terminal. Otherwise, downstream stages can observe "early EOF"
                     //   and stop consuming before the real writer has finished.
-                    let (is_eof, is_drain) = if let Some(chain_event) =
-                        (&envelope.event as &dyn Any).downcast_ref::<ChainEvent>()
-                    {
+                    let (is_eof, is_drain) = if let Some(chain_event) = original_chain_event {
                         match &chain_event.content {
                             ChainEventContent::FlowControl(FlowControlPayload::Eof {
                                 writer_id,
@@ -181,6 +286,47 @@ where
                         (false, false)
                     };
 
+                    let mut normalized_contract_event = None;
+                    if is_eof && self.has_selected_event_type_filter(stage_id) {
+                        if let Some(chain_event) = original_chain_event {
+                            let selected_writer_seq =
+                                self.selected_writer_seq_for_reader(current_index, stage_id);
+                            let mut normalized = chain_event.clone();
+                            if let ChainEventContent::FlowControl(FlowControlPayload::Eof {
+                                writer_seq,
+                                writer_seq_by_event_type,
+                                ..
+                            }) = &mut normalized.content
+                            {
+                                *writer_seq = self
+                                    .selected_writer_seq_from_eof_map(
+                                        stage_id,
+                                        writer_seq_by_event_type,
+                                    )
+                                    .or(Some(selected_writer_seq));
+                            }
+                            normalized_contract_event = Some(normalized);
+                        }
+                    }
+                    let contract_chain_event =
+                        normalized_contract_event.as_ref().or(original_chain_event);
+
+                    if let Some(ChainEventContent::Data { event_type, .. }) =
+                        original_chain_event.map(|event| &event.content)
+                    {
+                        if let Some(selected_seq) =
+                            self.selected_data_seq_by_reader.get_mut(current_index)
+                        {
+                            selected_seq.0 = selected_seq.0.saturating_add(1);
+                        }
+                        if let Some(by_type) = self
+                            .selected_data_seq_by_reader_event_type
+                            .get_mut(current_index)
+                        {
+                            by_type.increment(event_type.clone());
+                        }
+                    }
+
                     // Update legacy contract tracking state if enabled and
                     // contract progress has been provided by the owning FSM
                     // context. Reader progress lives in FSM contexts; we only
@@ -192,9 +338,7 @@ where
                         if let Some(progress_slice) = reader_progress.as_deref_mut() {
                             if let Some(progress) = progress_slice.get_mut(current_index) {
                                 // Update progress for data events
-                                if let Some(chain_event) =
-                                    (&envelope.event as &dyn Any).downcast_ref::<ChainEvent>()
-                                {
+                                if let Some(chain_event) = contract_chain_event {
                                     if chain_event.is_data() {
                                         progress.reader_seq.0 += 1;
                                         progress.last_read_instant = Some(Instant::now());
@@ -218,6 +362,7 @@ where
                                         FlowControlPayload::Eof {
                                             writer_id,
                                             writer_seq,
+                                            writer_seq_by_event_type,
                                             vector_clock,
                                             ..
                                         },
@@ -239,6 +384,12 @@ where
                                         if authored_by_upstream {
                                             progress.advertised_writer_seq = *writer_seq;
                                             progress.last_vector_clock = vector_clock.clone();
+                                            if let Some(by_type) = self
+                                                .advertised_writer_seq_by_reader_event_type
+                                                .get_mut(current_index)
+                                            {
+                                                by_type.replace_from_eof(writer_seq_by_event_type);
+                                            }
                                         }
                                     }
                                 }
@@ -260,7 +411,7 @@ where
 
                     // Feed the event into the ContractChain for this edge, if configured.
                     if let (Some(chain_event), Some(reader_stage)) = (
-                        (&envelope.event as &dyn Any).downcast_ref::<ChainEvent>(),
+                        contract_chain_event,
                         self.contract_tracker.as_ref().and_then(|t| t.reader_stage),
                     ) {
                         if let Some(chain_slot) = self.contract_chains.get_mut(current_index) {
@@ -279,6 +430,13 @@ where
                                 chain.on_write(chain_event, stage_id, SeqNo(0));
                             }
                         }
+
+                        self.feed_selected_contract_chains_on_event(
+                            current_index,
+                            stage_id,
+                            chain_event,
+                            reader_stage,
+                        );
                     }
 
                     tracing::debug!(

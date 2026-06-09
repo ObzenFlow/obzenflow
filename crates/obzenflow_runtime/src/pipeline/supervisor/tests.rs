@@ -6,8 +6,8 @@ use super::*;
 use crate::bootstrap::{
     bootstrap_test_lock_async, install_bootstrap_config, BootstrapConfig, StartupMode,
 };
+use crate::feed_plan::{FeedKey, FeedRole};
 use crate::id_conversions::StageIdExt;
-use crate::message_bus::FsmMessageBus;
 use crate::messaging::SystemSubscription;
 use crate::pipeline::fsm::PipelineContext;
 use crate::stages::common::stage_handle::{BoxedStageHandle, StageError, StageEvent, StageHandle};
@@ -206,7 +206,6 @@ fn test_context(
     let system_journal: Arc<dyn Journal<SystemEvent>> = system_journal;
     PipelineContext {
         system_id,
-        bus: Arc::new(FsmMessageBus::new()),
         topology,
         flow_name: "test_flow".to_string(),
         flow_id: FlowId::new(),
@@ -230,6 +229,58 @@ fn test_context(
         last_system_event_id_seen: None,
         stop_intent: Default::default(),
     }
+}
+
+#[test]
+fn contract_keys_for_stage_pair_returns_all_matching_logical_feeds() {
+    let system_id = SystemId::new();
+    let system_journal = Arc::new(MemoryJournal::with_owner(JournalOwner::system(system_id)));
+    let (topology, upstream, downstream) = source_sink_topology_with_source();
+    let first_key = FeedKey::new(upstream, downstream, "test.first", FeedRole::Reference);
+    let second_key = FeedKey::new(upstream, downstream, "test.second", FeedRole::Stream);
+    let mut context = test_context(topology, system_id, system_journal, None);
+    context.expected_contract_pairs.insert(first_key.clone());
+    context.expected_contract_pairs.insert(second_key.clone());
+
+    let keys = context.contract_keys_for_stage_pair(upstream, downstream);
+
+    assert_eq!(keys.len(), 2);
+    assert!(keys.contains(&first_key));
+    assert!(keys.contains(&second_key));
+}
+
+#[test]
+fn contract_keys_for_contract_event_returns_matching_logical_feed() {
+    let system_id = SystemId::new();
+    let system_journal = Arc::new(MemoryJournal::with_owner(JournalOwner::system(system_id)));
+    let (topology, upstream, downstream) = source_sink_topology_with_source();
+    let first_key = FeedKey::new(upstream, downstream, "test.first", FeedRole::Reference);
+    let second_key = FeedKey::new(upstream, downstream, "test.second", FeedRole::Stream);
+    let mut context = test_context(topology, system_id, system_journal, None);
+    context.expected_contract_pairs.insert(first_key.clone());
+    context.expected_contract_pairs.insert(second_key.clone());
+
+    let keys = context.contract_keys_for_contract_event(
+        upstream,
+        downstream,
+        Some("test.first"),
+        Some("reference"),
+    );
+
+    assert_eq!(keys, vec![first_key]);
+}
+
+#[test]
+fn contract_keys_for_stage_pair_falls_back_for_legacy_stage_pair_status() {
+    let system_id = SystemId::new();
+    let system_journal = Arc::new(MemoryJournal::with_owner(JournalOwner::system(system_id)));
+    let (topology, upstream, downstream) = source_sink_topology_with_source();
+    let context = test_context(topology, system_id, system_journal, None);
+
+    assert_eq!(
+        context.contract_keys_for_stage_pair(upstream, downstream),
+        vec![FeedKey::legacy_stage_pair(upstream, downstream)]
+    );
 }
 
 struct TestPipelineStageHandle {

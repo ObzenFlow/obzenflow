@@ -22,10 +22,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 /// File-local payload for the cycle-convergence test. The JSON shape
-/// matches what the seed sources emit; the type fingerprints the stage
-/// contract per FLOWIP-114c.
+/// fingerprints the stage contract per FLOWIP-114c. Individual cycle
+/// phases are encoded in the payload `kind`, not as separate event types.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct SeedEvent {
+    kind: String,
     depth: u64,
     target: u64,
 }
@@ -33,6 +34,10 @@ struct SeedEvent {
 impl TypedPayload for SeedEvent {
     const EVENT_TYPE: &'static str = "cycle.seed";
 }
+
+const KIND_SEED: &str = "seed";
+const KIND_ITER: &str = "iter";
+const KIND_DONE: &str = "done";
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -126,8 +131,8 @@ impl FiniteSourceHandler for SingleSeedSource {
 
         let mut event = ChainEventFactory::data_event(
             self.writer_id,
-            "test.seed",
-            json!({ "depth": 0u64, "target": self.target }),
+            SeedEvent::versioned_event_type(),
+            json!({ "kind": KIND_SEED, "depth": 0u64, "target": self.target }),
         );
         event.set_single_correlation(self.correlation_id, None);
         Ok(Some(vec![event]))
@@ -152,16 +157,13 @@ impl EntryConvergeTransform {
 #[async_trait]
 impl TransformHandler for EntryConvergeTransform {
     fn process(&self, event: ChainEvent) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
-        let ChainEventContent::Data {
-            event_type,
-            payload,
-        } = &event.content
-        else {
+        let ChainEventContent::Data { payload, .. } = &event.content else {
             return Ok(Vec::new());
         };
 
         self.processed_data.fetch_add(1, Ordering::Relaxed);
 
+        let kind = payload.get("kind").and_then(|v| v.as_str()).unwrap_or("");
         let depth = payload.get("depth").and_then(|v| v.as_u64()).unwrap_or(0);
         let target = payload.get("target").and_then(|v| v.as_u64()).unwrap_or(0);
 
@@ -169,15 +171,15 @@ impl TransformHandler for EntryConvergeTransform {
             Ok(vec![ChainEventFactory::derived_data_event(
                 self.writer_id,
                 &event,
-                "test.done",
-                json!({ "depth": depth, "target": target }),
+                SeedEvent::versioned_event_type(),
+                json!({ "kind": KIND_DONE, "depth": depth, "target": target }),
             )])
-        } else if event_type == "test.seed" || event_type == "test.iter" {
+        } else if kind == KIND_SEED || kind == KIND_ITER {
             Ok(vec![ChainEventFactory::derived_data_event(
                 self.writer_id,
                 &event,
-                "test.iter",
-                json!({ "depth": depth, "target": target }),
+                SeedEvent::versioned_event_type(),
+                json!({ "kind": KIND_ITER, "depth": depth, "target": target }),
             )])
         } else {
             Ok(Vec::new())
@@ -212,15 +214,11 @@ impl AsyncTransformHandler for IterationTransform {
         &self,
         event: ChainEvent,
     ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
-        let ChainEventContent::Data {
-            event_type,
-            payload,
-        } = &event.content
-        else {
+        let ChainEventContent::Data { payload, .. } = &event.content else {
             return Ok(Vec::new());
         };
 
-        if event_type != "test.iter" {
+        if payload.get("kind").and_then(|v| v.as_str()) != Some(KIND_ITER) {
             return Ok(Vec::new());
         }
 
@@ -233,8 +231,8 @@ impl AsyncTransformHandler for IterationTransform {
         Ok(vec![ChainEventFactory::derived_data_event(
             self.writer_id,
             &event,
-            "test.iter",
-            json!({ "depth": depth.saturating_add(1), "target": target }),
+            SeedEvent::versioned_event_type(),
+            json!({ "kind": KIND_ITER, "depth": depth.saturating_add(1), "target": target }),
         )])
     }
 
@@ -266,8 +264,8 @@ impl SinkHandler for DoneCounterSink {
         &mut self,
         event: ChainEvent,
     ) -> std::result::Result<DeliveryPayload, HandlerError> {
-        if let ChainEventContent::Data { event_type, .. } = &event.content {
-            if event_type == "test.done" {
+        if let ChainEventContent::Data { payload, .. } = &event.content {
+            if payload.get("kind").and_then(|v| v.as_str()) == Some(KIND_DONE) {
                 self.done_events.fetch_add(1, Ordering::Relaxed);
             }
         }
@@ -410,8 +408,8 @@ impl AsyncFiniteSourceHandler for SeedThenDrainSource {
                 self.state = 1;
                 let mut event = ChainEventFactory::data_event(
                     self.writer_id,
-                    "test.seed",
-                    json!({ "depth": 0u64, "target": self.target }),
+                    SeedEvent::versioned_event_type(),
+                    json!({ "kind": KIND_SEED, "depth": 0u64, "target": self.target }),
                 );
                 event.set_single_correlation(self.correlation_id, None);
                 Ok(Some(vec![event]))
@@ -465,8 +463,8 @@ impl FiniteSourceHandler for DualSeedSource {
 
         let mut event = ChainEventFactory::data_event(
             self.writer_id,
-            "test.seed",
-            json!({ "depth": 0u64, "target": target }),
+            SeedEvent::versioned_event_type(),
+            json!({ "kind": KIND_SEED, "depth": 0u64, "target": target }),
         );
         event.set_single_correlation(correlation_id, None);
         Ok(Some(vec![event]))

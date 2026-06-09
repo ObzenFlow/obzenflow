@@ -2,8 +2,10 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
+use super::types::{AdvertisedWriterSeqByEventType, SelectedDataSeqByEventType};
 use super::{
-    ContractTracker, ContractsWiring, DeliveryFilter, SubscriptionState, UpstreamSubscription,
+    ContractTracker, ContractsWiring, DeliveryFilter, FeedContractChain, SelectedFeedMetadata,
+    SubscriptionState, UpstreamSubscription,
 };
 use crate::contracts::ContractChain;
 use crate::messaging::upstream_subscription_policy::build_policy_stack_for_upstream;
@@ -14,7 +16,10 @@ use obzenflow_core::event::JournalEvent;
 use obzenflow_core::journal::journal_error::JournalError;
 use obzenflow_core::journal::journal_reader::JournalReader;
 use obzenflow_core::journal::Journal;
-use obzenflow_core::{DeliveryContract, EventEnvelope, Result, StageId, TransportContract};
+use obzenflow_core::{
+    DeliveryContract, EventEnvelope, EventType, Result, StageId, TransportContract,
+};
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 /// Fallback reader used when a real journal reader cannot be created.
@@ -163,10 +168,23 @@ where
         Ok(Self {
             delivery_filter: DeliveryFilter::All,
             owner_label: owner_label.to_string(),
+            selected_data_seq_by_reader: vec![SeqNo(0); readers.len()],
+            selected_data_seq_by_reader_event_type: vec![
+                SelectedDataSeqByEventType::default();
+                readers.len()
+            ],
+            advertised_writer_seq_by_reader_event_type: vec![
+                AdvertisedWriterSeqByEventType::default(
+                );
+                readers.len()
+            ],
             readers,
+            selected_event_types_by_stage: HashMap::new(),
+            selected_feeds_by_stage: HashMap::new(),
             state,
             contract_tracker: None,
             contract_chains: Vec::new(),
+            contract_feed_chains: Vec::new(),
             contract_policies: Vec::new(),
             control_middleware: Arc::new(NoControlMiddleware),
             last_eof_outcome: None,
@@ -183,6 +201,47 @@ where
     /// as part of normal draining / shutdown.
     pub fn transport_only(mut self) -> Self {
         self.delivery_filter = DeliveryFilter::TransportOnly;
+        self
+    }
+
+    /// Configure selected Data event types per upstream reader.
+    pub fn with_selected_event_types(
+        mut self,
+        selected_event_types_by_stage: HashMap<StageId, HashSet<EventType>>,
+    ) -> Self {
+        self.selected_feeds_by_stage = selected_event_types_by_stage
+            .iter()
+            .map(|(stage_id, event_types)| {
+                let feeds = event_types
+                    .iter()
+                    .cloned()
+                    .map(SelectedFeedMetadata::unscoped)
+                    .collect();
+                (*stage_id, feeds)
+            })
+            .collect();
+        self.selected_event_types_by_stage = selected_event_types_by_stage;
+        self
+    }
+
+    /// Configure selected logical feeds per upstream reader.
+    pub fn with_selected_feeds(
+        mut self,
+        selected_feeds_by_stage: HashMap<StageId, Vec<SelectedFeedMetadata>>,
+    ) -> Self {
+        self.selected_event_types_by_stage = selected_feeds_by_stage
+            .iter()
+            .map(|(stage_id, feeds)| {
+                (
+                    *stage_id,
+                    feeds
+                        .iter()
+                        .map(|feed| feed.event_type().clone())
+                        .collect::<HashSet<_>>(),
+                )
+            })
+            .collect();
+        self.selected_feeds_by_stage = selected_feeds_by_stage;
         self
     }
 
@@ -291,6 +350,34 @@ where
                         }
                     }
                     Some(chain)
+                })
+                .collect();
+
+            // Selected-feed chains intentionally start with the transport
+            // contract only. Delivery receipts and divergence predicates still
+            // use the physical edge chain until those contracts gain explicit
+            // selected-feed semantics.
+            self.contract_feed_chains = self
+                .readers
+                .iter()
+                .map(|(upstream_stage, _, _)| {
+                    let Some(feeds) = self.selected_feeds_by_stage.get(upstream_stage) else {
+                        return Vec::new();
+                    };
+                    if feeds.len() <= 1 {
+                        return Vec::new();
+                    }
+
+                    feeds
+                        .iter()
+                        .cloned()
+                        .map(|feed| {
+                            FeedContractChain::new(
+                                feed,
+                                ContractChain::new().with_contract(TransportContract::new()),
+                            )
+                        })
+                        .collect()
                 })
                 .collect();
 

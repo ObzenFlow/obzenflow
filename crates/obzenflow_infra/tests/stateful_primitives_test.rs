@@ -18,7 +18,8 @@ use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{FiniteSourceHandler, SinkHandler};
-use obzenflow_runtime::stages::stateful::{Conflate, GroupBy, Reduce};
+use obzenflow_runtime::stages::stateful::strategies::accumulators::{GroupByTyped, ReduceTyped};
+use obzenflow_runtime::stages::stateful::Conflate;
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -42,6 +43,10 @@ struct ProductStats {
     quantity_sold: u64,
     revenue: f64,
     transaction_count: u64,
+}
+
+impl TypedPayload for ProductStats {
+    const EVENT_TYPE: &'static str = "stateful_primitives.product_stats";
 }
 
 #[derive(Clone, Debug)]
@@ -78,7 +83,7 @@ impl FiniteSourceHandler for TransactionSource {
 
             Ok(Some(vec![ChainEventFactory::data_event(
                 self.writer_id,
-                "transaction",
+                TransactionEvent::versioned_event_type(),
                 json!({
                     "product_id": product,
                     "quantity": quantity,
@@ -135,14 +140,17 @@ async fn groupby_with_on_eof_emits_one_aggregate_per_key() {
         stages: {
             src = source!(TransactionEvent => TransactionSource::new(10));
             sales_by_product = stateful!(
-                TransactionEvent -> TransactionEvent => GroupBy::new("product_id", |event: &ChainEvent, stats: &mut ProductStats| {
-                    stats.quantity_sold += event.payload()["quantity"].as_u64().unwrap_or(0);
-                    stats.revenue += event.payload()["revenue"].as_f64().unwrap_or(0.0);
+                TransactionEvent -> ProductStats => GroupByTyped::new(
+                    |event: &TransactionEvent| event.product_id.clone(),
+                    |stats: &mut ProductStats, event: &TransactionEvent| {
+                    stats.quantity_sold += event.quantity;
+                    stats.revenue += event.revenue;
                     stats.transaction_count += 1;
-                })
+                    }
+                )
                 .emit_on_eof()
             );
-            sink = sink!(TransactionEvent => sink);
+            sink = sink!(ProductStats => sink);
         },
 
         topology: {
@@ -156,7 +164,7 @@ async fn groupby_with_on_eof_emits_one_aggregate_per_key() {
     let results = events.lock().unwrap();
     let aggregates: Vec<_> = results
         .iter()
-        .filter(|e| e.event_type() == "aggregated")
+        .filter(|e| e.event_type() == ProductStats::versioned_event_type())
         .collect();
     // Two product ids -> one aggregate per key.
     assert_eq!(aggregates.len(), 2);
@@ -167,6 +175,10 @@ struct TotalStats {
     total_revenue: f64,
     total_transactions: u64,
     total_quantity: u64,
+}
+
+impl TypedPayload for TotalStats {
+    const EVENT_TYPE: &'static str = "stateful_primitives.total_stats";
 }
 
 #[tokio::test]
@@ -183,17 +195,17 @@ async fn reduce_with_on_eof_emits_single_total() {
         stages: {
             src = source!(TransactionEvent => TransactionSource::new(5));
             totals = stateful!(
-                TransactionEvent -> TransactionEvent => Reduce::new(
+                TransactionEvent -> TotalStats => ReduceTyped::new(
                     TotalStats { total_revenue: 0.0, total_transactions: 0, total_quantity: 0 },
-                    |stats: &mut TotalStats, event: &ChainEvent| {
-                        stats.total_revenue += event.payload()["revenue"].as_f64().unwrap_or(0.0);
-                        stats.total_quantity += event.payload()["quantity"].as_u64().unwrap_or(0);
+                    |stats: &mut TotalStats, event: &TransactionEvent| {
+                        stats.total_revenue += event.revenue;
+                        stats.total_quantity += event.quantity;
                         stats.total_transactions += 1;
                     }
                 )
                 .emit_on_eof()
             );
-            sink = sink!(TransactionEvent => sink);
+            sink = sink!(TotalStats => sink);
         },
 
         topology: {
@@ -207,7 +219,7 @@ async fn reduce_with_on_eof_emits_single_total() {
     let results = events.lock().unwrap();
     let reduced: Vec<_> = results
         .iter()
-        .filter(|e| e.event_type() == "reduced")
+        .filter(|e| e.event_type() == TotalStats::versioned_event_type())
         .collect();
     assert_eq!(reduced.len(), 1);
 }

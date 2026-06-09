@@ -66,7 +66,7 @@ impl FiniteSourceHandler for TestEventSource {
         self.remaining -= 1;
         Ok(Some(vec![ChainEventFactory::data_event(
             self.writer_id,
-            "test.event",
+            SeedEvent::versioned_event_type(),
             json!({ "n": self.remaining }),
         )]))
     }
@@ -101,7 +101,11 @@ impl AsyncFiniteSourceHandler for CorrelatedEventSource {
     > {
         if !self.emitted {
             self.emitted = true;
-            let mut event = ChainEventFactory::data_event(self.writer_id, "test.event", json!({}));
+            let mut event = ChainEventFactory::data_event(
+                self.writer_id,
+                SeedEvent::versioned_event_type(),
+                json!({ "n": 0u64 }),
+            );
             event.set_single_correlation(self.correlation_id, None);
             return Ok(Some(vec![event]));
         }

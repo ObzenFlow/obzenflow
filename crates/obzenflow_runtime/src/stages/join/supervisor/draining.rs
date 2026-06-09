@@ -64,20 +64,6 @@ pub(super) async fn dispatch_draining<
                 // Capture reference-side ancestry for FLOWIP-071h (conservative high-water interim).
                 common::observe_reference_envelope(ctx, &envelope);
 
-                // FLOWIP-120a: transport-only EffectResult records must never reach
-                // handler processing. They are normally dropped by the subscription
-                // TransportOnly filter, but `is_control()` does not match them, so a
-                // leaked record would otherwise fall into the data path below and be
-                // processed as business input. Drop it explicitly during drain.
-                if envelope.event.is_effect_result() {
-                    tracing::warn!(
-                        stage_name = %ctx.stage_name,
-                        event_id = %envelope.event.id,
-                        "Dropping transport-only EffectResult that bypassed subscription filtering during drain"
-                    );
-                    return Ok(EventLoopDirective::Continue);
-                }
-
                 if !envelope.event.is_control() {
                     let event = envelope.event.clone();
                     let event_id = event.id;
@@ -198,17 +184,6 @@ pub(super) async fn dispatch_draining<
                 ctx.instrumentation
                     .event_loops_with_work_total
                     .fetch_add(1, Ordering::Relaxed);
-
-                // FLOWIP-120a: see the reference-side guard above. Drop a leaked
-                // transport-only EffectResult before it can reach the data path.
-                if envelope.event.is_effect_result() {
-                    tracing::warn!(
-                        stage_name = %ctx.stage_name,
-                        event_id = %envelope.event.id,
-                        "Dropping transport-only EffectResult that bypassed subscription filtering during drain"
-                    );
-                    return Ok(EventLoopDirective::Continue);
-                }
 
                 if !envelope.event.is_control() {
                     let writer_id = ctx.writer_id.ok_or("No writer ID available")?;

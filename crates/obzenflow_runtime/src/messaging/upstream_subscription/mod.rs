@@ -22,12 +22,14 @@ mod types;
 mod tests;
 
 pub use super::subscription_poller::{PollResult, SubscriptionPoller};
+use types::{AdvertisedWriterSeqByEventType, SelectedDataSeqByEventType};
 pub use types::{
     ContractConfig, ContractStatus, ContractTracker, ContractsWiring, EofOutcome, ReaderProgress,
-    StageInputPosition, SubscriptionState,
+    SelectedFeedMetadata, SelectedFeedRole, StageInputPosition, SubscriptionState,
 };
 
 use crate::contracts::ContractChain;
+use crate::feed_plan::declared_event_type_matches;
 use crate::messaging::upstream_subscription_policy::ContractPolicyStack;
 use obzenflow_core::control_middleware::ControlMiddlewareProvider;
 use obzenflow_core::event::payloads::delivery_payload::DeliveryResult;
@@ -35,9 +37,26 @@ use obzenflow_core::event::types::SeqNo;
 use obzenflow_core::event::vector_clock::VectorClock;
 use obzenflow_core::event::{ChainEvent, EventEnvelope, JournalEvent, JournalWriterId};
 use obzenflow_core::journal::journal_reader::JournalReader;
-use obzenflow_core::{EventId, StageId};
+use obzenflow_core::{EventId, EventType, StageId};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use tokio::time::Instant;
+
+struct FeedContractChain {
+    metadata: SelectedFeedMetadata,
+    chain: ContractChain,
+    last_contract_result_seq: SeqNo,
+}
+
+impl FeedContractChain {
+    fn new(metadata: SelectedFeedMetadata, chain: ContractChain) -> Self {
+        Self {
+            metadata,
+            chain,
+            last_contract_result_seq: SeqNo(0),
+        }
+    }
+}
 
 /// Subscription coordinator that manages reading from multiple upstream journals
 ///
@@ -62,6 +81,26 @@ where
     /// Readers for each upstream journal
     readers: Vec<(StageId, String, Box<dyn JournalReader<T>>)>,
 
+    /// Selected Data event types by upstream reader stage.
+    ///
+    /// When populated for a reader, non-selected Data events are consumed from
+    /// the journal but not delivered to the stage handler.
+    selected_event_types_by_stage: HashMap<StageId, HashSet<EventType>>,
+
+    /// Selected logical feed metadata by upstream reader stage.
+    selected_feeds_by_stage: HashMap<StageId, Vec<SelectedFeedMetadata>>,
+
+    /// Per-reader count of Data events that survived the selected event-type
+    /// filter and were delivered as stage inputs.
+    selected_data_seq_by_reader: Vec<SeqNo>,
+
+    /// Per-reader, per-event-type count of selected Data events delivered as
+    /// stage inputs.
+    selected_data_seq_by_reader_event_type: Vec<SelectedDataSeqByEventType>,
+
+    /// Per-reader producer EOF evidence keyed by event type.
+    advertised_writer_seq_by_reader_event_type: Vec<AdvertisedWriterSeqByEventType>,
+
     /// Subscription state (mechanism)
     state: SubscriptionState,
 
@@ -73,6 +112,13 @@ where
     /// When `with_contracts` is used, this vector is sized to match `readers`
     /// and each entry holds the contract chain for the corresponding edge.
     contract_chains: Vec<Option<ContractChain>>,
+
+    /// Optional selected-feed contract chains for each upstream reader.
+    ///
+    /// Multi-selected-feed readers need one transport contract state per
+    /// logical feed so two selected event types between the same stage pair do
+    /// not collapse into one aggregate contract chain.
+    contract_feed_chains: Vec<Vec<FeedContractChain>>,
 
     /// Optional contract policies for each upstream reader (edge-scoped policies).
     ///
@@ -154,6 +200,115 @@ where
         } else {
             progress.last_vector_clock.clone()
         }
+    }
+
+    fn has_selected_event_type_filter(&self, stage_id: StageId) -> bool {
+        self.selected_event_types_by_stage
+            .get(&stage_id)
+            .is_some_and(|selected| !selected.is_empty())
+    }
+
+    fn data_event_selected_for_stage(&self, stage_id: StageId, event_type: &str) -> bool {
+        self.selected_event_types_by_stage
+            .get(&stage_id)
+            .filter(|selected| !selected.is_empty())
+            .map(|selected| {
+                selected.iter().any(|selected_event_type| {
+                    declared_event_type_matches(selected_event_type.as_str(), event_type, None)
+                })
+            })
+            .unwrap_or(true)
+    }
+
+    fn selected_writer_seq_for_reader(&self, reader_index: usize, stage_id: StageId) -> SeqNo {
+        if self.has_selected_event_type_filter(stage_id) {
+            self.selected_data_seq_by_reader
+                .get(reader_index)
+                .copied()
+                .unwrap_or(SeqNo(0))
+        } else {
+            SeqNo(0)
+        }
+    }
+
+    fn selected_writer_seq_from_eof_map(
+        &self,
+        stage_id: StageId,
+        writer_seq_by_event_type: &BTreeMap<EventType, SeqNo>,
+    ) -> Option<SeqNo> {
+        let selected = self.selected_event_types_by_stage.get(&stage_id)?;
+        if selected.is_empty() || writer_seq_by_event_type.is_empty() {
+            return None;
+        }
+
+        let mut matched_event_types = HashSet::new();
+        let mut selected_total = 0u64;
+        for selected_event_type in selected {
+            let Some((actual_event_type, seq)) =
+                writer_seq_by_event_type
+                    .iter()
+                    .find(|(actual_event_type, _)| {
+                        declared_event_type_matches(
+                            selected_event_type.as_str(),
+                            actual_event_type.as_str(),
+                            None,
+                        )
+                    })
+            else {
+                continue;
+            };
+            if matched_event_types.insert(actual_event_type.clone()) {
+                selected_total = selected_total.saturating_add(seq.0);
+            }
+        }
+        Some(SeqNo(selected_total))
+    }
+
+    fn selected_feed_matches_event_type(feed: &SelectedFeedMetadata, event_type: &str) -> bool {
+        feed.matches_event_type(event_type)
+    }
+
+    fn selected_reader_seq_for_feed(
+        &self,
+        reader_index: usize,
+        feed: &SelectedFeedMetadata,
+    ) -> SeqNo {
+        self.selected_data_seq_by_reader_event_type
+            .get(reader_index)
+            .map(|reader_by_type| reader_by_type.seq_for_feed(feed))
+            .unwrap_or(SeqNo(0))
+    }
+
+    fn advertised_writer_seq_for_feed(
+        &self,
+        reader_index: usize,
+        feed: &SelectedFeedMetadata,
+    ) -> Option<SeqNo> {
+        self.advertised_writer_seq_by_reader_event_type
+            .get(reader_index)
+            .and_then(|advertised_by_type| advertised_by_type.seq_for_feed(feed))
+    }
+
+    fn unique_selected_feed_for_stage(
+        &self,
+        stage_id: StageId,
+    ) -> (
+        Option<obzenflow_core::EventType>,
+        Option<obzenflow_core::event::system_event::SystemFeedRole>,
+    ) {
+        let Some(feeds) = self.selected_feeds_by_stage.get(&stage_id) else {
+            return (None, None);
+        };
+
+        let mut unique_feeds = feeds.iter();
+        let Some(first) = unique_feeds.next() else {
+            return (None, None);
+        };
+        if unique_feeds.next().is_some() {
+            return (None, None);
+        }
+
+        (Some(first.event_type().clone()), first.system_feed_role())
     }
 
     /// Bridge a sink delivery receipt write into the edge-scoped `ContractChain`

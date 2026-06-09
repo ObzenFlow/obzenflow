@@ -289,17 +289,6 @@ async fn poll_live_reference<H: JoinHandler + Clone + std::fmt::Debug + Send + S
 
                     Some(EventLoopDirective::Continue)
                 }
-                obzenflow_core::event::ChainEventContent::EffectResult(_) => {
-                    // FLOWIP-120a: explicit drop for transport-only effect records,
-                    // matching the transform/stateful/sink cohort. Normally removed by
-                    // the subscription TransportOnly filter.
-                    tracing::warn!(
-                        stage_name = %ctx.stage_name,
-                        event_id = %envelope.event.id,
-                        "Dropping transport-only EffectResult that bypassed subscription filtering"
-                    );
-                    Some(EventLoopDirective::Continue)
-                }
                 _ => Some(EventLoopDirective::Continue),
             };
 
@@ -540,17 +529,6 @@ async fn poll_live_stream<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync
 
                     Some(EventLoopDirective::Continue)
                 }
-                obzenflow_core::event::ChainEventContent::EffectResult(_) => {
-                    // FLOWIP-120a: explicit drop for transport-only effect records,
-                    // matching the transform/stateful/sink cohort. Normally removed by
-                    // the subscription TransportOnly filter.
-                    tracing::warn!(
-                        stage_name = %ctx.stage_name,
-                        event_id = %envelope.event.id,
-                        "Dropping transport-only EffectResult that bypassed subscription filtering"
-                    );
-                    Some(EventLoopDirective::Continue)
-                }
                 _ => Some(EventLoopDirective::Continue),
             };
 
@@ -608,6 +586,7 @@ async fn write_stage_outputs_and_ack<H: JoinHandler>(
             &ctx.backpressure_writer,
             &mut ctx.backpressure_pulse,
             &mut ctx.backpressure_backoff,
+            Some(&ctx.output_contract),
             &mut outputs,
         )
         .await?

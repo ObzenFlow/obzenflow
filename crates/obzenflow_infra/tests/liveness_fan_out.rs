@@ -20,16 +20,34 @@ use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-/// File-local payload for the fan-out test. The JSON shape matches what
-/// `DelayedTwoEventSource` emits; the type fingerprints the stage
-/// contract per FLOWIP-114c.
+/// File-local payloads for the fan-out test. The JSON shape is shared, but each
+/// stage authors a distinct fact type, so the stage contracts mirror the actual
+/// event identities that move through the fan-out.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct ProbeEvent {
     value: u64,
 }
 
 impl TypedPayload for ProbeEvent {
-    const EVENT_TYPE: &'static str = "probe.event";
+    const EVENT_TYPE: &'static str = "liveness.fanout.input";
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct SlowProbeEvent {
+    value: u64,
+}
+
+impl TypedPayload for SlowProbeEvent {
+    const EVENT_TYPE: &'static str = "liveness.fanout.slow";
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct FastProbeEvent {
+    value: u64,
+}
+
+impl TypedPayload for FastProbeEvent {
+    const EVENT_TYPE: &'static str = "liveness.fanout.fast";
 }
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -67,7 +85,7 @@ impl AsyncFiniteSourceHandler for DelayedTwoEventSource {
                 self.emitted = 1;
                 Ok(Some(vec![ChainEventFactory::data_event(
                     writer_id,
-                    "liveness.fanout.input",
+                    ProbeEvent::versioned_event_type(),
                     json!({ "value": 1 }),
                 )]))
             }
@@ -76,7 +94,7 @@ impl AsyncFiniteSourceHandler for DelayedTwoEventSource {
                 tokio::time::sleep(Duration::from_secs(10)).await;
                 Ok(Some(vec![ChainEventFactory::data_event(
                     writer_id,
-                    "liveness.fanout.input",
+                    ProbeEvent::versioned_event_type(),
                     json!({ "value": 2 }),
                 )]))
             }
@@ -109,7 +127,7 @@ impl AsyncTransformHandler for SlowTransform {
         }
         Ok(vec![ChainEventFactory::data_event(
             self.writer_id,
-            "liveness.fanout.slow",
+            SlowProbeEvent::versioned_event_type(),
             event.payload().clone(),
         )])
     }
@@ -137,7 +155,7 @@ impl AsyncTransformHandler for FastTransform {
     async fn process(&self, event: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> {
         Ok(vec![ChainEventFactory::data_event(
             self.writer_id,
-            "liveness.fanout.fast",
+            FastProbeEvent::versioned_event_type(),
             event.payload().clone(),
         )])
     }
@@ -206,10 +224,10 @@ async fn liveness_fan_out_produces_independent_liveness_transitions() {
 
         stages: {
             numbers = async_source!(ProbeEvent => DelayedTwoEventSource::new());
-            slow = async_transform!(ProbeEvent -> ProbeEvent => SlowTransform::new());
-            fast = async_transform!(ProbeEvent -> ProbeEvent => FastTransform::new());
-            sink_slow = sink!(ProbeEvent => NoopSink);
-            sink_fast = sink!(ProbeEvent => NoopSink);
+            slow = async_transform!(ProbeEvent -> SlowProbeEvent => SlowTransform::new());
+            fast = async_transform!(ProbeEvent -> FastProbeEvent => FastTransform::new());
+            sink_slow = sink!(SlowProbeEvent => NoopSink);
+            sink_fast = sink!(FastProbeEvent => NoopSink);
         },
 
         topology: {

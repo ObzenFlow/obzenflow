@@ -290,18 +290,6 @@ pub(super) async fn dispatch_enriching<
 
                     EventLoopDirective::Continue
                 }
-                obzenflow_core::event::ChainEventContent::EffectResult(_) => {
-                    // FLOWIP-120a: explicit drop for transport-only effect records,
-                    // matching the transform/stateful/sink cohort. Normally removed by
-                    // the subscription TransportOnly filter; dropped here so a leaked
-                    // record never falls into the generic unexpected-content path.
-                    tracing::warn!(
-                        stage_name = %ctx.stage_name,
-                        event_id = %envelope.event.id,
-                        "Dropping transport-only EffectResult that bypassed subscription filtering"
-                    );
-                    EventLoopDirective::Continue
-                }
                 _ => {
                     tracing::warn!(
                         stage_name = %ctx.stage_name,
@@ -399,6 +387,7 @@ async fn write_stage_outputs_and_ack<H: JoinHandler>(
             &ctx.backpressure_writer,
             &mut ctx.backpressure_pulse,
             &mut ctx.backpressure_backoff,
+            Some(&ctx.output_contract),
             &mut outputs,
         )
         .await?

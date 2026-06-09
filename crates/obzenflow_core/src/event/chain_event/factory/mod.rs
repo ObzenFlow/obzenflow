@@ -72,6 +72,7 @@ impl ChainEventFactory {
             cycle_scc_id: None,
             runtime_context: None,
             observability: None,
+            effect_provenance: None,
         };
 
         event.processing_info.event_time = current_timestamp();

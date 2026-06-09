@@ -107,7 +107,7 @@ impl FiniteSourceHandler for TestEventSource {
             self.emitted += 1;
             Ok(Some(vec![ChainEventFactory::data_event(
                 self.writer_id,
-                "TestEvent",
+                <StreamItem as TypedPayload>::EVENT_TYPE,
                 json!({ "index": index }),
             )]))
         } else {
@@ -240,7 +240,7 @@ impl FiniteSourceHandler for NumberSource {
             self.emitted += 1;
             Ok(Some(vec![ChainEventFactory::data_event(
                 self.writer_id,
-                "Number",
+                <NumberItem as TypedPayload>::EVENT_TYPE,
                 json!({ "value": value }),
             )]))
         } else {
@@ -265,7 +265,7 @@ impl TransformHandler for NumberDoubler {
         if let Some(value) = event.payload().get("value").and_then(|v| v.as_u64()) {
             Ok(vec![ChainEventFactory::data_event(
                 event.writer_id,
-                "DoubledNumber",
+                <NumberItem as TypedPayload>::EVENT_TYPE,
                 json!({ "value": value * 2 }),
             )])
         } else {

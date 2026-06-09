@@ -54,7 +54,7 @@ impl FiniteSourceHandler for TestSource {
         if current < self.total_events {
             Ok(Some(vec![ChainEventFactory::data_event(
                 self.writer_id,
-                "TestEvent",
+                SmokeEvent::versioned_event_type(),
                 json!({ "n": current }),
             )]))
         } else {

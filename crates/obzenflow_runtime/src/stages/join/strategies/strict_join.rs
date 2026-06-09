@@ -9,6 +9,7 @@
 use super::common::{JoinStrategy, JoinWithStrategy};
 use crate::stages::common::stage_handle::StageHandle;
 use crate::stages::join::config::{JoinReferenceMode, DEFAULT_REFERENCE_BATCH_CAP};
+use obzenflow_core::event::payloads::flow_control_payload::EofKind;
 use obzenflow_core::event::ChainEventFactory;
 use obzenflow_core::ChainEvent;
 use obzenflow_core::TypedPayload;
@@ -313,11 +314,9 @@ where
                     stream_key
                 );
 
-                let poison_eof = ChainEventFactory::eof_event(
-                    writer_id, false, // Unnatural EOF signals error
-                );
+                let poison_eof = ChainEventFactory::eof_event_with_kind(writer_id, EofKind::Poison);
 
-                tracing::error!("StrictJoin: Triggering jonestown protocol with poison EOF");
+                tracing::error!("StrictJoin: emitting poison EOF for unmatched stream event");
 
                 vec![poison_eof]
             }
@@ -391,9 +390,9 @@ mod tests {
             .expect("process_event should succeed for strict join miss case");
         assert_eq!(out.len(), 1);
         match &out[0].content {
-            ChainEventContent::FlowControl(FlowControlPayload::Eof { natural, .. }) => {
+            ChainEventContent::FlowControl(FlowControlPayload::Eof { kind, .. }) => {
                 assert!(
-                    !natural,
+                    kind.is_poison(),
                     "strict join emits unnatural EOF on integrity violations"
                 );
             }

@@ -4,7 +4,9 @@
 
 //! Running-state dispatch loop for the journal sink supervisor.
 
+use crate::backpressure::BackpressureWriter;
 use crate::effects::EffectInvocationContext;
+use crate::feed_plan::StageOutputContract;
 use crate::messaging::PollResult;
 use crate::metrics::instrumentation::process_with_instrumentation;
 use crate::stages::common::handlers::UnifiedSinkHandler;
@@ -231,14 +233,6 @@ async fn dispatch_event<H: UnifiedSinkHandler + Clone + std::fmt::Debug + Send +
         obzenflow_core::event::ChainEventContent::Data { .. } => {
             dispatch_data_event(ctx, subscription, envelope, stage_input_position).await
         }
-        obzenflow_core::event::ChainEventContent::EffectResult(_) => {
-            tracing::warn!(
-                stage_name = %ctx.stage_name,
-                event_id = %envelope.event.id,
-                "Dropping transport-only EffectResult that bypassed subscription filtering"
-            );
-            Ok(EventLoopDirective::Continue)
-        }
         _ => {
             // For other content types, just consume without instrumentation.
             let envelope_event = envelope.event.clone();
@@ -449,11 +443,18 @@ async fn dispatch_data_event<
             input_seq,
             stage_logic_version: ctx.handler.stage_logic_version().to_string(),
             data_journal: ctx.data_journal.clone(),
+            flow_context: None,
+            system_journal: None,
+            instrumentation: None,
+            heartbeat_state: None,
             parent: envelope.clone(),
             effect_history: ctx.effect_history.clone(),
             effect_runtime_mode: ctx.effect_runtime_mode,
             effect_ports: ctx.effect_ports.clone(),
             effect_declarations: ctx.effect_declarations.clone(),
+            output_contract: StageOutputContract::empty(),
+            backpressure_writer: BackpressureWriter::disabled(),
+            emit_enabled: false,
             effect_boundary: None,
             boundary_control_events: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         })

@@ -61,6 +61,7 @@ pub(super) async fn dispatch_draining<
             &ctx.backpressure_writer,
             &mut ctx.backpressure_pulse,
             &mut ctx.backpressure_backoff,
+            Some(&ctx.output_contract),
             &mut ctx.pending_outputs,
         )
         .await?
@@ -119,15 +120,6 @@ pub(super) async fn dispatch_draining<
                 }
                 ctx.instrumentation.record_consumed(&envelope);
 
-                if envelope.event.is_effect_result() {
-                    tracing::warn!(
-                        stage_name = %ctx.stage_name,
-                        event_id = %envelope.event.id,
-                        "Dropping transport-only EffectResult that bypassed subscription filtering during drain"
-                    );
-                    return Ok(EventLoopDirective::Continue);
-                }
-
                 if envelope.event.is_data() {
                     // Accumulate data events during draining, synchronously.
                     let event = envelope.event.clone();
@@ -143,11 +135,18 @@ pub(super) async fn dispatch_draining<
                             input_seq,
                             stage_logic_version: handler.stage_logic_version().to_string(),
                             data_journal: ctx.data_journal.clone(),
+                            flow_context: None,
+                            system_journal: Some(ctx.system_journal.clone()),
+                            instrumentation: Some(ctx.instrumentation.clone()),
+                            heartbeat_state: ctx.heartbeat.as_ref().map(|h| h.state.clone()),
                             parent: envelope.clone(),
                             effect_history: ctx.effect_history.clone(),
                             effect_runtime_mode: ctx.effect_runtime_mode,
                             effect_ports: ctx.effect_ports.clone(),
                             effect_declarations: ctx.effect_declarations.clone(),
+                            output_contract: ctx.output_contract.clone(),
+                            backpressure_writer: ctx.backpressure_writer.clone(),
+                            emit_enabled: true,
                             effect_boundary: None,
                             boundary_control_events: std::sync::Arc::new(std::sync::Mutex::new(
                                 Vec::new(),
@@ -244,8 +243,8 @@ pub(super) async fn dispatch_draining<
                                 recorded_flow_id: ctx
                                     .effect_history
                                     .as_ref()
-                                    .map(|history| history.recorded_flow_id())
-                                    .unwrap_or(&flow_id),
+                                    .map(|history| history.recorded_flow_id().as_str())
+                                    .unwrap_or(flow_id.as_str()),
                                 stage_key: &ctx.stage_name,
                                 input_seq: ctx.last_input_position.unwrap_or(
                                     crate::messaging::upstream_subscription::StageInputPosition(0),
@@ -426,8 +425,8 @@ pub(super) async fn dispatch_draining<
                 recorded_flow_id: ctx
                     .effect_history
                     .as_ref()
-                    .map(|history| history.recorded_flow_id())
-                    .unwrap_or(&flow_id),
+                    .map(|history| history.recorded_flow_id().as_str())
+                    .unwrap_or(flow_id.as_str()),
                 stage_key: &ctx.stage_name,
                 input_seq: ctx.last_input_position.unwrap_or(
                     crate::messaging::upstream_subscription::StageInputPosition(0),

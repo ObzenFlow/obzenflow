@@ -6,19 +6,123 @@
 
 use crate::event::observability::HttpSurfaceMetricsSnapshot;
 use crate::event::payloads::observability_payload::MiddlewareLifecycle;
-use crate::event::types::{Count, DurationMs, EventId, SeqNo, WriterId};
+use crate::event::types::{Count, DurationMs, EventId, EventType, SeqNo, WriterId};
 use crate::event::vector_clock::VectorClock;
 use crate::id::{StageId, SystemId};
 use crate::journal::{ArchiveStatus, StatusDerivation};
 use crate::metrics::{FlowLifecycleMetricsSnapshot, StageMetricsSnapshot};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::str::FromStr;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MiddlewareEventOrigin {
     pub event_id: EventId,
     pub writer_key: String,
     pub seq: SeqNo,
+}
+
+/// Contract label carried by contract system events.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ContractName(String);
+
+impl ContractName {
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for ContractName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl From<&str> for ContractName {
+    fn from(value: &str) -> Self {
+        Self::new(value)
+    }
+}
+
+impl From<String> for ContractName {
+    fn from(value: String) -> Self {
+        Self::new(value)
+    }
+}
+
+/// Logical feed role carried by contract system events.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SystemFeedRole {
+    Input,
+    Reference,
+    Stream,
+}
+
+impl SystemFeedRole {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Input => "input",
+            Self::Reference => "reference",
+            Self::Stream => "stream",
+        }
+    }
+}
+
+impl std::fmt::Display for SystemFeedRole {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for SystemFeedRole {
+    type Err = ();
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "input" => Ok(Self::Input),
+            "reference" => Ok(Self::Reference),
+            "stream" => Ok(Self::Stream),
+            _ => Err(()),
+        }
+    }
+}
+
+/// Policy layer that overrode a contract decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContractOverridePolicy {
+    BreakerAware,
+}
+
+impl ContractOverridePolicy {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::BreakerAware => "breaker_aware",
+        }
+    }
+}
+
+impl std::fmt::Display for ContractOverridePolicy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for ContractOverridePolicy {
+    type Err = ();
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "breaker_aware" => Ok(Self::BreakerAware),
+            _ => Err(()),
+        }
+    }
 }
 
 /// System orchestration event with metadata (written to control journal)
@@ -123,6 +227,10 @@ pub enum SystemEventType {
     ContractStatus {
         upstream: StageId,
         reader: StageId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        selected_event_type: Option<EventType>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        feed_role: Option<SystemFeedRole>,
         pass: bool,
         #[serde(skip_serializing_if = "Option::is_none")]
         reader_seq: Option<crate::event::types::SeqNo>,
@@ -141,9 +249,12 @@ pub enum SystemEventType {
     ContractResult {
         upstream: StageId,
         reader: StageId,
-        contract_name: String,
-        /// "passed", "failed", "pending", or "healthy" (mid-flight heartbeat)
-        status: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        selected_event_type: Option<EventType>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        feed_role: Option<SystemFeedRole>,
+        contract_name: ContractName,
+        status: ContractResultStatusLabel,
         /// Stable category label (e.g. "seq_divergence", "content_mismatch", "other")
         #[serde(skip_serializing_if = "Option::is_none")]
         cause: Option<String>,
@@ -158,9 +269,13 @@ pub enum SystemEventType {
     ContractOverrideByPolicy {
         upstream: StageId,
         reader: StageId,
-        contract_name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        selected_event_type: Option<EventType>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        feed_role: Option<SystemFeedRole>,
+        contract_name: ContractName,
         original_cause: crate::contracts::ViolationCause,
-        policy: String,
+        policy: ContractOverridePolicy,
     },
 
     /// Generic hosted HTTP surface metrics snapshot emitted by the application host (FLOWIP-093a).
@@ -179,7 +294,8 @@ pub enum SystemEventType {
 /// The `system.log` schema stores these as strings for compatibility with JSON
 /// consumers (SSE, metrics aggregation). Prefer this enum when emitting or
 /// matching on status values to avoid stringly-typed drift.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ContractResultStatusLabel {
     Passed,
     Failed,
@@ -592,6 +708,8 @@ impl SystemEventFactory {
             SystemEventType::ContractStatus {
                 upstream,
                 reader,
+                selected_event_type: None,
+                feed_role: None,
                 pass,
                 reader_seq,
                 advertised_writer_seq,
@@ -795,22 +913,94 @@ impl JournalEvent for SystemEvent {
                     "system.contract.fail"
                 }
             }
-            SystemEventType::ContractResult { status, .. } => match status.as_str() {
-                s if s == ContractResultStatusLabel::Passed.as_str() => {
-                    "system.contract.result.passed"
-                }
-                s if s == ContractResultStatusLabel::Failed.as_str() => {
-                    "system.contract.result.failed"
-                }
-                s if s == ContractResultStatusLabel::Pending.as_str() => {
-                    "system.contract.result.pending"
-                }
-                _ => "system.contract.result",
+            SystemEventType::ContractResult { status, .. } => match status {
+                ContractResultStatusLabel::Passed => "system.contract.result.passed",
+                ContractResultStatusLabel::Failed => "system.contract.result.failed",
+                ContractResultStatusLabel::Pending => "system.contract.result.pending",
+                ContractResultStatusLabel::Healthy => "system.contract.result",
             },
             SystemEventType::ContractOverrideByPolicy { .. } => {
                 "system.contract.override_by_policy"
             }
             SystemEventType::HttpSurfaceSnapshot { .. } => "system.http_surface.snapshot",
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::StageId;
+    use serde_json::json;
+
+    #[test]
+    fn contract_result_feed_fields_are_typed_but_serialize_as_labels() {
+        let payload = SystemEventType::ContractResult {
+            upstream: StageId::new(),
+            reader: StageId::new(),
+            selected_event_type: Some(EventType::from("test.selected.v1")),
+            feed_role: Some(SystemFeedRole::Reference),
+            contract_name: ContractName::from("TransportContract"),
+            status: ContractResultStatusLabel::Healthy,
+            cause: None,
+            reader_seq: Some(SeqNo(3)),
+            advertised_writer_seq: Some(SeqNo(5)),
+        };
+
+        let serialized = serde_json::to_value(&payload).expect("system event should serialize");
+        assert_eq!(serialized["selected_event_type"], "test.selected.v1");
+        assert_eq!(serialized["feed_role"], "reference");
+        assert_eq!(serialized["contract_name"], "TransportContract");
+        assert_eq!(serialized["status"], "healthy");
+
+        let decoded: SystemEventType = serde_json::from_value(json!({
+            "system_event_type": "contract_result",
+            "upstream": serialized["upstream"].clone(),
+            "reader": serialized["reader"].clone(),
+            "selected_event_type": "test.selected.v1",
+            "feed_role": "reference",
+            "contract_name": "TransportContract",
+            "status": "healthy",
+            "reader_seq": 3,
+            "advertised_writer_seq": 5
+        }))
+        .expect("string-label system event should deserialize");
+
+        match decoded {
+            SystemEventType::ContractResult {
+                selected_event_type,
+                feed_role,
+                contract_name,
+                status,
+                ..
+            } => {
+                assert_eq!(
+                    selected_event_type,
+                    Some(EventType::from("test.selected.v1"))
+                );
+                assert_eq!(feed_role, Some(SystemFeedRole::Reference));
+                assert_eq!(contract_name.as_str(), "TransportContract");
+                assert_eq!(status, ContractResultStatusLabel::Healthy);
+            }
+            other => panic!("expected ContractResult, got {other:?}"),
+        }
+
+        let override_payload = SystemEventType::ContractOverrideByPolicy {
+            upstream: StageId::new(),
+            reader: StageId::new(),
+            selected_event_type: Some(EventType::from("test.selected.v1")),
+            feed_role: Some(SystemFeedRole::Input),
+            contract_name: ContractName::from("TransportContract"),
+            original_cause: crate::contracts::ViolationCause::SeqDivergence {
+                advertised: Some(SeqNo(3)),
+                reader: SeqNo(2),
+            },
+            policy: ContractOverridePolicy::BreakerAware,
+        };
+
+        let serialized =
+            serde_json::to_value(&override_payload).expect("override event should serialize");
+        assert_eq!(serialized["contract_name"], "TransportContract");
+        assert_eq!(serialized["policy"], "breaker_aware");
     }
 }

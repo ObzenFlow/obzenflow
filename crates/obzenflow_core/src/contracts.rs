@@ -3,6 +3,7 @@
 // https://obzenflow.dev
 
 use crate::event::payloads::delivery_payload::DeliveryResult;
+use crate::event::system_event::ContractName;
 use crate::event::{
     types::{Count, JournalIndex, SeqNo},
     ChainEvent, ChainEventContent, EventId,
@@ -30,7 +31,7 @@ pub enum ContractResult {
 /// Evidence that a contract was satisfied.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContractEvidence {
-    pub contract_name: String,
+    pub contract_name: ContractName,
     pub upstream_stage: StageId,
     pub downstream_stage: StageId,
     pub verified_at: DateTime<Utc>,
@@ -40,7 +41,7 @@ pub struct ContractEvidence {
 /// Details of a contract violation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContractViolation {
-    pub contract_name: String,
+    pub contract_name: ContractName,
     pub upstream_stage: StageId,
     pub downstream_stage: StageId,
     pub detected_at: DateTime<Utc>,
@@ -201,6 +202,11 @@ pub trait Contract: Send + Sync {
     /// Human-readable contract identifier for logs and evidence.
     fn name(&self) -> &str;
 
+    /// Typed contract identifier for persisted evidence and metrics.
+    fn contract_name(&self) -> ContractName {
+        ContractName::from(self.name())
+    }
+
     /// Called when the upstream side writes an event on the edge.
     fn on_write(&self, event: &ChainEvent, ctx: &mut ContractWriteContext);
 
@@ -296,7 +302,7 @@ impl Contract for TransportContract {
 
         if writer_count == reader_count {
             ContractResult::Passed(ContractEvidence {
-                contract_name: self.name().to_string(),
+                contract_name: self.contract_name(),
                 upstream_stage: ctx.upstream_stage,
                 downstream_stage: ctx.downstream_stage,
                 verified_at: Utc::now(),
@@ -311,7 +317,7 @@ impl Contract for TransportContract {
             })
         } else {
             ContractResult::Failed(ContractViolation {
-                contract_name: self.name().to_string(),
+                contract_name: self.contract_name(),
                 upstream_stage: ctx.upstream_stage,
                 downstream_stage: ctx.downstream_stage,
                 detected_at: Utc::now(),
@@ -413,7 +419,7 @@ impl Contract for SourceContract {
             None => {
                 // No writer-side evidence; treat as pass for now.
                 return ContractResult::Passed(ContractEvidence {
-                    contract_name: self.name().to_string(),
+                    contract_name: self.contract_name(),
                     upstream_stage: ctx.upstream_stage,
                     downstream_stage: ctx.downstream_stage,
                     verified_at: Utc::now(),
@@ -427,7 +433,7 @@ impl Contract for SourceContract {
         match (state.expected_count, state.eof_writer_seq) {
             (Some(expected), Some(observed)) if expected != observed => {
                 ContractResult::Failed(ContractViolation {
-                    contract_name: self.name().to_string(),
+                    contract_name: self.contract_name(),
                     upstream_stage: ctx.upstream_stage,
                     downstream_stage: ctx.downstream_stage,
                     detected_at: Utc::now(),
@@ -447,7 +453,7 @@ impl Contract for SourceContract {
                 })
             }
             _ => ContractResult::Passed(ContractEvidence {
-                contract_name: self.name().to_string(),
+                contract_name: self.contract_name(),
                 upstream_stage: ctx.upstream_stage,
                 downstream_stage: ctx.downstream_stage,
                 verified_at: Utc::now(),
@@ -601,7 +607,7 @@ impl Contract for DeliveryContract {
 
         if missing_count == 0 && orphan_count == 0 {
             ContractResult::Passed(ContractEvidence {
-                contract_name: self.name().to_string(),
+                contract_name: self.contract_name(),
                 upstream_stage: ctx.upstream_stage,
                 downstream_stage: ctx.downstream_stage,
                 verified_at: Utc::now(),
@@ -619,7 +625,7 @@ impl Contract for DeliveryContract {
             })
         } else {
             ContractResult::Failed(ContractViolation {
-                contract_name: self.name().to_string(),
+                contract_name: self.contract_name(),
                 upstream_stage: ctx.upstream_stage,
                 downstream_stage: ctx.downstream_stage,
                 detected_at: Utc::now(),
@@ -734,7 +740,7 @@ impl DivergenceContract {
         if st.data_events == 0 {
             if st.flow_control_signals > self.thresholds.max_signals_when_no_data {
                 return Some(ContractViolation {
-                    contract_name: self.name().to_string(),
+                    contract_name: self.contract_name(),
                     upstream_stage: ctx.upstream_stage,
                     downstream_stage: ctx.downstream_stage,
                     detected_at: Utc::now(),
@@ -758,7 +764,7 @@ impl DivergenceContract {
         let observed_ratio = st.flow_control_signals as f64 / st.data_events as f64;
         if observed_ratio > self.thresholds.signal_to_data_ratio {
             return Some(ContractViolation {
-                contract_name: self.name().to_string(),
+                contract_name: self.contract_name(),
                 upstream_stage: ctx.upstream_stage,
                 downstream_stage: ctx.downstream_stage,
                 detected_at: Utc::now(),
@@ -788,7 +794,7 @@ impl DivergenceContract {
     ) -> Option<ContractViolation> {
         if st.max_cycle_depth_observed > self.thresholds.max_cycle_depth {
             return Some(ContractViolation {
-                contract_name: self.name().to_string(),
+                contract_name: self.contract_name(),
                 upstream_stage: ctx.upstream_stage,
                 downstream_stage: ctx.downstream_stage,
                 detected_at: Utc::now(),
@@ -859,7 +865,7 @@ impl Contract for DivergenceContract {
         };
 
         ContractResult::Passed(ContractEvidence {
-            contract_name: self.name().to_string(),
+            contract_name: self.contract_name(),
             upstream_stage: ctx.upstream_stage,
             downstream_stage: ctx.downstream_stage,
             verified_at: Utc::now(),

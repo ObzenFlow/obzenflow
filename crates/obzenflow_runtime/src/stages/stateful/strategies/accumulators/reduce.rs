@@ -487,7 +487,8 @@ where
 
         let payload =
             serde_json::to_value(&state.value).expect("ReduceTyped failed to serialize state");
-        let mut out = ChainEventFactory::data_event(self.writer_id, S::EVENT_TYPE, payload);
+        let mut out =
+            ChainEventFactory::data_event(self.writer_id, S::versioned_event_type(), payload);
 
         out.causality = CausalityContext {
             parent_ids: state.trace.parent_ids(),
@@ -721,7 +722,7 @@ mod typed_tests {
         let emitted = accumulator.emit(&state);
 
         assert_eq!(emitted.len(), 1);
-        assert_eq!(emitted[0].event_type(), Counter::EVENT_TYPE);
+        assert_eq!(emitted[0].event_type(), Counter::versioned_event_type());
         assert_eq!(emitted[0].payload()["count"], SEED);
 
         // FLOWIP-054j fan-in lineage applies on the typed path too.

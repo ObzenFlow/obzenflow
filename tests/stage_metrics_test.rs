@@ -71,7 +71,7 @@ impl FiniteSourceHandler for TestSource {
 
         let event = ChainEventFactory::data_event(
             self.writer_id,
-            "test.data",
+            MetricEvent::versioned_event_type(),
             json!({
                 "data": self.events[self.index].clone(),
                 "index": self.index

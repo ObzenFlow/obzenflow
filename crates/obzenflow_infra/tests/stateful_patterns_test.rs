@@ -34,6 +34,42 @@ impl TypedPayload for NumberEvent {
     const EVENT_TYPE: &'static str = "stateful_patterns.number_event";
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct CountResult {
+    total_count: u64,
+}
+
+impl TypedPayload for CountResult {
+    const EVENT_TYPE: &'static str = "stateful_patterns.count_result";
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct CollectedValue {
+    value: u64,
+}
+
+impl TypedPayload for CollectedValue {
+    const EVENT_TYPE: &'static str = "stateful_patterns.collected_value";
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct SumResult {
+    total_sum: u64,
+}
+
+impl TypedPayload for SumResult {
+    const EVENT_TYPE: &'static str = "stateful_patterns.sum_result";
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct ProgressUpdate {
+    current_count: u64,
+}
+
+impl TypedPayload for ProgressUpdate {
+    const EVENT_TYPE: &'static str = "stateful_patterns.progress_update";
+}
+
 #[derive(Clone, Debug)]
 struct NumberSource {
     current: u64,
@@ -58,7 +94,7 @@ impl FiniteSourceHandler for NumberSource {
             self.current += 1;
             Ok(Some(vec![ChainEventFactory::data_event(
                 self.writer_id,
-                "number",
+                NumberEvent::versioned_event_type(),
                 json!({ "value": num }),
             )]))
         } else {
@@ -157,7 +193,7 @@ impl StatefulHandler for CounterHandler {
     ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
         Ok(vec![ChainEventFactory::data_event(
             self.writer_id,
-            "count_result",
+            CountResult::versioned_event_type(),
             json!({ "total_count": state.count }),
         )])
     }
@@ -199,7 +235,7 @@ impl StatefulHandler for AccumulatorHandler {
             .map(|&value| {
                 ChainEventFactory::data_event(
                     self.writer_id,
-                    "collected_value",
+                    CollectedValue::versioned_event_type(),
                     json!({ "value": value }),
                 )
             })
@@ -239,7 +275,7 @@ impl StatefulHandler for SumHandler {
     ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
         Ok(vec![ChainEventFactory::data_event(
             self.writer_id,
-            "sum_result",
+            SumResult::versioned_event_type(),
             json!({ "total_sum": *state }),
         )])
     }
@@ -273,7 +309,7 @@ impl StatefulHandler for ImmediateEmitter {
     fn emit(&self, state: &mut Self::State) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
         Ok(vec![ChainEventFactory::data_event(
             self.writer_id,
-            "progress_update",
+            ProgressUpdate::versioned_event_type(),
             json!({ "current_count": *state }),
         )])
     }
@@ -303,8 +339,8 @@ async fn counter_emits_single_event_on_drain() {
 
         stages: {
             src = source!(NumberEvent => NumberSource::new(5));
-            counter = stateful!(NumberEvent -> NumberEvent => CounterHandler::new());
-            sink = sink!(NumberEvent => sink);
+            counter = stateful!(NumberEvent -> CountResult => CounterHandler::new());
+            sink = sink!(CountResult => sink);
         },
 
         topology: {
@@ -317,7 +353,7 @@ async fn counter_emits_single_event_on_drain() {
     let events = events.lock().unwrap();
     let results: Vec<_> = events
         .iter()
-        .filter(|e| e.event_type() == "count_result")
+        .filter(|e| e.event_type() == CountResult::versioned_event_type())
         .collect();
     assert_eq!(results.len(), 1);
     let total = results[0].payload()["total_count"].as_u64().unwrap();
@@ -337,8 +373,8 @@ async fn accumulator_emits_one_event_per_input_on_drain() {
 
         stages: {
             src = source!(NumberEvent => NumberSource::new(5));
-            acc = stateful!(NumberEvent -> NumberEvent => AccumulatorHandler::new());
-            sink = sink!(NumberEvent => sink);
+            acc = stateful!(NumberEvent -> CollectedValue => AccumulatorHandler::new());
+            sink = sink!(CollectedValue => sink);
         },
 
         topology: {
@@ -351,7 +387,7 @@ async fn accumulator_emits_one_event_per_input_on_drain() {
     let events = events.lock().unwrap();
     let results: Vec<_> = events
         .iter()
-        .filter(|e| e.event_type() == "collected_value")
+        .filter(|e| e.event_type() == CollectedValue::versioned_event_type())
         .collect();
     assert_eq!(results.len(), 5);
 }
@@ -369,8 +405,8 @@ async fn sum_handler_emits_aggregated_result_on_drain() {
 
             stages: {
                 src = source!(NumberEvent => NumberSource::new(10));
-                summer = stateful!(NumberEvent -> NumberEvent => SumHandler::new());
-                sink = sink!(NumberEvent => sink);
+                summer = stateful!(NumberEvent -> SumResult => SumHandler::new());
+                sink = sink!(SumResult => sink);
             },
 
             topology: {
@@ -383,7 +419,7 @@ async fn sum_handler_emits_aggregated_result_on_drain() {
     let events = events.lock().unwrap();
     let results: Vec<_> = events
         .iter()
-        .filter(|e| e.event_type() == "sum_result")
+        .filter(|e| e.event_type() == SumResult::versioned_event_type())
         .collect();
     assert_eq!(results.len(), 1);
     let total = results[0].payload()["total_sum"].as_u64().unwrap();
@@ -403,8 +439,8 @@ async fn immediate_emitter_emits_during_accumulating() {
 
         stages: {
             src = source!(NumberEvent => NumberSource::new(5));
-            emitter = stateful!(NumberEvent -> NumberEvent => ImmediateEmitter::new());
-            sink = sink!(NumberEvent => sink);
+            emitter = stateful!(NumberEvent -> ProgressUpdate => ImmediateEmitter::new());
+            sink = sink!(ProgressUpdate => sink);
         },
 
         topology: {
@@ -417,7 +453,7 @@ async fn immediate_emitter_emits_during_accumulating() {
     let events = events.lock().unwrap();
     let results: Vec<_> = events
         .iter()
-        .filter(|e| e.event_type() == "progress_update")
+        .filter(|e| e.event_type() == ProgressUpdate::versioned_event_type())
         .collect();
     assert!(!results.is_empty());
 }
@@ -435,8 +471,8 @@ async fn empty_source_still_triggers_drain_for_stateful_handler() {
 
         stages: {
             src = source!(NumberEvent => EmptySource::new());
-            counter = stateful!(NumberEvent -> NumberEvent => CounterHandler::new());
-            sink = sink!(NumberEvent => sink);
+            counter = stateful!(NumberEvent -> CountResult => CounterHandler::new());
+            sink = sink!(CountResult => sink);
         },
 
         topology: {
@@ -449,7 +485,7 @@ async fn empty_source_still_triggers_drain_for_stateful_handler() {
     let events = events.lock().unwrap();
     let results: Vec<_> = events
         .iter()
-        .filter(|e| e.event_type() == "count_result")
+        .filter(|e| e.event_type() == CountResult::versioned_event_type())
         .collect();
     assert_eq!(results.len(), 1);
     let total = results[0].payload()["total_count"].as_u64().unwrap();

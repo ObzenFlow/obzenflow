@@ -102,7 +102,7 @@ impl AsyncInfiniteSourceHandler for TestAsyncInfiniteSource {
 
         let mut out = vec![ChainEventFactory::data_event(
             self.writer_id,
-            "TestEvent",
+            <AsyncInfiniteEvent as TypedPayload>::EVENT_TYPE,
             json!({ "n": first }),
         )];
 
@@ -110,7 +110,7 @@ impl AsyncInfiniteSourceHandler for TestAsyncInfiniteSource {
             match rx.try_recv() {
                 Ok(n) => out.push(ChainEventFactory::data_event(
                     self.writer_id,
-                    "TestEvent",
+                    <AsyncInfiniteEvent as TypedPayload>::EVENT_TYPE,
                     json!({ "n": n }),
                 )),
                 Err(_) => break,

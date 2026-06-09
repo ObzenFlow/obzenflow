@@ -6,13 +6,11 @@
 //!
 //! Examples: Aggregators, windowing operations, session tracking
 
-use crate::effects::{
-    deterministic_typed_output_event, EffectError, EffectInvocationContext, Effects,
-};
+use crate::effects::{EffectInvocationContext, Effects};
 use crate::messaging::upstream_subscription::StageInputPosition;
 use crate::stages::common::handler_error::HandlerError;
 use async_trait::async_trait;
-use obzenflow_core::event::schema::TypedPayload;
+use obzenflow_core::event::schema::{TypedFact, TypedFactSet, TypedFactSetError, TypedPayload};
 use obzenflow_core::{ChainEvent, EventEnvelope, WriterId};
 use std::time::Duration;
 
@@ -295,29 +293,22 @@ impl<T: StatefulHandler + Send + Sync> UnifiedStatefulHandler for T {
 pub trait EffectfulStatefulHandler: Send + Sync {
     type State: Clone + Send + Sync;
     type Input: TypedPayload + Send + Sync + 'static;
-    type Output: TypedPayload + Send + Sync + 'static;
-    type Transition: Send + Sync + 'static;
+    type Fact: TypedFactSet + Send + Sync + 'static;
 
     fn initial_state(&self) -> Self::State;
 
-    async fn transition(
+    async fn decide(
         &mut self,
         state: &Self::State,
         input: &Self::Input,
         fx: &mut Effects,
-    ) -> std::result::Result<Self::Transition, HandlerError>;
+    ) -> std::result::Result<(), HandlerError>;
 
     fn apply(
         &mut self,
         state: &mut Self::State,
-        input: Self::Input,
-        transition: Self::Transition,
+        fact: Self::Fact,
     ) -> std::result::Result<(), HandlerError>;
-
-    fn create_outputs(
-        &self,
-        state: &Self::State,
-    ) -> std::result::Result<Vec<Self::Output>, HandlerError>;
 
     fn emit_interval_hint(&self) -> Option<Duration> {
         None
@@ -327,18 +318,15 @@ pub trait EffectfulStatefulHandler: Send + Sync {
         false
     }
 
-    fn emit(
-        &self,
-        state: &mut Self::State,
-    ) -> std::result::Result<Vec<Self::Output>, HandlerError> {
-        self.create_outputs(state)
+    fn emit(&self, _state: &mut Self::State) -> std::result::Result<Vec<Self::Fact>, HandlerError> {
+        Ok(Vec::new())
     }
 
     async fn drain(
         &self,
-        state: &Self::State,
-    ) -> std::result::Result<Vec<Self::Output>, HandlerError> {
-        self.create_outputs(state)
+        _state: &Self::State,
+    ) -> std::result::Result<Vec<Self::Fact>, HandlerError> {
+        Ok(Vec::new())
     }
 
     fn stage_logic_version(&self) -> &str {
@@ -349,57 +337,6 @@ pub trait EffectfulStatefulHandler: Send + Sync {
 #[doc(hidden)]
 #[derive(Clone, Debug)]
 pub struct EffectfulStatefulHandlerAdapter<H>(pub H);
-
-fn typed_stateful_outputs_to_events<Out>(
-    outputs: Vec<Out>,
-    output_context: Option<StatefulOutputContext<'_>>,
-) -> std::result::Result<Vec<ChainEvent>, HandlerError>
-where
-    Out: TypedPayload + Send + Sync + 'static,
-{
-    let Some(output_context) = output_context else {
-        return outputs
-            .into_iter()
-            .enumerate()
-            .map(|(ordinal, output)| {
-                let payload =
-                    serde_json::to_value(output).map_err(|e| HandlerError::Other(e.to_string()))?;
-                let mut event = obzenflow_core::event::ChainEventFactory::data_event(
-                    WriterId::from(obzenflow_core::StageId::new()),
-                    Out::versioned_event_type(),
-                    payload,
-                );
-                event.processing_info.event_time = output_contextless_event_time(ordinal as u32);
-                Ok(event)
-            })
-            .collect();
-    };
-
-    outputs
-        .into_iter()
-        .enumerate()
-        .map(|(ordinal, output)| {
-            deterministic_typed_output_event(
-                output_context.writer_id,
-                &output_context.parent.event,
-                output,
-                output_context.recorded_flow_id,
-                output_context.stage_key,
-                output_context.input_seq,
-                ordinal as u32,
-            )
-            .map_err(effect_error_to_handler_error)
-        })
-        .collect()
-}
-
-fn output_contextless_event_time(output_ordinal: u32) -> u64 {
-    u64::from(output_ordinal)
-}
-
-fn effect_error_to_handler_error(err: EffectError) -> HandlerError {
-    HandlerError::Other(err.to_string())
-}
 
 #[async_trait]
 impl<H> UnifiedStatefulHandler for EffectfulStatefulHandlerAdapter<H>
@@ -422,9 +359,12 @@ where
             )
         })?;
         let mut fx = Effects::new(effect_context);
-        let transition = self.0.transition(state, &input, &mut fx).await?;
+        self.0.decide(state, &input, &mut fx).await?;
         let mut draft = state.clone();
-        self.0.apply(&mut draft, input, transition)?;
+        for fact_event in fx.drain_committed_facts() {
+            let fact = decode_effectful_stateful_fact::<H::Fact>(&fact_event)?;
+            self.0.apply(&mut draft, fact)?;
+        }
         *state = draft;
         Ok(())
     }
@@ -435,9 +375,9 @@ where
 
     fn create_events(
         &self,
-        state: &Self::State,
+        _state: &Self::State,
     ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
-        typed_stateful_outputs_to_events(self.0.create_outputs(state)?, None)
+        Ok(Vec::new())
     }
 
     fn emit_interval_hint(&self) -> Option<Duration> {
@@ -449,33 +389,95 @@ where
     }
 
     fn emit(&self, state: &mut Self::State) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
-        typed_stateful_outputs_to_events(self.0.emit(state)?, None)
+        let _ = state;
+        Ok(Vec::new())
     }
 
     fn emit_with_context(
         &self,
         state: &mut Self::State,
-        output_context: Option<StatefulOutputContext<'_>>,
+        _output_context: Option<StatefulOutputContext<'_>>,
     ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
-        typed_stateful_outputs_to_events(self.0.emit(state)?, output_context)
+        let _ = state;
+        Ok(Vec::new())
     }
 
     async fn drain(
         &self,
-        state: &Self::State,
+        _state: &Self::State,
     ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
-        typed_stateful_outputs_to_events(self.0.drain(state).await?, None)
+        Ok(Vec::new())
     }
 
     async fn drain_with_context(
         &self,
         state: &Self::State,
-        output_context: Option<StatefulOutputContext<'_>>,
+        _output_context: Option<StatefulOutputContext<'_>>,
     ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
-        typed_stateful_outputs_to_events(self.0.drain(state).await?, output_context)
+        let _ = state;
+        Ok(Vec::new())
     }
 
     fn stage_logic_version(&self) -> &str {
         self.0.stage_logic_version()
+    }
+}
+
+fn decode_effectful_stateful_fact<Fact>(event: &ChainEvent) -> Result<Fact, HandlerError>
+where
+    Fact: TypedFactSet,
+{
+    let fact = TypedFact::from_event(event).ok_or_else(|| {
+        HandlerError::Other("effectful stateful committed fact was not a Data event".to_string())
+    })?;
+    Fact::try_from_facts(&[fact]).map_err(effectful_stateful_fact_set_error)
+}
+
+fn effectful_stateful_fact_set_error(error: TypedFactSetError) -> HandlerError {
+    match error {
+        TypedFactSetError::SerializationFailed(message) => HandlerError::Other(message),
+        TypedFactSetError::DeserializationFailed { event_type, error } => {
+            HandlerError::Deserialization(format!("{event_type}: {error}"))
+        }
+        TypedFactSetError::MissingFact { event_type } => HandlerError::Other(format!(
+            "effectful stateful fact type `{event_type}` is not handled by the stage Fact type"
+        )),
+        TypedFactSetError::DuplicateFact { event_type } => HandlerError::Other(format!(
+            "effectful stateful fact type `{event_type}` appeared more than once"
+        )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use obzenflow_core::event::ChainEventContent;
+    use serde::{Deserialize, Serialize};
+
+    #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+    struct FirstOutput {
+        value: u32,
+    }
+
+    impl TypedPayload for FirstOutput {
+        const EVENT_TYPE: &'static str = "stateful.first";
+    }
+
+    #[test]
+    fn effectful_stateful_fact_decoder_accepts_scalar_fact() {
+        let event = obzenflow_core::event::ChainEventFactory::data_event(
+            WriterId::from(obzenflow_core::StageId::new()),
+            FirstOutput::versioned_event_type(),
+            serde_json::json!({ "value": 1 }),
+        );
+
+        let fact: FirstOutput =
+            decode_effectful_stateful_fact(&event).expect("scalar fact decodes");
+
+        assert_eq!(fact, FirstOutput { value: 1 });
+        assert!(matches!(
+            &event.content,
+            ChainEventContent::Data { event_type, .. } if event_type == "stateful.first.v1"
+        ));
     }
 }

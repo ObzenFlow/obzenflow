@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
+use obzenflow_core::event::system_event::ContractName;
 use obzenflow_core::{
     Contract, ContractContext, ContractReadContext, ContractResult, ContractWriteContext,
 };
@@ -99,7 +100,7 @@ impl ContractChain {
         &self,
         upstream_stage: obzenflow_core::StageId,
         downstream_stage: obzenflow_core::StageId,
-    ) -> Vec<(String, ContractResult)> {
+    ) -> Vec<(ContractName, ContractResult)> {
         self.contracts
             .iter()
             .zip(self.write_contexts.iter())
@@ -111,7 +112,7 @@ impl ContractChain {
                     write_state: &write_ctx.state,
                     read_state: &read_ctx.state,
                 };
-                (contract.name().to_string(), contract.verify(&ctx))
+                (contract.contract_name(), contract.verify(&ctx))
             })
             .collect()
     }
@@ -123,7 +124,7 @@ impl ContractChain {
         &self,
         upstream_stage: obzenflow_core::StageId,
         downstream_stage: obzenflow_core::StageId,
-    ) -> Vec<(String, ContractResult)> {
+    ) -> Vec<(ContractName, ContractResult)> {
         self.contracts
             .iter()
             .zip(self.write_contexts.iter())
@@ -140,7 +141,7 @@ impl ContractChain {
                     Some(v) => ContractResult::Failed(v),
                     None => ContractResult::Pending,
                 };
-                (contract.name().to_string(), result)
+                (contract.contract_name(), result)
             })
             .collect()
     }

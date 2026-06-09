@@ -36,9 +36,9 @@ scripted upstream events
   |\
   | \-> invalid_orders -> invalid_order_events
   |
-  \--> valid_orders -> gateway -> authorized_payments -> paid_orders
-                    |          \-> gateway_declines -> declined_payments
-                    |          \-> authorization_unavailable -> manual_review
+  \--> valid_orders -> gateway -> paid_orders
+                    |       \-> declined_payments
+                    |       \-> manual_review
                     |
                     AuthorizePayment effect
                     + circuit breaker
@@ -81,11 +81,18 @@ impl Effect for AuthorizePayment {
 }
 ```
 
-The stage performs the effect and folds the recorded gateway decision into a
-typed intermediate outcome:
+The stage performs the effect, records the gateway decision as an unrouted
+effect outcome fact, and emits the named business fact that happened:
 
 ```rust
 let decision = fx.perform(AuthorizePayment { order }).await?;
+match decision {
+    GatewayPaymentDecision::Authorized { .. } => fx.emit(PaymentAuthorized { ... }).await?,
+    GatewayPaymentDecision::Declined { .. } => fx.emit(PaymentDeclined { ... }).await?,
+    GatewayPaymentDecision::AuthorizationUnavailable { .. } => {
+        fx.emit(PaymentAuthorizationUnavailable { ... }).await?
+    }
+}
 ```
 
 Because the effect is declared (`effects: [AuthorizePayment]` on the stage), the
@@ -109,7 +116,7 @@ valid authorization attempt. Insufficient funds or billing-address mismatch
 becomes a `PaymentDeclined`:
 
 ```text
-ValidatedOrder -> gateway -> gateway_declines -> declined_payments
+ValidatedOrder -> gateway -> declined_payments
 ```
 
 Infrastructure unavailability is neither an invalid order nor a gateway decline.
@@ -118,7 +125,7 @@ Gateway timeouts and breaker-open fallbacks become
 those unavailable outcomes as dependency failures:
 
 ```text
-ValidatedOrder -> gateway -> authorization_unavailable -> manual_review
+ValidatedOrder -> gateway -> manual_review
 ```
 
 That is the preferred shape for business errors in ObzenFlow. Do not turn every
@@ -153,10 +160,11 @@ cargo run -p obzenflow --example payment_gateway_resilience -- --replay-from "$R
 
 On replay the source is **not polled** and the gateway effect is **not
 executed**. The runtime returns the recorded upstream events from the source
-journal and the recorded gateway decisions from the effect history, so downstream
-paid, invalid, declined, and unavailable outputs are reconstructed with the same
-outcomes. That is the durable-execution property: a recorded run replays exactly,
-without re-pulling inputs or re-firing side effects.
+journal and the recorded gateway decisions from the effect history, then the
+handler re-emits the same named payment facts. Downstream paid, invalid,
+declined, and unavailable outputs are reconstructed with the same outcomes. That
+is the durable-execution property: a recorded run replays exactly, without
+re-pulling inputs or re-firing side effects.
 
 ## 5. Resilience as the Second Layer
 

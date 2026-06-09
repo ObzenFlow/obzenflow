@@ -14,9 +14,8 @@
 //! its own copy of this logic and only swaps the source and the flow wiring.
 
 use super::domain::{
-    GatewayPaymentDecision, PaymentAuthorizationOutcome, PaymentAuthorizationUnavailable,
-    PaymentAuthorized, PaymentDeclineReason, PaymentDeclined, PaymentMethodState, TrafficPhase,
-    ValidatedOrder,
+    GatewayPaymentDecision, PaymentAuthorizationUnavailable, PaymentAuthorized,
+    PaymentDeclineReason, PaymentDeclined, PaymentMethodState, TrafficPhase, ValidatedOrder,
 };
 use async_trait::async_trait;
 use obzenflow_core::{event::chain_event::ChainEvent, TypedPayload};
@@ -100,24 +99,20 @@ impl Effect for AuthorizePayment {
     }
 }
 
-/// Effectful transform that turns a `ValidatedOrder` into a gateway outcome.
+/// Effectful transform that turns a `ValidatedOrder` into named gateway outcome facts.
 ///
 /// The handler body stays small and deterministic: it performs one effect and
-/// folds the recorded outcome into a typed output. Everything replay-sensitive
-/// lives inside the effect.
+/// emits the named payment fact that happened. The gateway decision itself is
+/// recorded as the effect outcome fact for replay suppression; the emitted
+/// payment facts are the public channels downstream stages subscribe to.
 #[derive(Debug, Clone)]
 pub struct GatewayTransform;
 
 #[async_trait]
 impl EffectfulTransformHandler for GatewayTransform {
     type Input = ValidatedOrder;
-    type Output = PaymentAuthorizationOutcome;
 
-    async fn process(
-        &self,
-        order: ValidatedOrder,
-        fx: &mut Effects,
-    ) -> Result<PaymentAuthorizationOutcome, HandlerError> {
+    async fn process(&self, order: ValidatedOrder, fx: &mut Effects) -> Result<(), HandlerError> {
         if matches!(
             order.payment_method_state,
             PaymentMethodState::InvalidNumber
@@ -134,13 +129,8 @@ impl EffectfulTransformHandler for GatewayTransform {
             .await
             .unwrap_or_else(authorization_unavailable_decision);
 
-        Ok(PaymentAuthorizationOutcome {
-            order_id: order.order_id,
-            customer_id: order.customer_id,
-            amount_cents: order.amount_cents,
-            phase: order.phase,
-            decision,
-        })
+        emit_payment_decision_fact(order, decision, fx).await?;
+        Ok(())
     }
 
     async fn drain(&mut self) -> Result<(), HandlerError> {
@@ -192,7 +182,7 @@ pub fn simulated_gateway_unavailability_counts_as_failure(
 ) -> bool {
     outputs.iter().any(|event| {
         matches!(
-            PaymentAuthorizationOutcome::from_event(event).map(|outcome| outcome.decision),
+            GatewayPaymentDecision::from_event(event),
             Some(GatewayPaymentDecision::AuthorizationUnavailable { .. })
         )
     }) || matches!(
@@ -201,53 +191,50 @@ pub fn simulated_gateway_unavailability_counts_as_failure(
     )
 }
 
-pub fn authorized_payment(outcome: PaymentAuthorizationOutcome) -> Option<PaymentAuthorized> {
-    let GatewayPaymentDecision::Authorized { authorization_id } = outcome.decision else {
-        return None;
-    };
-
-    Some(PaymentAuthorized {
-        order_id: outcome.order_id,
-        customer_id: outcome.customer_id,
-        amount_cents: outcome.amount_cents,
-        phase: outcome.phase,
-        authorization_id,
-    })
-}
-
-pub fn declined_payment(outcome: PaymentAuthorizationOutcome) -> Option<PaymentDeclined> {
-    let GatewayPaymentDecision::Declined { reason } = outcome.decision else {
-        return None;
-    };
-
-    Some(PaymentDeclined {
-        order_id: outcome.order_id,
-        customer_id: outcome.customer_id,
-        amount_cents: outcome.amount_cents,
-        phase: outcome.phase,
-        reason,
-    })
-}
-
-pub fn authorization_unavailable(
-    outcome: PaymentAuthorizationOutcome,
-) -> Option<PaymentAuthorizationUnavailable> {
-    let GatewayPaymentDecision::AuthorizationUnavailable { reason } = outcome.decision else {
-        return None;
-    };
-
-    Some(PaymentAuthorizationUnavailable {
-        order_id: outcome.order_id,
-        customer_id: outcome.customer_id,
-        amount_cents: outcome.amount_cents,
-        phase: outcome.phase,
-        reason,
-    })
+async fn emit_payment_decision_fact(
+    order: ValidatedOrder,
+    decision: GatewayPaymentDecision,
+    fx: &mut Effects,
+) -> Result<(), HandlerError> {
+    match decision {
+        GatewayPaymentDecision::Authorized { authorization_id } => {
+            fx.emit(PaymentAuthorized {
+                order_id: order.order_id,
+                customer_id: order.customer_id,
+                amount_cents: order.amount_cents,
+                phase: order.phase,
+                authorization_id,
+            })
+            .await
+        }
+        GatewayPaymentDecision::Declined { reason } => {
+            fx.emit(PaymentDeclined {
+                order_id: order.order_id,
+                customer_id: order.customer_id,
+                amount_cents: order.amount_cents,
+                phase: order.phase,
+                reason,
+            })
+            .await
+        }
+        GatewayPaymentDecision::AuthorizationUnavailable { reason } => {
+            fx.emit(PaymentAuthorizationUnavailable {
+                order_id: order.order_id,
+                customer_id: order.customer_id,
+                amount_cents: order.amount_cents,
+                phase: order.phase,
+                reason,
+            })
+            .await
+        }
+    }
+    .map_err(|e| HandlerError::Other(e.to_string()))
 }
 
 #[cfg(test)]
 mod tests {
     use super::{authorization_unavailable_reason, EffectError};
+    use obzenflow_runtime::effects::RetryDisposition;
 
     #[test]
     fn replayed_execution_failure_preserves_live_domain_reason() {
@@ -255,9 +242,9 @@ mod tests {
             "gateway_timeout_simulated".to_string(),
         ));
         let replay_reason = authorization_unavailable_reason(EffectError::RecordedFailure {
-            error_type: "execution".to_string(),
+            error_type: "execution".into(),
             error_message: "effect execution failed: gateway_timeout_simulated".to_string(),
-            retryable: true,
+            retry: RetryDisposition::Retryable,
         });
 
         assert_eq!(live_reason, "gateway_timeout_simulated");
