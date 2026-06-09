@@ -312,9 +312,7 @@ pub(super) fn effect_record_group_to_facts(
         let mut facts = Vec::new();
         for record in ordered {
             let EffectOutcomePayload::SucceededFact {
-                event_type,
-                output,
-                ..
+                event_type, output, ..
             } = &record.outcome
             else {
                 return Err(EffectError::EffectProvenanceMismatch(
@@ -332,15 +330,11 @@ pub(super) fn effect_record_group_to_facts(
 
     match &single.outcome {
         EffectOutcomePayload::SucceededFact {
-            event_type,
-            output,
-            ..
-        } => {
-            Ok(Some(vec![TypedFact {
-                event_type: event_type.clone(),
-                payload: output.clone(),
-            }]))
-        }
+            event_type, output, ..
+        } => Ok(Some(vec![TypedFact {
+            event_type: event_type.clone(),
+            payload: output.clone(),
+        }])),
         EffectOutcomePayload::Succeeded { .. } => Ok(None),
         EffectOutcomePayload::Failed { .. } => recorded_failure_from_outcome(&single.outcome),
     }
