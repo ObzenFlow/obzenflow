@@ -177,17 +177,16 @@ where
             outcome: outcome.clone(),
         };
 
-        let Some(err) = source_error else {
+        if source_error.is_none() {
             return Err(EffectError::Execution(
                 "domain success outcomes must be committed through commit_success".to_string(),
             ));
-        };
+        }
         let append_result = append_effect_record(
             &self.inner.data_journal,
             self.inner.writer_id,
             &self.inner.parent,
             record,
-            Some(err),
         )
         .await;
 
@@ -322,7 +321,6 @@ pub(super) async fn append_effect_record(
     writer_id: WriterId,
     parent: &EventEnvelope<ChainEvent>,
     record: EffectRecord,
-    source_error: Option<&EffectError>,
 ) -> Result<(), EffectError> {
     let event_type = framework_effect_event_type(&record.descriptor.effect_type);
     let provenance = EffectProvenance::from_record(&record, EffectFactOwner::Framework);
@@ -331,10 +329,12 @@ pub(super) async fn append_effect_record(
     let mut event =
         ChainEventFactory::derived_data_event(writer_id, &parent.event, event_type, payload)
             .with_effect_provenance(provenance);
-    if let Some(err) = source_error {
+    event.id = deterministic_effect_record_event_id(&record.cursor, event_type);
+    event.processing_info.event_time = deterministic_effect_record_event_time(&record.cursor);
+    if let EffectOutcomePayload::Failed { error_message, .. } = &record.outcome {
         event.processing_info.status =
             obzenflow_core::event::status::processing_status::ProcessingStatus::error_with_kind(
-                err.to_string(),
+                error_message.clone(),
                 Some(obzenflow_core::event::status::processing_status::ErrorKind::Remote),
             );
     }

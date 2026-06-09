@@ -296,9 +296,14 @@ where
     }
 }
 
-pub(super) fn effect_record_group_to_facts(
+pub(super) enum EffectRecordMaterialization {
+    DomainFacts(Vec<TypedFact>),
+    FrameworkRecords(Vec<EffectRecord>),
+}
+
+pub(super) fn effect_record_group_materialization(
     records: &[&EffectRecord],
-) -> Result<Option<Vec<TypedFact>>, EffectError> {
+) -> Result<EffectRecordMaterialization, EffectError> {
     validate_effect_outcome_group(records)?;
     let [single] = records else {
         let mut ordered = records.to_vec();
@@ -325,18 +330,21 @@ pub(super) fn effect_record_group_to_facts(
                 payload: output.clone(),
             });
         }
-        return Ok(Some(facts));
+        return Ok(EffectRecordMaterialization::DomainFacts(facts));
     };
 
     match &single.outcome {
         EffectOutcomePayload::SucceededFact {
             event_type, output, ..
-        } => Ok(Some(vec![TypedFact {
+        } => Ok(EffectRecordMaterialization::DomainFacts(vec![TypedFact {
             event_type: event_type.clone(),
             payload: output.clone(),
         }])),
-        EffectOutcomePayload::Succeeded { .. } => Ok(None),
-        EffectOutcomePayload::Failed { .. } => recorded_failure_from_outcome(&single.outcome),
+        EffectOutcomePayload::Succeeded { .. } | EffectOutcomePayload::Failed { .. } => {
+            Ok(EffectRecordMaterialization::FrameworkRecords(vec![
+                (*single).clone(),
+            ]))
+        }
     }
 }
 

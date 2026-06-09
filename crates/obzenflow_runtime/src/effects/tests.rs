@@ -164,6 +164,34 @@ impl Effect for CountingEffect {
 }
 
 #[derive(Clone, Debug)]
+struct FailingEffect {
+    label: &'static str,
+    calls: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl Effect for FailingEffect {
+    const EFFECT_TYPE: &'static str = "test.failing";
+    const SCHEMA_VERSION: u32 = 1;
+    const SAFETY: EffectSafety = EffectSafety::Idempotent;
+
+    type Output = CountingOutput;
+
+    fn label(&self) -> &str {
+        self.label
+    }
+
+    fn canonical_input(&self) -> Value {
+        json!({ "kind": "failing" })
+    }
+
+    async fn execute(&self, _ctx: &mut EffectContext) -> Result<Self::Output, EffectError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Err(EffectError::Execution("simulated_failure".to_string()))
+    }
+}
+
+#[derive(Clone, Debug)]
 struct TransactionalCountingEffect {
     value: u64,
     normal_calls: Arc<AtomicUsize>,
@@ -451,6 +479,7 @@ fn invocation_context_with_mode(
         effect_ports,
         effect_declarations: vec![
             EffectDeclaration::of::<CountingEffect>(),
+            EffectDeclaration::of::<FailingEffect>(),
             EffectDeclaration::of::<MultiFactEffect>(),
             EffectDeclaration::transactional_effect::<TransactionalCountingEffect>("tx"),
         ],
@@ -579,6 +608,62 @@ fn effect_records(journal: &MemoryJournal<ChainEvent>) -> Vec<EffectRecord> {
         .collect()
 }
 
+#[test]
+fn effect_history_uses_record_root_over_archive_fallback() {
+    let root_cursor = EffectCursor::new("root_flow", "effect_stage", 1, 0);
+    let record = EffectRecord {
+        cursor: root_cursor,
+        descriptor_hash: "hash".into(),
+        descriptor: EffectDescriptor::new(
+            CountingEffect::EFFECT_TYPE,
+            "same",
+            CountingEffect::SCHEMA_VERSION,
+            "test-v1",
+            "input",
+        ),
+        outcome: EffectOutcomePayload::Succeeded {
+            output: json!({ "value": 10 }),
+        },
+    };
+
+    let history = EffectHistory::from_records("replay_flow".to_string(), vec![record])
+        .expect("history should use record root");
+
+    assert_eq!(history.recorded_flow_id().as_str(), "root_flow");
+}
+
+#[test]
+fn effect_history_rejects_mixed_record_roots() {
+    let descriptor = EffectDescriptor::new(
+        CountingEffect::EFFECT_TYPE,
+        "same",
+        CountingEffect::SCHEMA_VERSION,
+        "test-v1",
+        "input",
+    );
+    let first = EffectRecord {
+        cursor: EffectCursor::new("root_a", "effect_stage", 1, 0),
+        descriptor_hash: "hash".into(),
+        descriptor: descriptor.clone(),
+        outcome: EffectOutcomePayload::Succeeded {
+            output: json!({ "value": 10 }),
+        },
+    };
+    let second = EffectRecord {
+        cursor: EffectCursor::new("root_b", "effect_stage", 2, 0),
+        descriptor_hash: "hash".into(),
+        descriptor,
+        outcome: EffectOutcomePayload::Succeeded {
+            output: json!({ "value": 11 }),
+        },
+    };
+
+    let err = EffectHistory::from_records("replay_flow".to_string(), vec![first, second])
+        .expect_err("mixed roots must fail closed");
+
+    assert!(matches!(err, EffectError::EffectProvenanceMismatch(_)));
+}
+
 #[tokio::test]
 async fn live_perform_records_effect_data_fact() {
     let stage_id = StageId::new();
@@ -702,7 +787,7 @@ async fn perform_records_and_replays_multi_fact_effect_outcome_group() {
 
     let records = effect_records(&live_journal);
     let history = Arc::new(
-        EffectHistory::from_records(live_flow_id, records).expect("grouped history loads"),
+        EffectHistory::from_records(live_flow_id.clone(), records).expect("grouped history loads"),
     );
     let replay_journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
     let mut replay_ctx = invocation_context(replay_journal.clone(), parent, Some(history));
@@ -780,7 +865,7 @@ async fn replay_success_effect_fact_advances_output_ordinals_before_emit() {
 
     let records = effect_records(&live_journal);
     let history = Arc::new(
-        EffectHistory::from_records(live_flow_id, records).expect("grouped history loads"),
+        EffectHistory::from_records(live_flow_id.clone(), records).expect("grouped history loads"),
     );
     let replay_journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
     let mut replay_ctx = invocation_context(replay_journal.clone(), parent, Some(history));
@@ -813,6 +898,50 @@ async fn replay_success_effect_fact_advances_output_ordinals_before_emit() {
     assert_eq!(replay_events[0].event.id, live_events[0].event.id);
     assert_eq!(replay_events[1].event.id, live_events[1].event.id);
     assert_ne!(replay_events[1].event.id, live_events[0].event.id);
+
+    let replay_records = effect_records(&replay_journal);
+    let replay_of_replay_history = Arc::new(
+        EffectHistory::from_records("replay_archive_flow".to_string(), replay_records)
+            .expect("replay history should infer the original root"),
+    );
+    assert_eq!(
+        replay_of_replay_history.recorded_flow_id().as_str(),
+        live_flow_id.as_str()
+    );
+    let replay_of_replay_journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
+    let replay_of_replay_calls = Arc::new(AtomicUsize::new(0));
+    let mut replay_of_replay_ctx = invocation_context(
+        replay_of_replay_journal.clone(),
+        parent_envelope(WriterId::from(stage_id)),
+        Some(replay_of_replay_history),
+    );
+    replay_of_replay_ctx.emit_enabled = true;
+    replay_of_replay_ctx.output_contract = output_contract_for_many(vec![
+        output_descriptor_for::<CountingOutput>(),
+        output_descriptor_for::<SecondOutput>(),
+    ]);
+    let mut replay_of_replay_effects = Effects::new(replay_of_replay_ctx);
+
+    let replay_of_replay_output = replay_of_replay_effects
+        .perform(CountingEffect {
+            value: 41,
+            label: "count",
+            calls: replay_of_replay_calls.clone(),
+        })
+        .await
+        .expect("replay-of-replay reconstructs effect output");
+    replay_of_replay_effects
+        .emit(SecondOutput {
+            value: "after-effect".to_string(),
+        })
+        .await
+        .expect("replay-of-replay emit succeeds");
+
+    assert_eq!(replay_of_replay_output, live_output);
+    assert_eq!(replay_of_replay_calls.load(Ordering::SeqCst), 0);
+    let replay_of_replay_events = replay_of_replay_journal.events();
+    assert_eq!(replay_of_replay_events[0].event.id, live_events[0].event.id);
+    assert_eq!(replay_of_replay_events[1].event.id, live_events[1].event.id);
 }
 
 #[test]
@@ -1045,6 +1174,106 @@ async fn strict_replay_missing_effect_record_fails_without_execute() {
     assert!(matches!(err, EffectError::MissingRecordedEffect { .. }));
     assert_eq!(calls.load(Ordering::SeqCst), 0);
     assert!(effect_records(&journal).is_empty());
+}
+
+#[tokio::test]
+async fn failed_effect_records_are_replayed_into_replay_history() {
+    let stage_id = StageId::new();
+    let live_journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
+    let live_calls = Arc::new(AtomicUsize::new(0));
+    let mut live = Effects::new(invocation_context(
+        live_journal.clone(),
+        parent_envelope(WriterId::from(stage_id)),
+        None,
+    ));
+
+    let live_err = live
+        .perform(FailingEffect {
+            label: "fail",
+            calls: live_calls.clone(),
+        })
+        .await
+        .expect_err("live effect should fail");
+
+    assert!(matches!(live_err, EffectError::Execution(_)));
+    assert_eq!(live_calls.load(Ordering::SeqCst), 1);
+    let live_events = live_journal.events();
+    assert_eq!(live_events.len(), 1);
+    let live_records = effect_records(&live_journal);
+    assert_eq!(live_records.len(), 1);
+    let live_record = live_records[0].clone();
+    let root_recorded_flow_id = live_record.cursor.recorded_flow_id.clone();
+    assert!(matches!(
+        live_record.outcome,
+        EffectOutcomePayload::Failed { .. }
+    ));
+    assert_eq!(
+        live_events[0].event.id,
+        deterministic_effect_record_event_id(&live_record.cursor, EFFECT_RECORD_EVENT_TYPE)
+    );
+
+    let replay_history = Arc::new(
+        EffectHistory::from_records("replay_archive_flow".to_string(), live_records)
+            .expect("history should infer the live root from records"),
+    );
+    assert_eq!(replay_history.recorded_flow_id(), &root_recorded_flow_id);
+    let replay_journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
+    let replay_calls = Arc::new(AtomicUsize::new(0));
+    let mut replay = Effects::new(invocation_context(
+        replay_journal.clone(),
+        parent_envelope(WriterId::from(stage_id)),
+        Some(replay_history),
+    ));
+
+    let replay_err = replay
+        .perform(FailingEffect {
+            label: "fail",
+            calls: replay_calls.clone(),
+        })
+        .await
+        .expect_err("strict replay should return the recorded failure");
+
+    assert!(matches!(replay_err, EffectError::RecordedFailure { .. }));
+    assert_eq!(replay_calls.load(Ordering::SeqCst), 0);
+    let replay_events = replay_journal.events();
+    assert_eq!(replay_events.len(), 1);
+    assert_eq!(replay_events[0].event.id, live_events[0].event.id);
+    let replay_records = effect_records(&replay_journal);
+    assert_eq!(replay_records, vec![live_record.clone()]);
+
+    let replay_of_replay_history = Arc::new(
+        EffectHistory::from_records("second_replay_archive_flow".to_string(), replay_records)
+            .expect("replay archive history should stay keyed by the live root"),
+    );
+    assert_eq!(
+        replay_of_replay_history.recorded_flow_id(),
+        &root_recorded_flow_id
+    );
+    let replay_of_replay_journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
+    let replay_of_replay_calls = Arc::new(AtomicUsize::new(0));
+    let mut replay_of_replay = Effects::new(invocation_context(
+        replay_of_replay_journal.clone(),
+        parent_envelope(WriterId::from(stage_id)),
+        Some(replay_of_replay_history),
+    ));
+
+    let replay_of_replay_err = replay_of_replay
+        .perform(FailingEffect {
+            label: "fail",
+            calls: replay_of_replay_calls.clone(),
+        })
+        .await
+        .expect_err("replay-of-replay should return the recorded failure");
+
+    assert!(matches!(
+        replay_of_replay_err,
+        EffectError::RecordedFailure { .. }
+    ));
+    assert_eq!(replay_of_replay_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        replay_of_replay_journal.events()[0].event.id,
+        live_events[0].event.id
+    );
 }
 
 #[tokio::test]
@@ -1523,12 +1752,19 @@ async fn capture_replays_recorded_value_without_using_live_value() {
     assert_eq!(captured, 7);
 
     let records = effect_records(&journal);
+    let live_record = records[0].clone();
+    let live_event_id = journal.events()[0].event.id;
+    assert_eq!(
+        live_event_id,
+        deterministic_effect_record_event_id(&live_record.cursor, CAPTURE_EVENT_TYPE)
+    );
     let history = Arc::new(
         EffectHistory::from_records(records[0].cursor.recorded_flow_id.clone(), records)
             .expect("history should index"),
     );
+    let replay_journal = Arc::new(MemoryJournal::new(JournalOwner::stage(StageId::new())));
     let mut replay = Effects::new(invocation_context(
-        Arc::new(MemoryJournal::new(JournalOwner::stage(StageId::new()))),
+        replay_journal.clone(),
         parent_envelope(WriterId::from(stage_id)),
         Some(history),
     ));
@@ -1539,4 +1775,29 @@ async fn capture_replays_recorded_value_without_using_live_value() {
         .expect("capture should replay");
 
     assert_eq!(replayed, 7);
+    let replay_events = replay_journal.events();
+    assert_eq!(replay_events.len(), 1);
+    assert_eq!(replay_events[0].event.id, live_event_id);
+    let replay_records = effect_records(&replay_journal);
+    assert_eq!(replay_records, vec![live_record]);
+
+    let replay_of_replay_history = Arc::new(
+        EffectHistory::from_records("replay_archive_flow".to_string(), replay_records)
+            .expect("capture replay history should infer the original root"),
+    );
+    let replay_of_replay_journal =
+        Arc::new(MemoryJournal::new(JournalOwner::stage(StageId::new())));
+    let mut replay_of_replay = Effects::new(invocation_context(
+        replay_of_replay_journal.clone(),
+        parent_envelope(WriterId::from(stage_id)),
+        Some(replay_of_replay_history),
+    ));
+
+    let replayed_again: u64 = replay_of_replay
+        .capture("side_value", 1234)
+        .await
+        .expect("capture should replay from a replay archive");
+
+    assert_eq!(replayed_again, 7);
+    assert_eq!(replay_of_replay_journal.events()[0].event.id, live_event_id);
 }

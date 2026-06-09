@@ -62,6 +62,7 @@ pub use declaration::{
 pub use error::EffectError;
 pub use history::{EffectHistory, EffectHistoryReader, EffectHistoryStore};
 pub use identity::{
+    deterministic_effect_record_event_id, deterministic_effect_record_event_time,
     deterministic_event_id, deterministic_event_time, deterministic_typed_output_event,
     EffectOutputOrdinal,
 };
@@ -75,6 +76,6 @@ use commit::{
 use identity::{descriptor_for_effect, descriptor_hash, hash_json_value};
 use replay::{
     decode_effect_outcome, decode_effect_outcome_group, effect_fact_set_error,
-    effect_record_from_event, effect_record_group_to_facts, is_routable_output_fact,
-    recorded_failure_from_outcome, validate_effect_outcome_group,
+    effect_record_from_event, effect_record_group_materialization, is_routable_output_fact,
+    recorded_failure_from_outcome, validate_effect_outcome_group, EffectRecordMaterialization,
 };

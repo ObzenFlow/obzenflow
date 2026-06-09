@@ -52,6 +52,9 @@ impl EffectHistory {
         recorded_flow_id: impl Into<RecordedFlowId>,
         records: Vec<EffectRecord>,
     ) -> Result<Self, EffectError> {
+        let fallback_recorded_flow_id = recorded_flow_id.into();
+        let recorded_flow_id =
+            infer_recorded_flow_id(&records)?.unwrap_or(fallback_recorded_flow_id);
         let mut index = HashMap::new();
         for (position, record) in records.iter().enumerate() {
             index
@@ -69,7 +72,7 @@ impl EffectHistory {
         }
 
         Ok(Self {
-            recorded_flow_id: recorded_flow_id.into(),
+            recorded_flow_id,
             records: Arc::new(records),
             index: Arc::new(index),
         })
@@ -101,6 +104,22 @@ impl EffectHistory {
     pub fn recorded_flow_id(&self) -> &RecordedFlowId {
         &self.recorded_flow_id
     }
+}
+
+fn infer_recorded_flow_id(records: &[EffectRecord]) -> Result<Option<RecordedFlowId>, EffectError> {
+    let Some(first) = records.first() else {
+        return Ok(None);
+    };
+    let recorded_flow_id = first.cursor.recorded_flow_id.clone();
+    for record in records.iter().skip(1) {
+        if record.cursor.recorded_flow_id != recorded_flow_id {
+            return Err(EffectError::EffectProvenanceMismatch(format!(
+                "effect history contains mixed recorded flow ids: `{}` and `{}`",
+                recorded_flow_id, record.cursor.recorded_flow_id
+            )));
+        }
+    }
+    Ok(Some(recorded_flow_id))
 }
 
 #[async_trait]

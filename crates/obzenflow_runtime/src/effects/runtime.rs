@@ -214,15 +214,29 @@ impl Effects {
 
         if let Some(history) = &self.ctx.effect_history {
             if let Some(records) = history.find_group(&cursor) {
-                let output = self.replay_records_output::<E::Output>(
+                let output_result = self.replay_records_output::<E::Output>(
                     &records,
                     cursor.clone(),
                     descriptor_hash.clone(),
-                )?;
-                if let Some(facts) = effect_record_group_to_facts(&records)? {
-                    self.append_success_facts(cursor, descriptor_hash, descriptor, facts)
+                );
+                let output = match output_result {
+                    Ok(output) => output,
+                    Err(err @ EffectError::RecordedFailure { .. }) => {
+                        let materialization = effect_record_group_materialization(&records)?;
+                        self.append_replayed_records(
+                            cursor,
+                            descriptor_hash,
+                            descriptor,
+                            materialization,
+                        )
                         .await?;
-                }
+                        return Err(err);
+                    }
+                    Err(err) => return Err(err),
+                };
+                let materialization = effect_record_group_materialization(&records)?;
+                self.append_replayed_records(cursor, descriptor_hash, descriptor, materialization)
+                    .await?;
                 return Ok(output);
             }
 
@@ -276,19 +290,16 @@ impl Effects {
                     self.ctx.push_boundary_control_events(control_events);
                     let err =
                         EffectError::Execution("effect boundary aborted execution".to_string());
-                    self.append_record(
-                        EffectRecord {
-                            cursor,
-                            descriptor_hash,
-                            descriptor,
-                            outcome: EffectOutcomePayload::Failed {
-                                error_type: err.error_type(),
-                                error_message: err.error_message(),
-                                retry: err.retry_disposition(),
-                            },
+                    self.append_record(EffectRecord {
+                        cursor,
+                        descriptor_hash,
+                        descriptor,
+                        outcome: EffectOutcomePayload::Failed {
+                            error_type: err.error_type(),
+                            error_message: err.error_message(),
+                            retry: err.retry_disposition(),
                         },
-                        Some(&err),
-                    )
+                    })
                     .await?;
                     return Err(err);
                 }
@@ -355,19 +366,16 @@ impl Effects {
                     );
                     self.ctx.push_boundary_control_events(control_events);
                 }
-                self.append_record(
-                    EffectRecord {
-                        cursor,
-                        descriptor_hash,
-                        descriptor,
-                        outcome: EffectOutcomePayload::Failed {
-                            error_type: err.error_type(),
-                            error_message: err.error_message(),
-                            retry: err.retry_disposition(),
-                        },
+                self.append_record(EffectRecord {
+                    cursor,
+                    descriptor_hash,
+                    descriptor,
+                    outcome: EffectOutcomePayload::Failed {
+                        error_type: err.error_type(),
+                        error_message: err.error_message(),
+                        retry: err.retry_disposition(),
                     },
-                    Some(&err),
-                )
+                })
                 .await?;
                 Err(err)
             }
@@ -402,7 +410,27 @@ impl Effects {
 
         if let Some(history) = &self.ctx.effect_history {
             if let Some(records) = history.find_group(&cursor) {
-                return self.replay_capture_output(&records, cursor, descriptor_hash);
+                let output_result =
+                    self.replay_capture_output(&records, cursor.clone(), descriptor_hash.clone());
+                let output = match output_result {
+                    Ok(output) => output,
+                    Err(err @ EffectError::RecordedFailure { .. }) => {
+                        let materialization = effect_record_group_materialization(&records)?;
+                        self.append_replayed_records(
+                            cursor,
+                            descriptor_hash,
+                            descriptor,
+                            materialization,
+                        )
+                        .await?;
+                        return Err(err);
+                    }
+                    Err(err) => return Err(err),
+                };
+                let materialization = effect_record_group_materialization(&records)?;
+                self.append_replayed_records(cursor, descriptor_hash, descriptor, materialization)
+                    .await?;
+                return Ok(output);
             }
 
             if matches!(
@@ -415,15 +443,12 @@ impl Effects {
 
         let output =
             serde_json::to_value(&value).map_err(|e| EffectError::Serialization(e.to_string()))?;
-        self.append_record(
-            EffectRecord {
-                cursor,
-                descriptor_hash,
-                descriptor,
-                outcome: EffectOutcomePayload::Succeeded { output },
-            },
-            None,
-        )
+        self.append_record(EffectRecord {
+            cursor,
+            descriptor_hash,
+            descriptor,
+            outcome: EffectOutcomePayload::Succeeded { output },
+        })
         .await?;
         Ok(value)
     }
@@ -565,17 +590,12 @@ impl Effects {
         }
     }
 
-    async fn append_record(
-        &self,
-        record: EffectRecord,
-        source_error: Option<&EffectError>,
-    ) -> Result<(), EffectError> {
+    async fn append_record(&self, record: EffectRecord) -> Result<(), EffectError> {
         append_effect_record(
             &self.ctx.data_journal,
             self.ctx.writer_id,
             &self.ctx.parent,
             record,
-            source_error,
         )
         .await
     }
@@ -617,5 +637,26 @@ impl Effects {
             .ok_or_else(|| EffectError::Execution("routed output fanout overflow".to_string()))?;
         self.committed_facts.extend(committed_events);
         Ok(())
+    }
+
+    async fn append_replayed_records(
+        &mut self,
+        cursor: EffectCursor,
+        descriptor_hash: EffectDescriptorHash,
+        descriptor: EffectDescriptor,
+        materialization: EffectRecordMaterialization,
+    ) -> Result<(), EffectError> {
+        match materialization {
+            EffectRecordMaterialization::DomainFacts(facts) => {
+                self.append_success_facts(cursor, descriptor_hash, descriptor, facts)
+                    .await
+            }
+            EffectRecordMaterialization::FrameworkRecords(records) => {
+                for record in records {
+                    self.append_record(record).await?;
+                }
+                Ok(())
+            }
+        }
     }
 }

@@ -127,6 +127,32 @@ pub fn deterministic_event_time(
         .saturating_add(u64::from(output_ordinal.get()))
 }
 
+pub fn deterministic_effect_record_event_id(
+    cursor: &EffectCursor,
+    event_type: impl AsRef<str>,
+) -> EventId {
+    let material = format!(
+        "effect-record:v1:{}:{}:{}:{}:{}",
+        event_type.as_ref(),
+        cursor.recorded_flow_id.as_str(),
+        cursor.stage_key.as_str(),
+        cursor.input_seq.get(),
+        cursor.effect_ordinal.get()
+    );
+    let hash = digest(&SHA256, material.as_bytes());
+    let mut id_bytes = [0u8; 16];
+    id_bytes.copy_from_slice(&hash.as_ref()[..16]);
+    EventId::from(obzenflow_core::Ulid(u128::from_be_bytes(id_bytes)))
+}
+
+pub fn deterministic_effect_record_event_time(cursor: &EffectCursor) -> u64 {
+    cursor
+        .input_seq
+        .get()
+        .saturating_mul(1_000)
+        .saturating_add(u64::from(cursor.effect_ordinal.get()))
+}
+
 pub fn deterministic_typed_output_event<Out>(
     writer_id: WriterId,
     parent: &ChainEvent,
