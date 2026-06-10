@@ -9,10 +9,11 @@ use obzenflow_core::event::context::FlowContext;
 pub use obzenflow_core::event::payloads::effect_payload::{
     effect_outcome_group_id, framework_effect_event_type, is_framework_effect_event_type,
     CanonicalInputHash, EffectCursor, EffectDescriptor, EffectDescriptorHash, EffectFactOrigin,
-    EffectFactOwner, EffectFailureCause, EffectFailureKind, EffectInputPosition, EffectLabel,
-    EffectOrdinal, EffectOutcomeGroupId, EffectOutcomePayload, EffectProvenance, EffectRecord,
-    EffectSchemaVersion, EffectStageKey, EffectType, OutcomeFactOrdinal, RecordedFlowId,
-    RetryDisposition, StageLogicVersion, CAPTURE_EVENT_TYPE, EFFECT_RECORD_EVENT_TYPE,
+    EffectFactOwner, EffectFailureCause, EffectFailureCode, EffectFailureKind, EffectFailureSource,
+    EffectInputPosition, EffectLabel, EffectOrdinal, EffectOutcomeGroupId, EffectOutcomePayload,
+    EffectProvenance, EffectRecord, EffectSchemaVersion, EffectStageKey, EffectType,
+    OutcomeFactOrdinal, RecordedFlowId, RetryDisposition, StageLogicVersion, CAPTURE_EVENT_TYPE,
+    EFFECT_RECORD_EVENT_TYPE,
 };
 use obzenflow_core::event::schema::{
     TypedFact, TypedFactSet, TypedFactSetError, TypedFactType, TypedPayload,

@@ -271,8 +271,8 @@ impl Effects {
                         // signal for a rejection the live run made deliberately.
                         self.ctx.push_boundary_control_events(control_events);
                         let err = EffectError::BoundaryRejected {
-                            rejected_by: "effect_boundary".to_string(),
-                            code: "skip_without_facts".to_string(),
+                            rejected_by: EffectFailureSource::new("effect_boundary"),
+                            code: EffectFailureCode::new("skip_without_facts"),
                             message: "effect boundary skipped without fallback output facts"
                                 .to_string(),
                             retry: RetryDisposition::NotRetryable,

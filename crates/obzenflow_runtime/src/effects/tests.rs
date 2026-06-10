@@ -1814,8 +1814,8 @@ impl EffectBoundaryMiddleware for AbortingBoundary {
         EffectBoundaryStart {
             action: EffectBoundaryAction::Abort(EffectAbortReason {
                 cause: EffectFailureCause {
-                    source: "circuit_breaker".to_string(),
-                    code: "rejected_circuit_open".to_string(),
+                    source: "circuit_breaker".into(),
+                    code: "rejected_circuit_open".into(),
                 },
                 message: "circuit breaker rejected effect execution".to_string(),
                 retry: RetryDisposition::Retryable,
@@ -1885,8 +1885,8 @@ async fn boundary_abort_records_failure_with_cause_and_replays_deterministically
         EffectError::BoundaryRejected {
             rejected_by, code, ..
         } => {
-            assert_eq!(rejected_by, "circuit_breaker");
-            assert_eq!(code, "rejected_circuit_open");
+            assert_eq!(rejected_by.as_str(), "circuit_breaker");
+            assert_eq!(code.as_str(), "rejected_circuit_open");
         }
         other => panic!("expected BoundaryRejected, got {other:?}"),
     }
@@ -2012,7 +2012,7 @@ async fn boundary_empty_skip_records_failure_instead_of_unrecorded_error() {
 
     assert!(matches!(
         &live_err,
-        EffectError::BoundaryRejected { code, .. } if code == "skip_without_facts"
+        EffectError::BoundaryRejected { code, .. } if code.as_str() == "skip_without_facts"
     ));
     assert_eq!(live_calls.load(Ordering::SeqCst), 0);
 
@@ -2025,7 +2025,8 @@ async fn boundary_empty_skip_records_failure_instead_of_unrecorded_error() {
     assert!(matches!(
         &live_records[0].outcome,
         EffectOutcomePayload::Failed { cause: Some(cause), .. }
-            if cause.source == "effect_boundary" && cause.code == "skip_without_facts"
+            if cause.source.as_str() == "effect_boundary"
+                && cause.code.as_str() == "skip_without_facts"
     ));
 
     // Strict replay must not fail with MissingRecordedEffect.

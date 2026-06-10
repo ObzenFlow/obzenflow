@@ -9,7 +9,7 @@
 
 use super::MiddlewareContext;
 use obzenflow_core::event::chain_event::ChainEvent;
-use obzenflow_core::event::RetryDisposition;
+use obzenflow_core::event::{EffectFailureCode, EffectFailureSource, RetryDisposition};
 
 /// Trait for composable middleware that wraps Step behavior.
 ///
@@ -116,9 +116,9 @@ pub trait Middleware: Send + Sync {
 #[derive(Debug, Clone)]
 pub struct MiddlewareAbortCause {
     /// Label of the rejecting middleware, e.g. "circuit_breaker".
-    pub source: &'static str,
+    pub source: EffectFailureSource,
     /// Stable machine-readable reason, e.g. "rejected_circuit_open".
-    pub code: &'static str,
+    pub code: EffectFailureCode,
     /// Human-readable detail for the recorded failure message.
     pub message: String,
     pub retry: RetryDisposition,

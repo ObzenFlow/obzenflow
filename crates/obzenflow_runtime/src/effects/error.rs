@@ -35,8 +35,8 @@ pub enum EffectError {
 
     #[error("effect rejected at boundary by {rejected_by}: {code}: {message}")]
     BoundaryRejected {
-        rejected_by: String,
-        code: String,
+        rejected_by: EffectFailureSource,
+        code: EffectFailureCode,
         message: String,
         retry: RetryDisposition,
     },

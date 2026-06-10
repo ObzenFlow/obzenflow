@@ -16,7 +16,9 @@ use super::{
 };
 use async_trait::async_trait;
 use obzenflow_core::event::status::processing_status::ProcessingStatus;
-use obzenflow_core::event::{EffectFailureCause, RetryDisposition};
+use obzenflow_core::event::{
+    EffectFailureCause, EffectFailureCode, EffectFailureSource, RetryDisposition,
+};
 use obzenflow_core::ChainEvent;
 use obzenflow_core::MiddlewareExecutionScope;
 use obzenflow_runtime::effects::{
@@ -531,16 +533,16 @@ impl EffectBoundaryMiddleware for MiddlewareEffectBoundary {
                     let reason = match cause {
                         Some(cause) => EffectAbortReason {
                             cause: EffectFailureCause {
-                                source: cause.source.to_string(),
-                                code: cause.code.to_string(),
+                                source: cause.source,
+                                code: cause.code,
                             },
                             message: cause.message,
                             retry: cause.retry,
                         },
                         None => EffectAbortReason {
                             cause: EffectFailureCause {
-                                source: middleware.label().to_string(),
-                                code: "aborted".to_string(),
+                                source: EffectFailureSource::new(middleware.label()),
+                                code: EffectFailureCode::new("aborted"),
                             },
                             message: format!(
                                 "middleware '{}' aborted effect execution",

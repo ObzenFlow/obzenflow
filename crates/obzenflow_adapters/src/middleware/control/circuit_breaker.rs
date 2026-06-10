@@ -28,7 +28,10 @@ use obzenflow_core::event::payloads::observability_payload::{
 };
 use obzenflow_core::event::schema::TypedFactType;
 use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
-use obzenflow_core::event::{ChainEventFactory, CircuitBreakerSummaryEventParams};
+use obzenflow_core::event::{
+    ChainEventFactory, CircuitBreakerSummaryEventParams, EffectFailureCode, EffectFailureSource,
+    RetryDisposition,
+};
 use obzenflow_core::MiddlewareExecutionScope;
 use obzenflow_core::TypedPayload;
 use obzenflow_core::{StageId, WriterId};
@@ -50,6 +53,44 @@ type FailureClassificationClassifier =
 type FallbackFn = Arc<dyn Fn(&ChainEvent) -> Vec<ChainEvent> + Send + Sync>;
 type RejectionFn =
     Arc<dyn Fn(&ChainEvent, CircuitBreakerRejectionReason) -> Vec<ChainEvent> + Send + Sync>;
+
+const CIRCUIT_BREAKER_ABORT_SOURCE: &str = "circuit_breaker";
+
+#[derive(Debug, Clone, Copy)]
+enum CircuitBreakerAbortCode {
+    CircuitOpen,
+    ProbeInProgress,
+    Rejected,
+}
+
+impl CircuitBreakerAbortCode {
+    fn from_rejection_reason(reason: CircuitBreakerRejectionReason) -> Self {
+        match reason {
+            CircuitBreakerRejectionReason::CircuitOpen => Self::CircuitOpen,
+            CircuitBreakerRejectionReason::ProbeInProgress => Self::ProbeInProgress,
+            CircuitBreakerRejectionReason::Unknown => Self::Rejected,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::CircuitOpen => "rejected_circuit_open",
+            Self::ProbeInProgress => "rejected_probe_in_progress",
+            Self::Rejected => "rejected",
+        }
+    }
+
+    fn effect_code(self) -> EffectFailureCode {
+        EffectFailureCode::new(self.as_str())
+    }
+
+    fn message(self) -> String {
+        format!(
+            "circuit breaker rejected effect execution: {}",
+            self.as_str()
+        )
+    }
+}
 
 /// Typed-outcome configuration (FLOWIP-120h): when the breaker is declared in
 /// the `output_middleware:` lane and the handler performs the guarded
@@ -849,16 +890,12 @@ impl CircuitBreakerMiddleware {
     }
 
     fn rejection_abort_cause(&self, reason: CircuitBreakerRejectionReason) -> MiddlewareAbortCause {
-        let code = match reason {
-            CircuitBreakerRejectionReason::CircuitOpen => "rejected_circuit_open",
-            CircuitBreakerRejectionReason::ProbeInProgress => "rejected_probe_in_progress",
-            CircuitBreakerRejectionReason::Unknown => "rejected",
-        };
+        let code = CircuitBreakerAbortCode::from_rejection_reason(reason);
         MiddlewareAbortCause {
-            source: "circuit_breaker",
-            code,
-            message: format!("circuit breaker rejected effect execution: {code}"),
-            retry: obzenflow_core::event::RetryDisposition::Retryable,
+            source: EffectFailureSource::new(CIRCUIT_BREAKER_ABORT_SOURCE),
+            code: code.effect_code(),
+            message: code.message(),
+            retry: RetryDisposition::Retryable,
         }
     }
 

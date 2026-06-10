@@ -147,6 +147,14 @@ string_newtype!(
     EffectFailureKind,
     "Stable classification for a recorded effect failure."
 );
+string_newtype!(
+    EffectFailureSource,
+    "Stable label for the component that caused a recorded effect failure."
+);
+string_newtype!(
+    EffectFailureCode,
+    "Stable machine-readable reason for a recorded effect failure."
+);
 
 /// Stage input position captured in an effect replay cursor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -473,8 +481,8 @@ impl RetryDisposition {
 /// rejecting component's label and `code` is a stable machine-readable reason.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EffectFailureCause {
-    pub source: String,
-    pub code: String,
+    pub source: EffectFailureSource,
+    pub code: EffectFailureCode,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -689,6 +697,27 @@ mod tests {
         let serialized = serde_json::to_value(outcome).expect("failure should serialize");
         assert_eq!(serialized["retry"], "retryable");
         assert!(serialized.get("retryable").is_none());
+    }
+
+    #[test]
+    fn effect_failure_cause_uses_typed_fields_with_string_wire_shape() {
+        let cause: EffectFailureCause = serde_json::from_value(json!({
+            "source": "circuit_breaker",
+            "code": "rejected_circuit_open"
+        }))
+        .expect("string wire cause should deserialize into typed fields");
+
+        assert_eq!(cause.source, "circuit_breaker");
+        assert_eq!(cause.code, "rejected_circuit_open");
+
+        let serialized = serde_json::to_value(&cause).expect("cause should serialize");
+        assert_eq!(
+            serialized,
+            json!({
+                "source": "circuit_breaker",
+                "code": "rejected_circuit_open"
+            })
+        );
     }
 
     #[test]
