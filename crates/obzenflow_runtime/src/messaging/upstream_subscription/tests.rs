@@ -4,7 +4,7 @@
 
 use super::{
     ContractConfig, ContractStatus, ContractsWiring, PollResult, ReaderProgress,
-    SelectedFeedMetadata, SelectedFeedRole, UpstreamSubscription,
+    ReaderSelectionPolicy, SelectedFeedMetadata, SelectedFeedRole, UpstreamSubscription,
 };
 use crate::messaging::upstream_subscription_policy::build_policy_stack_for_upstream;
 use async_trait::async_trait;
@@ -2317,4 +2317,534 @@ async fn forwarded_eof_with_missing_writer_is_not_terminal() {
     assert_eq!(outcome.stage_id, upstream_stage);
     assert_eq!(outcome.eof_count, 1);
     assert_eq!(outcome.total_readers, 1);
+}
+
+// ---------------------------------------------------------------------------
+// FLOWIP-095d: canonical deterministic merge
+// ---------------------------------------------------------------------------
+
+/// In-memory journal whose readers observe appends made after reader creation,
+/// with explicit vector-clock stamping for causality tests. `TestJournal`
+/// snapshots events at reader creation, which cannot express "quiet input
+/// later produces a head".
+struct SharedTestJournal {
+    id: JournalId,
+    owner: Option<JournalOwner>,
+    events: Arc<Mutex<Vec<EventEnvelope<ChainEvent>>>>,
+}
+
+impl SharedTestJournal {
+    fn new(owner: JournalOwner) -> Self {
+        Self {
+            id: JournalId::new(),
+            owner: Some(owner),
+            events: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn append_with_clock(&self, event: ChainEvent, vector_clock: VectorClock) {
+        let envelope = EventEnvelope {
+            journal_writer_id: JournalWriterId::from(self.id),
+            vector_clock,
+            timestamp: chrono::Utc::now(),
+            event,
+        };
+        self.events.lock().unwrap().push(envelope);
+    }
+}
+
+struct SharedTestJournalReader {
+    events: Arc<Mutex<Vec<EventEnvelope<ChainEvent>>>>,
+    pos: usize,
+}
+
+#[async_trait]
+impl JournalReader<ChainEvent> for SharedTestJournalReader {
+    async fn next(
+        &mut self,
+    ) -> std::result::Result<Option<EventEnvelope<ChainEvent>>, JournalError> {
+        let guard = self.events.lock().unwrap();
+        if self.pos < guard.len() {
+            let envelope = guard[self.pos].clone();
+            self.pos += 1;
+            Ok(Some(envelope))
+        } else {
+            Ok(None)
+        }
+    }
+
+    async fn skip(&mut self, n: u64) -> std::result::Result<u64, JournalError> {
+        let len = self.events.lock().unwrap().len();
+        let available = len.saturating_sub(self.pos) as u64;
+        let skipped = available.min(n);
+        self.pos += skipped as usize;
+        Ok(skipped)
+    }
+
+    fn position(&self) -> u64 {
+        self.pos as u64
+    }
+
+    fn is_at_end(&self) -> bool {
+        self.pos >= self.events.lock().unwrap().len()
+    }
+}
+
+#[async_trait]
+impl Journal<ChainEvent> for SharedTestJournal {
+    fn id(&self) -> &JournalId {
+        &self.id
+    }
+
+    fn owner(&self) -> Option<&JournalOwner> {
+        self.owner.as_ref()
+    }
+
+    async fn append(
+        &self,
+        event: ChainEvent,
+        _parent: Option<&EventEnvelope<ChainEvent>>,
+    ) -> std::result::Result<EventEnvelope<ChainEvent>, JournalError> {
+        let envelope = EventEnvelope::new(JournalWriterId::from(self.id), event);
+        self.events.lock().unwrap().push(envelope.clone());
+        Ok(envelope)
+    }
+
+    async fn read_causally_ordered(
+        &self,
+    ) -> std::result::Result<Vec<EventEnvelope<ChainEvent>>, JournalError> {
+        Ok(self.events.lock().unwrap().clone())
+    }
+
+    async fn read_causally_after(
+        &self,
+        _after_event_id: &obzenflow_core::EventId,
+    ) -> std::result::Result<Vec<EventEnvelope<ChainEvent>>, JournalError> {
+        Ok(Vec::new())
+    }
+
+    async fn read_event(
+        &self,
+        _event_id: &obzenflow_core::EventId,
+    ) -> std::result::Result<Option<EventEnvelope<ChainEvent>>, JournalError> {
+        Ok(None)
+    }
+
+    async fn reader(
+        &self,
+    ) -> std::result::Result<Box<dyn JournalReader<ChainEvent>>, JournalError> {
+        Ok(Box::new(SharedTestJournalReader {
+            events: self.events.clone(),
+            pos: 0,
+        }))
+    }
+
+    async fn reader_from(
+        &self,
+        position: u64,
+    ) -> std::result::Result<Box<dyn JournalReader<ChainEvent>>, JournalError> {
+        Ok(Box::new(SharedTestJournalReader {
+            events: self.events.clone(),
+            pos: position as usize,
+        }))
+    }
+
+    async fn read_last_n(
+        &self,
+        count: usize,
+    ) -> std::result::Result<Vec<EventEnvelope<ChainEvent>>, JournalError> {
+        let guard = self.events.lock().unwrap();
+        let len = guard.len();
+        let start = len.saturating_sub(count);
+        Ok(guard[start..].iter().rev().cloned().collect())
+    }
+}
+
+fn merge_data(writer: StageId, event_type: &str) -> ChainEvent {
+    ChainEventFactory::data_event(WriterId::Stage(writer), event_type, json!({}))
+}
+
+fn merge_authored_eof(writer: StageId) -> ChainEvent {
+    ChainEventFactory::eof_event(WriterId::Stage(writer), true)
+}
+
+fn merge_clock(entries: &[(&str, u64)]) -> VectorClock {
+    let mut clock = VectorClock::new();
+    for (writer, seq) in entries {
+        for _ in 0..*seq {
+            obzenflow_core::event::vector_clock::CausalOrderingService::increment(
+                &mut clock, writer,
+            );
+        }
+    }
+    clock
+}
+
+async fn canonical_pair(
+    name_a: &str,
+    name_b: &str,
+) -> (
+    UpstreamSubscription<ChainEvent>,
+    (StageId, Arc<SharedTestJournal>),
+    (StageId, Arc<SharedTestJournal>),
+) {
+    let stage_a = StageId::new();
+    let stage_b = StageId::new();
+    let journal_a = Arc::new(SharedTestJournal::new(JournalOwner::stage(stage_a)));
+    let journal_b = Arc::new(SharedTestJournal::new(JournalOwner::stage(stage_b)));
+
+    let upstreams = [
+        (
+            stage_a,
+            name_a.to_string(),
+            journal_a.clone() as Arc<dyn Journal<ChainEvent>>,
+        ),
+        (
+            stage_b,
+            name_b.to_string(),
+            journal_b.clone() as Arc<dyn Journal<ChainEvent>>,
+        ),
+    ];
+
+    let subscription = UpstreamSubscription::new_with_names("merge_owner", &upstreams)
+        .await
+        .unwrap()
+        .with_reader_selection(ReaderSelectionPolicy::CanonicalMerge);
+
+    (subscription, (stage_a, journal_a), (stage_b, journal_b))
+}
+
+async fn expect_delivery(
+    subscription: &mut UpstreamSubscription<ChainEvent>,
+) -> EventEnvelope<ChainEvent> {
+    match subscription.poll_next_with_state("test_fsm", None).await {
+        PollResult::Event(envelope) => envelope,
+        other => panic!(
+            "expected PollResult::Event, got {other:?} (delivered_seq={:?}, merge_wait={:?})",
+            subscription.delivered_seq_by_reader(),
+            subscription.merge_wait(),
+        ),
+    }
+}
+
+#[tokio::test]
+async fn canonical_merge_waits_while_any_input_is_quiet() {
+    let (mut subscription, (stage_a, journal_a), (stage_b, journal_b)) =
+        canonical_pair("upstream_a", "upstream_b").await;
+
+    journal_a.append_with_clock(merge_data(stage_a, "a.event"), VectorClock::new());
+
+    // B is quiet: nothing may deliver, and the wait names B.
+    match subscription.poll_next_with_state("test_fsm", None).await {
+        PollResult::NoEvents => {}
+        other => panic!("expected NoEvents while an input is quiet, got {other:?}"),
+    }
+    let wait = subscription.merge_wait().expect("merge wait recorded");
+    assert_eq!(wait.quiet_inputs, vec![(stage_b, "upstream_b".to_string())]);
+    assert_eq!(subscription.delivered_seq_by_reader(), &[0, 0]);
+
+    // B produces a head: the merge decides, and the tiebreak (equal ordinals,
+    // stage name) delivers A first.
+    journal_b.append_with_clock(merge_data(stage_b, "b.event"), VectorClock::new());
+    let first = expect_delivery(&mut subscription).await;
+    assert_eq!(first.event.event_type(), "a.event");
+    assert_eq!(subscription.last_delivered_upstream_stage(), Some(stage_a));
+    assert!(subscription.merge_wait().is_none());
+
+    // The roles flip: A is now the quiet input, so B's held head must wait.
+    match subscription.poll_next_with_state("test_fsm", None).await {
+        PollResult::NoEvents => {}
+        other => panic!("expected NoEvents while A is quiet, got {other:?}"),
+    }
+    let wait = subscription.merge_wait().expect("merge wait recorded");
+    assert_eq!(wait.quiet_inputs, vec![(stage_a, "upstream_a".to_string())]);
+
+    // A seals: B's data (ordinal 1) beats A's EOF (ordinal 2).
+    journal_a.append_with_clock(merge_authored_eof(stage_a), VectorClock::new());
+    let second = expect_delivery(&mut subscription).await;
+    assert_eq!(second.event.event_type(), "b.event");
+
+    // A's EOF still cannot deliver: B went quiet again. EOFs obey the same
+    // wait discipline as data, so exhaustion order stays deterministic.
+    match subscription.poll_next_with_state("test_fsm", None).await {
+        PollResult::NoEvents => {}
+        other => panic!("expected NoEvents while B is quiet, got {other:?}"),
+    }
+    journal_b.append_with_clock(merge_authored_eof(stage_b), VectorClock::new());
+
+    let third = expect_delivery(&mut subscription).await;
+    assert!(matches!(
+        third.event.content,
+        ChainEventContent::FlowControl(FlowControlPayload::Eof { .. })
+    ));
+    let fourth = expect_delivery(&mut subscription).await;
+    assert!(matches!(
+        fourth.event.content,
+        ChainEventContent::FlowControl(FlowControlPayload::Eof { .. })
+    ));
+    assert_eq!(subscription.delivered_seq_by_reader(), &[2, 2]);
+    assert!(subscription.all_readers_eof());
+}
+
+#[tokio::test]
+async fn canonical_merge_alternates_by_ordinal_then_stage_key_and_never_waits_on_sealed_inputs() {
+    let (mut subscription, (stage_a, journal_a), (stage_b, journal_b)) =
+        canonical_pair("upstream_a", "upstream_b").await;
+
+    for label in ["a1", "a2", "a3"] {
+        journal_a.append_with_clock(merge_data(stage_a, label), VectorClock::new());
+    }
+    journal_a.append_with_clock(merge_authored_eof(stage_a), VectorClock::new());
+    for label in ["b1", "b2", "b3"] {
+        journal_b.append_with_clock(merge_data(stage_b, label), VectorClock::new());
+    }
+    journal_b.append_with_clock(merge_authored_eof(stage_b), VectorClock::new());
+
+    // Sealed inputs never wait: eight consecutive deliveries, no NoEvents.
+    let mut delivered_from = Vec::new();
+    for _ in 0..8 {
+        let _ = expect_delivery(&mut subscription).await;
+        delivered_from.push(subscription.last_delivered_upstream_stage().unwrap());
+    }
+    assert_eq!(
+        delivered_from,
+        vec![stage_a, stage_b, stage_a, stage_b, stage_a, stage_b, stage_a, stage_b],
+        "ordinal-balanced tiebreak alternates fairly, stage key breaks ties"
+    );
+    assert_eq!(subscription.delivered_seq_by_reader(), &[4, 4]);
+    assert!(subscription.all_readers_eof());
+
+    match subscription.poll_next_with_state("test_fsm", None).await {
+        PollResult::NoEvents => {}
+        other => panic!("expected NoEvents after exhaustion, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn canonical_merge_excludes_happened_before_heads() {
+    // B sorts first by stage name, so the tiebreak alone would prefer B.
+    // Causality must override it: B's head derives from A's second event.
+    let (mut subscription, (stage_a, journal_a), (stage_b, journal_b)) =
+        canonical_pair("z_upstream", "a_upstream").await;
+
+    journal_a.append_with_clock(merge_data(stage_a, "a1"), merge_clock(&[("wa", 1)]));
+    journal_a.append_with_clock(merge_data(stage_a, "a2"), merge_clock(&[("wa", 2)]));
+    journal_a.append_with_clock(merge_authored_eof(stage_a), VectorClock::new());
+    journal_b.append_with_clock(
+        merge_data(stage_b, "b1"),
+        merge_clock(&[("wa", 2), ("wb", 1)]),
+    );
+    journal_b.append_with_clock(merge_authored_eof(stage_b), VectorClock::new());
+
+    let mut order = Vec::new();
+    for _ in 0..3 {
+        let envelope = expect_delivery(&mut subscription).await;
+        order.push(envelope.event.event_type());
+    }
+    assert_eq!(
+        order,
+        vec!["a1".to_string(), "a2".to_string(), "b1".to_string()],
+        "causal ancestors deliver before the head that derives from them"
+    );
+}
+
+#[tokio::test]
+async fn canonical_merge_authored_eof_orders_by_tiebreak_and_exhausts_reader() {
+    let (mut subscription, (stage_a, journal_a), (stage_b, journal_b)) =
+        canonical_pair("upstream_a", "upstream_b").await;
+
+    journal_a.append_with_clock(merge_data(stage_a, "a1"), VectorClock::new());
+    journal_a.append_with_clock(merge_authored_eof(stage_a), VectorClock::new());
+    for label in ["b1", "b2", "b3"] {
+        journal_b.append_with_clock(merge_data(stage_b, label), VectorClock::new());
+    }
+    journal_b.append_with_clock(merge_authored_eof(stage_b), VectorClock::new());
+
+    let mut delivered_from = Vec::new();
+    for _ in 0..6 {
+        let _ = expect_delivery(&mut subscription).await;
+        delivered_from.push(subscription.last_delivered_upstream_stage().unwrap());
+    }
+    // a1, b1, eofA (ordinal tie at 2, stage key), then B streams unblocked.
+    assert_eq!(
+        delivered_from,
+        vec![stage_a, stage_b, stage_a, stage_b, stage_b, stage_b]
+    );
+    assert!(subscription.all_readers_eof());
+
+    let outcome = subscription
+        .take_last_eof_outcome()
+        .expect("final EOF outcome recorded");
+    assert!(outcome.is_final);
+    assert_eq!(outcome.stage_id, stage_b);
+}
+
+#[tokio::test]
+async fn canonical_merge_forwarded_control_takes_ordinal_without_exhausting() {
+    let (mut subscription, (stage_a, journal_a), (stage_b, journal_b)) =
+        canonical_pair("upstream_a", "upstream_b").await;
+
+    let foreign_stage = StageId::new();
+    journal_a.append_with_clock(merge_data(stage_a, "a1"), VectorClock::new());
+    // Forwarded EOF: authored by another stage, merely present in A's journal.
+    journal_a.append_with_clock(merge_authored_eof(foreign_stage), VectorClock::new());
+    journal_a.append_with_clock(merge_data(stage_a, "a2"), VectorClock::new());
+    journal_a.append_with_clock(merge_authored_eof(stage_a), VectorClock::new());
+    journal_b.append_with_clock(merge_data(stage_b, "b1"), VectorClock::new());
+    journal_b.append_with_clock(merge_authored_eof(stage_b), VectorClock::new());
+
+    let mut deliveries = 0;
+    loop {
+        match subscription.poll_next_with_state("test_fsm", None).await {
+            PollResult::Event(_) => deliveries += 1,
+            PollResult::NoEvents => break,
+            PollResult::Error(e) => panic!("unexpected poll error: {e:?}"),
+        }
+    }
+
+    // All six rows deliver: the forwarded EOF takes an ordinal and does not
+    // exhaust A, whose authored EOF arrives later.
+    assert_eq!(deliveries, 6);
+    assert_eq!(subscription.delivered_seq_by_reader(), &[4, 2]);
+    assert!(subscription.all_readers_eof());
+}
+
+#[tokio::test]
+async fn canonical_merge_contract_read_accounting_fires_at_delivery_not_at_hold() {
+    let (subscription, (stage_a, journal_a), (stage_b, journal_b)) =
+        canonical_pair("upstream_a", "upstream_b").await;
+
+    let reader_stage = StageId::new();
+    let contract_journal: Arc<dyn Journal<ChainEvent>> =
+        Arc::new(TestJournal::new(JournalOwner::stage(reader_stage)));
+    let mut subscription = subscription.with_contracts(ContractsWiring {
+        writer_id: WriterId::from(reader_stage),
+        contract_journal,
+        config: ContractConfig::default(),
+        system_journal: None,
+        reader_stage: Some(reader_stage),
+        control_middleware: Arc::new(NoControlMiddleware),
+        include_delivery_contract: false,
+        cycle_guard_config: None,
+    });
+
+    journal_b.append_with_clock(merge_data(stage_b, "b1"), VectorClock::new());
+
+    let mut progress = [ReaderProgress::new(stage_a), ReaderProgress::new(stage_b)];
+
+    // A quiet: B's head is held, the read-side instant stamps, and the
+    // delivery-side accounting (reader_seq) must not move.
+    match subscription
+        .poll_next_with_state("test_fsm", Some(&mut progress[..]))
+        .await
+    {
+        PollResult::NoEvents => {}
+        other => panic!("expected NoEvents while A is quiet, got {other:?}"),
+    }
+    assert_eq!(progress[1].reader_seq, SeqNo(0));
+    assert!(
+        progress[1].last_read_instant.is_some(),
+        "read instant stamps at head acquisition so the held edge stays healthy"
+    );
+
+    // A seals: its EOF delivers first (ordinal tie, stage key), then B's data
+    // delivers and the delivery-side accounting advances.
+    journal_a.append_with_clock(merge_authored_eof(stage_a), VectorClock::new());
+    let first = match subscription
+        .poll_next_with_state("test_fsm", Some(&mut progress[..]))
+        .await
+    {
+        PollResult::Event(envelope) => envelope,
+        other => panic!("expected delivery, got {other:?}"),
+    };
+    assert!(matches!(
+        first.event.content,
+        ChainEventContent::FlowControl(FlowControlPayload::Eof { .. })
+    ));
+
+    match subscription
+        .poll_next_with_state("test_fsm", Some(&mut progress[..]))
+        .await
+    {
+        PollResult::Event(_) => {}
+        other => panic!("expected delivery, got {other:?}"),
+    }
+    assert_eq!(progress[1].reader_seq, SeqNo(1));
+}
+
+#[tokio::test]
+async fn canonical_merge_filtered_events_take_no_ordinals() {
+    let (subscription, (stage_a, journal_a), (stage_b, journal_b)) =
+        canonical_pair("upstream_a", "upstream_b").await;
+
+    let mut selected = HashMap::new();
+    selected.insert(
+        stage_a,
+        [EventType::from("sel.event")].into_iter().collect(),
+    );
+    let mut subscription = subscription
+        .with_selected_event_types(selected)
+        .transport_only();
+
+    journal_a.append_with_clock(merge_data(stage_a, "sel.event"), VectorClock::new());
+    journal_a.append_with_clock(merge_data(stage_a, "other.event"), VectorClock::new());
+    journal_a.append_with_clock(merge_data(stage_a, "sel.event"), VectorClock::new());
+    journal_a.append_with_clock(merge_authored_eof(stage_a), VectorClock::new());
+    journal_b.append_with_clock(merge_data(stage_b, "b.event"), VectorClock::new());
+    journal_b.append_with_clock(merge_authored_eof(stage_b), VectorClock::new());
+
+    let mut deliveries = 0;
+    loop {
+        match subscription.poll_next_with_state("test_fsm", None).await {
+            PollResult::Event(envelope) => {
+                assert_ne!(
+                    envelope.event.event_type(),
+                    "other.event",
+                    "unselected events must never deliver"
+                );
+                deliveries += 1;
+            }
+            PollResult::NoEvents => break,
+            PollResult::Error(e) => panic!("unexpected poll error: {e:?}"),
+        }
+    }
+
+    assert_eq!(deliveries, 5);
+    // The filtered row took no ordinal: A delivered sel, sel, eof.
+    assert_eq!(subscription.delivered_seq_by_reader(), &[3, 2]);
+}
+
+#[tokio::test]
+async fn round_robin_stage_input_positions_skip_control_events() {
+    let stage_a = StageId::new();
+    let journal_a = Arc::new(SharedTestJournal::new(JournalOwner::stage(stage_a)));
+    let foreign_stage = StageId::new();
+
+    journal_a.append_with_clock(merge_data(stage_a, "a1"), VectorClock::new());
+    journal_a.append_with_clock(merge_authored_eof(foreign_stage), VectorClock::new());
+    journal_a.append_with_clock(merge_data(stage_a, "a2"), VectorClock::new());
+    journal_a.append_with_clock(merge_authored_eof(stage_a), VectorClock::new());
+
+    let upstreams = [(
+        stage_a,
+        "upstream_a".to_string(),
+        journal_a as Arc<dyn Journal<ChainEvent>>,
+    )];
+    let mut subscription = UpstreamSubscription::new_with_names("rr_owner", &upstreams)
+        .await
+        .unwrap();
+
+    let expected_positions = [Some(1u64), None, Some(2u64), None];
+    for expected in expected_positions {
+        match subscription.poll_next_with_state("test_fsm", None).await {
+            PollResult::Event(_) => {}
+            other => panic!("expected delivery, got {other:?}"),
+        }
+        assert_eq!(
+            subscription
+                .last_delivered_stage_input_position()
+                .map(|position| position.0),
+            expected
+        );
+    }
 }

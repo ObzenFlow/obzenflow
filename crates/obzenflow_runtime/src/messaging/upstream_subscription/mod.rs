@@ -24,7 +24,8 @@ mod tests;
 pub use super::subscription_poller::{PollResult, SubscriptionPoller};
 use types::{AdvertisedWriterSeqByEventType, SelectedDataSeqByEventType};
 pub use types::{
-    ContractConfig, ContractStatus, ContractTracker, ContractsWiring, EofOutcome, ReaderProgress,
+    ContractConfig, ContractStatus, ContractTracker, ContractsWiring, EofOutcome,
+    MergeCandidateStatus, MergeWaitState, ReaderProgress, ReaderSelectionPolicy,
     SelectedFeedMetadata, SelectedFeedRole, StageInputPosition, SubscriptionState,
 };
 
@@ -46,6 +47,34 @@ struct FeedContractChain {
     metadata: SelectedFeedMetadata,
     chain: ContractChain,
     last_contract_result_seq: SeqNo,
+}
+
+/// A head event acquired from a reader but not yet delivered (FLOWIP-095d).
+///
+/// Classification happens at acquisition so the merge can treat authored EOFs
+/// specially (tiebreak-only ordering, exhaustion at delivery) without
+/// re-deriving it on the delivery side.
+pub(super) struct HeldHead<T: JournalEvent> {
+    pub(super) envelope: EventEnvelope<T>,
+    pub(super) is_authored_eof: bool,
+    pub(super) is_drain: bool,
+}
+
+/// Comparison metadata for the canonical merge's currently selected candidate.
+///
+/// The join supervisor composes two subscriptions by comparing each side's
+/// candidate with the same rule the subscription applies internally.
+pub struct MergeCandidateMeta<'a> {
+    /// The tiebreak ordinal this delivery would take (delivered count + 1).
+    pub ordinal: u64,
+    /// Stable upstream stage key (descriptor name, never the per-run StageId).
+    pub stage_key: &'a str,
+    /// Selected-feed identity for this reader (empty when unfiltered).
+    pub feed_identity: &'a str,
+    /// The head's envelope clock, for cross-subscription causality checks.
+    pub vector_clock: &'a VectorClock,
+    /// Authored EOFs are exempt from causality and order by tiebreak alone.
+    pub is_authored_eof: bool,
 }
 
 impl FeedContractChain {
@@ -144,6 +173,34 @@ where
 
     /// Stage-local data-input position for the last delivered data event.
     last_delivered_stage_input_position: Option<StageInputPosition>,
+
+    /// Reader-selection policy (FLOWIP-095d). Default is availability-driven
+    /// round-robin; ordered stages get the canonical deterministic merge.
+    reader_selection: types::ReaderSelectionPolicy,
+
+    /// One held head per reader, populated only under `CanonicalMerge`.
+    held_heads: Vec<Option<HeldHead<T>>>,
+
+    /// Per-reader count of delivered transport events (data and flow control),
+    /// post-filter, on the delivery side. This is the canonical merge's
+    /// tiebreak ordinal source and its entire checkpointable state.
+    ///
+    /// Deliberately distinct from `selected_data_seq_by_reader`, which counts
+    /// Data events only and feeds selected-feed contract accounting.
+    delivered_seq_by_reader: Vec<u64>,
+
+    /// Per-reader stable tiebreak keys: (upstream stage name, feed identity).
+    /// Stage names are the cross-run identity; `StageId` ULIDs are per-run and
+    /// must never participate in ordering decisions.
+    reader_tiebreak_keys: Vec<(String, String)>,
+
+    /// Set when a canonical-merge poll returned no event because a quiet input
+    /// blocked delivery; cleared on the next delivery.
+    last_merge_wait: Option<types::MergeWaitState>,
+
+    /// Cached winner index from `ensure_merge_candidate`, consumed by
+    /// `take_merge_candidate`. Invalidated on delivery.
+    merge_candidate_index: Option<usize>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -169,6 +226,24 @@ where
 
     pub fn last_delivered_stage_input_position(&self) -> Option<StageInputPosition> {
         self.last_delivered_stage_input_position
+    }
+
+    /// The quiet-input wait that blocked the most recent canonical-merge poll,
+    /// if any. Supervisors surface this through heartbeat liveness so a
+    /// blocked-by-rule stage names the input it is waiting on.
+    pub fn merge_wait(&self) -> Option<&types::MergeWaitState> {
+        self.last_merge_wait.as_ref()
+    }
+
+    /// Per-reader delivered transport-event counts (the canonical merge's
+    /// ordinal source and checkpointable state).
+    pub fn delivered_seq_by_reader(&self) -> &[u64] {
+        &self.delivered_seq_by_reader
+    }
+
+    /// The reader-selection policy this subscription was built with.
+    pub fn reader_selection(&self) -> types::ReaderSelectionPolicy {
+        self.reader_selection
     }
 
     fn uses_receipt_watermark(&self) -> bool {

@@ -4,39 +4,55 @@
 
 //! The payment-gateway resilience flow.
 //!
-//! One upstream event stream, four business outcome channels:
+//! Two upstream order channels, three business deliveries:
 //!
 //! ```text
-//! orders (source) -> valid orders -> gateway -> paid-order sink
-//!                 |                       \-> gateway-decline sink
-//!                 |                       \-> unavailable-authorization sink
-//!                 \-> invalid orders -> order-status sink
+//! web_orders ---+ canonical merge
+//! store_orders -+-> validate_order -- ValidatedOrder --> authorize_payment -- PaymentAuthorized --> paid-orders sink
+//!                     |                                    |             \-- PaymentAuthorizationUnavailable --> manual-review sink
+//!                     \-- OrderCancelled --------------+   \-- OrderCancelled --+
+//!                                                      \----------------------(fan-in)--> cancelled-orders sink
 //! ```
 //!
-//! Validation lives in `validation.rs`; the gateway stage performs the
-//! `AuthorizePayment` effect (see `gateway.rs`).
-//! On a live run the effect executes once and the runtime journals its result;
-//! on a replay the runtime returns that recorded gateway decision without calling
-//! the gateway again. The gateway then emits the named payment fact that happened.
+//! The channel merge at `validate_order` is FLOWIP-095d's canonical
+//! deterministic merge, enabled automatically because the effectful
+//! `authorize_payment` sits below the fan-in. Delivery order is a pure
+//! function of the two recorded streams: live runs with different arrival
+//! timing and replays all consume orders in the same merged order. The
+//! `cancelled_orders` sink fan-in stays availability-driven, since it is
+//! delivery-only with no effectful descendant.
 //!
-//! The circuit breaker on the gateway stage is the second, independent layer:
-//! it watches the live effect boundary and, once the dependency looks unhealthy,
-//! short-circuits to a typed unavailable outcome instead of hammering it. See
-//! `README.md`.
+//! Validation lives in `validation.rs` as one multi-type stage
+//! (`CustomerOrderPlaced -> { ValidatedOrder, InvalidOrder, OrderCancelled }`);
+//! the authorize_payment stage performs the `AuthorizePayment` effect (see
+//! `gateway.rs`). On a live run the effect executes once and the runtime
+//! journals its result; on a replay the runtime returns that recorded gateway
+//! decision without calling the gateway again. The stage then emits the named
+//! payment fact that happened, deriving `OrderCancelled` from declines.
+//!
+//! `InvalidOrder` and `PaymentDeclined` are journal-recorded facts with no
+//! dedicated sink: the journal is the record, sinks are external deliveries.
+//! The cancelled-orders sink converges cancellations from both producers.
+//!
+//! The circuit breaker on the authorize_payment stage is the second,
+//! independent layer: it watches the live effect boundary and, once the
+//! dependency looks unhealthy, short-circuits to a typed unavailable outcome
+//! instead of hammering it. Unavailability deliberately does not cancel; no
+//! decision was reached, so those orders go to manual review. See `README.md`.
 
 use super::domain::{
-    CustomerOrderPlaced, GatewayPaymentDecision, InvalidOrder, PaymentAuthorizationUnavailable,
-    PaymentAuthorized, PaymentDeclined, ValidatedOrder,
+    CustomerOrderPlaced, GatewayPaymentDecision, InvalidOrder, OrderCancelled,
+    PaymentAuthorizationUnavailable, PaymentAuthorized, PaymentDeclined, ValidatedOrder,
 };
 use super::fixtures;
 use super::gateway::{self, AuthorizePayment, GatewayTransform};
 use super::sinks;
 use super::validation;
-use obzenflow::typed::{sources as typed_sources, transforms as typed_transforms};
+use obzenflow::typed::sources as typed_sources;
 use obzenflow_adapters::middleware::circuit_breaker::{HalfOpenPolicy, OpenPolicy};
 use obzenflow_adapters::middleware::{backpressure, CircuitBreakerBuilder, RateLimiterBuilder};
 use obzenflow_core::CircuitBreakerContractMode;
-use obzenflow_dsl::{effectful_transform, flow, sink, source, transform};
+use obzenflow_dsl::{effectful_transform, flow, sink, source};
 use obzenflow_infra::journal::disk_journals;
 use std::num::NonZeroU32;
 
@@ -46,8 +62,34 @@ const BACKPRESSURE_WINDOW: u64 = 1_000;
 ///
 /// A gentle flow-level rate limit keeps logs and metrics readable, so you can
 /// watch the stage metrics and circuit-breaker gauges change over time.
+/// Optional per-source pacing jitter (FLOWIP-095d demo knob).
+///
+/// `PAYMENT_DEMO_SOURCE_JITTER_MS=<max>` delays each order by a deterministic
+/// pseudo-random duration derived from (channel, index). Two live runs with
+/// different jitter settings arrive in different wall-clock orders, and the
+/// canonical merge at `validate_order` still consumes them in the same merged
+/// order, asserted from the journals rather than from timing.
+fn demo_jitter(channel: &str, index: usize) {
+    let max_ms: u64 = std::env::var("PAYMENT_DEMO_SOURCE_JITTER_MS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(0);
+    if max_ms == 0 {
+        return;
+    }
+    // FNV-1a over (channel, index): reproducible for a given setting, varied
+    // across channels and indices.
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in channel.bytes().chain(index.to_le_bytes()) {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    std::thread::sleep(std::time::Duration::from_millis(hash % (max_ms + 1)));
+}
+
 pub fn build_flow() -> obzenflow_dsl::FlowDefinition {
-    let scripted_orders = fixtures::scripted_orders();
+    let scripted_web_orders = fixtures::scripted_web_orders();
+    let scripted_store_orders = fixtures::scripted_store_orders();
 
     flow! {
         name: "payment_gateway_resilience_demo",
@@ -58,31 +100,58 @@ pub fn build_flow() -> obzenflow_dsl::FlowDefinition {
         ],
 
         stages: {
-            // Source: a scripted stream of upstream customer-order events
-            // across three phases (warmup, outage, recovery).
+            // Sources: two scripted order channels across three phases
+            // (warmup, outage, recovery), of deliberately unequal length.
             //
             // The flow reacts to these facts. On replay the runtime injects
-            // journaled source events instead of polling this source again.
-            orders = source!(CustomerOrderPlaced => typed_sources::finite_from_fn(move |index| {
-                scripted_orders.get(index).cloned()
+            // journaled source events instead of polling these sources again.
+            // Optional jitter (PAYMENT_DEMO_SOURCE_JITTER_MS) varies arrival
+            // timing without changing the merged delivery order, because the
+            // canonical merge at validate_order orders by stream content.
+            web_orders = source!(CustomerOrderPlaced => typed_sources::finite_from_fn(move |index| {
+                let order = scripted_web_orders.get(index).cloned();
+                if order.is_some() {
+                    demo_jitter("web", index);
+                }
+                order
+            }), [
+                backpressure(BACKPRESSURE_WINDOW)
+            ]);
+            store_orders = source!(CustomerOrderPlaced => typed_sources::finite_from_fn(move |index| {
+                let order = scripted_store_orders.get(index).cloned();
+                if order.is_some() {
+                    demo_jitter("store", index);
+                }
+                order
             }), [
                 backpressure(BACKPRESSURE_WINDOW)
             ]);
 
-            // Local validation: deterministic checks with no external I/O.
-            // This is typed business classification, not exception handling:
-            // valid orders go to the gateway, invalid orders go to their own
-            // domain-event channel.
-            valid_orders = transform!(CustomerOrderPlaced -> ValidatedOrder => typed_transforms::filter_map(validation::valid_order), [
-                backpressure(BACKPRESSURE_WINDOW)
-            ]);
-            invalid_orders = transform!(CustomerOrderPlaced -> InvalidOrder => typed_transforms::filter_map(validation::invalid_order), [
-                backpressure(BACKPRESSURE_WINDOW)
-            ]);
+            // Local validation: deterministic checks with no external I/O,
+            // classified exactly once by one multi-type stage. This is typed
+            // business classification, not exception handling: a valid order
+            // becomes `ValidatedOrder`, an invalid order records the
+            // `InvalidOrder` fact and its derived `OrderCancelled` consequence.
+            // The empty `effects:` list is explicit: this stage performs no
+            // external I/O; the effectful macro surface is what provides
+            // multi-type emission today.
+            validate_order = effectful_transform!(
+                CustomerOrderPlaced -> {
+                    ValidatedOrder,
+                    InvalidOrder,
+                    OrderCancelled
+                } => validation::ValidateOrder,
+                effects: [],
+                middleware: [
+                    backpressure(BACKPRESSURE_WINDOW)
+                ]
+            );
 
-            // Gateway: the only stage that touches the outside world, expressed
-            // as the `AuthorizePayment` effect. The runtime runs it once, records
-            // the result, and suppresses it on replay.
+            // Payment authorization: the only stage that touches the outside
+            // world, expressed as the `AuthorizePayment` effect. The runtime
+            // runs it once, records the result, and suppresses it on replay.
+            // This is the authorization (hold) leg of authorize-then-capture;
+            // capture after fulfilment belongs to the checkout saga capstone.
             //
             // The circuit breaker is the live-run safety layer on top:
             //   - opens when >= 60% of the last 5 gateway calls fail,
@@ -91,11 +160,12 @@ pub fn build_flow() -> obzenflow_dsl::FlowDefinition {
             //     instead of calling the gateway (EmitFallback), with a single
             //     half-open probe.
             // BreakerAware keeps transport contracts green while the breaker is open.
-            gateway = effectful_transform!(
+            authorize_payment = effectful_transform!(
                 ValidatedOrder -> {
                     GatewayPaymentDecision,
                     PaymentAuthorized,
                     PaymentDeclined,
+                    OrderCancelled,
                     PaymentAuthorizationUnavailable
                 } => GatewayTransform,
                 effects: [AuthorizePayment],
@@ -124,33 +194,31 @@ pub fn build_flow() -> obzenflow_dsl::FlowDefinition {
                 sinks::send_to_shipping(authorized);
             });
 
-            // Invalid-order sink: local validation failures. These are normal
-            // business events, not framework errors.
-            invalid_order_events = sink!(|invalid: InvalidOrder| {
-                sinks::record_invalid_order(invalid);
-            });
-
-            // Gateway-decline sink: material payment declines from the remote
-            // authorization boundary, separate from local validation failures.
-            declined_payments = sink!(|declined: PaymentDeclined| {
-                sinks::record_gateway_decline(declined);
+            // Cancelled-order sink: the order's fate, converged from both
+            // producers (local validation failures and gateway declines).
+            // `InvalidOrder` and `PaymentDeclined` stay journal-recorded facts
+            // with no dedicated sink; this delivery carries the lifecycle
+            // consequence wherever it originated.
+            cancelled_orders = sink!(|cancelled: OrderCancelled| {
+                sinks::record_cancelled_order(cancelled);
             });
 
             // Unavailable-authorization sink: failed gateway call or breaker
-            // fallback. This means no payment decision was reached.
+            // fallback. No payment decision was reached, so the order is not
+            // cancelled; it goes to retry or manual review.
             manual_review = sink!(|unavailable: PaymentAuthorizationUnavailable| {
                 sinks::record_authorization_unavailable(unavailable);
             });
         },
 
         topology: {
-            orders |> valid_orders;
-            orders |> invalid_orders;
-            valid_orders |> gateway;
-            gateway |> paid_orders;
-            invalid_orders |> invalid_order_events;
-            gateway |> declined_payments;
-            gateway |> manual_review;
+            web_orders |> validate_order;
+            store_orders |> validate_order;
+            validate_order |> authorize_payment;
+            authorize_payment |> paid_orders;
+            validate_order |> cancelled_orders;
+            authorize_payment |> cancelled_orders;
+            authorize_payment |> manual_review;
         }
     }
 }

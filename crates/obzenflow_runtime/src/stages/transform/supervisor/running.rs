@@ -600,6 +600,13 @@ async fn dispatch_running_inner<
             Ok(directive)
         }
         PollResult::NoEvents => {
+            // FLOWIP-095d: a canonical merge that delivered nothing because an
+            // input is quiet is idle-by-rule; name the awaited input.
+            crate::stages::common::heartbeat::note_merge_wait(
+                ctx.heartbeat.as_ref(),
+                sup.subscription.as_ref().and_then(|s| s.merge_wait()),
+            );
+
             if let Some(directive) = sup.maybe_release_buffered_terminal(ctx).await? {
                 return Ok(directive);
             }

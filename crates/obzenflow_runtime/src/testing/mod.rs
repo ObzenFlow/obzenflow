@@ -15,6 +15,7 @@
 //! See `obzenflow_improvement_proposals/content/P0/open/FLOWIP-114h-...md`
 //! for the full contract.
 
+pub mod delivered_order;
 pub mod flow_test_harness;
 pub mod journal_snapshot;
 pub mod metrics_barrier;
@@ -22,6 +23,7 @@ pub mod probe;
 pub mod stage_journal;
 pub mod test_clock;
 
+pub use delivered_order::{DeliveredOrderProjection, DeliveredOrderRow};
 pub use flow_test_harness::FlowTestHarness;
 pub use journal_snapshot::{
     assert_concurrent, assert_happens_before, CausalAssertionError, EventShape, FanOutGroup,

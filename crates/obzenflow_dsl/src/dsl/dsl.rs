@@ -701,6 +701,22 @@ macro_rules! build_typed_flow {
             });
         }
 
+        // FLOWIP-095d: mark every multi-inbound stage above an effectful stage
+        // as a deterministic fan-in orderer and wrap its descriptor, so the
+        // guard below accepts the effectful stages and the runtime enables the
+        // canonical merge on exactly those subscriptions. The guard stays as
+        // the safety net for cycles and externally constructed descriptors.
+        let deterministic_fan_in_stages = $crate::dsl::typing::derive_deterministic_fan_in_stages(
+            &topology,
+            &descriptors,
+            &name_to_id,
+        );
+        $crate::dsl::typing::wrap_deterministic_orderers(
+            &mut descriptors,
+            &name_to_id,
+            &deterministic_fan_in_stages,
+        );
+
         $crate::dsl::typing::validate_effectful_deterministic_input_order(
             &topology,
             &descriptors,
@@ -1110,6 +1126,7 @@ macro_rules! build_typed_flow {
         )
         .with_backpressure_plan(backpressure_plan)
         .with_feed_plan(feed_plan)
+        .with_deterministic_fan_in_stages(deterministic_fan_in_stages)
         .with_effect_ports($effect_ports)
         .with_replay_archive(
             obzenflow_runtime::journal::FlowJournalFactory::replay_archive(&mut journal_factory)

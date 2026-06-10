@@ -100,15 +100,28 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Superviso
             .unwrap_or_else(|| Arc::new(StageInstrumentation::new()));
 
         // Bind factories for reference and stream subscriptions (after DSL split)
-        let reference_subscription_factory = self.resources.subscription_factory.bind(&[(
+        let mut reference_subscription_factory = self.resources.subscription_factory.bind(&[(
             self.config.reference_source_id,
             self.reference_journal.clone(),
         )]);
 
-        let stream_subscription_factory = self
+        let mut stream_subscription_factory = self
             .resources
             .subscription_factory
             .bind(&self.stream_journals);
+
+        // FLOWIP-095d: an ordered join runs the canonical merge on both side
+        // subscriptions, so every poll path (live canonical dispatch, drain)
+        // is deterministic. The reference side is single-reader, where the
+        // canonical policy is trivially equivalent; the per-boundary rule is
+        // what makes a multi-reader stream side deterministic within itself.
+        let deterministic_fan_in = self.resources.deterministic_fan_in;
+        if deterministic_fan_in {
+            reference_subscription_factory.reader_selection =
+                crate::messaging::upstream_subscription::ReaderSelectionPolicy::CanonicalMerge;
+            stream_subscription_factory.reader_selection =
+                crate::messaging::upstream_subscription::ReaderSelectionPolicy::CanonicalMerge;
+        }
 
         let heartbeat_config = self.heartbeat_config.clone();
         let heartbeat = if self.resources.replay_archive.is_some() || !heartbeat_config.enabled {
@@ -174,6 +187,7 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Superviso
                     std::time::Duration::from_millis(50),
                 ),
             heartbeat,
+            deterministic_fan_in,
         };
 
         // Create supervisor

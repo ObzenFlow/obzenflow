@@ -16,6 +16,7 @@ use tokio::time::Instant;
 
 const HANDLER_ACTIVITY_POLLING: u8 = 0;
 const HANDLER_ACTIVITY_PROCESSING: u8 = 1;
+const HANDLER_ACTIVITY_WAITING_QUIET: u8 = 2;
 
 const STAGE_MODE_RUNNING: u8 = 0;
 const STAGE_MODE_DRAINING: u8 = 1;
@@ -80,6 +81,7 @@ pub struct HeartbeatState {
     handler_entered_at: Mutex<Option<Instant>>,
     processing_event_id: Mutex<Option<EventId>>,
     processing_upstream: Mutex<Option<StageId>>,
+    waiting_on_quiet_upstream: Mutex<Option<StageId>>,
     last_consumed_event_id: Mutex<Option<EventId>>,
     last_output_event_id: Mutex<Option<EventId>>,
     edges: Vec<EdgeProgress>,
@@ -103,6 +105,7 @@ impl HeartbeatState {
             handler_entered_at: Mutex::new(None),
             processing_event_id: Mutex::new(None),
             processing_upstream: Mutex::new(None),
+            waiting_on_quiet_upstream: Mutex::new(None),
             last_consumed_event_id: Mutex::new(None),
             last_output_event_id: Mutex::new(None),
             edges,
@@ -142,6 +145,21 @@ impl HeartbeatState {
             .processing_upstream
             .lock()
             .expect("processing_upstream lock") = upstream;
+    }
+
+    /// Mark the stage as blocked-by-rule on a quiet input (FLOWIP-095d).
+    ///
+    /// An ordered fan-in running the canonical deterministic merge delivers
+    /// nothing while any non-exhausted input has no head. That is idle-by-rule
+    /// rather than hung, and the named upstream is the input being waited on.
+    /// Cleared by the next `mark_polling` or `mark_processing`.
+    pub fn mark_waiting_on_quiet_input(&self, upstream: Option<StageId>) {
+        self.handler_activity
+            .store(HANDLER_ACTIVITY_WAITING_QUIET, Ordering::Release);
+        *self
+            .waiting_on_quiet_upstream
+            .lock()
+            .expect("waiting_on_quiet_upstream lock") = upstream;
     }
 
     pub fn mark_draining(&self) {
@@ -227,6 +245,20 @@ impl HeartbeatState {
                 StageActivity::Processing {
                     event_id,
                     elapsed_ms,
+                }
+            }
+            HANDLER_ACTIVITY_WAITING_QUIET => {
+                if self.completed.load(Ordering::Acquire) {
+                    StageActivity::Completed
+                } else if self.stage_mode.load(Ordering::Acquire) == STAGE_MODE_DRAINING {
+                    StageActivity::Draining
+                } else {
+                    StageActivity::WaitingOnQuietInput {
+                        upstream: *self
+                            .waiting_on_quiet_upstream
+                            .lock()
+                            .expect("waiting_on_quiet_upstream lock"),
+                    }
                 }
             }
             _ => StageActivity::Polling,
@@ -338,6 +370,21 @@ pub struct HeartbeatHandle {
     pub state: Arc<HeartbeatState>,
     cancel: watch::Sender<bool>,
     task: tokio::task::JoinHandle<()>,
+}
+
+/// Surface a canonical-merge quiet-input wait through the stage heartbeat
+/// (FLOWIP-095d). Supervisors call this on a `NoEvents` poll outcome; the
+/// state clears on the next `mark_polling` or `mark_processing`.
+pub fn note_merge_wait(
+    heartbeat: Option<&HeartbeatHandle>,
+    wait: Option<&crate::messaging::upstream_subscription::MergeWaitState>,
+) {
+    let (Some(heartbeat), Some(wait)) = (heartbeat, wait) else {
+        return;
+    };
+    heartbeat
+        .state
+        .mark_waiting_on_quiet_input(wait.quiet_inputs.first().map(|(id, _)| *id));
 }
 
 impl HeartbeatHandle {
@@ -781,5 +828,31 @@ mod tests {
         );
 
         handle.cancel();
+    }
+
+    /// FLOWIP-095d: a canonical-merge quiet-input wait is idle-by-rule and
+    /// names the awaited input; processing or polling clears it.
+    #[test]
+    fn waiting_on_quiet_input_names_the_awaited_upstream_and_clears() {
+        let upstream = StageId::new();
+        let state = HeartbeatState::new(vec![upstream]);
+
+        state.mark_waiting_on_quiet_input(Some(upstream));
+        match state.current_activity() {
+            StageActivity::WaitingOnQuietInput { upstream: named } => {
+                assert_eq!(named, Some(upstream));
+            }
+            other => panic!("expected WaitingOnQuietInput, got {other:?}"),
+        }
+
+        state.mark_polling();
+        assert!(matches!(state.current_activity(), StageActivity::Polling));
+
+        state.mark_waiting_on_quiet_input(Some(upstream));
+        state.mark_processing(Some(upstream), EventId::default());
+        assert!(matches!(
+            state.current_activity(),
+            StageActivity::Processing { .. }
+        ));
     }
 }

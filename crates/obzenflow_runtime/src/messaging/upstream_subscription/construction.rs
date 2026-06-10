@@ -2,7 +2,9 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use super::types::{AdvertisedWriterSeqByEventType, SelectedDataSeqByEventType};
+use super::types::{
+    AdvertisedWriterSeqByEventType, ReaderSelectionPolicy, SelectedDataSeqByEventType,
+};
 use super::{
     ContractTracker, ContractsWiring, DeliveryFilter, FeedContractChain, SelectedFeedMetadata,
     SubscriptionState, UpstreamSubscription,
@@ -164,6 +166,10 @@ where
         }
 
         let state = SubscriptionState::new(readers.len());
+        let reader_tiebreak_keys = readers
+            .iter()
+            .map(|(_, stage_name, _)| (stage_name.clone(), String::new()))
+            .collect();
 
         Ok(Self {
             delivery_filter: DeliveryFilter::All,
@@ -178,6 +184,9 @@ where
                 );
                 readers.len()
             ],
+            held_heads: readers.iter().map(|_| None).collect(),
+            delivered_seq_by_reader: vec![0; readers.len()],
+            reader_tiebreak_keys,
             readers,
             selected_event_types_by_stage: HashMap::new(),
             selected_feeds_by_stage: HashMap::new(),
@@ -191,7 +200,20 @@ where
             last_delivered_upstream_stage: None,
             next_stage_input_position: 1,
             last_delivered_stage_input_position: None,
+            reader_selection: ReaderSelectionPolicy::default(),
+            last_merge_wait: None,
+            merge_candidate_index: None,
         })
+    }
+
+    /// Choose the reader-selection policy (FLOWIP-095d).
+    ///
+    /// `CanonicalMerge` requires every reader to start at position zero: a
+    /// tail-start baseline would shift per-reader delivered ordinals between
+    /// runs and break the deterministic-order function.
+    pub fn with_reader_selection(mut self, policy: ReaderSelectionPolicy) -> Self {
+        self.reader_selection = policy;
+        self
     }
 
     /// Configure this subscription to deliver only transport-relevant events to the caller.
@@ -221,6 +243,7 @@ where
             })
             .collect();
         self.selected_event_types_by_stage = selected_event_types_by_stage;
+        self.recompute_tiebreak_keys();
         self
     }
 
@@ -242,7 +265,38 @@ where
             })
             .collect();
         self.selected_feeds_by_stage = selected_feeds_by_stage;
+        self.recompute_tiebreak_keys();
         self
+    }
+
+    /// Recompute per-reader tiebreak keys (FLOWIP-095d).
+    ///
+    /// The key is (upstream stage name, feed identity), where feed identity is
+    /// the sorted selected event types joined with `,` (empty when the reader
+    /// is unfiltered). Two readers consuming different selected feeds of the
+    /// same upstream stage share a stage name, so the feed identity keeps the
+    /// key total. Both components are stable across runs; per-run `StageId`
+    /// ULIDs never participate.
+    fn recompute_tiebreak_keys(&mut self) {
+        self.reader_tiebreak_keys = self
+            .readers
+            .iter()
+            .map(|(stage_id, stage_name, _)| {
+                let feed_identity = self
+                    .selected_event_types_by_stage
+                    .get(stage_id)
+                    .map(|selected| {
+                        let mut types: Vec<&str> = selected
+                            .iter()
+                            .map(|event_type| event_type.as_str())
+                            .collect();
+                        types.sort_unstable();
+                        types.join(",")
+                    })
+                    .unwrap_or_default();
+                (stage_name.clone(), feed_identity)
+            })
+            .collect();
     }
 
     /// Create a subscription starting from explicit tail positions.
@@ -261,6 +315,16 @@ where
         let mut sub =
             Self::new_with_names_from_positions(owner_label, upstream_journals, tail_positions)
                 .await?;
+
+        // FLOWIP-095d: tail-start subscriptions are incompatible with the
+        // canonical merge (a non-zero baseline shifts per-reader delivered
+        // ordinals between runs). Tail-start construction always begins with
+        // the default round-robin policy; guard against later misuse by
+        // documenting the invariant here, where the baseline is established.
+        debug_assert!(
+            sub.reader_selection == ReaderSelectionPolicy::AvailabilityRoundRobin,
+            "canonical merge requires position-zero readers"
+        );
 
         // Only mark a reader as baseline-at-tail if we're actually skipping historical
         // events (i.e., the computed tail position is non-zero). For fresh/empty

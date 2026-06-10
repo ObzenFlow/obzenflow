@@ -259,7 +259,7 @@ jobs:
             --locked \
             --profile "${profile}" \
             --features test-support \
-            -E 'binary(/^(stateful_metrics_integration_test|metrics_exporter_integration_test|rate_limiter_integration_test|divergence_mid_flight_abort_test|cycle_unified_guard_test|cycle_convergence_eof_gating_test|flowip_114n_ui_tests)$/)'
+            -E 'binary(/^(stateful_metrics_integration_test|metrics_exporter_integration_test|rate_limiter_integration_test|divergence_mid_flight_abort_test|cycle_unified_guard_test|cycle_convergence_eof_gating_test|flowip_114n_ui_tests|deterministic_fan_in_replay_test|effectful_fan_in_envelope_test)$/)'
 
   doctest:
     needs: fmt

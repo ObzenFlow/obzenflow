@@ -400,6 +400,11 @@ pub struct JoinContext<H: JoinHandler> {
 
     /// Optional per-stage heartbeat task (FLOWIP-063e).
     pub(crate) heartbeat: Option<HeartbeatHandle>,
+
+    /// Whether the flow build marked this join as a deterministic fan-in
+    /// orderer (FLOWIP-095d). Ordered live joins run the canonical
+    /// cross-subscription merge instead of preference polling.
+    pub(crate) deterministic_fan_in: bool,
 }
 
 impl<H: JoinHandler + 'static> FsmContext for JoinContext<H> {}

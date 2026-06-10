@@ -20,6 +20,43 @@ use crate::pipeline::config::CycleGuardConfig;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct StageInputPosition(pub u64);
 
+/// Reader-selection policy for a multi-reader subscription (FLOWIP-095d).
+///
+/// `AvailabilityRoundRobin` is today's behaviour: cycle through readers and
+/// deliver whatever is available first. Delivery order then depends on arrival
+/// timing, which is fine for stages that do not need deterministic fan-in.
+///
+/// `CanonicalMerge` is the Kahn-style deterministic merge: hold one head per
+/// reader, deliver nothing while any non-exhausted reader is quiet, and choose
+/// among heads by happened-before then a (delivered ordinal, stage name, feed
+/// identity) tiebreak. Delivery order becomes a pure function of the per-input
+/// streams, so live, replay, and resume catch-up all compute the same order.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ReaderSelectionPolicy {
+    #[default]
+    AvailabilityRoundRobin,
+    CanonicalMerge,
+}
+
+/// Why a canonical-merge poll delivered nothing: at least one non-exhausted
+/// input had no head. Surfaced so supervisors can report idle-by-rule waits
+/// (the input being waited on) instead of looking hung.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MergeWaitState {
+    pub quiet_inputs: Vec<(StageId, String)>,
+}
+
+/// Status of a canonical-merge candidate acquisition pass.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MergeCandidateStatus {
+    /// Every non-exhausted reader presents a head and a winner is selected.
+    Candidate,
+    /// At least one non-exhausted reader has no head; nothing may deliver.
+    Quiet,
+    /// Every reader has delivered its authored EOF; the merge is finished.
+    AllExhausted,
+}
+
 /// Status of contract checking
 #[derive(Debug)]
 #[must_use]

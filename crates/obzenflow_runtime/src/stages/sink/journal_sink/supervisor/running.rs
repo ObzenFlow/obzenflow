@@ -155,6 +155,13 @@ pub(super) async fn dispatch_running<
             Ok(directive)
         }
         PollResult::NoEvents => {
+            // FLOWIP-095d: a canonical merge that delivered nothing because an
+            // input is quiet is idle-by-rule; name the awaited input.
+            crate::stages::common::heartbeat::note_merge_wait(
+                ctx.heartbeat.as_ref(),
+                subscription.merge_wait(),
+            );
+
             if let Some(status) = subscription
                 .maybe_check_contracts_tick_diagnostics_only(
                     &mut ctx.contract_state[..],
