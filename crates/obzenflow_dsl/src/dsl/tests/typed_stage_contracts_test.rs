@@ -1315,8 +1315,14 @@ mod tests {
             topology.add_stage_with_id(id.to_topology_id(), Some(name.to_string()), role);
             topology.reset_current();
         }
-        topology.add_edge(source_a_id.to_topology_id(), upper_merge_id.to_topology_id());
-        topology.add_edge(source_b_id.to_topology_id(), upper_merge_id.to_topology_id());
+        topology.add_edge(
+            source_a_id.to_topology_id(),
+            upper_merge_id.to_topology_id(),
+        );
+        topology.add_edge(
+            source_b_id.to_topology_id(),
+            upper_merge_id.to_topology_id(),
+        );
         topology.add_edge(upper_merge_id.to_topology_id(), orderer_id.to_topology_id());
         topology.add_edge(source_c_id.to_topology_id(), orderer_id.to_topology_id());
         topology.add_edge(orderer_id.to_topology_id(), effectful_id.to_topology_id());
@@ -1421,9 +1427,18 @@ mod tests {
             topology.add_stage_with_id(id.to_topology_id(), Some(name.to_string()), role);
             topology.reset_current();
         }
-        topology.add_edge(source_a_id.to_topology_id(), cycle_entry_id.to_topology_id());
-        topology.add_edge(cycle_entry_id.to_topology_id(), cycle_back_id.to_topology_id());
-        topology.add_edge(cycle_back_id.to_topology_id(), cycle_entry_id.to_topology_id());
+        topology.add_edge(
+            source_a_id.to_topology_id(),
+            cycle_entry_id.to_topology_id(),
+        );
+        topology.add_edge(
+            cycle_entry_id.to_topology_id(),
+            cycle_back_id.to_topology_id(),
+        );
+        topology.add_edge(
+            cycle_back_id.to_topology_id(),
+            cycle_entry_id.to_topology_id(),
+        );
         topology.add_edge(cycle_back_id.to_topology_id(), merge_id.to_topology_id());
         topology.add_edge(source_b_id.to_topology_id(), merge_id.to_topology_id());
         topology.add_edge(merge_id.to_topology_id(), effectful_id.to_topology_id());
@@ -1527,9 +1542,18 @@ mod tests {
             topology.add_stage_with_id(id.to_topology_id(), Some(name.to_string()), role);
             topology.reset_current();
         }
-        topology.add_edge(source_s_id.to_topology_id(), cycle_entry_id.to_topology_id());
-        topology.add_edge(cycle_entry_id.to_topology_id(), cycle_back_id.to_topology_id());
-        topology.add_edge(cycle_back_id.to_topology_id(), cycle_entry_id.to_topology_id());
+        topology.add_edge(
+            source_s_id.to_topology_id(),
+            cycle_entry_id.to_topology_id(),
+        );
+        topology.add_edge(
+            cycle_entry_id.to_topology_id(),
+            cycle_back_id.to_topology_id(),
+        );
+        topology.add_edge(
+            cycle_back_id.to_topology_id(),
+            cycle_entry_id.to_topology_id(),
+        );
         topology.add_edge(reference_id.to_topology_id(), join_id.to_topology_id());
         topology.add_edge(cycle_back_id.to_topology_id(), join_id.to_topology_id());
         topology.add_edge(join_id.to_topology_id(), effectful_id.to_topology_id());

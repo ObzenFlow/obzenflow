@@ -261,8 +261,7 @@ async fn join_forwards_error_row_with_foreign_author_and_joins_the_rest() {
         .map(|envelope| envelope.event.writer_id)
         .expect("stream source journal must contain data rows");
 
-    let validator_rows =
-        replay_testkit::read_stage_envelopes_appended(&run_dir, "validator").await;
+    let validator_rows = replay_testkit::read_stage_envelopes_appended(&run_dir, "validator").await;
     let error_rows: Vec<_> = validator_rows
         .iter()
         .filter(|envelope| envelope.event.is_data() && is_error_row(envelope))
