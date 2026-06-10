@@ -80,7 +80,7 @@ impl FiniteSourceHandler for TimestampedSource {
 
             Ok(Some(vec![ChainEventFactory::data_event(
                 self.writer_id,
-                "TimestampedEvent",
+                BenchEvent::versioned_event_type(),
                 json!({
                     "index": current,
                     "emit_time_nanos": emit_time_nanos,

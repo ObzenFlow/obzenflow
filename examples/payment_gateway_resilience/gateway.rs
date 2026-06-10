@@ -294,6 +294,7 @@ mod tests {
             error_type: "execution".into(),
             error_message: "effect execution failed: gateway_timeout_simulated".to_string(),
             retry: RetryDisposition::Retryable,
+            cause: None,
         });
 
         assert_eq!(live_reason, "gateway_timeout_simulated");
