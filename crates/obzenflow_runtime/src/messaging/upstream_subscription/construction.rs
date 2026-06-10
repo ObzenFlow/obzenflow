@@ -6,8 +6,9 @@ use super::types::{
     AdvertisedWriterSeqByEventType, ReaderSelectionPolicy, SelectedDataSeqByEventType,
 };
 use super::{
-    ContractTracker, ContractsWiring, DeliveryFilter, FeedContractChain, SelectedFeedMetadata,
-    SelectedFeedRole, SubscriptionState, UpstreamSubscription,
+    ContractTracker, ContractsWiring, DeliveredCount, DeliveryFilter, FeedContractChain,
+    FeedIdentity, ReaderSlot, ReaderTiebreakKey, SelectedFeedMetadata, StageKey, SubscriptionState,
+    UpstreamSubscription,
 };
 use crate::contracts::ContractChain;
 use crate::messaging::upstream_subscription_policy::build_policy_stack_for_upstream;
@@ -162,13 +163,20 @@ where
                     );
                 }
             };
-            readers.push((*stage_id, stage_name.clone(), reader));
+            readers.push(ReaderSlot {
+                stage_id: *stage_id,
+                stage_key: StageKey::new(stage_name.clone()),
+                reader,
+            });
         }
 
         let state = SubscriptionState::new(readers.len());
         let reader_tiebreak_keys = readers
             .iter()
-            .map(|(_, stage_name, _)| (stage_name.clone(), String::new()))
+            .map(|slot| ReaderTiebreakKey {
+                stage_key: slot.stage_key.clone(),
+                feed_identity: FeedIdentity::unfiltered(),
+            })
             .collect();
 
         Ok(Self {
@@ -185,7 +193,7 @@ where
                 readers.len()
             ],
             held_heads: readers.iter().map(|_| None).collect(),
-            delivered_seq_by_reader: vec![0; readers.len()],
+            delivered_count_by_reader: vec![DeliveredCount::default(); readers.len()],
             reader_tiebreak_keys,
             readers,
             selected_event_types_by_stage: HashMap::new(),
@@ -216,14 +224,15 @@ where
     /// this) would otherwise admit a silently broken subscription.
     pub fn with_reader_selection(mut self, policy: ReaderSelectionPolicy) -> Self {
         if policy == ReaderSelectionPolicy::CanonicalMerge {
-            for (index, (_, stage_name, reader)) in self.readers.iter().enumerate() {
-                let position = reader.position();
+            for (index, slot) in self.readers.iter().enumerate() {
+                let position = slot.reader.position();
                 assert!(
                     position == 0 && !self.state.baseline_at_tail[index],
-                    "FLOWIP-095d: CanonicalMerge requires reader '{stage_name}' at position \
+                    "FLOWIP-095d: CanonicalMerge requires reader '{}' at position \
                      zero with no tail-start baseline (position {position}); a non-zero \
                      starting point shifts per-reader delivered ordinals between runs and \
-                     breaks the deterministic merge"
+                     breaks the deterministic merge",
+                    slot.stage_key
                 );
             }
         }
@@ -286,40 +295,23 @@ where
 
     /// Recompute per-reader tiebreak keys (FLOWIP-095d).
     ///
-    /// The key is (upstream stage name, feed identity), where feed identity is
-    /// the sorted `role:event_type` selected feeds joined with `,` (empty when
-    /// the reader is unfiltered). Two readers consuming different selected
-    /// feeds of the same upstream stage share a stage name, so the feed
-    /// identity keeps the key total; the role qualifier keeps it total even
-    /// when two readers share a stage name and event type but differ by feed
-    /// role. Both components are stable across runs; per-run `StageId` ULIDs
-    /// never participate.
+    /// The key is (stage key, feed identity), both stable across runs;
+    /// per-run `StageId` ULIDs never participate. Two readers consuming
+    /// different selected feeds of the same upstream stage share a stage key,
+    /// so the feed identity keeps the key total, and its role qualifier keeps
+    /// it total even when two readers share a stage key and event type but
+    /// differ by feed role.
     fn recompute_tiebreak_keys(&mut self) {
         self.reader_tiebreak_keys = self
             .readers
             .iter()
-            .map(|(stage_id, stage_name, _)| {
-                let feed_identity = self
+            .map(|slot| ReaderTiebreakKey {
+                stage_key: slot.stage_key.clone(),
+                feed_identity: self
                     .selected_feeds_by_stage
-                    .get(stage_id)
-                    .map(|feeds| {
-                        let mut entries: Vec<String> = feeds
-                            .iter()
-                            .map(|feed| {
-                                let role = match feed.role() {
-                                    SelectedFeedRole::Unspecified => "unspecified",
-                                    SelectedFeedRole::Input => "input",
-                                    SelectedFeedRole::Reference => "reference",
-                                    SelectedFeedRole::Stream => "stream",
-                                };
-                                format!("{role}:{}", feed.event_type().as_str())
-                            })
-                            .collect();
-                        entries.sort_unstable();
-                        entries.join(",")
-                    })
-                    .unwrap_or_default();
-                (stage_name.clone(), feed_identity)
+                    .get(&slot.stage_id)
+                    .map(|feeds| FeedIdentity::from_feeds(feeds))
+                    .unwrap_or_default(),
             })
             .collect();
     }
@@ -407,7 +399,7 @@ where
             self.contract_chains = self
                 .readers
                 .iter()
-                .map(|(upstream_stage, _, _)| {
+                .map(|slot| {
                     let mut chain = ContractChain::new()
                         .with_contract(TransportContract::new())
                         .with_contract(obzenflow_core::SourceContract::new());
@@ -418,7 +410,7 @@ where
                     // Divergence detection is attached only for SCC-internal upstreams
                     // when cycle metadata is available (FLOWIP-080r).
                     if let Some(cycle_cfg) = &cycle_guard_config {
-                        if cycle_cfg.internal_upstreams.contains(upstream_stage) {
+                        if cycle_cfg.internal_upstreams.contains(&slot.stage_id) {
                             let thresholds = obzenflow_core::DivergenceThresholds {
                                 max_cycle_depth: cycle_cfg.max_iterations.as_u16(),
                                 ..Default::default()
@@ -442,8 +434,8 @@ where
             self.contract_feed_chains = self
                 .readers
                 .iter()
-                .map(|(upstream_stage, _, _)| {
-                    let Some(feeds) = self.selected_feeds_by_stage.get(upstream_stage) else {
+                .map(|slot| {
+                    let Some(feeds) = self.selected_feeds_by_stage.get(&slot.stage_id) else {
                         return Vec::new();
                     };
                     if feeds.len() <= 1 {
@@ -467,9 +459,8 @@ where
             self.contract_policies = self
                 .readers
                 .iter()
-                .map(|(upstream_stage, _, _)| {
-                    let stack =
-                        build_policy_stack_for_upstream(*upstream_stage, &control_middleware);
+                .map(|slot| {
+                    let stack = build_policy_stack_for_upstream(slot.stage_id, &control_middleware);
                     Some(stack)
                 })
                 .collect();

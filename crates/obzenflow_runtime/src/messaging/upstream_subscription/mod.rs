@@ -24,9 +24,10 @@ mod tests;
 pub use super::subscription_poller::{PollResult, SubscriptionPoller};
 use types::{AdvertisedWriterSeqByEventType, SelectedDataSeqByEventType};
 pub use types::{
-    ContractConfig, ContractStatus, ContractTracker, ContractsWiring, EofOutcome,
-    MergeCandidateStatus, MergeWaitState, ReaderProgress, ReaderSelectionPolicy,
-    SelectedFeedMetadata, SelectedFeedRole, StageInputPosition, SubscriptionState,
+    ContractConfig, ContractStatus, ContractTracker, ContractsWiring, DeliveredCount,
+    DeliveredOrdinal, EofOutcome, FeedIdentity, MergeCandidateStatus, MergeWaitState,
+    ReaderProgress, ReaderSelectionPolicy, ReaderTiebreakKey, SelectedFeedMetadata,
+    SelectedFeedRole, StageInputPosition, StageKey, SubscriptionState,
 };
 
 use crate::contracts::ContractChain;
@@ -49,6 +50,17 @@ struct FeedContractChain {
     last_contract_result_seq: SeqNo,
 }
 
+/// One upstream reader binding (FLOWIP-095d).
+///
+/// `stage_key` is the stable cross-run ordering identity (the descriptor
+/// stage name); `stage_id` is the per-run ULID and never participates in
+/// ordering decisions.
+pub(super) struct ReaderSlot<T: JournalEvent> {
+    pub(super) stage_id: StageId,
+    pub(super) stage_key: StageKey,
+    pub(super) reader: Box<dyn JournalReader<T>>,
+}
+
 /// A head event acquired from a reader but not yet delivered (FLOWIP-095d).
 ///
 /// Classification happens at acquisition so the merge can treat authored EOFs
@@ -65,12 +77,10 @@ pub(super) struct HeldHead<T: JournalEvent> {
 /// The join supervisor composes two subscriptions by comparing each side's
 /// candidate with the same rule the subscription applies internally.
 pub struct MergeCandidateMeta<'a> {
-    /// The tiebreak ordinal this delivery would take (delivered count + 1).
-    pub ordinal: u64,
-    /// Stable upstream stage key (descriptor name, never the per-run StageId).
-    pub stage_key: &'a str,
-    /// Selected-feed identity for this reader (empty when unfiltered).
-    pub feed_identity: &'a str,
+    /// The tiebreak ordinal this delivery would take.
+    pub ordinal: DeliveredOrdinal,
+    /// The reader's stable tiebreak key (stage key, feed identity).
+    pub key: &'a ReaderTiebreakKey,
     /// The head's envelope clock, for cross-subscription causality checks.
     pub vector_clock: &'a VectorClock,
     /// Authored EOFs are exempt from causality and order by tiebreak alone.
@@ -108,7 +118,7 @@ where
     owner_label: String,
 
     /// Readers for each upstream journal
-    readers: Vec<(StageId, String, Box<dyn JournalReader<T>>)>,
+    readers: Vec<ReaderSlot<T>>,
 
     /// Selected Data event types by upstream reader stage.
     ///
@@ -187,12 +197,12 @@ where
     ///
     /// Deliberately distinct from `selected_data_seq_by_reader`, which counts
     /// Data events only and feeds selected-feed contract accounting.
-    delivered_seq_by_reader: Vec<u64>,
+    delivered_count_by_reader: Vec<DeliveredCount>,
 
-    /// Per-reader stable tiebreak keys: (upstream stage name, feed identity).
-    /// Stage names are the cross-run identity; `StageId` ULIDs are per-run and
-    /// must never participate in ordering decisions.
-    reader_tiebreak_keys: Vec<(String, String)>,
+    /// Per-reader stable tiebreak keys. Stage keys are the cross-run
+    /// identity; `StageId` ULIDs are per-run and must never participate in
+    /// ordering decisions.
+    reader_tiebreak_keys: Vec<ReaderTiebreakKey>,
 
     /// Set when a canonical-merge poll returned no event because a quiet input
     /// blocked delivery; cleared on the next delivery.
@@ -237,8 +247,8 @@ where
 
     /// Per-reader delivered transport-event counts (the canonical merge's
     /// ordinal source and checkpointable state).
-    pub fn delivered_seq_by_reader(&self) -> &[u64] {
-        &self.delivered_seq_by_reader
+    pub fn delivered_counts(&self) -> &[DeliveredCount] {
+        &self.delivered_count_by_reader
     }
 
     /// The reader-selection policy this subscription was built with.
@@ -401,7 +411,7 @@ where
         let Some(index) = self
             .readers
             .iter()
-            .position(|(id, _, _)| *id == upstream_stage)
+            .position(|slot| slot.stage_id == upstream_stage)
         else {
             tracing::warn!(
                 owner = %self.owner_label,

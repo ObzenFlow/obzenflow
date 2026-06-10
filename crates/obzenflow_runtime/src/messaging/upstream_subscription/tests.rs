@@ -3,7 +3,7 @@
 // https://obzenflow.dev
 
 use super::{
-    ContractConfig, ContractStatus, ContractsWiring, PollResult, ReaderProgress,
+    ContractConfig, ContractStatus, ContractsWiring, FeedIdentity, PollResult, ReaderProgress,
     ReaderSelectionPolicy, SelectedFeedMetadata, SelectedFeedRole, UpstreamSubscription,
 };
 use crate::messaging::upstream_subscription_policy::build_policy_stack_for_upstream;
@@ -1409,8 +1409,8 @@ async fn breaker_aware_mode_overrides_seq_divergence_and_emits_override_event() 
     subscription.contract_policies = subscription
         .readers
         .iter()
-        .map(|(upstream, _name, _reader)| {
-            let stack = build_policy_stack_for_upstream(*upstream, &control_provider);
+        .map(|slot| {
+            let stack = build_policy_stack_for_upstream(slot.stage_id, &control_provider);
             Some(stack)
         })
         .collect();
@@ -2552,11 +2552,20 @@ async fn expect_delivery(
     match subscription.poll_next_with_state("test_fsm", None).await {
         PollResult::Event(envelope) => envelope,
         other => panic!(
-            "expected PollResult::Event, got {other:?} (delivered_seq={:?}, merge_wait={:?})",
-            subscription.delivered_seq_by_reader(),
+            "expected PollResult::Event, got {other:?} (delivered={:?}, merge_wait={:?})",
+            subscription.delivered_counts(),
             subscription.merge_wait(),
         ),
     }
+}
+
+/// Per-reader delivered counts as bare numbers, for readable assertions.
+fn delivered(subscription: &UpstreamSubscription<ChainEvent>) -> Vec<u64> {
+    subscription
+        .delivered_counts()
+        .iter()
+        .map(|count| count.0)
+        .collect()
 }
 
 #[tokio::test]
@@ -2573,7 +2582,7 @@ async fn canonical_merge_waits_while_any_input_is_quiet() {
     }
     let wait = subscription.merge_wait().expect("merge wait recorded");
     assert_eq!(wait.quiet_inputs, vec![(stage_b, "upstream_b".to_string())]);
-    assert_eq!(subscription.delivered_seq_by_reader(), &[0, 0]);
+    assert_eq!(delivered(&subscription), [0, 0]);
 
     // B produces a head: the merge decides, and the tiebreak (equal ordinals,
     // stage name) delivers A first.
@@ -2614,7 +2623,7 @@ async fn canonical_merge_waits_while_any_input_is_quiet() {
         fourth.event.content,
         ChainEventContent::FlowControl(FlowControlPayload::Eof { .. })
     ));
-    assert_eq!(subscription.delivered_seq_by_reader(), &[2, 2]);
+    assert_eq!(delivered(&subscription), [2, 2]);
     assert!(subscription.all_readers_eof());
 }
 
@@ -2643,7 +2652,7 @@ async fn canonical_merge_alternates_by_ordinal_then_stage_key_and_never_waits_on
         vec![stage_a, stage_b, stage_a, stage_b, stage_a, stage_b, stage_a, stage_b],
         "ordinal-balanced tiebreak alternates fairly, stage key breaks ties"
     );
-    assert_eq!(subscription.delivered_seq_by_reader(), &[4, 4]);
+    assert_eq!(delivered(&subscription), [4, 4]);
     assert!(subscription.all_readers_eof());
 
     match subscription.poll_next_with_state("test_fsm", None).await {
@@ -2737,7 +2746,7 @@ async fn canonical_merge_forwarded_control_takes_ordinal_without_exhausting() {
     // All six rows deliver: the forwarded EOF takes an ordinal and does not
     // exhaust A, whose authored EOF arrives later.
     assert_eq!(deliveries, 6);
-    assert_eq!(subscription.delivered_seq_by_reader(), &[4, 2]);
+    assert_eq!(delivered(&subscription), [4, 2]);
     assert!(subscription.all_readers_eof());
 }
 
@@ -2843,7 +2852,7 @@ async fn canonical_merge_filtered_events_take_no_ordinals() {
 
     assert_eq!(deliveries, 5);
     // The filtered row took no ordinal: A delivered sel, sel, eof.
-    assert_eq!(subscription.delivered_seq_by_reader(), &[3, 2]);
+    assert_eq!(delivered(&subscription), [3, 2]);
 }
 
 #[tokio::test]
@@ -2908,7 +2917,7 @@ async fn canonical_merge_skips_reader_telemetry_without_taking_ordinals() {
     // identical ordinals.
     assert_eq!(order.len(), 6);
     assert_eq!(&order[..4], ["a1", "b1", "a2", "b2"]);
-    assert_eq!(subscription.delivered_seq_by_reader(), &[3, 3]);
+    assert_eq!(delivered(&subscription), [3, 3]);
     assert!(subscription.all_readers_eof());
 }
 
@@ -2946,7 +2955,7 @@ async fn round_robin_transport_only_skips_reader_telemetry() {
     // semantics stay uniform across ordered and unordered stages.
     assert_eq!(order.len(), 3);
     assert_eq!(&order[..2], ["a1", "a2"]);
-    assert_eq!(subscription.delivered_seq_by_reader(), &[3]);
+    assert_eq!(delivered(&subscription), [3]);
     assert!(subscription.all_readers_eof());
 }
 
@@ -2969,7 +2978,7 @@ async fn interleaved_telemetry_does_not_perturb_merged_order() {
                 PollResult::Error(e) => panic!("unexpected poll error: {e:?}"),
             }
         }
-        let ordinals = subscription.delivered_seq_by_reader().to_vec();
+        let ordinals = delivered(subscription);
         (order, ordinals)
     }
 
@@ -3075,11 +3084,26 @@ async fn feed_role_distinguishes_tiebreak_identity() {
         .with_selected_feeds(selected_feeds);
 
     let keys = &subscription.reader_tiebreak_keys;
-    assert_eq!(keys[0].0, keys[1].0, "stage names deliberately collide");
+    assert_eq!(
+        keys[0].stage_key, keys[1].stage_key,
+        "stage keys deliberately collide"
+    );
     assert_ne!(
-        keys[0].1, keys[1].1,
+        keys[0].feed_identity, keys[1].feed_identity,
         "the role qualifier must keep the tiebreak key total"
     );
-    assert_eq!(keys[0].1, "reference:shared.event");
-    assert_eq!(keys[1].1, "stream:shared.event");
+    assert_eq!(
+        keys[0].feed_identity,
+        FeedIdentity::from_feeds(&[SelectedFeedMetadata::new(
+            EventType::from("shared.event"),
+            SelectedFeedRole::Reference,
+        )])
+    );
+    assert_eq!(
+        keys[1].feed_identity,
+        FeedIdentity::from_feeds(&[SelectedFeedMetadata::new(
+            EventType::from("shared.event"),
+            SelectedFeedRole::Stream,
+        )])
+    );
 }

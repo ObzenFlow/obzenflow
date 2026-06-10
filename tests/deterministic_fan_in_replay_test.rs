@@ -90,10 +90,6 @@ struct ChannelSource {
 }
 
 impl ChannelSource {
-    fn new(channel: &'static str, count: usize) -> Self {
-        Self::with_jitter(channel, count, 0)
-    }
-
     /// Deterministic pseudo-jitter per (channel, index): varies arrival
     /// timing without varying stream content, so two live runs with
     /// different jitter settings must still merge identically.

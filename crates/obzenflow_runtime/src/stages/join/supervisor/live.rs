@@ -577,18 +577,29 @@ async fn handle_stream_envelope<
     Ok(directive)
 }
 
+/// Which join subscription a merge candidate came from (FLOWIP-095d).
+///
+/// The final tiebreak component of the cross-side rule: it keeps the key
+/// total even when the same upstream feeds both sides. The derived `Ord`
+/// (`Reference < Stream`) is part of the canonical order and is code-defined,
+/// so it is stable across runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum JoinSide {
+    Reference,
+    Stream,
+}
+
 /// Cross-subscription comparison for the FLOWIP-095d canonical join dispatch.
 ///
 /// Applies the same rule as the subscription-internal merge: happened-before
 /// between non-EOF candidates first (authored EOFs are exempt and order by
-/// tiebreak alone), then the (ordinal, stage key, feed identity, side label)
-/// tiebreak. The side label keeps the key total even when the same upstream
-/// feeds both sides.
+/// tiebreak alone), then the (ordinal, reader tiebreak key, join side)
+/// tiebreak.
 pub(crate) fn select_between(
     a: &crate::messaging::upstream_subscription::MergeCandidateMeta<'_>,
-    a_side: &str,
+    a_side: JoinSide,
     b: &crate::messaging::upstream_subscription::MergeCandidateMeta<'_>,
-    b_side: &str,
+    b_side: JoinSide,
 ) -> std::cmp::Ordering {
     if !a.is_authored_eof && !b.is_authored_eof {
         if CausalOrderingService::happened_before(a.vector_clock, b.vector_clock) {
@@ -598,12 +609,7 @@ pub(crate) fn select_between(
             return std::cmp::Ordering::Greater;
         }
     }
-    (a.ordinal, a.stage_key, a.feed_identity, a_side).cmp(&(
-        b.ordinal,
-        b.stage_key,
-        b.feed_identity,
-        b_side,
-    ))
+    (a.ordinal, a.key, a_side).cmp(&(b.ordinal, b.key, b_side))
 }
 
 /// Run the periodic contract ticks for both join sides (the idle-path block
@@ -703,10 +709,6 @@ async fn dispatch_live_canonical<
         return Ok(EventLoopDirective::Continue);
     }
 
-    enum Side {
-        Reference,
-        Stream,
-    }
     let side = {
         let reference_meta = sup
             .reference_subscription
@@ -718,14 +720,16 @@ async fn dispatch_live_canonical<
             .and_then(|subscription| subscription.merge_candidate());
         match (reference_meta, stream_meta) {
             (Some(reference), Some(stream)) => {
-                if select_between(&reference, "reference", &stream, "stream").is_le() {
-                    Some(Side::Reference)
+                if select_between(&reference, JoinSide::Reference, &stream, JoinSide::Stream)
+                    .is_le()
+                {
+                    Some(JoinSide::Reference)
                 } else {
-                    Some(Side::Stream)
+                    Some(JoinSide::Stream)
                 }
             }
-            (Some(_), None) => Some(Side::Reference),
-            (None, Some(_)) => Some(Side::Stream),
+            (Some(_), None) => Some(JoinSide::Reference),
+            (None, Some(_)) => Some(JoinSide::Stream),
             (None, None) => None,
         }
     };
@@ -739,7 +743,7 @@ async fn dispatch_live_canonical<
     };
 
     let directive = match side {
-        Side::Reference => {
+        JoinSide::Reference => {
             let poll = {
                 let Some(subscription) = sup.reference_subscription.as_mut() else {
                     return Ok(EventLoopDirective::Continue);
@@ -757,7 +761,7 @@ async fn dispatch_live_canonical<
                 ))),
             }
         }
-        Side::Stream => {
+        JoinSide::Stream => {
             let poll = {
                 let Some(subscription) = sup.stream_subscription.as_mut() else {
                     return Ok(EventLoopDirective::Continue);
@@ -841,8 +845,10 @@ async fn write_stage_outputs_and_ack<H: JoinHandler>(
 
 #[cfg(test)]
 mod tests {
-    use super::select_between;
-    use crate::messaging::upstream_subscription::MergeCandidateMeta;
+    use super::{select_between, JoinSide};
+    use crate::messaging::upstream_subscription::{
+        DeliveredOrdinal, FeedIdentity, MergeCandidateMeta, ReaderTiebreakKey, StageKey,
+    };
     use obzenflow_core::event::vector_clock::{CausalOrderingService, VectorClock};
     use std::cmp::Ordering;
 
@@ -856,16 +862,22 @@ mod tests {
         clock
     }
 
+    fn key(stage_key: &str) -> ReaderTiebreakKey {
+        ReaderTiebreakKey {
+            stage_key: StageKey::new(stage_key),
+            feed_identity: FeedIdentity::unfiltered(),
+        }
+    }
+
     fn meta<'a>(
         ordinal: u64,
-        stage_key: &'a str,
+        key: &'a ReaderTiebreakKey,
         vector_clock: &'a VectorClock,
         is_authored_eof: bool,
     ) -> MergeCandidateMeta<'a> {
         MergeCandidateMeta {
-            ordinal,
-            stage_key,
-            feed_identity: "",
+            ordinal: DeliveredOrdinal(ordinal),
+            key,
             vector_clock,
             is_authored_eof,
         }
@@ -874,10 +886,11 @@ mod tests {
     #[test]
     fn lower_ordinal_wins_regardless_of_stage_key() {
         let empty = VectorClock::new();
-        let a = meta(1, "z_stage", &empty, false);
-        let b = meta(2, "a_stage", &empty, false);
+        let (key_z, key_a) = (key("z_stage"), key("a_stage"));
+        let a = meta(1, &key_z, &empty, false);
+        let b = meta(2, &key_a, &empty, false);
         assert_eq!(
-            select_between(&a, "reference", &b, "stream"),
+            select_between(&a, JoinSide::Reference, &b, JoinSide::Stream),
             Ordering::Less
         );
     }
@@ -885,19 +898,21 @@ mod tests {
     #[test]
     fn ordinal_tie_breaks_by_stage_key_then_side() {
         let empty = VectorClock::new();
-        let a = meta(1, "a_stage", &empty, false);
-        let b = meta(1, "b_stage", &empty, false);
+        let (key_a, key_b) = (key("a_stage"), key("b_stage"));
+        let a = meta(1, &key_a, &empty, false);
+        let b = meta(1, &key_b, &empty, false);
         assert_eq!(
-            select_between(&a, "stream", &b, "reference"),
+            select_between(&a, JoinSide::Stream, &b, JoinSide::Reference),
             Ordering::Less
         );
 
-        let same_a = meta(1, "same", &empty, false);
-        let same_b = meta(1, "same", &empty, false);
+        let key_same = key("same");
+        let same_a = meta(1, &key_same, &empty, false);
+        let same_b = meta(1, &key_same, &empty, false);
         assert_eq!(
-            select_between(&same_a, "reference", &same_b, "stream"),
+            select_between(&same_a, JoinSide::Reference, &same_b, JoinSide::Stream),
             Ordering::Less,
-            "the side label keeps the cross-side key total"
+            "the join side keeps the cross-side key total"
         );
     }
 
@@ -907,14 +922,15 @@ mod tests {
         let derived = clock(&[("wa", 2), ("wb", 1)]);
         // The derived candidate has the better ordinal and stage key, and
         // still loses to its causal ancestor.
-        let a = meta(5, "z_stage", &ancestor, false);
-        let b = meta(1, "a_stage", &derived, false);
+        let (key_z, key_a) = (key("z_stage"), key("a_stage"));
+        let a = meta(5, &key_z, &ancestor, false);
+        let b = meta(1, &key_a, &derived, false);
         assert_eq!(
-            select_between(&a, "stream", &b, "reference"),
+            select_between(&a, JoinSide::Stream, &b, JoinSide::Reference),
             Ordering::Less
         );
         assert_eq!(
-            select_between(&b, "reference", &a, "stream"),
+            select_between(&b, JoinSide::Reference, &a, JoinSide::Stream),
             Ordering::Greater
         );
     }
@@ -926,10 +942,11 @@ mod tests {
         // The EOF's clock happened-before the data candidate's clock, but the
         // exemption sends the decision to the tiebreak, where the data
         // candidate's lower ordinal wins.
-        let eof = meta(2, "a_stage", &ancestor, true);
-        let data = meta(1, "b_stage", &derived, false);
+        let (key_a, key_b) = (key("a_stage"), key("b_stage"));
+        let eof = meta(2, &key_a, &ancestor, true);
+        let data = meta(1, &key_b, &derived, false);
         assert_eq!(
-            select_between(&eof, "reference", &data, "stream"),
+            select_between(&eof, JoinSide::Reference, &data, JoinSide::Stream),
             Ordering::Greater
         );
     }

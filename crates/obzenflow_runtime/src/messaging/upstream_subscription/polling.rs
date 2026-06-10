@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use super::types::{MergeCandidateStatus, MergeWaitState, ReaderSelectionPolicy};
+use super::types::{MergeCandidateStatus, MergeWaitState, ReaderSelectionPolicy, StageKey};
 use super::{
     DeliveryFilter, EofOutcome, HeldHead, MergeCandidateMeta, PollResult, ReaderProgress,
     StageInputPosition, UpstreamSubscription,
@@ -82,11 +82,8 @@ where
         &mut self,
         index: usize,
     ) -> std::result::Result<ReadStep<T>, JournalError> {
-        let stage_id = self.readers[index].0;
-        let next = {
-            let (_, _, reader) = &mut self.readers[index];
-            reader.next().await?
-        };
+        let stage_id = self.readers[index].stage_id;
+        let next = self.readers[index].reader.next().await?;
         let Some(envelope) = next else {
             return Ok(ReadStep::Empty);
         };
@@ -331,9 +328,9 @@ where
             is_authored_eof: is_eof,
             is_drain,
         } = head;
-        let (stage_id, stage_name) = {
-            let (id, name, _) = &self.readers[reader_index];
-            (*id, name.clone())
+        let (stage_id, stage_key) = {
+            let slot = &self.readers[reader_index];
+            (slot.stage_id, slot.stage_key.clone())
         };
         let original_chain_event = (&envelope.event as &dyn Any).downcast_ref::<ChainEvent>();
 
@@ -373,7 +370,7 @@ where
             target: "flowip-080o",
             owner = %self.owner_label,
             stage_id = ?stage_id,
-            stage_name = %stage_name,
+            stage_key = %stage_key,
             reader_index = reader_index,
             fsm_state = fsm_state,
             event_type = %envelope.event.event_type_name(),
@@ -382,13 +379,13 @@ where
         );
 
         if is_eof {
-            self.record_eof_exhaustion(reader_index, stage_id, &stage_name);
+            self.record_eof_exhaustion(reader_index, stage_id, &stage_key);
         } else if is_drain {
             tracing::debug!(
                 target: "flowip-080o",
                 owner = %self.owner_label,
                 stage_id = ?stage_id,
-                stage_name = %stage_name,
+                stage_key = %stage_key,
                 reader_index = reader_index,
                 "Received drain from stage — continuing to consume until EOF"
             );
@@ -406,8 +403,8 @@ where
         // FLOWIP-095d: every delivered transport event takes a per-reader
         // ordinal, post-filter, on the delivery side. This counter is the
         // canonical merge's tiebreak source and its checkpointable state.
-        if let Some(delivered) = self.delivered_seq_by_reader.get_mut(reader_index) {
-            *delivered = delivered.saturating_add(1);
+        if let Some(delivered) = self.delivered_count_by_reader.get_mut(reader_index) {
+            delivered.increment();
         }
         self.last_merge_wait = None;
         self.merge_candidate_index = None;
@@ -661,14 +658,19 @@ where
 
     /// EOF exhaustion accounting (delivery side): a reader leaves the head
     /// set only when its authored EOF is delivered, never when merely held.
-    fn record_eof_exhaustion(&mut self, reader_index: usize, stage_id: StageId, stage_name: &str) {
+    fn record_eof_exhaustion(
+        &mut self,
+        reader_index: usize,
+        stage_id: StageId,
+        stage_key: &StageKey,
+    ) {
         self.state.mark_reader_eof(reader_index);
         let total_readers = self.readers.len();
         let eof_count = self.state.eof_count();
         let is_final = eof_count == total_readers;
         self.last_eof_outcome = Some(EofOutcome {
             stage_id,
-            stage_name: stage_name.to_string(),
+            stage_name: stage_key.to_string(),
             reader_index,
             eof_count,
             total_readers,
@@ -678,7 +680,7 @@ where
             target: "flowip-080o",
             owner = %self.owner_label,
             stage_id = ?stage_id,
-            stage_name = %stage_name,
+            stage_key = %stage_key,
             reader_index = reader_index,
             total_readers = total_readers,
             eof_status = ?self.state.eof_received,
@@ -741,8 +743,8 @@ where
         let quiet_inputs: Vec<(StageId, String)> = (0..self.readers.len())
             .filter(|&index| !self.state.is_reader_eof(index) && self.held_heads[index].is_none())
             .map(|index| {
-                let (id, name, _) = &self.readers[index];
-                (*id, name.clone())
+                let slot = &self.readers[index];
+                (slot.stage_id, slot.stage_key.to_string())
             })
             .collect();
         if !quiet_inputs.is_empty() {
@@ -819,9 +821,11 @@ where
     /// deterministic.
     fn select_merge_winner(&self, candidates: &[usize]) -> Option<usize> {
         let head = |index: usize| self.held_heads[index].as_ref().expect("candidate has head");
+        // Compared as the ordinal the delivery would take, the same key shape
+        // the join's cross-side rule uses; counts never enter a comparison.
         let tiebreak = |index: usize| {
             (
-                self.delivered_seq_by_reader[index],
+                self.delivered_count_by_reader[index].next_ordinal(),
                 &self.reader_tiebreak_keys[index],
             )
         };
@@ -864,11 +868,10 @@ where
     pub fn merge_candidate(&self) -> Option<MergeCandidateMeta<'_>> {
         let index = self.merge_candidate_index?;
         let head = self.held_heads.get(index)?.as_ref()?;
-        let (stage_key, feed_identity) = self.reader_tiebreak_keys.get(index)?;
+        let key = self.reader_tiebreak_keys.get(index)?;
         Some(MergeCandidateMeta {
-            ordinal: self.delivered_seq_by_reader[index].saturating_add(1),
-            stage_key,
-            feed_identity,
+            ordinal: self.delivered_count_by_reader[index].next_ordinal(),
+            key,
             vector_clock: &head.envelope.vector_clock,
             is_authored_eof: head.is_authored_eof,
         })
