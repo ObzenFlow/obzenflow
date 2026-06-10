@@ -228,3 +228,23 @@ required-features = ["test-support"]
 name = "stateful_emit_within_window_test"
 path = "tests/stateful_emit_within_window_test.rs"
 required-features = ["test-support"]
+
+[[test]]
+name = "deterministic_fan_in_replay_test"
+path = "tests/deterministic_fan_in_replay_test.rs"
+required-features = ["test-support"]
+
+[[test]]
+name = "effectful_fan_in_envelope_test"
+path = "tests/effectful_fan_in_envelope_test.rs"
+required-features = ["test-support"]
+
+[[test]]
+name = "join_phase_transition_replay_test"
+path = "tests/join_phase_transition_replay_test.rs"
+required-features = ["test-support"]
+
+[[test]]
+name = "join_error_passthrough_identity_test"
+path = "tests/join_error_passthrough_identity_test.rs"
+required-features = ["test-support"]

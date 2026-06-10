@@ -172,6 +172,20 @@ impl OutputCommitter<'_> {
             return Ok(());
         }
 
+        // Error-marked rows are forwarded provenance, not handler output. An
+        // in-band business error (Validation/Domain) keeps its input event
+        // type as it passes through, so checking it against the stage's
+        // declared output types would kill every type-changing stage that
+        // forwards one, contradicting the error-routing doctrine that
+        // business errors stay in the main pipeline for downstream stages to
+        // observe.
+        if matches!(
+            event.processing_info.status,
+            obzenflow_core::event::status::processing_status::ProcessingStatus::Error { .. }
+        ) {
+            return Ok(());
+        }
+
         let Some(output_contract) = self.output_contract else {
             return Ok(());
         };

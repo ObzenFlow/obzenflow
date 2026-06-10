@@ -16,6 +16,7 @@ use obzenflow_runtime::feed_plan::{
     FactVisibility, FeedKey, FeedPlan, FeedRole, LogicalFeed, PayloadTypeDescriptor,
     StageOutputContract,
 };
+use obzenflow_runtime::id_conversions::StageIdExt;
 use obzenflow_runtime::pipeline::config::StageConfig;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::source::SourceError;
@@ -1564,10 +1565,18 @@ pub fn validate_effectful_deterministic_input_order(
         let deterministic = if upstreams.is_empty() {
             true
         } else if upstreams.len() > 1 {
+            // An orderer makes the merge deterministic only over stable input
+            // streams, so the stability induction needs both halves: the stage
+            // orders its inputs AND every input stream is itself
+            // deterministic. Stopping at the orderer would let a cycle, or a
+            // fan-in the enablement walk never marked, sit above it unexamined.
             descriptors
                 .get(&stage_id)
                 .map(|descriptor| descriptor.is_deterministic_input_orderer())
                 .unwrap_or(false)
+                && upstreams.iter().all(|&upstream| {
+                    deterministic_for_stage(upstream, inbound, descriptors, memo, visiting)
+                })
         } else {
             deterministic_for_stage(upstreams[0], inbound, descriptors, memo, visiting)
         };
@@ -1609,6 +1618,187 @@ pub fn validate_effectful_deterministic_input_order(
     }
 
     Ok(())
+}
+
+/// FLOWIP-095d: the build-time enablement walk, the inverse of
+/// `validate_effectful_deterministic_input_order`.
+///
+/// Marks every multi-inbound stage that lies on a path above an effectful
+/// stage (including an effectful stage that is itself multi-inbound). Those
+/// stages run the canonical deterministic merge on their input subscriptions
+/// and report `is_deterministic_input_orderer()` true, so the FLOWIP-120a
+/// guard accepts the effectful stages below them.
+///
+/// The marking is transitive on purpose: the stability induction the guard
+/// encodes requires every fan-in above an ordered stage to be ordered too,
+/// and the guard verifies it by recursing through an orderer's own inputs.
+/// Cycle members are never marked; the merge is never enabled on a cycle
+/// edge, and the guard remains the safety net that rejects effectful stages
+/// below cycles, including a cycle that feeds an ordered fan-in from above.
+pub fn derive_deterministic_fan_in_stages(
+    topology: &Topology,
+    descriptors: &HashMap<String, Box<dyn StageDescriptor>>,
+    name_to_id: &HashMap<String, StageId>,
+) -> HashSet<StageId> {
+    let mut inbound: HashMap<StageId, Vec<StageId>> = HashMap::new();
+    for edge in topology.edges() {
+        if edge.kind != EdgeKind::Forward {
+            continue;
+        }
+        inbound
+            .entry(StageId::from_ulid(edge.to.ulid()))
+            .or_default()
+            .push(StageId::from_ulid(edge.from.ulid()));
+    }
+
+    let mut marked = HashSet::new();
+    for (dsl_name, descriptor) in descriptors {
+        if !descriptor.is_effectful() {
+            continue;
+        }
+        let Some(stage_id) = name_to_id.get(dsl_name) else {
+            continue;
+        };
+
+        let mut stack = vec![*stage_id];
+        let mut visited = HashSet::new();
+        while let Some(current) = stack.pop() {
+            if !visited.insert(current) {
+                continue;
+            }
+            let upstreams = inbound.get(&current).cloned().unwrap_or_default();
+            if upstreams.len() > 1 && !topology.is_in_cycle(current.to_topology_id()) {
+                marked.insert(current);
+            }
+            stack.extend(upstreams);
+        }
+    }
+    marked
+}
+
+/// FLOWIP-095d: build-time orderer override.
+///
+/// Wraps a descriptor the enablement walk marked so it reports
+/// `is_deterministic_input_orderer()` true. Everything else delegates to the
+/// wrapped descriptor; in particular `typing_metadata()` must pass through, or
+/// feed-plan derivation and edge typing silently degrade. The runtime half
+/// (the canonical merge on the stage's subscription) is threaded separately
+/// through `StageResourcesBuilder::with_deterministic_fan_in_stages`.
+pub struct DeterministicOrdererOverride {
+    inner: Box<dyn StageDescriptor>,
+}
+
+#[async_trait]
+impl StageDescriptor for DeterministicOrdererOverride {
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+
+    fn set_name(&mut self, name: String) {
+        self.inner.set_name(name);
+    }
+
+    fn stage_type(&self) -> StageType {
+        self.inner.stage_type()
+    }
+
+    fn reference_stage_id(&self) -> Option<StageId> {
+        self.inner.reference_stage_id()
+    }
+
+    fn reference_stage_name(&self) -> Option<&str> {
+        self.inner.reference_stage_name()
+    }
+
+    fn set_reference_stage_id(&mut self, id: StageId) {
+        self.inner.set_reference_stage_id(id);
+    }
+
+    async fn create_handle_with_flow_middleware(
+        self: Box<Self>,
+        config: StageConfig,
+        resources: StageResources,
+        flow_middleware: Vec<Box<dyn MiddlewareFactory>>,
+        control_middleware: Arc<ControlMiddlewareAggregator>,
+    ) -> StageCreationResult<BoxedStageHandle> {
+        self.inner
+            .create_handle_with_flow_middleware(
+                config,
+                resources,
+                flow_middleware,
+                control_middleware,
+            )
+            .await
+    }
+
+    fn stage_middleware_names(&self) -> Vec<String> {
+        self.inner.stage_middleware_names()
+    }
+
+    fn stage_middleware_factories(&self) -> &[Box<dyn MiddlewareFactory>] {
+        self.inner.stage_middleware_factories()
+    }
+
+    fn debug_info(&self) -> String {
+        self.inner.debug_info()
+    }
+
+    fn typing_metadata(&self) -> Option<&StageTypingMetadata> {
+        self.inner.typing_metadata()
+    }
+
+    fn is_effectful(&self) -> bool {
+        self.inner.is_effectful()
+    }
+
+    fn is_deterministic_input_orderer(&self) -> bool {
+        true
+    }
+
+    fn stage_logic_version(&self) -> String {
+        self.inner.stage_logic_version()
+    }
+
+    fn effect_declarations(&self) -> Vec<obzenflow_runtime::effects::EffectDeclaration> {
+        self.inner.effect_declarations()
+    }
+
+    fn is_composite(&self) -> bool {
+        self.inner.is_composite()
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn try_lower_composite(
+        self: Box<Self>,
+        binding: &str,
+    ) -> Result<Option<crate::dsl::composites::CompositeLowering>, crate::dsl::FlowBuildError> {
+        self.inner.try_lower_composite(binding)
+    }
+}
+
+/// FLOWIP-095d: apply the orderer override to every marked descriptor that is
+/// not already a structural orderer (hydrating joins stay unwrapped).
+pub fn wrap_deterministic_orderers(
+    descriptors: &mut HashMap<String, Box<dyn StageDescriptor>>,
+    name_to_id: &HashMap<String, StageId>,
+    marked: &HashSet<StageId>,
+) {
+    let to_wrap: Vec<String> = descriptors
+        .iter()
+        .filter(|(dsl_name, descriptor)| {
+            name_to_id
+                .get(dsl_name.as_str())
+                .is_some_and(|stage_id| marked.contains(stage_id))
+                && !descriptor.is_deterministic_input_orderer()
+        })
+        .map(|(dsl_name, _)| dsl_name.clone())
+        .collect();
+
+    for dsl_name in to_wrap {
+        if let Some(inner) = descriptors.remove(&dsl_name) {
+            descriptors.insert(dsl_name, Box::new(DeterministicOrdererOverride { inner }));
+        }
+    }
 }
 
 #[cfg(test)]

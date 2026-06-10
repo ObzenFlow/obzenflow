@@ -744,7 +744,7 @@ async fn group_by_emit_within_parents_each_group_to_its_own_inputs() -> Result<(
         else {
             continue;
         };
-        if event_type != GroupInput::EVENT_TYPE {
+        if !GroupInput::event_type_matches(event_type) {
             continue;
         }
         let group = payload
@@ -769,7 +769,11 @@ async fn group_by_emit_within_parents_each_group_to_its_own_inputs() -> Result<(
         else {
             continue;
         };
-        if event_type != GroupAgg::EVENT_TYPE {
+        // FLOWIP-120b stamps emissions with the versioned event type, so row
+        // matching must use the runtime's own tolerance, never strict
+        // equality. (`from_event` is not suitable here: group_by emits a
+        // `{"key", "result"}` envelope payload, not a bare `GroupAgg`.)
+        if !GroupAgg::event_type_matches(event_type) {
             continue;
         }
         let key = payload

@@ -14,8 +14,9 @@
 //! its own copy of this logic and only swaps the source and the flow wiring.
 
 use super::domain::{
-    GatewayPaymentDecision, PaymentAuthorizationUnavailable, PaymentAuthorized,
-    PaymentDeclineReason, PaymentDeclined, PaymentMethodState, TrafficPhase, ValidatedOrder,
+    GatewayPaymentDecision, OrderCancellationReason, OrderCancelled,
+    PaymentAuthorizationUnavailable, PaymentAuthorized, PaymentDeclineReason, PaymentDeclined,
+    PaymentMethodState, TrafficPhase, ValidatedOrder,
 };
 use async_trait::async_trait;
 use obzenflow_core::{event::chain_event::ChainEvent, TypedPayload};
@@ -208,16 +209,34 @@ async fn emit_payment_decision_fact(
             .await
         }
         GatewayPaymentDecision::Declined { reason } => {
+            // Fact first, consequence second: the gateway's decline is the
+            // effect-adjacent fact, and the derived lifecycle consequence is
+            // that the order is cancelled. Both are recorded, so the journal
+            // keeps the provenance and the cancelled-orders subscriber sees
+            // the fate.
             fx.emit(PaymentDeclined {
+                order_id: order.order_id.clone(),
+                customer_id: order.customer_id.clone(),
+                amount_cents: order.amount_cents,
+                phase: order.phase.clone(),
+                reason: reason.clone(),
+            })
+            .await
+            .map_err(|e| HandlerError::Other(e.to_string()))?;
+            fx.emit(OrderCancelled {
                 order_id: order.order_id,
                 customer_id: order.customer_id,
                 amount_cents: order.amount_cents,
                 phase: order.phase,
-                reason,
+                reason: OrderCancellationReason::PaymentDeclined { reason },
             })
             .await
         }
         GatewayPaymentDecision::AuthorizationUnavailable { reason } => {
+            // Deliberately no cancellation here: unavailability means no
+            // payment decision was reached, and manufacturing an order fate
+            // out of a gateway outage would be a fake outcome (the FLOWIP-120m
+            // non-performance doctrine). These orders go to manual review.
             fx.emit(PaymentAuthorizationUnavailable {
                 order_id: order.order_id,
                 customer_id: order.customer_id,

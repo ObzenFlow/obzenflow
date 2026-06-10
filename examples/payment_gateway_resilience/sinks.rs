@@ -5,13 +5,16 @@
 //! Tutorial sink actions.
 //!
 //! These functions stand in for real subscribers. In production, paid orders
-//! might feed shipping, locally invalid orders might feed website status, remote
-//! declines might feed customer notification, and unavailable authorizations
-//! might feed retry or manual-review workflows.
+//! might feed shipping, cancelled orders might feed customer notification and
+//! order-status services, and unavailable authorizations might feed retry or
+//! manual-review workflows.
+//!
+//! Sinks are external deliveries, not fact channels: `InvalidOrder` and
+//! `PaymentDeclined` are recorded in the journal as provenance but have no
+//! sink of their own; their lifecycle consequence arrives here as
+//! `OrderCancelled`.
 
-use super::domain::{
-    InvalidOrder, PaymentAuthorizationUnavailable, PaymentAuthorized, PaymentDeclined,
-};
+use super::domain::{OrderCancelled, PaymentAuthorizationUnavailable, PaymentAuthorized};
 
 pub fn send_to_shipping(authorized: PaymentAuthorized) {
     println!(
@@ -23,23 +26,13 @@ pub fn send_to_shipping(authorized: PaymentAuthorized) {
     );
 }
 
-pub fn record_invalid_order(invalid: InvalidOrder) {
+pub fn record_cancelled_order(cancelled: OrderCancelled) {
     println!(
-        "🚫 Order {} is invalid before gateway authorization: {} (customer {}, amount: ${:.2})",
-        invalid.order_id,
-        invalid.reason.label(),
-        invalid.customer_id,
-        invalid.amount_cents as f64 / 100.0
-    );
-}
-
-pub fn record_gateway_decline(declined: PaymentDeclined) {
-    println!(
-        "💳 Gateway declined payment for order {}: {} (customer {}, amount: ${:.2})",
-        declined.order_id,
-        declined.reason.label(),
-        declined.customer_id,
-        declined.amount_cents as f64 / 100.0
+        "🚫 Order {} is cancelled: {} (customer {}, amount: ${:.2})",
+        cancelled.order_id,
+        cancelled.reason.label(),
+        cancelled.customer_id,
+        cancelled.amount_cents as f64 / 100.0
     );
 }
 

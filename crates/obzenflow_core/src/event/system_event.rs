@@ -455,6 +455,11 @@ pub enum StageActivity {
         event_id: EventId,
         elapsed_ms: DurationMs,
     },
+    /// The canonical deterministic merge is waiting on a quiet input
+    /// (FLOWIP-095d). This is idle-by-rule, never hung: an ordered fan-in
+    /// delivers nothing while any non-exhausted input has no head. `upstream`
+    /// names an input being waited on so operators can debug rate coupling.
+    WaitingOnQuietInput { upstream: Option<StageId> },
     /// Stage is draining.
     Draining,
     /// Stage has completed.

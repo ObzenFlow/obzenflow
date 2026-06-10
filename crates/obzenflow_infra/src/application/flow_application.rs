@@ -1289,6 +1289,9 @@ impl FlowApplication {
                         } => 1.0,
                         obzenflow_core::event::system_event::StageActivity::Draining => 2.0,
                         obzenflow_core::event::system_event::StageActivity::Completed => 3.0,
+                        obzenflow_core::event::system_event::StageActivity::WaitingOnQuietInput {
+                            ..
+                        } => 4.0,
                     };
                     snapshot
                         .liveness_metrics

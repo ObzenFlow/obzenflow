@@ -287,6 +287,42 @@ impl FlowControlPayload {
     pub fn is_natural_eof(&self) -> bool {
         self.eof_kind().is_some_and(EofKind::is_natural)
     }
+
+    /// FLOWIP-095d: whether this row is reader telemetry rather than
+    /// behavioural flow control.
+    ///
+    /// The stage journal carries two lanes. Behavioural flow control (EOF,
+    /// drain, watermarks, checkpoints, pipeline abort, source contracts)
+    /// participates in transport order: it is delivered to downstream
+    /// subscriptions and takes per-reader ordinals in the canonical
+    /// deterministic merge. Reader telemetry (consumption progress, gaps,
+    /// finals, stalls, at-least-once violations) is consumption observability
+    /// emitted at wall-clock-gated times, so its journal positions are not a
+    /// function of stream content; it is excluded from `TransportOnly`
+    /// delivery so per-reader ordinals stay a pure function of the per-input
+    /// streams across live, replay, and resume.
+    ///
+    /// `SourceContract` is behavioural: it is emitted exactly once,
+    /// deterministically, at source startup and is consumed by downstream
+    /// contract chains.
+    ///
+    /// Deliberately an exhaustive match with no wildcard arm: adding a new
+    /// variant must force a lane decision here.
+    pub fn is_reader_telemetry(&self) -> bool {
+        match self {
+            Self::ConsumptionProgress { .. }
+            | Self::ConsumptionGap { .. }
+            | Self::ConsumptionFinal { .. }
+            | Self::ReaderStalled { .. }
+            | Self::AtLeastOnceViolation { .. } => true,
+            Self::Eof { .. }
+            | Self::Watermark { .. }
+            | Self::Checkpoint { .. }
+            | Self::Drain
+            | Self::PipelineAbort { .. }
+            | Self::SourceContract { .. } => false,
+        }
+    }
 }
 
 fn current_timestamp() -> u64 {

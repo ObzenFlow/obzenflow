@@ -39,7 +39,7 @@ use obzenflow_runtime::{
             },
             stage_handle::{BoxedStageHandle, StageEvent, FORCE_SHUTDOWN_MESSAGE},
         },
-        join::{JoinBuilder, JoinConfig, JoinEvent, JoinState},
+        join::{JoinBuilder, JoinConfig, JoinEvent, JoinReferenceMode, JoinState},
         sink::journal_sink::{
             JournalSinkBuilder, JournalSinkConfig, JournalSinkEvent, JournalSinkState,
         },
@@ -2115,6 +2115,16 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
         self.reference_stage_id = id;
     }
 
+    /// FLOWIP-095d: a hydrating join is a structural deterministic orderer.
+    /// The phase boundary (reference consumed to authored EOF, then stream)
+    /// pins the reference-versus-stream order with no merge machinery. The
+    /// claim is per-boundary: a multi-upstream stream side still needs the
+    /// subscription-level canonical merge within that side, which the join
+    /// builder wires when the flow build marks the stage.
+    fn is_deterministic_input_orderer(&self) -> bool {
+        self.handler.reference_mode() == JoinReferenceMode::FiniteEof
+    }
+
     async fn create_handle_with_flow_middleware(
         self: Box<Self>,
         config: StageConfig,
@@ -2716,6 +2726,7 @@ mod tests {
             effect_runtime_mode: obzenflow_runtime::effects::EffectRuntimeMode::Live,
             effect_ports: obzenflow_runtime::effects::EffectPortRegistry::new(),
             effect_declarations: Vec::new(),
+            deterministic_fan_in: false,
         };
 
         let descriptor = FiniteSourceDescriptor {

@@ -11,7 +11,6 @@
 
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::status::processing_status::ProcessingStatus;
-use obzenflow_core::event::types::{JournalIndex, JournalPath, SeqNo};
 use obzenflow_core::event::{ChainEvent, EventId};
 use obzenflow_core::{CycleDepth, SccId, StageId, WriterId};
 use std::collections::HashMap;
@@ -26,34 +25,15 @@ const DEFAULT_CLEANUP_INTERVAL: Duration = Duration::from_secs(60);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum SignalKind {
     Eof,
-    Watermark,
-    Checkpoint,
     Drain,
     PipelineAbort,
     SourceContract,
-    ConsumptionGap,
-    ConsumptionFinal,
-    ReaderStalled,
-    AtLeastOnceViolation,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct OneShotKey {
     kind: SignalKind,
     origin: WriterId,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct ProgressKey {
-    origin: WriterId,
-    reader_path: JournalPath,
-    reader_index: JournalIndex,
-}
-
-#[derive(Debug, Clone)]
-struct ProgressEntry {
-    last_seq: SeqNo,
-    last_accessed: Instant,
 }
 
 /// Unified cycle protection for stages participating in a backflow cycle.
@@ -71,7 +51,6 @@ pub(crate) struct CycleGuard {
     // --- Flow signal attenuation (FLOWIP-051l) ---
     forwarded_signal_ids: HashMap<EventId, Instant>,
     forwarded_one_shots: HashMap<OneShotKey, Instant>,
-    progress_watermarks: HashMap<ProgressKey, ProgressEntry>,
 
     // --- Cycle EOF tracking (liveness in SCCs) ---
     upstream_eofs_seen: HashMap<StageId, Instant>,
@@ -94,7 +73,6 @@ impl CycleGuard {
             last_cleanup: Instant::now(),
             forwarded_signal_ids: HashMap::new(),
             forwarded_one_shots: HashMap::new(),
-            progress_watermarks: HashMap::new(),
             upstream_eofs_seen: HashMap::new(),
         }
     }
@@ -126,7 +104,10 @@ impl CycleGuard {
     /// - Event-id dedup for all signals (suppresses exact re-arrivals).
     /// - Watermark/checkpoint pass-through (advancing state).
     /// - One-shot suppression for "terminal" signals keyed by (kind, origin).
-    /// - ConsumptionProgress watermark suppression keyed by (origin, reader, index).
+    ///
+    /// Reader telemetry never reaches this decision: it is filtered at the
+    /// read side of every `TransportOnly` subscription (FLOWIP-095d), so it
+    /// cannot circulate in a cycle in the first place.
     pub(crate) fn should_forward_signal(&mut self, event: &ChainEvent) -> bool {
         let now = Instant::now();
         self.maybe_cleanup(now);
@@ -140,107 +121,49 @@ impl CycleGuard {
             _ => return true,
         };
 
-        match payload {
-            FlowControlPayload::ConsumptionProgress {
-                reader_seq,
-                reader_path,
-                reader_index,
-                ..
-            } => {
-                // ConsumptionProgress: forward only when reader_seq advances for this origin+reader.
-                let key = ProgressKey {
-                    origin: event.writer_id,
-                    reader_path: reader_path.clone(),
-                    reader_index: *reader_index,
-                };
-
-                match self.progress_watermarks.get_mut(&key) {
-                    Some(entry) => {
-                        entry.last_accessed = now;
-                        if *reader_seq <= entry.last_seq {
-                            debug!(
-                                stage_name = %self.stage_name,
-                                origin = %event.writer_id,
-                                reader_path = %key.reader_path.0,
-                                reader_index = key.reader_index.0,
-                                reader_seq = reader_seq.0,
-                                last_seq = entry.last_seq.0,
-                                "CycleGuard: suppressing stale consumption_progress signal"
-                            );
-                            return false;
-                        }
-
-                        entry.last_seq = *reader_seq;
-                        debug!(
-                            stage_name = %self.stage_name,
-                            origin = %event.writer_id,
-                            reader_path = %key.reader_path.0,
-                            reader_index = key.reader_index.0,
-                            reader_seq = reader_seq.0,
-                            "CycleGuard: allowing advanced consumption_progress signal"
-                        );
-                        true
-                    }
-                    None => {
-                        self.progress_watermarks.insert(
-                            key,
-                            ProgressEntry {
-                                last_seq: *reader_seq,
-                                last_accessed: now,
-                            },
-                        );
-                        true
-                    }
-                }
+        let kind = match payload {
+            FlowControlPayload::Eof { .. } => SignalKind::Eof,
+            FlowControlPayload::Drain => SignalKind::Drain,
+            FlowControlPayload::PipelineAbort { .. } => SignalKind::PipelineAbort,
+            FlowControlPayload::SourceContract { .. } => SignalKind::SourceContract,
+            // Allow repeated watermarks/checkpoints as they represent advancing
+            // state. The event-id dedup above is sufficient to prevent cycle
+            // amplification.
+            FlowControlPayload::Watermark { .. } | FlowControlPayload::Checkpoint { .. } => {
+                return true;
             }
+            FlowControlPayload::ConsumptionProgress { .. }
+            | FlowControlPayload::ConsumptionGap { .. }
+            | FlowControlPayload::ConsumptionFinal { .. }
+            | FlowControlPayload::ReaderStalled { .. }
+            | FlowControlPayload::AtLeastOnceViolation { .. } => {
+                unreachable!(
+                    "FLOWIP-095d: reader telemetry is filtered at the read side of every \
+                     TransportOnly subscription and never reaches signal forwarding"
+                )
+            }
+        };
 
-            other => {
-                let kind = match other {
-                    FlowControlPayload::Eof { .. } => SignalKind::Eof,
-                    FlowControlPayload::Watermark { .. } => SignalKind::Watermark,
-                    FlowControlPayload::Checkpoint { .. } => SignalKind::Checkpoint,
-                    FlowControlPayload::Drain => SignalKind::Drain,
-                    FlowControlPayload::PipelineAbort { .. } => SignalKind::PipelineAbort,
-                    FlowControlPayload::SourceContract { .. } => SignalKind::SourceContract,
-                    FlowControlPayload::ConsumptionGap { .. } => SignalKind::ConsumptionGap,
-                    FlowControlPayload::ConsumptionFinal { .. } => SignalKind::ConsumptionFinal,
-                    FlowControlPayload::ReaderStalled { .. } => SignalKind::ReaderStalled,
-                    FlowControlPayload::AtLeastOnceViolation { .. } => {
-                        SignalKind::AtLeastOnceViolation
-                    }
-                    FlowControlPayload::ConsumptionProgress { .. } => {
-                        unreachable!("handled above")
-                    }
-                };
-
-                // Allow repeated watermarks/checkpoints as they represent advancing state.
-                // The event-id dedup above is sufficient to prevent cycle amplification.
-                if matches!(kind, SignalKind::Watermark | SignalKind::Checkpoint) {
-                    return true;
-                }
-
-                // Coarse dedup for one-shot style signals to avoid repeated emissions
-                // (new event IDs) amplifying in cycles.
-                let key = OneShotKey {
-                    kind,
-                    origin: event.writer_id,
-                };
-                match self.forwarded_one_shots.get_mut(&key) {
-                    Some(last_seen) => {
-                        *last_seen = now;
-                        debug!(
-                            stage_name = %self.stage_name,
-                            signal_kind = ?kind,
-                            origin = %event.writer_id,
-                            "CycleGuard: suppressing repeated one-shot flow control signal"
-                        );
-                        false
-                    }
-                    None => {
-                        self.forwarded_one_shots.insert(key, now);
-                        true
-                    }
-                }
+        // Coarse dedup for one-shot style signals to avoid repeated emissions
+        // (new event IDs) amplifying in cycles.
+        let key = OneShotKey {
+            kind,
+            origin: event.writer_id,
+        };
+        match self.forwarded_one_shots.get_mut(&key) {
+            Some(last_seen) => {
+                *last_seen = now;
+                debug!(
+                    stage_name = %self.stage_name,
+                    signal_kind = ?kind,
+                    origin = %event.writer_id,
+                    "CycleGuard: suppressing repeated one-shot flow control signal"
+                );
+                false
+            }
+            None => {
+                self.forwarded_one_shots.insert(key, now);
+                true
             }
         }
     }
@@ -356,23 +279,6 @@ impl CycleGuard {
             }
         });
 
-        self.progress_watermarks.retain(|key, entry| {
-            let age = now.duration_since(entry.last_accessed);
-            if age > self.entry_ttl {
-                debug!(
-                    stage_name = %self.stage_name,
-                    origin = %key.origin,
-                    reader_path = %key.reader_path.0,
-                    reader_index = key.reader_index.0,
-                    age = ?age,
-                    "CycleGuard: removing expired progress watermark entry"
-                );
-                false
-            } else {
-                true
-            }
-        });
-
         self.upstream_eofs_seen.retain(|upstream, last_seen| {
             let age = now.duration_since(*last_seen);
             if age > self.entry_ttl {
@@ -403,23 +309,6 @@ mod tests {
         SccId::from_ulid(obzenflow_core::Ulid::from(n))
     }
 
-    fn progress_event(origin: WriterId, seq: u64) -> ChainEvent {
-        ChainEventFactory::consumption_progress_event(
-            origin,
-            obzenflow_core::event::ConsumptionProgressEventParams {
-                reader_seq: SeqNo(seq),
-                last_event_id: None,
-                vector_clock: None,
-                eof_seen: false,
-                reader_path: JournalPath("upstream".to_string()),
-                reader_index: JournalIndex(0),
-                advertised_writer_seq: None,
-                advertised_vector_clock: None,
-                stalled_since: None,
-            },
-        )
-    }
-
     #[test]
     fn check_signal_deduplicates_by_event_id() {
         let mut guard = CycleGuard::new(MaxIterations::new(10), test_scc_id(0), true, "stage_a");
@@ -428,36 +317,6 @@ mod tests {
 
         assert!(guard.should_forward_signal(&event));
         assert!(!guard.should_forward_signal(&event));
-    }
-
-    #[test]
-    fn check_signal_suppresses_stale_consumption_progress() {
-        let mut guard = CycleGuard::new(MaxIterations::new(10), test_scc_id(0), true, "stage_a");
-        let origin = WriterId::from(StageId::new());
-
-        let event1 = progress_event(origin, 1);
-        let event2 = progress_event(origin, 1);
-
-        assert!(guard.should_forward_signal(&event1));
-        assert!(
-            !guard.should_forward_signal(&event2),
-            "same reader_seq should be suppressed even with new event_id"
-        );
-    }
-
-    #[test]
-    fn check_signal_allows_advanced_consumption_progress() {
-        let mut guard = CycleGuard::new(MaxIterations::new(10), test_scc_id(0), true, "stage_a");
-        let origin = WriterId::from(StageId::new());
-
-        let event1 = progress_event(origin, 1);
-        let event2 = progress_event(origin, 2);
-
-        assert!(guard.should_forward_signal(&event1));
-        assert!(
-            guard.should_forward_signal(&event2),
-            "advanced reader_seq should be forwarded"
-        );
     }
 
     #[test]
@@ -532,17 +391,6 @@ mod tests {
             },
             old,
         );
-        guard.progress_watermarks.insert(
-            ProgressKey {
-                origin,
-                reader_path: JournalPath("upstream".to_string()),
-                reader_index: JournalIndex(0),
-            },
-            ProgressEntry {
-                last_seq: SeqNo(1),
-                last_accessed: old,
-            },
-        );
 
         let upstream = StageId::new();
         guard.upstream_eofs_seen.insert(upstream, old);
@@ -551,7 +399,6 @@ mod tests {
 
         assert!(guard.forwarded_signal_ids.is_empty());
         assert!(guard.forwarded_one_shots.is_empty());
-        assert!(guard.progress_watermarks.is_empty());
         assert!(guard.upstream_eofs_seen.is_empty());
     }
 

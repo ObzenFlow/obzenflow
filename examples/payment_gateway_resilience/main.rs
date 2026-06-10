@@ -39,8 +39,9 @@ fn main() -> Result<()> {
         .bullets(
             "What to watch",
             [
-                "Locally invalid orders and gateway declines go to separate business-event channels",
-                "Gateway outages open the circuit breaker (obzenflow_circuit_breaker_*); once open it emits authorization-unavailable events",
+                "validate_order classifies once and authors multiple named facts; invalid orders and gateway declines converge on the cancelled-orders delivery",
+                "InvalidOrder and PaymentDeclined are journal-recorded provenance facts with no sink; OrderCancelled carries the order's fate",
+                "Gateway outages open the circuit breaker (obzenflow_circuit_breaker_*); once open it emits authorization-unavailable events, which do not cancel",
                 "Re-run with --replay-from target/payment-gateway-logs/flows/<flow_id> to replay with zero gateway calls",
             ],
         )

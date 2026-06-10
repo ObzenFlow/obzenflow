@@ -20,6 +20,137 @@ use crate::pipeline::config::CycleGuardConfig;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct StageInputPosition(pub u64);
 
+/// Stable cross-run upstream identity (FLOWIP-095d): the descriptor stage
+/// name, never the per-run `StageId` ULID. This is a replay-order
+/// correctness key, not display text; it is a tiebreak component of the
+/// canonical deterministic merge.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct StageKey(String);
+
+impl StageKey {
+    pub fn new(name: impl Into<String>) -> Self {
+        Self(name.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for StageKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// Selected-feed identity component of the merge tiebreak (FLOWIP-095d): the
+/// sorted set of (role, event type) feeds a reader consumes, empty when the
+/// reader is unfiltered. Structural rather than a joined string, so the
+/// ordering can never be perturbed by delimiter collisions inside event-type
+/// names. The derived `Ord` is lexicographic over the sorted entries;
+/// `SelectedFeedRole`'s variant order is part of the total order and is
+/// code-defined, so it is stable across runs.
+#[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub struct FeedIdentity(Vec<(SelectedFeedRole, EventType)>);
+
+impl FeedIdentity {
+    /// Identity of an unfiltered reader (compares before every filtered one).
+    pub fn unfiltered() -> Self {
+        Self::default()
+    }
+
+    pub fn from_feeds(feeds: &[SelectedFeedMetadata]) -> Self {
+        let mut entries: Vec<(SelectedFeedRole, EventType)> = feeds
+            .iter()
+            .map(|feed| (feed.role(), feed.event_type().clone()))
+            .collect();
+        entries.sort_unstable();
+        Self(entries)
+    }
+}
+
+impl std::fmt::Display for FeedIdentity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for (index, (role, event_type)) in self.0.iter().enumerate() {
+            if index > 0 {
+                f.write_str(",")?;
+            }
+            write!(f, "{role:?}:{}", event_type.as_str())?;
+        }
+        Ok(())
+    }
+}
+
+/// The canonical merge tiebreak key for one reader (FLOWIP-095d): stage key,
+/// then feed identity, both stable across runs. Compared after the delivered
+/// ordinal; per-run identifiers never participate. The derived `Ord` follows
+/// field order.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ReaderTiebreakKey {
+    pub stage_key: StageKey,
+    pub feed_identity: FeedIdentity,
+}
+
+/// Count of transport events delivered from one reader (FLOWIP-095d): the
+/// canonical merge's ordinal source and its entire checkpointable state.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct DeliveredCount(pub u64);
+
+impl DeliveredCount {
+    pub fn increment(&mut self) {
+        self.0 = self.0.saturating_add(1);
+    }
+
+    /// The tiebreak ordinal this reader's next delivery would take.
+    pub fn next_ordinal(self) -> DeliveredOrdinal {
+        DeliveredOrdinal(self.0.saturating_add(1))
+    }
+}
+
+/// The tiebreak ordinal a pending delivery would take (FLOWIP-095d).
+/// Deliberately distinct from `DeliveredCount` so a count can never be
+/// compared against an ordinal; both the subscription-internal merge and the
+/// join's cross-side rule compare ordinals only.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct DeliveredOrdinal(pub u64);
+
+/// Reader-selection policy for a multi-reader subscription (FLOWIP-095d).
+///
+/// `AvailabilityRoundRobin` is today's behaviour: cycle through readers and
+/// deliver whatever is available first. Delivery order then depends on arrival
+/// timing, which is fine for stages that do not need deterministic fan-in.
+///
+/// `CanonicalMerge` is the Kahn-style deterministic merge: hold one head per
+/// reader, deliver nothing while any non-exhausted reader is quiet, and choose
+/// among heads by happened-before then a (delivered ordinal, stage name, feed
+/// identity) tiebreak. Delivery order becomes a pure function of the per-input
+/// streams, so live, replay, and resume catch-up all compute the same order.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ReaderSelectionPolicy {
+    #[default]
+    AvailabilityRoundRobin,
+    CanonicalMerge,
+}
+
+/// Why a canonical-merge poll delivered nothing: at least one non-exhausted
+/// input had no head. Surfaced so supervisors can report idle-by-rule waits
+/// (the input being waited on) instead of looking hung.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MergeWaitState {
+    pub quiet_inputs: Vec<(StageId, String)>,
+}
+
+/// Status of a canonical-merge candidate acquisition pass.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MergeCandidateStatus {
+    /// Every non-exhausted reader presents a head and a winner is selected.
+    Candidate,
+    /// At least one non-exhausted reader has no head; nothing may deliver.
+    Quiet,
+    /// Every reader has delivered its authored EOF; the merge is finished.
+    AllExhausted,
+}
+
 /// Status of contract checking
 #[derive(Debug)]
 #[must_use]
@@ -140,7 +271,9 @@ pub struct EofOutcome {
     pub is_final: bool,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+/// The variant order participates in `FeedIdentity`'s total order
+/// (FLOWIP-095d); it is code-defined and therefore stable across runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum SelectedFeedRole {
     /// Compatibility path for callers that select only by event type and do not
     /// distinguish input/reference/stream roles.

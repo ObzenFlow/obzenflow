@@ -240,9 +240,13 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Superviso
                         if let JoinEvent::Error(msg) = event {
                             ctx.instrumentation.transition_to_state("Failed");
                             ctx.instrumentation.failures_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            let failure_msg = msg.clone();
                             Ok(Transition {
-                                next_state: JoinState::Failed(msg),
-                                actions: vec![JoinAction::Cleanup],
+                                next_state: JoinState::Failed(failure_msg),
+                                actions: vec![
+                                    JoinAction::SendFailure { message: msg },
+                                    JoinAction::Cleanup,
+                                ],
                             })
                         } else {
                             unreachable!()
@@ -288,9 +292,13 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Superviso
                         if let JoinEvent::Error(msg) = event {
                             ctx.instrumentation.transition_to_state("Failed");
                             ctx.instrumentation.failures_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            let failure_msg = msg.clone();
                             Ok(Transition {
-                                next_state: JoinState::Failed(msg),
-                                actions: vec![JoinAction::Cleanup],
+                                next_state: JoinState::Failed(failure_msg),
+                                actions: vec![
+                                    JoinAction::SendFailure { message: msg },
+                                    JoinAction::Cleanup,
+                                ],
                             })
                         } else {
                             unreachable!()

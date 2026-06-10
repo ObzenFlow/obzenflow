@@ -164,12 +164,12 @@ pub(super) async fn dispatch_enriching<
                     }
                 }
                 obzenflow_core::event::ChainEventContent::Data { .. } => {
-                    let source_id = envelope
-                        .event
-                        .writer_id
-                        .as_stage()
-                        .copied()
-                        .ok_or("Event writer is not a stage")?;
+                    // Edge identity comes from the reader slot that delivered
+                    // the envelope, never from `event.writer_id`, which is
+                    // preserved across stages for causal attribution.
+                    let source_id = subscription
+                        .last_delivered_upstream_stage()
+                        .ok_or("No delivered upstream recorded for stream event")?;
                     let writer_id = ctx.writer_id.ok_or("No writer ID available")?;
                     let event = envelope.event.clone();
                     let event_id = event.id;

@@ -21,6 +21,27 @@ pub enum TrafficPhase {
     Recovery,
 }
 
+/// The order channel an upstream event arrived on (FLOWIP-095d).
+///
+/// Two channels feed the flow concurrently; the canonical deterministic merge
+/// at `validate_order` makes their interleaving a pure function of the two
+/// recorded streams, so live runs with different arrival timing and replays
+/// all consume orders in the same merged order.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+pub enum OrderChannel {
+    Web,
+    Store,
+}
+
+impl OrderChannel {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Web => "web",
+            Self::Store => "store",
+        }
+    }
+}
+
 /// Upstream business event saying a customer placed an order.
 ///
 /// This is the input boundary of the tutorial. In production it might be read
@@ -38,6 +59,7 @@ pub enum TrafficPhase {
 pub struct CustomerOrderPlaced {
     pub order_id: String,
     pub customer_id: String,
+    pub channel: OrderChannel,
     pub amount_cents: u64,
     pub payment_method_state: PaymentMethodState,
     pub phase: TrafficPhase,
@@ -66,6 +88,7 @@ pub enum PaymentMethodState {
 pub struct ValidatedOrder {
     pub order_id: String,
     pub customer_id: String,
+    pub channel: OrderChannel,
     pub amount_cents: u64,
     pub payment_method_state: PaymentMethodState,
     pub phase: TrafficPhase,
@@ -107,6 +130,55 @@ pub struct InvalidOrder {
 
 impl TypedPayload for InvalidOrder {
     const EVENT_TYPE: &'static str = "order.invalid";
+    const SCHEMA_VERSION: u32 = 1;
+}
+
+/// Why an order's lifecycle ended in cancellation.
+///
+/// Cancellation is a lifecycle consequence derived from a more specific fact:
+/// local validation failed (`InvalidOrder`) or the gateway declined payment
+/// (`PaymentDeclined`). The specific fact stays in the journal as provenance;
+/// this reason carries enough for subscribers that only care about the order's
+/// fate.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub enum OrderCancellationReason {
+    LocalValidationFailed { reason: InvalidOrderReason },
+    PaymentDeclined { reason: PaymentDeclineReason },
+}
+
+impl OrderCancellationReason {
+    pub fn label(&self) -> String {
+        match self {
+            Self::LocalValidationFailed { reason } => {
+                format!("local validation failed: {}", reason.label())
+            }
+            Self::PaymentDeclined { reason } => {
+                format!("payment declined: {}", reason.label())
+            }
+        }
+    }
+}
+
+/// Lifecycle fact: this order will not proceed and is cancelled.
+///
+/// Authored by whichever stage decided the order's fate: `validate_order` for
+/// locally invalid orders, `authorize_payment` for gateway declines. Both write
+/// the same named fact, so a single cancelled-orders subscriber sees every
+/// cancellation regardless of origin.
+///
+/// A gateway that was merely unavailable does not cancel: no decision was
+/// reached, so those orders go to manual review instead.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct OrderCancelled {
+    pub order_id: String,
+    pub customer_id: String,
+    pub amount_cents: u64,
+    pub phase: TrafficPhase,
+    pub reason: OrderCancellationReason,
+}
+
+impl TypedPayload for OrderCancelled {
+    const EVENT_TYPE: &'static str = "order.cancelled";
     const SCHEMA_VERSION: u32 = 1;
 }
 

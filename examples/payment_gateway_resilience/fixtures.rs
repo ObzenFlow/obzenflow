@@ -2,19 +2,48 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use super::domain::{CustomerOrderPlaced, PaymentMethodState, TrafficPhase};
+use super::domain::{CustomerOrderPlaced, OrderChannel, PaymentMethodState, TrafficPhase};
 
-/// Scripted upstream event sequence used by the demo source.
+/// Scripted upstream event sequences used by the demo sources (FLOWIP-095d).
 ///
-/// The sequence is deliberately small and predictable so it is
-/// easy to reason about circuit breaker behaviour:
+/// The original single stream is split across two order channels, web and
+/// store, by alternating orders. The channels deliberately end at different
+/// lengths (13 web, 12 store) so the earlier-ending channel's merged EOF
+/// point is a real thing to reproduce under replay.
+///
+/// The combined sequence keeps the three scripted phases so it is easy to
+/// reason about circuit breaker behaviour:
 ///
 /// - First 8 orders (Warmup): locally valid, gateway healthy, with a couple of
 ///   material payment declines.
 /// - Next 10 orders (Outage): locally valid, gateway starts failing.
 /// - Final 7 orders (Recovery): mix of local invalid orders, gateway declines,
 ///   and successful authorizations while the gateway is healthy again.
-pub fn scripted_orders() -> Vec<CustomerOrderPlaced> {
+pub fn scripted_web_orders() -> Vec<CustomerOrderPlaced> {
+    split_channel(OrderChannel::Web)
+}
+
+pub fn scripted_store_orders() -> Vec<CustomerOrderPlaced> {
+    split_channel(OrderChannel::Store)
+}
+
+fn split_channel(channel: OrderChannel) -> Vec<CustomerOrderPlaced> {
+    scripted_orders()
+        .into_iter()
+        .enumerate()
+        .filter(|(index, _)| match channel {
+            OrderChannel::Web => index % 2 == 0,
+            OrderChannel::Store => index % 2 == 1,
+        })
+        .map(|(_, mut order)| {
+            order.order_id = format!("{}-{}", channel.label(), order.order_id);
+            order.channel = channel;
+            order
+        })
+        .collect()
+}
+
+fn scripted_orders() -> Vec<CustomerOrderPlaced> {
     let mut orders = Vec::new();
 
     // Warmup: healthy dependency. Some payment methods are declined by the
@@ -23,6 +52,7 @@ pub fn scripted_orders() -> Vec<CustomerOrderPlaced> {
         orders.push(CustomerOrderPlaced {
             order_id: format!("warmup-{i}"),
             customer_id: format!("cust-{i}"),
+            channel: OrderChannel::Web,
             amount_cents: 10_00,
             payment_method_state: match i {
                 2 => PaymentMethodState::InsufficientFunds,
@@ -38,6 +68,7 @@ pub fn scripted_orders() -> Vec<CustomerOrderPlaced> {
         orders.push(CustomerOrderPlaced {
             order_id: format!("outage-{i}"),
             customer_id: format!("cust-{}", 100 + i),
+            channel: OrderChannel::Web,
             amount_cents: 20_00,
             payment_method_state: PaymentMethodState::Valid,
             phase: TrafficPhase::Outage,
@@ -61,6 +92,7 @@ pub fn scripted_orders() -> Vec<CustomerOrderPlaced> {
         orders.push(CustomerOrderPlaced {
             order_id: format!("recovery-{idx}"),
             customer_id: format!("cust-{}", 200 + idx),
+            channel: OrderChannel::Web,
             amount_cents,
             payment_method_state,
             phase: TrafficPhase::Recovery,

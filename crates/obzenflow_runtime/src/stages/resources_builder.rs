@@ -15,7 +15,8 @@ use crate::feed_plan::{FeedPlan, LogicalFeed, StageOutputContract};
 use crate::id_conversions::StageIdExt;
 use crate::message_bus::FsmMessageBus;
 use crate::messaging::upstream_subscription::{
-    ContractsWiring, SelectedFeedMetadata, SelectedFeedRole, UpstreamSubscription,
+    ContractsWiring, ReaderSelectionPolicy, SelectedFeedMetadata, SelectedFeedRole,
+    UpstreamSubscription,
 };
 use crate::replay::ReplayArchive;
 use crate::stages::LivenessSnapshots;
@@ -23,7 +24,7 @@ use obzenflow_core::event::SystemEvent;
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{ChainEvent, EventType, FlowId, StageId, SystemId};
 use obzenflow_topology::Topology;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 /// Factory for creating subscriptions with pre-computed metadata
@@ -43,6 +44,10 @@ pub struct BoundSubscriptionFactory {
     pub owner_label: String,
     journals_with_names: Vec<(StageId, String, Arc<dyn Journal<ChainEvent>>)>,
     selected_feeds_by_stage: HashMap<StageId, Vec<SelectedFeedMetadata>>,
+    /// Reader-selection policy for built subscriptions (FLOWIP-095d).
+    /// `CanonicalMerge` on stages the flow build marked as deterministic
+    /// fan-in orderers; availability-driven round-robin otherwise.
+    pub reader_selection: ReaderSelectionPolicy,
 }
 
 impl SubscriptionFactory {
@@ -95,6 +100,7 @@ impl SubscriptionFactory {
             owner_label: "unknown_owner".to_string(),
             journals_with_names,
             selected_feeds_by_stage: HashMap::new(),
+            reader_selection: ReaderSelectionPolicy::default(),
         }
     }
 
@@ -117,6 +123,7 @@ impl BoundSubscriptionFactory {
             .await
             .map(|sub| {
                 sub.with_selected_feeds(self.selected_feeds_by_stage.clone())
+                    .with_reader_selection(self.reader_selection)
                     .transport_only()
             })
             .map_err(|e| format!("Failed to create subscription: {e:?}"))
@@ -132,6 +139,7 @@ impl BoundSubscriptionFactory {
                 .await
                 .map_err(|e| format!("Failed to create subscription: {e:?}"))?
                 .with_selected_feeds(self.selected_feeds_by_stage.clone())
+                .with_reader_selection(self.reader_selection)
                 .with_contracts(wiring)
                 .transport_only();
 
@@ -242,6 +250,11 @@ pub struct StageResources {
 
     /// Descriptor-owned effect declarations available to replay-safe effect invocation.
     pub effect_declarations: Vec<EffectDeclaration>,
+
+    /// Whether the flow build marked this stage as a deterministic fan-in
+    /// orderer (FLOWIP-095d): a multi-inbound stage with an effectful
+    /// descendant whose input delivery runs the canonical merge.
+    pub deterministic_fan_in: bool,
 }
 
 /// Builder for creating all stage resources with proper wiring
@@ -256,6 +269,7 @@ pub struct StageResourcesBuilder {
     replay_archive: Option<Arc<dyn ReplayArchive>>,
     effect_ports: EffectPortRegistry,
     feed_plan: FeedPlan,
+    deterministic_fan_in_stages: HashSet<StageId>,
 }
 
 impl StageResourcesBuilder {
@@ -279,6 +293,7 @@ impl StageResourcesBuilder {
             replay_archive: None,
             effect_ports: EffectPortRegistry::new(),
             feed_plan: FeedPlan::default(),
+            deterministic_fan_in_stages: HashSet::new(),
         }
     }
 
@@ -303,6 +318,13 @@ impl StageResourcesBuilder {
     /// Inject flow-scoped logical feed metadata derived by the DSL.
     pub fn with_feed_plan(mut self, feed_plan: FeedPlan) -> Self {
         self.feed_plan = feed_plan;
+        self
+    }
+
+    /// Inject the stages the flow build marked as deterministic fan-in
+    /// orderers (FLOWIP-095d). Their subscriptions run the canonical merge.
+    pub fn with_deterministic_fan_in_stages(mut self, stages: HashSet<StageId>) -> Self {
+        self.deterministic_fan_in_stages = stages;
         self
     }
 
@@ -474,9 +496,14 @@ impl StageResourcesBuilder {
                 .unwrap_or_default();
             let input_feeds = self.feed_plan.input_feeds(stage_id);
             let selected_feeds_by_stage = selected_feeds_by_upstream(&input_feeds);
+            let deterministic_fan_in = self.deterministic_fan_in_stages.contains(&stage_id);
             let mut upstream_subscription_factory = subscription_factory
                 .bind_with_selected_feeds(&upstream_journals, selected_feeds_by_stage);
             upstream_subscription_factory.owner_label = stage_info.name.clone();
+            if deterministic_fan_in {
+                upstream_subscription_factory.reader_selection =
+                    ReaderSelectionPolicy::CanonicalMerge;
+            }
 
             let resources = StageResources {
                 flow_id: self.flow_id,
@@ -505,6 +532,7 @@ impl StageResourcesBuilder {
                 replay_archive: self.replay_archive.clone(),
                 effect_ports: self.effect_ports.clone(),
                 effect_declarations: Vec::new(),
+                deterministic_fan_in,
             };
 
             tracing::debug!(
