@@ -876,7 +876,10 @@ mod tests {
         let empty = VectorClock::new();
         let a = meta(1, "z_stage", &empty, false);
         let b = meta(2, "a_stage", &empty, false);
-        assert_eq!(select_between(&a, "reference", &b, "stream"), Ordering::Less);
+        assert_eq!(
+            select_between(&a, "reference", &b, "stream"),
+            Ordering::Less
+        );
     }
 
     #[test]
@@ -884,7 +887,10 @@ mod tests {
         let empty = VectorClock::new();
         let a = meta(1, "a_stage", &empty, false);
         let b = meta(1, "b_stage", &empty, false);
-        assert_eq!(select_between(&a, "stream", &b, "reference"), Ordering::Less);
+        assert_eq!(
+            select_between(&a, "stream", &b, "reference"),
+            Ordering::Less
+        );
 
         let same_a = meta(1, "same", &empty, false);
         let same_b = meta(1, "same", &empty, false);
@@ -903,7 +909,10 @@ mod tests {
         // still loses to its causal ancestor.
         let a = meta(5, "z_stage", &ancestor, false);
         let b = meta(1, "a_stage", &derived, false);
-        assert_eq!(select_between(&a, "stream", &b, "reference"), Ordering::Less);
+        assert_eq!(
+            select_between(&a, "stream", &b, "reference"),
+            Ordering::Less
+        );
         assert_eq!(
             select_between(&b, "reference", &a, "stream"),
             Ordering::Greater

@@ -163,7 +163,7 @@ impl TransformHandler for FanOutEntryTransform {
 
         self.processed.fetch_add(1, Ordering::Relaxed);
 
-        if event_type != SeedEvent::EVENT_TYPE {
+        if !SeedEvent::event_type_matches(event_type) {
             return Ok(Vec::new());
         }
 
@@ -254,7 +254,7 @@ impl TransformHandler for IterationTransform {
             return Ok(Vec::new());
         };
 
-        if event_type != SeedEvent::EVENT_TYPE
+        if !SeedEvent::event_type_matches(event_type)
             || payload.get("kind").and_then(|v| v.as_str()) != Some("iter")
         {
             return Ok(Vec::new());
@@ -307,7 +307,7 @@ impl SinkHandler for DoneCounterSink {
             payload,
         } = &event.content
         {
-            if event_type == SeedEvent::EVENT_TYPE
+            if SeedEvent::event_type_matches(event_type)
                 && payload.get("kind").and_then(|v| v.as_str()) == Some("done")
             {
                 self.done_count.fetch_add(1, Ordering::Relaxed);

@@ -85,6 +85,7 @@ struct ChannelSource {
     next_index: usize,
     count: usize,
     jitter_ms: u64,
+    delay_ms: u64,
     writer_id: WriterId,
 }
 
@@ -102,6 +103,22 @@ impl ChannelSource {
             next_index: 0,
             count,
             jitter_ms,
+            delay_ms: 0,
+            writer_id: WriterId::from(StageId::new()),
+        }
+    }
+
+    /// Fixed per-event delay (unlike `jitter_ms`, which is a maximum). The
+    /// telemetry witness uses this to guarantee the live run crosses the
+    /// contract tick so intermediate stages emit ConsumptionProgress
+    /// mid-stream.
+    fn with_delay(channel: &'static str, count: usize, delay_ms: u64) -> Self {
+        Self {
+            channel,
+            next_index: 0,
+            count,
+            jitter_ms: 0,
+            delay_ms,
             writer_id: WriterId::from(StageId::new()),
         }
     }
@@ -113,6 +130,9 @@ impl FiniteSourceHandler for ChannelSource {
             return Ok(None);
         }
         self.next_index += 1;
+        if self.delay_ms > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(self.delay_ms));
+        }
         if self.jitter_ms > 0 {
             let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
             for byte in self.channel.bytes().chain(self.next_index.to_le_bytes()) {
@@ -336,13 +356,21 @@ fn build_two_channel_flow_with_jitter(
 /// so the merge's two inputs are causally related and the canonical merge must
 /// deliver each original before the tap sibling derived from it.
 fn build_skip_level_flow(journal_base: PathBuf, calls: Arc<AtomicUsize>) -> FlowDefinition {
+    build_skip_level_flow_with_delay(journal_base, calls, 0)
+}
+
+fn build_skip_level_flow_with_delay(
+    journal_base: PathBuf,
+    calls: Arc<AtomicUsize>,
+    delay_ms: u64,
+) -> FlowDefinition {
     flow! {
         name: "deterministic_fan_in_skip_level",
         journals: disk_journals(journal_base),
         middleware: [],
 
         stages: {
-            source_a = source!(FanInInput => ChannelSource::new("a", 4));
+            source_a = source!(FanInInput => ChannelSource::with_delay("a", 4, delay_ms));
             tap = transform!(FanInInput -> FanInInput => TapTransform::new());
             merge = transform!(FanInInput -> MergedRecord => MergeTransform::new());
             effectful = effectful_transform!(
@@ -569,6 +597,56 @@ async fn skip_level_fan_in_delivers_causal_ancestors_first() {
     let replay_run = replay_testkit::latest_run_dir(&journal_base);
     replay_testkit::assert_same_delivered_order(
         &run_dir,
+        &replay_run,
+        "merge",
+        &["source_a", "tap"],
+    )
+    .await;
+}
+
+/// The telemetry-lane witness (FLOWIP-095d): a live run long enough to cross
+/// the contract tick makes the intermediate `tap` stage emit
+/// ConsumptionProgress rows into its data journal mid-stream, at
+/// wall-clock-dependent positions. The read-side telemetry filter keeps those
+/// rows out of the merge's per-reader ordinals, so replay still reproduces
+/// the fan-in order exactly. Before the filter, the interleaved rows took
+/// ordinals at timing-dependent positions and could flip the tiebreak between
+/// live and replay.
+#[tokio::test]
+async fn fan_in_replay_unaffected_by_mid_stream_reader_telemetry() {
+    let _guard = FAN_IN_TEST_LOCK.lock().await;
+    let temp = tempfile::tempdir().expect("tempdir");
+    let journal_base = temp.path().join("journals");
+
+    // 4 events x 250ms ≈ 1s of live runtime, comfortably past the ~500ms
+    // contract tick, so tap's subscription emits progress mid-stream.
+    let live_calls = Arc::new(AtomicUsize::new(0));
+    run_live(
+        &journal_base,
+        build_skip_level_flow_with_delay(journal_base.clone(), live_calls.clone(), 250),
+    )
+    .await;
+    let live_run = replay_testkit::latest_run_dir(&journal_base);
+
+    // Witness validity: the run must actually have exercised the condition.
+    let telemetry_rows = replay_testkit::count_reader_telemetry_rows(&live_run, "tap").await;
+    assert!(
+        telemetry_rows > 0,
+        "the slow live run must emit reader telemetry mid-stream for this \
+         witness to mean anything (found none; raise the delay?)"
+    );
+
+    let replay_calls = Arc::new(AtomicUsize::new(0));
+    run_replay(
+        &live_run,
+        build_skip_level_flow_with_delay(journal_base.clone(), replay_calls.clone(), 250),
+    )
+    .await;
+    assert_eq!(replay_calls.load(Ordering::SeqCst), 0);
+    let replay_run = replay_testkit::latest_run_dir(&journal_base);
+
+    replay_testkit::assert_same_delivered_order(
+        &live_run,
         &replay_run,
         "merge",
         &["source_a", "tap"],

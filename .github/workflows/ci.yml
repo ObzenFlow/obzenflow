@@ -244,7 +244,15 @@ jobs:
       - name: Install nextest
         uses: taiki-e/install-action@nextest
 
-      - name: Demonstrating tests (test-support)
+      - name: Tests (test-support)
+        # Every test-support binary runs; coverage policy lives in
+        # .config/nextest.toml profiles, never in a workflow allowlist. A
+        # hand-maintained binary filter here silently excluded new test
+        # binaries and masked a regression for an entire FLOWIP cycle
+        # (the 054j group_by lineage test after 120b's versioned-emission
+        # change). Exclude a genuinely slow binary via the profile's
+        # default-filter, with a comment, so the exclusion is explicit
+        # and reviewed.
         run: |
           set -euo pipefail
 
@@ -258,8 +266,7 @@ jobs:
             --workspace \
             --locked \
             --profile "${profile}" \
-            --features test-support \
-            -E 'binary(/^(stateful_metrics_integration_test|metrics_exporter_integration_test|rate_limiter_integration_test|divergence_mid_flight_abort_test|cycle_unified_guard_test|cycle_convergence_eof_gating_test|flowip_114n_ui_tests|deterministic_fan_in_replay_test|effectful_fan_in_envelope_test)$/)'
+            --features test-support
 
   doctest:
     needs: fmt

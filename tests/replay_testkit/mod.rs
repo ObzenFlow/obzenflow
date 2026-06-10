@@ -12,11 +12,14 @@
 
 #![allow(dead_code)]
 
-use obzenflow_core::event::{ChainEvent, EventEnvelope};
+use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
+use obzenflow_core::event::{ChainEvent, ChainEventContent, EventEnvelope};
 use obzenflow_core::id::StageId;
 use obzenflow_core::journal::journal_owner::JournalOwner;
 use obzenflow_core::journal::Journal;
+use obzenflow_core::WriterId;
 use obzenflow_runtime::testing::DeliveredOrderProjection;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 /// The most recent run directory under `base/flows/`.
@@ -63,6 +66,127 @@ pub async fn read_stage_envelopes(
         .read_causally_ordered()
         .await
         .expect("stage journal should read")
+}
+
+/// Read a stage's data journal in physical append order, the order a
+/// downstream subscription's sequential reader delivers.
+///
+/// `read_stage_envelopes` orders by event id, which matches append order for
+/// a stage's own outputs (a single writer mints ids in sequence) but NOT for
+/// forwarded control rows, which retain their original upstream ids. Any
+/// position-sensitive comparison involving control rows must use this reader.
+pub async fn read_stage_envelopes_appended(
+    run_dir: &Path,
+    stage_key: &str,
+) -> Vec<EventEnvelope<ChainEvent>> {
+    let manifest = archive_manifest(run_dir);
+    let stage_journal = manifest["stages"][stage_key]["data_journal_file"]
+        .as_str()
+        .unwrap_or_else(|| panic!("manifest should contain data journal for '{stage_key}'"));
+    let journal: obzenflow_infra::journal::DiskJournal<ChainEvent> =
+        obzenflow_infra::journal::DiskJournal::with_owner(
+            run_dir.join(stage_journal),
+            JournalOwner::stage(StageId::new()),
+        )
+        .expect("stage journal should open");
+
+    let mut reader = journal.reader().await.expect("stage journal reader");
+    let mut envelopes = Vec::new();
+    while let Some(envelope) = reader.next().await.expect("stage journal read") {
+        envelopes.push(envelope);
+    }
+    envelopes
+}
+
+/// The per-run `StageId` an upstream's authored EOF names, resolved from the
+/// EOF payload's `writer_id` (falling back to the chain event's writer).
+fn authored_eof_stage_id(envelopes: &[EventEnvelope<ChainEvent>]) -> Option<StageId> {
+    envelopes.iter().find_map(|envelope| {
+        let ChainEventContent::FlowControl(FlowControlPayload::Eof { writer_id, .. }) =
+            &envelope.event.content
+        else {
+            return None;
+        };
+        match writer_id {
+            Some(WriterId::Stage(id)) => Some(*id),
+            Some(_) => None,
+            None => match &envelope.event.writer_id {
+                WriterId::Stage(id) => Some(*id),
+                _ => None,
+            },
+        }
+    })
+}
+
+/// Project a stage's journal as a transport-row signature: `data:{event_type}`
+/// for data rows and `eof:{upstream key}` for EOF rows attributed through each
+/// upstream's authored EOF (FLOWIP-095d). EOFs whose author is not one of the
+/// named upstreams (the stage's own authored EOF) are labelled `eof:local`.
+///
+/// Rows are read in physical append order, the order a downstream
+/// subscription delivers. `StageId`s are per-run, so cross-run comparison
+/// must resolve them through stable stage keys; this helper does that
+/// resolution per run. The position of a forwarded reference EOF in this
+/// signature is the join's phase-transition witness: equality of signatures
+/// across runs proves the EOF-relative ordering reproduced.
+///
+/// Assumes each named upstream's journal contains only its own authored EOF
+/// (true for source stages); reader telemetry and observability rows are
+/// ignored.
+pub async fn transport_row_signature(
+    run_dir: &Path,
+    stage_key: &str,
+    upstream_stage_keys: &[&str],
+) -> Vec<String> {
+    let mut stage_id_to_key: HashMap<StageId, String> = HashMap::new();
+    for upstream in upstream_stage_keys {
+        let envelopes = read_stage_envelopes(run_dir, upstream).await;
+        let stage_id = authored_eof_stage_id(&envelopes).unwrap_or_else(|| {
+            panic!("upstream '{upstream}' should have an authored EOF naming its stage id")
+        });
+        stage_id_to_key.insert(stage_id, (*upstream).to_string());
+    }
+
+    read_stage_envelopes_appended(run_dir, stage_key)
+        .await
+        .iter()
+        .filter_map(|envelope| match &envelope.event.content {
+            ChainEventContent::Data { .. } => Some(format!("data:{}", envelope.event.event_type())),
+            ChainEventContent::FlowControl(FlowControlPayload::Eof { writer_id, .. }) => {
+                let author = match writer_id {
+                    Some(WriterId::Stage(id)) => Some(*id),
+                    Some(_) => None,
+                    None => match &envelope.event.writer_id {
+                        WriterId::Stage(id) => Some(*id),
+                        _ => None,
+                    },
+                };
+                let key = author
+                    .and_then(|id| stage_id_to_key.get(&id).cloned())
+                    .unwrap_or_else(|| "local".to_string());
+                Some(format!("eof:{key}"))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// Count reader-telemetry flow-control rows in a stage's journal
+/// (FLOWIP-095d). Witness tests use this to prove a run actually crossed the
+/// contract tick and emitted telemetry mid-stream, so a determinism assertion
+/// downstream of the telemetry filter is exercising the condition it pins.
+pub async fn count_reader_telemetry_rows(run_dir: &Path, stage_key: &str) -> usize {
+    read_stage_envelopes(run_dir, stage_key)
+        .await
+        .iter()
+        .filter(|envelope| {
+            matches!(
+                &envelope.event.content,
+                obzenflow_core::event::ChainEventContent::FlowControl(payload)
+                    if payload.is_reader_telemetry()
+            )
+        })
+        .count()
 }
 
 /// Project a fan-in stage's delivered order from a run directory.

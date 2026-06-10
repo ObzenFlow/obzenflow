@@ -884,7 +884,7 @@ impl JoinHandler for PassthroughJoin {
         _source_id: StageId,
         writer_id: WriterId,
     ) -> Result<Vec<ChainEvent>, HandlerError> {
-        let source = if event.event_type() == RefPayload::EVENT_TYPE {
+        let source = if RefPayload::event_type_matches(&event.event_type()) {
             "ref"
         } else {
             "stream"

@@ -70,7 +70,9 @@ const BACKPRESSURE_WINDOW: u64 = 1_000;
 /// canonical merge at `validate_order` still consumes them in the same merged
 /// order, asserted from the journals rather than from timing.
 fn demo_jitter(channel: &str, index: usize) {
-    let max_ms: u64 = std::env::var("PAYMENT_DEMO_SOURCE_JITTER_MS")
+    // The FLOWIP-095d demo knob varies arrival timing only, never stream
+    // content, which is precisely what the canonical merge is insensitive to.
+    let max_ms: u64 = std::env::var("PAYMENT_DEMO_SOURCE_JITTER_MS") // allow-replay-ambient: timing-only demo pacing knob, stream content unaffected
         .ok()
         .and_then(|value| value.parse().ok())
         .unwrap_or(0);

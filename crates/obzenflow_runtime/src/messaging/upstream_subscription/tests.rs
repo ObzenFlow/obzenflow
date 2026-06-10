@@ -2468,6 +2468,23 @@ fn merge_authored_eof(writer: StageId) -> ChainEvent {
     ChainEventFactory::eof_event(WriterId::Stage(writer), true)
 }
 
+fn merge_consumption_progress(writer: StageId, seq: u64) -> ChainEvent {
+    ChainEventFactory::consumption_progress_event(
+        WriterId::Stage(writer),
+        obzenflow_core::event::ConsumptionProgressEventParams {
+            reader_seq: SeqNo(seq),
+            last_event_id: None,
+            vector_clock: None,
+            eof_seen: false,
+            reader_path: obzenflow_core::event::types::JournalPath("upstream".to_string()),
+            reader_index: obzenflow_core::event::types::JournalIndex(0),
+            advertised_writer_seq: None,
+            advertised_vector_clock: None,
+            stalled_since: None,
+        },
+    )
+}
+
 fn merge_clock(entries: &[(&str, u64)]) -> VectorClock {
     let mut clock = VectorClock::new();
     for (writer, seq) in entries {
@@ -2512,6 +2529,21 @@ async fn canonical_pair(
         .with_reader_selection(ReaderSelectionPolicy::CanonicalMerge);
 
     (subscription, (stage_a, journal_a), (stage_b, journal_b))
+}
+
+/// `canonical_pair` with the stage-runtime delivery filter applied. The
+/// reader-telemetry skip (FLOWIP-095d) is `TransportOnly`-gated, so tests for
+/// it must build the subscription the way stage runtimes do.
+async fn canonical_pair_transport_only(
+    name_a: &str,
+    name_b: &str,
+) -> (
+    UpstreamSubscription<ChainEvent>,
+    (StageId, Arc<SharedTestJournal>),
+    (StageId, Arc<SharedTestJournal>),
+) {
+    let (subscription, a, b) = canonical_pair(name_a, name_b).await;
+    (subscription.transport_only(), a, b)
 }
 
 async fn expect_delivery(
@@ -2847,4 +2879,207 @@ async fn round_robin_stage_input_positions_skip_control_events() {
             expected
         );
     }
+}
+
+#[tokio::test]
+async fn canonical_merge_skips_reader_telemetry_without_taking_ordinals() {
+    let (mut subscription, (stage_a, journal_a), (stage_b, journal_b)) =
+        canonical_pair_transport_only("upstream_a", "upstream_b").await;
+
+    journal_a.append_with_clock(merge_data(stage_a, "a1"), VectorClock::new());
+    journal_a.append_with_clock(merge_consumption_progress(stage_a, 1), VectorClock::new());
+    journal_a.append_with_clock(merge_data(stage_a, "a2"), VectorClock::new());
+    journal_a.append_with_clock(merge_authored_eof(stage_a), VectorClock::new());
+    journal_b.append_with_clock(merge_data(stage_b, "b1"), VectorClock::new());
+    journal_b.append_with_clock(merge_data(stage_b, "b2"), VectorClock::new());
+    journal_b.append_with_clock(merge_authored_eof(stage_b), VectorClock::new());
+
+    let mut order = Vec::new();
+    loop {
+        match subscription.poll_next_with_state("test_fsm", None).await {
+            PollResult::Event(envelope) => order.push(envelope.event.event_type()),
+            PollResult::NoEvents => break,
+            PollResult::Error(e) => panic!("unexpected poll error: {e:?}"),
+        }
+    }
+
+    // The telemetry row is consumed from the journal but never becomes a
+    // head: the canonical alternation is undisturbed and both readers end on
+    // identical ordinals.
+    assert_eq!(order.len(), 6);
+    assert_eq!(&order[..4], ["a1", "b1", "a2", "b2"]);
+    assert_eq!(subscription.delivered_seq_by_reader(), &[3, 3]);
+    assert!(subscription.all_readers_eof());
+}
+
+#[tokio::test]
+async fn round_robin_transport_only_skips_reader_telemetry() {
+    let stage_a = StageId::new();
+    let journal_a = Arc::new(SharedTestJournal::new(JournalOwner::stage(stage_a)));
+
+    journal_a.append_with_clock(merge_data(stage_a, "a1"), VectorClock::new());
+    journal_a.append_with_clock(merge_consumption_progress(stage_a, 1), VectorClock::new());
+    journal_a.append_with_clock(merge_data(stage_a, "a2"), VectorClock::new());
+    journal_a.append_with_clock(merge_authored_eof(stage_a), VectorClock::new());
+
+    let upstreams = [(
+        stage_a,
+        "upstream_a".to_string(),
+        journal_a as Arc<dyn Journal<ChainEvent>>,
+    )];
+    let mut subscription = UpstreamSubscription::new_with_names("rr_owner", &upstreams)
+        .await
+        .unwrap()
+        .transport_only();
+
+    let mut order = Vec::new();
+    loop {
+        match subscription.poll_next_with_state("test_fsm", None).await {
+            PollResult::Event(envelope) => order.push(envelope.event.event_type()),
+            PollResult::NoEvents => break,
+            PollResult::Error(e) => panic!("unexpected poll error: {e:?}"),
+        }
+    }
+
+    // Both policies share the read-side filter: telemetry never delivers
+    // under availability-driven round-robin either, so per-reader ordinal
+    // semantics stay uniform across ordered and unordered stages.
+    assert_eq!(order.len(), 3);
+    assert_eq!(&order[..2], ["a1", "a2"]);
+    assert_eq!(subscription.delivered_seq_by_reader(), &[3]);
+    assert!(subscription.all_readers_eof());
+}
+
+#[tokio::test]
+async fn interleaved_telemetry_does_not_perturb_merged_order() {
+    // The divergence witness for the FLOWIP-095d telemetry-lane bug: the same
+    // logical streams, once with a wall-clock-positioned ConsumptionProgress
+    // row interleaved mid-stream (a live run longer than the contract tick)
+    // and once without (its replay), must merge identically. Before the
+    // read-side telemetry filter, the interleaved row took an ordinal on A
+    // and flipped the tiebreak between concurrent heads.
+    async fn drain_order(
+        subscription: &mut UpstreamSubscription<ChainEvent>,
+    ) -> (Vec<String>, Vec<u64>) {
+        let mut order = Vec::new();
+        loop {
+            match subscription.poll_next_with_state("test_fsm", None).await {
+                PollResult::Event(envelope) => order.push(envelope.event.event_type()),
+                PollResult::NoEvents => break,
+                PollResult::Error(e) => panic!("unexpected poll error: {e:?}"),
+            }
+        }
+        let ordinals = subscription.delivered_seq_by_reader().to_vec();
+        (order, ordinals)
+    }
+
+    let (mut clean, (clean_a, clean_journal_a), (clean_b, clean_journal_b)) =
+        canonical_pair_transport_only("upstream_a", "upstream_b").await;
+    let (mut noisy, (noisy_a, noisy_journal_a), (noisy_b, noisy_journal_b)) =
+        canonical_pair_transport_only("upstream_a", "upstream_b").await;
+
+    for (stage_a, journal_a, telemetry) in [
+        (clean_a, &clean_journal_a, false),
+        (noisy_a, &noisy_journal_a, true),
+    ] {
+        journal_a.append_with_clock(merge_data(stage_a, "a1"), VectorClock::new());
+        if telemetry {
+            journal_a.append_with_clock(merge_consumption_progress(stage_a, 1), VectorClock::new());
+        }
+        journal_a.append_with_clock(merge_data(stage_a, "a2"), VectorClock::new());
+        journal_a.append_with_clock(merge_data(stage_a, "a3"), VectorClock::new());
+        journal_a.append_with_clock(merge_authored_eof(stage_a), VectorClock::new());
+    }
+    for (stage_b, journal_b) in [(clean_b, &clean_journal_b), (noisy_b, &noisy_journal_b)] {
+        journal_b.append_with_clock(merge_data(stage_b, "b1"), VectorClock::new());
+        journal_b.append_with_clock(merge_data(stage_b, "b2"), VectorClock::new());
+        journal_b.append_with_clock(merge_authored_eof(stage_b), VectorClock::new());
+    }
+
+    let (clean_order, clean_ordinals) = drain_order(&mut clean).await;
+    let (noisy_order, noisy_ordinals) = drain_order(&mut noisy).await;
+
+    assert_eq!(
+        clean_order, noisy_order,
+        "an interleaved telemetry row must not perturb the merged order"
+    );
+    assert_eq!(
+        clean_ordinals, noisy_ordinals,
+        "per-reader delivered ordinals must be a pure function of stream content"
+    );
+}
+
+#[tokio::test]
+#[should_panic(expected = "CanonicalMerge requires reader")]
+async fn canonical_merge_rejects_tail_start_readers() {
+    let stage_a = StageId::new();
+    let journal_a = Arc::new(SharedTestJournal::new(JournalOwner::stage(stage_a)));
+    journal_a.append_with_clock(merge_data(stage_a, "a1"), VectorClock::new());
+
+    let upstreams = [(
+        stage_a,
+        "upstream_a".to_string(),
+        journal_a as Arc<dyn Journal<ChainEvent>>,
+    )];
+
+    // A tail-start reader has a non-zero position and baseline; selecting the
+    // canonical merge on it must fail fast (FLOWIP-095d ordinal stability).
+    let _ = UpstreamSubscription::new_at_tail("tail_owner", &upstreams, &[1])
+        .await
+        .unwrap()
+        .with_reader_selection(ReaderSelectionPolicy::CanonicalMerge);
+}
+
+#[tokio::test]
+async fn feed_role_distinguishes_tiebreak_identity() {
+    // Two readers can share a stage NAME (the first tiebreak component) while
+    // having distinct StageIds; with the same selected event type, only the
+    // feed role keeps the tiebreak key total.
+    let stage_a = StageId::new();
+    let stage_b = StageId::new();
+    let journal_a = Arc::new(SharedTestJournal::new(JournalOwner::stage(stage_a)));
+    let journal_b = Arc::new(SharedTestJournal::new(JournalOwner::stage(stage_b)));
+
+    let upstreams = [
+        (
+            stage_a,
+            "shared_upstream".to_string(),
+            journal_a as Arc<dyn Journal<ChainEvent>>,
+        ),
+        (
+            stage_b,
+            "shared_upstream".to_string(),
+            journal_b as Arc<dyn Journal<ChainEvent>>,
+        ),
+    ];
+
+    let mut selected_feeds = HashMap::new();
+    selected_feeds.insert(
+        stage_a,
+        vec![SelectedFeedMetadata::new(
+            EventType::from("shared.event"),
+            SelectedFeedRole::Reference,
+        )],
+    );
+    selected_feeds.insert(
+        stage_b,
+        vec![SelectedFeedMetadata::new(
+            EventType::from("shared.event"),
+            SelectedFeedRole::Stream,
+        )],
+    );
+
+    let subscription = UpstreamSubscription::new_with_names("role_owner", &upstreams)
+        .await
+        .unwrap()
+        .with_selected_feeds(selected_feeds);
+
+    let keys = &subscription.reader_tiebreak_keys;
+    assert_eq!(keys[0].0, keys[1].0, "stage names deliberately collide");
+    assert_ne!(
+        keys[0].1, keys[1].1,
+        "the role qualifier must keep the tiebreak key total"
+    );
+    assert_eq!(keys[0].1, "reference:shared.event");
+    assert_eq!(keys[1].1, "stream:shared.event");
 }

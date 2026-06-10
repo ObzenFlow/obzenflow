@@ -238,3 +238,8 @@ required-features = ["test-support"]
 name = "effectful_fan_in_envelope_test"
 path = "tests/effectful_fan_in_envelope_test.rs"
 required-features = ["test-support"]
+
+[[test]]
+name = "join_phase_transition_replay_test"
+path = "tests/join_phase_transition_replay_test.rs"
+required-features = ["test-support"]
