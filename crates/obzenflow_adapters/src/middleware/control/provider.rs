@@ -9,8 +9,7 @@
 //! runtime_services can consume control middleware state without global state.
 
 use obzenflow_core::control_middleware::{
-    CircuitBreakerContractInfo, CircuitBreakerContractMode, CircuitBreakerSnapshotter,
-    ControlMiddlewareProvider, RateLimiterSnapshotter,
+    CircuitBreakerSnapshotter, ControlMiddlewareProvider, RateLimiterSnapshotter,
 };
 use obzenflow_core::id::StageId;
 use std::collections::HashMap;
@@ -20,7 +19,6 @@ use std::sync::{Arc, RwLock};
 struct CircuitBreakerRegistration {
     metrics_fn: Arc<CircuitBreakerSnapshotter>,
     state: Arc<AtomicU8>,
-    contract_info: CircuitBreakerContractInfo,
 }
 
 struct RateLimiterRegistration {
@@ -46,18 +44,8 @@ impl ControlMiddlewareAggregator {
         stage_id: StageId,
         metrics_fn: Arc<CircuitBreakerSnapshotter>,
         state: Arc<AtomicU8>,
-        mode: CircuitBreakerContractMode,
-        has_fallback: bool,
     ) {
-        let registration = CircuitBreakerRegistration {
-            metrics_fn,
-            state,
-            contract_info: CircuitBreakerContractInfo {
-                mode,
-                has_opened_since_registration: false,
-                has_fallback_configured: has_fallback,
-            },
-        };
+        let registration = CircuitBreakerRegistration { metrics_fn, state };
 
         self.circuit_breakers
             .write()
@@ -104,27 +92,5 @@ impl ControlMiddlewareProvider for ControlMiddlewareAggregator {
             .expect("ControlMiddlewareAggregator: circuit_breakers poisoned read lock")
             .get(stage_id)
             .map(|reg| reg.state.clone())
-    }
-
-    fn circuit_breaker_contract_info(
-        &self,
-        stage_id: &StageId,
-    ) -> Option<CircuitBreakerContractInfo> {
-        self.circuit_breakers
-            .read()
-            .expect("ControlMiddlewareAggregator: circuit_breakers poisoned read lock")
-            .get(stage_id)
-            .map(|reg| reg.contract_info)
-    }
-
-    fn mark_circuit_breaker_opened(&self, stage_id: &StageId) {
-        if let Some(reg) = self
-            .circuit_breakers
-            .write()
-            .expect("ControlMiddlewareAggregator: circuit_breakers poisoned write lock")
-            .get_mut(stage_id)
-        {
-            reg.contract_info.has_opened_since_registration = true;
-        }
     }
 }

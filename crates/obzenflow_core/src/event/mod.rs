@@ -34,10 +34,11 @@ pub use chain_event::{
 pub use event_envelope::EventEnvelope;
 pub use journal_event::JournalEvent;
 pub use payloads::effect_payload::{
-    CanonicalInputHash, EffectCursor, EffectDescriptor, EffectDescriptorHash, EffectFactOwner,
-    EffectFailureKind, EffectInputPosition, EffectLabel, EffectOrdinal, EffectOutcomeGroupId,
-    EffectOutcomePayload, EffectProvenance, EffectRecord, EffectSchemaVersion, EffectStageKey,
-    EffectType, OutcomeFactOrdinal, RecordedFlowId, RetryDisposition, StageLogicVersion,
+    CanonicalInputHash, EffectCursor, EffectDescriptor, EffectDescriptorHash, EffectFactOrigin,
+    EffectFactOwner, EffectFailureCause, EffectFailureKind, EffectInputPosition, EffectLabel,
+    EffectOrdinal, EffectOutcomeGroupId, EffectOutcomePayload, EffectProvenance, EffectRecord,
+    EffectSchemaVersion, EffectStageKey, EffectType, OutcomeFactOrdinal, RecordedFlowId,
+    RetryDisposition, StageLogicVersion,
 };
 pub use system_event::{
     EdgeLivenessState, MetricsCoordinationEvent, PipelineLifecycleEvent, ReplayLifecycleEvent,

@@ -62,26 +62,6 @@ pub mod cb_state {
 }
 
 // ============================================================================
-// Circuit Breaker Contract Info (replaces circuit_breaker_contract_registry)
-// ============================================================================
-
-/// How contract policies should interpret circuit breaker activity.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum CircuitBreakerContractMode {
-    #[default]
-    Strict,
-    BreakerAware,
-}
-
-/// Contract-related metadata for a breaker-protected stage.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct CircuitBreakerContractInfo {
-    pub mode: CircuitBreakerContractMode,
-    pub has_opened_since_registration: bool,
-    pub has_fallback_configured: bool,
-}
-
-// ============================================================================
 // Unified Provider Trait
 // ============================================================================
 
@@ -111,17 +91,6 @@ pub trait ControlMiddlewareProvider: Send + Sync {
 
     /// Get circuit breaker current state for a stage.
     fn circuit_breaker_state(&self, stage_id: &StageId) -> Option<Arc<AtomicU8>>;
-
-    // --- Contract Info (for contract policies) ---
-
-    /// Get circuit breaker contract info for a stage.
-    fn circuit_breaker_contract_info(
-        &self,
-        stage_id: &StageId,
-    ) -> Option<CircuitBreakerContractInfo>;
-
-    /// Mark that the breaker for this stage has opened at least once.
-    fn mark_circuit_breaker_opened(&self, stage_id: &StageId);
 }
 
 /// Null implementation for flows without control middleware.
@@ -140,10 +109,4 @@ impl ControlMiddlewareProvider for NoControlMiddleware {
     fn circuit_breaker_state(&self, _: &StageId) -> Option<Arc<AtomicU8>> {
         None
     }
-
-    fn circuit_breaker_contract_info(&self, _: &StageId) -> Option<CircuitBreakerContractInfo> {
-        None
-    }
-
-    fn mark_circuit_breaker_opened(&self, _: &StageId) {}
 }

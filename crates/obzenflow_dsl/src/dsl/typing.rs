@@ -1046,6 +1046,16 @@ impl StageDescriptor for TypedStageDescriptor {
     fn effect_declarations(&self) -> Vec<obzenflow_runtime::effects::EffectDeclaration> {
         self.inner.effect_declarations()
     }
+
+    fn synthesized_outcome_registrations(
+        &self,
+    ) -> Vec<obzenflow_runtime::effects::SynthesizedOutcomeRegistration> {
+        self.inner.synthesized_outcome_registrations()
+    }
+
+    fn type_shaping_config_errors(&self) -> Vec<String> {
+        self.inner.type_shaping_config_errors()
+    }
 }
 
 fn select_downstream_input_hint<'a>(
@@ -1225,6 +1235,140 @@ fn selected_or_single_output_for_fan_in(
     }
 
     None
+}
+
+/// FLOWIP-120h: reject middleware that silently drops events at the effect
+/// boundary (e.g. a circuit breaker configured with `OpenPolicy::Skip`) on any
+/// effectful stage. The handler awaits a value from `fx.perform`, so transport
+/// truncation has no coherent boundary behaviour; without this check the
+/// rejection surfaces only at runtime, while the breaker is open.
+#[allow(clippy::result_large_err)]
+pub fn validate_effectful_middleware_compatibility(
+    descriptors: &HashMap<String, Box<dyn StageDescriptor>>,
+    flow_middleware: &[Box<dyn MiddlewareFactory>],
+) -> Result<(), crate::dsl::error::FlowBuildError> {
+    use crate::dsl::error::FlowBuildError;
+
+    for (name, descriptor) in descriptors {
+        if !descriptor.is_effectful() {
+            continue;
+        }
+        let resolved = crate::middleware_resolution::resolve_middleware_view(
+            flow_middleware,
+            descriptor.stage_middleware_factories(),
+            name,
+        )
+        .map_err(|e| FlowBuildError::PipelineBuildFailed(e.to_string()))?;
+        for factory in resolved {
+            if factory.hints().effect_boundary_truncates {
+                return Err(
+                    FlowBuildError::MiddlewarePolicyIncompatibleWithEffectfulStage {
+                        stage_name: name.clone(),
+                        middleware_label: factory.label().to_string(),
+                        policy: "OpenPolicy::Skip".to_string(),
+                    },
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// FLOWIP-120h: validate `output_middleware:` lane contributions at build time.
+///
+/// Every branch fact a type-shaping middleware may author must be a member of
+/// the arrow contract (corrected Option A: membership is enforced, never
+/// inferred), must not collide with the guarded effect's own fact set (the
+/// event type is the branch discriminator), and typed-outcome middleware is
+/// limited to single-effect stages until FLOWIP-120c locks per-effect scope.
+/// As a producer-side check, every declared effect's fact set must also be
+/// contained in the arrow contract.
+#[allow(clippy::result_large_err)]
+pub fn validate_type_shaping_contributions(
+    descriptors: &HashMap<String, Box<dyn StageDescriptor>>,
+) -> Result<(), crate::dsl::error::FlowBuildError> {
+    use crate::dsl::error::FlowBuildError;
+
+    for (name, descriptor) in descriptors {
+        if let Some(error) = descriptor.type_shaping_config_errors().first() {
+            return Err(FlowBuildError::TypeShapingConfiguration {
+                stage_name: name.clone(),
+                message: error.clone(),
+            });
+        }
+
+        let registrations = descriptor.synthesized_outcome_registrations();
+        if registrations.is_empty() {
+            continue;
+        }
+
+        let declarations = descriptor.effect_declarations();
+        if declarations.len() != 1 {
+            return Err(FlowBuildError::TypedOutcomeMiddlewareOnMultiEffectStage {
+                stage_name: name.clone(),
+                effect_count: declarations.len(),
+            });
+        }
+
+        let Some(metadata) = descriptor.typing_metadata() else {
+            return Err(FlowBuildError::StageMissingTypingMetadata {
+                stage_name: name.clone(),
+            });
+        };
+        let contract_type_ids: HashSet<TypeId> = exact_output_contract_members(metadata)
+            .into_iter()
+            .map(|(type_id, _)| type_id)
+            .collect();
+
+        let effect_fact_event_types: HashSet<String> = declarations
+            .iter()
+            .flat_map(|declaration| {
+                declaration
+                    .output_fact_types
+                    .iter()
+                    .map(|fact| fact.event_type.to_string())
+            })
+            .collect();
+
+        for registration in &registrations {
+            for fact in &registration.fact_types {
+                if !contract_type_ids.contains(&fact.type_id) {
+                    return Err(FlowBuildError::MiddlewareContributedFactNotInContract {
+                        stage_name: name.clone(),
+                        middleware_label: registration.source_label.clone(),
+                        fact: fact.display_name.clone(),
+                        contract: output_contract_display(metadata),
+                    });
+                }
+                if effect_fact_event_types.contains(fact.event_type.as_str()) {
+                    return Err(FlowBuildError::TypeShapingConfiguration {
+                        stage_name: name.clone(),
+                        message: format!(
+                            "branch fact '{}' collides with an effect outcome fact; branch \
+                             dispatch is by event type, so middleware branch facts must be \
+                             disjoint from the guarded effect's fact set",
+                            fact.event_type,
+                        ),
+                    });
+                }
+            }
+        }
+
+        for declaration in &declarations {
+            for fact in &declaration.output_fact_types {
+                if !contract_type_ids.contains(&fact.type_id) {
+                    return Err(FlowBuildError::EffectFactNotInContract {
+                        stage_name: name.clone(),
+                        effect_type: declaration.effect_type.to_string(),
+                        fact: fact.display_name.clone(),
+                        contract: output_contract_display(metadata),
+                    });
+                }
+            }
+        }
+    }
+
+    Ok(())
 }
 
 /// FLOWIP-114c per-stage typing-metadata check. Returns an error if any
@@ -1761,6 +1905,16 @@ impl StageDescriptor for DeterministicOrdererOverride {
 
     fn effect_declarations(&self) -> Vec<obzenflow_runtime::effects::EffectDeclaration> {
         self.inner.effect_declarations()
+    }
+
+    fn synthesized_outcome_registrations(
+        &self,
+    ) -> Vec<obzenflow_runtime::effects::SynthesizedOutcomeRegistration> {
+        self.inner.synthesized_outcome_registrations()
+    }
+
+    fn type_shaping_config_errors(&self) -> Vec<String> {
+        self.inner.type_shaping_config_errors()
     }
 
     fn is_composite(&self) -> bool {

@@ -14,11 +14,12 @@
 //! its own copy of this logic and only swaps the source and the flow wiring.
 
 use super::domain::{
-    GatewayPaymentDecision, OrderCancellationReason, OrderCancelled,
-    PaymentAuthorizationUnavailable, PaymentAuthorized, PaymentDeclineReason, PaymentDeclined,
-    PaymentMethodState, TrafficPhase, ValidatedOrder,
+    GatewayPaymentDecision, GatewayPaymentFallback, GatewayPaymentRejected,
+    OrderCancellationReason, OrderCancelled, PaymentAuthorizationUnavailable, PaymentAuthorized,
+    PaymentDeclineReason, PaymentDeclined, PaymentMethodState, TrafficPhase, ValidatedOrder,
 };
 use async_trait::async_trait;
+use obzenflow_adapters::effects::{CircuitBreakerOutcome, GuardedEffectExt};
 use obzenflow_core::{event::chain_event::ChainEvent, TypedPayload};
 use obzenflow_runtime::effects::{
     Effect, EffectContext, EffectError, EffectSafety, Effects, IdempotencyKey,
@@ -123,14 +124,41 @@ impl EffectfulTransformHandler for GatewayTransform {
             ));
         }
 
-        let decision = fx
-            .perform(AuthorizePayment {
-                order: order.clone(),
-            })
-            .await
-            .unwrap_or_else(authorization_unavailable_decision);
+        // The guarded wrapper (FLOWIP-120h) lifts the effect outcome into an
+        // explicit branch type: the breaker's fallback and rejection are
+        // distinct named facts the carrier reconstructs by event type, live
+        // and replay alike, rather than a variant of the gateway's own
+        // decision distinguished by a reason string.
+        let outcome = fx
+            .perform(
+                AuthorizePayment {
+                    order: order.clone(),
+                }
+                .guarded::<GatewayPaymentFallback, GatewayPaymentRejected>(),
+            )
+            .await;
 
-        emit_payment_decision_fact(order, decision, fx).await?;
+        match outcome {
+            Ok(CircuitBreakerOutcome::Primary(decision)) => {
+                emit_payment_decision_fact(order, decision, fx).await?;
+            }
+            Ok(CircuitBreakerOutcome::Fallback(fallback)) => {
+                // Breaker-synthesized: the gateway was never called, so no
+                // payment decision exists and the order goes to manual review.
+                emit_authorization_unavailable(order, fallback.reason, fx).await?;
+            }
+            Ok(CircuitBreakerOutcome::Rejected(rejected)) => {
+                emit_authorization_unavailable(order, rejected.reason, fx).await?;
+            }
+            Err(err) => {
+                // Genuine gateway failure (e.g. the scripted outage before the
+                // breaker opens): recorded under the effect cursor, so replay
+                // reproduces the same failure; the operational consequence is
+                // manual review, never a manufactured order fate.
+                emit_authorization_unavailable(order, authorization_unavailable_reason(err), fx)
+                    .await?;
+            }
+        }
         Ok(())
     }
 
@@ -143,16 +171,10 @@ impl EffectfulTransformHandler for GatewayTransform {
     }
 }
 
-/// Map a remote effect failure onto an operational domain outcome.
+/// Map a remote effect failure onto an operational reason string.
 ///
 /// A simulated gateway outage is infrastructure behavior, not a local business
 /// invalid-order outcome and not a material gateway decline.
-fn authorization_unavailable_decision(err: EffectError) -> GatewayPaymentDecision {
-    GatewayPaymentDecision::AuthorizationUnavailable {
-        reason: authorization_unavailable_reason(err),
-    }
-}
-
 fn authorization_unavailable_reason(err: EffectError) -> String {
     match err {
         EffectError::Execution(message) => message,
@@ -175,16 +197,18 @@ fn authorization_unavailable_reason(err: EffectError) -> String {
 
 /// Tell the circuit breaker which scripted inputs represent dependency failure.
 ///
-/// The stage still emits a domain event for subscribers, while the breaker keeps
-/// its health model accurate and opens under sustained gateway unavailability.
+/// Error-marked outputs cover genuine gateway failures; the input-phase check
+/// covers the scripted outage. Breaker-synthesized fallback facts never reach
+/// `post_handle` (the boundary short-circuits), so degraded outputs do not
+/// re-count as failures.
 pub fn simulated_gateway_unavailability_counts_as_failure(
     event: &ChainEvent,
     outputs: &[ChainEvent],
 ) -> bool {
-    outputs.iter().any(|event| {
+    outputs.iter().any(|output| {
         matches!(
-            GatewayPaymentDecision::from_event(event),
-            Some(GatewayPaymentDecision::AuthorizationUnavailable { .. })
+            output.processing_info.status,
+            obzenflow_core::event::status::processing_status::ProcessingStatus::Error { .. }
         )
     }) || matches!(
         ValidatedOrder::from_event(event).map(|order| order.phase),
@@ -232,21 +256,27 @@ async fn emit_payment_decision_fact(
             })
             .await
         }
-        GatewayPaymentDecision::AuthorizationUnavailable { reason } => {
-            // Deliberately no cancellation here: unavailability means no
-            // payment decision was reached, and manufacturing an order fate
-            // out of a gateway outage would be a fake outcome (the FLOWIP-120m
-            // non-performance doctrine). These orders go to manual review.
-            fx.emit(PaymentAuthorizationUnavailable {
-                order_id: order.order_id,
-                customer_id: order.customer_id,
-                amount_cents: order.amount_cents,
-                phase: order.phase,
-                reason,
-            })
-            .await
-        }
     }
+    .map_err(|e| HandlerError::Other(e.to_string()))
+}
+
+/// Deliberately no cancellation here: unavailability means no payment decision
+/// was reached, and manufacturing an order fate out of a gateway outage would
+/// be a fake outcome (the FLOWIP-120m non-performance doctrine). These orders
+/// go to manual review.
+async fn emit_authorization_unavailable(
+    order: ValidatedOrder,
+    reason: String,
+    fx: &mut Effects,
+) -> Result<(), HandlerError> {
+    fx.emit(PaymentAuthorizationUnavailable {
+        order_id: order.order_id,
+        customer_id: order.customer_id,
+        amount_cents: order.amount_cents,
+        phase: order.phase,
+        reason,
+    })
+    .await
     .map_err(|e| HandlerError::Other(e.to_string()))
 }
 

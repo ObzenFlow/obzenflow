@@ -684,7 +684,32 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use crate::stages::common::handlers::FiniteSourceHandler as TestFiniteSourceHandler;
-    use crate::stages::source::strategies::CircuitBreakerSourceStrategy;
+    use crate::stages::source::strategies::{
+        SourceControlContext, SourceControlStrategy, SourceShutdownDecision,
+    };
+
+    /// Test stand-in for a degraded-mode source strategy: emits a poison EOF
+    /// when the shared flag is non-zero. The breaker-backed implementation
+    /// lives in `obzenflow_adapters`; this FSM test only exercises the
+    /// policy-neutral `SourceShutdownDecision::PoisonEof` path.
+    #[derive(Debug)]
+    struct FlagPoisonStrategy {
+        state: Arc<AtomicU8>,
+    }
+
+    impl SourceControlStrategy for FlagPoisonStrategy {
+        fn on_natural_completion(&self, _ctx: &mut SourceControlContext) -> SourceShutdownDecision {
+            if self.state.load(std::sync::atomic::Ordering::SeqCst) != 0 {
+                SourceShutdownDecision::PoisonEof
+            } else {
+                SourceShutdownDecision::DefaultEof
+            }
+        }
+
+        fn on_begin_drain(&self, ctx: &mut SourceControlContext) -> SourceShutdownDecision {
+            self.on_natural_completion(ctx)
+        }
+    }
 
     /// Minimal in-memory journal for tests
     struct TestJournal<T: JournalEvent> {
@@ -858,9 +883,9 @@ mod tests {
 
         // Case 1: breaker closed -> natural EOF
         let state_closed = Arc::new(AtomicU8::new(0)); // Closed
-        let mut ctx = build_ctx(Arc::new(CircuitBreakerSourceStrategy::new(
-            state_closed.clone(),
-        )));
+        let mut ctx = build_ctx(Arc::new(FlagPoisonStrategy {
+            state: state_closed.clone(),
+        }));
 
         // Allocate resources to set writer_id
         FiniteSourceAction::<DummySource>::AllocateResources
@@ -925,9 +950,9 @@ mod tests {
 
         // Case 2: breaker open -> poison EOF
         let state_open = Arc::new(AtomicU8::new(1)); // Open
-        let mut ctx_open = build_ctx(Arc::new(CircuitBreakerSourceStrategy::new(
-            state_open.clone(),
-        )));
+        let mut ctx_open = build_ctx(Arc::new(FlagPoisonStrategy {
+            state: state_open.clone(),
+        }));
 
         FiniteSourceAction::<DummySource>::AllocateResources
             .execute(&mut ctx_open)

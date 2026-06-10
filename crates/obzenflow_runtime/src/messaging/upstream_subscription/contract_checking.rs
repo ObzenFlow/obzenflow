@@ -3,12 +3,9 @@
 // https://obzenflow.dev
 
 use super::{ContractStatus, ContractTracker, ReaderProgress, UpstreamSubscription};
-use crate::messaging::upstream_subscription_policy::{
-    EdgeContext, EdgeContractDecision, PolicyHints,
-};
+use crate::messaging::upstream_subscription_policy::{EdgeContext, EdgeContractDecision};
 use obzenflow_core::event::system_event::{
-    ContractName, ContractOverridePolicy, ContractResultStatusLabel, SystemEvent, SystemEventType,
-    SystemFeedRole,
+    ContractName, ContractResultStatusLabel, SystemEvent, SystemEventType, SystemFeedRole,
 };
 use obzenflow_core::event::types::{
     Count, DurationMs, EventType, JournalIndex, JournalPath, SeqNo,
@@ -50,8 +47,6 @@ struct DirectFeedContractEvidence {
     advertised_writer_seq: SeqNo,
     pass: bool,
     reason: Option<EventViolationCause>,
-    raw_failure: Option<(ContractName, ViolationCause)>,
-    overridden_by_policy: bool,
     contract_results: Vec<(ContractName, ContractResult)>,
 }
 
@@ -141,28 +136,16 @@ where
                     advertised_writer_seq: Some(advertised_writer_seq),
                     reader_seq,
                 };
-                let cb_info = self
-                    .control_middleware
-                    .circuit_breaker_contract_info(&progress.stage_id);
-                let hints = PolicyHints {
-                    breaker_mode: cb_info.map(|i| i.mode),
-                    has_opened_since_registration: cb_info
-                        .map(|i| i.has_opened_since_registration)
-                        .unwrap_or(false),
-                    has_fallback_configured: cb_info
-                        .map(|i| i.has_fallback_configured)
-                        .unwrap_or(false),
-                };
                 let decision = self
                     .contract_policies
                     .get(index)
                     .and_then(|policy| policy.as_ref())
-                    .map(|policy| policy.decide(&results_only, &edge, &hints));
-                let (pass, reason, overridden_by_policy) = match decision {
-                    Some(EdgeContractDecision::Pass) => (true, None, raw_failure.is_some()),
-                    Some(EdgeContractDecision::Fail(cause)) => (false, Some(cause), false),
-                    None if raw_failure.is_some() => (false, raw_reason.clone(), false),
-                    None => (true, None, false),
+                    .map(|policy| policy.decide(&results_only, &edge));
+                let (pass, reason) = match decision {
+                    Some(EdgeContractDecision::Pass) => (true, None),
+                    Some(EdgeContractDecision::Fail(cause)) => (false, Some(cause)),
+                    None if raw_failure.is_some() => (false, raw_reason.clone()),
+                    None => (true, None),
                 };
                 DirectFeedContractEvidence {
                     event_type: feed_chain.metadata.event_type().clone(),
@@ -171,8 +154,6 @@ where
                     advertised_writer_seq,
                     pass,
                     reason,
-                    raw_failure,
-                    overridden_by_policy,
                     contract_results,
                 }
             })
@@ -223,37 +204,6 @@ where
                         error = %e,
                         "Failed to append direct feed contract result event; skipping emission"
                     );
-                }
-            }
-
-            if feed.overridden_by_policy {
-                if let Some((contract_name, cause)) = &feed.raw_failure {
-                    let override_event = SystemEvent::new(
-                        tracker.writer_id,
-                        SystemEventType::ContractOverrideByPolicy {
-                            upstream,
-                            reader,
-                            selected_event_type: Some(feed.event_type.clone()),
-                            feed_role: feed.feed_role,
-                            contract_name: contract_name.clone(),
-                            original_cause: cause.clone(),
-                            policy: ContractOverridePolicy::BreakerAware,
-                        },
-                    );
-                    if let Err(e) = system_journal.append(override_event, None).await {
-                        append_ok = false;
-                        tracing::error!(
-                            target: "flowip-105",
-                            owner = %self.owner_label,
-                            upstream = ?upstream,
-                            reader = ?reader,
-                            selected_event_type = %feed.event_type,
-                            feed_role = ?feed.feed_role,
-                            contract = %contract_name,
-                            error = %e,
-                            "Failed to append direct feed contract override event; skipping emission"
-                        );
-                    }
                 }
             }
 
@@ -623,62 +573,13 @@ where
             reader_seq: progress.reader_seq,
         };
 
-        let cb_info = self
-            .control_middleware
-            .circuit_breaker_contract_info(&progress.stage_id);
-        let hints = PolicyHints {
-            breaker_mode: cb_info.map(|i| i.mode),
-            has_opened_since_registration: cb_info
-                .map(|i| i.has_opened_since_registration)
-                .unwrap_or(false),
-            has_fallback_configured: cb_info.map(|i| i.has_fallback_configured).unwrap_or(false),
-        };
-
         let Some(policy_stack) = self.contract_policies.get(index).and_then(|p| p.as_ref()) else {
             return;
         };
 
-        let raw_failure: Option<(ContractName, ViolationCause)> =
-            results.iter().find_map(|(name, r)| {
-                let ContractResult::Failed(v) = r else {
-                    return None;
-                };
-                Some((name.clone(), v.cause.clone()))
-            });
-
-        let decision = policy_stack.decide(&results_only, &edge, &hints);
+        let decision = policy_stack.decide(&results_only, &edge);
         match decision {
-            EdgeContractDecision::Pass => {
-                // If raw contracts reported a failure but policies overrode it
-                // to Pass, emit an override system event.
-                if let (Some(system_journal), Some((contract_name, cause))) =
-                    (&tracker.system_journal, raw_failure)
-                {
-                    let override_event = SystemEvent::new(
-                        tracker.writer_id,
-                        SystemEventType::ContractOverrideByPolicy {
-                            upstream: progress.stage_id,
-                            reader: reader_stage,
-                            selected_event_type: selected_event_type.clone(),
-                            feed_role,
-                            contract_name,
-                            original_cause: cause,
-                            policy: ContractOverridePolicy::BreakerAware,
-                        },
-                    );
-                    if let Err(e) = system_journal.append(override_event, None).await {
-                        tracing::error!(
-                            target: "flowip-105",
-                            owner = %self.owner_label,
-                            upstream = ?progress.stage_id,
-                            reader = ?reader_stage,
-                            reader_index = index,
-                            error = %e,
-                            "Failed to append contract override event; skipping emission"
-                        );
-                    }
-                }
-            }
+            EdgeContractDecision::Pass => {}
             EdgeContractDecision::Fail(cause) => {
                 if !matches!(status, ContractStatus::Violated { .. }) {
                     *status = ContractStatus::Violated {
@@ -863,65 +764,13 @@ where
                 reader_seq: progress.reader_seq,
             };
 
-            let cb_info = self
-                .control_middleware
-                .circuit_breaker_contract_info(&progress.stage_id);
-            let hints = PolicyHints {
-                breaker_mode: cb_info.map(|i| i.mode),
-                has_opened_since_registration: cb_info
-                    .map(|i| i.has_opened_since_registration)
-                    .unwrap_or(false),
-                has_fallback_configured: cb_info
-                    .map(|i| i.has_fallback_configured)
-                    .unwrap_or(false),
-            };
-
             if let Some(policy_stack) = self.contract_policies.get(index).and_then(|p| p.as_ref()) {
-                let raw_failure: Option<(ContractName, ViolationCause)> =
-                    results.iter().find_map(|(name, r)| match r {
-                        ContractResult::Failed(v) => Some((name.clone(), v.cause.clone())),
-                        _ => None,
-                    });
-
-                let decision = policy_stack.decide(&results_only, &edge, &hints);
+                let decision = policy_stack.decide(&results_only, &edge);
 
                 match decision {
                     EdgeContractDecision::Pass => {
                         pass = true;
                         failure_reason = None;
-
-                        // If raw contracts reported a failure but policies
-                        // overrode it to Pass, emit an override system event.
-                        if let (
-                            Some(system_journal),
-                            Some(reader_stage),
-                            Some((contract_name, cause)),
-                        ) = (&tracker.system_journal, tracker.reader_stage, raw_failure)
-                        {
-                            let override_event = SystemEvent::new(
-                                tracker.writer_id,
-                                SystemEventType::ContractOverrideByPolicy {
-                                    upstream: progress.stage_id,
-                                    reader: reader_stage,
-                                    selected_event_type: selected_event_type.clone(),
-                                    feed_role,
-                                    contract_name,
-                                    original_cause: cause,
-                                    policy: ContractOverridePolicy::BreakerAware,
-                                },
-                            );
-                            if let Err(e) = system_journal.append(override_event, None).await {
-                                tracing::error!(
-                                    target: "flowip-105",
-                                    owner = %self.owner_label,
-                                    upstream = ?progress.stage_id,
-                                    reader = ?reader_stage,
-                                    reader_index = index,
-                                    error = %e,
-                                    "Failed to append contract override event; skipping emission"
-                                );
-                            }
-                        }
                     }
                     EdgeContractDecision::Fail(cause) => {
                         pass = false;

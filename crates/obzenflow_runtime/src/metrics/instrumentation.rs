@@ -210,13 +210,8 @@ impl StageInstrumentation {
         self.cb_snapshotter = provider.circuit_breaker_snapshotter(stage_id);
         self.rl_snapshotter = provider.rate_limiter_snapshotter(stage_id);
         self.cb_state = provider.circuit_breaker_state(stage_id);
-        let cb_contract_info_present = provider.circuit_breaker_contract_info(stage_id).is_some();
 
-        if expects_circuit_breaker
-            && (self.cb_snapshotter.is_none()
-                || self.cb_state.is_none()
-                || !cb_contract_info_present)
-        {
+        if expects_circuit_breaker && (self.cb_snapshotter.is_none() || self.cb_state.is_none()) {
             return Err(ControlBindError::MissingCircuitBreaker {
                 stage_id: *stage_id,
             });

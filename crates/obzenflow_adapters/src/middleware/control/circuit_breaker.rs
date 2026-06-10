@@ -14,20 +14,22 @@ use crate::middleware::{
         CircuitBreakerProbeSlot, CircuitBreakerProbeSlotGuard, CircuitBreakerRetryAfterMs,
         CircuitBreakerRetryDelayMs, CircuitBreakerShouldRetry,
     },
-    ControlMiddlewareRole, Middleware, MiddlewareAction, MiddlewareContext, MiddlewareFactory,
-    MiddlewareFactoryError, MiddlewareHints, MiddlewareOverrideKey, MiddlewarePlanContribution,
-    MiddlewareSafety, SourceMiddlewarePhase, TopologyMiddlewareConfigSlot,
+    ControlMiddlewareRole, Middleware, MiddlewareAbortCause, MiddlewareAction, MiddlewareContext,
+    MiddlewareFactory, MiddlewareFactoryError, MiddlewareHints, MiddlewareOverrideKey,
+    MiddlewarePlanContribution, MiddlewareSafety, SourceMiddlewarePhase,
+    TopologyMiddlewareConfigSlot,
 };
 use obzenflow_core::control_middleware::{
-    cb_state, CircuitBreakerContractMode, CircuitBreakerMetrics, CircuitBreakerSnapshotter,
-    ControlMiddlewareProvider, NoControlMiddleware,
+    cb_state, CircuitBreakerMetrics, CircuitBreakerSnapshotter,
 };
 use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::event::payloads::observability_payload::{
     CircuitBreakerEvent, CircuitBreakerRejectionReason, MiddlewareLifecycle, ObservabilityPayload,
 };
+use obzenflow_core::event::schema::TypedFactType;
 use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
 use obzenflow_core::event::{ChainEventFactory, CircuitBreakerSummaryEventParams};
+use obzenflow_core::MiddlewareExecutionScope;
 use obzenflow_core::TypedPayload;
 use obzenflow_core::{StageId, WriterId};
 use obzenflow_runtime::pipeline::config::StageConfig;
@@ -46,6 +48,18 @@ type FailureClassifier = Arc<dyn Fn(&ChainEvent, &[ChainEvent]) -> bool + Send +
 type FailureClassificationClassifier =
     Arc<dyn Fn(&ChainEvent, &[ChainEvent]) -> FailureClassification + Send + Sync>;
 type FallbackFn = Arc<dyn Fn(&ChainEvent) -> Vec<ChainEvent> + Send + Sync>;
+type RejectionFn =
+    Arc<dyn Fn(&ChainEvent, CircuitBreakerRejectionReason) -> Vec<ChainEvent> + Send + Sync>;
+
+/// Typed-outcome configuration (FLOWIP-120h): when the breaker is declared in
+/// the `output_middleware:` lane and the handler performs the guarded
+/// wrapper, a rejection synthesizes the author-named rejection fact instead of
+/// aborting, so the recorded group is success-shaped and replays as the
+/// `Rejected` branch.
+#[derive(Clone)]
+pub(crate) struct TypedOutcomeConfig {
+    pub(crate) build_rejection: RejectionFn,
+}
 
 pub struct CircuitBreakerFamily;
 
@@ -307,13 +321,6 @@ pub struct CircuitBreakerMiddleware {
     /// This must match the stage's writer_id so vector-clock watermarks and
     /// stage attribution remain correct in downstream consumers.
     writer_id: WriterId,
-    /// Stage identifier for this breaker (when known).
-    stage_id: Option<StageId>,
-    /// Control middleware provider used to publish breaker lifecycle hints.
-    ///
-    /// Set to a flow-scoped provider by the factory when built inside a flow.
-    /// Defaults to `NoControlMiddleware` for direct unit tests / standalone usage.
-    control_provider: Arc<dyn ControlMiddlewareProvider>,
     /// Optional fallback generator used when the circuit is open.
     ///
     /// When configured, requests that would normally be rejected in the
@@ -324,6 +331,9 @@ pub struct CircuitBreakerMiddleware {
     /// allowing flows to provide domain‑specific degraded responses purely
     /// via circuit breaker configuration.
     fallback: Option<FallbackFn>,
+    /// Typed-outcome mode (FLOWIP-120h): rejection branch synthesis for
+    /// stages that perform the guarded wrapper.
+    typed_outcome: Option<TypedOutcomeConfig>,
     /// Optional classifier that decides whether a given call should be counted
     /// as a failure for breaker purposes based on the input event and the
     /// outputs produced by the handler.
@@ -435,9 +445,8 @@ impl CircuitBreakerMiddleware {
             writer_id: stage_id
                 .map(WriterId::from)
                 .unwrap_or_else(|| WriterId::from(StageId::new())),
-            stage_id,
-            control_provider: Arc::new(NoControlMiddleware),
             fallback,
+            typed_outcome: None,
             failure_classifier,
             failure_classification_classifier: None,
             open_policy: OpenPolicy::default(),
@@ -669,9 +678,6 @@ impl CircuitBreakerMiddleware {
             if let Ok(mut last_cleanup) = self.last_retry_cleanup.lock() {
                 *last_cleanup = now;
             }
-            if let Some(stage_id) = self.stage_id {
-                self.control_provider.mark_circuit_breaker_opened(&stage_id);
-            }
         }
 
         // Emit lifecycle event for state transition
@@ -767,11 +773,17 @@ impl CircuitBreakerMiddleware {
     }
 
     /// Apply an Open-like policy (Open or HalfOpen non-probe behaviour).
+    ///
+    /// At the live effect boundary a rejection without fallback data must abort
+    /// with a structured cause so the runtime records a failure under the
+    /// effect cursor and strict replay reproduces the same rejection. An empty
+    /// skip there would leave the input with no recorded outcome (FLOWIP-120h).
     fn handle_open_like(
         &self,
         event: &ChainEvent,
         ctx: &mut MiddlewareContext,
         policy: &OpenPolicy,
+        reason: CircuitBreakerRejectionReason,
     ) -> MiddlewareAction {
         // Track rejection for summaries.
         if let Ok(mut stats) = self.stats.lock() {
@@ -779,23 +791,54 @@ impl CircuitBreakerMiddleware {
         }
         self.rejections_total.fetch_add(1, Ordering::Relaxed);
 
+        let at_effect_boundary =
+            ctx.execution_scope() == MiddlewareExecutionScope::LiveEffectBoundary;
+
+        // Typed-outcome mode (FLOWIP-120h): at the effect boundary a rejection
+        // synthesizes the author-named rejection fact, a success-shaped group
+        // the guarded carrier decodes as `Rejected`, so the input completes
+        // and strict replay reconstructs the same branch.
+        let typed_rejection = |reason: CircuitBreakerRejectionReason| -> Option<MiddlewareAction> {
+            if !at_effect_boundary {
+                return None;
+            }
+            self.typed_outcome
+                .as_ref()
+                .map(|typed| MiddlewareAction::Skip((typed.build_rejection)(event, reason)))
+        };
+
         let action = match policy {
             OpenPolicy::EmitFallback => {
                 if let Some(fallback) = &self.fallback {
                     let results = (fallback)(event);
                     MiddlewareAction::Skip(results)
+                } else if let Some(action) = typed_rejection(reason) {
+                    action
+                } else if at_effect_boundary {
+                    MiddlewareAction::Abort(Some(self.rejection_abort_cause(reason)))
                 } else {
                     MiddlewareAction::Skip(vec![])
                 }
             }
             OpenPolicy::FailFast => {
-                // For now, FailFast behaves like a pure rejection from the
-                // middleware perspective (no synthetic data). Future work
-                // (051b‑part‑3c / 082h) can introduce a dedicated error
-                // payload or ErrorKind for this case.
-                MiddlewareAction::Skip(vec![])
+                if let Some(action) = typed_rejection(reason) {
+                    action
+                } else if at_effect_boundary {
+                    MiddlewareAction::Abort(Some(self.rejection_abort_cause(reason)))
+                } else {
+                    MiddlewareAction::Skip(vec![])
+                }
             }
-            OpenPolicy::Skip => MiddlewareAction::Skip(vec![]),
+            OpenPolicy::Skip => {
+                if at_effect_boundary {
+                    // Transport truncation is incoherent at the effect boundary;
+                    // build validation rejects this configuration on effectful
+                    // stages, and this arm is the defensive backstop.
+                    MiddlewareAction::Abort(Some(self.rejection_abort_cause(reason)))
+                } else {
+                    MiddlewareAction::Skip(vec![])
+                }
+            }
         };
 
         // The middleware wrapper returns early for Skip actions, so post_handle is not invoked.
@@ -803,6 +846,20 @@ impl CircuitBreakerMiddleware {
         self.maybe_emit_summary(ctx);
 
         action
+    }
+
+    fn rejection_abort_cause(&self, reason: CircuitBreakerRejectionReason) -> MiddlewareAbortCause {
+        let code = match reason {
+            CircuitBreakerRejectionReason::CircuitOpen => "rejected_circuit_open",
+            CircuitBreakerRejectionReason::ProbeInProgress => "rejected_probe_in_progress",
+            CircuitBreakerRejectionReason::Unknown => "rejected",
+        };
+        MiddlewareAbortCause {
+            source: "circuit_breaker",
+            code,
+            message: format!("circuit breaker rejected effect execution: {code}"),
+            retry: obzenflow_core::event::RetryDisposition::Retryable,
+        }
     }
 
     fn maybe_emit_summary(&self, ctx: &mut MiddlewareContext) {
@@ -961,7 +1018,12 @@ impl Middleware for CircuitBreakerMiddleware {
                         )),
                     ));
 
-                    self.handle_open_like(event, ctx, &self.open_policy)
+                    self.handle_open_like(
+                        event,
+                        ctx,
+                        &self.open_policy,
+                        CircuitBreakerRejectionReason::CircuitOpen,
+                    )
                 }
             }
 
@@ -990,6 +1052,7 @@ impl Middleware for CircuitBreakerMiddleware {
                             event,
                             ctx,
                             &self.half_open_policy.on_rejected,
+                            CircuitBreakerRejectionReason::ProbeInProgress,
                         );
                     }
 
@@ -1380,15 +1443,6 @@ impl Middleware for CircuitBreakerMiddleware {
     }
 }
 
-fn copy_metadata_from(target: &mut ChainEvent, source: &ChainEvent) {
-    target.flow_context = source.flow_context.clone();
-    target.processing_info = source.processing_info.clone();
-    target.causality = source.causality.clone();
-    target.correlation = source.correlation.clone();
-    target.runtime_context = source.runtime_context.clone();
-    target.observability = source.observability.clone();
-}
-
 fn build_typed_fallback_event<In, Out, F>(f: &F, event: &ChainEvent) -> Vec<ChainEvent>
 where
     In: TypedPayload + DeserializeOwned,
@@ -1423,10 +1477,54 @@ where
         }
     };
 
-    // 4. Wrap into a ChainEvent, copying metadata
+    // 4. Wrap into a ChainEvent derived from the guarded input, so causality
+    //    records the input as the fallback's parent (FLOWIP-120h lineage fix).
     let event_type = Out::versioned_event_type();
-    let mut ev = ChainEventFactory::data_event(event.writer_id, &event_type, out_value);
-    copy_metadata_from(&mut ev, event);
+    let ev = ChainEventFactory::derived_data_event(event.writer_id, event, &event_type, out_value);
+
+    vec![ev]
+}
+
+/// Build the typed rejection fact for typed-outcome mode (FLOWIP-120h),
+/// derived from the guarded input so causality records it as the parent.
+fn build_typed_rejection_event<In, R, F>(
+    f: &F,
+    event: &ChainEvent,
+    reason: CircuitBreakerRejectionReason,
+) -> Vec<ChainEvent>
+where
+    In: TypedPayload + DeserializeOwned,
+    R: TypedPayload + Serialize,
+    F: Fn(&In, CircuitBreakerRejectionReason) -> R + Send + Sync + 'static,
+{
+    use obzenflow_core::event::status::processing_status::ProcessingStatus;
+
+    let payload = event.payload();
+    let input: In = match serde_json::from_value(payload.clone()) {
+        Ok(v) => v,
+        Err(err) => {
+            let mut clone = event.clone();
+            clone.processing_info.status =
+                ProcessingStatus::error(format!("cb_rejection_deserialize_failed: {err}"));
+            return vec![clone];
+        }
+    };
+
+    let rejection = f(&input, reason);
+
+    let rejection_value = match serde_json::to_value(&rejection) {
+        Ok(v) => v,
+        Err(err) => {
+            let mut clone = event.clone();
+            clone.processing_info.status =
+                ProcessingStatus::error(format!("cb_rejection_serialize_failed: {err}"));
+            return vec![clone];
+        }
+    };
+
+    let event_type = R::versioned_event_type();
+    let ev =
+        ChainEventFactory::derived_data_event(event.writer_id, event, &event_type, rejection_value);
 
     vec![ev]
 }
@@ -1442,7 +1540,9 @@ pub struct CircuitBreakerBuilder {
     threshold: usize,
     cooldown: Duration,
     fallback: Option<FallbackFn>,
-    contract_mode: Option<CircuitBreakerContractMode>,
+    fallback_fact_type: Option<TypedFactType>,
+    typed_outcome: Option<TypedOutcomeConfig>,
+    rejection_fact_type: Option<TypedFactType>,
     failure_classifier: Option<FailureClassifier>,
     failure_classification_classifier: Option<FailureClassificationClassifier>,
     failure_mode: Option<CircuitBreakerFailureMode>,
@@ -1461,7 +1561,9 @@ impl CircuitBreakerBuilder {
             threshold,
             cooldown: Duration::from_secs(60),
             fallback: None,
-            contract_mode: None,
+            fallback_fact_type: None,
+            typed_outcome: None,
+            rejection_fact_type: None,
             failure_classifier: None,
             failure_classification_classifier: None,
             failure_mode: None,
@@ -1534,13 +1636,6 @@ impl CircuitBreakerBuilder {
         self
     }
 
-    /// Configure how downstream contracts should interpret breaker activity
-    /// for this stage.
-    pub fn with_contract_mode(mut self, mode: CircuitBreakerContractMode) -> Self {
-        self.contract_mode = Some(mode);
-        self
-    }
-
     /// Configure how this breaker should behave while Open.
     pub fn open_policy(mut self, policy: OpenPolicy) -> Self {
         self.open_policy = Some(policy);
@@ -1561,7 +1656,7 @@ impl CircuitBreakerBuilder {
     pub fn with_typed_fallback<In, Out, F>(mut self, f: F) -> Self
     where
         In: TypedPayload + DeserializeOwned,
-        Out: TypedPayload + Serialize,
+        Out: TypedPayload + Serialize + 'static,
         F: Fn(&In) -> Out + Send + Sync + 'static,
     {
         let adapter = move |event: &ChainEvent| -> Vec<ChainEvent> {
@@ -1569,7 +1664,72 @@ impl CircuitBreakerBuilder {
         };
 
         self.fallback = Some(Arc::new(adapter));
+        self.fallback_fact_type = Some(TypedFactType::of::<Out>());
         self
+    }
+
+    /// Configure the typed rejection branch (FLOWIP-120h). When the breaker
+    /// rejects without fallback data at the effect boundary in typed-outcome
+    /// mode, this closure synthesizes the author-named rejection fact from the
+    /// guarded input and the rejection reason. The reason must end up in the
+    /// fact payload; strict replay reconstructs branches from facts alone.
+    pub fn typed_outcome_with<In, R, F>(mut self, f: F) -> Self
+    where
+        In: TypedPayload + DeserializeOwned,
+        R: TypedPayload + Serialize + 'static,
+        F: Fn(&In, CircuitBreakerRejectionReason) -> R + Send + Sync + 'static,
+    {
+        let adapter =
+            move |event: &ChainEvent, reason: CircuitBreakerRejectionReason| -> Vec<ChainEvent> {
+                build_typed_rejection_event::<In, R, F>(&f, event, reason)
+            };
+
+        self.typed_outcome = Some(TypedOutcomeConfig {
+            build_rejection: Arc::new(adapter),
+        });
+        self.rejection_fact_type = Some(TypedFactType::of::<R>());
+        self
+    }
+
+    /// Build for the `output_middleware:` macro lane (FLOWIP-120h), naming
+    /// the fallback and rejection branch fact types. Both branches must have
+    /// producers: `with_typed_fallback` for `F` and `typed_outcome_with` for
+    /// `R`, with matching fact types. A mismatch is reported as a flow build
+    /// error rather than a silent misconfiguration.
+    pub fn build_typed<F, R>(self) -> crate::middleware::TypeShapingMiddleware<F, R>
+    where
+        F: TypedPayload + 'static,
+        R: TypedPayload + 'static,
+    {
+        let expected_fallback = TypedFactType::of::<F>();
+        let expected_rejection = TypedFactType::of::<R>();
+
+        let config_error = match (&self.fallback_fact_type, &self.rejection_fact_type) {
+            (None, _) => Some(
+                "build_typed requires with_typed_fallback so the Fallback branch has a producer"
+                    .to_string(),
+            ),
+            (_, None) => Some(
+                "build_typed requires typed_outcome_with so the Rejected branch has a producer"
+                    .to_string(),
+            ),
+            (Some(fallback), _) if fallback.event_type != expected_fallback.event_type => {
+                Some(format!(
+                    "with_typed_fallback produces '{}' but build_typed names fallback '{}'",
+                    fallback.event_type, expected_fallback.event_type,
+                ))
+            }
+            (_, Some(rejection)) if rejection.event_type != expected_rejection.event_type => {
+                Some(format!(
+                    "typed_outcome_with produces '{}' but build_typed names rejection '{}'",
+                    rejection.event_type, expected_rejection.event_type,
+                ))
+            }
+            _ => None,
+        };
+
+        let factory = self.build();
+        crate::middleware::TypeShapingMiddleware::new(factory, "circuit_breaker", config_error)
     }
 
     /// Configure a custom failure classifier used to decide whether a given
@@ -1739,7 +1899,7 @@ impl CircuitBreakerBuilder {
             threshold: self.threshold,
             cooldown: self.cooldown,
             fallback: self.fallback,
-            contract_mode: self.contract_mode,
+            typed_outcome: self.typed_outcome,
             failure_classifier: self.failure_classifier,
             failure_classification_classifier: self.failure_classification_classifier,
             failure_mode: self.failure_mode,
@@ -1758,7 +1918,7 @@ pub struct CircuitBreakerFactory {
     threshold: usize,
     cooldown: Duration,
     fallback: Option<FallbackFn>,
-    contract_mode: Option<CircuitBreakerContractMode>,
+    typed_outcome: Option<TypedOutcomeConfig>,
     failure_classifier: Option<FailureClassifier>,
     failure_classification_classifier: Option<FailureClassificationClassifier>,
     failure_mode: Option<CircuitBreakerFailureMode>,
@@ -1777,7 +1937,7 @@ impl CircuitBreakerFactory {
             threshold,
             cooldown: Duration::from_secs(60),
             fallback: None,
-            contract_mode: None,
+            typed_outcome: None,
             failure_classifier: None,
             failure_classification_classifier: None,
             failure_mode: None,
@@ -1811,12 +1971,6 @@ impl CircuitBreakerFactory {
         F: Fn(&ChainEvent) -> Vec<ChainEvent> + Send + Sync + 'static,
     {
         self.fallback = Some(Arc::new(f));
-        self
-    }
-
-    /// Configure the breaker-aware contract mode for this stage.
-    pub fn with_contract_mode(mut self, mode: CircuitBreakerContractMode) -> Self {
-        self.contract_mode = Some(mode);
         self
     }
 
@@ -2009,23 +2163,6 @@ impl MiddlewareFactory for CircuitBreakerFactory {
         config: &StageConfig,
         control_middleware: std::sync::Arc<super::ControlMiddlewareAggregator>,
     ) -> crate::middleware::MiddlewareFactoryResult<Box<dyn Middleware>> {
-        // Determine the effective contract mode for this stage. BreakerAware
-        // without any fallback configured is unsafe because it could mask
-        // genuine data loss. In that case we degrade to Strict semantics and
-        // emit a loud warning rather than silently registering BreakerAware.
-        let mut effective_mode = self.contract_mode;
-        if let Some(CircuitBreakerContractMode::BreakerAware) = self.contract_mode {
-            if self.fallback.is_none() {
-                tracing::warn!(
-                    target: "flowip-051b-part-2",
-                    stage_id = ?config.stage_id,
-                    "CircuitBreaker configured with BreakerAware contract mode but no fallback; \
-                     degrading to Strict mode to avoid masking genuine data loss"
-                );
-                effective_mode = Some(CircuitBreakerContractMode::Strict);
-            }
-        }
-
         let validated_threshold = self.validated_threshold().map_err(|err| {
             MiddlewareFactoryError::invalid_configuration(self.label(), &config.name, err)
         })?;
@@ -2072,6 +2209,7 @@ impl MiddlewareFactory for CircuitBreakerFactory {
         );
         middleware.failure_mode = failure_mode;
         middleware.rate_window = rate_window;
+        middleware.typed_outcome = self.typed_outcome.clone();
         middleware.open_policy = open_policy;
         middleware.half_open_policy = half_open_policy;
         middleware.unknown_error_kind_policy = unknown_error_kind_policy;
@@ -2081,16 +2219,9 @@ impl MiddlewareFactory for CircuitBreakerFactory {
         middleware.retry_limits = self.retry_limits.clone();
         middleware.failure_classification_policy = self.failure_classification_policy.clone();
 
-        // Publish breaker lifecycle hints (e.g., "has opened at least once")
-        // via the flow-scoped control middleware provider.
-        middleware.control_provider = control_middleware.clone();
-
-        // Register circuit breaker snapshotter/state/contract info with the
-        // flow-scoped aggregator so runtime_services can inject control metrics
-        // into wide events and apply breaker-aware contract policies.
-        let contract_mode = effective_mode.unwrap_or(CircuitBreakerContractMode::Strict);
-        let has_fallback = self.fallback.is_some();
-
+        // Register circuit breaker snapshotter/state with the flow-scoped
+        // aggregator so runtime_services can inject control metrics into wide
+        // events and source strategies can observe breaker state.
         let cb_state = middleware.state.clone();
         let cb_state_for_registry = cb_state.clone();
         let successes_total = middleware.successes_total.clone();
@@ -2143,8 +2274,6 @@ impl MiddlewareFactory for CircuitBreakerFactory {
             config.stage_id,
             snapshotter,
             cb_state_for_registry,
-            contract_mode,
-            has_fallback,
         );
 
         Ok(Box::new(middleware))
@@ -2178,8 +2307,15 @@ impl MiddlewareFactory for CircuitBreakerFactory {
             }
         });
 
+        let effect_boundary_truncates = matches!(self.open_policy, Some(OpenPolicy::Skip))
+            || self
+                .half_open_policy
+                .as_ref()
+                .is_some_and(|policy| matches!(policy.on_rejected, OpenPolicy::Skip));
+
         MiddlewareHints {
             retry,
+            effect_boundary_truncates,
             ..Default::default()
         }
     }
@@ -2249,6 +2385,7 @@ pub fn ai_circuit_breaker() -> Box<dyn MiddlewareFactory> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use obzenflow_core::control_middleware::ControlMiddlewareProvider;
     use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
     use obzenflow_core::time::MetricsDuration;
     use std::num::NonZeroU32;
@@ -2909,7 +3046,7 @@ mod tests {
                                     cb.post_handle(&event, &[create_test_event()], &mut ctx);
                                 }
                             }
-                            MiddlewareAction::Skip(_) | MiddlewareAction::Abort => {
+                            MiddlewareAction::Skip(_) | MiddlewareAction::Abort(_) => {
                                 // Rejected while Open or HalfOpen — normal.
                             }
                         }
@@ -3067,6 +3204,110 @@ mod tests {
             states.len() <= 10_000,
             "retry_state exceeded cap: {} entries",
             states.len()
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // FLOWIP-120h: rejection recording at the effect boundary
+    // -----------------------------------------------------------------------
+
+    #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+    struct FallbackIn {
+        n: u32,
+    }
+
+    impl TypedPayload for FallbackIn {
+        const EVENT_TYPE: &'static str = "test.fallback_in";
+    }
+
+    #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+    struct FallbackOut {
+        n: u32,
+    }
+
+    impl TypedPayload for FallbackOut {
+        const EVENT_TYPE: &'static str = "test.fallback_out";
+    }
+
+    #[test]
+    fn open_breaker_failfast_aborts_with_cause_at_effect_boundary() {
+        let mut cb = CircuitBreakerMiddleware::new(1);
+        cb.open_policy = OpenPolicy::FailFast;
+        let mut ctx = MiddlewareContext::with_scope(MiddlewareExecutionScope::LiveEffectBoundary);
+        cb.force_open(&mut ctx);
+
+        match cb.pre_handle(&create_test_event(), &mut ctx) {
+            MiddlewareAction::Abort(Some(cause)) => {
+                assert_eq!(cause.source, "circuit_breaker");
+                assert_eq!(cause.code, "rejected_circuit_open");
+                assert!(cause.retry.is_retryable());
+            }
+            other => panic!("expected Abort with cause at effect boundary, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn open_breaker_emit_fallback_without_fallback_aborts_at_effect_boundary() {
+        let cb = CircuitBreakerMiddleware::new(1); // default EmitFallback, no fallback configured
+        let mut ctx = MiddlewareContext::with_scope(MiddlewareExecutionScope::LiveEffectBoundary);
+        cb.force_open(&mut ctx);
+
+        assert!(matches!(
+            cb.pre_handle(&create_test_event(), &mut ctx),
+            MiddlewareAction::Abort(Some(_))
+        ));
+    }
+
+    #[test]
+    fn open_breaker_rejection_keeps_legacy_skip_on_handler_lane() {
+        let mut cb = CircuitBreakerMiddleware::new(1);
+        cb.open_policy = OpenPolicy::FailFast;
+        let mut ctx = MiddlewareContext::new();
+        cb.force_open(&mut ctx);
+
+        match cb.pre_handle(&create_test_event(), &mut ctx) {
+            MiddlewareAction::Skip(results) => assert!(results.is_empty()),
+            other => panic!("expected legacy empty Skip on the handler lane, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn probe_rejection_cause_distinguishes_probe_in_progress() {
+        let cb = CircuitBreakerMiddleware::new(1);
+        let mut ctx = MiddlewareContext::with_scope(MiddlewareExecutionScope::LiveEffectBoundary);
+
+        match cb.handle_open_like(
+            &create_test_event(),
+            &mut ctx,
+            &OpenPolicy::FailFast,
+            CircuitBreakerRejectionReason::ProbeInProgress,
+        ) {
+            MiddlewareAction::Abort(Some(cause)) => {
+                assert_eq!(cause.code, "rejected_probe_in_progress");
+            }
+            other => panic!("expected Abort with probe reason, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn typed_fallback_event_records_input_as_causality_parent() {
+        let input_event = ChainEventFactory::data_event(
+            WriterId::from(StageId::new()),
+            FallbackIn::EVENT_TYPE,
+            json!({ "n": 7 }),
+        );
+        let f = |input: &FallbackIn| FallbackOut { n: input.n };
+
+        let events = build_typed_fallback_event::<FallbackIn, FallbackOut, _>(&f, &input_event);
+        assert_eq!(events.len(), 1);
+        let fallback = &events[0];
+        assert_eq!(
+            fallback.event_type(),
+            FallbackOut::versioned_event_type().as_str()
+        );
+        assert!(
+            fallback.causality.parent_ids.contains(&input_event.id),
+            "fallback event must record the guarded input as its causality parent"
         );
     }
 

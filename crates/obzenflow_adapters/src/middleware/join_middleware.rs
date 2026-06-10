@@ -87,7 +87,7 @@ impl<H: JoinHandler> MiddlewareJoin<H> {
             match middleware.pre_handle(event, ctx) {
                 MiddlewareAction::Continue => continue,
                 MiddlewareAction::Skip(_) => return false,
-                MiddlewareAction::Abort => return false,
+                MiddlewareAction::Abort(_) => return false,
             }
         }
         true

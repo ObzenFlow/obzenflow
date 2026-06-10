@@ -16,11 +16,12 @@ use super::{
 };
 use async_trait::async_trait;
 use obzenflow_core::event::status::processing_status::ProcessingStatus;
+use obzenflow_core::event::{EffectFailureCause, RetryDisposition};
 use obzenflow_core::ChainEvent;
 use obzenflow_core::MiddlewareExecutionScope;
 use obzenflow_runtime::effects::{
-    EffectBoundaryAction, EffectBoundaryContext, EffectBoundaryMiddleware, EffectBoundaryStart,
-    EffectInvocationContext,
+    EffectAbortReason, EffectBoundaryAction, EffectBoundaryContext, EffectBoundaryMiddleware,
+    EffectBoundaryStart, EffectInvocationContext,
 };
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::transform::traits::UnifiedTransformHandler;
@@ -110,7 +111,7 @@ impl<H: TransformHandler> MiddlewareTransform<H> {
                     results.extend(control_events);
                     return Ok(results);
                 }
-                MiddlewareAction::Abort => {
+                MiddlewareAction::Abort(_) => {
                     let mut err = event.clone();
                     err.processing_info.status = ProcessingStatus::error("aborted by middleware");
                     return Ok(vec![err]);
@@ -314,7 +315,7 @@ impl<H: AsyncTransformHandler> AsyncMiddlewareTransform<H> {
                         short_circuit = Some(results);
                         break;
                     }
-                    MiddlewareAction::Abort => {
+                    MiddlewareAction::Abort(_) => {
                         accumulated_control_events.extend(ctx.take_control_events());
                         ctx.insert::<CircuitBreakerTotalRetryWallMs>(
                             retry_start.elapsed().as_millis() as u64,
@@ -517,15 +518,39 @@ impl EffectBoundaryMiddleware for MiddlewareEffectBoundary {
                 MiddlewareAction::Skip(results) => {
                     let control_events = self.drain_control_events(&mut ctx);
                     return EffectBoundaryStart {
-                        action: EffectBoundaryAction::Skip(results),
+                        action: EffectBoundaryAction::Skip {
+                            results,
+                            source: Some(middleware.label().to_string()),
+                        },
                         context: EffectBoundaryContext::new(ctx),
                         control_events,
                     };
                 }
-                MiddlewareAction::Abort => {
+                MiddlewareAction::Abort(cause) => {
                     let control_events = self.drain_control_events(&mut ctx);
+                    let reason = match cause {
+                        Some(cause) => EffectAbortReason {
+                            cause: EffectFailureCause {
+                                source: cause.source.to_string(),
+                                code: cause.code.to_string(),
+                            },
+                            message: cause.message,
+                            retry: cause.retry,
+                        },
+                        None => EffectAbortReason {
+                            cause: EffectFailureCause {
+                                source: middleware.label().to_string(),
+                                code: "aborted".to_string(),
+                            },
+                            message: format!(
+                                "middleware '{}' aborted effect execution",
+                                middleware.label()
+                            ),
+                            retry: RetryDisposition::NotRetryable,
+                        },
+                    };
                     return EffectBoundaryStart {
-                        action: EffectBoundaryAction::Abort,
+                        action: EffectBoundaryAction::Abort(reason),
                         context: EffectBoundaryContext::new(ctx),
                         control_events,
                     };
@@ -651,7 +676,7 @@ impl<H: UnifiedTransformHandler> UnifiedMiddlewareTransform<H> {
                     results.extend(control_events);
                     return Ok(results);
                 }
-                MiddlewareAction::Abort => {
+                MiddlewareAction::Abort(_) => {
                     let mut err = event.clone();
                     err.processing_info.status = ProcessingStatus::error("aborted by middleware");
                     return Ok(vec![err]);
@@ -1170,7 +1195,7 @@ mod tests {
 
         let start = boundary.before_effect(&event);
         match start.action {
-            EffectBoundaryAction::Skip(results) => {
+            EffectBoundaryAction::Skip { results, .. } => {
                 assert_eq!(results.len(), 1);
                 assert_eq!(results[0].payload()["effect_value"], json!(42));
             }

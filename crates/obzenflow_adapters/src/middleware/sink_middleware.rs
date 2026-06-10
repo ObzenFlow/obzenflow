@@ -84,7 +84,7 @@ impl<H: SinkHandler> MiddlewareSink<H> {
                         None, // bytes_processed
                     )));
                 }
-                MiddlewareAction::Abort => {
+                MiddlewareAction::Abort(_) => {
                     // Abort is also treated as success but with a different message
                     return Ok(SinkConsumeReport::new(DeliveryPayload::success(
                         "middleware_sink",

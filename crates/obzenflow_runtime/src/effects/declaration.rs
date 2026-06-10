@@ -27,6 +27,10 @@ pub struct EffectDeclaration {
     pub idempotency_key_policy: IdempotencyKeyPolicy,
     pub required_ports: Vec<EffectPortRequirement>,
     pub transactional_executor: Option<&'static str>,
+    /// Fact types this effect's `Output` may produce, read off the type via
+    /// `TypedFactSet::fact_types()` (FLOWIP-120h). Empty for the string-only
+    /// constructors, which predate typed outputs and carry no type info.
+    pub output_fact_types: Vec<TypedFactType>,
 }
 
 impl EffectDeclaration {
@@ -47,6 +51,7 @@ impl EffectDeclaration {
             idempotency_key_policy,
             required_ports: E::required_ports(),
             transactional_executor: None,
+            output_fact_types: E::Output::fact_types(),
         }
     }
 
@@ -57,6 +62,7 @@ impl EffectDeclaration {
             idempotency_key_policy: IdempotencyKeyPolicy::NotRequired,
             required_ports: Vec::new(),
             transactional_executor: None,
+            output_fact_types: Vec::new(),
         }
     }
 
@@ -67,6 +73,7 @@ impl EffectDeclaration {
             idempotency_key_policy: IdempotencyKeyPolicy::Required,
             required_ports: Vec::new(),
             transactional_executor: None,
+            output_fact_types: Vec::new(),
         }
     }
 
@@ -77,6 +84,7 @@ impl EffectDeclaration {
             idempotency_key_policy: IdempotencyKeyPolicy::NotRequired,
             required_ports: Vec::new(),
             transactional_executor: Some(executor),
+            output_fact_types: Vec::new(),
         }
     }
 
@@ -95,6 +103,7 @@ impl EffectDeclaration {
             idempotency_key_policy: IdempotencyKeyPolicy::NotRequired,
             required_ports,
             transactional_executor: Some(executor),
+            output_fact_types: E::Output::fact_types(),
         }
     }
 

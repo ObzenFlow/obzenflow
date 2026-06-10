@@ -483,6 +483,7 @@ fn invocation_context_with_mode(
             EffectDeclaration::of::<MultiFactEffect>(),
             EffectDeclaration::transactional_effect::<TransactionalCountingEffect>("tx"),
         ],
+        synthesized_outcomes: Vec::new(),
         output_contract: StageOutputContract::empty(),
         backpressure_writer: BackpressureWriter::disabled(),
         emit_enabled: false,
@@ -1800,4 +1801,257 @@ async fn capture_replays_recorded_value_without_using_live_value() {
 
     assert_eq!(replayed_again, 7);
     assert_eq!(replay_of_replay_journal.events()[0].event.id, live_event_id);
+}
+
+// ---------------------------------------------------------------------------
+// FLOWIP-120h: boundary rejections must be recorded under the effect cursor
+// ---------------------------------------------------------------------------
+
+struct AbortingBoundary;
+
+impl EffectBoundaryMiddleware for AbortingBoundary {
+    fn before_effect(&self, _event: &ChainEvent) -> EffectBoundaryStart {
+        EffectBoundaryStart {
+            action: EffectBoundaryAction::Abort(EffectAbortReason {
+                cause: EffectFailureCause {
+                    source: "circuit_breaker".to_string(),
+                    code: "rejected_circuit_open".to_string(),
+                },
+                message: "circuit breaker rejected effect execution".to_string(),
+                retry: RetryDisposition::Retryable,
+            }),
+            context: EffectBoundaryContext::new(()),
+            control_events: Vec::new(),
+        }
+    }
+
+    fn after_effect(
+        &self,
+        _context: EffectBoundaryContext,
+        _event: &ChainEvent,
+        _outputs: &[ChainEvent],
+    ) -> Vec<ChainEvent> {
+        Vec::new()
+    }
+}
+
+struct EmptySkipBoundary;
+
+impl EffectBoundaryMiddleware for EmptySkipBoundary {
+    fn before_effect(&self, _event: &ChainEvent) -> EffectBoundaryStart {
+        EffectBoundaryStart {
+            action: EffectBoundaryAction::Skip {
+                results: Vec::new(),
+                source: None,
+            },
+            context: EffectBoundaryContext::new(()),
+            control_events: Vec::new(),
+        }
+    }
+
+    fn after_effect(
+        &self,
+        _context: EffectBoundaryContext,
+        _event: &ChainEvent,
+        _outputs: &[ChainEvent],
+    ) -> Vec<ChainEvent> {
+        Vec::new()
+    }
+}
+
+#[tokio::test]
+async fn boundary_abort_records_failure_with_cause_and_replays_deterministically() {
+    let stage_id = StageId::new();
+    let live_journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
+    let live_calls = Arc::new(AtomicUsize::new(0));
+    let mut live_ctx = invocation_context(
+        live_journal.clone(),
+        parent_envelope(WriterId::from(stage_id)),
+        None,
+    );
+    live_ctx.effect_boundary = Some(Arc::new(AbortingBoundary));
+    let mut live = Effects::new(live_ctx);
+
+    let live_err = live
+        .perform(CountingEffect {
+            value: 1,
+            label: "guarded",
+            calls: live_calls.clone(),
+        })
+        .await
+        .expect_err("boundary abort should fail the perform");
+
+    match &live_err {
+        EffectError::BoundaryRejected {
+            rejected_by, code, ..
+        } => {
+            assert_eq!(rejected_by, "circuit_breaker");
+            assert_eq!(code, "rejected_circuit_open");
+        }
+        other => panic!("expected BoundaryRejected, got {other:?}"),
+    }
+    assert_eq!(
+        live_calls.load(Ordering::SeqCst),
+        0,
+        "boundary abort must prevent effect execution"
+    );
+
+    let live_records = effect_records(&live_journal);
+    assert_eq!(
+        live_records.len(),
+        1,
+        "boundary abort must record a failure under the effect cursor"
+    );
+    match &live_records[0].outcome {
+        EffectOutcomePayload::Failed { cause, retry, .. } => {
+            let cause = cause
+                .as_ref()
+                .expect("recorded failure must carry the cause");
+            assert_eq!(cause.source, "circuit_breaker");
+            assert_eq!(cause.code, "rejected_circuit_open");
+            assert!(retry.is_retryable());
+        }
+        other => panic!("expected Failed outcome, got {other:?}"),
+    }
+
+    // Strict replay: same deterministic error, no MissingRecordedEffect, no
+    // boundary consultation, zero executions.
+    let replay_history = Arc::new(
+        EffectHistory::from_records("replay_archive_flow".to_string(), live_records.clone())
+            .expect("history from live records"),
+    );
+    let replay_journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
+    let replay_calls = Arc::new(AtomicUsize::new(0));
+    let mut replay = Effects::new(invocation_context(
+        replay_journal.clone(),
+        parent_envelope(WriterId::from(stage_id)),
+        Some(replay_history),
+    ));
+
+    let replay_err = replay
+        .perform(CountingEffect {
+            value: 1,
+            label: "guarded",
+            calls: replay_calls.clone(),
+        })
+        .await
+        .expect_err("strict replay should return the recorded rejection");
+
+    match &replay_err {
+        EffectError::RecordedFailure { cause, .. } => {
+            let cause = cause
+                .as_ref()
+                .expect("replayed failure must carry the cause");
+            assert_eq!(cause.source, "circuit_breaker");
+            assert_eq!(cause.code, "rejected_circuit_open");
+        }
+        other => panic!("expected RecordedFailure on replay, got {other:?}"),
+    }
+    assert_eq!(replay_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(effect_records(&replay_journal), live_records);
+}
+
+#[tokio::test]
+async fn perform_rejects_unguarded_effect_on_typed_outcome_stage() {
+    let stage_id = StageId::new();
+    let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut ctx = invocation_context(
+        journal.clone(),
+        parent_envelope(WriterId::from(stage_id)),
+        None,
+    );
+    ctx.synthesized_outcomes = vec![SynthesizedOutcomeRegistration {
+        effect_type: None,
+        fact_types: vec![TypedFactType::of::<CountingOutput>()],
+        source_label: "circuit_breaker".to_string(),
+    }];
+    let mut effects = Effects::new(ctx);
+
+    let err = effects
+        .perform(CountingEffect {
+            value: 1,
+            label: "unguarded",
+            calls: calls.clone(),
+        })
+        .await
+        .expect_err("plain perform on a typed-outcome stage must fail before any I/O");
+
+    assert!(
+        matches!(&err, EffectError::TypedOutcomeCoordination { .. }),
+        "expected TypedOutcomeCoordination, got {err:?}"
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 0, "no I/O before the check");
+    assert!(
+        journal.events().is_empty(),
+        "the coordination check runs before any record is appended"
+    );
+}
+
+#[tokio::test]
+async fn boundary_empty_skip_records_failure_instead_of_unrecorded_error() {
+    let stage_id = StageId::new();
+    let live_journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
+    let live_calls = Arc::new(AtomicUsize::new(0));
+    let mut live_ctx = invocation_context(
+        live_journal.clone(),
+        parent_envelope(WriterId::from(stage_id)),
+        None,
+    );
+    live_ctx.effect_boundary = Some(Arc::new(EmptySkipBoundary));
+    let mut live = Effects::new(live_ctx);
+
+    let live_err = live
+        .perform(CountingEffect {
+            value: 1,
+            label: "guarded",
+            calls: live_calls.clone(),
+        })
+        .await
+        .expect_err("empty boundary skip should fail the perform");
+
+    assert!(matches!(
+        &live_err,
+        EffectError::BoundaryRejected { code, .. } if code == "skip_without_facts"
+    ));
+    assert_eq!(live_calls.load(Ordering::SeqCst), 0);
+
+    let live_records = effect_records(&live_journal);
+    assert_eq!(
+        live_records.len(),
+        1,
+        "empty skip must leave a recorded outcome, not an unrecorded error"
+    );
+    assert!(matches!(
+        &live_records[0].outcome,
+        EffectOutcomePayload::Failed { cause: Some(cause), .. }
+            if cause.source == "effect_boundary" && cause.code == "skip_without_facts"
+    ));
+
+    // Strict replay must not fail with MissingRecordedEffect.
+    let replay_history = Arc::new(
+        EffectHistory::from_records("replay_archive_flow".to_string(), live_records)
+            .expect("history from live records"),
+    );
+    let replay_calls = Arc::new(AtomicUsize::new(0));
+    let mut replay = Effects::new(invocation_context(
+        Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id))),
+        parent_envelope(WriterId::from(stage_id)),
+        Some(replay_history),
+    ));
+
+    let replay_err = replay
+        .perform(CountingEffect {
+            value: 1,
+            label: "guarded",
+            calls: replay_calls.clone(),
+        })
+        .await
+        .expect_err("strict replay should return the recorded rejection");
+
+    assert!(
+        matches!(&replay_err, EffectError::RecordedFailure { .. }),
+        "expected RecordedFailure, got {replay_err:?}"
+    );
+    assert_eq!(replay_calls.load(Ordering::SeqCst), 0);
 }

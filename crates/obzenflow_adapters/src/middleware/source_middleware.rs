@@ -265,7 +265,7 @@ impl<H: AsyncFiniteSourceHandler> AsyncFiniteSourceHandler for MiddlewareAsyncFi
 
                     return Ok(Some(results));
                 }
-                MiddlewareAction::Abort => return Ok(Some(Vec::new())),
+                MiddlewareAction::Abort(_) => return Ok(Some(Vec::new())),
             }
         }
 
@@ -344,7 +344,7 @@ impl<H: AsyncFiniteSourceHandler> AsyncFiniteSourceHandler for MiddlewareAsyncFi
                     results.extend(control_events);
                     return Ok(Some(results));
                 }
-                MiddlewareAction::Abort => return Ok(Some(Vec::new())),
+                MiddlewareAction::Abort(_) => return Ok(Some(Vec::new())),
             }
         }
 
@@ -515,7 +515,7 @@ impl<H: AsyncInfiniteSourceHandler> AsyncInfiniteSourceHandler
 
                     return Ok(results);
                 }
-                MiddlewareAction::Abort => return Ok(Vec::new()),
+                MiddlewareAction::Abort(_) => return Ok(Vec::new()),
             }
         }
 
@@ -559,7 +559,7 @@ impl<H: AsyncInfiniteSourceHandler> AsyncInfiniteSourceHandler
                     results.extend(control_events);
                     return Ok(results);
                 }
-                MiddlewareAction::Abort => return Ok(Vec::new()),
+                MiddlewareAction::Abort(_) => return Ok(Vec::new()),
             }
         }
 
@@ -699,7 +699,7 @@ impl<H: FiniteSourceHandler> FiniteSourceHandler for MiddlewareFiniteSource<H> {
                     results.extend(control_events);
                     return Ok(Some(results));
                 }
-                MiddlewareAction::Abort => {
+                MiddlewareAction::Abort(_) => {
                     return Ok(Some(Vec::new()));
                 }
             }
@@ -770,7 +770,7 @@ impl<H: FiniteSourceHandler> FiniteSourceHandler for MiddlewareFiniteSource<H> {
                     results.extend(control_events);
                     return Ok(Some(results));
                 }
-                MiddlewareAction::Abort => return Ok(Some(Vec::new())),
+                MiddlewareAction::Abort(_) => return Ok(Some(Vec::new())),
             }
         }
 
@@ -909,7 +909,7 @@ impl<H: InfiniteSourceHandler> InfiniteSourceHandler for MiddlewareInfiniteSourc
                     results.extend(control_events);
                     return Ok(results);
                 }
-                MiddlewareAction::Abort => {
+                MiddlewareAction::Abort(_) => {
                     return Ok(Vec::new());
                 }
             }
@@ -946,7 +946,7 @@ impl<H: InfiniteSourceHandler> InfiniteSourceHandler for MiddlewareInfiniteSourc
                     results.extend(control_events);
                     return Ok(results);
                 }
-                MiddlewareAction::Abort => return Ok(Vec::new()),
+                MiddlewareAction::Abort(_) => return Ok(Vec::new()),
             }
         }
 

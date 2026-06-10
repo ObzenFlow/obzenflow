@@ -55,6 +55,5 @@ pub use contracts::{
 // Re-export control middleware contracts so adapters/runtime can depend on them
 // without reaching into internal modules.
 pub use control_middleware::{
-    CircuitBreakerContractInfo, CircuitBreakerContractMode, CircuitBreakerMetrics,
-    ControlMiddlewareProvider, NoControlMiddleware, RateLimiterMetrics,
+    CircuitBreakerMetrics, ControlMiddlewareProvider, NoControlMiddleware, RateLimiterMetrics,
 };

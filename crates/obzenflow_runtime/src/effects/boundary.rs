@@ -29,10 +29,24 @@ impl EffectBoundaryContext {
     }
 }
 
+/// Structured, policy-neutral reason carried by a boundary abort so the
+/// rejection is recorded under the effect cursor and replays deterministically.
+#[derive(Debug, Clone)]
+pub struct EffectAbortReason {
+    pub cause: EffectFailureCause,
+    pub message: String,
+    pub retry: RetryDisposition,
+}
+
 pub enum EffectBoundaryAction {
     Continue,
-    Skip(Vec<ChainEvent>),
-    Abort,
+    Skip {
+        results: Vec<ChainEvent>,
+        /// Label of the middleware that synthesized the results, recorded as
+        /// the outcome group's `EffectFactOrigin` (FLOWIP-120h).
+        source: Option<String>,
+    },
+    Abort(EffectAbortReason),
 }
 
 pub struct EffectBoundaryStart {

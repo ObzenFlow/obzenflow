@@ -99,6 +99,15 @@ pub trait TypedFactSet: Send + Sync + 'static {
     fn try_from_facts(facts: &[TypedFact]) -> Result<Self, TypedFactSetError>
     where
         Self: Sized;
+
+    /// Fact types in this set that only registered type-shaping middleware may
+    /// author (FLOWIP-120h), e.g. the fallback and rejection branches of a
+    /// lifted circuit-breaker outcome. Empty for ordinary fact sets. The
+    /// effects runtime uses this to reject a guarded perform on a stage with
+    /// no matching middleware registration, and the inverse, before any I/O.
+    fn synthesized_fact_types() -> Vec<TypedFactType> {
+        Vec::new()
+    }
 }
 
 impl<T> TypedFactSet for T

@@ -6,9 +6,7 @@ use super::{
     ContractConfig, ContractStatus, ContractsWiring, FeedIdentity, PollResult, ReaderProgress,
     ReaderSelectionPolicy, SelectedFeedMetadata, SelectedFeedRole, UpstreamSubscription,
 };
-use crate::messaging::upstream_subscription_policy::build_policy_stack_for_upstream;
 use async_trait::async_trait;
-use obzenflow_core::control_middleware::{CircuitBreakerSnapshotter, RateLimiterSnapshotter};
 use obzenflow_core::event::context::causality_context::CausalityContext;
 use obzenflow_core::event::event_envelope::EventEnvelope;
 use obzenflow_core::event::identity::JournalWriterId;
@@ -19,7 +17,7 @@ use obzenflow_core::event::payloads::effect_payload::{
 };
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::system_event::{
-    ContractOverridePolicy, ContractResultStatusLabel, SystemEvent, SystemEventType,
+    ContractResultStatusLabel, SystemEvent, SystemEventType,
 };
 use obzenflow_core::event::types::{
     Count, DurationMs, SeqNo, ViolationCause as EventViolationCause,
@@ -32,81 +30,15 @@ use obzenflow_core::journal::journal_owner::JournalOwner;
 use obzenflow_core::journal::journal_reader::JournalReader;
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{
-    CircuitBreakerContractInfo, CircuitBreakerContractMode, ControlMiddlewareProvider, EventId,
-    EventType, NoControlMiddleware, StageId, TransportContract, WriterId,
+    ControlMiddlewareProvider, EventId, EventType, NoControlMiddleware, StageId, TransportContract,
+    WriterId,
 };
 use serde_json::json;
 use std::collections::HashMap;
 use std::io;
-use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use tokio::time::Instant;
-
-#[derive(Debug, Default)]
-struct TestControlMiddlewareProvider {
-    breaker_contracts: RwLock<HashMap<StageId, CircuitBreakerContractInfo>>,
-}
-
-impl TestControlMiddlewareProvider {
-    fn new() -> Self {
-        Self::default()
-    }
-
-    fn register_stage_mode(
-        &self,
-        stage_id: StageId,
-        mode: CircuitBreakerContractMode,
-        has_fallback: bool,
-    ) {
-        let mut reg = self
-            .breaker_contracts
-            .write()
-            .expect("TestControlMiddlewareProvider: poisoned lock");
-        reg.insert(
-            stage_id,
-            CircuitBreakerContractInfo {
-                mode,
-                has_opened_since_registration: false,
-                has_fallback_configured: has_fallback,
-            },
-        );
-    }
-}
-
-impl ControlMiddlewareProvider for TestControlMiddlewareProvider {
-    fn circuit_breaker_snapshotter(&self, _: &StageId) -> Option<Arc<CircuitBreakerSnapshotter>> {
-        None
-    }
-
-    fn rate_limiter_snapshotter(&self, _: &StageId) -> Option<Arc<RateLimiterSnapshotter>> {
-        None
-    }
-
-    fn circuit_breaker_state(&self, _: &StageId) -> Option<Arc<AtomicU8>> {
-        None
-    }
-
-    fn circuit_breaker_contract_info(
-        &self,
-        stage_id: &StageId,
-    ) -> Option<CircuitBreakerContractInfo> {
-        self.breaker_contracts
-            .read()
-            .expect("TestControlMiddlewareProvider: poisoned lock")
-            .get(stage_id)
-            .copied()
-    }
-
-    fn mark_circuit_breaker_opened(&self, stage_id: &StageId) {
-        let mut reg = self
-            .breaker_contracts
-            .write()
-            .expect("TestControlMiddlewareProvider: poisoned lock");
-        if let Some(info) = reg.get_mut(stage_id) {
-            info.has_opened_since_registration = true;
-        }
-    }
-}
 
 /// Minimal in-memory journal implementation for tests.
 struct TestJournal<T: JournalEvent> {
@@ -1346,167 +1278,36 @@ async fn strict_mode_produces_seq_divergence_and_gap_event() {
 
     let system_events = system_journal.read_causally_ordered().await.unwrap();
     let mut status_found = false;
-    let mut override_found = false;
 
     for env in &system_events {
-        match &env.event.event {
-            SystemEventType::ContractStatus {
-                upstream,
-                reader,
-                pass,
-                reason,
-                ..
-            } => {
-                if *pass {
-                    // FLOWIP-080r may emit passing contract-status heartbeats during
-                    // mid-flight checks. This test asserts that a failure status is
-                    // emitted for strict SeqDivergence at EOF.
-                    continue;
-                }
+        if let SystemEventType::ContractStatus {
+            upstream,
+            reader,
+            pass,
+            reason,
+            ..
+        } = &env.event.event
+        {
+            if *pass {
+                // FLOWIP-080r may emit passing contract-status heartbeats during
+                // mid-flight checks. This test asserts that a failure status is
+                // emitted for strict SeqDivergence at EOF.
+                continue;
+            }
 
-                status_found = true;
-                assert_eq!(*upstream, upstream_stage);
-                assert_eq!(*reader, reader_stage);
-                match reason {
-                    Some(EventViolationCause::SeqDivergence { .. }) => {}
-                    other => {
-                        panic!("expected SeqDivergence reason in ContractStatus, got {other:?}")
-                    }
+            status_found = true;
+            assert_eq!(*upstream, upstream_stage);
+            assert_eq!(*reader, reader_stage);
+            match reason {
+                Some(EventViolationCause::SeqDivergence { .. }) => {}
+                other => {
+                    panic!("expected SeqDivergence reason in ContractStatus, got {other:?}")
                 }
             }
-            SystemEventType::ContractOverrideByPolicy { .. } => {
-                override_found = true;
-            }
-            _ => {}
         }
     }
 
     assert!(status_found, "expected ContractStatus system event");
-    assert!(
-        !override_found,
-        "did not expect ContractOverrideByPolicy in strict mode"
-    );
-}
-
-#[tokio::test]
-async fn breaker_aware_mode_overrides_seq_divergence_and_emits_override_event() {
-    let control_middleware = Arc::new(TestControlMiddlewareProvider::new());
-    let (mut subscription, contract_journal, system_journal, upstream_stage, reader_stage) =
-        build_upstream_with_seq_divergence(control_middleware.clone()).await;
-
-    // Register breaker-aware contract mode with fallback configured and mark
-    // that the breaker has opened at least once. This makes the policy
-    // layer eligible to override pure SeqDivergence failures.
-    control_middleware.register_stage_mode(
-        upstream_stage,
-        CircuitBreakerContractMode::BreakerAware,
-        true,
-    );
-    control_middleware.mark_circuit_breaker_opened(&upstream_stage);
-
-    // Rebuild the policy stack so that it includes BreakerAwarePolicy.
-    let control_provider: Arc<dyn ControlMiddlewareProvider> = control_middleware.clone();
-    subscription.contract_policies = subscription
-        .readers
-        .iter()
-        .map(|slot| {
-            let stack = build_policy_stack_for_upstream(slot.stage_id, &control_provider);
-            Some(stack)
-        })
-        .collect();
-
-    let mut reader_progress = [ReaderProgress::new(upstream_stage)];
-    drive_subscription_to_eof(&mut subscription, &mut reader_progress).await;
-
-    let status = subscription.check_contracts(&mut reader_progress).await;
-
-    // With breaker-aware contracts, the SeqDivergence should be treated as pass.
-    match status {
-        ContractStatus::ProgressEmitted | ContractStatus::Healthy => {}
-        other => panic!("expected non-violated status under BreakerAware, got {other:?}"),
-    }
-
-    let events = contract_journal.read_causally_ordered().await.unwrap();
-
-    let mut final_pass_found = false;
-    let mut gap_found = false;
-
-    for env in &events {
-        match &env.event.content {
-            ChainEventContent::FlowControl(FlowControlPayload::ConsumptionFinal {
-                pass,
-                reader_seq,
-                advertised_writer_seq,
-                failure_reason,
-                ..
-            }) => {
-                final_pass_found = true;
-                assert!(*pass, "expected pass=true in ConsumptionFinal");
-                assert_eq!(*reader_seq, SeqNo(1));
-                assert_eq!(*advertised_writer_seq, Some(SeqNo(3)));
-                assert!(
-                    failure_reason.is_none(),
-                    "expected no failure_reason when overridden by policy"
-                );
-            }
-            ChainEventContent::FlowControl(FlowControlPayload::ConsumptionGap { .. }) => {
-                gap_found = true;
-            }
-            _ => {}
-        }
-    }
-
-    assert!(
-        final_pass_found,
-        "expected a ConsumptionFinal event under BreakerAware mode"
-    );
-    assert!(
-        !gap_found,
-        "did not expect a ConsumptionGap event when override is applied"
-    );
-
-    let system_events = system_journal.read_causally_ordered().await.unwrap();
-    let mut status_found = false;
-    let mut override_found = false;
-
-    for env in &system_events {
-        match &env.event.event {
-            SystemEventType::ContractStatus {
-                upstream,
-                reader,
-                pass,
-                reason,
-                ..
-            } => {
-                status_found = true;
-                assert_eq!(*upstream, upstream_stage);
-                assert_eq!(*reader, reader_stage);
-                assert!(*pass, "expected pass=true in ContractStatus");
-                assert!(
-                    reason.is_none(),
-                    "expected no reason when contracts are overridden to pass"
-                );
-            }
-            SystemEventType::ContractOverrideByPolicy {
-                upstream,
-                reader,
-                policy,
-                ..
-            } => {
-                override_found = true;
-                assert_eq!(*upstream, upstream_stage);
-                assert_eq!(*reader, reader_stage);
-                assert_eq!(*policy, ContractOverridePolicy::BreakerAware);
-            }
-            _ => {}
-        }
-    }
-
-    assert!(status_found, "expected ContractStatus system event");
-    assert!(
-        override_found,
-        "expected ContractOverrideByPolicy system event in BreakerAware mode"
-    );
 }
 
 #[tokio::test]

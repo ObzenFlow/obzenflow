@@ -658,6 +658,18 @@ macro_rules! build_typed_flow {
         // tooling sees a typed error rather than a tracing warning.
         $crate::dsl::typing::validate_stage_typing_metadata(&descriptors)?;
 
+        // FLOWIP-120h: truncating middleware (e.g. OpenPolicy::Skip breakers)
+        // is incoherent at the effect boundary; reject it on effectful stages.
+        $crate::dsl::typing::validate_effectful_middleware_compatibility(
+            &descriptors,
+            &create_flow_middleware(),
+        )?;
+
+        // FLOWIP-120h: output_middleware lane contributions must be arrow
+        // members, disjoint from effect fact sets, and single-effect scoped;
+        // effect fact sets must be contained in the arrow contract.
+        $crate::dsl::typing::validate_type_shaping_contributions(&descriptors)?;
+
         if let Err(edge_errors) =
             $crate::dsl::typing::validate_edge_typing(&topology, &descriptors, &name_to_id)
         {

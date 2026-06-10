@@ -1510,53 +1510,6 @@ impl PrometheusExporter {
             writeln!(output)?;
         }
 
-        if !snapshot.contract_metrics.overrides_total.is_empty() {
-            writeln!(
-                output,
-                "# HELP obzenflow_contract_overrides_total Contract decisions overridden by policy"
-            )?;
-            writeln!(output, "# TYPE obzenflow_contract_overrides_total counter")?;
-
-            for (key, count) in &snapshot.contract_metrics.overrides_total {
-                let labels = ContractMetricLabels::from_edge(&key.edge, &snapshot.stage_metadata);
-                let policy = key.policy.as_str();
-
-                if let Some(flow_id) = labels.flow_id {
-                    writeln!(
-                        output,
-                        "obzenflow_contract_overrides_total{{flow=\"{}\",flow_id=\"{}\",upstream_stage_id=\"{}\",downstream_stage_id=\"{}\",upstream=\"{}\",downstream=\"{}\",contract=\"{}\",selected_event_type=\"{}\",feed_role=\"{}\",policy=\"{}\"}} {}",
-                        escape_label(labels.flow_name),
-                        escape_label(&flow_id.to_string()),
-                        escape_label(&labels.upstream_id),
-                        escape_label(&labels.downstream_id),
-                        escape_label(labels.upstream_name),
-                        escape_label(labels.downstream_name),
-                        escape_label(labels.contract),
-                        escape_label(labels.selected_event_type),
-                        escape_label(labels.feed_role),
-                        escape_label(policy),
-                        count
-                    )?;
-                } else {
-                    writeln!(
-                        output,
-                        "obzenflow_contract_overrides_total{{flow=\"{}\",upstream_stage_id=\"{}\",downstream_stage_id=\"{}\",upstream=\"{}\",downstream=\"{}\",contract=\"{}\",selected_event_type=\"{}\",feed_role=\"{}\",policy=\"{}\"}} {}",
-                        escape_label(labels.flow_name),
-                        escape_label(&labels.upstream_id),
-                        escape_label(&labels.downstream_id),
-                        escape_label(labels.upstream_name),
-                        escape_label(labels.downstream_name),
-                        escape_label(labels.contract),
-                        escape_label(labels.selected_event_type),
-                        escape_label(labels.feed_role),
-                        escape_label(policy),
-                        count
-                    )?;
-                }
-            }
-            writeln!(output)?;
-        }
-
         if !snapshot.contract_metrics.reader_seq.is_empty() {
             writeln!(
                 output,

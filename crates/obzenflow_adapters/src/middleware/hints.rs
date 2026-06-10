@@ -20,6 +20,12 @@ pub struct MiddlewareHints {
     pub batching: Option<BatchingHint>,
     /// Whether this middleware rate limits
     pub rate_limits: bool,
+    /// Whether this middleware can silently drop events at the effect
+    /// boundary (e.g. a circuit breaker with `OpenPolicy::Skip`). Build
+    /// validation rejects such middleware on effectful stages, because the
+    /// handler awaits a value from `perform` and truncation has no coherent
+    /// boundary behaviour (FLOWIP-120h).
+    pub effect_boundary_truncates: bool,
 }
 
 /// Hints about retry behavior
