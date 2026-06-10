@@ -3107,3 +3107,58 @@ async fn feed_role_distinguishes_tiebreak_identity() {
         )])
     );
 }
+
+/// FLOWIP-095d adjacency: edge identity for a delivered event comes from the
+/// reader slot, never from `event.writer_id`. A forwarded row keeps its
+/// original author on `writer_id` for causal attribution (an error-marked
+/// event passed through an intermediate stage is the in-tree producer), so a
+/// consumer deriving its upstream from the event author would misroute
+/// backpressure acks and heartbeat attribution. The join supervisors key both
+/// on `last_delivered_upstream_stage()`; this test pins the accessor's
+/// contract against forwarded rows.
+#[tokio::test]
+async fn delivered_upstream_identity_ignores_event_writer() {
+    let upstream_stage = StageId::new();
+    let foreign_author = StageId::new();
+    let upstream_owner = JournalOwner::stage(upstream_stage);
+    let upstream_journal: Arc<dyn Journal<ChainEvent>> = Arc::new(TestJournal::new(upstream_owner));
+
+    // A forwarded row: it sits in `upstream_stage`'s journal but its writer_id
+    // names the original author from further up the topology.
+    upstream_journal
+        .append(
+            ChainEventFactory::data_event(
+                WriterId::Stage(foreign_author),
+                "test.forwarded",
+                json!({"n": 1}),
+            ),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let upstreams = [(upstream_stage, "upstream".to_string(), upstream_journal)];
+    let mut subscription = UpstreamSubscription::new_with_names("test_owner", &upstreams)
+        .await
+        .unwrap()
+        .transport_only();
+
+    let mut reader_progress = [ReaderProgress::new(upstream_stage)];
+    let polled = subscription
+        .poll_next_with_state("test_fsm", Some(&mut reader_progress[..]))
+        .await;
+    let envelope = match polled {
+        PollResult::Event(envelope) => envelope,
+        other => panic!("expected delivered data event, got {other:?}"),
+    };
+    assert_eq!(
+        envelope.event.writer_id,
+        WriterId::Stage(foreign_author),
+        "premise: the forwarded row preserves its original author"
+    );
+    assert_eq!(
+        subscription.last_delivered_upstream_stage(),
+        Some(upstream_stage),
+        "edge identity must be the reader slot's stage, not the event author"
+    );
+}

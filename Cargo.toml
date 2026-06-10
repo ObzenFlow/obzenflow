@@ -243,3 +243,8 @@ required-features = ["test-support"]
 name = "join_phase_transition_replay_test"
 path = "tests/join_phase_transition_replay_test.rs"
 required-features = ["test-support"]
+
+[[test]]
+name = "join_error_passthrough_identity_test"
+path = "tests/join_error_passthrough_identity_test.rs"
+required-features = ["test-support"]

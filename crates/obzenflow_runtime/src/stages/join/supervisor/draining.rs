@@ -189,11 +189,13 @@ pub(super) async fn dispatch_draining<
                     let writer_id = ctx.writer_id.ok_or("No writer ID available")?;
                     let event = envelope.event.clone();
                     let event_id = event.id;
-                    let source_id = envelope
-                        .event
-                        .writer_id
-                        .as_stage()
-                        .copied()
+                    // Edge identity comes from the reader slot that delivered
+                    // the envelope, never from `event.writer_id`, which is
+                    // preserved across stages for causal attribution. The
+                    // factory and reference fallbacks cover pre-delivery
+                    // states where no upstream has been recorded yet.
+                    let source_id = subscription
+                        .last_delivered_upstream_stage()
                         .or_else(|| {
                             ctx.stream_subscription_factory
                                 .upstream_stage_ids()
@@ -202,12 +204,9 @@ pub(super) async fn dispatch_draining<
                         })
                         .unwrap_or(ctx.reference_stage_id);
 
-                    let upstream_stage = subscription
-                        .last_delivered_upstream_stage()
-                        .unwrap_or(source_id);
                     if let Some(heartbeat) = &ctx.heartbeat {
                         if event.is_data() {
-                            heartbeat.state.record_data_read(upstream_stage, event_id);
+                            heartbeat.state.record_data_read(source_id, event_id);
                         }
                     }
                     let heartbeat_state = ctx.heartbeat.as_ref().map(|h| h.state.clone());
@@ -223,7 +222,7 @@ pub(super) async fn dispatch_draining<
                         .fetch_add(1, Ordering::Relaxed);
                     let start = Instant::now();
                     let _processing = heartbeat_state.as_ref().map(|state| {
-                        HeartbeatProcessingGuard::new(state.clone(), Some(upstream_stage), event_id)
+                        HeartbeatProcessingGuard::new(state.clone(), Some(source_id), event_id)
                     });
                     let result = ctx.handler.process_event(
                         &mut ctx.handler_state,

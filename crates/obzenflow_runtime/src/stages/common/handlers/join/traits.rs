@@ -38,7 +38,11 @@ pub trait JoinHandler: Send + Sync + Clone {
     /// # Arguments
     /// - `state`: Mutable reference to handler state
     /// - `event`: The event to process
-    /// - `source_id`: Which upstream sent this event (reference or stream)
+    /// - `source_id`: The upstream edge that delivered this event (the join's
+    ///   direct upstream stage, reference or stream side). This is topology
+    ///   identity, not authorship: a forwarded event's original author is
+    ///   preserved on `event.writer_id` for causal attribution and can be
+    ///   read from there if a handler needs semantic origin
     /// - `writer_id`: The join stage's writer ID for creating output events
     ///
     /// # Returns

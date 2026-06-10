@@ -119,8 +119,9 @@ pub enum FlowBuildError {
     #[error(
         "Effectful stage '{stage_name}' is downstream of nondeterministic fan-in. \
          FLOWIP-095d auto-enables the canonical deterministic merge on fan-ins above \
-         effectful stages, so this rejection means the fan-in cannot be ordered: it is \
-         part of a cycle, or the flow was built without the flow! enablement walk. \
+         effectful stages, so this rejection means the order cannot be made stable: a \
+         fan-in on the path is part of a cycle, a cycle feeds an ordered fan-in from \
+         above, or the flow was built without the flow! enablement walk. \
          Move the effect to a single-input deterministic path or out of the cycle."
     )]
     EffectfulFanInRequiresDeterministicOrder { stage_name: String },

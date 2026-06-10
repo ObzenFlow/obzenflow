@@ -1565,10 +1565,18 @@ pub fn validate_effectful_deterministic_input_order(
         let deterministic = if upstreams.is_empty() {
             true
         } else if upstreams.len() > 1 {
+            // An orderer makes the merge deterministic only over stable input
+            // streams, so the stability induction needs both halves: the stage
+            // orders its inputs AND every input stream is itself
+            // deterministic. Stopping at the orderer would let a cycle, or a
+            // fan-in the enablement walk never marked, sit above it unexamined.
             descriptors
                 .get(&stage_id)
                 .map(|descriptor| descriptor.is_deterministic_input_orderer())
                 .unwrap_or(false)
+                && upstreams.iter().all(|&upstream| {
+                    deterministic_for_stage(upstream, inbound, descriptors, memo, visiting)
+                })
         } else {
             deterministic_for_stage(upstreams[0], inbound, descriptors, memo, visiting)
         };
@@ -1623,10 +1631,10 @@ pub fn validate_effectful_deterministic_input_order(
 ///
 /// The marking is transitive on purpose: the stability induction the guard
 /// encodes requires every fan-in above an ordered stage to be ordered too,
-/// because the guard stops walking at the first orderer it meets. Cycle
-/// members are never marked; the merge is never enabled on a cycle edge, and
-/// the guard remains the safety net that rejects effectful stages below
-/// cycles.
+/// and the guard verifies it by recursing through an orderer's own inputs.
+/// Cycle members are never marked; the merge is never enabled on a cycle
+/// edge, and the guard remains the safety net that rejects effectful stages
+/// below cycles, including a cycle that feeds an ordered fan-in from above.
 pub fn derive_deterministic_fan_in_stages(
     topology: &Topology,
     descriptors: &HashMap<String, Box<dyn StageDescriptor>>,
