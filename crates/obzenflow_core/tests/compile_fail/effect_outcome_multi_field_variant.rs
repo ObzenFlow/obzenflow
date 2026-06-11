@@ -1,0 +1,29 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
+// https://obzenflow.dev
+
+use obzenflow_core::{effect_outcome, TypedPayload};
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct FirstFact;
+
+impl TypedPayload for FirstFact {
+    const EVENT_TYPE: &'static str = "compile_fail.first";
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SecondFact;
+
+impl TypedPayload for SecondFact {
+    const EVENT_TYPE: &'static str = "compile_fail.second";
+}
+
+effect_outcome! {
+    #[derive(Debug, Clone)]
+    pub enum MultiFieldVariant {
+        Both(FirstFact, SecondFact),
+    }
+}
+
+fn main() {}

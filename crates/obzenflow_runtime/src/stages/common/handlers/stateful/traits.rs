@@ -289,6 +289,15 @@ impl<T: StatefulHandler + Send + Sync> UnifiedStatefulHandler for T {
     }
 }
 
+/// Mealy-split effectful stateful surface (FLOWIP-120b): `decide` performs
+/// effects and emits facts, `apply` folds each committed fact into state.
+///
+/// `Fact` is the stage's per-fact enum, one variant per committed fact type;
+/// the `effect_outcome!` enum form generates exactly this shape. An effect
+/// outcome carrier never reaches `apply` (FLOWIP-120m): the carrier is
+/// transient `fx.perform` machinery, and a multi-fact product outcome folds
+/// as its individual member facts, one `apply` call per fact in ordinal
+/// (field) order.
 #[async_trait]
 pub trait EffectfulStatefulHandler: Send + Sync {
     type State: Clone + Send + Sync;
@@ -304,6 +313,8 @@ pub trait EffectfulStatefulHandler: Send + Sync {
         fx: &mut Effects,
     ) -> std::result::Result<(), HandlerError>;
 
+    /// Fold one committed fact into state. Called once per committed `Data`
+    /// fact in commit order; carriers never appear here.
     fn apply(
         &mut self,
         state: &mut Self::State,
@@ -444,6 +455,9 @@ fn effectful_stateful_fact_set_error(error: TypedFactSetError) -> HandlerError {
         )),
         TypedFactSetError::DuplicateFact { event_type } => HandlerError::Other(format!(
             "effectful stateful fact type `{event_type}` appeared more than once"
+        )),
+        TypedFactSetError::UnexpectedFact { event_type } => HandlerError::Other(format!(
+            "effectful stateful fact type `{event_type}` is not handled by the stage Fact type"
         )),
     }
 }

@@ -12,6 +12,7 @@ use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
 use obzenflow_core::TypedPayload;
 use obzenflow_core::{ChainEvent, StageId, WriterId};
+use obzenflow_runtime::effects::SynthesizedOutcomeKind;
 use obzenflow_runtime::feed_plan::{
     FactVisibility, FeedKey, FeedPlan, FeedRole, LogicalFeed, PayloadTypeDescriptor,
     StageOutputContract,
@@ -1281,8 +1282,9 @@ pub fn validate_effectful_middleware_compatibility(
 /// inferred), must not collide with the guarded effect's own fact set (the
 /// event type is the branch discriminator), and typed-outcome middleware is
 /// limited to single-effect stages until FLOWIP-120c locks per-effect scope.
-/// As a producer-side check, every declared effect's fact set must also be
-/// contained in the arrow contract.
+/// Producer-side effect-fact containment lives in
+/// [`validate_effect_fact_containment`], which runs unconditionally
+/// (FLOWIP-120m); this validator owns only the registration-gated checks.
 #[allow(clippy::result_large_err)]
 pub fn validate_type_shaping_contributions(
     descriptors: &HashMap<String, Box<dyn StageDescriptor>>,
@@ -1324,38 +1326,149 @@ pub fn validate_type_shaping_contributions(
             .iter()
             .flat_map(|declaration| {
                 declaration
-                    .output_fact_types
+                    .outcome_fact_types
                     .iter()
                     .map(|fact| fact.event_type.to_string())
             })
             .collect();
 
+        // FLOWIP-120m: one fallback shape per stage. Branch-shaped uses the
+        // Guarded carrier; outcome-shaped uses the plain perform; mixing them
+        // on one stage has no coherent perform signature.
+        let has_branch_shaped = registrations
+            .iter()
+            .any(|registration| registration.kind == SynthesizedOutcomeKind::BranchShaped);
+        let has_outcome_shaped = registrations
+            .iter()
+            .any(|registration| registration.kind == SynthesizedOutcomeKind::OutcomeShaped);
+        if has_branch_shaped && has_outcome_shaped {
+            return Err(FlowBuildError::MixedFallbackShapesOnStage {
+                stage_name: name.clone(),
+            });
+        }
+
         for registration in &registrations {
-            for fact in &registration.fact_types {
-                if !contract_type_ids.contains(&fact.type_id) {
-                    return Err(FlowBuildError::MiddlewareContributedFactNotInContract {
-                        stage_name: name.clone(),
-                        middleware_label: registration.source_label.clone(),
-                        fact: fact.display_name.clone(),
-                        contract: output_contract_display(metadata),
-                    });
+            match registration.kind {
+                SynthesizedOutcomeKind::BranchShaped => {
+                    for fact in &registration.fact_types {
+                        if !contract_type_ids.contains(&fact.type_id) {
+                            return Err(FlowBuildError::MiddlewareContributedFactNotInContract {
+                                stage_name: name.clone(),
+                                middleware_label: registration.source_label.clone(),
+                                fact: fact.display_name.clone(),
+                                contract: output_contract_display(metadata),
+                            });
+                        }
+                        if effect_fact_event_types.contains(fact.event_type.as_str()) {
+                            return Err(FlowBuildError::TypeShapingConfiguration {
+                                stage_name: name.clone(),
+                                message: format!(
+                                    "branch fact '{}' collides with an effect outcome fact; \
+                                     branch dispatch is by event type, so middleware branch \
+                                     facts must be disjoint from the guarded effect's fact set",
+                                    fact.event_type,
+                                ),
+                            });
+                        }
+                    }
                 }
-                if effect_fact_event_types.contains(fact.event_type.as_str()) {
-                    return Err(FlowBuildError::TypeShapingConfiguration {
-                        stage_name: name.clone(),
-                        message: format!(
-                            "branch fact '{}' collides with an effect outcome fact; branch \
-                             dispatch is by event type, so middleware branch facts must be \
-                             disjoint from the guarded effect's fact set",
-                            fact.event_type,
-                        ),
-                    });
+                SynthesizedOutcomeKind::OutcomeShaped => {
+                    // The inverse rule (FLOWIP-120m): an outcome-shaped
+                    // fallback produces the protected effect's own facts, so
+                    // its fact types must be contained in the declaration's
+                    // outcome fact set, and its target effect must be the
+                    // stage's single declared effect.
+                    let declaration = &declarations[0];
+                    if let Some(target) = registration.effect_type.as_deref() {
+                        if target != declaration.effect_type {
+                            return Err(FlowBuildError::TypeShapingConfiguration {
+                                stage_name: name.clone(),
+                                message: format!(
+                                    "outcome-shaped fallback targets effect '{target}' but \
+                                     the stage declares '{}'",
+                                    declaration.effect_type,
+                                ),
+                            });
+                        }
+                    }
+                    for fact in &registration.fact_types {
+                        if !declaration
+                            .outcome_fact_types
+                            .iter()
+                            .any(|member| member.event_type == fact.event_type)
+                        {
+                            return Err(FlowBuildError::OutcomeFallbackFactNotInEffectFactSet {
+                                stage_name: name.clone(),
+                                middleware_label: registration.source_label.clone(),
+                                fact: fact.display_name.clone(),
+                                effect_type: declaration.effect_type.to_string(),
+                            });
+                        }
+                    }
                 }
             }
         }
+    }
+
+    Ok(())
+}
+
+/// FLOWIP-120m: unconditional producer-side effect-fact containment.
+///
+/// Every declared effect's fact set must be contained in the stage's arrow
+/// contract, whether or not the stage configures an `output_middleware:`
+/// lane. Before this validator the check lived behind that lane's
+/// registration gate in [`validate_type_shaping_contributions`], so an
+/// effectful stage without the lane surfaced an undeclared effect fact only
+/// at commit time, after live I/O.
+#[allow(clippy::result_large_err)]
+pub fn validate_effect_fact_containment(
+    descriptors: &HashMap<String, Box<dyn StageDescriptor>>,
+) -> Result<(), crate::dsl::error::FlowBuildError> {
+    use crate::dsl::error::FlowBuildError;
+
+    for (name, descriptor) in descriptors {
+        // Sinks have no output contract for effect facts to be members of;
+        // an effectful sink is rejected at materialisation by the FLOWIP-120b
+        // retirement path with the message that explains the policy.
+        if descriptor.stage_type() == StageType::Sink {
+            continue;
+        }
+
+        let declarations = descriptor.effect_declarations();
+        if declarations.is_empty() {
+            continue;
+        }
+
+        let Some(metadata) = descriptor.typing_metadata() else {
+            return Err(FlowBuildError::StageMissingTypingMetadata {
+                stage_name: name.clone(),
+            });
+        };
+        let contract_type_ids: HashSet<TypeId> = exact_output_contract_members(metadata)
+            .into_iter()
+            .map(|(type_id, _)| type_id)
+            .collect();
 
         for declaration in &declarations {
-            for fact in &declaration.output_fact_types {
+            // Duplicate event types across carrier members cannot be seen by
+            // the effect_outcome! macro (a macro compares tokens, not
+            // EVENT_TYPE values), so the collision is rejected here, before
+            // any I/O. Dispatch is by event type, so a collision would make
+            // carrier reconstruction ambiguous.
+            let mut members_by_event_type: HashMap<String, String> = HashMap::new();
+            for fact in &declaration.outcome_fact_types {
+                if let Some(first_member) = members_by_event_type
+                    .insert(fact.event_type.to_string(), fact.display_name.clone())
+                {
+                    return Err(FlowBuildError::DuplicateEffectOutcomeFactEventType {
+                        stage_name: name.clone(),
+                        effect_type: declaration.effect_type.to_string(),
+                        event_type: fact.event_type.to_string(),
+                        first_member,
+                        second_member: fact.display_name.clone(),
+                    });
+                }
                 if !contract_type_ids.contains(&fact.type_id) {
                     return Err(FlowBuildError::EffectFactNotInContract {
                         stage_name: name.clone(),

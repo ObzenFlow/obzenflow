@@ -1,0 +1,12 @@
+error: effect_outcome! enum variants must each hold exactly one TypedPayload fact, e.g. `Authorized(PaymentAuthorized)`; unit, struct-like, multi-field, and empty enums are not valid carriers (FLOWIP-120m)
+  --> tests/compile_fail/effect_outcome_multi_field_variant.rs:22:1
+   |
+22 | / effect_outcome! {
+23 | |     #[derive(Debug, Clone)]
+24 | |     pub enum MultiFieldVariant {
+25 | |         Both(FirstFact, SecondFact),
+26 | |     }
+27 | | }
+   | |_^
+   |
+   = note: this error originates in the macro `effect_outcome` (in Nightly builds, run with -Z macro-backtrace for more info)

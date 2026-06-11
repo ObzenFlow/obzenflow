@@ -177,6 +177,7 @@ where
             descriptor_hash: self.inner.descriptor_hash.clone(),
             descriptor: self.inner.descriptor.clone(),
             outcome: outcome.clone(),
+            origin: None,
         };
 
         if source_error.is_none() {
@@ -266,6 +267,7 @@ pub(super) async fn append_domain_effect_success_facts(
                 output: fact.payload.clone(),
                 outcome_fact_ordinal: ordinal,
             },
+            origin: origin.clone(),
         };
 
         let mut event = ChainEventFactory::derived_data_event(
@@ -284,9 +286,10 @@ pub(super) async fn append_domain_effect_success_facts(
             StageInputPosition(record.cursor.input_seq.get()),
             output_ordinal,
         );
+        // `from_record` copies the record's origin (FLOWIP-120m), so the
+        // provenance carries it without a separate assignment.
         let mut provenance = EffectProvenance::from_record(&record, EffectFactOwner::User);
         provenance.outcome_fact_ordinal = Some(ordinal);
-        provenance.origin = origin.clone();
         event = event.with_effect_provenance(provenance);
 
         let committed_event = event.clone();

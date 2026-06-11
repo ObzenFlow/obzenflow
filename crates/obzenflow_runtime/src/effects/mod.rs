@@ -5,6 +5,7 @@
 //! Replay-safe user effects.
 
 use async_trait::async_trait;
+pub use obzenflow_core::effect_outcome;
 use obzenflow_core::event::context::FlowContext;
 pub use obzenflow_core::event::payloads::effect_payload::{
     effect_outcome_group_id, framework_effect_event_type, is_framework_effect_event_type,
@@ -15,8 +16,8 @@ pub use obzenflow_core::event::payloads::effect_payload::{
     OutcomeFactOrdinal, RecordedFlowId, RetryDisposition, StageLogicVersion, CAPTURE_EVENT_TYPE,
     EFFECT_RECORD_EVENT_TYPE,
 };
-use obzenflow_core::event::schema::{
-    TypedFact, TypedFactSet, TypedFactSetError, TypedFactType, TypedPayload,
+pub use obzenflow_core::event::schema::{
+    EffectOutcomeFacts, TypedFact, TypedFactSet, TypedFactSetError, TypedFactType, TypedPayload,
 };
 use obzenflow_core::event::{ChainEventContent, ChainEventFactory, SystemEvent};
 use obzenflow_core::journal::{ArchiveStatus, Journal};
@@ -59,7 +60,8 @@ pub use boundary::{
 };
 pub use commit::EffectCommitHandle;
 pub use context::{
-    EffectContext, EffectInvocationContext, EffectRuntimeMode, SynthesizedOutcomeRegistration,
+    EffectContext, EffectInvocationContext, EffectRuntimeMode, SynthesizedOutcomeKind,
+    SynthesizedOutcomeRegistration,
 };
 pub use declaration::{
     Effect, EffectDeclaration, EffectSafety, IdempotencyKey, IdempotencyKeyPolicy,

@@ -29,10 +29,10 @@ pub use journal::journal_error::JournalError;
 pub use journal::journal_owner::JournalOwner;
 pub use journal::Journal;
 
-// Re-export schema types (FLOWIP-082a)
+// Re-export schema types (FLOWIP-082a; EffectOutcomeFacts FLOWIP-120m)
 pub use event::schema::{
-    MiddlewareContextKey, TypedFact, TypedFactSet, TypedFactSetError, TypedFactType,
-    TypedMiddlewareEvent, TypedPayload,
+    EffectOutcomeFacts, MiddlewareContextKey, TypedFact, TypedFactSet, TypedFactSetError,
+    TypedFactType, TypedMiddlewareEvent, TypedPayload,
 };
 
 // Re-export typed IDs

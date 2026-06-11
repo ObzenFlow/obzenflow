@@ -13,7 +13,7 @@
 
 use crate::middleware::MiddlewareFactory;
 use obzenflow_core::event::schema::{TypedFactType, TypedPayload};
-use obzenflow_runtime::effects::SynthesizedOutcomeRegistration;
+use obzenflow_runtime::effects::{SynthesizedOutcomeKind, SynthesizedOutcomeRegistration};
 use std::marker::PhantomData;
 
 /// A middleware factory plus the branch fact types it may author.
@@ -64,7 +64,49 @@ where
             effect_type: None,
             fact_types: vec![TypedFactType::of::<F>(), TypedFactType::of::<R>()],
             source_label: self.source_label.to_string(),
+            kind: SynthesizedOutcomeKind::BranchShaped,
         };
         (self.factory, registration, self.config_error)
+    }
+}
+
+/// An outcome-shaped fallback declaration for the `output_middleware:` lane
+/// (FLOWIP-120m).
+///
+/// Where [`TypeShapingMiddleware`] declares branch facts disjoint from the
+/// protected effect's set, this entry declares that the middleware may
+/// synthesize the effect's own outcome carrier facts (a cached decision, a
+/// stubbed authorization). The handler performs the plain effect; every
+/// branch resumes it with `E::Outcome`. No type parameters are needed: the
+/// fact types were captured when the fallback closure was configured.
+pub struct OutcomeShapingMiddleware {
+    factory: Box<dyn MiddlewareFactory>,
+    registration: SynthesizedOutcomeRegistration,
+    config_error: Option<String>,
+}
+
+impl OutcomeShapingMiddleware {
+    pub fn new(
+        factory: Box<dyn MiddlewareFactory>,
+        registration: SynthesizedOutcomeRegistration,
+        config_error: Option<String>,
+    ) -> Self {
+        Self {
+            factory,
+            registration,
+            config_error,
+        }
+    }
+
+    /// Same duck-typed decomposition the macro lane calls on
+    /// [`TypeShapingMiddleware`].
+    pub fn into_registration_parts(
+        self,
+    ) -> (
+        Box<dyn MiddlewareFactory>,
+        SynthesizedOutcomeRegistration,
+        Option<String>,
+    ) {
+        (self.factory, self.registration, self.config_error)
     }
 }

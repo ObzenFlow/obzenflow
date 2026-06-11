@@ -512,6 +512,13 @@ pub struct EffectRecord {
     pub descriptor_hash: EffectDescriptorHash,
     pub descriptor: EffectDescriptor,
     pub outcome: EffectOutcomePayload,
+    /// Origin recorded on the fact's provenance (FLOWIP-120m). `None` on
+    /// framework rows and pre-120h journals. Read back on replay so origin
+    /// reconstruction never depends on registration fact-type membership,
+    /// which becomes ambiguous once an outcome-shaped fallback synthesizes
+    /// the effect's own facts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<EffectFactOrigin>,
 }
 
 /// Replay identity for an effect-produced fact.
@@ -572,7 +579,7 @@ impl EffectProvenance {
             outcome_fact_ordinal: None,
             group_id: Some(effect_outcome_group_id(&record.cursor)),
             fact_owner,
-            origin: None,
+            origin: record.origin.clone(),
         }
     }
 }
@@ -614,6 +621,7 @@ mod tests {
             outcome: EffectOutcomePayload::Succeeded {
                 output: json!({"ok": true}),
             },
+            origin: None,
         }
     }
 

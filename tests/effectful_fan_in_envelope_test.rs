@@ -120,7 +120,7 @@ impl Effect for CountingEffect {
     const SCHEMA_VERSION: u32 = 1;
     const SAFETY: EffectSafety = EffectSafety::NonIdempotentRequiresKey;
 
-    type Output = EnvelopeEffectValue;
+    type Outcome = EnvelopeEffectValue;
 
     fn label(&self) -> &str {
         "counting"
@@ -130,7 +130,7 @@ impl Effect for CountingEffect {
         json!({ "channel": self.channel, "value": self.value })
     }
 
-    async fn execute(&self, _ctx: &mut EffectContext) -> Result<Self::Output, EffectError> {
+    async fn execute(&self, _ctx: &mut EffectContext) -> Result<Self::Outcome, EffectError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         Ok(EnvelopeEffectValue {
             effect_value: self.value + 100,

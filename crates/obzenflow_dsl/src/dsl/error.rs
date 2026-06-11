@@ -159,14 +159,47 @@ pub enum FlowBuildError {
 
     #[error(
         "Stage '{stage_name}': effect '{effect_type}' may produce fact '{fact}', which is not a \
-         member of the stage output contract {contract}. Add it to the arrow (FLOWIP-120h \
-         producer-side containment check)."
+         member of the stage output contract {contract}. Add it to the arrow (FLOWIP-120m \
+         unconditional producer-side containment check)."
     )]
     EffectFactNotInContract {
         stage_name: String,
         effect_type: String,
         fact: String,
         contract: String,
+    },
+
+    #[error(
+        "Stage '{stage_name}': effect '{effect_type}' declares two outcome members with the same \
+         event type `{event_type}` ('{first_member}' and '{second_member}'). Dispatch is by \
+         event type, so carrier members must have distinct event types (FLOWIP-120m)."
+    )]
+    DuplicateEffectOutcomeFactEventType {
+        stage_name: String,
+        effect_type: String,
+        event_type: String,
+        first_member: String,
+        second_member: String,
+    },
+
+    #[error(
+        "Stage '{stage_name}' declares both branch-shaped and outcome-shaped fallback \
+         registrations. A stage uses one fallback shape: the Guarded carrier with branch \
+         facts (build_typed) or the plain perform with an outcome-shaped fallback \
+         (build_outcome) (FLOWIP-120m)."
+    )]
+    MixedFallbackShapesOnStage { stage_name: String },
+
+    #[error(
+        "Stage '{stage_name}': outcome-shaped fallback '{middleware_label}' may synthesize \
+         fact '{fact}', which is not in effect '{effect_type}'s declared outcome fact set. \
+         An outcome-shaped fallback produces the protected effect's own facts (FLOWIP-120m)."
+    )]
+    OutcomeFallbackFactNotInEffectFactSet {
+        stage_name: String,
+        middleware_label: String,
+        fact: String,
+        effect_type: String,
     },
 
     #[error(

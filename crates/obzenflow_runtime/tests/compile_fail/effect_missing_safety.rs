@@ -23,7 +23,7 @@ impl Effect for MissingSafetyEffect {
     const EFFECT_TYPE: &'static str = "test.missing_safety";
     const SCHEMA_VERSION: u32 = 1;
 
-    type Output = MissingSafetyOutput;
+    type Outcome = MissingSafetyOutput;
 
     fn label(&self) -> &str {
         "missing_safety"
@@ -33,7 +33,7 @@ impl Effect for MissingSafetyEffect {
         json!({})
     }
 
-    async fn execute(&self, _ctx: &mut EffectContext) -> Result<Self::Output, EffectError> {
+    async fn execute(&self, _ctx: &mut EffectContext) -> Result<Self::Outcome, EffectError> {
         Ok(MissingSafetyOutput)
     }
 }

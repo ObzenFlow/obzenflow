@@ -145,7 +145,7 @@ pub use context::MiddlewareContext;
 pub use function::{middleware_fn, FnMiddleware};
 pub use hints::{Attempts, BackoffKind, BatchingHint, MiddlewareHints, RetryHint};
 pub use observability::timing::TimingMiddleware;
-pub use type_shaping::TypeShapingMiddleware;
+pub use type_shaping::{OutcomeShapingMiddleware, TypeShapingMiddleware};
 
 // Control middleware
 pub use control::{

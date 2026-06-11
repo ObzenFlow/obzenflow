@@ -5,7 +5,7 @@
 //! The guarded effect wrapper and lifted breaker-outcome carrier (FLOWIP-120h).
 //!
 //! `Guarded<E, F, R>` lifts an effect's output into
-//! `CircuitBreakerOutcome<E::Output, F, R>` so circuit-breaker branches are
+//! `CircuitBreakerOutcome<E::Outcome, F, R>` so circuit-breaker branches are
 //! explicit in the type at the call site, through the unchanged `fx.perform`
 //! verb. The wrapper delegates every piece of effect identity to the inner
 //! effect, so the guarded call records and replays under exactly the inner
@@ -142,7 +142,7 @@ where
     const SCHEMA_VERSION: u32 = E::SCHEMA_VERSION;
     const SAFETY: EffectSafety = E::SAFETY;
 
-    type Output = CircuitBreakerOutcome<E::Output, F, R>;
+    type Outcome = CircuitBreakerOutcome<E::Outcome, F, R>;
 
     fn label(&self) -> &str {
         self.inner.label()
@@ -160,7 +160,7 @@ where
         E::required_ports()
     }
 
-    async fn execute(&self, ctx: &mut EffectContext) -> Result<Self::Output, EffectError> {
+    async fn execute(&self, ctx: &mut EffectContext) -> Result<Self::Outcome, EffectError> {
         self.inner
             .execute(ctx)
             .await
@@ -225,7 +225,7 @@ mod tests {
         const SCHEMA_VERSION: u32 = 3;
         const SAFETY: EffectSafety = EffectSafety::Idempotent;
 
-        type Output = PrimaryFact;
+        type Outcome = PrimaryFact;
 
         fn label(&self) -> &str {
             "demo"
@@ -235,7 +235,7 @@ mod tests {
             json!({ "value": self.value })
         }
 
-        async fn execute(&self, _ctx: &mut EffectContext) -> Result<Self::Output, EffectError> {
+        async fn execute(&self, _ctx: &mut EffectContext) -> Result<Self::Outcome, EffectError> {
             Ok(PrimaryFact { value: self.value })
         }
     }
