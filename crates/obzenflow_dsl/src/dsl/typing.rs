@@ -1933,6 +1933,71 @@ pub fn derive_deterministic_fan_in_stages(
     marked
 }
 
+/// FLOWIP-095j: per-stage delivery metadata recorded in the run manifest.
+///
+/// For each stage: the upstream stage keys delivering into it over forward
+/// edges (sorted, deduplicated), and whether its input delivery order is
+/// deterministic. A stage delivers deterministically when it has at most one
+/// forward inbound edge and is outside any cycle, or when its descriptor
+/// reports `is_deterministic_input_orderer()` (an FLOWIP-095d marked fan-in,
+/// already wrapped by `wrap_deterministic_orderers` when this runs, or a
+/// structural orderer such as the hydrating join). Cycle members are always
+/// non-deterministic: backflow arrivals interleave by timing, and the 095d
+/// merge is never enabled on a cycle edge.
+///
+/// Called after `wrap_deterministic_orderers` so the descriptor answer is the
+/// same one the runtime acts on. The verifier (FLOWIP-095j) computes
+/// order-certification as the transitive closure over these recorded fields,
+/// never by re-deriving from a topology it does not have.
+pub fn derive_manifest_delivery_metadata(
+    topology: &Topology,
+    descriptors: &HashMap<String, Box<dyn StageDescriptor>>,
+    name_to_id: &HashMap<String, StageId>,
+) -> HashMap<StageId, (Vec<String>, bool)> {
+    let mut id_to_stage_key: HashMap<StageId, String> = HashMap::new();
+    for (dsl_name, stage_id) in name_to_id {
+        if let Some(descriptor) = descriptors.get(dsl_name.as_str()) {
+            id_to_stage_key.insert(*stage_id, descriptor.name().to_string());
+        }
+    }
+
+    let mut inbound_ids: HashMap<StageId, Vec<StageId>> = HashMap::new();
+    for edge in topology.edges() {
+        if edge.kind != EdgeKind::Forward {
+            continue;
+        }
+        inbound_ids
+            .entry(StageId::from_ulid(edge.to.ulid()))
+            .or_default()
+            .push(StageId::from_ulid(edge.from.ulid()));
+    }
+
+    let mut metadata = HashMap::new();
+    for (dsl_name, stage_id) in name_to_id {
+        let Some(descriptor) = descriptors.get(dsl_name.as_str()) else {
+            continue;
+        };
+        let mut inbound: Vec<String> = inbound_ids
+            .get(stage_id)
+            .map(|ups| {
+                ups.iter()
+                    .filter_map(|up| id_to_stage_key.get(up).cloned())
+                    .collect()
+            })
+            .unwrap_or_default();
+        inbound.sort();
+        inbound.dedup();
+
+        let ordered_delivery = if topology.is_in_cycle(stage_id.to_topology_id()) {
+            false
+        } else {
+            inbound.len() <= 1 || descriptor.is_deterministic_input_orderer()
+        };
+        metadata.insert(*stage_id, (inbound, ordered_delivery));
+    }
+    metadata
+}
+
 /// FLOWIP-095d: build-time orderer override.
 ///
 /// Wraps a descriptor the enablement walk marked so it reports

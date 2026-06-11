@@ -397,8 +397,9 @@ impl RunPresentationOutcome {
     ) -> String {
         match mode {
             RunMode::Replay(ctx) => format!(
-                "{flow_name} {verb} (strict replay of {source}).\nArchived outcomes were reconstructed: source config ignored, effects suppressed, recorded facts reused.\nReplay journal: {run_dir}\nCompare it with the source archive, or replay this replay with: --replay-from {run_dir}",
+                "{flow_name} {verb} (strict replay of {source}).\nArchived outcomes were reconstructed: source config ignored, effects suppressed, recorded facts reused.\nReplay journal: {run_dir}\nVerify it against the source archive: re-run with --replay-from {source_path} --verify\nReplay this replay with: --replay-from {run_dir}",
                 source = ctx.source_label(),
+                source_path = ctx.archive_path.display(),
                 run_dir = run_dir.display(),
             ),
             _ => format!(
@@ -832,6 +833,10 @@ mod tests {
         assert!(
             footer.contains("source config ignored, effects suppressed, recorded facts reused"),
             "replay footer must state what was reconstructed: {footer}"
+        );
+        assert!(
+            footer.contains("--replay-from tmp/archive --verify"),
+            "replay footer must teach the --verify verb against the source archive (FLOWIP-095j): {footer}"
         );
         assert!(
             footer.contains("--replay-from tmp/replay-run"),

@@ -37,6 +37,8 @@ fn write_manifest(dir: &Path) {
                 .to_string(),
             error_journal_file: "FiniteSource_returns_error_stage_01H000000000000000000000000.log"
                 .to_string(),
+            inbound: Vec::new(),
+            ordered_delivery: true,
         },
     );
 
@@ -169,6 +171,8 @@ fn write_manifest_with_version(dir: &Path, version: &str) {
                 .to_string(),
             error_journal_file: "FiniteSource_returns_error_stage_01H000000000000000000000000.log"
                 .to_string(),
+            inbound: Vec::new(),
+            ordered_delivery: true,
         },
     );
 
@@ -279,6 +283,56 @@ async fn open_rejects_archive_with_unparseable_version() {
     assert!(
         matches!(err, ReplayError::VersionMismatch { .. }),
         "unparseable version should fail closed as VersionMismatch, got: {err}"
+    );
+}
+
+/// FLOWIP-095j: an archive written under the previous manifest version is refused
+/// with the unsupported-version error, never a missing-field parse error. The raw
+/// JSON deliberately lacks the 2.0 `inbound`/`ordered_delivery` fields, so this
+/// only passes when the version gate runs before typed deserialization.
+#[tokio::test]
+async fn open_rejects_previous_manifest_version_before_typed_parse() {
+    let dir = tempdir().unwrap();
+    let old_manifest = serde_json::json!({
+        "manifest_version": "1.0",
+        "obzenflow_version": OBZENFLOW_VERSION,
+        "flow_id": "flow_01H000000000000000000000000",
+        "flow_name": "test_flow",
+        "created_at": Utc::now(),
+        "stages": {
+            "returns": {
+                "dsl_var": "source",
+                "stage_type": "finite_source",
+                "stage_id": "stage_01H000000000000000000000000",
+                "stage_logic_version": "1",
+                "data_journal_file": "FiniteSource_returns_stage_01H000000000000000000000000.log",
+                "error_journal_file": "FiniteSource_returns_error_stage_01H000000000000000000000000.log"
+            }
+        },
+        "system_journal_file": "system.log"
+    });
+    std::fs::write(
+        dir.path().join(RUN_MANIFEST_FILENAME),
+        serde_json::to_string_pretty(&old_manifest).unwrap(),
+    )
+    .unwrap();
+    write_system_log_completed(dir.path());
+
+    let err = DiskReplayArchive::open(dir.path().to_path_buf(), false)
+        .await
+        .err()
+        .unwrap();
+    assert!(
+        matches!(
+            err,
+            ReplayError::UnsupportedManifestVersion { ref manifest_version, .. }
+                if manifest_version == "1.0"
+        ),
+        "expected UnsupportedManifestVersion for a 1.0 archive, got: {err}"
+    );
+    assert!(
+        err.to_string().contains("re-record"),
+        "refusal must carry the re-record guidance, got: {err}"
     );
 }
 

@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 pub const RUN_MANIFEST_FILENAME: &str = "run_manifest.json";
-pub const RUN_MANIFEST_VERSION: &str = "1.0";
+pub const RUN_MANIFEST_VERSION: &str = "2.0";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunManifest {
@@ -44,20 +44,19 @@ pub struct RunManifestStage {
     /// FLOWIP-120a: the stage logic version, sourced at flow build from
     /// `StageDescriptor::stage_logic_version()` and folded into the effect
     /// descriptor hash so a deliberate bump invalidates effect replay matches for a
-    /// changed stage. It is a real, handler-supplied field, not a runtime default;
-    /// the `serde(default)` below applies only when loading an archive written before
-    /// the field existed. Most stages report `"1"` today because the descriptor and
-    /// handler traits default to `"1"` unless a handler overrides the method.
-    #[serde(default = "default_stage_logic_version")]
+    /// changed stage. It is a real, handler-supplied field, not a runtime default.
+    /// Most stages report `"1"` today because the descriptor and handler traits
+    /// default to `"1"` unless a handler overrides the method.
     pub stage_logic_version: String,
     pub data_journal_file: String,
     pub error_journal_file: String,
-}
-
-/// Legacy-archive deserialization fallback for `stage_logic_version` (FLOWIP-120a).
-/// This is not the runtime source of the value; live runs populate the field from
-/// the stage descriptor at flow build. It only fills the field for archives written
-/// before `stage_logic_version` was added to the manifest.
-fn default_stage_logic_version() -> String {
-    "1".to_string()
+    /// FLOWIP-095j: upstream stage keys delivering into this stage over forward
+    /// edges, sorted and deduplicated. Together with `ordered_delivery` this makes
+    /// the archive self-describing for order-certification at verify time.
+    pub inbound: Vec<String>,
+    /// FLOWIP-095j: whether this stage's input delivery order is deterministic
+    /// (zero or one inbound edge outside a cycle, an FLOWIP-095d marked fan-in,
+    /// or a structural orderer such as the hydrating join). Cycle members are
+    /// always false; backflow arrivals interleave by timing.
+    pub ordered_delivery: bool,
 }

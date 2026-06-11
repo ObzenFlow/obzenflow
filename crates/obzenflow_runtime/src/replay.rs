@@ -26,7 +26,7 @@ pub enum ReplayError {
     #[error("Replay archive is missing run_manifest.json at {path}")]
     MissingManifest { path: PathBuf },
 
-    #[error("Replay archive manifest version '{manifest_version}' is unsupported (supported: {supported})")]
+    #[error("Replay archive manifest version '{manifest_version}' is unsupported (supported: {supported}); re-record the run with this build of ObzenFlow")]
     UnsupportedManifestVersion {
         manifest_version: String,
         supported: &'static str,

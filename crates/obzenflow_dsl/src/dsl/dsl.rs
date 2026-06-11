@@ -1002,6 +1002,13 @@ macro_rules! build_typed_flow {
         let mut stage_journals = HashMap::new();
         let mut error_journals = HashMap::new();
         let mut manifest_stages: HashMap<String, obzenflow_core::journal::run_manifest::RunManifestStage> = HashMap::new();
+        // FLOWIP-095j: per-stage delivery metadata for the manifest, derived after
+        // wrap_deterministic_orderers so orderer answers match the runtime.
+        let manifest_delivery_metadata = $crate::dsl::typing::derive_manifest_delivery_metadata(
+            &topology,
+            &descriptors,
+            &name_to_id,
+        );
         for (name, &stage_id) in name_to_id.iter() {
             // Get the descriptor to access stage type and name
             let descriptor = descriptors.get(name).ok_or_else(|| {
@@ -1060,6 +1067,10 @@ macro_rules! build_typed_flow {
                 name: format!("{}_error", descriptor.name()),
             }
             .to_filename();
+            let (inbound, ordered_delivery) = manifest_delivery_metadata
+                .get(&stage_id)
+                .cloned()
+                .unwrap_or((Vec::new(), true));
             manifest_stages.insert(
                 stage_key,
                 obzenflow_core::journal::run_manifest::RunManifestStage {
@@ -1069,6 +1080,8 @@ macro_rules! build_typed_flow {
                     stage_logic_version: descriptor.stage_logic_version(),
                     data_journal_file,
                     error_journal_file,
+                    inbound,
+                    ordered_delivery,
                 },
             );
         }

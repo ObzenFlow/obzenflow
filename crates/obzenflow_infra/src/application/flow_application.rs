@@ -732,6 +732,17 @@ impl FlowApplication {
             None => super::run_mode::RunMode::Live,
         };
 
+        // FLOWIP-095j pre-flight: verification re-reads the source archive
+        // after completion, so it must remain present through the run.
+        if config.replay.as_ref().is_some_and(|replay| replay.verify) {
+            if let Some(replay) = &config.replay {
+                tracing::info!(
+                    archive = %replay.from.display(),
+                    "--verify: the source archive must remain present through completion"
+                );
+            }
+        }
+
         let presentation_enabled = presentation.is_some();
 
         // Clear any stale run-dir hint from prior FlowApplication runs (OT-17).
@@ -1196,6 +1207,9 @@ impl FlowApplication {
 
         match (result, flow_name, run_dir, stopped) {
             (Ok(()), flow_name, run_dir, stopped) => {
+                // FLOWIP-095j: keep the candidate run directory before the
+                // outcome takes ownership of it below.
+                let verify_candidate_dir = run_dir.clone();
                 if let Some(presentation) = &presentation {
                     let flow_name = flow_name.unwrap_or_else(|| "Flow".to_string());
                     let outcome = if stopped {
@@ -1226,6 +1240,18 @@ impl FlowApplication {
                         }
                     }
                 }
+
+                // FLOWIP-095j: verify the replay output against the source
+                // archive after the run reaches its terminal outcome.
+                if config.replay.as_ref().is_some_and(|replay| replay.verify) {
+                    if let super::run_mode::RunMode::Replay(ctx) = &run_mode {
+                        return Self::run_post_replay_verification(
+                            ctx.archive_path.clone(),
+                            verify_candidate_dir,
+                        )
+                        .await;
+                    }
+                }
                 Ok(())
             }
             (Err(err), flow_name, run_dir, _) => {
@@ -1252,6 +1278,57 @@ impl FlowApplication {
                 }
                 Err(err)
             }
+        }
+    }
+
+    /// FLOWIP-095j: the `--verify` convenience form. Compares the just-written
+    /// replay run against the source archive it replayed and maps the verdict
+    /// onto the exit-code contract (`Ok(())` is exit 0, the fully certified
+    /// match; codes 1/2/3 travel as `ApplicationError::Verification`).
+    async fn run_post_replay_verification(
+        baseline: PathBuf,
+        candidate: Option<PathBuf>,
+    ) -> Result<(), ApplicationError> {
+        let skip = |summary: String| {
+            println!("\n{summary}");
+            Err(ApplicationError::Verification {
+                exit_code: 3,
+                summary,
+            })
+        };
+
+        let Some(candidate) = candidate else {
+            return skip(
+                "verification skipped: this run wrote no durable run directory (verification needs disk journals)"
+                    .to_string(),
+            );
+        };
+        if std::fs::metadata(&baseline).is_err() {
+            return skip(format!(
+                "verification skipped: source archive unavailable ({})\nrun later: obzenflow verify --baseline {} --candidate {}",
+                baseline.display(),
+                baseline.display(),
+                candidate.display()
+            ));
+        }
+
+        let options = crate::verify::VerifyOptions::default();
+        let outcome = tokio::task::spawn_blocking(move || {
+            crate::verify::verify_run_dirs(&baseline, &candidate, &options)
+        })
+        .await
+        .map_err(|err| ApplicationError::Other(Box::new(err)))?
+        .map_err(|err| ApplicationError::Other(Box::new(err)))?;
+
+        let rendered = crate::verify::render_verdict(&outcome);
+        println!("\n{rendered}");
+
+        match outcome.exit_code() {
+            0 => Ok(()),
+            exit_code => Err(ApplicationError::Verification {
+                exit_code,
+                summary: rendered.lines().next().unwrap_or_default().to_string(),
+            }),
         }
     }
 
