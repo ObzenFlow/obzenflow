@@ -1946,6 +1946,7 @@ async fn transport_only_skips_framework_effect_data_without_stage_input_position
         outcome: obzenflow_core::event::payloads::effect_payload::EffectOutcomePayload::Succeeded {
             output: json!({"ok": true}),
         },
+        origin: None,
     };
 
     upstream_journal

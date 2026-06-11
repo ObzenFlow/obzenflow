@@ -1,0 +1,5 @@
+error: effect outcome struct carriers use named fields, one TypedPayload fact per field; tuple and unit structs are not valid carriers (FLOWIP-120m)
+  --> tests/compile_fail/effect_outcome_tuple_struct.rs:16:24
+   |
+16 | pub struct TupleCarrier(FirstFact);
+   |                        ^^^^^^^^^^^

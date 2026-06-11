@@ -6,21 +6,22 @@
 //!
 //! The gateway call is the one place this flow touches the outside world, so it
 //! is expressed as an [`Effect`] (a value the stage returns) rather than inline
-//! I/O. The runtime executes the effect once, journals the captured gateway
-//! decision, and on replay returns that recorded value without calling the
-//! gateway again. That is the durable-execution property the tutorial teaches.
+//! I/O. The runtime executes the effect once, journals the named outcome fact
+//! that happened (`payment.authorized.v1` or `payment.declined.v1`), and on
+//! replay reconstructs that recorded outcome without calling the gateway
+//! again. That is the durable-execution property the tutorial teaches.
 //!
 //! Each payment-gateway example is self-contained; the high-volume variant keeps
 //! its own copy of this logic and only swaps the source and the flow wiring.
 
 use super::domain::{
-    GatewayPaymentDecision, GatewayPaymentFallback, GatewayPaymentRejected,
-    OrderCancellationReason, OrderCancelled, PaymentAuthorizationUnavailable, PaymentAuthorized,
-    PaymentDeclineReason, PaymentDeclined, PaymentMethodState, TrafficPhase, ValidatedOrder,
+    GatewayPaymentFallback, GatewayPaymentRejected, OrderCancellationReason, OrderCancelled,
+    PaymentAuthorizationUnavailable, PaymentAuthorized, PaymentDeclineReason, PaymentDeclined,
+    PaymentMethodState, TrafficPhase, ValidatedOrder,
 };
 use async_trait::async_trait;
 use obzenflow_adapters::effects::{CircuitBreakerOutcome, GuardedEffectExt};
-use obzenflow_core::{event::chain_event::ChainEvent, TypedPayload};
+use obzenflow_core::{event::chain_event::ChainEvent, EffectOutcomeFacts, TypedPayload};
 use obzenflow_runtime::effects::{
     Effect, EffectContext, EffectError, EffectSafety, Effects, IdempotencyKey,
 };
@@ -40,6 +41,18 @@ pub struct AuthorizePayment {
     pub order: ValidatedOrder,
 }
 
+/// Closed set of successful gateway authorization outcomes (FLOWIP-120m).
+///
+/// The variants are the facts the journal records (`payment.authorized.v1`,
+/// `payment.declined.v1`); the derive writes the marshalling. The carrier
+/// itself is transient `fx.perform` machinery the handler matches
+/// exhaustively. There is no persisted gateway-decision wrapper.
+#[derive(Debug, Clone, EffectOutcomeFacts)]
+pub enum AuthorizePaymentOutcome {
+    Authorized(PaymentAuthorized),
+    Declined(PaymentDeclined),
+}
+
 #[async_trait]
 impl Effect for AuthorizePayment {
     const EFFECT_TYPE: &'static str = "payment.authorize";
@@ -48,7 +61,7 @@ impl Effect for AuthorizePayment {
     // the gateway can dedupe on. The runtime enforces this before any I/O.
     const SAFETY: EffectSafety = EffectSafety::NonIdempotentRequiresKey;
 
-    type Output = GatewayPaymentDecision;
+    type Outcome = AuthorizePaymentOutcome;
 
     fn label(&self) -> &str {
         "authorize_payment"
@@ -64,7 +77,7 @@ impl Effect for AuthorizePayment {
         })
     }
 
-    async fn execute(&self, ctx: &mut EffectContext) -> Result<Self::Output, EffectError> {
+    async fn execute(&self, ctx: &mut EffectContext) -> Result<Self::Outcome, EffectError> {
         // Latency comes from the deterministic, seeded RNG on the effect context
         // rather than a wall clock, so a replay reconstructs the same timing.
         let latency_ms: u64 = ctx.rng("gateway_latency").u64(50..=200);
@@ -77,16 +90,35 @@ impl Effect for AuthorizePayment {
             ));
         }
 
-        match self.order.payment_method_state {
-            PaymentMethodState::Valid => Ok(GatewayPaymentDecision::Authorized {
-                authorization_id: PaymentAuthorized::AUTHORIZATION_ID_DEMO.to_string(),
-            }),
-            PaymentMethodState::InsufficientFunds => Ok(GatewayPaymentDecision::Declined {
-                reason: PaymentDeclineReason::InsufficientFunds,
-            }),
-            PaymentMethodState::AddressMismatch => Ok(GatewayPaymentDecision::Declined {
-                reason: PaymentDeclineReason::AddressMismatch,
-            }),
+        let order = &self.order;
+        match order.payment_method_state {
+            PaymentMethodState::Valid => {
+                Ok(AuthorizePaymentOutcome::Authorized(PaymentAuthorized {
+                    order_id: order.order_id.clone(),
+                    customer_id: order.customer_id.clone(),
+                    amount_cents: order.amount_cents,
+                    phase: order.phase.clone(),
+                    authorization_id: PaymentAuthorized::AUTHORIZATION_ID_DEMO.to_string(),
+                }))
+            }
+            PaymentMethodState::InsufficientFunds => {
+                Ok(AuthorizePaymentOutcome::Declined(PaymentDeclined {
+                    order_id: order.order_id.clone(),
+                    customer_id: order.customer_id.clone(),
+                    amount_cents: order.amount_cents,
+                    phase: order.phase.clone(),
+                    reason: PaymentDeclineReason::InsufficientFunds,
+                }))
+            }
+            PaymentMethodState::AddressMismatch => {
+                Ok(AuthorizePaymentOutcome::Declined(PaymentDeclined {
+                    order_id: order.order_id.clone(),
+                    customer_id: order.customer_id.clone(),
+                    amount_cents: order.amount_cents,
+                    phase: order.phase.clone(),
+                    reason: PaymentDeclineReason::AddressMismatch,
+                }))
+            }
             PaymentMethodState::InvalidNumber => Err(EffectError::Execution(
                 "invalid_payment_method_reached_gateway".to_string(),
             )),
@@ -103,10 +135,12 @@ impl Effect for AuthorizePayment {
 
 /// Effectful transform that turns a `ValidatedOrder` into named gateway outcome facts.
 ///
-/// The handler body stays small and deterministic: it performs one effect and
-/// emits the named payment fact that happened. The gateway decision itself is
-/// recorded as the effect outcome fact for replay suppression; the emitted
-/// payment facts are the public channels downstream stages subscribe to.
+/// The handler body stays small and deterministic. The named payment facts
+/// (`PaymentAuthorized`, `PaymentDeclined`) ARE the recorded effect outcome
+/// group (FLOWIP-120m): `fx.perform` records whichever fact happened and
+/// returns the transient carrier, so the handler never re-emits them. The
+/// handler emits only derived consequences (`OrderCancelled`) and the
+/// non-performance fact (`PaymentAuthorizationUnavailable`).
 #[derive(Debug, Clone)]
 pub struct GatewayTransform;
 
@@ -139,8 +173,25 @@ impl EffectfulTransformHandler for GatewayTransform {
             .await;
 
         match outcome {
-            Ok(CircuitBreakerOutcome::Primary(decision)) => {
-                emit_payment_decision_fact(order, decision, fx).await?;
+            Ok(CircuitBreakerOutcome::Primary(AuthorizePaymentOutcome::Authorized(_))) => {
+                // The PaymentAuthorized outcome fact is already recorded by
+                // fx.perform; authorization has no derived consequence here.
+            }
+            Ok(CircuitBreakerOutcome::Primary(AuthorizePaymentOutcome::Declined(declined))) => {
+                // Fact first, consequence second: the recorded PaymentDeclined
+                // outcome fact is the gateway's decision, and the derived
+                // lifecycle consequence is that the order is cancelled.
+                fx.emit(OrderCancelled {
+                    order_id: declined.order_id,
+                    customer_id: declined.customer_id,
+                    amount_cents: declined.amount_cents,
+                    phase: declined.phase,
+                    reason: OrderCancellationReason::PaymentDeclined {
+                        reason: declined.reason,
+                    },
+                })
+                .await
+                .map_err(|e| HandlerError::Other(e.to_string()))?;
             }
             Ok(CircuitBreakerOutcome::Fallback(fallback)) => {
                 // Breaker-synthesized: the gateway was never called, so no
@@ -214,50 +265,6 @@ pub fn simulated_gateway_unavailability_counts_as_failure(
         ValidatedOrder::from_event(event).map(|order| order.phase),
         Some(TrafficPhase::Outage)
     )
-}
-
-async fn emit_payment_decision_fact(
-    order: ValidatedOrder,
-    decision: GatewayPaymentDecision,
-    fx: &mut Effects,
-) -> Result<(), HandlerError> {
-    match decision {
-        GatewayPaymentDecision::Authorized { authorization_id } => {
-            fx.emit(PaymentAuthorized {
-                order_id: order.order_id,
-                customer_id: order.customer_id,
-                amount_cents: order.amount_cents,
-                phase: order.phase,
-                authorization_id,
-            })
-            .await
-        }
-        GatewayPaymentDecision::Declined { reason } => {
-            // Fact first, consequence second: the gateway's decline is the
-            // effect-adjacent fact, and the derived lifecycle consequence is
-            // that the order is cancelled. Both are recorded, so the journal
-            // keeps the provenance and the cancelled-orders subscriber sees
-            // the fate.
-            fx.emit(PaymentDeclined {
-                order_id: order.order_id.clone(),
-                customer_id: order.customer_id.clone(),
-                amount_cents: order.amount_cents,
-                phase: order.phase.clone(),
-                reason: reason.clone(),
-            })
-            .await
-            .map_err(|e| HandlerError::Other(e.to_string()))?;
-            fx.emit(OrderCancelled {
-                order_id: order.order_id,
-                customer_id: order.customer_id,
-                amount_cents: order.amount_cents,
-                phase: order.phase,
-                reason: OrderCancellationReason::PaymentDeclined { reason },
-            })
-            .await
-        }
-    }
-    .map_err(|e| HandlerError::Other(e.to_string()))
 }
 
 /// Deliberately no cancellation here: unavailability means no payment decision

@@ -4,6 +4,13 @@
 
 #![doc = include_str!("../README.md")]
 
+// Escape-hatch target for `#[effect_outcome(crate = ...)]` (FLOWIP-120m):
+// derive output resolves `::obzenflow_core` in the deriving crate, so a
+// downstream crate that depends only on obzenflow_runtime points the derive
+// at `obzenflow_runtime::obzenflow_core` instead.
+#[doc(hidden)]
+pub use obzenflow_core;
+
 // Core modules
 pub mod backpressure;
 pub mod bootstrap;

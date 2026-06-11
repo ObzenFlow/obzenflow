@@ -55,6 +55,7 @@ pub(super) fn effect_record_from_event(
                     output: payload.clone(),
                     outcome_fact_ordinal,
                 },
+                origin: provenance.origin.clone(),
             };
             validate_domain_effect_record_provenance(&record, provenance)?;
             Ok(Some(record))
@@ -296,9 +297,29 @@ where
     }
 }
 
+#[derive(Debug)]
 pub(super) enum EffectRecordMaterialization {
-    DomainFacts(Vec<TypedFact>),
+    DomainFacts {
+        facts: Vec<TypedFact>,
+        /// Origin read back from the recorded provenance (FLOWIP-120m).
+        /// `None` on pre-120h journals, where replay falls back to
+        /// registration-based derivation.
+        origin: Option<EffectFactOrigin>,
+    },
     FrameworkRecords(Vec<EffectRecord>),
+}
+
+/// The commit path stamps one origin per outcome group, so records inside a
+/// group that disagree on origin are corruption.
+fn group_origin(records: &[&EffectRecord]) -> Result<Option<EffectFactOrigin>, EffectError> {
+    let mut origins = records.iter().map(|record| &record.origin);
+    let first = origins.next().cloned().flatten();
+    if origins.any(|origin| origin.as_ref() != first.as_ref()) {
+        return Err(EffectError::EffectProvenanceMismatch(
+            "effect outcome group records disagree on fact origin".to_string(),
+        ));
+    }
+    Ok(first)
 }
 
 pub(super) fn effect_record_group_materialization(
@@ -306,6 +327,7 @@ pub(super) fn effect_record_group_materialization(
 ) -> Result<EffectRecordMaterialization, EffectError> {
     validate_effect_outcome_group(records)?;
     let [single] = records else {
+        let origin = group_origin(records)?;
         let mut ordered = records.to_vec();
         ordered.sort_by_key(|record| match &record.outcome {
             EffectOutcomePayload::SucceededFact {
@@ -330,16 +352,19 @@ pub(super) fn effect_record_group_materialization(
                 payload: output.clone(),
             });
         }
-        return Ok(EffectRecordMaterialization::DomainFacts(facts));
+        return Ok(EffectRecordMaterialization::DomainFacts { facts, origin });
     };
 
     match &single.outcome {
         EffectOutcomePayload::SucceededFact {
             event_type, output, ..
-        } => Ok(EffectRecordMaterialization::DomainFacts(vec![TypedFact {
-            event_type: event_type.clone(),
-            payload: output.clone(),
-        }])),
+        } => Ok(EffectRecordMaterialization::DomainFacts {
+            facts: vec![TypedFact {
+                event_type: event_type.clone(),
+                payload: output.clone(),
+            }],
+            origin: single.origin.clone(),
+        }),
         EffectOutcomePayload::Succeeded { .. } | EffectOutcomePayload::Failed { .. } => {
             Ok(EffectRecordMaterialization::FrameworkRecords(vec![
                 (*single).clone(),
@@ -419,6 +444,9 @@ pub(super) fn effect_fact_set_error(error: TypedFactSetError) -> EffectError {
         ),
         TypedFactSetError::DuplicateFact { event_type } => EffectError::EffectProvenanceMismatch(
             format!("effect outcome group has duplicate fact `{event_type}`"),
+        ),
+        TypedFactSetError::UnexpectedFact { event_type } => EffectError::EffectProvenanceMismatch(
+            format!("effect outcome group contains unexpected fact `{event_type}`"),
         ),
     }
 }

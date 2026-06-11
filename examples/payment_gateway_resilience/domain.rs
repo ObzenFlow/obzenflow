@@ -182,24 +182,6 @@ impl TypedPayload for OrderCancelled {
     const SCHEMA_VERSION: u32 = 1;
 }
 
-/// Remote gateway decision for a valid payment authorization attempt.
-///
-/// FLOWIP-120h removed the old `AuthorizationUnavailable` variant: breaker
-/// branches are now distinct named facts (`GatewayPaymentFallback`,
-/// `GatewayPaymentRejected`) rather than a variant of the effect's own
-/// outcome distinguished by a reason string, and a genuine gateway failure is
-/// a recorded effect failure the handler maps to manual review.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
-pub enum GatewayPaymentDecision {
-    Authorized { authorization_id: String },
-    Declined { reason: PaymentDeclineReason },
-}
-
-impl TypedPayload for GatewayPaymentDecision {
-    const EVENT_TYPE: &'static str = "payment.gateway_decision";
-    const SCHEMA_VERSION: u32 = 1;
-}
-
 /// Breaker-synthesized fallback branch (FLOWIP-120h): the circuit was open,
 /// the gateway was never called, and this fact records the degraded outcome
 /// under the effect cursor. The branch is its own named fact, so replay

@@ -1,0 +1,5 @@
+error: effect outcome enum variants must each hold exactly one TypedPayload fact, e.g. `Authorized(PaymentAuthorized)`; unit, struct-like, multi-field, and empty enums are not valid carriers (FLOWIP-120m)
+  --> tests/compile_fail/effect_outcome_struct_variant.rs:17:5
+   |
+17 |     Present { fact: FirstFact },
+   |     ^^^^^^^

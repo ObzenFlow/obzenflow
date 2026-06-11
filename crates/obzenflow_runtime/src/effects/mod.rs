@@ -15,8 +15,9 @@ pub use obzenflow_core::event::payloads::effect_payload::{
     OutcomeFactOrdinal, RecordedFlowId, RetryDisposition, StageLogicVersion, CAPTURE_EVENT_TYPE,
     EFFECT_RECORD_EVENT_TYPE,
 };
-use obzenflow_core::event::schema::{
-    TypedFact, TypedFactSet, TypedFactSetError, TypedFactType, TypedPayload,
+// `EffectOutcomeFacts` re-exports both the trait and its derive (FLOWIP-120m).
+pub use obzenflow_core::event::schema::{
+    EffectOutcomeFacts, TypedFact, TypedFactSet, TypedFactSetError, TypedFactType, TypedPayload,
 };
 use obzenflow_core::event::{ChainEventContent, ChainEventFactory, SystemEvent};
 use obzenflow_core::journal::{ArchiveStatus, Journal};
@@ -59,7 +60,8 @@ pub use boundary::{
 };
 pub use commit::EffectCommitHandle;
 pub use context::{
-    EffectContext, EffectInvocationContext, EffectRuntimeMode, SynthesizedOutcomeRegistration,
+    EffectContext, EffectInvocationContext, EffectRuntimeMode, SynthesizedOutcomeKind,
+    SynthesizedOutcomeRegistration,
 };
 pub use declaration::{
     Effect, EffectDeclaration, EffectSafety, IdempotencyKey, IdempotencyKeyPolicy,

@@ -41,9 +41,9 @@
 //! decision was reached, so those orders go to manual review. See `README.md`.
 
 use super::domain::{
-    CustomerOrderPlaced, GatewayPaymentDecision, GatewayPaymentFallback, GatewayPaymentRejected,
-    InvalidOrder, OrderCancelled, PaymentAuthorizationUnavailable, PaymentAuthorized,
-    PaymentDeclined, ValidatedOrder,
+    CustomerOrderPlaced, GatewayPaymentFallback, GatewayPaymentRejected, InvalidOrder,
+    OrderCancelled, PaymentAuthorizationUnavailable, PaymentAuthorized, PaymentDeclined,
+    ValidatedOrder,
 };
 use super::fixtures;
 use super::gateway::{self, AuthorizePayment, GatewayTransform};
@@ -171,11 +171,10 @@ pub fn build_flow() -> obzenflow_dsl::FlowDefinition {
             // synthesized it.
             authorize_payment = effectful_transform!(
                 ValidatedOrder -> {
-                    GatewayPaymentDecision,
-                    GatewayPaymentFallback,
-                    GatewayPaymentRejected,
                     PaymentAuthorized,
                     PaymentDeclined,
+                    GatewayPaymentFallback,
+                    GatewayPaymentRejected,
                     OrderCancelled,
                     PaymentAuthorizationUnavailable
                 } => GatewayTransform,
@@ -185,14 +184,14 @@ pub fn build_flow() -> obzenflow_dsl::FlowDefinition {
                         .cooldown(std::time::Duration::from_secs(5))
                         .rate_based_over_last_n_calls(5, 0.6)
                         .slow_call(std::time::Duration::from_millis(250), 0.5)
-                        .with_typed_fallback::<ValidatedOrder, GatewayPaymentFallback, _>(|order| GatewayPaymentFallback {
+                        .with_fallback_fact::<ValidatedOrder, GatewayPaymentFallback, _>(|order| GatewayPaymentFallback {
                             order_id: order.order_id.clone(),
                             customer_id: order.customer_id.clone(),
                             amount_cents: order.amount_cents,
                             phase: order.phase.clone(),
                             reason: "circuit breaker open".to_string(),
                         })
-                        .typed_outcome_with::<ValidatedOrder, GatewayPaymentRejected, _>(|order, reason| GatewayPaymentRejected {
+                        .with_rejection_fact::<ValidatedOrder, GatewayPaymentRejected, _>(|order, reason| GatewayPaymentRejected {
                             order_id: order.order_id.clone(),
                             customer_id: order.customer_id.clone(),
                             amount_cents: order.amount_cents,

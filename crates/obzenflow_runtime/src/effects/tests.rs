@@ -145,7 +145,7 @@ impl Effect for CountingEffect {
     const SCHEMA_VERSION: u32 = 1;
     const SAFETY: EffectSafety = EffectSafety::Idempotent;
 
-    type Output = CountingOutput;
+    type Outcome = CountingOutput;
 
     fn label(&self) -> &str {
         self.label
@@ -155,7 +155,7 @@ impl Effect for CountingEffect {
         json!({ "value": self.value })
     }
 
-    async fn execute(&self, _ctx: &mut EffectContext) -> Result<Self::Output, EffectError> {
+    async fn execute(&self, _ctx: &mut EffectContext) -> Result<Self::Outcome, EffectError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         Ok(CountingOutput {
             value: self.value + 1,
@@ -175,7 +175,7 @@ impl Effect for FailingEffect {
     const SCHEMA_VERSION: u32 = 1;
     const SAFETY: EffectSafety = EffectSafety::Idempotent;
 
-    type Output = CountingOutput;
+    type Outcome = CountingOutput;
 
     fn label(&self) -> &str {
         self.label
@@ -185,7 +185,7 @@ impl Effect for FailingEffect {
         json!({ "kind": "failing" })
     }
 
-    async fn execute(&self, _ctx: &mut EffectContext) -> Result<Self::Output, EffectError> {
+    async fn execute(&self, _ctx: &mut EffectContext) -> Result<Self::Outcome, EffectError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         Err(EffectError::Execution("simulated_failure".to_string()))
     }
@@ -203,7 +203,7 @@ impl Effect for TransactionalCountingEffect {
     const SCHEMA_VERSION: u32 = 1;
     const SAFETY: EffectSafety = EffectSafety::Transactional;
 
-    type Output = CountingOutput;
+    type Outcome = CountingOutput;
 
     fn label(&self) -> &str {
         "transactional"
@@ -213,7 +213,7 @@ impl Effect for TransactionalCountingEffect {
         json!({ "value": self.value })
     }
 
-    async fn execute(&self, _ctx: &mut EffectContext) -> Result<Self::Output, EffectError> {
+    async fn execute(&self, _ctx: &mut EffectContext) -> Result<Self::Outcome, EffectError> {
         self.normal_calls.fetch_add(1, Ordering::SeqCst);
         Ok(CountingOutput {
             value: self.value + 10,
@@ -239,33 +239,12 @@ impl TypedPayload for SecondOutput {
     const EVENT_TYPE: &'static str = "test.second_output";
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// Product carrier for the multi-fact effect tests, derived per FLOWIP-120m:
+/// exact reconstruction, one fact per field.
+#[derive(Clone, Debug, PartialEq, Eq, obzenflow_core::EffectOutcomeFacts)]
 struct MultiFactOutcome {
     first: FirstOutput,
     second: SecondOutput,
-}
-
-impl TypedFactSet for MultiFactOutcome {
-    fn fact_types() -> Vec<obzenflow_core::event::schema::TypedFactType> {
-        vec![
-            obzenflow_core::event::schema::TypedFactType::of::<FirstOutput>(),
-            obzenflow_core::event::schema::TypedFactType::of::<SecondOutput>(),
-        ]
-    }
-
-    fn into_facts(self) -> Result<Vec<TypedFact>, TypedFactSetError> {
-        Ok(vec![
-            TypedFact::from_payload(self.first)?,
-            TypedFact::from_payload(self.second)?,
-        ])
-    }
-
-    fn try_from_facts(facts: &[TypedFact]) -> Result<Self, TypedFactSetError> {
-        Ok(Self {
-            first: <FirstOutput as TypedFactSet>::try_from_facts(facts)?,
-            second: <SecondOutput as TypedFactSet>::try_from_facts(facts)?,
-        })
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -279,7 +258,7 @@ impl Effect for MultiFactEffect {
     const SCHEMA_VERSION: u32 = 1;
     const SAFETY: EffectSafety = EffectSafety::Idempotent;
 
-    type Output = MultiFactOutcome;
+    type Outcome = MultiFactOutcome;
 
     fn label(&self) -> &str {
         "multi"
@@ -289,7 +268,7 @@ impl Effect for MultiFactEffect {
         json!({ "kind": "multi" })
     }
 
-    async fn execute(&self, _ctx: &mut EffectContext) -> Result<Self::Output, EffectError> {
+    async fn execute(&self, _ctx: &mut EffectContext) -> Result<Self::Outcome, EffectError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         Ok(MultiFactOutcome {
             first: FirstOutput { value: 10 },
@@ -425,6 +404,63 @@ impl TransactionalEffectPort<TransactionalCountingEffect> for DivergentTransacti
         // Return a value that disagrees with what was committed.
         Ok(CountingOutput {
             value: effect.value + 9_999,
+        })
+    }
+}
+
+/// A carrier with a non-empty synthesized set, standing in for a `Guarded`
+/// lifted carrier without depending on the adapters crate (FLOWIP-120m
+/// coordination tests).
+#[derive(Clone, Debug)]
+struct LiftedProbeOutcome {
+    value: CountingOutput,
+}
+
+impl TypedFactSet for LiftedProbeOutcome {
+    fn fact_types() -> Vec<TypedFactType> {
+        vec![
+            TypedFactType::of::<CountingOutput>(),
+            TypedFactType::of::<FirstOutput>(),
+        ]
+    }
+
+    fn into_facts(self) -> Result<Vec<TypedFact>, TypedFactSetError> {
+        Ok(vec![TypedFact::from_payload(self.value)?])
+    }
+
+    fn try_from_facts(facts: &[TypedFact]) -> Result<Self, TypedFactSetError> {
+        Ok(Self {
+            value: obzenflow_core::event::schema::decode_member_fact::<CountingOutput>(facts)?,
+        })
+    }
+
+    fn synthesized_fact_types() -> Vec<TypedFactType> {
+        vec![TypedFactType::of::<FirstOutput>()]
+    }
+}
+
+#[derive(Clone, Debug)]
+struct LiftedProbeEffect;
+
+#[async_trait]
+impl Effect for LiftedProbeEffect {
+    const EFFECT_TYPE: &'static str = "test.lifted_probe";
+    const SCHEMA_VERSION: u32 = 1;
+    const SAFETY: EffectSafety = EffectSafety::Idempotent;
+
+    type Outcome = LiftedProbeOutcome;
+
+    fn label(&self) -> &str {
+        "lifted_probe"
+    }
+
+    fn canonical_input(&self) -> Value {
+        json!({})
+    }
+
+    async fn execute(&self, _ctx: &mut EffectContext) -> Result<Self::Outcome, EffectError> {
+        Ok(LiftedProbeOutcome {
+            value: CountingOutput { value: 0 },
         })
     }
 }
@@ -625,6 +661,7 @@ fn effect_history_uses_record_root_over_archive_fallback() {
         outcome: EffectOutcomePayload::Succeeded {
             output: json!({ "value": 10 }),
         },
+        origin: None,
     };
 
     let history = EffectHistory::from_records("replay_flow".to_string(), vec![record])
@@ -649,6 +686,7 @@ fn effect_history_rejects_mixed_record_roots() {
         outcome: EffectOutcomePayload::Succeeded {
             output: json!({ "value": 10 }),
         },
+        origin: None,
     };
     let second = EffectRecord {
         cursor: EffectCursor::new("root_b", "effect_stage", 2, 0),
@@ -657,6 +695,7 @@ fn effect_history_rejects_mixed_record_roots() {
         outcome: EffectOutcomePayload::Succeeded {
             output: json!({ "value": 11 }),
         },
+        origin: None,
     };
 
     let err = EffectHistory::from_records("replay_flow".to_string(), vec![first, second])
@@ -965,6 +1004,7 @@ fn effect_history_rejects_partial_multi_fact_outcome_group() {
                 output: json!({ "value": 10 }),
                 outcome_fact_ordinal: OutcomeFactOrdinal::new(0),
             },
+            origin: None,
         },
         EffectRecord {
             cursor,
@@ -975,6 +1015,7 @@ fn effect_history_rejects_partial_multi_fact_outcome_group() {
                 output: json!({ "value": "twenty" }),
                 outcome_fact_ordinal: OutcomeFactOrdinal::new(2),
             },
+            origin: None,
         },
     ];
 
@@ -1692,6 +1733,7 @@ fn effect_record_decode_rejects_reserved_event_without_provenance() {
         outcome: EffectOutcomePayload::Succeeded {
             output: json!(2_u64),
         },
+        origin: None,
     };
     let event = ChainEventFactory::data_event(
         WriterId::from(stage_id),
@@ -1701,6 +1743,202 @@ fn effect_record_decode_rejects_reserved_event_without_provenance() {
 
     let err = effect_record_from_event(&event)
         .expect_err("reserved effect record without provenance must fail loud");
+
+    assert!(matches!(err, EffectError::EffectProvenanceMismatch(_)));
+}
+
+// ---------------------------------------------------------------------------
+// FLOWIP-120m: replay origin read-back
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn effect_record_from_event_reads_back_provenance_origin() {
+    let stage_id = StageId::new();
+    let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
+    let mut live = Effects::new(invocation_context(
+        journal.clone(),
+        parent_envelope(WriterId::from(stage_id)),
+        None,
+    ));
+    live.perform(CountingEffect {
+        value: 1,
+        label: "same",
+        calls: Arc::new(AtomicUsize::new(0)),
+    })
+    .await
+    .expect("live effect should succeed");
+
+    // The live commit stamps Effect origin; the record reconstructed from the
+    // journaled event must carry it back.
+    let records = effect_records(&journal);
+    assert_eq!(records[0].origin, Some(EffectFactOrigin::Effect));
+
+    // A middleware-synthesized marker survives the same round trip.
+    let mut event = journal.events()[0].event.clone();
+    event
+        .effect_provenance
+        .as_mut()
+        .expect("effect event should carry provenance")
+        .origin = Some(EffectFactOrigin::MiddlewareSynthesized {
+        label: "test_breaker".to_string(),
+    });
+    let record = effect_record_from_event(&event)
+        .expect("provenance-stamped event should decode")
+        .expect("data event should produce a record");
+    assert_eq!(
+        record.origin,
+        Some(EffectFactOrigin::MiddlewareSynthesized {
+            label: "test_breaker".to_string(),
+        })
+    );
+}
+
+#[tokio::test]
+async fn replayed_group_prefers_recorded_origin_over_derivation() {
+    let stage_id = StageId::new();
+    let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
+    let mut live = Effects::new(invocation_context(
+        journal.clone(),
+        parent_envelope(WriterId::from(stage_id)),
+        None,
+    ));
+    live.perform(CountingEffect {
+        value: 1,
+        label: "same",
+        calls: Arc::new(AtomicUsize::new(0)),
+    })
+    .await
+    .expect("live effect should succeed");
+
+    // Simulate a middleware-synthesized group: the replay context has no
+    // registrations, so derivation would say Effect; the recorded origin must
+    // win.
+    let records: Vec<EffectRecord> = effect_records(&journal)
+        .into_iter()
+        .map(|mut record| {
+            record.origin = Some(EffectFactOrigin::MiddlewareSynthesized {
+                label: "recorded_breaker".to_string(),
+            });
+            record
+        })
+        .collect();
+    let history = Arc::new(
+        EffectHistory::from_records(records[0].cursor.recorded_flow_id.clone(), records)
+            .expect("history should index"),
+    );
+    let replay_journal = Arc::new(MemoryJournal::new(JournalOwner::stage(StageId::new())));
+    let mut replay = Effects::new(invocation_context(
+        replay_journal.clone(),
+        parent_envelope(WriterId::from(stage_id)),
+        Some(history),
+    ));
+    replay
+        .perform(CountingEffect {
+            value: 1,
+            label: "same",
+            calls: Arc::new(AtomicUsize::new(0)),
+        })
+        .await
+        .expect("replay should reconstruct the recorded outcome");
+
+    let replayed_origin = replay_journal.events()[0]
+        .event
+        .effect_provenance
+        .as_ref()
+        .expect("replayed fact should carry provenance")
+        .origin
+        .clone();
+    assert_eq!(
+        replayed_origin,
+        Some(EffectFactOrigin::MiddlewareSynthesized {
+            label: "recorded_breaker".to_string(),
+        }),
+        "the recorded origin must win over registration-based derivation"
+    );
+}
+
+#[tokio::test]
+async fn replayed_group_without_recorded_origin_falls_back_to_derivation() {
+    let stage_id = StageId::new();
+    let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
+    let mut live = Effects::new(invocation_context(
+        journal.clone(),
+        parent_envelope(WriterId::from(stage_id)),
+        None,
+    ));
+    live.perform(CountingEffect {
+        value: 1,
+        label: "same",
+        calls: Arc::new(AtomicUsize::new(0)),
+    })
+    .await
+    .expect("live effect should succeed");
+
+    // Strip the origin to simulate a pre-120h journal.
+    let records: Vec<EffectRecord> = effect_records(&journal)
+        .into_iter()
+        .map(|mut record| {
+            record.origin = None;
+            record
+        })
+        .collect();
+    let history = Arc::new(
+        EffectHistory::from_records(records[0].cursor.recorded_flow_id.clone(), records)
+            .expect("history should index"),
+    );
+    let replay_journal = Arc::new(MemoryJournal::new(JournalOwner::stage(StageId::new())));
+    let mut replay = Effects::new(invocation_context(
+        replay_journal.clone(),
+        parent_envelope(WriterId::from(stage_id)),
+        Some(history),
+    ));
+    replay
+        .perform(CountingEffect {
+            value: 1,
+            label: "same",
+            calls: Arc::new(AtomicUsize::new(0)),
+        })
+        .await
+        .expect("replay should reconstruct the recorded outcome");
+
+    let replayed_origin = replay_journal.events()[0]
+        .event
+        .effect_provenance
+        .as_ref()
+        .expect("replayed fact should carry provenance")
+        .origin
+        .clone();
+    assert_eq!(
+        replayed_origin,
+        Some(EffectFactOrigin::Effect),
+        "a pre-120h record falls back to registration-based derivation"
+    );
+}
+
+#[tokio::test]
+async fn mixed_origin_group_is_rejected_as_provenance_mismatch() {
+    let stage_id = StageId::new();
+    let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
+    let mut live = Effects::new(invocation_context(
+        journal.clone(),
+        parent_envelope(WriterId::from(stage_id)),
+        None,
+    ));
+    live.perform(MultiFactEffect {
+        calls: Arc::new(AtomicUsize::new(0)),
+    })
+    .await
+    .expect("live multi-fact effect should succeed");
+
+    let mut records = effect_records(&journal);
+    assert_eq!(records.len(), 2, "multi-fact outcome should record a group");
+    records[1].origin = Some(EffectFactOrigin::MiddlewareSynthesized {
+        label: "tampered".to_string(),
+    });
+
+    let record_refs: Vec<&EffectRecord> = records.iter().collect();
+    let err = effect_record_group_materialization(&record_refs)
+        .expect_err("a group disagreeing on origin must fail loud");
 
     assert!(matches!(err, EffectError::EffectProvenanceMismatch(_)));
 }
@@ -1965,6 +2203,7 @@ async fn perform_rejects_unguarded_effect_on_typed_outcome_stage() {
         effect_type: None,
         fact_types: vec![TypedFactType::of::<CountingOutput>()],
         source_label: "circuit_breaker".to_string(),
+        kind: SynthesizedOutcomeKind::BranchShaped,
     }];
     let mut effects = Effects::new(ctx);
 
@@ -1986,6 +2225,102 @@ async fn perform_rejects_unguarded_effect_on_typed_outcome_stage() {
         journal.events().is_empty(),
         "the coordination check runs before any record is appended"
     );
+}
+
+#[tokio::test]
+async fn plain_perform_is_allowed_on_outcome_shaped_registration() {
+    let stage_id = StageId::new();
+    let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut ctx = invocation_context(
+        journal.clone(),
+        parent_envelope(WriterId::from(stage_id)),
+        None,
+    );
+    ctx.synthesized_outcomes = vec![SynthesizedOutcomeRegistration {
+        effect_type: Some(CountingEffect::EFFECT_TYPE.to_string()),
+        fact_types: vec![TypedFactType::of::<CountingOutput>()],
+        source_label: "circuit_breaker".to_string(),
+        kind: SynthesizedOutcomeKind::OutcomeShaped,
+    }];
+    let mut effects = Effects::new(ctx);
+
+    let output = effects
+        .perform(CountingEffect {
+            value: 1,
+            label: "plain",
+            calls: calls.clone(),
+        })
+        .await
+        .expect("outcome-shaped registrations use the plain perform");
+
+    assert_eq!(output, CountingOutput { value: 2 });
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn guarded_perform_is_rejected_on_outcome_shaped_registration() {
+    let stage_id = StageId::new();
+    let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
+    let mut ctx = invocation_context(
+        journal.clone(),
+        parent_envelope(WriterId::from(stage_id)),
+        None,
+    );
+    ctx.effect_declarations
+        .push(EffectDeclaration::of::<LiftedProbeEffect>());
+    ctx.synthesized_outcomes = vec![SynthesizedOutcomeRegistration {
+        effect_type: Some(LiftedProbeEffect::EFFECT_TYPE.to_string()),
+        fact_types: vec![TypedFactType::of::<CountingOutput>()],
+        source_label: "circuit_breaker".to_string(),
+        kind: SynthesizedOutcomeKind::OutcomeShaped,
+    }];
+    let mut effects = Effects::new(ctx);
+
+    let err = effects
+        .perform(LiftedProbeEffect)
+        .await
+        .expect_err("a lifted carrier on an outcome-shaped stage must fail before any I/O");
+
+    assert!(
+        matches!(&err, EffectError::TypedOutcomeCoordination { .. }),
+        "expected TypedOutcomeCoordination, got {err:?}"
+    );
+    assert!(journal.events().is_empty());
+}
+
+#[tokio::test]
+async fn transactional_perform_is_rejected_on_outcome_shaped_registration() {
+    let stage_id = StageId::new();
+    let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
+    let normal_calls = Arc::new(AtomicUsize::new(0));
+    let mut ctx = invocation_context(
+        journal.clone(),
+        parent_envelope(WriterId::from(stage_id)),
+        None,
+    );
+    ctx.synthesized_outcomes = vec![SynthesizedOutcomeRegistration {
+        effect_type: Some(TransactionalCountingEffect::EFFECT_TYPE.to_string()),
+        fact_types: vec![TypedFactType::of::<CountingOutput>()],
+        source_label: "circuit_breaker".to_string(),
+        kind: SynthesizedOutcomeKind::OutcomeShaped,
+    }];
+    let mut effects = Effects::new(ctx);
+
+    let err = effects
+        .perform(TransactionalCountingEffect {
+            value: 1,
+            normal_calls: normal_calls.clone(),
+        })
+        .await
+        .expect_err("the transactional path runs before the boundary; it cannot be protected");
+
+    assert!(
+        matches!(&err, EffectError::TypedOutcomeCoordination { .. }),
+        "expected TypedOutcomeCoordination, got {err:?}"
+    );
+    assert_eq!(normal_calls.load(Ordering::SeqCst), 0);
+    assert!(journal.events().is_empty());
 }
 
 #[tokio::test]

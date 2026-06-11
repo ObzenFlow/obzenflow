@@ -109,14 +109,25 @@ with replay provenance, so the upstream feed is not re-run.
 
 ## 2. The Gateway Command as an Effect
 
-`gateway.rs` defines the outbound gateway command as an `Effect`:
+`gateway.rs` defines the outbound gateway command as an `Effect` whose outcome
+is a closed enum carrier (FLOWIP-120m). The variants are the facts the journal
+records (`payment.authorized.v1`, `payment.declined.v1`) directly as the
+effect outcome group, with no persisted gateway-decision wrapper; the derive
+writes the marshalling and the carrier itself is transient `fx.perform`
+machinery:
 
 ```rust
+#[derive(Debug, Clone, EffectOutcomeFacts)]
+pub enum AuthorizePaymentOutcome {
+    Authorized(PaymentAuthorized),
+    Declined(PaymentDeclined),
+}
+
 impl Effect for AuthorizePayment {
     const SAFETY: EffectSafety = EffectSafety::NonIdempotentRequiresKey;
-    type Output = GatewayPaymentDecision;
+    type Outcome = AuthorizePaymentOutcome;
 
-    async fn execute(&self, ctx: &mut EffectContext) -> Result<Self::Output, EffectError> {
+    async fn execute(&self, ctx: &mut EffectContext) -> Result<Self::Outcome, EffectError> {
         // A real gateway call would go here. The runtime owns when this runs.
     }
 
@@ -126,8 +137,9 @@ impl Effect for AuthorizePayment {
 
 The stage performs the effect through the guarded wrapper (FLOWIP-120h), so the
 circuit breaker's branches are explicit in the type rather than smuggled as a
-variant of the gateway's own decision. The recorded outcome group is the branch
-fact itself, reconstructed by event type on replay:
+variant of the gateway's own outcome. The recorded outcome group is the named
+fact itself, reconstructed by event type on replay, so the handler never
+re-emits the outcome facts; it emits only derived consequences:
 
 ```rust
 let outcome = fx
@@ -135,15 +147,14 @@ let outcome = fx
     .await;
 
 match outcome {
-    Ok(CircuitBreakerOutcome::Primary(decision)) => match decision {
-        GatewayPaymentDecision::Authorized { .. } => fx.emit(PaymentAuthorized { ... }).await?,
-        GatewayPaymentDecision::Declined { .. } => {
-            // Fact first, consequence second: the decline is the provenance,
-            // the derived cancellation is the order's fate.
-            fx.emit(PaymentDeclined { ... }).await?;
-            fx.emit(OrderCancelled { ... }).await?
-        }
-    },
+    Ok(CircuitBreakerOutcome::Primary(AuthorizePaymentOutcome::Authorized(_))) => {
+        // The PaymentAuthorized outcome fact is already recorded by fx.perform.
+    }
+    Ok(CircuitBreakerOutcome::Primary(AuthorizePaymentOutcome::Declined(declined))) => {
+        // Fact first, consequence second: the recorded decline is the
+        // provenance, the derived cancellation is the order's fate.
+        fx.emit(OrderCancelled { ... }).await?
+    }
     Ok(CircuitBreakerOutcome::Fallback(fallback)) => {
         // Breaker open: the gateway was never called, no decision exists.
         fx.emit(PaymentAuthorizationUnavailable { ... }).await?
@@ -231,11 +242,12 @@ cargo run -p obzenflow --example payment_gateway_resilience -- --replay-from "$R
 
 On replay the source is **not polled** and the gateway effect is **not
 executed**. The runtime returns the recorded upstream events from the source
-journal and the recorded gateway decisions from the effect history, then the
-handler re-emits the same named payment facts and derived cancellations.
-Downstream paid, cancelled, and unavailable deliveries are reconstructed with
-the same outcomes. That is the durable-execution property: a recorded run
-replays exactly, without re-pulling inputs or re-firing side effects.
+journal and reconstructs the recorded outcome facts (`payment.authorized.v1`,
+`payment.declined.v1`, and the breaker's branch facts) from the effect
+history, then the handler re-emits the same derived cancellations. Downstream
+paid, cancelled, and unavailable deliveries are reconstructed with the same
+outcomes. That is the durable-execution property: a recorded run replays
+exactly, without re-pulling inputs or re-firing side effects.
 
 ## 5. Resilience as the Second Layer
 
@@ -282,7 +294,7 @@ has its own published tutorial.
 
 | File | What it holds |
 |------|---------------|
-| `domain.rs`   | The payment events, gateway decisions, cancellation lifecycle facts, and scripted `TrafficPhase`. |
+| `domain.rs`   | The payment events, breaker branch facts, cancellation lifecycle facts, and scripted `TrafficPhase`. |
 | `validation.rs` | One multi-type validation stage that classifies each order exactly once. |
 | `gateway.rs`  | Gateway authorization as a replay-suppressed effect, deriving cancellations from declines. |
 | `fixtures.rs` | The scripted upstream order-event sequence. |

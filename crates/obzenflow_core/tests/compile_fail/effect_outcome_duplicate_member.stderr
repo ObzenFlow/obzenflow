@@ -1,0 +1,5 @@
+error: duplicate member type `FirstFact`: dispatch is by event type, so each member type appears once in a carrier (FLOWIP-120m)
+  --> tests/compile_fail/effect_outcome_duplicate_member.rs:23:11
+   |
+23 |     Retry(FirstFact),
+   |           ^^^^^^^^^

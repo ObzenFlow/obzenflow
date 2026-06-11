@@ -2370,7 +2370,7 @@ mod tests {
         const SCHEMA_VERSION: u32 = 1;
         const SAFETY: EffectSafety = EffectSafety::Transactional;
 
-        type Output = DemoTransactionalOutput;
+        type Outcome = DemoTransactionalOutput;
 
         fn label(&self) -> &str {
             "declared"
@@ -2380,7 +2380,7 @@ mod tests {
             json!({})
         }
 
-        async fn execute(&self, _ctx: &mut EffectContext) -> Result<Self::Output, EffectError> {
+        async fn execute(&self, _ctx: &mut EffectContext) -> Result<Self::Outcome, EffectError> {
             Ok(DemoTransactionalOutput)
         }
     }
@@ -2409,7 +2409,7 @@ mod tests {
             idempotency_key_policy: IdempotencyKeyPolicy::NotRequired,
             required_ports: Vec::new(),
             transactional_executor: None,
-            output_fact_types: Vec::new(),
+            outcome_fact_types: Vec::new(),
         };
 
         let err =
@@ -2419,11 +2419,59 @@ mod tests {
         assert!(err.contains("without an idempotency-key strategy"));
     }
 
+    #[derive(Clone, Debug)]
+    struct DemoDuplicateEffect;
+
+    #[async_trait]
+    impl Effect for DemoDuplicateEffect {
+        const EFFECT_TYPE: &'static str = "test.duplicate";
+        const SCHEMA_VERSION: u32 = 1;
+        const SAFETY: EffectSafety = EffectSafety::Idempotent;
+
+        type Outcome = DemoTransactionalOutput;
+
+        fn label(&self) -> &str {
+            "duplicate"
+        }
+
+        fn canonical_input(&self) -> serde_json::Value {
+            json!({})
+        }
+
+        async fn execute(&self, _ctx: &mut EffectContext) -> Result<Self::Outcome, EffectError> {
+            Ok(DemoTransactionalOutput)
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    struct DemoPortedEffect;
+
+    #[async_trait]
+    impl Effect for DemoPortedEffect {
+        const EFFECT_TYPE: &'static str = "test.ported";
+        const SCHEMA_VERSION: u32 = 1;
+        const SAFETY: EffectSafety = EffectSafety::Idempotent;
+
+        type Outcome = DemoTransactionalOutput;
+
+        fn label(&self) -> &str {
+            "ported"
+        }
+
+        fn canonical_input(&self) -> serde_json::Value {
+            json!({})
+        }
+
+        async fn execute(&self, _ctx: &mut EffectContext) -> Result<Self::Outcome, EffectError> {
+            Ok(DemoTransactionalOutput)
+        }
+    }
+
     #[test]
     fn effect_declaration_validation_rejects_duplicate_effect_type() {
         let declarations = [
-            EffectDeclaration::idempotent("test.duplicate"),
-            EffectDeclaration::idempotent("test.duplicate"),
+            EffectDeclaration::of::<DemoDuplicateEffect>(),
+            EffectDeclaration::of::<DemoDuplicateEffect>(),
         ];
 
         let err =
@@ -2435,7 +2483,7 @@ mod tests {
 
     #[test]
     fn effect_declaration_validation_checks_required_ports() {
-        let declaration = EffectDeclaration::idempotent("test.ported")
+        let declaration = EffectDeclaration::of::<DemoPortedEffect>()
             .require_port::<dyn DemoEffectPort>("primary");
 
         let missing = validate_effect_declarations(

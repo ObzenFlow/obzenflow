@@ -1,0 +1,5 @@
+error: effect outcome carriers cannot be generic; declare a concrete carrier per effect (FLOWIP-120m)
+ --> tests/compile_fail/effect_outcome_generic_carrier.rs:8:24
+  |
+8 | pub enum GenericCarrier<T: TypedPayload> {
+  |                        ^

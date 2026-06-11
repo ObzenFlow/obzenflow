@@ -1622,13 +1622,24 @@ dependencies = [
  "chrono",
  "futures-core",
  "http 1.4.0",
+ "obzenflow_derive",
  "ring",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
  "tokio",
+ "trybuild",
  "ulid",
  "url",
+]
+
+[[package]]
+name = "obzenflow_derive"
+version = "0.1.2"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]

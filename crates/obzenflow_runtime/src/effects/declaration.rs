@@ -27,10 +27,10 @@ pub struct EffectDeclaration {
     pub idempotency_key_policy: IdempotencyKeyPolicy,
     pub required_ports: Vec<EffectPortRequirement>,
     pub transactional_executor: Option<&'static str>,
-    /// Fact types this effect's `Output` may produce, read off the type via
-    /// `TypedFactSet::fact_types()` (FLOWIP-120h). Empty for the string-only
-    /// constructors, which predate typed outputs and carry no type info.
-    pub output_fact_types: Vec<TypedFactType>,
+    /// Fact types this effect's `Outcome` may produce, read off the type via
+    /// `TypedFactSet::fact_types()` (FLOWIP-120h). Build validation checks
+    /// these against the stage output contract unconditionally (FLOWIP-120m).
+    pub outcome_fact_types: Vec<TypedFactType>,
 }
 
 impl EffectDeclaration {
@@ -51,40 +51,7 @@ impl EffectDeclaration {
             idempotency_key_policy,
             required_ports: E::required_ports(),
             transactional_executor: None,
-            output_fact_types: E::Output::fact_types(),
-        }
-    }
-
-    pub fn idempotent(effect_type: &'static str) -> Self {
-        Self {
-            effect_type,
-            safety: EffectSafety::Idempotent,
-            idempotency_key_policy: IdempotencyKeyPolicy::NotRequired,
-            required_ports: Vec::new(),
-            transactional_executor: None,
-            output_fact_types: Vec::new(),
-        }
-    }
-
-    pub fn non_idempotent_with_key(effect_type: &'static str) -> Self {
-        Self {
-            effect_type,
-            safety: EffectSafety::NonIdempotentRequiresKey,
-            idempotency_key_policy: IdempotencyKeyPolicy::Required,
-            required_ports: Vec::new(),
-            transactional_executor: None,
-            output_fact_types: Vec::new(),
-        }
-    }
-
-    pub fn transactional(effect_type: &'static str, executor: &'static str) -> Self {
-        Self {
-            effect_type,
-            safety: EffectSafety::Transactional,
-            idempotency_key_policy: IdempotencyKeyPolicy::NotRequired,
-            required_ports: Vec::new(),
-            transactional_executor: Some(executor),
-            output_fact_types: Vec::new(),
+            outcome_fact_types: E::Outcome::fact_types(),
         }
     }
 
@@ -103,7 +70,7 @@ impl EffectDeclaration {
             idempotency_key_policy: IdempotencyKeyPolicy::NotRequired,
             required_ports,
             transactional_executor: Some(executor),
-            output_fact_types: E::Output::fact_types(),
+            outcome_fact_types: E::Outcome::fact_types(),
         }
     }
 
@@ -123,13 +90,16 @@ pub trait Effect: Clone + std::fmt::Debug + Send + Sync + 'static {
     const SCHEMA_VERSION: u32;
     const SAFETY: EffectSafety;
 
-    type Output: TypedFactSet + Clone + Send + Sync + 'static;
+    /// The closed set of successful facts this effect may produce, as a
+    /// transient outcome carrier (FLOWIP-120m). A scalar `TypedPayload` is a
+    /// valid carrier for single-fact effects.
+    type Outcome: EffectOutcomeFacts + Clone + Send + Sync + 'static;
 
     fn label(&self) -> &str;
 
     fn canonical_input(&self) -> Value;
 
-    async fn execute(&self, ctx: &mut EffectContext) -> Result<Self::Output, EffectError>;
+    async fn execute(&self, ctx: &mut EffectContext) -> Result<Self::Outcome, EffectError>;
 
     fn idempotency_key(&self) -> Option<IdempotencyKey> {
         None
@@ -146,6 +116,6 @@ pub trait TransactionalEffectPort<E: Effect>: Send + Sync {
         &self,
         effect: E,
         ctx: &mut EffectContext,
-        commit: EffectCommitHandle<E::Output>,
-    ) -> Result<E::Output, EffectError>;
+        commit: EffectCommitHandle<E::Outcome>,
+    ) -> Result<E::Outcome, EffectError>;
 }

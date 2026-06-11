@@ -209,7 +209,7 @@ mod tests {
         const SCHEMA_VERSION: u32 = 1;
         const SAFETY: EffectSafety = EffectSafety::Transactional;
 
-        type Output = Out;
+        type Outcome = Out;
 
         fn label(&self) -> &str {
             "tx_effect"
@@ -219,7 +219,7 @@ mod tests {
             serde_json::Value::Null
         }
 
-        async fn execute(&self, _ctx: &mut EffectContext) -> Result<Self::Output, EffectError> {
+        async fn execute(&self, _ctx: &mut EffectContext) -> Result<Self::Outcome, EffectError> {
             Ok(Out)
         }
     }

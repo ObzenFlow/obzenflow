@@ -666,9 +666,14 @@ macro_rules! build_typed_flow {
         )?;
 
         // FLOWIP-120h: output_middleware lane contributions must be arrow
-        // members, disjoint from effect fact sets, and single-effect scoped;
-        // effect fact sets must be contained in the arrow contract.
+        // members, disjoint from effect fact sets, and single-effect scoped.
         $crate::dsl::typing::validate_type_shaping_contributions(&descriptors)?;
+
+        // FLOWIP-120m: producer-side effect-fact containment is unconditional.
+        // An effectful stage without an output_middleware lane must still fail
+        // the build, not the first post-I/O commit, when an effect fact is
+        // missing from the arrow contract.
+        $crate::dsl::typing::validate_effect_fact_containment(&descriptors)?;
 
         if let Err(edge_errors) =
             $crate::dsl::typing::validate_edge_typing(&topology, &descriptors, &name_to_id)

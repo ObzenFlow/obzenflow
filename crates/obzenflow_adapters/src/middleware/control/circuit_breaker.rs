@@ -1522,6 +1522,56 @@ where
     vec![ev]
 }
 
+/// Build the outcome-shaped fallback events (FLOWIP-120m): the closure's
+/// `E::Outcome` carrier lowers through `into_facts`, one derived data event
+/// per fact, each parented on the protected input. The runtime's boundary
+/// skip path validates the group against the effect's declared carrier and
+/// commits it with contiguous outcome ordinals and middleware-synthesized
+/// origin, so multi-fact product outcomes ride the ordinary grouped path.
+fn build_outcome_fallback_events<E, In, F>(f: &F, event: &ChainEvent) -> Vec<ChainEvent>
+where
+    E: obzenflow_runtime::effects::Effect,
+    In: TypedPayload + DeserializeOwned,
+    F: Fn(&In) -> E::Outcome + Send + Sync + 'static,
+{
+    use obzenflow_core::event::schema::TypedFactSet;
+    use obzenflow_core::event::status::processing_status::ProcessingStatus;
+
+    let payload = event.payload();
+    let input: In = match serde_json::from_value(payload.clone()) {
+        Ok(value) => value,
+        Err(err) => {
+            let mut clone = event.clone();
+            clone.processing_info.status =
+                ProcessingStatus::error(format!("cb_outcome_fallback_deserialize_failed: {err}"));
+            return vec![clone];
+        }
+    };
+
+    let outcome = f(&input);
+    let facts = match outcome.into_facts() {
+        Ok(facts) => facts,
+        Err(err) => {
+            let mut clone = event.clone();
+            clone.processing_info.status =
+                ProcessingStatus::error(format!("cb_outcome_fallback_serialize_failed: {err}"));
+            return vec![clone];
+        }
+    };
+
+    facts
+        .into_iter()
+        .map(|fact| {
+            ChainEventFactory::derived_data_event(
+                event.writer_id,
+                event,
+                fact.event_type.as_str(),
+                fact.payload,
+            )
+        })
+        .collect()
+}
+
 /// Build the typed rejection fact for typed-outcome mode (FLOWIP-120h),
 /// derived from the guarded input so causality records it as the parent.
 fn build_typed_rejection_event<In, R, F>(
@@ -1568,6 +1618,13 @@ where
 
 /// Builder for circuit breaker middleware
 ///
+/// Captured configuration of an outcome-shaped fallback (FLOWIP-120m): which
+/// effect the closure targets and the carrier fact types it may synthesize.
+struct OutcomeFallbackConfig {
+    effect_type: &'static str,
+    fact_types: Vec<TypedFactType>,
+}
+
 /// TODO(G4/051c): `CircuitBreakerBuilder` and `CircuitBreakerFactory` share ~300 lines of
 /// nearly identical builder methods and field definitions.  Extract a shared
 /// `CircuitBreakerConfig` struct that owns the policy fields and provide `impl From<Config>`
@@ -1580,6 +1637,7 @@ pub struct CircuitBreakerBuilder {
     fallback_fact_type: Option<TypedFactType>,
     typed_outcome: Option<TypedOutcomeConfig>,
     rejection_fact_type: Option<TypedFactType>,
+    outcome_fallback: Option<OutcomeFallbackConfig>,
     failure_classifier: Option<FailureClassifier>,
     failure_classification_classifier: Option<FailureClassificationClassifier>,
     failure_mode: Option<CircuitBreakerFailureMode>,
@@ -1601,6 +1659,7 @@ impl CircuitBreakerBuilder {
             fallback_fact_type: None,
             typed_outcome: None,
             rejection_fact_type: None,
+            outcome_fallback: None,
             failure_classifier: None,
             failure_classification_classifier: None,
             failure_mode: None,
@@ -1685,12 +1744,15 @@ impl CircuitBreakerBuilder {
         self
     }
 
-    /// Configure a typed fallback factory used when the circuit is open.
+    /// Configure the branch-shaped fallback fact (FLOWIP-120h, renamed by
+    /// FLOWIP-120m from `with_typed_fallback`).
     ///
     /// This adapter lets flows express degraded responses purely in terms of
     /// domain types (`In` -> `Out`) while the circuit breaker handles all
-    /// `ChainEvent` plumbing (serde and metadata copying).
-    pub fn with_typed_fallback<In, Out, F>(mut self, f: F) -> Self
+    /// `ChainEvent` plumbing (serde and metadata copying). `In` is the
+    /// protected input payload, never an output contract member; `Out` is the
+    /// distinct branch fact the carrier decodes as the `Fallback` branch.
+    pub fn with_fallback_fact<In, Out, F>(mut self, f: F) -> Self
     where
         In: TypedPayload + DeserializeOwned,
         Out: TypedPayload + Serialize + 'static,
@@ -1705,12 +1767,13 @@ impl CircuitBreakerBuilder {
         self
     }
 
-    /// Configure the typed rejection branch (FLOWIP-120h). When the breaker
-    /// rejects without fallback data at the effect boundary in typed-outcome
-    /// mode, this closure synthesizes the author-named rejection fact from the
+    /// Configure the branch-shaped rejection fact (FLOWIP-120h, renamed by
+    /// FLOWIP-120m from `typed_outcome_with`). When the breaker rejects
+    /// without fallback data at the effect boundary in typed-outcome mode,
+    /// this closure synthesizes the author-named rejection fact from the
     /// guarded input and the rejection reason. The reason must end up in the
     /// fact payload; strict replay reconstructs branches from facts alone.
-    pub fn typed_outcome_with<In, R, F>(mut self, f: F) -> Self
+    pub fn with_rejection_fact<In, R, F>(mut self, f: F) -> Self
     where
         In: TypedPayload + DeserializeOwned,
         R: TypedPayload + Serialize + 'static,
@@ -1728,9 +1791,39 @@ impl CircuitBreakerBuilder {
         self
     }
 
+    /// Configure the outcome-shaped fallback (FLOWIP-120m): while the breaker
+    /// prevents the call, synthesize the protected effect's own outcome
+    /// carrier instead of a distinct branch fact. The closure returns
+    /// `E::Outcome`; the carrier lowers through `into_facts`, so multi-fact
+    /// product outcomes commit as ordinary recorded groups. The handler
+    /// performs the plain effect, with no `Guarded` wrapper: every branch
+    /// resumes `fx.perform` with an outcome value.
+    ///
+    /// This is for fallbacks that are genuine alternative outcomes (a cached
+    /// decision, a stubbed authorization in a test profile). A fallback that
+    /// records non-performance must stay branch-shaped and never manufacture
+    /// an outcome value.
+    pub fn with_outcome_fallback<E, In, F>(mut self, f: F) -> Self
+    where
+        E: obzenflow_runtime::effects::Effect,
+        In: TypedPayload + DeserializeOwned,
+        F: Fn(&In) -> E::Outcome + Send + Sync + 'static,
+    {
+        let adapter = move |event: &ChainEvent| -> Vec<ChainEvent> {
+            build_outcome_fallback_events::<E, In, F>(&f, event)
+        };
+
+        self.fallback = Some(Arc::new(adapter));
+        self.outcome_fallback = Some(OutcomeFallbackConfig {
+            effect_type: E::EFFECT_TYPE,
+            fact_types: <E::Outcome as obzenflow_core::event::schema::TypedFactSet>::fact_types(),
+        });
+        self
+    }
+
     /// Build for the `output_middleware:` macro lane (FLOWIP-120h), naming
     /// the fallback and rejection branch fact types. Both branches must have
-    /// producers: `with_typed_fallback` for `F` and `typed_outcome_with` for
+    /// producers: `with_fallback_fact` for `F` and `with_rejection_fact` for
     /// `R`, with matching fact types. A mismatch is reported as a flow build
     /// error rather than a silent misconfiguration.
     pub fn build_typed<F, R>(self) -> crate::middleware::TypeShapingMiddleware<F, R>
@@ -1742,23 +1835,28 @@ impl CircuitBreakerBuilder {
         let expected_rejection = TypedFactType::of::<R>();
 
         let config_error = match (&self.fallback_fact_type, &self.rejection_fact_type) {
+            _ if self.outcome_fallback.is_some() => Some(
+                "a breaker declares one fallback shape: with_outcome_fallback requires \
+                 build_outcome, not build_typed"
+                    .to_string(),
+            ),
             (None, _) => Some(
-                "build_typed requires with_typed_fallback so the Fallback branch has a producer"
+                "build_typed requires with_fallback_fact so the Fallback branch has a producer"
                     .to_string(),
             ),
             (_, None) => Some(
-                "build_typed requires typed_outcome_with so the Rejected branch has a producer"
+                "build_typed requires with_rejection_fact so the Rejected branch has a producer"
                     .to_string(),
             ),
             (Some(fallback), _) if fallback.event_type != expected_fallback.event_type => {
                 Some(format!(
-                    "with_typed_fallback produces '{}' but build_typed names fallback '{}'",
+                    "with_fallback_fact produces '{}' but build_typed names fallback '{}'",
                     fallback.event_type, expected_fallback.event_type,
                 ))
             }
             (_, Some(rejection)) if rejection.event_type != expected_rejection.event_type => {
                 Some(format!(
-                    "typed_outcome_with produces '{}' but build_typed names rejection '{}'",
+                    "with_rejection_fact produces '{}' but build_typed names rejection '{}'",
                     rejection.event_type, expected_rejection.event_type,
                 ))
             }
@@ -1767,6 +1865,54 @@ impl CircuitBreakerBuilder {
 
         let factory = self.build();
         crate::middleware::TypeShapingMiddleware::new(factory, "circuit_breaker", config_error)
+    }
+
+    /// Build for the `output_middleware:` macro lane as an outcome-shaped
+    /// registration (FLOWIP-120m). The breaker may synthesize the protected
+    /// effect's own outcome facts; the handler performs the plain effect.
+    /// Branch-shaped producers cannot combine with this shape on one breaker.
+    pub fn build_outcome<E>(self) -> crate::middleware::OutcomeShapingMiddleware
+    where
+        E: obzenflow_runtime::effects::Effect,
+    {
+        let config_error = match &self.outcome_fallback {
+            None => Some(
+                "build_outcome requires with_outcome_fallback so the synthesized outcome has \
+                 a producer"
+                    .to_string(),
+            ),
+            Some(config) if config.effect_type != E::EFFECT_TYPE => Some(format!(
+                "with_outcome_fallback targets effect '{}' but build_outcome names '{}'",
+                config.effect_type,
+                E::EFFECT_TYPE,
+            )),
+            Some(_)
+                if self.fallback_fact_type.is_some()
+                    || self.rejection_fact_type.is_some()
+                    || self.typed_outcome.is_some() =>
+            {
+                Some(
+                    "a breaker declares one fallback shape: with_outcome_fallback cannot \
+                     combine with branch-shaped producers (with_fallback_fact / \
+                     with_rejection_fact)"
+                        .to_string(),
+                )
+            }
+            Some(_) => None,
+        };
+
+        let registration = obzenflow_runtime::effects::SynthesizedOutcomeRegistration {
+            effect_type: Some(E::EFFECT_TYPE.to_string()),
+            fact_types: self
+                .outcome_fallback
+                .as_ref()
+                .map(|config| config.fact_types.clone())
+                .unwrap_or_default(),
+            source_label: "circuit_breaker".to_string(),
+            kind: obzenflow_runtime::effects::SynthesizedOutcomeKind::OutcomeShaped,
+        };
+        let factory = self.build();
+        crate::middleware::OutcomeShapingMiddleware::new(factory, registration, config_error)
     }
 
     /// Configure a custom failure classifier used to decide whether a given
@@ -2430,6 +2576,194 @@ mod tests {
 
     fn create_test_event() -> ChainEvent {
         ChainEventFactory::data_event(WriterId::from(StageId::new()), "test", json!({}))
+    }
+
+    // ── FLOWIP-120m: outcome-shaped fallback ────────────────────────────────
+
+    #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+    struct OutcomeInput {
+        value: u64,
+    }
+
+    impl TypedPayload for OutcomeInput {
+        const EVENT_TYPE: &'static str = "cb_outcome.input";
+    }
+
+    #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+    struct OutcomeFirst {
+        value: u64,
+    }
+
+    impl TypedPayload for OutcomeFirst {
+        const EVENT_TYPE: &'static str = "cb_outcome.first";
+    }
+
+    #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+    struct OutcomeSecond {
+        value: u64,
+    }
+
+    impl TypedPayload for OutcomeSecond {
+        const EVENT_TYPE: &'static str = "cb_outcome.second";
+    }
+
+    #[derive(Clone, Debug, PartialEq, obzenflow_core::EffectOutcomeFacts)]
+    struct DemoProductOutcome {
+        first: OutcomeFirst,
+        second: OutcomeSecond,
+    }
+
+    #[derive(Clone, Debug)]
+    struct DemoOutcomeEffect;
+
+    #[async_trait::async_trait]
+    impl obzenflow_runtime::effects::Effect for DemoOutcomeEffect {
+        const EFFECT_TYPE: &'static str = "cb_outcome.demo";
+        const SCHEMA_VERSION: u32 = 1;
+        const SAFETY: obzenflow_runtime::effects::EffectSafety =
+            obzenflow_runtime::effects::EffectSafety::Idempotent;
+
+        type Outcome = DemoProductOutcome;
+
+        fn label(&self) -> &str {
+            "demo_outcome"
+        }
+
+        fn canonical_input(&self) -> serde_json::Value {
+            json!({})
+        }
+
+        async fn execute(
+            &self,
+            _ctx: &mut obzenflow_runtime::effects::EffectContext,
+        ) -> Result<Self::Outcome, obzenflow_runtime::effects::EffectError> {
+            Ok(DemoProductOutcome {
+                first: OutcomeFirst { value: 1 },
+                second: OutcomeSecond { value: 2 },
+            })
+        }
+    }
+
+    #[test]
+    fn build_outcome_requires_outcome_fallback_producer() {
+        let (_, registration, config_error) = CircuitBreakerBuilder::new(1)
+            .open_policy(OpenPolicy::EmitFallback)
+            .build_outcome::<DemoOutcomeEffect>()
+            .into_registration_parts();
+
+        assert_eq!(
+            registration.kind,
+            obzenflow_runtime::effects::SynthesizedOutcomeKind::OutcomeShaped
+        );
+        let error = config_error.expect("missing producer must be a config error");
+        assert!(error.contains("with_outcome_fallback"), "got: {error}");
+    }
+
+    #[test]
+    fn build_outcome_rejects_effect_type_mismatch() {
+        #[derive(Clone, Debug)]
+        struct OtherEffect;
+
+        #[async_trait::async_trait]
+        impl obzenflow_runtime::effects::Effect for OtherEffect {
+            const EFFECT_TYPE: &'static str = "cb_outcome.other";
+            const SCHEMA_VERSION: u32 = 1;
+            const SAFETY: obzenflow_runtime::effects::EffectSafety =
+                obzenflow_runtime::effects::EffectSafety::Idempotent;
+
+            type Outcome = OutcomeFirst;
+
+            fn label(&self) -> &str {
+                "other"
+            }
+
+            fn canonical_input(&self) -> serde_json::Value {
+                json!({})
+            }
+
+            async fn execute(
+                &self,
+                _ctx: &mut obzenflow_runtime::effects::EffectContext,
+            ) -> Result<Self::Outcome, obzenflow_runtime::effects::EffectError> {
+                Ok(OutcomeFirst { value: 1 })
+            }
+        }
+
+        let (_, _, config_error) = CircuitBreakerBuilder::new(1)
+            .open_policy(OpenPolicy::EmitFallback)
+            .with_outcome_fallback::<DemoOutcomeEffect, OutcomeInput, _>(|input| {
+                DemoProductOutcome {
+                    first: OutcomeFirst {
+                        value: input.value + 900,
+                    },
+                    second: OutcomeSecond {
+                        value: input.value + 1900,
+                    },
+                }
+            })
+            .build_outcome::<OtherEffect>()
+            .into_registration_parts();
+
+        let error = config_error.expect("effect-type mismatch must be a config error");
+        assert!(error.contains("targets effect"), "got: {error}");
+    }
+
+    #[test]
+    fn build_outcome_rejects_mixed_shape_builder() {
+        let (_, _, config_error) = CircuitBreakerBuilder::new(1)
+            .open_policy(OpenPolicy::EmitFallback)
+            .with_fallback_fact::<OutcomeInput, OutcomeFirst, _>(|input| OutcomeFirst {
+                value: input.value + 900,
+            })
+            .with_outcome_fallback::<DemoOutcomeEffect, OutcomeInput, _>(|input| {
+                DemoProductOutcome {
+                    first: OutcomeFirst {
+                        value: input.value + 900,
+                    },
+                    second: OutcomeSecond {
+                        value: input.value + 1900,
+                    },
+                }
+            })
+            .build_outcome::<DemoOutcomeEffect>()
+            .into_registration_parts();
+
+        let error = config_error.expect("mixing fallback shapes must be a config error");
+        assert!(error.contains("one fallback shape"), "got: {error}");
+    }
+
+    #[test]
+    fn outcome_fallback_builds_one_derived_event_per_fact() {
+        let input_event = ChainEventFactory::data_event(
+            WriterId::from(StageId::new()),
+            OutcomeInput::EVENT_TYPE,
+            json!(OutcomeInput { value: 7 }),
+        );
+
+        let closure = |input: &OutcomeInput| DemoProductOutcome {
+            first: OutcomeFirst {
+                value: input.value + 900,
+            },
+            second: OutcomeSecond {
+                value: input.value + 1900,
+            },
+        };
+        let events = build_outcome_fallback_events::<DemoOutcomeEffect, OutcomeInput, _>(
+            &closure,
+            &input_event,
+        );
+
+        assert_eq!(events.len(), 2, "one derived event per carrier fact");
+        assert_eq!(events[0].event_type(), "cb_outcome.first.v1");
+        assert_eq!(events[1].event_type(), "cb_outcome.second.v1");
+        assert_eq!(events[0].payload()["value"], 907);
+        assert_eq!(events[1].payload()["value"], 1907);
+        for event in &events {
+            assert!(
+                event.causality.parent_ids.contains(&input_event.id),
+                "fallback facts must be parented on the protected input"
+            );
+        }
     }
 
     fn ctx_has_rejection(ctx: &MiddlewareContext) -> bool {
