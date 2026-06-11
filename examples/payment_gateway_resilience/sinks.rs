@@ -15,10 +15,22 @@
 //! `OrderCancelled`.
 
 use super::domain::{OrderCancelled, PaymentAuthorizationUnavailable, PaymentAuthorized};
+use obzenflow_runtime::stages::sink::DeliveryProvenance;
 
-pub fn send_to_shipping(authorized: PaymentAuthorized) {
+/// FLOWIP-120i: archived outcomes re-emitted during replay are labelled, so
+/// the console never implies a delivery happened again. The label is stdout
+/// presentation only; journals carry no marker.
+fn provenance_prefix(provenance: DeliveryProvenance) -> &'static str {
+    match provenance {
+        DeliveryProvenance::Replayed => "[replay] ",
+        _ => "",
+    }
+}
+
+pub fn send_to_shipping(authorized: PaymentAuthorized, provenance: DeliveryProvenance) {
     println!(
-        "📦 Paid order {} is ready for shipping (customer {}, amount: ${:.2}, auth {})",
+        "{}📦 Paid order {} is ready for shipping (customer {}, amount: ${:.2}, auth {})",
+        provenance_prefix(provenance),
         authorized.order_id,
         authorized.customer_id,
         authorized.amount_cents as f64 / 100.0,
@@ -26,9 +38,10 @@ pub fn send_to_shipping(authorized: PaymentAuthorized) {
     );
 }
 
-pub fn record_cancelled_order(cancelled: OrderCancelled) {
+pub fn record_cancelled_order(cancelled: OrderCancelled, provenance: DeliveryProvenance) {
     println!(
-        "🚫 Order {} is cancelled: {} (customer {}, amount: ${:.2})",
+        "{}🚫 Order {} is cancelled: {} (customer {}, amount: ${:.2})",
+        provenance_prefix(provenance),
         cancelled.order_id,
         cancelled.reason.label(),
         cancelled.customer_id,
@@ -36,9 +49,13 @@ pub fn record_cancelled_order(cancelled: OrderCancelled) {
     );
 }
 
-pub fn record_authorization_unavailable(unavailable: PaymentAuthorizationUnavailable) {
+pub fn record_authorization_unavailable(
+    unavailable: PaymentAuthorizationUnavailable,
+    provenance: DeliveryProvenance,
+) {
     println!(
-        "🟡 Payment authorization unavailable for order {}; route to retry/manual review: {} (customer {}, amount: ${:.2})",
+        "{}🟡 Payment authorization unavailable for order {}; route to retry/manual review: {} (customer {}, amount: ${:.2})",
+        provenance_prefix(provenance),
         unavailable.order_id,
         unavailable.reason,
         unavailable.customer_id,

@@ -289,12 +289,24 @@ impl RateLimiterMiddleware {
     ) -> Self {
         let bucket = TokenBucket::new(config.burst_capacity, config.events_per_second);
 
+        // FLOWIP-120i: under strict replay the limiter is constructed because
+        // topology and contracts must match the recorded run, but it consumes
+        // no live tokens and moves no admission state. The setup log must not
+        // read like live policy activity.
+        let strict_replay = crate::middleware::strict_replay_active();
         info!(
             events_per_second = config.events_per_second,
             burst_capacity = config.burst_capacity,
             cost_per_event = config.cost_per_event,
             initial_tokens = config.burst_capacity,
-            "Created rate limiter middleware"
+            run_mode = if strict_replay { "replay" } else { "live" },
+            strict_replay,
+            "{}",
+            if strict_replay {
+                "Created rate limiter middleware (configured for topology validation; live accounting suppressed)"
+            } else {
+                "Created rate limiter middleware"
+            }
         );
 
         let stats = Arc::new(Mutex::new(RateLimiterStats::default()));

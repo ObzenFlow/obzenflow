@@ -47,12 +47,28 @@ pub fn validate_middleware_safety(
             result.has_dangerous = true;
         }
         MiddlewareSafety::Advanced => {
-            let message = format!(
-                "⚠️  ADVANCED: Middleware '{}' on stage '{}' requires careful configuration",
-                factory.label(),
-                stage_name
+            // FLOWIP-120i: this warning keeps firing under strict replay,
+            // because topology validation is real in both modes, but it must
+            // say that the configured policy is inert for data-path
+            // accounting rather than implying live enforcement.
+            let strict_replay = crate::middleware::strict_replay_active();
+            let message = if strict_replay {
+                format!(
+                    "⚠️  ADVANCED: Middleware '{}' on stage '{}' requires careful configuration (configured for topology validation; live accounting suppressed)",
+                    factory.label(),
+                    stage_name
+                )
+            } else {
+                format!(
+                    "⚠️  ADVANCED: Middleware '{}' on stage '{}' requires careful configuration",
+                    factory.label(),
+                    stage_name
+                )
+            };
+            warn!(
+                run_mode = if strict_replay { "replay" } else { "live" },
+                strict_replay, "{}", message
             );
-            warn!("{}", message);
             result.warnings.push(message);
         }
         MiddlewareSafety::Safe => {
