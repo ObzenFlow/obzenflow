@@ -86,6 +86,15 @@ mod middleware_factory;
 mod middleware_safety;
 mod middleware_trait;
 
+/// FLOWIP-120i: whether this process is performing a strict replay, read from
+/// the installed bootstrap, the same source the journal factory uses to open
+/// the replay archive. Middleware setup logs use this to say that configured
+/// policies are inert for data-path accounting, so a replay transcript never
+/// reads like live policy activity.
+pub(crate) fn strict_replay_active() -> bool {
+    obzenflow_runtime::bootstrap::replay_bootstrap().is_some()
+}
+
 // Handler-specific middleware adapters
 mod backpressure;
 mod join_middleware;

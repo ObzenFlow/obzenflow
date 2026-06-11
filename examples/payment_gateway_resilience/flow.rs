@@ -54,6 +54,7 @@ use obzenflow_adapters::middleware::circuit_breaker::{HalfOpenPolicy, OpenPolicy
 use obzenflow_adapters::middleware::{backpressure, CircuitBreakerBuilder, RateLimiterBuilder};
 use obzenflow_dsl::{effectful_transform, flow, sink, source};
 use obzenflow_infra::journal::disk_journals;
+use obzenflow_runtime::stages::sink::SinkTyped;
 use std::num::NonZeroU32;
 
 const BACKPRESSURE_WINDOW: u64 = 1_000;
@@ -210,26 +211,34 @@ pub fn build_flow() -> obzenflow_dsl::FlowDefinition {
             );
 
             // Paid-order sink: in production this is the boundary a shipping
-            // system would subscribe to.
-            paid_orders = sink!(|authorized: PaymentAuthorized| {
-                sinks::send_to_shipping(authorized);
-            });
+            // system would subscribe to. The delivery context tells the
+            // console helper whether this outcome is fresh or an archived one
+            // re-emitted during replay (FLOWIP-120i).
+            paid_orders = sink!(PaymentAuthorized => SinkTyped::with_delivery(
+                |authorized: PaymentAuthorized, delivery| async move {
+                    sinks::send_to_shipping(authorized, delivery.provenance());
+                }
+            ));
 
             // Cancelled-order sink: the order's fate, converged from both
             // producers (local validation failures and gateway declines).
             // `InvalidOrder` and `PaymentDeclined` stay journal-recorded facts
             // with no dedicated sink; this delivery carries the lifecycle
             // consequence wherever it originated.
-            cancelled_orders = sink!(|cancelled: OrderCancelled| {
-                sinks::record_cancelled_order(cancelled);
-            });
+            cancelled_orders = sink!(OrderCancelled => SinkTyped::with_delivery(
+                |cancelled: OrderCancelled, delivery| async move {
+                    sinks::record_cancelled_order(cancelled, delivery.provenance());
+                }
+            ));
 
             // Unavailable-authorization sink: failed gateway call or breaker
             // fallback. No payment decision was reached, so the order is not
             // cancelled; it goes to retry or manual review.
-            manual_review = sink!(|unavailable: PaymentAuthorizationUnavailable| {
-                sinks::record_authorization_unavailable(unavailable);
-            });
+            manual_review = sink!(PaymentAuthorizationUnavailable => SinkTyped::with_delivery(
+                |unavailable: PaymentAuthorizationUnavailable, delivery| async move {
+                    sinks::record_authorization_unavailable(unavailable, delivery.provenance());
+                }
+            ));
         },
 
         topology: {

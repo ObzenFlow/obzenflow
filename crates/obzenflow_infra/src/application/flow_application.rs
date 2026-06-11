@@ -726,6 +726,12 @@ impl FlowApplication {
 
         let config = resolve_startup_config(builder_config_file, enable_autodiscovery, cli_args)?;
 
+        // FLOWIP-120i: resolve the run mode once, for banner and footer copy.
+        let run_mode = match &config.replay {
+            Some(replay) => super::run_mode::RunMode::replay_from_archive(replay.from.clone()),
+            None => super::run_mode::RunMode::Live,
+        };
+
         let presentation_enabled = presentation.is_some();
 
         // Clear any stale run-dir hint from prior FlowApplication runs (OT-17).
@@ -744,7 +750,7 @@ impl FlowApplication {
         let mut surface_metrics_emitter: Option<HttpSurfaceMetricsEmitter> = None;
 
         if let Some(presentation) = &presentation {
-            let rendered = presentation.banner().render_for_stdout();
+            let rendered = presentation.render_banner(&run_mode);
             for warning in rendered.warnings {
                 tracing::warn!("{warning}");
             }
@@ -1193,9 +1199,17 @@ impl FlowApplication {
                 if let Some(presentation) = &presentation {
                     let flow_name = flow_name.unwrap_or_else(|| "Flow".to_string());
                     let outcome = if stopped {
-                        RunPresentationOutcome::Stopped { flow_name, run_dir }
+                        RunPresentationOutcome::Stopped {
+                            flow_name,
+                            run_dir,
+                            run_mode: run_mode.clone(),
+                        }
                     } else {
-                        RunPresentationOutcome::Completed { flow_name, run_dir }
+                        RunPresentationOutcome::Completed {
+                            flow_name,
+                            run_dir,
+                            run_mode: run_mode.clone(),
+                        }
                     };
                     let rendered_footer_banner = presentation.render_footer_banner();
                     let footer = presentation.render_footer(outcome);
@@ -1221,6 +1235,7 @@ impl FlowApplication {
                         flow_name,
                         error: err.to_string(),
                         run_dir,
+                        run_mode: run_mode.clone(),
                     });
                     if rendered_footer_banner.is_some() || !footer.trim().is_empty() {
                         println!();

@@ -142,8 +142,50 @@ impl EffectError {
         .into()
     }
 
+    /// The business-facing failure reason, identical live and replayed
+    /// (FLOWIP-120i).
+    ///
+    /// A live `Execution("gateway_timeout_simulated")` and the
+    /// `RecordedFailure` its journaled outcome rehydrates to on replay both
+    /// project to `"gateway_timeout_simulated"`, so failure-mapping code has
+    /// one path and never parses Display wrappers. Variants carrying a
+    /// semantic message borrow it; infrastructure variants with structured
+    /// fields fall back to their Display rendering.
+    pub fn semantic_reason(&self) -> std::borrow::Cow<'_, str> {
+        match self {
+            EffectError::Execution(message)
+            | EffectError::Serialization(message)
+            | EffectError::Journal(message)
+            | EffectError::ReplayArchive(message)
+            | EffectError::EffectProvenanceMismatch(message) => std::borrow::Cow::Borrowed(message),
+            EffectError::RecordedFailure { error_message, .. } => {
+                std::borrow::Cow::Borrowed(error_message)
+            }
+            EffectError::BoundaryRejected { message, .. } => std::borrow::Cow::Borrowed(message),
+            EffectError::TypedOutcomeCoordination { message, .. } => {
+                std::borrow::Cow::Borrowed(message)
+            }
+            EffectError::MissingRecordedEffect { .. }
+            | EffectError::DuplicateRecordedEffect { .. }
+            | EffectError::DescriptorMismatch { .. }
+            | EffectError::MissingIdempotencyKey { .. }
+            | EffectError::UndeclaredEffect { .. }
+            | EffectError::UndeclaredOutput { .. }
+            | EffectError::EmitUnsupported { .. }
+            | EffectError::MissingEffectPort { .. }
+            | EffectError::TransactionalCommitMissing { .. } => {
+                std::borrow::Cow::Owned(self.to_string())
+            }
+        }
+    }
+
+    /// The message recorded into a `Failed` outcome payload. The semantic
+    /// reason, never the Display wrapper: recording `self.to_string()` here
+    /// baked "effect execution failed: " into journaled facts, which replay
+    /// then surfaced to user code as a different business payload than the
+    /// live run produced (the FLOWIP-120i wrapper leak).
     pub(super) fn error_message(&self) -> String {
-        self.to_string()
+        self.semantic_reason().into_owned()
     }
 
     /// Structured cause carried into a recorded `Failed` outcome, present when
@@ -165,5 +207,65 @@ impl EffectError {
 impl From<ReplayError> for EffectError {
     fn from(value: ReplayError) -> Self {
         Self::ReplayArchive(value.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// FLOWIP-120i: the semantic reason is identical across the live error,
+    /// what gets recorded, and the replay-side rehydration, with no Display
+    /// wrapper anywhere in the chain.
+    #[test]
+    fn semantic_reason_is_stable_across_live_recording_and_replay() {
+        let live = EffectError::Execution("gateway_timeout_simulated".to_string());
+        assert_eq!(live.semantic_reason(), "gateway_timeout_simulated");
+        assert_eq!(live.error_message(), "gateway_timeout_simulated");
+
+        // What replay rehydrates from the recorded Failed payload.
+        let replayed = EffectError::RecordedFailure {
+            error_type: live.error_type(),
+            error_message: live.error_message(),
+            retry: live.retry_disposition(),
+            cause: live.failure_cause(),
+        };
+        assert_eq!(replayed.semantic_reason(), live.semantic_reason());
+        assert_eq!(
+            replayed.error_message(),
+            "gateway_timeout_simulated",
+            "re-recording a recorded failure must not wrap again"
+        );
+        assert!(
+            !replayed
+                .semantic_reason()
+                .contains("effect execution failed"),
+            "no Display wrapper may leak into the semantic reason"
+        );
+    }
+
+    #[test]
+    fn semantic_reason_projects_boundary_rejections_to_their_message() {
+        let rejected = EffectError::BoundaryRejected {
+            rejected_by: EffectFailureSource::new("effect_boundary"),
+            code: EffectFailureCode::new("breaker_open"),
+            message: "circuit breaker open".to_string(),
+            retry: RetryDisposition::from_bool(true),
+        };
+        assert_eq!(rejected.semantic_reason(), "circuit breaker open");
+        assert_eq!(
+            rejected.error_message(),
+            "circuit breaker open",
+            "structured source and code live in the recorded cause, never the message"
+        );
+        assert!(rejected.failure_cause().is_some());
+    }
+
+    #[test]
+    fn semantic_reason_falls_back_to_display_for_infrastructure_variants() {
+        let infra = EffectError::MissingIdempotencyKey {
+            effect_type: "demo.effect".to_string(),
+        };
+        assert_eq!(infra.semantic_reason(), infra.to_string());
     }
 }

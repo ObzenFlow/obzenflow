@@ -225,25 +225,12 @@ impl EffectfulTransformHandler for GatewayTransform {
 /// Map a remote effect failure onto an operational reason string.
 ///
 /// A simulated gateway outage is infrastructure behavior, not a local business
-/// invalid-order outcome and not a material gateway decline.
+/// invalid-order outcome and not a material gateway decline. The framework's
+/// `semantic_reason` projection is identical for a live failure and the
+/// `RecordedFailure` replay rehydrates it to, so there is no live-versus-replay
+/// handling here (FLOWIP-120i).
 fn authorization_unavailable_reason(err: EffectError) -> String {
-    match err {
-        EffectError::Execution(message) => message,
-        EffectError::RecordedFailure {
-            error_type,
-            error_message,
-            ..
-        } if error_type == "execution" => error_message
-            .strip_prefix("effect execution failed: ")
-            .unwrap_or(&error_message)
-            .to_string(),
-        EffectError::RecordedFailure {
-            error_type,
-            error_message,
-            ..
-        } => format!("{error_type}: {error_message}"),
-        other => other.to_string(),
-    }
+    err.semantic_reason().into_owned()
 }
 
 /// Tell the circuit breaker which scripted inputs represent dependency failure.
@@ -292,14 +279,17 @@ mod tests {
     use super::{authorization_unavailable_reason, EffectError};
     use obzenflow_runtime::effects::RetryDisposition;
 
+    /// FLOWIP-120i: the recorded payload carries the semantic reason, never
+    /// the Display wrapper, so live and replayed failures project to the same
+    /// domain reason with no normalisation in example code.
     #[test]
     fn replayed_execution_failure_preserves_live_domain_reason() {
-        let live_reason = authorization_unavailable_reason(EffectError::Execution(
-            "gateway_timeout_simulated".to_string(),
-        ));
+        let live = EffectError::Execution("gateway_timeout_simulated".to_string());
+        let live_reason = authorization_unavailable_reason(live);
+
         let replay_reason = authorization_unavailable_reason(EffectError::RecordedFailure {
             error_type: "execution".into(),
-            error_message: "effect execution failed: gateway_timeout_simulated".to_string(),
+            error_message: "gateway_timeout_simulated".to_string(),
             retry: RetryDisposition::Retryable,
             cause: None,
         });

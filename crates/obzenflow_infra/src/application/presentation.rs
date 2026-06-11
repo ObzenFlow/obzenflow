@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
+use super::run_mode::RunMode;
 use std::fmt::Display;
 use std::io::IsTerminal;
 use std::path::PathBuf;
@@ -123,7 +124,10 @@ impl Banner {
         &self.title
     }
 
-    pub(crate) fn render_for_stdout(&self) -> RenderedBanner {
+    /// Render this banner to the text FlowApplication prints at startup.
+    /// Public so applications and their tests can assert on the copy a run
+    /// mode produces (FLOWIP-120i).
+    pub fn render_for_stdout(&self) -> RenderedBanner {
         self.render_with_stdout_is_tty(std::io::stdout().is_terminal())
     }
 
@@ -197,9 +201,9 @@ impl Banner {
     }
 }
 
-pub(crate) struct RenderedBanner {
-    pub(crate) text: String,
-    pub(crate) warnings: Vec<String>,
+pub struct RenderedBanner {
+    pub text: String,
+    pub warnings: Vec<String>,
 }
 
 #[derive(Default)]
@@ -275,8 +279,15 @@ impl From<&str> for Footer {
     }
 }
 
+/// The startup banner is either fixed or branches on the resolved run mode
+/// (FLOWIP-120i), mirroring the footer's closure pattern.
+enum BannerSource {
+    Static(Banner),
+    ForMode(Box<dyn Fn(&RunMode) -> Banner + Send + Sync + 'static>),
+}
+
 pub struct Presentation {
-    banner: Banner,
+    banner: BannerSource,
     footer_banner: Option<Banner>,
     footer: Option<Box<dyn Fn(RunPresentationOutcome) -> Footer + Send + Sync + 'static>>,
 }
@@ -284,7 +295,20 @@ pub struct Presentation {
 impl Presentation {
     pub fn new(banner: Banner) -> Self {
         Self {
-            banner,
+            banner: BannerSource::Static(banner),
+            footer_banner: None,
+            footer: None,
+        }
+    }
+
+    /// A banner that branches on the resolved run mode, so a strict replay
+    /// announces itself instead of reprinting live-run guidance (FLOWIP-120i).
+    pub fn for_mode<F>(banner: F) -> Self
+    where
+        F: Fn(&RunMode) -> Banner + Send + Sync + 'static,
+    {
+        Self {
+            banner: BannerSource::ForMode(Box::new(banner)),
             footer_banner: None,
             footer: None,
         }
@@ -304,8 +328,11 @@ impl Presentation {
         self
     }
 
-    pub fn banner(&self) -> &Banner {
-        &self.banner
+    pub(crate) fn render_banner(&self, mode: &RunMode) -> RenderedBanner {
+        match &self.banner {
+            BannerSource::Static(banner) => banner.render_for_stdout(),
+            BannerSource::ForMode(banner) => banner(mode).render_for_stdout(),
+        }
     }
 
     pub fn footer_banner(&self) -> Option<&Banner> {
@@ -328,15 +355,18 @@ pub enum RunPresentationOutcome {
     Completed {
         flow_name: String,
         run_dir: Option<PathBuf>,
+        run_mode: RunMode,
     },
     Stopped {
         flow_name: String,
         run_dir: Option<PathBuf>,
+        run_mode: RunMode,
     },
     Failed {
         flow_name: Option<String>,
         error: String,
         run_dir: Option<PathBuf>,
+        run_mode: RunMode,
     },
 }
 
@@ -345,21 +375,61 @@ impl RunPresentationOutcome {
         self.to_footer().finish()
     }
 
+    /// The run mode this outcome describes, so custom footers can branch the
+    /// same way the default copy does (FLOWIP-120i).
+    pub fn run_mode(&self) -> &RunMode {
+        match self {
+            Self::Completed { run_mode, .. }
+            | Self::Stopped { run_mode, .. }
+            | Self::Failed { run_mode, .. } => run_mode,
+        }
+    }
+
+    /// Default terminal copy for a finished run. Lives once: live runs are
+    /// invited to replay their journal; strict replays state what was
+    /// reconstructed and offer replay-of-replay, which a replay journal
+    /// supports by closure (FLOWIP-120b).
+    fn terminal_paragraph(
+        verb: &str,
+        flow_name: &str,
+        run_dir: &std::path::Path,
+        mode: &RunMode,
+    ) -> String {
+        match mode {
+            RunMode::Replay(ctx) => format!(
+                "{flow_name} {verb} (strict replay of {source}).\nArchived outcomes were reconstructed: source config ignored, effects suppressed, recorded facts reused.\nReplay journal: {run_dir}\nCompare it with the source archive, or replay this replay with: --replay-from {run_dir}",
+                source = ctx.source_label(),
+                run_dir = run_dir.display(),
+            ),
+            _ => format!(
+                "{flow_name} {verb}. Journal: {run_dir}\nTo replay, add: --replay-from {run_dir}\n(Source config env vars are ignored during replay)",
+                run_dir = run_dir.display(),
+            ),
+        }
+    }
+
     pub fn to_footer(&self) -> Footer {
         match self {
-            Self::Completed { flow_name, run_dir } => match run_dir {
-                Some(run_dir) => Footer::new().paragraph(format!(
-                    "{flow_name} completed. Journal: {}\nTo replay, add: --replay-from {}\n(Source config env vars are ignored during replay)",
-                    run_dir.display(),
-                    run_dir.display(),
+            Self::Completed {
+                flow_name,
+                run_dir,
+                run_mode,
+            } => match run_dir {
+                Some(run_dir) => Footer::new().paragraph(Self::terminal_paragraph(
+                    "completed",
+                    flow_name,
+                    run_dir,
+                    run_mode,
                 )),
                 None => Footer::new().paragraph(format!("{flow_name} completed.")),
             },
-            Self::Stopped { flow_name, run_dir } => match run_dir {
-                Some(run_dir) => Footer::new().paragraph(format!(
-                    "{flow_name} stopped. Journal: {}\nTo replay, add: --replay-from {}\n(Source config env vars are ignored during replay)",
-                    run_dir.display(),
-                    run_dir.display(),
+            Self::Stopped {
+                flow_name,
+                run_dir,
+                run_mode,
+            } => match run_dir {
+                Some(run_dir) => Footer::new().paragraph(Self::terminal_paragraph(
+                    "stopped", flow_name, run_dir, run_mode,
                 )),
                 None => Footer::new().paragraph(format!("{flow_name} stopped.")),
             },
@@ -367,15 +437,18 @@ impl RunPresentationOutcome {
                 flow_name,
                 error,
                 run_dir,
+                run_mode,
             } => {
-                let prefix = flow_name
+                let mut prefix = flow_name
                     .as_ref()
                     .map(|name| format!("{name} failed"))
                     .unwrap_or_else(|| "Flow failed".to_string());
+                if let RunMode::Replay(ctx) = run_mode {
+                    prefix = format!("{prefix} (strict replay of {})", ctx.source_label());
+                }
                 match run_dir {
-                    Some(run_dir) => {
-                        Footer::new().paragraph(format!("{prefix}: {error}. Journal: {}", run_dir.display()))
-                    }
+                    Some(run_dir) => Footer::new()
+                        .paragraph(format!("{prefix}: {error}. Journal: {}", run_dir.display())),
                     None => Footer::new().paragraph(format!("{prefix}: {error}")),
                 }
             }
@@ -383,39 +456,7 @@ impl RunPresentationOutcome {
     }
 
     pub fn into_footer(self) -> Footer {
-        match self {
-            Self::Completed { flow_name, run_dir } => match run_dir {
-                Some(run_dir) => Footer::new().paragraph(format!(
-                    "{flow_name} completed. Journal: {}\nTo replay, add: --replay-from {}\n(Source config env vars are ignored during replay)",
-                    run_dir.display(),
-                    run_dir.display(),
-                )),
-                None => Footer::new().paragraph(format!("{flow_name} completed.")),
-            },
-            Self::Stopped { flow_name, run_dir } => match run_dir {
-                Some(run_dir) => Footer::new().paragraph(format!(
-                    "{flow_name} stopped. Journal: {}\nTo replay, add: --replay-from {}\n(Source config env vars are ignored during replay)",
-                    run_dir.display(),
-                    run_dir.display(),
-                )),
-                None => Footer::new().paragraph(format!("{flow_name} stopped.")),
-            },
-            Self::Failed {
-                flow_name,
-                error,
-                run_dir,
-            } => {
-                let prefix = flow_name
-                    .map(|name| format!("{name} failed"))
-                    .unwrap_or_else(|| "Flow failed".to_string());
-                match run_dir {
-                    Some(run_dir) => {
-                        Footer::new().paragraph(format!("{prefix}: {error}. Journal: {}", run_dir.display()))
-                    }
-                    None => Footer::new().paragraph(format!("{prefix}: {error}")),
-                }
-            }
-        }
+        self.to_footer()
     }
 }
 
@@ -729,6 +770,7 @@ mod tests {
         let completed = RunPresentationOutcome::Completed {
             flow_name: "flow".to_string(),
             run_dir: None,
+            run_mode: RunMode::Live,
         };
         assert_eq!(completed.default_footer(), "flow completed.");
 
@@ -736,6 +778,7 @@ mod tests {
         let completed_with_journal = RunPresentationOutcome::Completed {
             flow_name: "flow".to_string(),
             run_dir: Some(run_dir.clone()),
+            run_mode: RunMode::Live,
         };
         assert_eq!(
             completed_with_journal.default_footer(),
@@ -745,6 +788,7 @@ mod tests {
         let stopped = RunPresentationOutcome::Stopped {
             flow_name: "flow".to_string(),
             run_dir: None,
+            run_mode: RunMode::Live,
         };
         assert_eq!(stopped.default_footer(), "flow stopped.");
 
@@ -752,6 +796,7 @@ mod tests {
             flow_name: Some("flow".to_string()),
             error: "err".to_string(),
             run_dir: None,
+            run_mode: RunMode::Live,
         };
         assert_eq!(failed.default_footer(), "flow failed: err");
 
@@ -759,10 +804,53 @@ mod tests {
             flow_name: None,
             error: "err".to_string(),
             run_dir: Some(run_dir),
+            run_mode: RunMode::Live,
         };
         assert_eq!(
             failed_without_name.default_footer(),
             "Flow failed: err. Journal: tmp/run"
+        );
+    }
+
+    #[test]
+    fn default_footer_announces_strict_replay() {
+        let replay_mode = RunMode::Replay(super::super::run_mode::ReplayRunContext {
+            archive_path: PathBuf::from("tmp/archive"),
+            archive_flow_id: Some("flow_01SOURCE".to_string()),
+        });
+
+        let completed = RunPresentationOutcome::Completed {
+            flow_name: "flow".to_string(),
+            run_dir: Some(PathBuf::from("tmp/replay-run")),
+            run_mode: replay_mode.clone(),
+        };
+        let footer = completed.default_footer();
+        assert!(
+            footer.contains("strict replay of flow_01SOURCE (tmp/archive)"),
+            "replay footer must name the source archive: {footer}"
+        );
+        assert!(
+            footer.contains("source config ignored, effects suppressed, recorded facts reused"),
+            "replay footer must state what was reconstructed: {footer}"
+        );
+        assert!(
+            footer.contains("--replay-from tmp/replay-run"),
+            "replay footer must offer replay-of-replay on the new journal: {footer}"
+        );
+        assert!(
+            !footer.contains("(Source config env vars are ignored during replay)"),
+            "replay footer must not reuse the live-run hint copy: {footer}"
+        );
+
+        let failed = RunPresentationOutcome::Failed {
+            flow_name: Some("flow".to_string()),
+            error: "err".to_string(),
+            run_dir: None,
+            run_mode: replay_mode,
+        };
+        assert_eq!(
+            failed.default_footer(),
+            "flow failed (strict replay of flow_01SOURCE (tmp/archive)): err"
         );
     }
 

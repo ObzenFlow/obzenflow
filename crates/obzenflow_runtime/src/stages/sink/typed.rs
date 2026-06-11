@@ -105,6 +105,25 @@ where
     {
         FallibleSinkTyped::new(handler)
     }
+
+    /// Create a typed sink whose handler also receives the delivery's
+    /// [`DeliveryContext`], so it can tell a fresh outcome from one
+    /// reconstructed during replay (FLOWIP-120i).
+    ///
+    /// ```ignore
+    /// paid_orders = sink!(PaymentAuthorized => SinkTyped::with_delivery(
+    ///     |authorized: PaymentAuthorized, delivery| async move {
+    ///         send_to_shipping(authorized, delivery.provenance());
+    ///     }
+    /// ));
+    /// ```
+    pub fn with_delivery<G, FutG>(handler: G) -> SinkTypedWithDelivery<T, G, FutG>
+    where
+        G: FnMut(T, DeliveryContext) -> FutG + Send + Sync + Clone,
+        FutG: Future<Output = ()> + Send,
+    {
+        SinkTypedWithDelivery::new(handler)
+    }
 }
 
 #[async_trait]
@@ -183,6 +202,184 @@ impl<T, F, Fut> SinkTyping for SinkTyped<T, F, Fut>
 where
     T: TypedPayload + DeserializeOwned + Send + Sync + 'static,
     F: FnMut(T) -> Fut + Send + Sync + Clone,
+    Fut: Future<Output = ()> + Send,
+{
+    type Input = T;
+}
+
+/// FLOWIP-120i: per-delivery provenance for typed sinks.
+///
+/// Built by the framework from the event envelope before payload
+/// deserialization, so the raw `ChainEvent` never crosses the typed boundary.
+/// Provenance derives from `event.replay_context`, which the replay driver
+/// stamps on re-injected source events and every derived event inherits; that
+/// per-event derivation is what keeps labels honest when FLOWIP-120n's resume
+/// mixes a replayed prefix with a live tail in one run, where a run-scoped
+/// flag would lie about the tail.
+#[derive(Debug, Clone)]
+pub struct DeliveryContext {
+    provenance: DeliveryProvenance,
+}
+
+impl DeliveryContext {
+    fn from_event(event: &ChainEvent) -> Self {
+        Self {
+            provenance: if event.replay_context.is_some() {
+                DeliveryProvenance::Replayed
+            } else {
+                DeliveryProvenance::Live
+            },
+        }
+    }
+
+    pub fn provenance(&self) -> DeliveryProvenance {
+        self.provenance
+    }
+
+    pub fn is_replayed(&self) -> bool {
+        matches!(self.provenance, DeliveryProvenance::Replayed)
+    }
+}
+
+/// Whether a delivered outcome is fresh or reconstructed from a recorded run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum DeliveryProvenance {
+    Live,
+    Replayed,
+}
+
+/// Typed sink handler whose closure also receives the delivery's
+/// [`DeliveryContext`] (FLOWIP-120i). Constructed via
+/// [`SinkTyped::with_delivery`]; consumes through the same skip, mismatch,
+/// and deserialization semantics as [`SinkTyped`]. The context is passed by
+/// value: it is a small owned view, and an `async move` handler could not
+/// borrow it across the returned future otherwise.
+pub struct SinkTypedWithDelivery<T, F, Fut>
+where
+    T: TypedPayload + DeserializeOwned + Send + Sync + 'static,
+    F: FnMut(T, DeliveryContext) -> Fut + Send + Sync + Clone,
+    Fut: Future<Output = ()> + Send,
+{
+    handler: F,
+    allow_skip: bool,
+    _phantom: PhantomData<fn() -> (T, Fut)>,
+}
+
+impl<T, F, Fut> Clone for SinkTypedWithDelivery<T, F, Fut>
+where
+    T: TypedPayload + DeserializeOwned + Send + Sync + 'static,
+    F: FnMut(T, DeliveryContext) -> Fut + Send + Sync + Clone,
+    Fut: Future<Output = ()> + Send,
+{
+    fn clone(&self) -> Self {
+        Self {
+            handler: self.handler.clone(),
+            allow_skip: self.allow_skip,
+            _phantom: PhantomData,
+        }
+    }
+}
+
+impl<T, F, Fut> SinkTypedWithDelivery<T, F, Fut>
+where
+    T: TypedPayload + DeserializeOwned + Send + Sync + 'static,
+    F: FnMut(T, DeliveryContext) -> Fut + Send + Sync + Clone,
+    Fut: Future<Output = ()> + Send,
+{
+    pub fn new(handler: F) -> Self {
+        Self {
+            handler,
+            allow_skip: false,
+            _phantom: PhantomData,
+        }
+    }
+
+    /// Opt out of strict mode and silently skip non-matching event types.
+    pub fn allow_skip(mut self) -> Self {
+        self.allow_skip = true;
+        self
+    }
+}
+
+#[async_trait]
+impl<T, F, Fut> SinkHandler for SinkTypedWithDelivery<T, F, Fut>
+where
+    T: TypedPayload + DeserializeOwned + Send + Sync + 'static,
+    F: FnMut(T, DeliveryContext) -> Fut + Send + Sync + Clone,
+    Fut: Future<Output = ()> + Send,
+{
+    async fn consume(&mut self, event: ChainEvent) -> Result<DeliveryPayload, HandlerError> {
+        let destination = std::any::type_name::<T>();
+
+        let (event_type, payload) = match &event.content {
+            ChainEventContent::Data {
+                event_type,
+                payload,
+            } => (event_type.as_str(), payload),
+            _ => {
+                return Ok(DeliveryPayload::success(
+                    destination,
+                    DeliveryMethod::Custom("Skipped".to_string()),
+                    None,
+                ))
+            }
+        };
+
+        if !T::event_type_matches(event_type) {
+            if self.allow_skip {
+                return Ok(DeliveryPayload::success(
+                    destination,
+                    DeliveryMethod::Custom("Skipped".to_string()),
+                    None,
+                ));
+            }
+
+            return Err(HandlerError::Validation(format!(
+                "SinkTypedWithDelivery expected event type '{}' (or '{}'), got '{}'",
+                T::EVENT_TYPE,
+                T::versioned_event_type(),
+                event_type
+            )));
+        }
+
+        let context = DeliveryContext::from_event(&event);
+
+        let typed_event: T = serde_json::from_value(payload.clone()).map_err(|e| {
+            HandlerError::Deserialization(format!(
+                "SinkTypedWithDelivery failed to deserialize {}: {e}",
+                std::any::type_name::<T>()
+            ))
+        })?;
+
+        (self.handler)(typed_event, context).await;
+
+        Ok(DeliveryPayload::success(
+            destination,
+            DeliveryMethod::Custom("TypedSink".to_string()),
+            Some(1),
+        ))
+    }
+}
+
+impl<T, F, Fut> std::fmt::Debug for SinkTypedWithDelivery<T, F, Fut>
+where
+    T: TypedPayload + DeserializeOwned + Send + Sync + 'static,
+    F: FnMut(T, DeliveryContext) -> Fut + Send + Sync + Clone,
+    Fut: Future<Output = ()> + Send,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SinkTypedWithDelivery")
+            .field("payload_type", &std::any::type_name::<T>())
+            .field("allow_skip", &self.allow_skip)
+            .finish()
+    }
+}
+
+impl<T, F, Fut> SinkTyping for SinkTypedWithDelivery<T, F, Fut>
+where
+    T: TypedPayload + DeserializeOwned + Send + Sync + 'static,
+    F: FnMut(T, DeliveryContext) -> Fut + Send + Sync + Clone,
     Fut: Future<Output = ()> + Send,
 {
     type Input = T;
@@ -482,5 +679,117 @@ mod tests {
             .await
             .expect_err("expected handler error");
         assert!(matches!(err, HandlerError::Timeout(_)));
+    }
+
+    fn stamped_with_replay_context(mut event: ChainEvent) -> ChainEvent {
+        event.replay_context = Some(obzenflow_core::event::context::ReplayContext {
+            original_event_id: obzenflow_core::event::types::EventId::new(),
+            original_flow_id: "flow_01SOURCE".to_string(),
+            original_stage_id: StageId::new(),
+            archive_path: std::path::PathBuf::from("tmp/archive"),
+            replayed_at: chrono::Utc::now(),
+        });
+        event
+    }
+
+    #[tokio::test]
+    async fn with_delivery_reports_live_provenance_for_unstamped_events() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let seen_for_closure = seen.clone();
+
+        let mut sink = SinkTyped::with_delivery(move |value: TestPayload, delivery| {
+            let seen_for_closure = seen_for_closure.clone();
+            async move {
+                seen_for_closure
+                    .lock()
+                    .expect("seen lock poisoned")
+                    .push((value, delivery.provenance()));
+            }
+        });
+
+        let event = ChainEventFactory::data_event(
+            WriterId::from(StageId::new()),
+            TestPayload::EVENT_TYPE,
+            serde_json::json!({"n": 7}),
+        );
+        let receipt = sink.consume(event).await.expect("consume should succeed");
+
+        assert!(matches!(
+            receipt.delivery_method,
+            DeliveryMethod::Custom(ref name) if name == "TypedSink"
+        ));
+        assert_eq!(
+            seen.lock().expect("seen lock poisoned").clone(),
+            vec![(TestPayload { n: 7 }, DeliveryProvenance::Live)]
+        );
+    }
+
+    #[tokio::test]
+    async fn with_delivery_reports_replayed_provenance_for_stamped_events() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let seen_for_closure = seen.clone();
+
+        let mut sink = SinkTyped::with_delivery(move |value: TestPayload, delivery| {
+            let seen_for_closure = seen_for_closure.clone();
+            async move {
+                seen_for_closure
+                    .lock()
+                    .expect("seen lock poisoned")
+                    .push((value, delivery.is_replayed()));
+            }
+        });
+
+        let event = stamped_with_replay_context(ChainEventFactory::data_event(
+            WriterId::from(StageId::new()),
+            TestPayload::EVENT_TYPE,
+            serde_json::json!({"n": 9}),
+        ));
+        sink.consume(event).await.expect("consume should succeed");
+
+        assert_eq!(
+            seen.lock().expect("seen lock poisoned").clone(),
+            vec![(TestPayload { n: 9 }, true)]
+        );
+    }
+
+    #[tokio::test]
+    async fn with_delivery_keeps_sink_typed_skip_and_mismatch_semantics() {
+        let called = Arc::new(AtomicUsize::new(0));
+        let called_for_closure = called.clone();
+        let mut sink = SinkTyped::with_delivery(move |_value: TestPayload, _delivery| {
+            let called_for_closure = called_for_closure.clone();
+            async move {
+                called_for_closure.fetch_add(1, Ordering::Relaxed);
+            }
+        });
+
+        let eof = ChainEventFactory::eof_event(WriterId::from(StageId::new()), true);
+        let receipt = sink.consume(eof).await.expect("non-data events skip");
+        assert!(matches!(
+            receipt.delivery_method,
+            DeliveryMethod::Custom(ref name) if name == "Skipped"
+        ));
+
+        let mismatched = ChainEventFactory::data_event(
+            WriterId::from(StageId::new()),
+            "other.type",
+            serde_json::json!({"n": 1}),
+        );
+        let err = sink
+            .consume(mismatched.clone())
+            .await
+            .expect_err("type mismatches error by default");
+        assert!(matches!(err, HandlerError::Validation(_)));
+
+        let mut lenient = sink.allow_skip();
+        let receipt = lenient
+            .consume(mismatched)
+            .await
+            .expect("allow_skip skips mismatches");
+        assert!(matches!(
+            receipt.delivery_method,
+            DeliveryMethod::Custom(ref name) if name == "Skipped"
+        ));
+        assert_eq!(called.load(Ordering::Relaxed), 0);
     }
 }
