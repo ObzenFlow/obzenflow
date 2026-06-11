@@ -23,28 +23,12 @@ use super::typed_fact_set::TypedFactSet;
 /// [`TypedFactSet`] remains the low-level marshalling bridge for non-effect
 /// uses such as scalar stateful outputs.
 ///
-/// A scalar `TypedPayload` is a valid carrier through the blanket
-/// `TypedPayload -> TypedFactSet` implementation, so single-fact effects keep
-/// their bare payload type as `Outcome`. A carrier type can never also
-/// implement `TypedPayload`: the blanket implementations would conflict, which
-/// is deliberate, because a carrier must never double as a persisted wrapper
-/// event.
-pub trait EffectOutcomeFacts: TypedFactSet {}
-
-impl<T: TypedFactSet> EffectOutcomeFacts for T {}
-
-/// Define an effect outcome carrier and generate its fact-set implementation
-/// (FLOWIP-120m).
-///
-/// Wrap an enum for a closed sum outcome (one persisted fact per variant) or
-/// a named-field struct for a genuine product outcome (one persisted fact per
-/// field, recorded together). The macro emits the type definition verbatim
-/// plus an exact, fail-closed `TypedFactSet` implementation, which the
-/// blanket lift makes an `EffectOutcomeFacts` carrier usable as
-/// `Effect::Outcome`.
+/// Define a carrier with `#[derive(EffectOutcomeFacts)]` on an enum (closed
+/// sum, one persisted fact per variant) or a named-field struct (product, one
+/// fact per field):
 ///
 /// ```
-/// use obzenflow_core::{effect_outcome, TypedPayload};
+/// use obzenflow_core::{EffectOutcomeFacts, TypedPayload};
 /// use serde::{Deserialize, Serialize};
 ///
 /// #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -59,190 +43,36 @@ impl<T: TypedFactSet> EffectOutcomeFacts for T {}
 ///     const EVENT_TYPE: &'static str = "payment.declined";
 /// }
 ///
-/// effect_outcome! {
-///     /// Closed set of successful gateway authorization outcomes.
-///     #[derive(Debug, Clone)]
-///     pub enum AuthorizePaymentOutcome {
-///         Authorized(PaymentAuthorized),
-///         Declined(PaymentDeclined),
-///     }
+/// /// Closed set of successful gateway authorization outcomes. The variants
+/// /// are the facts the journal records; the derive writes the marshalling.
+/// #[derive(Debug, Clone, EffectOutcomeFacts)]
+/// pub enum AuthorizePaymentOutcome {
+///     Authorized(PaymentAuthorized),
+///     Declined(PaymentDeclined),
 /// }
 /// ```
 ///
-/// Reconstruction is exact: a recorded group containing a fact outside the
-/// carrier's declared set fails with `TypedFactSetError::UnexpectedFact`,
-/// sum groups must hold exactly one fact matching exactly one variant, and
-/// product groups must hold exactly one fact per field. Each variant or
-/// field holds exactly one `TypedPayload`; nested carriers, multi-field
-/// variants, tuple structs, and generics are rejected at compile time.
-///
-/// A carrier must not also implement `TypedPayload`: the blanket
-/// `TypedPayload -> TypedFactSet` implementation would conflict with the
-/// generated one, which is deliberate, because a carrier is transient
-/// control-flow machinery and never a persisted wrapper event. Two distinct
-/// member types that collide on `EVENT_TYPE` cannot be seen by a macro;
-/// flow build rejects them when declarations are collected.
-#[macro_export]
-macro_rules! effect_outcome {
-    // ── Sum carrier: enum, exactly one TypedPayload per tuple variant ──
-    (
-        $(#[$meta:meta])*
-        $vis:vis enum $name:ident {
-            $( $(#[$variant_meta:meta])* $variant:ident($member:ty) ),+ $(,)?
-        }
-    ) => {
-        $(#[$meta])*
-        $vis enum $name {
-            $( $(#[$variant_meta])* $variant($member), )+
-        }
+/// A scalar `TypedPayload` is a valid carrier through the blanket
+/// `TypedPayload -> TypedFactSet` implementation, so single-fact effects keep
+/// their bare payload type as `Outcome`. A derived carrier can never also
+/// implement `TypedPayload`: the blanket implementations would conflict, which
+/// is deliberate, because a carrier must never double as a persisted wrapper
+/// event.
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` is not an effect outcome carrier",
+    note = "an effect outcome is a closed set of named facts: add \
+            #[derive(EffectOutcomeFacts)] so each variant or field lowers to its persisted \
+            fact (FLOWIP-120m)"
+)]
+pub trait EffectOutcomeFacts: TypedFactSet {}
 
-        impl $crate::event::schema::TypedFactSet for $name {
-            fn fact_types() -> ::std::vec::Vec<$crate::event::schema::TypedFactType> {
-                ::std::vec![ $( $crate::event::schema::TypedFactType::of::<$member>() ),+ ]
-            }
-
-            fn into_facts(
-                self,
-            ) -> ::std::result::Result<
-                ::std::vec::Vec<$crate::event::schema::TypedFact>,
-                $crate::event::schema::TypedFactSetError,
-            > {
-                match self {
-                    $( Self::$variant(member) => ::std::result::Result::Ok(::std::vec![
-                        $crate::event::schema::TypedFact::from_payload(member)?,
-                    ]), )+
-                }
-            }
-
-            fn try_from_facts(
-                facts: &[$crate::event::schema::TypedFact],
-            ) -> ::std::result::Result<Self, $crate::event::schema::TypedFactSetError> {
-                for fact in facts {
-                    let declared = false
-                        $( || <$member as $crate::event::schema::TypedPayload>::event_type_matches(
-                            fact.event_type.as_str(),
-                        ) )+;
-                    if !declared {
-                        return ::std::result::Result::Err(
-                            $crate::event::schema::TypedFactSetError::UnexpectedFact {
-                                event_type: fact.event_type.clone(),
-                            },
-                        );
-                    }
-                }
-                match facts {
-                    [single] => {
-                        $(
-                            if <$member as $crate::event::schema::TypedPayload>::event_type_matches(
-                                single.event_type.as_str(),
-                            ) {
-                                return ::std::result::Result::Ok(Self::$variant(
-                                    $crate::event::schema::decode_member_fact::<$member>(facts)?,
-                                ));
-                            }
-                        )+
-                        // Safe: the undeclared-fact scan above already
-                        // rejected any fact no variant matches.
-                        ::core::unreachable!(
-                            "effect_outcome!: undeclared facts were rejected above"
-                        )
-                    }
-                    [] => ::std::result::Result::Err(
-                        $crate::event::schema::missing_fact_group_error(
-                            &<Self as $crate::event::schema::TypedFactSet>::fact_types(),
-                        ),
-                    ),
-                    [first, rest @ ..] => ::std::result::Result::Err(
-                        $crate::event::schema::sum_group_arity_error(first, rest),
-                    ),
-                }
-            }
-        }
-    };
-
-    // ── Product carrier: struct, exactly one TypedPayload per named field ──
-    (
-        $(#[$meta:meta])*
-        $vis:vis struct $name:ident {
-            $( $(#[$field_meta:meta])* $field_vis:vis $field:ident : $member:ty ),+ $(,)?
-        }
-    ) => {
-        $(#[$meta])*
-        $vis struct $name {
-            $( $(#[$field_meta])* $field_vis $field: $member, )+
-        }
-
-        impl $crate::event::schema::TypedFactSet for $name {
-            fn fact_types() -> ::std::vec::Vec<$crate::event::schema::TypedFactType> {
-                ::std::vec![ $( $crate::event::schema::TypedFactType::of::<$member>() ),+ ]
-            }
-
-            fn into_facts(
-                self,
-            ) -> ::std::result::Result<
-                ::std::vec::Vec<$crate::event::schema::TypedFact>,
-                $crate::event::schema::TypedFactSetError,
-            > {
-                // Field order is the committed fact order; the committer's
-                // outcome_fact_ordinal preserves it deterministically.
-                ::std::result::Result::Ok(::std::vec![
-                    $( $crate::event::schema::TypedFact::from_payload(self.$field)?, )+
-                ])
-            }
-
-            fn try_from_facts(
-                facts: &[$crate::event::schema::TypedFact],
-            ) -> ::std::result::Result<Self, $crate::event::schema::TypedFactSetError> {
-                for fact in facts {
-                    let declared = false
-                        $( || <$member as $crate::event::schema::TypedPayload>::event_type_matches(
-                            fact.event_type.as_str(),
-                        ) )+;
-                    if !declared {
-                        return ::std::result::Result::Err(
-                            $crate::event::schema::TypedFactSetError::UnexpectedFact {
-                                event_type: fact.event_type.clone(),
-                            },
-                        );
-                    }
-                }
-                // Multiset equality: the scan above rejects foreign facts,
-                // and each member decode requires exactly one fact of its
-                // type (MissingFact / DuplicateFact otherwise).
-                ::std::result::Result::Ok(Self {
-                    $( $field: $crate::event::schema::decode_member_fact::<$member>(facts)?, )+
-                })
-            }
-        }
-    };
-
-    // ── Diagnostics: invalid shapes fail at compile time, in arm order ──
-    ( $(#[$meta:meta])* $vis:vis enum $name:ident { $($body:tt)* } ) => {
-        ::core::compile_error!(
-            "effect_outcome! enum variants must each hold exactly one TypedPayload fact, \
-             e.g. `Authorized(PaymentAuthorized)`; unit, struct-like, multi-field, and \
-             empty enums are not valid carriers (FLOWIP-120m)"
-        );
-    };
-    ( $(#[$meta:meta])* $vis:vis struct $name:ident ( $($body:tt)* ) $(;)? ) => {
-        ::core::compile_error!(
-            "effect_outcome! struct carriers use named fields, one TypedPayload fact per \
-             field; tuple structs are not valid carriers (FLOWIP-120m)"
-        );
-    };
-    ( $($tokens:tt)* ) => {
-        ::core::compile_error!(
-            "effect_outcome! accepts exactly one enum or struct carrier definition; \
-             attributes, doc comments, and a visibility qualifier may precede it \
-             (FLOWIP-120m)"
-        );
-    };
-}
+impl<T: TypedFactSet> EffectOutcomeFacts for T {}
 
 #[cfg(test)]
 mod tests {
-    use crate::event::schema::{TypedFact, TypedFactSet, TypedFactSetError, TypedPayload};
+    use crate::event::schema::{EffectOutcomeFacts, TypedFact, TypedFactSet, TypedFactSetError};
     use crate::event::types::EventType;
+    use crate::TypedPayload;
     use serde::{Deserialize, Serialize};
 
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -263,21 +93,17 @@ mod tests {
         const EVENT_TYPE: &'static str = "carrier.refused";
     }
 
-    effect_outcome! {
-        /// Doc comments and derives pass through.
-        #[derive(Debug, Clone, PartialEq, Eq)]
-        pub enum DecisionOutcome {
-            Approved(Approved),
-            Refused(Refused),
-        }
+    /// Doc comments and derives pass through; the carrier is plain source.
+    #[derive(Debug, Clone, PartialEq, Eq, EffectOutcomeFacts)]
+    pub enum DecisionOutcome {
+        Approved(Approved),
+        Refused(Refused),
     }
 
-    effect_outcome! {
-        #[derive(Debug, Clone, PartialEq, Eq)]
-        pub struct DecisionWithAudit {
-            pub decision: Approved,
-            pub audit: Refused,
-        }
+    #[derive(Debug, Clone, PartialEq, Eq, EffectOutcomeFacts)]
+    pub struct DecisionWithAudit {
+        pub decision: Approved,
+        pub audit: Refused,
     }
 
     fn unknown_fact() -> TypedFact {

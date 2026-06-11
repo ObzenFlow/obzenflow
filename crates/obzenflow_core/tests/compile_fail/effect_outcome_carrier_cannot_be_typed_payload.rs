@@ -6,7 +6,7 @@
 // TypedPayload on a carrier collides with the blanket
 // `TypedPayload -> TypedFactSet` implementation (FLOWIP-120m).
 
-use obzenflow_core::{effect_outcome, TypedPayload};
+use obzenflow_core::{EffectOutcomeFacts, TypedPayload};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -16,11 +16,9 @@ impl TypedPayload for FirstFact {
     const EVENT_TYPE: &'static str = "compile_fail.first";
 }
 
-effect_outcome! {
-    #[derive(Debug, Clone, Serialize, Deserialize)]
-    pub enum WrapperAttempt {
-        Present(FirstFact),
-    }
+#[derive(Debug, Clone, Serialize, Deserialize, EffectOutcomeFacts)]
+pub enum WrapperAttempt {
+    Present(FirstFact),
 }
 
 impl TypedPayload for WrapperAttempt {

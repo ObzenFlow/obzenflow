@@ -1,10 +1,5 @@
-error: effect_outcome! struct carriers use named fields, one TypedPayload fact per field; tuple structs are not valid carriers (FLOWIP-120m)
-  --> tests/compile_fail/effect_outcome_tuple_struct.rs:15:1
+error: effect outcome struct carriers use named fields, one TypedPayload fact per field; tuple and unit structs are not valid carriers (FLOWIP-120m)
+  --> tests/compile_fail/effect_outcome_tuple_struct.rs:16:24
    |
-15 | / effect_outcome! {
-16 | |     #[derive(Debug, Clone)]
-17 | |     pub struct TupleCarrier(FirstFact);
-18 | | }
-   | |_^
-   |
-   = note: this error originates in the macro `effect_outcome` (in Nightly builds, run with -Z macro-backtrace for more info)
+16 | pub struct TupleCarrier(FirstFact);
+   |                        ^^^^^^^^^^^

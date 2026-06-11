@@ -29,6 +29,10 @@ pub use journal::journal_error::JournalError;
 pub use journal::journal_owner::JournalOwner;
 pub use journal::Journal;
 
+// The derive generates paths through `::obzenflow_core`, so make that name
+// resolve inside this crate too (the serde-style self-alias trick).
+extern crate self as obzenflow_core;
+
 // Re-export schema types (FLOWIP-082a; EffectOutcomeFacts FLOWIP-120m)
 pub use event::schema::{
     EffectOutcomeFacts, MiddlewareContextKey, TypedFact, TypedFactSet, TypedFactSetError,

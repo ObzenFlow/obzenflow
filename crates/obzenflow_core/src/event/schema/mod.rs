@@ -14,7 +14,9 @@ mod typed_middleware_event;
 mod typed_payload;
 
 pub use effect_outcome::EffectOutcomeFacts;
+// The derive shares the trait's name, serde-style: one import brings both.
 pub use middleware_context_key::MiddlewareContextKey;
+pub use obzenflow_derive::EffectOutcomeFacts;
 pub use typed_fact_set::{
     decode_member_fact, missing_fact_group_error, sum_group_arity_error, TypedFact, TypedFactSet,
     TypedFactSetError, TypedFactType,

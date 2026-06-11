@@ -3,16 +3,10 @@
 // https://obzenflow.dev
 
 use obzenflow_core::{EffectOutcomeFacts, TypedPayload};
-use serde::{Deserialize, Serialize};
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct FirstFact;
-
-impl TypedPayload for FirstFact {
-    const EVENT_TYPE: &'static str = "compile_fail.first";
-}
 
 #[derive(Debug, Clone, EffectOutcomeFacts)]
-pub struct TupleCarrier(FirstFact);
+pub enum GenericCarrier<T: TypedPayload> {
+    Present(T),
+}
 
 fn main() {}

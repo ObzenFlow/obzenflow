@@ -293,7 +293,7 @@ impl<T: StatefulHandler + Send + Sync> UnifiedStatefulHandler for T {
 /// effects and emits facts, `apply` folds each committed fact into state.
 ///
 /// `Fact` is the stage's per-fact enum, one variant per committed fact type;
-/// the `effect_outcome!` enum form generates exactly this shape. An effect
+/// deriving `EffectOutcomeFacts` on it generates exactly this shape. An effect
 /// outcome carrier never reaches `apply` (FLOWIP-120m): the carrier is
 /// transient `fx.perform` machinery, and a multi-fact product outcome folds
 /// as its individual member facts, one `apply` call per fact in ordinal

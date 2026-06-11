@@ -5,7 +5,6 @@
 //! Replay-safe user effects.
 
 use async_trait::async_trait;
-pub use obzenflow_core::effect_outcome;
 use obzenflow_core::event::context::FlowContext;
 pub use obzenflow_core::event::payloads::effect_payload::{
     effect_outcome_group_id, framework_effect_event_type, is_framework_effect_event_type,
@@ -16,6 +15,7 @@ pub use obzenflow_core::event::payloads::effect_payload::{
     OutcomeFactOrdinal, RecordedFlowId, RetryDisposition, StageLogicVersion, CAPTURE_EVENT_TYPE,
     EFFECT_RECORD_EVENT_TYPE,
 };
+// `EffectOutcomeFacts` re-exports both the trait and its derive (FLOWIP-120m).
 pub use obzenflow_core::event::schema::{
     EffectOutcomeFacts, TypedFact, TypedFactSet, TypedFactSetError, TypedFactType, TypedPayload,
 };

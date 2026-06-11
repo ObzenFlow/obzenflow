@@ -131,6 +131,12 @@ pub fn sum_group_arity_error(first: &TypedFact, rest: &[TypedFact]) -> TypedFact
 /// The blanket `TypedPayload -> TypedFactSet` implementation keeps scalar
 /// stateful outputs working while FLOWIP-120b moves effectful authoring to
 /// explicit `fx.emit` calls and flat output contracts.
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` does not lower to named facts",
+    note = "a closed set of named facts is written as an enum or named-field struct with \
+            #[derive(EffectOutcomeFacts)]; a single fact is its `TypedPayload` type directly \
+            (FLOWIP-120m)"
+)]
 pub trait TypedFactSet: Send + Sync + 'static {
     fn fact_types() -> Vec<TypedFactType>;
 

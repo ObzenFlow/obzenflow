@@ -2607,12 +2607,10 @@ mod tests {
         const EVENT_TYPE: &'static str = "cb_outcome.second";
     }
 
-    obzenflow_core::effect_outcome! {
-        #[derive(Clone, Debug, PartialEq)]
-        struct DemoProductOutcome {
-            first: OutcomeFirst,
-            second: OutcomeSecond,
-        }
+    #[derive(Clone, Debug, PartialEq, obzenflow_core::EffectOutcomeFacts)]
+    struct DemoProductOutcome {
+        first: OutcomeFirst,
+        second: OutcomeSecond,
     }
 
     #[derive(Clone, Debug)]

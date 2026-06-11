@@ -110,17 +110,17 @@ with replay provenance, so the upstream feed is not re-run.
 ## 2. The Gateway Command as an Effect
 
 `gateway.rs` defines the outbound gateway command as an `Effect` whose outcome
-is a closed enum carrier (FLOWIP-120m). The carrier is transient `fx.perform`
-machinery; the journal records the named facts (`payment.authorized.v1`,
-`payment.declined.v1`) directly as the effect outcome group, with no persisted
-gateway-decision wrapper:
+is a closed enum carrier (FLOWIP-120m). The variants are the facts the journal
+records (`payment.authorized.v1`, `payment.declined.v1`) directly as the
+effect outcome group, with no persisted gateway-decision wrapper; the derive
+writes the marshalling and the carrier itself is transient `fx.perform`
+machinery:
 
 ```rust
-effect_outcome! {
-    pub enum AuthorizePaymentOutcome {
-        Authorized(PaymentAuthorized),
-        Declined(PaymentDeclined),
-    }
+#[derive(Debug, Clone, EffectOutcomeFacts)]
+pub enum AuthorizePaymentOutcome {
+    Authorized(PaymentAuthorized),
+    Declined(PaymentDeclined),
 }
 
 impl Effect for AuthorizePayment {

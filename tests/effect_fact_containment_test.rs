@@ -261,12 +261,10 @@ impl TypedPayload for ColliderB {
     const EVENT_TYPE: &'static str = "containment.collide";
 }
 
-obzenflow_core::effect_outcome! {
-    #[derive(Clone, Debug)]
-    enum CollidingOutcome {
-        A(ColliderA),
-        B(ColliderB),
-    }
+#[derive(Clone, Debug, obzenflow_core::EffectOutcomeFacts)]
+enum CollidingOutcome {
+    A(ColliderA),
+    B(ColliderB),
 }
 
 #[derive(Clone, Debug)]

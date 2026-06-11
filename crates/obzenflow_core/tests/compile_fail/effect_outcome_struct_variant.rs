@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use obzenflow_core::{effect_outcome, TypedPayload};
+use obzenflow_core::{EffectOutcomeFacts, TypedPayload};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -12,11 +12,9 @@ impl TypedPayload for FirstFact {
     const EVENT_TYPE: &'static str = "compile_fail.first";
 }
 
-effect_outcome! {
-    #[derive(Debug, Clone)]
-    pub enum StructVariant {
-        Present { fact: FirstFact },
-    }
+#[derive(Debug, Clone, EffectOutcomeFacts)]
+pub enum StructVariant {
+    Present { fact: FirstFact },
 }
 
 fn main() {}

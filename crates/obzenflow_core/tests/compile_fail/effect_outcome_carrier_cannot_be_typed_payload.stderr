@@ -1,15 +1,10 @@
 error[E0119]: conflicting implementations of trait `TypedFactSet` for type `WrapperAttempt`
-  --> tests/compile_fail/effect_outcome_carrier_cannot_be_typed_payload.rs:19:1
+  --> tests/compile_fail/effect_outcome_carrier_cannot_be_typed_payload.rs:19:48
    |
-19 | / effect_outcome! {
-20 | |     #[derive(Debug, Clone, Serialize, Deserialize)]
-21 | |     pub enum WrapperAttempt {
-22 | |         Present(FirstFact),
-23 | |     }
-24 | | }
-   | |_^
+19 | #[derive(Debug, Clone, Serialize, Deserialize, EffectOutcomeFacts)]
+   |                                                ^^^^^^^^^^^^^^^^^^
    |
    = note: conflicting implementation in crate `obzenflow_core`:
            - impl<T> TypedFactSet for T
              where T: TypedPayload, T: Send, T: Sync, T: 'static;
-   = note: this error originates in the macro `effect_outcome` (in Nightly builds, run with -Z macro-backtrace for more info)
+   = note: this error originates in the derive macro `EffectOutcomeFacts` (in Nightly builds, run with -Z macro-backtrace for more info)

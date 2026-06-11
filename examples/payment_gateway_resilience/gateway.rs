@@ -21,7 +21,7 @@ use super::domain::{
 };
 use async_trait::async_trait;
 use obzenflow_adapters::effects::{CircuitBreakerOutcome, GuardedEffectExt};
-use obzenflow_core::{event::chain_event::ChainEvent, TypedPayload};
+use obzenflow_core::{event::chain_event::ChainEvent, EffectOutcomeFacts, TypedPayload};
 use obzenflow_runtime::effects::{
     Effect, EffectContext, EffectError, EffectSafety, Effects, IdempotencyKey,
 };
@@ -41,18 +41,16 @@ pub struct AuthorizePayment {
     pub order: ValidatedOrder,
 }
 
-obzenflow_core::effect_outcome! {
-    /// Closed set of successful gateway authorization outcomes (FLOWIP-120m).
-    ///
-    /// The carrier is transient `fx.perform` machinery: the journal records
-    /// the named facts (`payment.authorized.v1`, `payment.declined.v1`)
-    /// directly as the effect outcome group, and the handler matches the
-    /// carrier exhaustively. There is no persisted gateway-decision wrapper.
-    #[derive(Debug, Clone)]
-    pub enum AuthorizePaymentOutcome {
-        Authorized(PaymentAuthorized),
-        Declined(PaymentDeclined),
-    }
+/// Closed set of successful gateway authorization outcomes (FLOWIP-120m).
+///
+/// The variants are the facts the journal records (`payment.authorized.v1`,
+/// `payment.declined.v1`); the derive writes the marshalling. The carrier
+/// itself is transient `fx.perform` machinery the handler matches
+/// exhaustively. There is no persisted gateway-decision wrapper.
+#[derive(Debug, Clone, EffectOutcomeFacts)]
+pub enum AuthorizePaymentOutcome {
+    Authorized(PaymentAuthorized),
+    Declined(PaymentDeclined),
 }
 
 #[async_trait]
