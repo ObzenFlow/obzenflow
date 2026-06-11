@@ -3099,41 +3099,6 @@ fn map_system_event_to_sse(
                 )
             }
         },
-        SystemEventType::ContractOverrideByPolicy {
-            upstream,
-            reader,
-            selected_event_type,
-            feed_role,
-            contract_name,
-            original_cause,
-            policy,
-        } => {
-            let mut data = json!({
-                "system_event_type": "contract_override_by_policy",
-                "upstream_stage_id": upstream.to_string(),
-                "reader_stage_id": reader.to_string(),
-                "contract_name": contract_name,
-                "original_cause": original_cause,
-                "policy": policy,
-                "timestamp_ms": event.timestamp,
-            });
-            if let Some(selected_event_type) = selected_event_type {
-                data["selected_event_type"] = serde_json::json!(selected_event_type);
-            }
-            if let Some(feed_role) = feed_role {
-                data["feed_role"] = serde_json::json!(feed_role);
-            }
-            if let Some(vc) = &vector_clock_value {
-                data["vector_clock"] = vc.clone();
-            }
-
-            Some(
-                SseEvent::default()
-                    .id(id_str)
-                    .event("contract_override_by_policy")
-                    .data(data.to_string()),
-            )
-        }
         // FLOWIP-093a: keep system-level hosted-surface snapshot facts out of the SSE stream
         // by default to avoid turning /api/flow/events into a high-volume metrics pipe.
         SystemEventType::HttpSurfaceSnapshot { .. } => None,

@@ -3,6 +3,7 @@
 // https://obzenflow.dev
 
 use async_trait::async_trait;
+use obzenflow_adapters::effects::{CircuitBreakerOutcome, GuardedEffectExt};
 use obzenflow_adapters::middleware::control::circuit_breaker::{CircuitBreakerBuilder, OpenPolicy};
 use obzenflow_adapters::middleware::RateLimiterBuilder;
 use obzenflow_core::{
@@ -753,6 +754,58 @@ fn build_breaker_fallback_flow(
             effectful |> collector;
         }
     }
+}
+
+fn build_skip_policy_breaker_flow(
+    journal_base: PathBuf,
+    calls: Arc<AtomicUsize>,
+    outputs: Arc<Mutex<Vec<ReplayOutput>>>,
+) -> FlowDefinition {
+    flow! {
+        name: "effect_skip_policy_rejected",
+        journals: disk_journals(journal_base),
+        middleware: [],
+
+        stages: {
+            inputs = source!(ReplayInput => ReplaySource::new());
+            effectful = effectful_transform!(
+                ReplayInput -> { ReplayOutput, ReplayEffectValue } => FallbackTransform { calls },
+                effects: [AlwaysFailingEffect],
+                middleware: [
+                CircuitBreakerBuilder::new(1)
+                    .open_policy(OpenPolicy::Skip)
+                    .build()
+            ]);
+            collector = sink!(ReplayOutput => CollectSink { outputs });
+        },
+
+        topology: {
+            inputs |> effectful;
+            effectful |> collector;
+        }
+    }
+}
+
+#[tokio::test]
+async fn open_policy_skip_is_rejected_on_effectful_stages() {
+    let _guard = effect_replay_test_guard().await;
+    let temp = tempfile::tempdir().expect("tempdir");
+    let journal_base = temp.path().join("journals");
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let outputs = Arc::new(Mutex::new(Vec::new()));
+
+    let err = FlowApplication::builder()
+        .with_cli_args(["obzenflow"])
+        .run_async(build_skip_policy_breaker_flow(journal_base, calls, outputs))
+        .await
+        .expect_err("OpenPolicy::Skip on an effectful stage must fail the build");
+
+    let message = err.to_string();
+    assert!(
+        message.contains("silently drops events at the effect boundary"),
+        "expected the FLOWIP-120h truncation rejection, got: {message}"
+    );
 }
 
 fn build_stateful_flow(
@@ -2195,5 +2248,268 @@ async fn flow_supplied_registry_dispatches_transactional_effect_through_port() {
             value: 1,
             effect_value: 1_001
         }]
+    );
+}
+
+// ---------------------------------------------------------------------------
+// FLOWIP-120h: typed circuit-breaker outcomes through the guarded wrapper
+// ---------------------------------------------------------------------------
+
+/// Marker outputs so sink-level equality proves which branch each input took,
+/// live and replay alike.
+const GUARDED_REJECTED_MARKER: u64 = 7_777;
+const GUARDED_FAILED_MARKER: u64 = 9_999;
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct ReplayFallback {
+    effect_value: u64,
+}
+
+impl TypedPayload for ReplayFallback {
+    const EVENT_TYPE: &'static str = "effect_replay.fallback";
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct ReplayRejected {
+    value: u64,
+    reason: String,
+}
+
+impl TypedPayload for ReplayRejected {
+    const EVENT_TYPE: &'static str = "effect_replay.rejected";
+}
+
+#[derive(Clone, Debug)]
+struct GuardedTransform {
+    calls: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl EffectfulTransformHandler for GuardedTransform {
+    type Input = ReplayInput;
+
+    async fn process(&self, input: ReplayInput, fx: &mut Effects) -> Result<(), HandlerError> {
+        let outcome = fx
+            .perform(
+                AlwaysFailingEffect {
+                    value: input.value,
+                    calls: self.calls.clone(),
+                }
+                .guarded::<ReplayFallback, ReplayRejected>(),
+            )
+            .await;
+
+        let output = match outcome {
+            Ok(CircuitBreakerOutcome::Primary(value)) => ReplayOutput {
+                value: input.value,
+                effect_value: value.effect_value,
+            },
+            Ok(CircuitBreakerOutcome::Fallback(fallback)) => ReplayOutput {
+                value: input.value,
+                effect_value: fallback.effect_value,
+            },
+            Ok(CircuitBreakerOutcome::Rejected(rejected)) => ReplayOutput {
+                value: rejected.value,
+                effect_value: GUARDED_REJECTED_MARKER,
+            },
+            Err(_) => ReplayOutput {
+                value: input.value,
+                effect_value: GUARDED_FAILED_MARKER,
+            },
+        };
+
+        fx.emit(output)
+            .await
+            .map_err(|e| HandlerError::Other(e.to_string()))?;
+        Ok(())
+    }
+
+    fn stage_logic_version(&self) -> &str {
+        "effect-replay-guarded-v1"
+    }
+}
+
+fn build_typed_rejection_flow(
+    journal_base: PathBuf,
+    calls: Arc<AtomicUsize>,
+    outputs: Arc<Mutex<Vec<ReplayOutput>>>,
+) -> FlowDefinition {
+    flow! {
+        name: "effect_replay_typed_rejection",
+        journals: disk_journals(journal_base),
+        middleware: [],
+
+        stages: {
+            inputs = source!(ReplayInput => ReplaySource::new());
+            effectful = effectful_transform!(
+                ReplayInput -> { ReplayOutput, ReplayEffectValue, ReplayFallback, ReplayRejected } => GuardedTransform { calls },
+                effects: [AlwaysFailingEffect],
+                output_middleware: [
+                CircuitBreakerBuilder::new(1)
+                    .open_policy(OpenPolicy::FailFast)
+                    .with_typed_fallback::<ReplayInput, ReplayFallback, _>(|input| ReplayFallback {
+                        effect_value: input.value + 900,
+                    })
+                    .typed_outcome_with::<ReplayInput, ReplayRejected, _>(|input, reason| ReplayRejected {
+                        value: input.value,
+                        reason: format!("{reason:?}"),
+                    })
+                    .build_typed::<ReplayFallback, ReplayRejected>()
+            ],
+                middleware: []);
+            collector = sink!(ReplayOutput => CollectSink { outputs });
+        },
+
+        topology: {
+            inputs |> effectful;
+            effectful |> collector;
+        }
+    }
+}
+
+fn build_multi_effect_typed_outcome_flow(
+    journal_base: PathBuf,
+    calls: Arc<AtomicUsize>,
+    outputs: Arc<Mutex<Vec<ReplayOutput>>>,
+) -> FlowDefinition {
+    flow! {
+        name: "effect_replay_multi_effect_typed",
+        journals: disk_journals(journal_base),
+        middleware: [],
+
+        stages: {
+            inputs = source!(ReplayInput => ReplaySource::new());
+            effectful = effectful_transform!(
+                ReplayInput -> { ReplayOutput, ReplayEffectValue, ReplayFallback, ReplayRejected } => GuardedTransform { calls },
+                effects: [AlwaysFailingEffect, CountingEffect],
+                output_middleware: [
+                CircuitBreakerBuilder::new(1)
+                    .open_policy(OpenPolicy::FailFast)
+                    .with_typed_fallback::<ReplayInput, ReplayFallback, _>(|input| ReplayFallback {
+                        effect_value: input.value + 900,
+                    })
+                    .typed_outcome_with::<ReplayInput, ReplayRejected, _>(|input, reason| ReplayRejected {
+                        value: input.value,
+                        reason: format!("{reason:?}"),
+                    })
+                    .build_typed::<ReplayFallback, ReplayRejected>()
+            ],
+                middleware: []);
+            collector = sink!(ReplayOutput => CollectSink { outputs });
+        },
+
+        topology: {
+            inputs |> effectful;
+            effectful |> collector;
+        }
+    }
+}
+
+/// FLOWIP-120h two-regime rule, typed side: with a typed-outcome breaker, a
+/// FailFast rejection synthesizes the author-named rejection fact, the guarded
+/// carrier decodes it as `Ok(Rejected)`, the input completes, and strict
+/// replay reconstructs the same branch per input with zero effect executions.
+/// The first input's genuine effect failure stays an `Err` recorded under the
+/// cursor, replayed deterministically.
+#[tokio::test]
+async fn typed_rejection_branch_completes_inputs_and_replays_without_execution() {
+    let _guard = effect_replay_test_guard().await;
+    let temp = tempfile::tempdir().expect("tempdir");
+    let journal_base = temp.path().join("journals");
+
+    let live_calls = Arc::new(AtomicUsize::new(0));
+    let live_outputs = Arc::new(Mutex::new(Vec::new()));
+    FlowApplication::builder()
+        .with_cli_args(["obzenflow"])
+        .run_async(build_typed_rejection_flow(
+            journal_base.clone(),
+            live_calls.clone(),
+            live_outputs.clone(),
+        ))
+        .await
+        .expect("live flow should complete");
+
+    assert_eq!(
+        live_calls.load(Ordering::SeqCst),
+        1,
+        "only the first effect should execute before the breaker opens"
+    );
+    let live_domain_outputs = live_outputs.lock().expect("outputs lock poisoned").clone();
+    assert_eq!(
+        live_domain_outputs,
+        vec![
+            ReplayOutput {
+                value: 1,
+                effect_value: GUARDED_FAILED_MARKER
+            },
+            ReplayOutput {
+                value: 2,
+                effect_value: GUARDED_REJECTED_MARKER
+            },
+            ReplayOutput {
+                value: 3,
+                effect_value: GUARDED_REJECTED_MARKER
+            },
+        ],
+        "rejected inputs must complete through the typed Rejected branch"
+    );
+
+    let archive_dir = latest_run_dir(&journal_base);
+    let replay_calls = Arc::new(AtomicUsize::new(0));
+    let replay_outputs = Arc::new(Mutex::new(Vec::new()));
+    FlowApplication::builder()
+        .with_cli_args(vec![
+            OsString::from("obzenflow"),
+            OsString::from("--replay-from"),
+            archive_dir.as_os_str().to_os_string(),
+        ])
+        .run_async(build_typed_rejection_flow(
+            journal_base.clone(),
+            replay_calls.clone(),
+            replay_outputs.clone(),
+        ))
+        .await
+        .expect("replay flow should complete");
+
+    assert_eq!(
+        replay_calls.load(Ordering::SeqCst),
+        0,
+        "strict replay must not execute effects"
+    );
+    assert_eq!(
+        replay_outputs
+            .lock()
+            .expect("outputs lock poisoned")
+            .clone(),
+        live_domain_outputs,
+        "strict replay must reconstruct the same branch for every input"
+    );
+}
+
+/// Until FLOWIP-120c locks per-effect policy scope, typed-outcome middleware
+/// on a multi-effect stage is rejected at build time.
+#[tokio::test]
+async fn typed_outcome_middleware_is_rejected_on_multi_effect_stages() {
+    let _guard = effect_replay_test_guard().await;
+    let temp = tempfile::tempdir().expect("tempdir");
+    let journal_base = temp.path().join("journals");
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let outputs = Arc::new(Mutex::new(Vec::new()));
+
+    let err = FlowApplication::builder()
+        .with_cli_args(["obzenflow"])
+        .run_async(build_multi_effect_typed_outcome_flow(
+            journal_base,
+            calls,
+            outputs,
+        ))
+        .await
+        .expect_err("typed-outcome middleware on a multi-effect stage must fail the build");
+
+    let message = err.to_string();
+    assert!(
+        message.contains("limited to single-effect stages"),
+        "expected the FLOWIP-120h multi-effect rejection, got: {message}"
     );
 }

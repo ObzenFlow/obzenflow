@@ -459,6 +459,7 @@ async fn dispatch_data_event<
             effect_runtime_mode: ctx.effect_runtime_mode,
             effect_ports: ctx.effect_ports.clone(),
             effect_declarations: ctx.effect_declarations.clone(),
+            synthesized_outcomes: Vec::new(),
             output_contract: StageOutputContract::empty(),
             backpressure_writer: BackpressureWriter::disabled(),
             emit_enabled: false,

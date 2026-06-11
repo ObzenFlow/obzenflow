@@ -10,9 +10,7 @@
 use crate::event::context::StageType;
 use crate::event::observability::HttpSurfaceRouteMetricsSnapshot;
 use crate::event::status::processing_status::ErrorKind;
-use crate::event::system_event::{
-    ContractName, ContractOverridePolicy, ContractResultStatusLabel, SystemFeedRole,
-};
+use crate::event::system_event::{ContractName, ContractResultStatusLabel, SystemFeedRole};
 use crate::event::types::EventType;
 use crate::id::{FlowId, StageId};
 use crate::metrics::Percentile;
@@ -269,12 +267,6 @@ pub struct ContractMetricViolationKey {
     pub cause: ContractViolationCauseLabel,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct ContractMetricOverrideKey {
-    pub edge: ContractMetricEdgeKey,
-    pub policy: ContractOverridePolicy,
-}
-
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ContractMetricsSnapshot {
     /// Contract results by contract edge and status.
@@ -282,9 +274,6 @@ pub struct ContractMetricsSnapshot {
 
     /// Contract violations by contract edge and stable cause label.
     pub violations_total: HashMap<ContractMetricViolationKey, u64>,
-
-    /// Contract overrides by contract edge and policy.
-    pub overrides_total: HashMap<ContractMetricOverrideKey, u64>,
 
     /// Latest reader sequence per contract edge.
     pub reader_seq: HashMap<ContractMetricEdgeKey, u64>,

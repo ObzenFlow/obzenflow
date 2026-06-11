@@ -190,6 +190,7 @@ impl Effects {
         E: Effect,
     {
         let declaration = self.ctx.effect_declaration(E::EFFECT_TYPE)?;
+        self.validate_typed_outcome_coordination::<E>()?;
         let effect_ordinal = self.reserve_effect_ordinal()?;
 
         let descriptor = descriptor_for_effect(
@@ -262,11 +263,33 @@ impl Effects {
             } = boundary.before_effect(&self.ctx.parent.event);
             match action {
                 EffectBoundaryAction::Continue => Some(context),
-                EffectBoundaryAction::Skip(results) => {
+                EffectBoundaryAction::Skip { results, source } => {
                     if results.is_empty() {
-                        return Err(EffectError::Execution(
-                            "effect boundary skipped without fallback output facts".to_string(),
-                        ));
+                        // An empty skip must still record an outcome under the
+                        // effect cursor; otherwise strict replay of this input
+                        // fails with MissingRecordedEffect, a false corruption
+                        // signal for a rejection the live run made deliberately.
+                        self.ctx.push_boundary_control_events(control_events);
+                        let err = EffectError::BoundaryRejected {
+                            rejected_by: EffectFailureSource::new("effect_boundary"),
+                            code: EffectFailureCode::new("skip_without_facts"),
+                            message: "effect boundary skipped without fallback output facts"
+                                .to_string(),
+                            retry: RetryDisposition::NotRetryable,
+                        };
+                        self.append_record(EffectRecord {
+                            cursor,
+                            descriptor_hash,
+                            descriptor,
+                            outcome: EffectOutcomePayload::Failed {
+                                error_type: err.error_type(),
+                                error_message: err.error_message(),
+                                retry: err.retry_disposition(),
+                                cause: err.failure_cause(),
+                            },
+                        })
+                        .await?;
+                        return Err(err);
                     }
                     let facts = results
                         .iter()
@@ -282,14 +305,21 @@ impl Effects {
                     self.ctx.push_boundary_control_events(control_events);
                     let output =
                         E::Output::try_from_facts(&facts).map_err(effect_fact_set_error)?;
-                    self.append_success_facts(cursor, descriptor_hash, descriptor, facts)
+                    let origin = Some(EffectFactOrigin::MiddlewareSynthesized {
+                        label: source.unwrap_or_else(|| "effect_boundary".to_string()),
+                    });
+                    self.append_success_facts(cursor, descriptor_hash, descriptor, facts, origin)
                         .await?;
                     return Ok(output);
                 }
-                EffectBoundaryAction::Abort => {
+                EffectBoundaryAction::Abort(reason) => {
                     self.ctx.push_boundary_control_events(control_events);
-                    let err =
-                        EffectError::Execution("effect boundary aborted execution".to_string());
+                    let err = EffectError::BoundaryRejected {
+                        rejected_by: reason.cause.source.clone(),
+                        code: reason.cause.code.clone(),
+                        message: reason.message.clone(),
+                        retry: reason.retry,
+                    };
                     self.append_record(EffectRecord {
                         cursor,
                         descriptor_hash,
@@ -297,7 +327,8 @@ impl Effects {
                         outcome: EffectOutcomePayload::Failed {
                             error_type: err.error_type(),
                             error_message: err.error_message(),
-                            retry: err.retry_disposition(),
+                            retry: reason.retry,
+                            cause: Some(reason.cause),
                         },
                     })
                     .await?;
@@ -347,8 +378,14 @@ impl Effects {
                     );
                     self.ctx.push_boundary_control_events(control_events);
                 }
-                self.append_success_facts(cursor, descriptor_hash, descriptor, facts)
-                    .await?;
+                self.append_success_facts(
+                    cursor,
+                    descriptor_hash,
+                    descriptor,
+                    facts,
+                    Some(EffectFactOrigin::Effect),
+                )
+                .await?;
                 Ok(output)
             }
             Err(err) => {
@@ -374,10 +411,76 @@ impl Effects {
                         error_type: err.error_type(),
                         error_message: err.error_message(),
                         retry: err.retry_disposition(),
+                        cause: err.failure_cause(),
                     },
                 })
                 .await?;
                 Err(err)
+            }
+        }
+    }
+
+    /// FLOWIP-120h: validate guarded-wrapper coordination before any I/O.
+    ///
+    /// A carrier with synthesized branch facts (e.g. `CircuitBreakerOutcome`)
+    /// requires a matching typed-outcome middleware registration, and a stage
+    /// that registers typed-outcome middleware requires the guarded wrapper,
+    /// so a breaker branch always has a carrier that can decode it. The
+    /// transactional path runs before the effect boundary, so it cannot be
+    /// guarded.
+    fn validate_typed_outcome_coordination<E>(&self) -> Result<(), EffectError>
+    where
+        E: Effect,
+    {
+        let synthesized = E::Output::synthesized_fact_types();
+        let registration = self.ctx.synthesized_outcome_registration(E::EFFECT_TYPE);
+
+        match (synthesized.is_empty(), registration) {
+            (true, None) => Ok(()),
+            (true, Some(registration)) => Err(EffectError::TypedOutcomeCoordination {
+                stage_key: self.ctx.stage_key.clone(),
+                effect_type: E::EFFECT_TYPE.to_string(),
+                message: format!(
+                    "stage registers typed-outcome middleware '{}'; perform the guarded \
+                     wrapper so its branch facts can decode",
+                    registration.source_label,
+                ),
+            }),
+            (false, None) => Err(EffectError::TypedOutcomeCoordination {
+                stage_key: self.ctx.stage_key.clone(),
+                effect_type: E::EFFECT_TYPE.to_string(),
+                message: "guarded effect performed on a stage with no typed-outcome \
+                          middleware registration; declare the breaker in the \
+                          output_middleware: lane or perform the inner effect directly"
+                    .to_string(),
+            }),
+            (false, Some(registration)) => {
+                if matches!(E::SAFETY, EffectSafety::Transactional) {
+                    return Err(EffectError::TypedOutcomeCoordination {
+                        stage_key: self.ctx.stage_key.clone(),
+                        effect_type: E::EFFECT_TYPE.to_string(),
+                        message: "transactional effects cannot be guarded; the transactional \
+                                  path runs before the effect boundary"
+                            .to_string(),
+                    });
+                }
+                for fact_type in &registration.fact_types {
+                    if !synthesized
+                        .iter()
+                        .any(|member| member.event_type == fact_type.event_type)
+                    {
+                        return Err(EffectError::TypedOutcomeCoordination {
+                            stage_key: self.ctx.stage_key.clone(),
+                            effect_type: E::EFFECT_TYPE.to_string(),
+                            message: format!(
+                                "registered branch fact '{}' is not a member of the guarded \
+                                 carrier's synthesized fact set",
+                                fact_type.event_type,
+                            ),
+                        });
+                    }
+                }
+                Ok(())
             }
         }
     }
@@ -606,6 +709,7 @@ impl Effects {
         descriptor_hash: EffectDescriptorHash,
         descriptor: EffectDescriptor,
         facts: Vec<TypedFact>,
+        origin: Option<EffectFactOrigin>,
     ) -> Result<(), EffectError> {
         if facts.is_empty() {
             return Err(EffectError::Execution(
@@ -629,6 +733,7 @@ impl Effects {
             descriptor,
             facts,
             output_ordinal,
+            origin,
         )
         .await?;
         self.routed_output_fact_count = self
@@ -648,7 +753,13 @@ impl Effects {
     ) -> Result<(), EffectError> {
         match materialization {
             EffectRecordMaterialization::DomainFacts(facts) => {
-                self.append_success_facts(cursor, descriptor_hash, descriptor, facts)
+                // Re-derive the branch origin from the typed-outcome
+                // registrations: in typed mode branch facts are disjoint from
+                // effect facts by build validation, so this is lossless. The
+                // same-output compatibility mode keeps the marker only on the
+                // original live journal (documented FLOWIP-120h limitation).
+                let origin = self.derive_replayed_origin(&facts);
+                self.append_success_facts(cursor, descriptor_hash, descriptor, facts, origin)
                     .await
             }
             EffectRecordMaterialization::FrameworkRecords(records) => {
@@ -658,5 +769,22 @@ impl Effects {
                 Ok(())
             }
         }
+    }
+
+    fn derive_replayed_origin(&self, facts: &[TypedFact]) -> Option<EffectFactOrigin> {
+        let synthesized = self.ctx.synthesized_outcomes.iter().find(|registration| {
+            facts.iter().all(|fact| {
+                registration
+                    .fact_types
+                    .iter()
+                    .any(|branch| branch.event_type == fact.event_type)
+            })
+        });
+        Some(match synthesized {
+            Some(registration) => EffectFactOrigin::MiddlewareSynthesized {
+                label: registration.source_label.clone(),
+            },
+            None => EffectFactOrigin::Effect,
+        })
     }
 }

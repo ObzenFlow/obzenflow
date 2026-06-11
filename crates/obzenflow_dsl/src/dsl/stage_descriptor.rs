@@ -11,7 +11,9 @@ use crate::dsl::typing::StageTypingMetadata;
 use crate::dsl::StageCreationResult;
 use crate::stage_handle_adapter::StageHandleAdapter;
 use async_trait::async_trait;
-use obzenflow_adapters::middleware::control::ControlMiddlewareAggregator;
+use obzenflow_adapters::middleware::control::{
+    CircuitBreakerSourceStrategy, ControlMiddlewareAggregator,
+};
 use obzenflow_adapters::middleware::{
     validate_middleware_safety, AsyncFiniteSourceHandlerExt, AsyncInfiniteSourceHandlerExt,
     AsyncTransformHandlerExt, ControlMiddlewareRole, FiniteSourceHandlerExt,
@@ -22,7 +24,10 @@ use obzenflow_adapters::middleware::{
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::{StageId, WriterId};
 use obzenflow_runtime::{
-    effects::{EffectDeclaration, EffectPortRegistry, EffectSafety, IdempotencyKeyPolicy},
+    effects::{
+        EffectDeclaration, EffectPortRegistry, EffectSafety, IdempotencyKeyPolicy,
+        SynthesizedOutcomeRegistration,
+    },
     metrics::instrumentation::{InstrumentationConfig, StageInstrumentation},
     stages::StageResources,
 };
@@ -52,7 +57,6 @@ use obzenflow_runtime::{
                 AsyncInfiniteSourceBuilder, InfiniteSourceBuilder, InfiniteSourceConfig,
                 InfiniteSourceEvent, InfiniteSourceState,
             },
-            strategies::CircuitBreakerSourceStrategy,
         },
         stateful::{StatefulBuilder, StatefulConfig, StatefulEvent, StatefulState},
         transform::{
@@ -221,6 +225,18 @@ pub trait StageDescriptor: Send + Sync {
     }
 
     fn effect_declarations(&self) -> Vec<EffectDeclaration> {
+        Vec::new()
+    }
+
+    /// Typed-outcome middleware registrations from the `output_middleware:`
+    /// lane (FLOWIP-120h). Default: none.
+    fn synthesized_outcome_registrations(&self) -> Vec<SynthesizedOutcomeRegistration> {
+        Vec::new()
+    }
+
+    /// Configuration errors detected by the `output_middleware:` lane while
+    /// branch types were nameable. Default: none.
+    fn type_shaping_config_errors(&self) -> Vec<String> {
         Vec::new()
     }
 
@@ -1226,6 +1242,12 @@ pub struct EffectfulTransformDescriptor<H: EffectfulTransformHandler + 'static> 
     pub handler: H,
     pub effects: Vec<EffectDeclaration>,
     pub middleware: Vec<Box<dyn MiddlewareFactory>>,
+    /// Typed-outcome registrations from the `output_middleware:` lane
+    /// (FLOWIP-120h). Their factories are already in `middleware`.
+    pub synthesized_outcomes: Vec<SynthesizedOutcomeRegistration>,
+    /// Configuration errors detected by the lane while branch types were
+    /// nameable; surfaced as flow build failures.
+    pub type_shaping_errors: Vec<String>,
 }
 
 #[async_trait]
@@ -1256,6 +1278,14 @@ impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
         self.effects.clone()
     }
 
+    fn synthesized_outcome_registrations(&self) -> Vec<SynthesizedOutcomeRegistration> {
+        self.synthesized_outcomes.clone()
+    }
+
+    fn type_shaping_config_errors(&self) -> Vec<String> {
+        self.type_shaping_errors.clone()
+    }
+
     fn stage_middleware_names(&self) -> Vec<String> {
         self.middleware
             .iter()
@@ -1277,6 +1307,7 @@ impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
         let effect_declarations = self.effects.clone();
         validate_effect_declarations(&self.name, &effect_declarations, &resources.effect_ports)?;
         resources.effect_declarations = effect_declarations;
+        resources.synthesized_outcomes = self.synthesized_outcomes.clone();
 
         for factory in &self.middleware {
             let validation_result =
@@ -2378,6 +2409,7 @@ mod tests {
             idempotency_key_policy: IdempotencyKeyPolicy::NotRequired,
             required_ports: Vec::new(),
             transactional_executor: None,
+            output_fact_types: Vec::new(),
         };
 
         let err =
@@ -2726,6 +2758,7 @@ mod tests {
             effect_runtime_mode: obzenflow_runtime::effects::EffectRuntimeMode::Live,
             effect_ports: obzenflow_runtime::effects::EffectPortRegistry::new(),
             effect_declarations: Vec::new(),
+            synthesized_outcomes: Vec::new(),
             deterministic_fan_in: false,
         };
 

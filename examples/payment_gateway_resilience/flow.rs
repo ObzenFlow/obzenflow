@@ -41,8 +41,9 @@
 //! decision was reached, so those orders go to manual review. See `README.md`.
 
 use super::domain::{
-    CustomerOrderPlaced, GatewayPaymentDecision, InvalidOrder, OrderCancelled,
-    PaymentAuthorizationUnavailable, PaymentAuthorized, PaymentDeclined, ValidatedOrder,
+    CustomerOrderPlaced, GatewayPaymentDecision, GatewayPaymentFallback, GatewayPaymentRejected,
+    InvalidOrder, OrderCancelled, PaymentAuthorizationUnavailable, PaymentAuthorized,
+    PaymentDeclined, ValidatedOrder,
 };
 use super::fixtures;
 use super::gateway::{self, AuthorizePayment, GatewayTransform};
@@ -51,7 +52,6 @@ use super::validation;
 use obzenflow::typed::sources as typed_sources;
 use obzenflow_adapters::middleware::circuit_breaker::{HalfOpenPolicy, OpenPolicy};
 use obzenflow_adapters::middleware::{backpressure, CircuitBreakerBuilder, RateLimiterBuilder};
-use obzenflow_core::CircuitBreakerContractMode;
 use obzenflow_dsl::{effectful_transform, flow, sink, source};
 use obzenflow_infra::journal::disk_journals;
 use std::num::NonZeroU32;
@@ -158,26 +158,46 @@ pub fn build_flow() -> obzenflow_dsl::FlowDefinition {
             // The circuit breaker is the live-run safety layer on top:
             //   - opens when >= 60% of the last 5 gateway calls fail,
             //   - also counts calls slower than 250ms toward opening,
-            //   - while open, emits a typed authorization-unavailable outcome
-            //     instead of calling the gateway (EmitFallback), with a single
-            //     half-open probe.
-            // BreakerAware keeps transport contracts green while the breaker is open.
+            //   - while open, synthesizes the named `GatewayPaymentFallback`
+            //     branch fact instead of calling the gateway (EmitFallback),
+            //     with a single half-open probe.
+            // The breaker is declared in the `output_middleware:` lane
+            // (FLOWIP-120h): its branch fact types are validated as arrow
+            // members at build time, and the handler performs the guarded
+            // wrapper so the branch is explicit in the type. Branch facts ride
+            // the effect cursor as recorded outcomes, so contracts stay strict
+            // with no breaker-aware compensation: every admitted input has a
+            // journaled outcome whether the gateway ran or the breaker
+            // synthesized it.
             authorize_payment = effectful_transform!(
                 ValidatedOrder -> {
                     GatewayPaymentDecision,
+                    GatewayPaymentFallback,
+                    GatewayPaymentRejected,
                     PaymentAuthorized,
                     PaymentDeclined,
                     OrderCancelled,
                     PaymentAuthorizationUnavailable
                 } => GatewayTransform,
                 effects: [AuthorizePayment],
-                middleware: [
+                output_middleware: [
                     CircuitBreakerBuilder::new(3)
                         .cooldown(std::time::Duration::from_secs(5))
                         .rate_based_over_last_n_calls(5, 0.6)
                         .slow_call(std::time::Duration::from_millis(250), 0.5)
-                        .with_typed_fallback::<ValidatedOrder, GatewayPaymentDecision, _>(|_order| GatewayPaymentDecision::AuthorizationUnavailable {
+                        .with_typed_fallback::<ValidatedOrder, GatewayPaymentFallback, _>(|order| GatewayPaymentFallback {
+                            order_id: order.order_id.clone(),
+                            customer_id: order.customer_id.clone(),
+                            amount_cents: order.amount_cents,
+                            phase: order.phase.clone(),
                             reason: "circuit breaker open".to_string(),
+                        })
+                        .typed_outcome_with::<ValidatedOrder, GatewayPaymentRejected, _>(|order, reason| GatewayPaymentRejected {
+                            order_id: order.order_id.clone(),
+                            customer_id: order.customer_id.clone(),
+                            amount_cents: order.amount_cents,
+                            phase: order.phase.clone(),
+                            reason: format!("{reason:?}"),
                         })
                         .with_failure_classifier(gateway::simulated_gateway_unavailability_counts_as_failure)
                         .open_policy(OpenPolicy::EmitFallback)
@@ -185,9 +205,9 @@ pub fn build_flow() -> obzenflow_dsl::FlowDefinition {
                             NonZeroU32::new(1).expect("permitted_probes must be non-zero"),
                             OpenPolicy::EmitFallback,
                         ))
-                        .with_contract_mode(CircuitBreakerContractMode::BreakerAware)
-                        .build()
-                ]
+                        .build_typed::<GatewayPaymentFallback, GatewayPaymentRejected>()
+                ],
+                middleware: []
             );
 
             // Paid-order sink: in production this is the boundary a shipping

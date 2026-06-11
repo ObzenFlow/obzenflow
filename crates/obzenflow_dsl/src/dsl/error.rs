@@ -117,6 +117,59 @@ pub enum FlowBuildError {
     UnspecifiedTypingOnApplicableSlot { stage_name: String, slot: String },
 
     #[error(
+        "Effectful stage '{stage_name}' carries middleware '{middleware_label}' whose '{policy}' \
+         policy silently drops events at the effect boundary. The handler awaits a value from \
+         `fx.perform`, so transport truncation has no coherent boundary behaviour; use \
+         `OpenPolicy::EmitFallback` with a typed fallback or `OpenPolicy::FailFast` instead \
+         (FLOWIP-120h)."
+    )]
+    MiddlewarePolicyIncompatibleWithEffectfulStage {
+        stage_name: String,
+        middleware_label: String,
+        policy: String,
+    },
+
+    #[error(
+        "Stage '{stage_name}' has a type-shaping middleware configuration error: {message} \
+         (FLOWIP-120h)."
+    )]
+    TypeShapingConfiguration { stage_name: String, message: String },
+
+    #[error(
+        "Stage '{stage_name}' declares typed-outcome middleware but has {effect_count} declared \
+         effects. Until FLOWIP-120c locks per-effect policy scope, typed-outcome middleware is \
+         limited to single-effect stages (FLOWIP-120h)."
+    )]
+    TypedOutcomeMiddlewareOnMultiEffectStage {
+        stage_name: String,
+        effect_count: usize,
+    },
+
+    #[error(
+        "Stage '{stage_name}': middleware '{middleware_label}' may author branch fact '{fact}', \
+         which is not a member of the stage output contract {contract}. Add it to the arrow \
+         (FLOWIP-120h corrected Option A: membership is enforced, never inferred)."
+    )]
+    MiddlewareContributedFactNotInContract {
+        stage_name: String,
+        middleware_label: String,
+        fact: String,
+        contract: String,
+    },
+
+    #[error(
+        "Stage '{stage_name}': effect '{effect_type}' may produce fact '{fact}', which is not a \
+         member of the stage output contract {contract}. Add it to the arrow (FLOWIP-120h \
+         producer-side containment check)."
+    )]
+    EffectFactNotInContract {
+        stage_name: String,
+        effect_type: String,
+        fact: String,
+        contract: String,
+    },
+
+    #[error(
         "Effectful stage '{stage_name}' is downstream of nondeterministic fan-in. \
          FLOWIP-095d auto-enables the canonical deterministic merge on fan-ins above \
          effectful stages, so this rejection means the order cannot be made stable: a \

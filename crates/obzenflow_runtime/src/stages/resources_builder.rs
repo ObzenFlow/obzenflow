@@ -251,6 +251,10 @@ pub struct StageResources {
     /// Descriptor-owned effect declarations available to replay-safe effect invocation.
     pub effect_declarations: Vec<EffectDeclaration>,
 
+    /// Typed-outcome middleware registrations from the `output_middleware:`
+    /// lane (FLOWIP-120h), validated against guarded performs before any I/O.
+    pub synthesized_outcomes: Vec<crate::effects::SynthesizedOutcomeRegistration>,
+
     /// Whether the flow build marked this stage as a deterministic fan-in
     /// orderer (FLOWIP-095d): a multi-inbound stage with an effectful
     /// descendant whose input delivery runs the canonical merge.
@@ -532,6 +536,7 @@ impl StageResourcesBuilder {
                 replay_archive: self.replay_archive.clone(),
                 effect_ports: self.effect_ports.clone(),
                 effect_declarations: Vec::new(),
+                synthesized_outcomes: Vec::new(),
                 deterministic_fan_in,
             };
 

@@ -124,21 +124,35 @@ impl Effect for AuthorizePayment {
 }
 ```
 
-The stage performs the effect, records the gateway decision as an unrouted
-effect outcome fact, and emits the named business fact that happened:
+The stage performs the effect through the guarded wrapper (FLOWIP-120h), so the
+circuit breaker's branches are explicit in the type rather than smuggled as a
+variant of the gateway's own decision. The recorded outcome group is the branch
+fact itself, reconstructed by event type on replay:
 
 ```rust
-let decision = fx.perform(AuthorizePayment { order }).await?;
-match decision {
-    GatewayPaymentDecision::Authorized { .. } => fx.emit(PaymentAuthorized { ... }).await?,
-    GatewayPaymentDecision::Declined { .. } => {
-        // Fact first, consequence second: the decline is the provenance,
-        // the derived cancellation is the order's fate.
-        fx.emit(PaymentDeclined { ... }).await?;
-        fx.emit(OrderCancelled { ... }).await?
+let outcome = fx
+    .perform(AuthorizePayment { order }.guarded::<GatewayPaymentFallback, GatewayPaymentRejected>())
+    .await;
+
+match outcome {
+    Ok(CircuitBreakerOutcome::Primary(decision)) => match decision {
+        GatewayPaymentDecision::Authorized { .. } => fx.emit(PaymentAuthorized { ... }).await?,
+        GatewayPaymentDecision::Declined { .. } => {
+            // Fact first, consequence second: the decline is the provenance,
+            // the derived cancellation is the order's fate.
+            fx.emit(PaymentDeclined { ... }).await?;
+            fx.emit(OrderCancelled { ... }).await?
+        }
+    },
+    Ok(CircuitBreakerOutcome::Fallback(fallback)) => {
+        // Breaker open: the gateway was never called, no decision exists.
+        fx.emit(PaymentAuthorizationUnavailable { ... }).await?
     }
-    GatewayPaymentDecision::AuthorizationUnavailable { .. } => {
-        // No decision was reached, so nothing is cancelled here.
+    Ok(CircuitBreakerOutcome::Rejected(rejected)) => {
+        fx.emit(PaymentAuthorizationUnavailable { ... }).await?
+    }
+    Err(err) => {
+        // Genuine gateway failure, recorded under the effect cursor.
         fx.emit(PaymentAuthorizationUnavailable { ... }).await?
     }
 }
@@ -226,10 +240,15 @@ replays exactly, without re-pulling inputs or re-firing side effects.
 ## 5. Resilience as the Second Layer
 
 While the live run is in progress, the gateway stage also carries a circuit
-breaker (`flow.rs`). During the scripted outage the breaker observes the failing
-effect boundary and opens. While open it emits a typed
-`PaymentAuthorizationUnavailable` fallback instead of calling the gateway, with a
-single half-open probe to test recovery.
+breaker, declared in the `output_middleware:` lane (`flow.rs`) so its branch
+fact types are validated as arrow members at build time. During the scripted
+outage the breaker observes the failing effect boundary and opens. While open
+it synthesizes the named `GatewayPaymentFallback` branch fact instead of
+calling the gateway, with a single half-open probe to test recovery. The
+handler maps that branch to `PaymentAuthorizationUnavailable` for manual
+review, and the journal records the group with a `middleware_synthesized`
+origin marker, so breaker activity is auditable without reason-string
+inspection.
 
 What to watch as it runs:
 

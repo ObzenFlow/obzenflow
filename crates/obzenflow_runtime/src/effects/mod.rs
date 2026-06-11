@@ -8,13 +8,16 @@ use async_trait::async_trait;
 use obzenflow_core::event::context::FlowContext;
 pub use obzenflow_core::event::payloads::effect_payload::{
     effect_outcome_group_id, framework_effect_event_type, is_framework_effect_event_type,
-    CanonicalInputHash, EffectCursor, EffectDescriptor, EffectDescriptorHash, EffectFactOwner,
-    EffectFailureKind, EffectInputPosition, EffectLabel, EffectOrdinal, EffectOutcomeGroupId,
-    EffectOutcomePayload, EffectProvenance, EffectRecord, EffectSchemaVersion, EffectStageKey,
-    EffectType, OutcomeFactOrdinal, RecordedFlowId, RetryDisposition, StageLogicVersion,
-    CAPTURE_EVENT_TYPE, EFFECT_RECORD_EVENT_TYPE,
+    CanonicalInputHash, EffectCursor, EffectDescriptor, EffectDescriptorHash, EffectFactOrigin,
+    EffectFactOwner, EffectFailureCause, EffectFailureCode, EffectFailureKind, EffectFailureSource,
+    EffectInputPosition, EffectLabel, EffectOrdinal, EffectOutcomeGroupId, EffectOutcomePayload,
+    EffectProvenance, EffectRecord, EffectSchemaVersion, EffectStageKey, EffectType,
+    OutcomeFactOrdinal, RecordedFlowId, RetryDisposition, StageLogicVersion, CAPTURE_EVENT_TYPE,
+    EFFECT_RECORD_EVENT_TYPE,
 };
-use obzenflow_core::event::schema::{TypedFact, TypedFactSet, TypedFactSetError, TypedPayload};
+use obzenflow_core::event::schema::{
+    TypedFact, TypedFactSet, TypedFactSetError, TypedFactType, TypedPayload,
+};
 use obzenflow_core::event::{ChainEventContent, ChainEventFactory, SystemEvent};
 use obzenflow_core::journal::{ArchiveStatus, Journal};
 use obzenflow_core::{ChainEvent, EventEnvelope, EventId, FlowId, StageId, WriterId};
@@ -51,10 +54,13 @@ mod runtime;
 mod tests;
 
 pub use boundary::{
-    EffectBoundaryAction, EffectBoundaryContext, EffectBoundaryMiddleware, EffectBoundaryStart,
+    EffectAbortReason, EffectBoundaryAction, EffectBoundaryContext, EffectBoundaryMiddleware,
+    EffectBoundaryStart,
 };
 pub use commit::EffectCommitHandle;
-pub use context::{EffectContext, EffectInvocationContext, EffectRuntimeMode};
+pub use context::{
+    EffectContext, EffectInvocationContext, EffectRuntimeMode, SynthesizedOutcomeRegistration,
+};
 pub use declaration::{
     Effect, EffectDeclaration, EffectSafety, IdempotencyKey, IdempotencyKeyPolicy,
     TransactionalEffectPort,

@@ -85,7 +85,7 @@ where
                     // Skip means don't accumulate this event
                     return;
                 }
-                MiddlewareAction::Abort => {
+                MiddlewareAction::Abort(_) => {
                     // Abort means don't accumulate this event
                     return;
                 }

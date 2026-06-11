@@ -118,6 +118,7 @@ where
             self.inner.descriptor.clone(),
             facts,
             self.inner.output_ordinal,
+            Some(EffectFactOrigin::Effect),
         )
         .await?;
 
@@ -145,6 +146,7 @@ where
                 error_type: error.error_type(),
                 error_message: error.error_message(),
                 retry: error.retry_disposition(),
+                cause: error.failure_cause(),
             },
             Some(error),
         )
@@ -230,6 +232,7 @@ pub(super) async fn append_domain_effect_success_facts(
     descriptor: EffectDescriptor,
     facts: Vec<TypedFact>,
     base_output_ordinal: EffectOutputOrdinal,
+    origin: Option<EffectFactOrigin>,
 ) -> Result<Vec<ChainEvent>, EffectError> {
     if facts.is_empty() {
         return Err(EffectError::Execution(
@@ -283,6 +286,7 @@ pub(super) async fn append_domain_effect_success_facts(
         );
         let mut provenance = EffectProvenance::from_record(&record, EffectFactOwner::User);
         provenance.outcome_fact_ordinal = Some(ordinal);
+        provenance.origin = origin.clone();
         event = event.with_effect_provenance(provenance);
 
         let committed_event = event.clone();

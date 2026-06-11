@@ -11,6 +11,7 @@
 #![doc = include_str!("../README.md")]
 
 pub mod ai;
+pub mod effects;
 pub mod middleware;
 pub mod monitoring;
 pub mod sinks;

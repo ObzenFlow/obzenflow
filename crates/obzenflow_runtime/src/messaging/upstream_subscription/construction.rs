@@ -460,7 +460,7 @@ where
                 .readers
                 .iter()
                 .map(|slot| {
-                    let stack = build_policy_stack_for_upstream(slot.stage_id, &control_middleware);
+                    let stack = build_policy_stack_for_upstream(slot.stage_id);
                     Some(stack)
                 })
                 .collect();

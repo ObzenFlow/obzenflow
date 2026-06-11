@@ -377,10 +377,12 @@ where
             error_type,
             error_message,
             retry,
+            cause,
         } => Err(EffectError::RecordedFailure {
             error_type: error_type.clone(),
             error_message: error_message.clone(),
             retry: *retry,
+            cause: cause.clone(),
         }),
     }
 }
@@ -393,10 +395,12 @@ pub(super) fn recorded_failure_from_outcome<T>(
             error_type,
             error_message,
             retry,
+            cause,
         } => Err(EffectError::RecordedFailure {
             error_type: error_type.clone(),
             error_message: error_message.clone(),
             retry: *retry,
+            cause: cause.clone(),
         }),
         _ => Err(EffectError::EffectProvenanceMismatch(
             "expected recorded effect failure".to_string(),

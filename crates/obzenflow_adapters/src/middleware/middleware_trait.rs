@@ -9,6 +9,7 @@
 
 use super::MiddlewareContext;
 use obzenflow_core::event::chain_event::ChainEvent;
+use obzenflow_core::event::{EffectFailureCode, EffectFailureSource, RetryDisposition};
 
 /// Trait for composable middleware that wraps Step behavior.
 ///
@@ -109,6 +110,20 @@ pub trait Middleware: Send + Sync {
     }
 }
 
+/// Structured cause attached to an abort so downstream seams, the effect
+/// boundary in particular, can record the rejection under the effect cursor
+/// instead of losing it as an unrecorded error.
+#[derive(Debug, Clone)]
+pub struct MiddlewareAbortCause {
+    /// Label of the rejecting middleware, e.g. "circuit_breaker".
+    pub source: EffectFailureSource,
+    /// Stable machine-readable reason, e.g. "rejected_circuit_open".
+    pub code: EffectFailureCode,
+    /// Human-readable detail for the recorded failure message.
+    pub message: String,
+    pub retry: RetryDisposition,
+}
+
 /// Actions that middleware can take during pre-processing
 #[derive(Debug, Clone)]
 pub enum MiddlewareAction {
@@ -116,8 +131,9 @@ pub enum MiddlewareAction {
     Continue,
     /// Skip the inner step and return these results instead
     Skip(Vec<ChainEvent>),
-    /// Abort processing entirely (returns empty results)
-    Abort,
+    /// Abort processing entirely (returns empty results). The optional cause
+    /// lets the effect boundary record a structured, replayable rejection.
+    Abort(Option<MiddlewareAbortCause>),
 }
 
 /// Actions that middleware can take when handling errors

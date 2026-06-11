@@ -71,7 +71,7 @@ impl FiniteSourceHandler for TimestampedSource {
         if current < self.total_events {
             Ok(Some(vec![ChainEventFactory::data_event(
                 self.writer_id,
-                "TimestampedEvent",
+                BenchEvent::versioned_event_type(),
                 json!({
                     "event_id": current,
                     "emit_time_nanos": SystemTime::now()

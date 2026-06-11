@@ -74,6 +74,22 @@ impl EffectContext {
     }
 }
 
+/// Registration made by type-shaping middleware declared in the
+/// `output_middleware:` macro lane (FLOWIP-120h). It names the branch fact
+/// types the middleware may synthesize at the effect boundary, so `perform`
+/// can validate guarded-wrapper coordination before any I/O.
+#[derive(Debug, Clone)]
+pub struct SynthesizedOutcomeRegistration {
+    /// The guarded effect's `EFFECT_TYPE`. `None` means the stage's single
+    /// declared effect (v1 rejects typed-outcome middleware on multi-effect
+    /// stages at build time).
+    pub effect_type: Option<String>,
+    /// Branch fact types only this middleware may author.
+    pub fact_types: Vec<TypedFactType>,
+    /// Label of the registering middleware, for error messages.
+    pub source_label: String,
+}
+
 pub struct EffectInvocationContext {
     pub flow_id: FlowId,
     pub stage_id: StageId,
@@ -91,6 +107,7 @@ pub struct EffectInvocationContext {
     pub effect_runtime_mode: EffectRuntimeMode,
     pub effect_ports: EffectPortRegistry,
     pub effect_declarations: Vec<EffectDeclaration>,
+    pub synthesized_outcomes: Vec<SynthesizedOutcomeRegistration>,
     pub output_contract: StageOutputContract,
     pub backpressure_writer: BackpressureWriter,
     pub emit_enabled: bool,
@@ -131,6 +148,19 @@ impl EffectInvocationContext {
                 stage_key: self.stage_key.clone(),
                 effect_type: effect_type.to_string(),
             })
+    }
+
+    /// The typed-outcome registration covering the given effect, if any.
+    pub fn synthesized_outcome_registration(
+        &self,
+        effect_type: &str,
+    ) -> Option<&SynthesizedOutcomeRegistration> {
+        self.synthesized_outcomes.iter().find(|registration| {
+            registration
+                .effect_type
+                .as_deref()
+                .is_none_or(|guarded| guarded == effect_type)
+        })
     }
 }
 

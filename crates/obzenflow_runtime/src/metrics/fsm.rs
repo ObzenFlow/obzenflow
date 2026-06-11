@@ -18,9 +18,8 @@ use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStat
 use obzenflow_core::event::{JournalEvent, WriterId};
 use obzenflow_core::id::{FlowId, StageId, SystemId};
 use obzenflow_core::metrics::{
-    ContractMetricEdgeKey, ContractMetricOverrideKey, ContractMetricResultKey,
-    ContractMetricViolationKey, ContractMetricsSnapshot, ContractViolationCauseLabel, Percentile,
-    StageMetadata,
+    ContractMetricEdgeKey, ContractMetricResultKey, ContractMetricViolationKey,
+    ContractMetricsSnapshot, ContractViolationCauseLabel, Percentile, StageMetadata,
 };
 use obzenflow_core::time::MetricsDuration;
 use obzenflow_core::web::HttpMethod;
@@ -1387,32 +1386,6 @@ impl FsmAction for MetricsAggregatorAction {
                                 .or_insert(0);
                             *gauge = (*gauge).max(seq.0);
                         }
-                    }
-                    obzenflow_core::event::SystemEventType::ContractOverrideByPolicy {
-                        upstream,
-                        reader,
-                        selected_event_type,
-                        feed_role,
-                        contract_name,
-                        policy,
-                        ..
-                    } => {
-                        let key = ContractMetricOverrideKey {
-                            edge: ContractMetricEdgeKey {
-                                upstream: *upstream,
-                                downstream: *reader,
-                                contract: contract_name.clone(),
-                                selected_event_type: selected_event_type.clone(),
-                                feed_role: *feed_role,
-                            },
-                            policy: *policy,
-                        };
-                        let counter = store
-                            .contract_metrics
-                            .overrides_total
-                            .entry(key)
-                            .or_insert(0);
-                        *counter = (*counter).saturating_add(1);
                     }
                     obzenflow_core::event::SystemEventType::EdgeLiveness {
                         upstream,

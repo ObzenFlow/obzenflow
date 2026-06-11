@@ -99,6 +99,7 @@ mod context;
 mod context_keys;
 mod function;
 mod hints;
+pub mod type_shaping;
 
 // Middleware categories
 pub mod ai;
@@ -117,7 +118,9 @@ pub use middleware_factory::{
     MiddlewareOverrideKey, MiddlewarePlanContribution, TopologyMiddlewareConfigSlot,
 };
 pub use middleware_safety::MiddlewareSafety;
-pub use middleware_trait::{ErrorAction, Middleware, MiddlewareAction, SourceMiddlewarePhase};
+pub use middleware_trait::{
+    ErrorAction, Middleware, MiddlewareAbortCause, MiddlewareAction, SourceMiddlewarePhase,
+};
 
 // Handler-specific exports
 pub use join_middleware::{JoinHandlerMiddlewareExt, JoinMiddlewareBuilder, MiddlewareJoin};
@@ -142,6 +145,7 @@ pub use context::MiddlewareContext;
 pub use function::{middleware_fn, FnMiddleware};
 pub use hints::{Attempts, BackoffKind, BatchingHint, MiddlewareHints, RetryHint};
 pub use observability::timing::TimingMiddleware;
+pub use type_shaping::TypeShapingMiddleware;
 
 // Control middleware
 pub use control::{

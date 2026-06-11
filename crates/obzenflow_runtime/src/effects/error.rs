@@ -30,6 +30,24 @@ pub enum EffectError {
         error_type: EffectFailureKind,
         error_message: String,
         retry: RetryDisposition,
+        cause: Option<EffectFailureCause>,
+    },
+
+    #[error("effect rejected at boundary by {rejected_by}: {code}: {message}")]
+    BoundaryRejected {
+        rejected_by: EffectFailureSource,
+        code: EffectFailureCode,
+        message: String,
+        retry: RetryDisposition,
+    },
+
+    #[error(
+        "typed-outcome coordination error on stage '{stage_key}' for effect '{effect_type}': {message}"
+    )]
+    TypedOutcomeCoordination {
+        stage_key: String,
+        effect_type: String,
+        message: String,
     },
 
     #[error("effect provenance mismatch: {0}")]
@@ -77,7 +95,8 @@ pub enum EffectError {
 impl EffectError {
     pub fn retryable(&self) -> bool {
         match self {
-            EffectError::RecordedFailure { retry, .. } => retry.is_retryable(),
+            EffectError::RecordedFailure { retry, .. }
+            | EffectError::BoundaryRejected { retry, .. } => retry.is_retryable(),
             EffectError::EffectProvenanceMismatch(_) => false,
             EffectError::MissingRecordedEffect { .. }
             | EffectError::DuplicateRecordedEffect { .. }
@@ -87,6 +106,7 @@ impl EffectError {
             | EffectError::UndeclaredOutput { .. }
             | EffectError::EmitUnsupported { .. }
             | EffectError::MissingEffectPort { .. }
+            | EffectError::TypedOutcomeCoordination { .. }
             | EffectError::TransactionalCommitMissing { .. } => false,
             EffectError::Serialization(_)
             | EffectError::Journal(_)
@@ -107,12 +127,14 @@ impl EffectError {
             EffectError::DuplicateRecordedEffect { .. } => "duplicate_recorded_effect",
             EffectError::DescriptorMismatch { .. } => "descriptor_mismatch",
             EffectError::RecordedFailure { error_type, .. } => return error_type.clone(),
+            EffectError::BoundaryRejected { .. } => "boundary_rejected",
             EffectError::EffectProvenanceMismatch(_) => "effect_provenance_mismatch",
             EffectError::MissingIdempotencyKey { .. } => "missing_idempotency_key",
             EffectError::UndeclaredEffect { .. } => "undeclared_effect",
             EffectError::UndeclaredOutput { .. } => "undeclared_output",
             EffectError::EmitUnsupported { .. } => "emit_unsupported",
             EffectError::MissingEffectPort { .. } => "missing_effect_port",
+            EffectError::TypedOutcomeCoordination { .. } => "typed_outcome_coordination",
             EffectError::TransactionalCommitMissing { .. } => "transactional_commit_missing",
             EffectError::Execution(_) => "execution",
             EffectError::ReplayArchive(_) => "replay_archive",
@@ -122,6 +144,21 @@ impl EffectError {
 
     pub(super) fn error_message(&self) -> String {
         self.to_string()
+    }
+
+    /// Structured cause carried into a recorded `Failed` outcome, present when
+    /// execution was rejected by a named component such as boundary middleware.
+    pub(super) fn failure_cause(&self) -> Option<EffectFailureCause> {
+        match self {
+            EffectError::BoundaryRejected {
+                rejected_by, code, ..
+            } => Some(EffectFailureCause {
+                source: rejected_by.clone(),
+                code: code.clone(),
+            }),
+            EffectError::RecordedFailure { cause, .. } => cause.clone(),
+            _ => None,
+        }
     }
 }
 

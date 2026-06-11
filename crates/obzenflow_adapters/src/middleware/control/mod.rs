@@ -3,6 +3,7 @@
 // https://obzenflow.dev
 
 pub mod circuit_breaker;
+pub mod circuit_breaker_source_strategy;
 pub mod provider;
 pub mod rate_limiter;
 
@@ -11,6 +12,7 @@ pub use circuit_breaker::{
     ai_circuit_breaker, circuit_breaker, CircuitBreakerBuilder, CircuitBreakerFactory,
     CircuitBreakerMiddleware, HalfOpenPolicy, OpenPolicy,
 };
+pub use circuit_breaker_source_strategy::CircuitBreakerSourceStrategy;
 pub use provider::ControlMiddlewareAggregator;
 pub use rate_limiter::{
     rate_limit, rate_limit_with_burst, RateLimiterBuilder, RateLimiterFactory,
