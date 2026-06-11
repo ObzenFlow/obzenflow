@@ -1,0 +1,5 @@
+error: expected #[effect_outcome(crate = <path>)]: expected `crate`
+  --> tests/compile_fail/effect_outcome_bad_crate_attribute.rs:16:18
+   |
+16 | #[effect_outcome(path = obzenflow_core)]
+   |                  ^^^^

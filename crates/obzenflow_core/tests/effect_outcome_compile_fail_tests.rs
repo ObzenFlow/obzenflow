@@ -12,4 +12,5 @@ fn effect_outcome_rejects_invalid_carrier_shapes() {
     t.compile_fail("tests/compile_fail/effect_outcome_carrier_cannot_be_typed_payload.rs");
     t.compile_fail("tests/compile_fail/effect_outcome_duplicate_member.rs");
     t.compile_fail("tests/compile_fail/effect_outcome_generic_carrier.rs");
+    t.compile_fail("tests/compile_fail/effect_outcome_bad_crate_attribute.rs");
 }

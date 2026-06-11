@@ -106,6 +106,16 @@ mod tests {
         pub audit: Refused,
     }
 
+    /// The path escape hatch (FLOWIP-120m): generated code resolves through
+    /// the named path instead of the extern-prelude `::obzenflow_core`. The
+    /// self alias makes the unprefixed name stand in for a re-export path.
+    #[derive(Debug, Clone, PartialEq, Eq, EffectOutcomeFacts)]
+    #[effect_outcome(crate = obzenflow_core)]
+    pub enum HatchOutcome {
+        Approved(Approved),
+        Refused(Refused),
+    }
+
     fn unknown_fact() -> TypedFact {
         TypedFact {
             event_type: EventType::from("carrier.unknown.v1"),
@@ -220,6 +230,16 @@ mod tests {
             DecisionWithAudit::try_from_facts(&with_unknown),
             Err(TypedFactSetError::UnexpectedFact { .. })
         ));
+    }
+
+    #[test]
+    fn effect_outcome_crate_path_hatch_substitutes_generated_paths() {
+        let carrier = HatchOutcome::Approved(Approved { value: 11 });
+        let facts = carrier.clone().into_facts().expect("variant serializes");
+        assert_eq!(
+            HatchOutcome::try_from_facts(&facts).expect("variant reconstructs"),
+            carrier
+        );
     }
 
     #[test]

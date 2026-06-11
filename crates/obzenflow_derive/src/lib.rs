@@ -34,12 +34,66 @@ use syn::{parse_macro_input, Data, DeriveInput, Fields, Ident, Type};
 /// `TypedPayload -> TypedFactSet` implementation conflicts with the derived
 /// one, which is deliberate, because a carrier is transient control-flow
 /// machinery and never a persisted wrapper event.
-#[proc_macro_derive(EffectOutcomeFacts)]
+///
+/// # Path resolution
+///
+/// Generated code resolves `::obzenflow_core` in the deriving crate's
+/// namespace. If your crate reaches the trait through a re-export and has no
+/// direct `obzenflow_core` dependency (for example, only `obzenflow_runtime`
+/// in Cargo.toml), point the derive at the re-exported core:
+///
+/// ```ignore
+/// #[derive(Debug, Clone, EffectOutcomeFacts)]
+/// #[effect_outcome(crate = obzenflow_runtime::obzenflow_core)]
+/// enum Outcome {
+///     Ok(SomeFact),
+/// }
+/// ```
+#[proc_macro_derive(EffectOutcomeFacts, attributes(effect_outcome))]
 pub fn derive_effect_outcome_facts(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     expand(&input)
         .unwrap_or_else(syn::Error::into_compile_error)
         .into()
+}
+
+/// The path the generated code resolves `obzenflow_core` through: the
+/// caller's extern-prelude name by default, or the path named by
+/// `#[effect_outcome(crate = <path>)]` when core is reached via a re-export.
+fn core_path(input: &DeriveInput) -> Result<proc_macro2::TokenStream, syn::Error> {
+    let mut override_path: Option<syn::Path> = None;
+    for attr in &input.attrs {
+        if !attr.path().is_ident("effect_outcome") {
+            continue;
+        }
+        if override_path.is_some() {
+            return Err(syn::Error::new_spanned(
+                attr,
+                "duplicate #[effect_outcome(...)] attribute (FLOWIP-120m)",
+            ));
+        }
+        let path = attr
+            .parse_args_with(|stream: syn::parse::ParseStream<'_>| {
+                stream.parse::<syn::Token![crate]>()?;
+                stream.parse::<syn::Token![=]>()?;
+                let path: syn::Path = stream.parse()?;
+                if !stream.is_empty() {
+                    return Err(stream.error("unexpected tokens after the path"));
+                }
+                Ok(path)
+            })
+            .map_err(|err| {
+                syn::Error::new(
+                    err.span(),
+                    format!("expected #[effect_outcome(crate = <path>)]: {err}"),
+                )
+            })?;
+        override_path = Some(path);
+    }
+    Ok(match override_path {
+        Some(path) => quote!(#path),
+        None => quote!(::obzenflow_core),
+    })
 }
 
 fn expand(input: &DeriveInput) -> Result<proc_macro2::TokenStream, syn::Error> {
@@ -51,9 +105,10 @@ fn expand(input: &DeriveInput) -> Result<proc_macro2::TokenStream, syn::Error> {
         ));
     }
 
+    let core = core_path(input)?;
     match &input.data {
-        Data::Enum(data) => expand_enum(&input.ident, data),
-        Data::Struct(data) => expand_struct(&input.ident, data),
+        Data::Enum(data) => expand_enum(&input.ident, data, &core),
+        Data::Struct(data) => expand_struct(&input.ident, data, &core),
         Data::Union(data) => Err(syn::Error::new(
             data.union_token.span,
             "EffectOutcomeFacts carriers are enums (sum outcomes) or named-field structs \
@@ -93,7 +148,11 @@ fn reject_duplicate_members(members: &[&Type]) -> Result<(), syn::Error> {
     Ok(())
 }
 
-fn expand_enum(name: &Ident, data: &syn::DataEnum) -> Result<proc_macro2::TokenStream, syn::Error> {
+fn expand_enum(
+    name: &Ident,
+    data: &syn::DataEnum,
+    core: &proc_macro2::TokenStream,
+) -> Result<proc_macro2::TokenStream, syn::Error> {
     if data.variants.is_empty() {
         return Err(syn::Error::new(name.span(), ENUM_SHAPE_ERROR));
     }
@@ -113,40 +172,40 @@ fn expand_enum(name: &Ident, data: &syn::DataEnum) -> Result<proc_macro2::TokenS
     reject_duplicate_members(&members)?;
 
     Ok(quote! {
-        impl ::obzenflow_core::event::schema::TypedFactSet for #name {
-            fn fact_types() -> ::std::vec::Vec<::obzenflow_core::event::schema::TypedFactType> {
+        impl #core::event::schema::TypedFactSet for #name {
+            fn fact_types() -> ::std::vec::Vec<#core::event::schema::TypedFactType> {
                 ::std::vec![
-                    #( ::obzenflow_core::event::schema::TypedFactType::of::<#members>() ),*
+                    #( #core::event::schema::TypedFactType::of::<#members>() ),*
                 ]
             }
 
             fn into_facts(
                 self,
             ) -> ::std::result::Result<
-                ::std::vec::Vec<::obzenflow_core::event::schema::TypedFact>,
-                ::obzenflow_core::event::schema::TypedFactSetError,
+                ::std::vec::Vec<#core::event::schema::TypedFact>,
+                #core::event::schema::TypedFactSetError,
             > {
                 match self {
                     #( Self::#variants(member) => ::std::result::Result::Ok(::std::vec![
-                        ::obzenflow_core::event::schema::TypedFact::from_payload(member)?,
+                        #core::event::schema::TypedFact::from_payload(member)?,
                     ]), )*
                 }
             }
 
             fn try_from_facts(
-                facts: &[::obzenflow_core::event::schema::TypedFact],
+                facts: &[#core::event::schema::TypedFact],
             ) -> ::std::result::Result<
                 Self,
-                ::obzenflow_core::event::schema::TypedFactSetError,
+                #core::event::schema::TypedFactSetError,
             > {
                 for fact in facts {
                     let declared = false
-                        #( || <#members as ::obzenflow_core::event::schema::TypedPayload>::event_type_matches(
+                        #( || <#members as #core::event::schema::TypedPayload>::event_type_matches(
                             fact.event_type.as_str(),
                         ) )*;
                     if !declared {
                         return ::std::result::Result::Err(
-                            ::obzenflow_core::event::schema::TypedFactSetError::UnexpectedFact {
+                            #core::event::schema::TypedFactSetError::UnexpectedFact {
                                 event_type: fact.event_type.clone(),
                             },
                         );
@@ -155,11 +214,11 @@ fn expand_enum(name: &Ident, data: &syn::DataEnum) -> Result<proc_macro2::TokenS
                 match facts {
                     [single] => {
                         #(
-                            if <#members as ::obzenflow_core::event::schema::TypedPayload>::event_type_matches(
+                            if <#members as #core::event::schema::TypedPayload>::event_type_matches(
                                 single.event_type.as_str(),
                             ) {
                                 return ::std::result::Result::Ok(Self::#variants(
-                                    ::obzenflow_core::event::schema::decode_member_fact::<#members>(facts)?,
+                                    #core::event::schema::decode_member_fact::<#members>(facts)?,
                                 ));
                             }
                         )*
@@ -170,12 +229,12 @@ fn expand_enum(name: &Ident, data: &syn::DataEnum) -> Result<proc_macro2::TokenS
                         )
                     }
                     [] => ::std::result::Result::Err(
-                        ::obzenflow_core::event::schema::missing_fact_group_error(
-                            &<Self as ::obzenflow_core::event::schema::TypedFactSet>::fact_types(),
+                        #core::event::schema::missing_fact_group_error(
+                            &<Self as #core::event::schema::TypedFactSet>::fact_types(),
                         ),
                     ),
                     [first, rest @ ..] => ::std::result::Result::Err(
-                        ::obzenflow_core::event::schema::sum_group_arity_error(first, rest),
+                        #core::event::schema::sum_group_arity_error(first, rest),
                     ),
                 }
             }
@@ -186,6 +245,7 @@ fn expand_enum(name: &Ident, data: &syn::DataEnum) -> Result<proc_macro2::TokenS
 fn expand_struct(
     name: &Ident,
     data: &syn::DataStruct,
+    core: &proc_macro2::TokenStream,
 ) -> Result<proc_macro2::TokenStream, syn::Error> {
     let Fields::Named(fields) = &data.fields else {
         return Err(syn::Error::new(data.fields.span(), STRUCT_SHAPE_ERROR));
@@ -203,40 +263,40 @@ fn expand_struct(
     reject_duplicate_members(&members)?;
 
     Ok(quote! {
-        impl ::obzenflow_core::event::schema::TypedFactSet for #name {
-            fn fact_types() -> ::std::vec::Vec<::obzenflow_core::event::schema::TypedFactType> {
+        impl #core::event::schema::TypedFactSet for #name {
+            fn fact_types() -> ::std::vec::Vec<#core::event::schema::TypedFactType> {
                 ::std::vec![
-                    #( ::obzenflow_core::event::schema::TypedFactType::of::<#members>() ),*
+                    #( #core::event::schema::TypedFactType::of::<#members>() ),*
                 ]
             }
 
             fn into_facts(
                 self,
             ) -> ::std::result::Result<
-                ::std::vec::Vec<::obzenflow_core::event::schema::TypedFact>,
-                ::obzenflow_core::event::schema::TypedFactSetError,
+                ::std::vec::Vec<#core::event::schema::TypedFact>,
+                #core::event::schema::TypedFactSetError,
             > {
                 // Field order is the committed fact order; the committer's
                 // outcome_fact_ordinal preserves it deterministically.
                 ::std::result::Result::Ok(::std::vec![
-                    #( ::obzenflow_core::event::schema::TypedFact::from_payload(self.#idents)?, )*
+                    #( #core::event::schema::TypedFact::from_payload(self.#idents)?, )*
                 ])
             }
 
             fn try_from_facts(
-                facts: &[::obzenflow_core::event::schema::TypedFact],
+                facts: &[#core::event::schema::TypedFact],
             ) -> ::std::result::Result<
                 Self,
-                ::obzenflow_core::event::schema::TypedFactSetError,
+                #core::event::schema::TypedFactSetError,
             > {
                 for fact in facts {
                     let declared = false
-                        #( || <#members as ::obzenflow_core::event::schema::TypedPayload>::event_type_matches(
+                        #( || <#members as #core::event::schema::TypedPayload>::event_type_matches(
                             fact.event_type.as_str(),
                         ) )*;
                     if !declared {
                         return ::std::result::Result::Err(
-                            ::obzenflow_core::event::schema::TypedFactSetError::UnexpectedFact {
+                            #core::event::schema::TypedFactSetError::UnexpectedFact {
                                 event_type: fact.event_type.clone(),
                             },
                         );
@@ -246,7 +306,7 @@ fn expand_struct(
                 // and each member decode requires exactly one fact of its
                 // type (MissingFact / DuplicateFact otherwise).
                 ::std::result::Result::Ok(Self {
-                    #( #idents: ::obzenflow_core::event::schema::decode_member_fact::<#members>(facts)?, )*
+                    #( #idents: #core::event::schema::decode_member_fact::<#members>(facts)?, )*
                 })
             }
         }
