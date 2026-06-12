@@ -24,7 +24,9 @@ pub enum StageCertification {
     /// Not positionally comparable. `blocking` names every ancestor
     /// (possibly including the stage itself) whose delivery order is
     /// unconstrained in at least one of the two runs.
-    NotOrderCertified { blocking: Vec<String> },
+    NotOrderCertified {
+        blocking: Vec<String>,
+    },
 }
 
 impl StageCertification {
@@ -175,9 +177,16 @@ mod tests {
 
     #[test]
     fn regime_mismatch_downgrades_the_stage() {
-        let baseline = manifest(&[("a", &[], true), ("b", &[], true), ("merge", &["a", "b"], false)]);
-        let candidate =
-            manifest(&[("a", &[], true), ("b", &[], true), ("merge", &["a", "b"], true)]);
+        let baseline = manifest(&[
+            ("a", &[], true),
+            ("b", &[], true),
+            ("merge", &["a", "b"], false),
+        ]);
+        let candidate = manifest(&[
+            ("a", &[], true),
+            ("b", &[], true),
+            ("merge", &["a", "b"], true),
+        ]);
         let certs = certify(&baseline, &candidate);
         assert_eq!(
             certs["merge"],

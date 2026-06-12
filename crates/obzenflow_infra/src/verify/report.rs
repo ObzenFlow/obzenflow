@@ -128,7 +128,12 @@ pub fn delta_side(raw: &str) -> DeltaSide {
         while !raw.is_char_boundary(end) {
             end -= 1;
         }
-        format!("{}… [truncated {} of {} bytes]", &raw[..end], end, bytes.len())
+        format!(
+            "{}… [truncated {} of {} bytes]",
+            &raw[..end],
+            end,
+            bytes.len()
+        )
     };
     DeltaSide {
         truncated,

@@ -20,9 +20,9 @@ use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_infra::verify::{verify_run_dirs, VerifyOptions, VerifyOutcome};
 use obzenflow_runtime::stages::common::handlers::FiniteSourceHandler;
-use obzenflow_runtime::supervised_base::SupervisorHandle;
 use obzenflow_runtime::stages::sink::SinkTyped;
 use obzenflow_runtime::stages::SourceError;
+use obzenflow_runtime::supervised_base::SupervisorHandle;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::ffi::OsString;
@@ -76,10 +76,7 @@ impl FiniteSourceHandler for StallingTicks {
 
 fn counting<T>(
     counter: Arc<AtomicUsize>,
-) -> impl FnMut(
-    T,
-    obzenflow_runtime::stages::sink::DeliveryContext,
-) -> std::future::Ready<()>
+) -> impl FnMut(T, obzenflow_runtime::stages::sink::DeliveryContext) -> std::future::Ready<()>
        + Send
        + Sync
        + Clone

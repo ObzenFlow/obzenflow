@@ -398,8 +398,9 @@ mod tests {
     #[test]
     fn max_divergences_caps_recording_but_not_counting() {
         let baseline: Vec<ChainEvent> = (0..10).map(|n| data("a", json!({ "n": n }))).collect();
-        let candidate: Vec<ChainEvent> =
-            (0..10).map(|n| data("a", json!({ "n": n + 100 }))).collect();
+        let candidate: Vec<ChainEvent> = (0..10)
+            .map(|n| data("a", json!({ "n": n + 100 })))
+            .collect();
         let mut o = opts(WalkMode::WholeRun);
         o.max_divergences = 3;
         let out = walk_journal(ok_rows(baseline), ok_rows(candidate), &o).unwrap();

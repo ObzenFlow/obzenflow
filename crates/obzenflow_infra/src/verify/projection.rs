@@ -103,16 +103,17 @@ pub struct EffectIdentity {
 /// Project one journal row. `None` means the row is excluded from comparison.
 pub fn project(event: &ChainEvent) -> Option<ProjectedRow> {
     match &event.content {
-        ChainEventContent::Data { event_type, payload } => {
-            Some(ProjectedRow::Positional(PositionalRow {
-                kind: RowKind::Data {
-                    event_type: event_type.clone(),
-                },
-                payload: payload.clone(),
-                status: semantic_status(event),
-                identity: effect_identity(event),
-            }))
-        }
+        ChainEventContent::Data {
+            event_type,
+            payload,
+        } => Some(ProjectedRow::Positional(PositionalRow {
+            kind: RowKind::Data {
+                event_type: event_type.clone(),
+            },
+            payload: payload.clone(),
+            status: semantic_status(event),
+            identity: effect_identity(event),
+        })),
         ChainEventContent::FlowControl(FlowControlPayload::Watermark { timestamp, .. }) => {
             Some(ProjectedRow::Positional(PositionalRow {
                 kind: RowKind::Watermark,

@@ -138,10 +138,8 @@ impl EffectfulTransformHandler for StampV2 {
     }
 }
 
-fn discard<T>() -> impl FnMut(
-    T,
-    obzenflow_runtime::stages::sink::DeliveryContext,
-) -> std::future::Ready<()>
+fn discard<T>(
+) -> impl FnMut(T, obzenflow_runtime::stages::sink::DeliveryContext) -> std::future::Ready<()>
        + Send
        + Sync
        + Clone

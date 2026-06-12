@@ -19,13 +19,12 @@
 //! effect-lane namespace in the journals rather than from manifest chains.
 
 use async_trait::async_trait;
+use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
 use obzenflow_core::{id::StageId, TypedPayload, WriterId};
 use obzenflow_dsl::{effectful_transform, flow, sink, source, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_infra::verify::{
-    verify_run_dirs, RefusalReason, VerifyOptions, VerifyOutcome,
-};
+use obzenflow_infra::verify::{verify_run_dirs, RefusalReason, VerifyOptions, VerifyOutcome};
 use obzenflow_runtime::effects::{
     Effect, EffectContext, EffectError, EffectSafety, Effects, IdempotencyKey,
 };
@@ -33,7 +32,6 @@ use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{EffectfulTransformHandler, FiniteSourceHandler};
 use obzenflow_runtime::stages::sink::SinkTyped;
 use obzenflow_runtime::stages::SourceError;
-use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::ffi::OsString;
@@ -265,10 +263,8 @@ impl EffectfulTransformHandler for AuthorizePayment {
     }
 }
 
-fn discard<T>() -> impl FnMut(
-    T,
-    obzenflow_runtime::stages::sink::DeliveryContext,
-) -> std::future::Ready<()>
+fn discard<T>(
+) -> impl FnMut(T, obzenflow_runtime::stages::sink::DeliveryContext) -> std::future::Ready<()>
        + Send
        + Sync
        + Clone
@@ -366,7 +362,11 @@ async fn replay_verification_certifies_the_reconstruction_and_replay_closure() {
 
     // Record the baseline live.
     let live_calls = run_flow(&journal_base, None).await;
-    assert_eq!(live_calls.load(Ordering::SeqCst), 4, "orders 1, 2, 4, 5 reach the gateway");
+    assert_eq!(
+        live_calls.load(Ordering::SeqCst),
+        4,
+        "orders 1, 2, 4, 5 reach the gateway"
+    );
     let baseline = latest_run_dir(&journal_base);
 
     // Strict replay: zero effect executions.
@@ -404,7 +404,10 @@ async fn replay_verification_certifies_the_reconstruction_and_replay_closure() {
     // vacuously certified: it must not block the headline verdict.
     let sink = &report.stages["cancelled_orders"];
     assert!(!sink.order_certified);
-    assert!(sink.vacuous, "delivery-only sink fan-in is vacuously certified");
+    assert!(
+        sink.vacuous,
+        "delivery-only sink fan-in is vacuously certified"
+    );
     assert_eq!(sink.status, "matched");
 
     // The sidecar report is the receipt, inside the candidate run directory,

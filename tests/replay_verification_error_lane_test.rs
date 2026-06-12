@@ -109,10 +109,8 @@ impl EffectfulTransformHandler for RejectOdd {
     }
 }
 
-fn discard<T>() -> impl FnMut(
-    T,
-    obzenflow_runtime::stages::sink::DeliveryContext,
-) -> std::future::Ready<()>
+fn discard<T>(
+) -> impl FnMut(T, obzenflow_runtime::stages::sink::DeliveryContext) -> std::future::Ready<()>
        + Send
        + Sync
        + Clone
@@ -201,5 +199,8 @@ async fn deterministic_handler_failures_verify_on_the_error_lane() {
         "both the accepted facts and the error rows enter the projection (got {})",
         gate.positional_rows_baseline
     );
-    assert_eq!(gate.positional_rows_baseline, gate.positional_rows_candidate);
+    assert_eq!(
+        gate.positional_rows_baseline,
+        gate.positional_rows_candidate
+    );
 }

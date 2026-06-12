@@ -36,9 +36,7 @@ pub use verdict::{Verdict, VerifyOutcome, MATCHED_LINE};
 pub use walker::WalkMode;
 
 use certification::StageCertification;
-use report::{
-    delta_side, CountsByType, DivergenceReport, RunSummary, StageReport, Totals,
-};
+use report::{delta_side, CountsByType, DivergenceReport, RunSummary, StageReport, Totals};
 use source::SourceOpenError;
 use walker::{tally_journal, walk_journal, StageWalkOptions};
 
@@ -109,8 +107,8 @@ pub fn verify_sources(
         let stage_report = match certification {
             StageCertification::Certified => {
                 let walk = |journal_label: &'static str,
-                                b_file: &str,
-                                c_file: &str|
+                            b_file: &str,
+                            c_file: &str|
                  -> Result<walker::StageWalkOutput, VerifyError> {
                     let opts = StageWalkOptions {
                         mode: plan.mode,
@@ -199,8 +197,7 @@ pub fn verify_sources(
                     order_certified: true,
                     blocking: Vec::new(),
                     logic_version_changed,
-                    positional_rows_baseline: data.positional_baseline
-                        + errors.positional_baseline,
+                    positional_rows_baseline: data.positional_baseline + errors.positional_baseline,
                     positional_rows_candidate: data.positional_candidate
                         + errors.positional_candidate,
                     divergence_count,
