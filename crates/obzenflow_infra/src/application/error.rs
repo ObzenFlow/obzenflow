@@ -29,6 +29,11 @@ pub enum ApplicationError {
     /// IO error
     IoError(std::io::Error),
 
+    /// Replay verification finished with a non-zero verdict (FLOWIP-095j):
+    /// 1 divergence in the certified region, 2 certified region matched with
+    /// uncertified stages, 3 refused or skipped.
+    Verification { exit_code: u8, summary: String },
+
     /// Other error
     Other(Box<dyn Error + Send + Sync>),
 }
@@ -43,12 +48,27 @@ impl fmt::Display for ApplicationError {
             Self::FeatureNotEnabled(feature) => write!(f, "Feature not enabled: {feature}"),
             Self::InvalidConfiguration(msg) => write!(f, "Invalid configuration: {msg}"),
             Self::IoError(err) => write!(f, "IO error: {err}"),
+            Self::Verification { exit_code, summary } => {
+                write!(f, "replay verification (exit code {exit_code}): {summary}")
+            }
             Self::Other(err) => write!(f, "Application error: {err}"),
         }
     }
 }
 
 impl Error for ApplicationError {}
+
+impl ApplicationError {
+    /// Map to a process exit code. Verification verdicts carry their
+    /// FLOWIP-095j contract code (1 divergence, 2 uncertified remainder,
+    /// 3 refused/skipped); every other error is 1.
+    pub fn process_exit_code(&self) -> u8 {
+        match self {
+            Self::Verification { exit_code, .. } => *exit_code,
+            _ => 1,
+        }
+    }
+}
 
 impl From<std::io::Error> for ApplicationError {
     fn from(err: std::io::Error) -> Self {

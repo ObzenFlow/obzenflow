@@ -277,13 +277,13 @@ impl<T: JournalEvent> DiskJournal<T> {
 }
 
 /// Outcome of attempting to parse a framed log line
-pub(super) enum ParseOutcome<R: JournalEvent> {
+pub(crate) enum ParseOutcome<R: JournalEvent> {
     Complete(LogRecord<R>),
     Partial,
     Corrupt(String),
 }
 
-pub(super) fn parse_framed_record<R: JournalEvent>(line: &str) -> ParseOutcome<R> {
+pub(crate) fn parse_framed_record<R: JournalEvent>(line: &str) -> ParseOutcome<R> {
     let trimmed = line.trim_end_matches('\n');
 
     // Attempt framed format: <len>:<crc>:<json>

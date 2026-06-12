@@ -136,6 +136,13 @@ pub struct FlowConfig {
     /// This is intended for debugging; outputs may be partial and not suitable for regression comparison.
     #[arg(long, action = ArgAction::SetTrue)]
     pub allow_incomplete_archive: bool,
+
+    /// Verify the replay output against the source archive after completion
+    /// (FLOWIP-095j). Requires `--replay-from`. The source archive must remain
+    /// present through completion; on a fully certified match the run prints
+    /// "output matched the original run, 0 differences" and exits 0.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub verify: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -177,6 +184,8 @@ pub(crate) struct ResolvedMetricsConfig {
 pub(crate) struct ResolvedReplayConfig {
     pub from: PathBuf,
     pub allow_incomplete_archive: bool,
+    /// FLOWIP-095j: verify the replay output against `from` after completion.
+    pub verify: bool,
 }
 
 impl ResolvedStartupConfig {
@@ -305,6 +314,7 @@ struct RawFileMetricsConfig {
 struct RawFileReplayConfig {
     from: Option<PathBuf>,
     allow_incomplete_archive: Option<bool>,
+    verify: Option<bool>,
 }
 
 impl FlowConfig {
@@ -494,9 +504,16 @@ impl FlowConfig {
             )?,
             false,
         );
+        let verify = resolve_positive_flag(
+            self.verify,
+            file.replay.verify,
+            parse_env_bool("OBZENFLOW_REPLAY_VERIFY", "replay.verify")?,
+            false,
+        );
         let replay = replay_from.map(|from| ResolvedReplayConfig {
             from,
             allow_incomplete_archive,
+            verify,
         });
 
         if let Some(replay) = &replay {
@@ -504,6 +521,11 @@ impl FlowConfig {
         } else if allow_incomplete_archive {
             return Err(ConfigError::at(
                 "replay.allow_incomplete_archive",
+                "cannot be true without replay.from",
+            ));
+        } else if verify {
+            return Err(ConfigError::at(
+                "replay.verify",
                 "cannot be true without replay.from",
             ));
         }

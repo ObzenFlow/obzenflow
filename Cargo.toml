@@ -123,6 +123,8 @@ obzenflow_infra = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 async-trait = { workspace = true }
+# CLI surface for the `obzenflow` binary (FLOWIP-095j)
+clap = { workspace = true }
 
 [dev-dependencies]
 # Used by examples/tests/benchmarks in this crate

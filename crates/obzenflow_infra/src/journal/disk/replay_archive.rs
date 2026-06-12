@@ -66,7 +66,11 @@ impl DiskReplayArchive {
                 message: format!("Failed to read run manifest: {}", manifest_path.display()),
                 source: e,
             })?;
-        let manifest: RunManifest =
+        // FLOWIP-095j: gate on the version from the raw JSON before typed
+        // deserialization. Required fields added in newer manifest versions would
+        // otherwise turn an old archive into a confusing missing-field parse error
+        // instead of the clean unsupported-version refusal.
+        let manifest_value: serde_json::Value =
             serde_json::from_str(&manifest_body).map_err(|e| ReplayError::Parse {
                 message: format!(
                     "Failed to parse run manifest JSON at {}: {}",
@@ -74,13 +78,25 @@ impl DiskReplayArchive {
                     e
                 ),
             })?;
-
-        if manifest.manifest_version != RUN_MANIFEST_VERSION {
+        let manifest_version = manifest_value
+            .get("manifest_version")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        if manifest_version != RUN_MANIFEST_VERSION {
             return Err(ReplayError::UnsupportedManifestVersion {
-                manifest_version: manifest.manifest_version.clone(),
+                manifest_version,
                 supported: RUN_MANIFEST_VERSION,
             });
         }
+        let manifest: RunManifest =
+            serde_json::from_value(manifest_value).map_err(|e| ReplayError::Parse {
+                message: format!(
+                    "Failed to parse run manifest JSON at {}: {}",
+                    manifest_path.display(),
+                    e
+                ),
+            })?;
 
         if !is_compatible_semver(&manifest.obzenflow_version, OBZENFLOW_VERSION) {
             return Err(ReplayError::VersionMismatch {
@@ -296,7 +312,9 @@ impl ReplayArchive for DiskReplayArchive {
     }
 }
 
-fn derive_status_derivation_from_system_log(path: &Path) -> Result<StatusDerivation, ReplayError> {
+pub(crate) fn derive_status_derivation_from_system_log(
+    path: &Path,
+) -> Result<StatusDerivation, ReplayError> {
     if !path.exists() {
         return Err(ReplayError::MissingSystemLog {
             path: path.to_path_buf(),

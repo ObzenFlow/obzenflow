@@ -30,7 +30,6 @@ mod gateway;
 mod sinks;
 mod validation;
 
-use anyhow::Result;
 use obzenflow_infra::application::{
     Banner, FlowApplication, Footer, LogLevel, Presentation, RunMode, RunPresentationOutcome,
 };
@@ -71,27 +70,36 @@ fn banner_for(mode: &RunMode) -> Banner {
 }
 
 /// Completion copy branches the same way: live runs are pointed at replay and
-/// live metrics; replays are pointed at the journal comparison and
+/// live metrics; replays are pointed at verification (FLOWIP-095j) and
 /// replay-of-replay, never at metrics the replay did not touch.
 fn footer_for(outcome: RunPresentationOutcome) -> Footer {
     let next_step = match outcome.run_mode() {
         RunMode::Replay(_) => {
-            "Next: compare the replay journal with the source archive (per-stage rows match, zero gateway calls), or replay the replay."
+            "Next: add --verify to make the runtime prove the reconstruction (\"output matched the original run, 0 differences\"), or replay the replay."
         }
         _ => "Next: replay this run with --replay-from, or scrape /metrics for obzenflow_circuit_breaker_*.",
     };
     outcome.into_footer().paragraph(next_step)
 }
 
-fn main() -> Result<()> {
+/// Exit codes follow the FLOWIP-095j verification contract when `--verify`
+/// is passed: 0 certified match, 1 divergence, 2 uncertified remainder,
+/// 3 refused or skipped. Every other failure exits 1.
+fn main() -> std::process::ExitCode {
     let presentation = Presentation::for_mode(banner_for).with_footer(footer_for);
 
-    FlowApplication::builder()
+    let result = FlowApplication::builder()
         .with_log_level(LogLevel::Info)
         .with_presentation(presentation)
-        .run_blocking(flow::build_flow())?;
+        .run_blocking(flow::build_flow());
 
-    Ok(())
+    match result {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(err) => {
+            eprintln!("{err}");
+            std::process::ExitCode::from(err.process_exit_code())
+        }
+    }
 }
 
 #[cfg(test)]
@@ -144,6 +152,10 @@ mod tests {
         assert!(live.contains("scrape /metrics"));
         assert!(!replay.contains("scrape /metrics"));
         assert!(replay.contains("strict replay of flow_01SOURCE"));
+        assert!(
+            replay.contains("--verify"),
+            "replay footer must teach the verification verb (FLOWIP-095j): {replay}"
+        );
         assert!(
             replay.contains("--replay-from target/payment-gateway-logs/flows/flow_01REPLAY"),
             "replay footer must offer replay-of-replay on the new journal: {replay}"

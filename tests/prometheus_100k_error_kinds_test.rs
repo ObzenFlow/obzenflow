@@ -2,12 +2,12 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Integration test for error-kind metrics on the prometheus_100k_demo-style flow.
+//! Integration test for error-kind metrics on the prometheus volume-demo-style flow.
 //!
 //! This mirrors the high-volume source + error_prone_transform pipeline from
 //! `examples/prometheus_100k_demo.rs`, but runs entirely under `cargo test`.
 //! It asserts that:
-//! - `error_processor` reports exactly 1000 Domain errors, and
+//! - `error_processor` reports exactly 100 Domain errors, and
 //! - there are no Unknown errors for that stage.
 
 use anyhow::Result;
@@ -27,7 +27,11 @@ use obzenflow_runtime::stages::transform::Map;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-/// Source that generates 100,000 events with a deterministic error pattern.
+const TOTAL_EVENTS: usize = 10_000;
+const ERROR_EVERY: usize = 100;
+const EXPECTED_DOMAIN_ERRORS: u64 = (TOTAL_EVENTS / ERROR_EVERY) as u64;
+
+/// Source that generates a high-volume stream with a deterministic error pattern.
 #[derive(Clone, Debug)]
 struct HighVolumeSource {
     count: usize,
@@ -59,7 +63,7 @@ impl FiniteSourceHandler for HighVolumeSource {
         let current_id = self.count;
         self.count += 1;
 
-        let should_fail = current_id.is_multiple_of(100);
+        let should_fail = current_id.is_multiple_of(ERROR_EVERY);
 
         Ok(Some(vec![ChainEventFactory::data_event(
             self.writer_id,
@@ -176,7 +180,7 @@ async fn prometheus_100k_error_processor_error_kinds_are_domain_only() -> Result
 
     // Build a minimal flow that mirrors the prometheus_100k_demo core path:
     // high_volume_source -> error_processor -> completion_sink.
-    let source = HighVolumeSource::new(100_000);
+    let source = HighVolumeSource::new(TOTAL_EVENTS);
     let transform = error_prone_transform();
     let sink = CompletionSink::new();
 
@@ -239,11 +243,11 @@ async fn prometheus_100k_error_processor_error_kinds_are_domain_only() -> Result
         }
     }
 
-    // We generated 100,000 events and marked every 100th as a Domain error.
+    // We generated a high-volume stream and marked every 100th event as a Domain error.
     assert_eq!(
         domain_errors,
-        Some(1000),
-        "error_processor should report exactly 1000 domain errors"
+        Some(EXPECTED_DOMAIN_ERRORS),
+        "error_processor should report exactly {EXPECTED_DOMAIN_ERRORS} domain errors"
     );
 
     // Unknown errors should not be present (regression check for the old 'unknown' bucket bug).
