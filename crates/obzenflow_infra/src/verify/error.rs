@@ -72,9 +72,9 @@ pub enum RefusalReason {
     /// not the same shape even though the stage names match.
     InboundMismatch { stage: String },
 
-    /// The candidate ran in `ResumeIncomplete` mode and legitimately extends
-    /// history past the baseline; whole-run equality is the wrong instrument.
-    ResumeIncompleteCandidate,
+    /// The candidate was recorded with `--allow-incomplete-archive`; its source
+    /// archive may be partial, so whole-run equality is not a certificate.
+    IncompleteArchiveReplayCandidate,
 
     /// A run did not reach a comparable terminal status
     /// (`Completed | Cancelled`, the same gate replay itself applies).
@@ -121,9 +121,9 @@ impl fmt::Display for RefusalReason {
                 f,
                 "stage '{stage}' has different inbound edges in the two runs; verification compares same-topology runs only"
             ),
-            Self::ResumeIncompleteCandidate => write!(
+            Self::IncompleteArchiveReplayCandidate => write!(
                 f,
-                "candidate ran with --allow-incomplete-archive (resume mode) and legitimately extends history past the baseline; whole-run verification does not apply"
+                "candidate replayed with --allow-incomplete-archive; the source archive may be partial, so whole-run verification cannot certify this candidate"
             ),
             Self::StatusGate { run, status } => write!(
                 f,

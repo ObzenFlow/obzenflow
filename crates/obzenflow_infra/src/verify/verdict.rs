@@ -7,8 +7,8 @@
 //! `0` fully certified match, and only here does [`MATCHED_LINE`] print;
 //! `1` divergence in the certified region;
 //! `2` certified region matched but uncertified stages exist;
-//! `3` refused (lineage, resume mode, stage sets, status gate, manifest
-//! version, unavailable archive).
+//! `3` refused (lineage, incomplete-archive replay, stage sets, status gate,
+//! manifest version, unavailable archive).
 
 use std::path::PathBuf;
 

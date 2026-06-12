@@ -629,7 +629,7 @@ mod tests {
     }
 
     #[test]
-    fn resume_mode_candidate_is_refused() {
+    fn incomplete_archive_replay_candidate_is_refused() {
         let baseline = source(
             manifest(&topology(), None, "flow_b"),
             ArchiveStatus::Completed,
@@ -653,7 +653,7 @@ mod tests {
         assert_eq!(outcome.exit_code(), 3);
         assert!(matches!(
             outcome,
-            VerifyOutcome::Refused(RefusalReason::ResumeIncompleteCandidate)
+            VerifyOutcome::Refused(RefusalReason::IncompleteArchiveReplayCandidate)
         ));
     }
 

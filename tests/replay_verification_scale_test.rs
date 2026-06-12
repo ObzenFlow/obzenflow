@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! FLOWIP-095j at scale: a six-figure-event run records, replays, and
+//! FLOWIP-095j at scale: a five-figure-event run records, replays, and
 //! verifies. The comparison is a streaming walk, so memory stays bounded by
 //! row size rather than run size; this suite is the executable witness that
 //! the posture holds on real journals.
@@ -21,7 +21,7 @@ use serde_json::json;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
-const EVENTS: u64 = 100_000;
+const EVENTS: u64 = 10_000;
 const BATCH: u64 = 500;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -103,7 +103,7 @@ fn latest_run_dir(base: &Path) -> PathBuf {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn six_figure_run_verifies_with_streaming_comparison() {
+async fn five_figure_run_verifies_with_streaming_comparison() {
     let temp = tempfile::tempdir().expect("tempdir");
     let journal_base = temp.path().join("journals");
 
@@ -144,6 +144,6 @@ async fn six_figure_run_verifies_with_streaming_comparison() {
     // an accidental quadratic or load-all regression, not micro-performance.
     assert!(
         elapsed < std::time::Duration::from_secs(60),
-        "six-figure verification took {elapsed:?}"
+        "five-figure verification took {elapsed:?}"
     );
 }

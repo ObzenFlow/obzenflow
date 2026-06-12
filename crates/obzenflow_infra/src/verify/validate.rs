@@ -30,13 +30,14 @@ pub(crate) fn validate(
     let b_manifest = baseline.manifest();
     let c_manifest = candidate.manifest();
 
-    // A resume-mode candidate legitimately extends history past the baseline.
+    // An incomplete-archive replay may have been produced from a partial source
+    // archive, so whole-run verification cannot certify it.
     if c_manifest
         .replay
         .as_ref()
         .is_some_and(|replay| replay.allow_incomplete_archive)
     {
-        return Err(Box::new(RefusalReason::ResumeIncompleteCandidate));
+        return Err(Box::new(RefusalReason::IncompleteArchiveReplayCandidate));
     }
 
     if b_manifest.flow_name != c_manifest.flow_name {
