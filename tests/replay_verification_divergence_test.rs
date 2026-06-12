@@ -114,6 +114,30 @@ impl EffectfulTransformHandler for Stamp {
     }
 }
 
+/// The diff workflow: same stage, deliberately changed logic with a bumped
+/// stage logic version, replayed against the v1 recording.
+#[derive(Clone, Debug)]
+struct StampV2;
+
+#[async_trait]
+impl EffectfulTransformHandler for StampV2 {
+    type Input = Input;
+
+    async fn process(&self, input: Input, fx: &mut Effects) -> Result<(), HandlerError> {
+        fx.emit(Stamped {
+            id: input.id,
+            stamp: u128::from(input.id) * 1000,
+        })
+        .await
+        .map_err(|e| HandlerError::Other(e.to_string()))?;
+        Ok(())
+    }
+
+    fn stage_logic_version(&self) -> &str {
+        "replay-verification-stamp-v2"
+    }
+}
+
 fn discard<T>() -> impl FnMut(
     T,
     obzenflow_runtime::stages::sink::DeliveryContext,
@@ -137,6 +161,29 @@ fn build_flow(journal_base: PathBuf, nondeterministic: bool) -> FlowDefinition {
             numbers = source!(Input => Numbers::new());
             stamp = effectful_transform!(
                 Input -> { Stamped } => Stamp { nondeterministic },
+                effects: [],
+                middleware: []
+            );
+            out = sink!(Stamped => SinkTyped::with_delivery(discard::<Stamped>()));
+        },
+
+        topology: {
+            numbers |> stamp;
+            stamp |> out;
+        }
+    }
+}
+
+fn build_flow_v2(journal_base: PathBuf) -> FlowDefinition {
+    flow! {
+        name: "replay_verification_divergence",
+        journals: disk_journals(journal_base),
+        middleware: [],
+
+        stages: {
+            numbers = source!(Input => Numbers::new());
+            stamp = effectful_transform!(
+                Input -> { Stamped } => StampV2,
                 effects: [],
                 middleware: []
             );
@@ -204,6 +251,43 @@ async fn wall_clock_outside_the_effect_boundary_diverges_with_exact_coordinates(
     assert_eq!(
         report.stages["numbers"].status, "matched",
         "the re-injected source rows are identical; only the handler smuggled nondeterminism"
+    );
+}
+
+/// The supported diff workflow: replay recorded inputs through changed code.
+/// Verification reports the differences (that is the point of the workflow)
+/// and the bumped stage logic version classifies them as `changed-code`.
+#[tokio::test(flavor = "multi_thread")]
+async fn changed_code_replay_diverges_and_is_classified_changed_code() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let journal_base = temp.path().join("journals");
+
+    run_flow(&journal_base, false, None).await;
+    let baseline = latest_run_dir(&journal_base);
+
+    FlowApplication::builder()
+        .with_cli_args(vec![
+            OsString::from("obzenflow"),
+            OsString::from("--replay-from"),
+            baseline.as_os_str().to_os_string(),
+        ])
+        .run_async(build_flow_v2(journal_base.clone()))
+        .await
+        .expect("changed-code replay should complete");
+    let candidate = latest_run_dir(&journal_base);
+
+    let outcome = verify_run_dirs(&baseline, &candidate, &VerifyOptions::default())
+        .expect("verification should run");
+    assert_eq!(outcome.exit_code(), 1, "the diff workflow reports its diff");
+    let VerifyOutcome::Completed { report, .. } = &outcome else {
+        panic!("expected a completed comparison");
+    };
+    let stage = &report.stages["stamp"];
+    assert!(stage.logic_version_changed);
+    assert_eq!(stage.divergences[0].field, "payload");
+    assert_eq!(
+        stage.divergences[0].classification, "changed-code",
+        "a bumped stage logic version triages the divergence as the diff workflow"
     );
 }
 
