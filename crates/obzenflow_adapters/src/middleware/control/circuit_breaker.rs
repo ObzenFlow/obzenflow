@@ -2907,7 +2907,7 @@ mod tests {
         // First 2 failures shouldn't open the circuit
         for _ in 0..2 {
             let event = create_test_event();
-            let mut ctx = MiddlewareContext::new();
+            let mut ctx = MiddlewareContext::live_handler();
             assert!(matches!(
                 cb.pre_handle(&event, &mut ctx),
                 MiddlewareAction::Continue
@@ -2921,7 +2921,7 @@ mod tests {
 
         // Third failure should open the circuit
         let event = create_test_event();
-        let mut ctx = MiddlewareContext::new();
+        let mut ctx = MiddlewareContext::live_handler();
         assert!(matches!(
             cb.pre_handle(&event, &mut ctx),
             MiddlewareAction::Continue
@@ -2933,7 +2933,7 @@ mod tests {
 
         // Next request should be rejected
         let event = create_test_event();
-        let mut ctx = MiddlewareContext::new();
+        let mut ctx = MiddlewareContext::live_handler();
         assert!(matches!(
             cb.pre_handle(&event, &mut ctx),
             MiddlewareAction::Skip { .. }
@@ -2948,7 +2948,7 @@ mod tests {
         // Two failures
         for _ in 0..2 {
             let event = create_test_event();
-            let mut ctx = MiddlewareContext::new();
+            let mut ctx = MiddlewareContext::live_handler();
             let _ = cb.pre_handle(&event, &mut ctx);
             let mut failed_output = create_test_event();
             failed_output.processing_info.status =
@@ -2958,7 +2958,7 @@ mod tests {
 
         // Success should reset the count
         let event = create_test_event();
-        let mut ctx = MiddlewareContext::new();
+        let mut ctx = MiddlewareContext::live_handler();
         let _ = cb.pre_handle(&event, &mut ctx);
         let outputs = vec![create_test_event()]; // Non-empty = success
         cb.post_handle(&event, &outputs, &mut ctx);
@@ -2966,7 +2966,7 @@ mod tests {
         // Should now need 3 more failures to open
         for _ in 0..2 {
             let event = create_test_event();
-            let mut ctx = MiddlewareContext::new();
+            let mut ctx = MiddlewareContext::live_handler();
             assert!(matches!(
                 cb.pre_handle(&event, &mut ctx),
                 MiddlewareAction::Continue
@@ -2976,7 +2976,7 @@ mod tests {
 
         // Still closed
         let event = create_test_event();
-        let mut ctx = MiddlewareContext::new();
+        let mut ctx = MiddlewareContext::live_handler();
         assert!(matches!(
             cb.pre_handle(&event, &mut ctx),
             MiddlewareAction::Continue
@@ -3118,7 +3118,7 @@ mod tests {
 
         for (idx, is_failure) in patterns.iter().enumerate() {
             let event = create_test_event();
-            let mut ctx = MiddlewareContext::new();
+            let mut ctx = MiddlewareContext::live_handler();
             let action = cb.pre_handle(&event, &mut ctx);
             assert!(
                 matches!(action, MiddlewareAction::Continue),
@@ -3171,7 +3171,7 @@ mod tests {
 
         for is_slow in pattern.iter() {
             let event = create_test_event();
-            let mut ctx = MiddlewareContext::new();
+            let mut ctx = MiddlewareContext::live_handler();
             let action = cb.pre_handle(&event, &mut ctx);
             assert!(
                 matches!(action, MiddlewareAction::Continue),
@@ -3198,7 +3198,7 @@ mod tests {
     fn default_failure_classifier_uses_errorkind() {
         let cb = CircuitBreakerMiddleware::new(1);
         let event = create_test_event();
-        let mut ctx = MiddlewareContext::new();
+        let mut ctx = MiddlewareContext::live_handler();
 
         // Domain/validation error should NOT count as a breaker failure by default.
         let mut domain_err = create_test_event();
@@ -3230,7 +3230,7 @@ mod tests {
         cb.open_policy = OpenPolicy::Skip;
 
         let event = create_test_event();
-        let mut ctx = MiddlewareContext::new();
+        let mut ctx = MiddlewareContext::live_handler();
         let action = cb.pre_handle(&event, &mut ctx);
 
         match action {
@@ -3252,7 +3252,7 @@ mod tests {
         cb.probe_in_flight.store(1, Ordering::SeqCst);
 
         let event = create_test_event();
-        let mut ctx = MiddlewareContext::new();
+        let mut ctx = MiddlewareContext::live_handler();
         let action = cb.pre_handle(&event, &mut ctx);
 
         match action {
@@ -3274,7 +3274,7 @@ mod tests {
         let event = create_test_event();
 
         {
-            let mut ctx = MiddlewareContext::new();
+            let mut ctx = MiddlewareContext::live_handler();
             assert!(matches!(
                 cb.pre_handle(&event, &mut ctx),
                 MiddlewareAction::Continue
@@ -3284,7 +3284,7 @@ mod tests {
 
         assert_eq!(cb.probe_in_flight.load(Ordering::SeqCst), 0);
 
-        let mut ctx2 = MiddlewareContext::new();
+        let mut ctx2 = MiddlewareContext::live_handler();
         assert!(matches!(
             cb.pre_handle(&event, &mut ctx2),
             MiddlewareAction::Continue
@@ -3305,7 +3305,7 @@ mod tests {
         cb.half_open_policy = HalfOpenPolicy::new(NonZeroU32::new(1).unwrap(), OpenPolicy::Skip);
 
         let event = create_test_event();
-        let mut ctx = MiddlewareContext::new();
+        let mut ctx = MiddlewareContext::live_handler();
         assert!(matches!(
             cb.pre_handle(&event, &mut ctx),
             MiddlewareAction::Continue
@@ -3316,7 +3316,7 @@ mod tests {
         assert_eq!(cb.current_state(), CircuitState::Open);
 
         let stale_probe = create_test_event();
-        let mut stale_ctx = MiddlewareContext::new();
+        let mut stale_ctx = MiddlewareContext::live_handler();
         assert!(matches!(
             cb.pre_handle(&stale_probe, &mut stale_ctx),
             MiddlewareAction::Continue
@@ -3324,11 +3324,11 @@ mod tests {
         assert_eq!(cb.current_state(), CircuitState::HalfOpen);
         assert_eq!(cb.probe_in_flight.load(Ordering::SeqCst), 1);
 
-        let mut reopen_ctx = MiddlewareContext::new();
+        let mut reopen_ctx = MiddlewareContext::live_handler();
         assert!(cb.transition_to(CircuitState::Open, &mut reopen_ctx));
 
         let blocked_probe = create_test_event();
-        let mut blocked_ctx = MiddlewareContext::new();
+        let mut blocked_ctx = MiddlewareContext::live_handler();
         assert!(matches!(
             cb.pre_handle(&blocked_probe, &mut blocked_ctx),
             MiddlewareAction::Skip { results, .. } if results.is_empty()
@@ -3341,7 +3341,7 @@ mod tests {
         assert_eq!(cb.probe_in_flight.load(Ordering::SeqCst), 0);
 
         let fresh_probe = create_test_event();
-        let mut fresh_ctx = MiddlewareContext::new();
+        let mut fresh_ctx = MiddlewareContext::live_handler();
         assert!(matches!(
             cb.pre_handle(&fresh_probe, &mut fresh_ctx),
             MiddlewareAction::Continue
@@ -3372,7 +3372,7 @@ mod tests {
         // Phase 1: Two failures → Open
         for _ in 0..2 {
             let event = create_test_event();
-            let mut ctx = MiddlewareContext::new();
+            let mut ctx = MiddlewareContext::live_handler();
             assert!(matches!(
                 cb.pre_handle(&event, &mut ctx),
                 MiddlewareAction::Continue
@@ -3386,7 +3386,7 @@ mod tests {
         // Phase 2: Cooldown has already elapsed (0ms). Next pre_handle
         // should transition Open → HalfOpen and admit a probe.
         let probe_event = create_test_event();
-        let mut probe_ctx = MiddlewareContext::new();
+        let mut probe_ctx = MiddlewareContext::live_handler();
         let action = cb.pre_handle(&probe_event, &mut probe_ctx);
         assert!(
             matches!(action, MiddlewareAction::Continue),
@@ -3433,7 +3433,7 @@ mod tests {
 
         // Phase 4: Normal traffic should flow again.
         let normal_event = create_test_event();
-        let mut normal_ctx = MiddlewareContext::new();
+        let mut normal_ctx = MiddlewareContext::live_handler();
         assert!(matches!(
             cb.pre_handle(&normal_event, &mut normal_ctx),
             MiddlewareAction::Continue
@@ -3458,7 +3458,7 @@ mod tests {
 
         // One failure → Open (threshold = 1)
         let event = create_test_event();
-        let mut ctx = MiddlewareContext::new();
+        let mut ctx = MiddlewareContext::live_handler();
         cb.pre_handle(&event, &mut ctx);
         let mut failed = create_test_event();
         failed.processing_info.status = ProcessingStatus::error("simulated_failure_halfopen_fail");
@@ -3467,7 +3467,7 @@ mod tests {
 
         // Cooldown elapsed → HalfOpen, probe admitted.
         let probe_event = create_test_event();
-        let mut probe_ctx = MiddlewareContext::new();
+        let mut probe_ctx = MiddlewareContext::live_handler();
         let action = cb.pre_handle(&probe_event, &mut probe_ctx);
         assert!(matches!(action, MiddlewareAction::Continue));
         assert_eq!(cb.current_state(), CircuitState::HalfOpen);
@@ -3523,7 +3523,7 @@ mod tests {
                 thread::spawn(move || {
                     for idx in 0..iterations {
                         let event = create_test_event();
-                        let mut ctx = MiddlewareContext::new();
+                        let mut ctx = MiddlewareContext::live_handler();
                         let action = cb.pre_handle(&event, &mut ctx);
 
                         match action {
@@ -3577,7 +3577,7 @@ mod tests {
     fn deserialization_classified_as_permanent() {
         let cb = CircuitBreakerMiddleware::new(5);
         let event = create_test_event();
-        let ctx = MiddlewareContext::new();
+        let ctx = MiddlewareContext::live_handler();
 
         let mut deser_err = create_test_event();
         deser_err.processing_info.status =
@@ -3623,7 +3623,7 @@ mod tests {
 
         let raw_wait = StdDuration::from_secs(1);
         let event = create_test_event();
-        let mut ctx = MiddlewareContext::new();
+        let mut ctx = MiddlewareContext::live_handler();
         ctx.insert::<CircuitBreakerRetryAfterMs>(raw_wait.as_millis() as u64);
 
         // Create a rate-limited output.
@@ -3683,7 +3683,7 @@ mod tests {
         // Pump 10,500 unique failing events — 500 more than the cap (10,000).
         for _ in 0..10_500 {
             let event = create_test_event(); // each has a unique EventId
-            let mut ctx = MiddlewareContext::new();
+            let mut ctx = MiddlewareContext::live_handler();
             cb.pre_handle(&event, &mut ctx);
             let mut failed = create_test_event();
             failed.processing_info.status =
@@ -3754,7 +3754,7 @@ mod tests {
     fn open_breaker_rejection_keeps_legacy_skip_on_handler_lane() {
         let mut cb = CircuitBreakerMiddleware::new(1);
         cb.open_policy = OpenPolicy::FailFast;
-        let mut ctx = MiddlewareContext::new();
+        let mut ctx = MiddlewareContext::live_handler();
         cb.force_open(&mut ctx);
 
         match cb.pre_handle(&create_test_event(), &mut ctx) {
@@ -3812,7 +3812,7 @@ mod tests {
         let cb = CircuitBreakerMiddleware::new(100);
         assert_eq!(cb.current_state(), CircuitState::Closed);
 
-        let mut ctx = MiddlewareContext::new();
+        let mut ctx = MiddlewareContext::live_handler();
         cb.force_open(&mut ctx);
         assert_eq!(cb.current_state(), CircuitState::Open);
     }
@@ -3823,7 +3823,7 @@ mod tests {
 
         // Drive it to Open via a failure.
         let event = create_test_event();
-        let mut ctx = MiddlewareContext::new();
+        let mut ctx = MiddlewareContext::live_handler();
         cb.pre_handle(&event, &mut ctx);
         let mut failed = create_test_event();
         failed.processing_info.status = ProcessingStatus::error("simulated_failure_force_close");
@@ -3835,7 +3835,7 @@ mod tests {
         );
 
         // Admin reset.
-        let mut admin_ctx = MiddlewareContext::new();
+        let mut admin_ctx = MiddlewareContext::live_handler();
         cb.force_close(&mut admin_ctx);
         assert_eq!(cb.current_state(), CircuitState::Closed);
         assert_eq!(
@@ -3851,7 +3851,7 @@ mod tests {
 
         // Normal traffic should flow.
         let event = create_test_event();
-        let mut ctx = MiddlewareContext::new();
+        let mut ctx = MiddlewareContext::live_handler();
         assert!(matches!(
             cb.pre_handle(&event, &mut ctx),
             MiddlewareAction::Continue
@@ -3872,7 +3872,7 @@ mod tests {
 
         // Drive to HalfOpen: one failure → Open → instant cooldown → probe → HalfOpen.
         let event = create_test_event();
-        let mut ctx = MiddlewareContext::new();
+        let mut ctx = MiddlewareContext::live_handler();
         cb.pre_handle(&event, &mut ctx);
         let mut failed = create_test_event();
         failed.processing_info.status = ProcessingStatus::error("simulated_failure_force_close_ho");
@@ -3880,12 +3880,12 @@ mod tests {
         assert_eq!(cb.current_state(), CircuitState::Open);
 
         let probe_event = create_test_event();
-        let mut probe_ctx = MiddlewareContext::new();
+        let mut probe_ctx = MiddlewareContext::live_handler();
         cb.pre_handle(&probe_event, &mut probe_ctx);
         assert_eq!(cb.current_state(), CircuitState::HalfOpen);
 
         // Admin force-close from HalfOpen.
-        let mut admin_ctx = MiddlewareContext::new();
+        let mut admin_ctx = MiddlewareContext::live_handler();
         cb.force_close(&mut admin_ctx);
         assert_eq!(cb.current_state(), CircuitState::Closed);
         assert_eq!(cb.failure_count.load(Ordering::SeqCst), 0);

@@ -18,7 +18,7 @@
 
 ```rust
 // 1. Context created fresh for each event
-let mut ctx = MiddlewareContext::new();
+let mut ctx = MiddlewareContext::live_handler();
 
 // 2. Flows through middleware chain
 middleware1.pre_handle(&event, &mut ctx)  // Can emit ephemeral events, insert typed slots

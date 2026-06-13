@@ -230,7 +230,7 @@ impl<H: AsyncFiniteSourceHandler> AsyncFiniteSourceHandler for MiddlewareAsyncFi
             }),
         );
 
-        let mut ctx = MiddlewareContext::new();
+        let mut ctx = MiddlewareContext::live_handler();
 
         // Phase 0: circuit breaker gate (must run before polling).
         for middleware in self.middleware_chain.iter() {
@@ -479,7 +479,7 @@ impl<H: AsyncInfiniteSourceHandler> AsyncInfiniteSourceHandler
             }),
         );
 
-        let mut ctx = MiddlewareContext::new();
+        let mut ctx = MiddlewareContext::live_handler();
 
         // Phase 0: gating middleware (circuit breaker + rate limiter) before polling.
         for middleware in self.middleware_chain.iter() {
@@ -694,7 +694,7 @@ impl<H: FiniteSourceHandler> FiniteSourceHandler for MiddlewareFiniteSource<H> {
         );
 
         // Create ephemeral context for this processing
-        let mut ctx = MiddlewareContext::new();
+        let mut ctx = MiddlewareContext::live_handler();
 
         // Phase 0: circuit breaker pre-handle (must run before polling).
         for middleware in self.middleware_chain.iter() {
@@ -902,7 +902,7 @@ impl<H: InfiniteSourceHandler> InfiniteSourceHandler for MiddlewareInfiniteSourc
         );
 
         // Create ephemeral context for this processing
-        let mut ctx = MiddlewareContext::new();
+        let mut ctx = MiddlewareContext::live_handler();
 
         // Phase 0: gating middleware (circuit breaker + rate limiter) before polling.
         for middleware in self.middleware_chain.iter() {

@@ -1112,7 +1112,7 @@ mod tests {
         // Create middleware directly (we only need a stage_id for writer attribution)
         let middleware = test_middleware(StageId::new(), 10.0, Some(20.0), 1.0);
 
-        let mut ctx = MiddlewareContext::new();
+        let mut ctx = MiddlewareContext::live_handler();
 
         // Should allow burst of 20 events
         for i in 0..20 {
@@ -1137,7 +1137,7 @@ mod tests {
         // Create middleware directly (we only need a stage_id for writer attribution)
         let middleware = test_middleware(StageId::new(), 1.0, None, 1.0);
 
-        let mut ctx = MiddlewareContext::new();
+        let mut ctx = MiddlewareContext::live_handler();
 
         // Consume the one available token
         let data_event =
@@ -1158,7 +1158,7 @@ mod tests {
     fn test_rate_limiter_lifecycle_events_pass_through() {
         let middleware = test_middleware(StageId::new(), 1.0, None, 1.0);
 
-        let mut ctx = MiddlewareContext::new();
+        let mut ctx = MiddlewareContext::live_handler();
 
         // Consume the one available token
         let data_event =
@@ -1366,7 +1366,7 @@ mod tests {
                 "test.event",
                 json!({}),
             );
-            let mut ctx = MiddlewareContext::new();
+            let mut ctx = MiddlewareContext::live_handler();
             let action = middleware_for_thread.pre_handle(&event, &mut ctx);
             tx.send(action).unwrap();
         });
@@ -1443,7 +1443,7 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::channel();
 
         let handle = std::thread::spawn(move || {
-            let mut ctx = MiddlewareContext::new();
+            let mut ctx = MiddlewareContext::live_handler();
             middleware_for_thread.maybe_emit_summary(&mut ctx);
             tx.send(ctx.control_events().len()).unwrap();
         });
@@ -1469,7 +1469,7 @@ mod tests {
             stats.last_summary = Instant::now() - Duration::from_secs(10);
         }
 
-        let mut ctx = MiddlewareContext::new();
+        let mut ctx = MiddlewareContext::live_handler();
         middleware.maybe_emit_summary(&mut ctx);
         assert_eq!(ctx.control_events().len(), 2);
 
@@ -1511,7 +1511,7 @@ mod tests {
             stats.last_summary = Instant::now() - Duration::from_secs(10);
         }
 
-        let mut ctx = MiddlewareContext::new();
+        let mut ctx = MiddlewareContext::live_handler();
         middleware.maybe_emit_summary(&mut ctx);
         assert_eq!(ctx.control_events().len(), 1);
         match &ctx.control_events()[0].content {
@@ -1529,7 +1529,7 @@ mod tests {
             stats.last_summary = Instant::now() - Duration::from_secs(10);
         }
 
-        let mut ctx = MiddlewareContext::new();
+        let mut ctx = MiddlewareContext::live_handler();
         middleware.maybe_emit_summary(&mut ctx);
         assert_eq!(ctx.control_events().len(), 2);
         match &ctx.control_events()[0].content {
@@ -1563,7 +1563,7 @@ mod tests {
             stats.pulse_delay_ms_max = 200;
         }
 
-        let mut ctx = MiddlewareContext::new();
+        let mut ctx = MiddlewareContext::live_handler();
         middleware.maybe_emit_activity_pulse(&mut ctx);
         assert_eq!(ctx.control_events().len(), 1);
 

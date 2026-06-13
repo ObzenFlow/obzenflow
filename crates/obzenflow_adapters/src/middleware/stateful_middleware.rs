@@ -118,7 +118,7 @@ where
 
     fn create_events(&self, state: &Self::State) -> Result<Vec<ChainEvent>, HandlerError> {
         // Create ephemeral context for emission
-        let ctx = MiddlewareContext::new();
+        let ctx = MiddlewareContext::live_handler();
 
         // Get events from inner handler
         let mut results = self.inner.create_events(state)?;
@@ -140,7 +140,7 @@ where
 
     fn emit(&self, state: &mut Self::State) -> Result<Vec<ChainEvent>, HandlerError> {
         // Create ephemeral context for emission
-        let ctx = MiddlewareContext::new();
+        let ctx = MiddlewareContext::live_handler();
 
         // Emit from inner handler
         let mut results = self.inner.emit(state)?;
@@ -157,7 +157,7 @@ where
 
     async fn drain(&self, state: &Self::State) -> Result<Vec<ChainEvent>, HandlerError> {
         // Create ephemeral context for drain
-        let mut ctx = MiddlewareContext::new();
+        let mut ctx = MiddlewareContext::live_handler();
 
         // Drain from inner handler
         let mut results = self.inner.drain(state).await?;

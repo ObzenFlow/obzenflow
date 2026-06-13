@@ -214,7 +214,7 @@ mod tests {
     #[test]
     fn detects_error_from_event_type() {
         let mw = OutcomeEnrichmentMiddleware::new("test_stage");
-        let ctx = MiddlewareContext::new();
+        let ctx = MiddlewareContext::live_handler();
 
         let mut event =
             ChainEventFactory::data_event(writer(), "validation.error", json!({"data": "invalid"}));
@@ -232,7 +232,7 @@ mod tests {
     #[test]
     fn detects_error_from_payload_flag() {
         let mw = OutcomeEnrichmentMiddleware::new("test_stage");
-        let ctx = MiddlewareContext::new();
+        let ctx = MiddlewareContext::live_handler();
 
         let mut event = ChainEventFactory::data_event(
             writer(),
@@ -251,7 +251,7 @@ mod tests {
     #[test]
     fn detects_error_from_error_field() {
         let mw = OutcomeEnrichmentMiddleware::new("test_stage");
-        let ctx = MiddlewareContext::new();
+        let ctx = MiddlewareContext::live_handler();
 
         let mut event = ChainEventFactory::data_event(
             writer(),
@@ -270,7 +270,7 @@ mod tests {
     #[test]
     fn detects_retry_from_context() {
         let mw = OutcomeEnrichmentMiddleware::new("test_stage");
-        let mut ctx = MiddlewareContext::new();
+        let mut ctx = MiddlewareContext::live_handler();
         ctx.insert::<OutcomeRetryAttempt>(3);
 
         let mut event = ChainEventFactory::data_event(
@@ -290,7 +290,7 @@ mod tests {
     #[test]
     fn marks_control_events_as_filtered() {
         let mw = OutcomeEnrichmentMiddleware::new("test_stage");
-        let ctx = MiddlewareContext::new();
+        let ctx = MiddlewareContext::live_handler();
 
         let mut event = ChainEventFactory::eof_event(writer(), true);
 
@@ -305,7 +305,7 @@ mod tests {
     #[test]
     fn preserves_existing_outcome() {
         let mw = OutcomeEnrichmentMiddleware::new("test_stage");
-        let ctx = MiddlewareContext::new();
+        let ctx = MiddlewareContext::live_handler();
 
         let mut event =
             ChainEventFactory::data_event(writer(), "error.validation", json!({"data": "invalid"}));
@@ -324,7 +324,7 @@ mod tests {
     #[test]
     fn leaves_success_events_unchanged() {
         let mw = OutcomeEnrichmentMiddleware::new("test_stage");
-        let ctx = MiddlewareContext::new();
+        let ctx = MiddlewareContext::live_handler();
 
         let mut event = ChainEventFactory::data_event(
             writer(),

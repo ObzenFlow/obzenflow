@@ -197,7 +197,7 @@ where
         writer_id: WriterId,
     ) -> Result<Vec<ChainEvent>, HandlerError> {
         // Create ephemeral context
-        let ctx = MiddlewareContext::new();
+        let ctx = MiddlewareContext::live_handler();
 
         // EOF handling doesn't go through pre_handle (no event to check)
         // Just delegate to inner handler
@@ -215,7 +215,7 @@ where
 
     async fn drain(&self, state: &Self::State) -> Result<Vec<ChainEvent>, HandlerError> {
         // Create ephemeral context
-        let mut ctx = MiddlewareContext::new();
+        let mut ctx = MiddlewareContext::live_handler();
 
         // Drain from inner handler
         let mut results = self.inner.drain(state).await?;

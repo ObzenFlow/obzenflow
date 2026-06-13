@@ -166,7 +166,7 @@ mod tests {
 
         assert_eq!(middleware.events_processed(), 0);
 
-        let mut ctx = MiddlewareContext::new();
+        let mut ctx = MiddlewareContext::live_handler();
         middleware.pre_handle(&event, &mut ctx);
         assert_eq!(middleware.events_processed(), 1);
 

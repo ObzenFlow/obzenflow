@@ -18,7 +18,6 @@ use std::collections::HashMap;
 /// This context is created fresh for each event processing and is never
 /// persisted. It enables middleware to communicate without mutating the
 /// core ChainEvent.
-#[derive(Default)]
 pub struct MiddlewareContext {
     // NOTE: All fields are private; use helper methods.
     ephemeral_events: Vec<ChainEvent>,
@@ -32,16 +31,22 @@ pub struct MiddlewareContext {
 }
 
 impl MiddlewareContext {
-    /// Create a new empty context (live handler scope).
-    pub fn new() -> Self {
-        Self::default()
+    /// Create a new empty context for a live handler path.
+    ///
+    /// There is deliberately no scope-free constructor: replay-sensitive
+    /// runners should use [`with_scope`](Self::with_scope), while truly live
+    /// surfaces should spell that out here.
+    pub fn live_handler() -> Self {
+        Self::with_scope(MiddlewareExecutionScope::LiveHandler)
     }
 
     /// Create a new empty context bound to an explicit execution scope.
     pub fn with_scope(scope: MiddlewareExecutionScope) -> Self {
         Self {
+            ephemeral_events: Vec::new(),
+            control_events: Vec::new(),
+            slots: HashMap::new(),
             execution_scope: scope,
-            ..Self::default()
         }
     }
 
@@ -165,7 +170,7 @@ mod tests {
 
     #[test]
     fn test_context_ephemeral_events_round_trip() {
-        let mut ctx = MiddlewareContext::new();
+        let mut ctx = MiddlewareContext::live_handler();
         let writer_id = WriterId::from(obzenflow_core::StageId::new());
 
         let event = ChainEventFactory::metrics_state_snapshot(writer_id, json!({ "k": 1 }));
@@ -177,7 +182,7 @@ mod tests {
 
     #[test]
     fn test_context_typed_slots() {
-        let mut ctx = MiddlewareContext::new();
+        let mut ctx = MiddlewareContext::live_handler();
 
         ctx.insert::<RetryCountKey>(3);
         ctx.insert::<CircuitStateKey>("open".to_string());
@@ -192,7 +197,7 @@ mod tests {
 
     #[test]
     fn test_write_control_event() {
-        let mut ctx = MiddlewareContext::new();
+        let mut ctx = MiddlewareContext::live_handler();
         let writer_id = WriterId::from(obzenflow_core::StageId::new());
 
         // Write a circuit breaker opened event

@@ -8,12 +8,12 @@
 //! decision (H3).
 //!
 //! These live in the integration suite rather than as `obzenflow_adapters`
-//! unit tests because the effectful case needs a full `EffectInvocationContext`,
-//! whose `data_journal` is an `Arc<dyn Journal<ChainEvent>>`. The adapters
-//! crate cannot depend on `obzenflow_infra` (correctly), so a unit test there
-//! would have to fake the journal. Here we inject the real
-//! `obzenflow_infra::journal::MemoryJournal`, the same pattern as
-//! `middleware_factory_context_injection_test.rs`.
+//! unit tests because the effectful case needs a full `EffectInvocationContext`.
+//! The root `effect_testkit` helper builds that context with the real
+//! `obzenflow_infra::journal::MemoryJournal`, keeping infra dependencies out
+//! of lower crates.
+
+mod effect_testkit;
 
 use std::sync::{Arc, Mutex};
 
@@ -24,18 +24,12 @@ use obzenflow_adapters::middleware::{
     Middleware, MiddlewareContext, SourceMiddlewarePhase, UnifiedMiddlewareTransform,
 };
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
-use obzenflow_core::event::EventEnvelope;
-use obzenflow_core::journal::Journal;
-use obzenflow_core::{
-    FlowId, JournalOwner, JournalWriterId, MiddlewareExecutionScope, StageId, WriterId,
-};
-use obzenflow_infra::journal::MemoryJournal;
-use obzenflow_runtime::backpressure::BackpressureWriter;
-use obzenflow_runtime::effects::{EffectInvocationContext, EffectPortRegistry, EffectRuntimeMode};
-use obzenflow_runtime::feed_plan::StageOutputContract;
-use obzenflow_runtime::messaging::upstream_subscription::StageInputPosition;
+use obzenflow_core::{MiddlewareExecutionScope, StageId, WriterId};
+use obzenflow_runtime::effects::{EffectInvocationContext, EffectRuntimeMode};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::transform::traits::UnifiedTransformHandler;
+
+use effect_testkit::EffectInvocationContextBuilder;
 
 /// Records the execution scope its `pre_write` hook observes.
 struct ScopeProbe {
@@ -75,40 +69,6 @@ impl UnifiedTransformHandler for UnifiedEcho {
 
     async fn drain(&mut self) -> Result<(), HandlerError> {
         Ok(())
-    }
-}
-
-/// Build an `EffectInvocationContext` backed by the real in-memory journal.
-fn effect_context(journal: Arc<dyn Journal<ChainEvent>>) -> EffectInvocationContext {
-    let stage_id = StageId::new();
-    let writer_id = WriterId::from(stage_id);
-    let parent = EventEnvelope::new(
-        JournalWriterId::from(*journal.id()),
-        ChainEventFactory::data_event(writer_id, "test.parent", json!({})),
-    );
-    EffectInvocationContext {
-        flow_id: FlowId::new(),
-        stage_id,
-        stage_key: "effect_stage".to_string(),
-        writer_id,
-        input_seq: StageInputPosition(1),
-        stage_logic_version: "test-v1".to_string(),
-        data_journal: journal,
-        flow_context: None,
-        system_journal: None,
-        instrumentation: None,
-        heartbeat_state: None,
-        parent,
-        effect_history: None,
-        effect_runtime_mode: EffectRuntimeMode::ReplayStrict,
-        effect_ports: EffectPortRegistry::new(),
-        effect_declarations: Vec::new(),
-        synthesized_outcomes: Vec::new(),
-        output_contract: StageOutputContract::empty(),
-        backpressure_writer: BackpressureWriter::disabled(),
-        emit_enabled: false,
-        effect_boundary: None,
-        boundary_control_events: Arc::new(Mutex::new(Vec::new())),
     }
 }
 
@@ -156,15 +116,15 @@ async fn effectful_results_pre_write_carries_stage_scope() {
     let wrapped = UnifiedMiddlewareTransform::new(UnifiedEcho)
         .with_middleware(Box::new(ScopeProbe { seen: seen.clone() }));
 
-    let journal: Arc<dyn Journal<ChainEvent>> = Arc::new(MemoryJournal::<ChainEvent>::with_owner(
-        JournalOwner::stage(StageId::new()),
-    ));
     let event = ChainEventFactory::data_event(WriterId::from(StageId::new()), "test", json!({}));
+    let effect_context = EffectInvocationContextBuilder::new()
+        .with_runtime_mode(EffectRuntimeMode::ReplayStrict)
+        .build();
 
     wrapped
         .process(
             event,
-            Some(effect_context(journal)),
+            Some(effect_context),
             MiddlewareExecutionScope::StrictReplayHandler,
         )
         .await
