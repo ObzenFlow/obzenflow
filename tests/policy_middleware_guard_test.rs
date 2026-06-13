@@ -104,6 +104,43 @@ impl SinkHandler for NullSink {
 }
 
 #[tokio::test]
+async fn flow_level_policy_middleware_is_rejected_at_build() {
+    let result = flow! {
+        name: "policy_guard_flow_scope",
+        journals: disk_journals(std::path::PathBuf::from(
+            "target/policy-guard-logs/flow-scope",
+        )),
+        middleware: [
+            circuit_breaker(3)
+        ],
+
+        stages: {
+            guard_source = source!(GuardEvent => OneShotSource {
+                emitted: false,
+                writer_id: WriterId::from(obzenflow_core::StageId::new()),
+            });
+            guarded = transform!(GuardEvent -> GuardEvent => SyncPassthrough);
+            guard_sink = sink!(GuardEvent => NullSink);
+        },
+
+        topology: {
+            guard_source |> guarded;
+            guarded |> guard_sink;
+        }
+    }
+    .await;
+
+    let err = match result {
+        Ok(_) => panic!("flow-level policy middleware must fail the build"),
+        Err(err) => format!("{err:?}"),
+    };
+    assert!(
+        err.contains("PolicyMiddlewareOnFlowScope") || err.contains("Flow-level policy"),
+        "expected the FLOWIP-120c flow-scope rejection, got: {err}"
+    );
+}
+
+#[tokio::test]
 async fn policy_middleware_on_pure_sync_stage_is_rejected_at_build() {
     let result = flow! {
         name: "policy_guard_pure_sync",

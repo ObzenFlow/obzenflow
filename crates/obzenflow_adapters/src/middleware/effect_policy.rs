@@ -382,8 +382,14 @@ mod tests {
         let breaker_a = Arc::new(CircuitBreakerMiddleware::new(1));
         let breaker_b = Arc::new(CircuitBreakerMiddleware::new(1));
         let mut chains: HashMap<&'static str, Arc<Vec<Arc<dyn EffectPolicy>>>> = HashMap::new();
-        chains.insert("effect.a", Arc::new(vec![breaker_a as Arc<dyn EffectPolicy>]));
-        chains.insert("effect.b", Arc::new(vec![breaker_b as Arc<dyn EffectPolicy>]));
+        chains.insert(
+            "effect.a",
+            Arc::new(vec![breaker_a as Arc<dyn EffectPolicy>]),
+        );
+        chains.insert(
+            "effect.b",
+            Arc::new(vec![breaker_b as Arc<dyn EffectPolicy>]),
+        );
         let boundary = PerEffectPolicyBoundary::new(chains);
 
         // One failure opens effect A's breaker (threshold 1).

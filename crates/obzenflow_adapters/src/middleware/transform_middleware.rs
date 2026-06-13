@@ -666,7 +666,11 @@ impl<H: UnifiedTransformHandler> UnifiedMiddlewareTransform<H> {
             }
         }
 
-        let mut results = match self.inner.process(event.clone(), effect_context, scope).await {
+        let mut results = match self
+            .inner
+            .process(event.clone(), effect_context, scope)
+            .await
+        {
             Ok(results) => results,
             Err(err) => {
                 let reason = format!("Transform handler error: {err:?}");
@@ -1193,20 +1197,16 @@ mod tests {
         EffectIdentity {
             effect_type: "test.effect",
             safety: obzenflow_runtime::effects::EffectSafety::Idempotent,
-            cursor: obzenflow_runtime::effects::EffectCursor::new(
-                "test_flow",
-                "test_stage",
-                1,
-                0,
-            ),
+            cursor: obzenflow_runtime::effects::EffectCursor::new("test_flow", "test_stage", 1, 0),
             idempotency_key: None,
         }
     }
 
     fn boundary_for(middleware: Arc<dyn Middleware>) -> crate::middleware::PerEffectPolicyBoundary {
-        let chain: Arc<Vec<Arc<dyn crate::middleware::EffectPolicy>>> = Arc::new(vec![
-            crate::middleware::effect_policy_from_middleware(middleware),
-        ]);
+        let chain: Arc<Vec<Arc<dyn crate::middleware::EffectPolicy>>> =
+            Arc::new(vec![crate::middleware::effect_policy_from_middleware(
+                middleware,
+            )]);
         let mut chains = std::collections::HashMap::new();
         chains.insert("test.effect", chain);
         crate::middleware::PerEffectPolicyBoundary::new(chains)
@@ -1446,7 +1446,11 @@ mod tests {
             crate::middleware::MiddlewareKind::Policy
         }
 
-        fn pre_handle(&self, _event: &ChainEvent, _ctx: &mut MiddlewareContext) -> MiddlewareAction {
+        fn pre_handle(
+            &self,
+            _event: &ChainEvent,
+            _ctx: &mut MiddlewareContext,
+        ) -> MiddlewareAction {
             MiddlewareAction::Abort {
                 cause: Some(MiddlewareAbortCause {
                     source: EffectFailureSource::new("test.aborting"),
@@ -1532,7 +1536,11 @@ mod tests {
             crate::middleware::SourceMiddlewarePhase::Ordinary
         }
 
-        fn pre_handle(&self, _event: &ChainEvent, _ctx: &mut MiddlewareContext) -> MiddlewareAction {
+        fn pre_handle(
+            &self,
+            _event: &ChainEvent,
+            _ctx: &mut MiddlewareContext,
+        ) -> MiddlewareAction {
             MiddlewareAction::Skip {
                 results: vec![],
                 cause: None,

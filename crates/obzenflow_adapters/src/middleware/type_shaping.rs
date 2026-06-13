@@ -154,7 +154,8 @@ where
         Option<String>,
     ) {
         let (factory, registration, config_error) = self.into_registration_parts();
-        let (registration, config_error) = stamp_entry_effect(registration, config_error, effect_type);
+        let (registration, config_error) =
+            stamp_entry_effect(registration, config_error, effect_type);
         (factory, Some(registration), config_error)
     }
 }
@@ -169,7 +170,8 @@ impl IntoEffectPolicyParts for OutcomeShapingMiddleware {
         Option<String>,
     ) {
         let (factory, registration, config_error) = self.into_registration_parts();
-        let (registration, config_error) = stamp_entry_effect(registration, config_error, effect_type);
+        let (registration, config_error) =
+            stamp_entry_effect(registration, config_error, effect_type);
         (factory, Some(registration), config_error)
     }
 }
@@ -188,7 +190,10 @@ fn stamp_entry_effect(
                  effect '{effect_type}'; attach it to the effect it guards \
                  (FLOWIP-120c H7)"
             );
-            (registration, Some(config_error.map_or(mismatch.clone(), |e| format!("{e}; {mismatch}"))))
+            (
+                registration,
+                Some(config_error.map_or(mismatch.clone(), |e| format!("{e}; {mismatch}"))),
+            )
         }
         _ => {
             registration.effect_type = Some(effect_type.to_string());

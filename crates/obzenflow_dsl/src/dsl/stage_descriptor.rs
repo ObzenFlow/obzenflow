@@ -135,6 +135,9 @@ pub enum PolicyGuardSurface {
     AsyncNonEffectful,
     /// Effectful stages: per-effect policy placement (FLOWIP-120c phase 3).
     Effectful,
+    /// Effectful stateful stages do not install the stateful effect boundary
+    /// until FLOWIP-120l, so policy declarations must reject for now.
+    EffectfulStatefulPendingBoundary,
     /// Sources are live I/O units; policy middleware attaches legitimately.
     Source,
     /// Sink delivery placement is deferred until FLOWIP-095g.
@@ -1430,9 +1433,10 @@ impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
                     control_middleware.clone(),
                     effect_type,
                 )?);
-                effect_chains.entry(effect_type).or_default().push(
-                    obzenflow_adapters::middleware::effect_policy_from_middleware(instance),
-                );
+                effect_chains
+                    .entry(effect_type)
+                    .or_default()
+                    .push(obzenflow_adapters::middleware::effect_policy_from_middleware(instance));
             }
         }
 
@@ -1443,9 +1447,10 @@ impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
                     control_middleware.clone(),
                     attachment.effect_type,
                 )?);
-                effect_chains.entry(attachment.effect_type).or_default().push(
-                    obzenflow_adapters::middleware::effect_policy_from_middleware(instance),
-                );
+                effect_chains
+                    .entry(attachment.effect_type)
+                    .or_default()
+                    .push(obzenflow_adapters::middleware::effect_policy_from_middleware(instance));
             }
         }
 
@@ -1489,7 +1494,8 @@ impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
         for mw in all_middleware {
             handler_with_middleware = handler_with_middleware.with_middleware(mw);
         }
-        let handler_with_middleware = handler_with_middleware.with_effect_policies(effect_policy_chains);
+        let handler_with_middleware =
+            handler_with_middleware.with_effect_policies(effect_policy_chains);
 
         let handle = TransformBuilder::new(handler_with_middleware, transform_config, resources)
             .with_instrumentation(instrumentation)
@@ -2063,6 +2069,10 @@ impl<H: EffectfulStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
 
     fn is_effectful(&self) -> bool {
         true
+    }
+
+    fn policy_guard_surface(&self) -> PolicyGuardSurface {
+        PolicyGuardSurface::EffectfulStatefulPendingBoundary
     }
 
     fn stage_logic_version(&self) -> String {

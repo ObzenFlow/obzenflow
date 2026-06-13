@@ -324,7 +324,12 @@ mod tests {
         // Normal event should be accumulated
         let event1 = ChainEventFactory::data_event(writer_id, "test", json!({"data": 1}));
         handler
-            .accumulate(&mut state, event1, None, MiddlewareExecutionScope::LiveHandler)
+            .accumulate(
+                &mut state,
+                event1,
+                None,
+                MiddlewareExecutionScope::LiveHandler,
+            )
             .await
             .expect("accumulate should not fail");
         assert_eq!(accumulated_count.load(Ordering::Relaxed), 1);
@@ -332,7 +337,12 @@ mod tests {
         // Event with "skip" should be skipped
         let event2 = ChainEventFactory::data_event(writer_id, "test", json!({"skip": true}));
         handler
-            .accumulate(&mut state, event2, None, MiddlewareExecutionScope::LiveHandler)
+            .accumulate(
+                &mut state,
+                event2,
+                None,
+                MiddlewareExecutionScope::LiveHandler,
+            )
             .await
             .expect("accumulate should not fail");
         assert_eq!(accumulated_count.load(Ordering::Relaxed), 1); // Still 1
@@ -340,7 +350,12 @@ mod tests {
         // Another normal event
         let event3 = ChainEventFactory::data_event(writer_id, "test", json!({"data": 3}));
         handler
-            .accumulate(&mut state, event3, None, MiddlewareExecutionScope::LiveHandler)
+            .accumulate(
+                &mut state,
+                event3,
+                None,
+                MiddlewareExecutionScope::LiveHandler,
+            )
             .await
             .expect("accumulate should not fail");
         assert_eq!(accumulated_count.load(Ordering::Relaxed), 2);

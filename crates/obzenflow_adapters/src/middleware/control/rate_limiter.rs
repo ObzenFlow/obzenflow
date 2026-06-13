@@ -1605,13 +1605,11 @@ mod tests {
             cursor: EffectCursor::new("test_flow", "test_stage", 1, 0),
             idempotency_key: None,
         };
-        let event = ChainEventFactory::data_event(
-            WriterId::from(StageId::new()),
-            "test.input",
-            json!({}),
+        let event =
+            ChainEventFactory::data_event(WriterId::from(StageId::new()), "test.input", json!({}));
+        let mut ctx = MiddlewareContext::with_scope(
+            obzenflow_core::MiddlewareExecutionScope::LiveEffectBoundary,
         );
-        let mut ctx =
-            MiddlewareContext::with_scope(obzenflow_core::MiddlewareExecutionScope::LiveEffectBoundary);
 
         // The single burst token admits immediately.
         assert!(matches!(

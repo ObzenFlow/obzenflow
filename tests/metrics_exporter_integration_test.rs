@@ -11,10 +11,11 @@
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
-use obzenflow_adapters::middleware::{circuit_breaker, rate_limit_with_burst};
+use obzenflow_adapters::middleware::{
+    circuit_breaker, rate_limit_with_burst, CircuitBreakerBuilder,
+};
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
-use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
 use obzenflow_core::metrics::MetricsExporter;
 use obzenflow_core::TypedPayload;
 use obzenflow_core::{StageId, WriterId};
@@ -82,6 +83,41 @@ impl FiniteSourceHandler for BurstSource {
 }
 
 #[derive(Clone, Debug)]
+struct ErrorAfterFirstSource {
+    current: usize,
+    writer_id: WriterId,
+}
+
+impl ErrorAfterFirstSource {
+    fn new() -> Self {
+        Self {
+            current: 0,
+            writer_id: WriterId::from(StageId::new()),
+        }
+    }
+}
+
+impl FiniteSourceHandler for ErrorAfterFirstSource {
+    fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
+        match self.current {
+            0 => {
+                self.current = 1;
+                Ok(Some(vec![ChainEventFactory::data_event(
+                    self.writer_id,
+                    MetricEvent::versioned_event_type(),
+                    json!({ "index": 0 }),
+                )]))
+            }
+            1 => {
+                self.current = 2;
+                Err(SourceError::Timeout("source timeout".to_string()))
+            }
+            _ => Ok(None),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
 struct PassthroughTransform;
 
 #[async_trait]
@@ -102,31 +138,6 @@ struct DropTransform;
 impl TransformHandler for DropTransform {
     fn process(&self, _event: ChainEvent) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
         Ok(Vec::new())
-    }
-
-    async fn drain(&mut self) -> std::result::Result<(), HandlerError> {
-        Ok(())
-    }
-}
-
-#[derive(Clone, Debug)]
-struct TimeoutAfterFirstTransform;
-
-#[async_trait]
-impl TransformHandler for TimeoutAfterFirstTransform {
-    fn process(&self, mut event: ChainEvent) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
-        let idx = event
-            .payload()
-            .get("index")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0);
-
-        if idx >= 1 {
-            event.processing_info.status =
-                ProcessingStatus::error_with_kind("simulated_timeout", Some(ErrorKind::Timeout));
-        }
-
-        Ok(vec![event])
     }
 
     async fn drain(&mut self) -> std::result::Result<(), HandlerError> {
@@ -372,11 +383,10 @@ async fn metrics_all_stage_metrics_include_flow_id_label() -> Result<()> {
         stages: {
             src = source!(MetricEvent => BurstSource::new(50), [
                 // No summaries/threshold crossings required; utilization is derived from bucket state.
-                rate_limit_with_burst(10_000.0, 10_000.0)
-            ]);
-            trans = transform!(MetricEvent -> MetricEvent => DropTransform, [
+                rate_limit_with_burst(10_000.0, 10_000.0),
                 circuit_breaker(10)
             ]);
+            trans = transform!(MetricEvent -> MetricEvent => DropTransform);
             snk = sink!(MetricEvent => CountingSink::new().0);
         },
 
@@ -522,12 +532,12 @@ async fn metrics_circuit_breaker_counters_are_exported_with_joinable_labels() ->
         stages: {
             // 1000 events triggers a CircuitBreaker summary (>=1000 processed requests).
             // Use 1001 so the summary is not emitted on the final stage output.
-            src = source!(MetricEvent => BurstSource::new(1001));
-            // Drop downstream data outputs to keep journaling light; the circuit breaker
-            // still observes successful processing and emits a summary at 1000.
-            trans = transform!(MetricEvent -> MetricEvent => DropTransform, [
+            src = source!(MetricEvent => BurstSource::new(1001), [
                 circuit_breaker(10)
             ]);
+            // Drop downstream data outputs to keep journaling light; the circuit breaker
+            // still observes successful source polling and emits a summary at 1000.
+            trans = transform!(MetricEvent -> MetricEvent => DropTransform);
             snk = sink!(MetricEvent => CountingSink::new().0);
         },
 
@@ -596,11 +606,13 @@ async fn metrics_circuit_breaker_cumulative_are_exported_and_trippable() -> Resu
 
         stages: {
             // 1001 events ensures the 1000-threshold summary is emitted before the run completes.
-            src = source!(MetricEvent => BurstSource::new(1001));
-            // First event succeeds, second event fails (Timeout), opening the breaker.
-            trans = transform!(MetricEvent -> MetricEvent => TimeoutAfterFirstTransform, [
-                circuit_breaker(1)
+            // First poll succeeds, second poll fails (Timeout), opening the breaker.
+            src = source!(MetricEvent => ErrorAfterFirstSource::new(), [
+                CircuitBreakerBuilder::new(1)
+                    .cooldown(Duration::from_millis(0))
+                    .build()
             ]);
+            trans = transform!(MetricEvent -> MetricEvent => DropTransform);
             snk = sink!(MetricEvent => CountingSink::new().0);
         },
 
@@ -659,8 +671,8 @@ async fn metrics_circuit_breaker_cumulative_are_exported_and_trippable() -> Resu
     )
     .ok_or_else(|| anyhow!("missing circuit_breaker_successes_total for {cb_stage_label}"))?;
     assert!(
-        (successes_total - 1.0).abs() < f64::EPSILON,
-        "expected circuit_breaker_successes_total=1, got {successes_total}"
+        (successes_total - 3.0).abs() < f64::EPSILON,
+        "expected circuit_breaker_successes_total=3 for source data/recovery/terminal polls, got {successes_total}"
     );
 
     let failures_total = metric_line_value(
@@ -685,7 +697,10 @@ async fn metrics_circuit_breaker_cumulative_are_exported_and_trippable() -> Resu
         ],
     )
     .ok_or_else(|| {
-        anyhow!("missing circuit_breaker_state_transitions_total closed->open for {cb_stage_label}")
+        anyhow!(
+            "missing circuit_breaker_state_transitions_total closed->open for {cb_stage_label}\n{}",
+            filter_metrics_lines(&metrics_text, &debug_patterns, 120)
+        )
     })?;
     assert!(
         (transitions_total - 1.0).abs() < f64::EPSILON,
@@ -879,10 +894,10 @@ async fn metrics_circuit_breaker_requests_total_is_accurate_without_summaries() 
         middleware: [],
 
         stages: {
-            src = source!(MetricEvent => BurstSource::new(total_events));
-            trans = transform!(MetricEvent -> MetricEvent => DropTransform, [
+            src = source!(MetricEvent => BurstSource::new(total_events), [
                 circuit_breaker(10)
             ]);
+            trans = transform!(MetricEvent -> MetricEvent => DropTransform);
             snk = sink!(MetricEvent => CountingSink::new().0);
         },
 
@@ -923,9 +938,11 @@ async fn metrics_circuit_breaker_requests_total_is_accurate_without_summaries() 
         &[flow_label.clone(), cb_stage_label.clone()],
     )
     .ok_or_else(|| anyhow!("missing circuit_breaker_requests_total for {cb_stage_label}"))?;
+    let expected_requests = total_events + 1;
     assert!(
-        (requests_total - total_events as f64).abs() < f64::EPSILON,
-        "expected circuit_breaker_requests_total={total_events}, got {requests_total}"
+        (requests_total - expected_requests as f64).abs() < f64::EPSILON,
+        "expected circuit_breaker_requests_total={} including the terminal source poll, got {requests_total}",
+        expected_requests
     );
 
     Ok(())

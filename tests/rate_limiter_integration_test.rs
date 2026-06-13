@@ -214,10 +214,10 @@ async fn rate_limiter_low_rate_half_eps_processes_all_events() -> Result<()> {
         middleware: [],
 
         stages: {
-            src = source!(RateLimiterTestEvent => SequenceSource::new(2));
-            throttled = transform!(RateLimiterTestEvent -> RateLimiterTestEvent => PassthroughTransform, [
+            src = source!(RateLimiterTestEvent => SequenceSource::new(2), [
                 rate_limit_with_burst(50.0, 1.0)
             ]);
+            throttled = transform!(RateLimiterTestEvent -> RateLimiterTestEvent => PassthroughTransform);
             snk = sink!(RateLimiterTestEvent => sink);
         },
 
@@ -230,8 +230,8 @@ async fn rate_limiter_low_rate_half_eps_processes_all_events() -> Result<()> {
     .map_err(|e| anyhow!("failed to create low-rate flow: {e}"))?;
 
     let (_, throttled_journal) = test_handle
-        .stage_journal_for_test("throttled")
-        .map_err(|e| anyhow!("failed to look up throttled stage journal: {e}"))?;
+        .stage_journal_for_test("src")
+        .map_err(|e| anyhow!("failed to look up source stage journal: {e}"))?;
 
     tokio::time::timeout(Duration::from_secs(8), test_handle.into_inner().run())
         .await
@@ -257,12 +257,12 @@ async fn rate_limiter_weighted_default_burst_makes_progress() -> Result<()> {
         middleware: [],
 
         stages: {
-            src = source!(RateLimiterTestEvent => SequenceSource::new(1));
-            throttled = transform!(RateLimiterTestEvent -> RateLimiterTestEvent => PassthroughTransform, [
+            src = source!(RateLimiterTestEvent => SequenceSource::new(1), [
                 RateLimiterBuilder::new(2.0)
                     .with_cost_per_event(5.0)
                     .build()
             ]);
+            throttled = transform!(RateLimiterTestEvent -> RateLimiterTestEvent => PassthroughTransform);
             snk = sink!(RateLimiterTestEvent => sink);
         },
 
@@ -291,13 +291,13 @@ async fn rate_limiter_invalid_explicit_burst_fails_at_materialisation() {
         middleware: [],
 
         stages: {
-            src = source!(RateLimiterTestEvent => SequenceSource::new(1));
-            throttled = transform!(RateLimiterTestEvent -> RateLimiterTestEvent => PassthroughTransform, [
+            src = source!(RateLimiterTestEvent => SequenceSource::new(1), [
                 RateLimiterBuilder::new(10.0)
                     .with_burst(2.0)
                     .with_cost_per_event(5.0)
                     .build()
             ]);
+            throttled = transform!(RateLimiterTestEvent -> RateLimiterTestEvent => PassthroughTransform);
             snk = sink!(RateLimiterTestEvent => CountingSink::new().0);
         },
 
@@ -913,9 +913,9 @@ impl JoinHandler for PassthroughJoin {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn rate_limiter_join_stage_supports_rate_limit_middleware() -> Result<()> {
-    let (sink, count) = CountingSink::new();
-    let test_handle = test_flow! {
+async fn rate_limiter_join_stage_rejects_rate_limit_middleware() -> Result<()> {
+    let (sink, _count) = CountingSink::new();
+    let result = test_flow! {
         name: "rate_limiter_join_support",
         journals: disk_journals(unique_journal_dir("rate_limiter_join_support")),
         middleware: [],
@@ -924,7 +924,7 @@ async fn rate_limiter_join_stage_supports_rate_limit_middleware() -> Result<()> 
             ref_src = source!(RefPayload => SingleRefSource::new());
             stream_src = async_source!(StreamPayload => TwoStreamEventsSource::new());
             joiner = join!(catalog ref_src: RefPayload, StreamPayload -> EnrichedPayload => PassthroughJoin, [
-                // Burst is 3 to account for: 1 reference hydration event + 2 stream events.
+                // Joins are deterministic coordination surfaces under FLOWIP-120c H1.
                 rate_limit_with_burst(1.0, 3.0)
             ]);
             snk = sink!(EnrichedPayload => sink);
@@ -935,21 +935,16 @@ async fn rate_limiter_join_stage_supports_rate_limit_middleware() -> Result<()> 
             joiner |> snk;
         }
     }
-    .await
-    .map_err(|e| anyhow!("failed to create join+rate_limit flow: {e}"))?;
+    .await;
 
-    let (_, joiner_journal) = test_handle
-        .stage_journal_for_test("joiner")
-        .map_err(|e| anyhow!("failed to look up joiner stage journal: {e}"))?;
-
-    tokio::time::timeout(Duration::from_secs(6), test_handle.into_inner().run())
-        .await
-        .map_err(|_| anyhow!("join+rate_limit flow run timed out"))?
-        .map_err(|e| anyhow!("join+rate_limit flow run failed: {e}"))?;
-
-    assert_eq!(count.load(Ordering::Relaxed), 2);
-    let delayed = rate_limiter_delayed_events(&joiner_journal).await?;
-    assert_eq!(delayed, 0);
+    let err = match result {
+        Ok(_) => return Err(anyhow!("rate limiter on a join must fail the build")),
+        Err(err) => format!("{err:?}"),
+    };
+    assert!(
+        err.contains("PolicyMiddlewareOnPureStage") || err.contains("pure sync surface"),
+        "expected FLOWIP-120c H1 join rejection, got: {err}"
+    );
 
     Ok(())
 }

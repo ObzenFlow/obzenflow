@@ -245,13 +245,15 @@ async fn dispatch_event<H: UnifiedSinkHandler + Clone + std::fmt::Debug + Send +
             let envelope_event = envelope.event.clone();
             let event_id = envelope_event.id;
             let heartbeat_state = ctx.heartbeat.as_ref().map(|h| h.state.clone());
-            if let Err(e) = ctx.handler
+            if let Err(e) = ctx
+                .handler
                 .consume_report(
                     envelope_event,
                     None,
                     crate::effects::scope_for_dispatch(ctx.effect_runtime_mode, None),
                 )
-                .await {
+                .await
+            {
                 tracing::error!(
                     stage_name = %ctx.stage_name,
                     error = ?e,
@@ -369,13 +371,15 @@ async fn dispatch_control_event<
 
             // For non-EOF control events, let handler consume if needed.
             let envelope_event = envelope.event.clone();
-            if let Err(e) = ctx.handler
+            if let Err(e) = ctx
+                .handler
                 .consume_report(
                     envelope_event,
                     None,
                     crate::effects::scope_for_dispatch(ctx.effect_runtime_mode, None),
                 )
-                .await {
+                .await
+            {
                 tracing::error!(
                     stage_name = %ctx.stage_name,
                     error = ?e,
@@ -491,10 +495,13 @@ async fn dispatch_data_event<
             .as_ref()
             .map(|state| HeartbeatProcessingGuard::new(state.clone(), upstream_stage, event_id));
 
-        let result =
-            AssertUnwindSafe(ctx.handler.consume_report(envelope_event, effect_context, scope))
-                .catch_unwind()
-                .await;
+        let result = AssertUnwindSafe(ctx.handler.consume_report(
+            envelope_event,
+            effect_context,
+            scope,
+        ))
+        .catch_unwind()
+        .await;
 
         match result {
             Ok(Ok(mut report)) => {

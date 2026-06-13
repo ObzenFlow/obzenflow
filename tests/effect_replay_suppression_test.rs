@@ -842,20 +842,20 @@ fn build_flow(
     }
 }
 
-fn build_flow_level_limiter_flow(
+fn build_source_limiter_flow(
     journal_base: PathBuf,
     calls: Arc<AtomicUsize>,
     outputs: Arc<Mutex<Vec<ReplayOutput>>>,
 ) -> FlowDefinition {
     flow! {
-        name: "effect_replay_flow_limiter",
+        name: "effect_replay_source_limiter",
         journals: disk_journals(journal_base),
-        middleware: [
-            RateLimiterBuilder::new(1.0).build()
-        ],
+        middleware: [],
 
         stages: {
-            inputs = source!(ReplayInput => ReplaySource::new());
+            inputs = source!(ReplayInput => ReplaySource::new(), [
+                RateLimiterBuilder::new(1.0).build()
+            ]);
             effectful = effectful_transform!(
                 ReplayInput -> { ReplayOutput, ReplayEffectValue } => ReplayTransform { calls },
                 effects: [CountingEffect],
@@ -871,12 +871,11 @@ fn build_flow_level_limiter_flow(
     }
 }
 
-/// Same shape as `build_flow_level_limiter_flow` but with a high admission rate, so
+/// Same shape as `build_flow` but with a high effect-boundary admission rate, so
 /// the limiter consumes tokens and moves admission state without blocking a worker
 /// thread for seconds. The resume regression only needs token consumption at the
-/// effect boundary versus suppression at the sink, not real backpressure delay, so
-/// this keeps that test fast and avoids starving the shared runtime under parallel
-/// test execution.
+/// effect boundary, not real backpressure delay, so this keeps that test fast and
+/// avoids starving the shared runtime under parallel test execution.
 fn build_fast_limiter_flow(
     journal_base: PathBuf,
     calls: Arc<AtomicUsize>,
@@ -885,15 +884,15 @@ fn build_fast_limiter_flow(
     flow! {
         name: "effect_replay_fast_limiter",
         journals: disk_journals(journal_base),
-        middleware: [
-            RateLimiterBuilder::new(1000.0).build()
-        ],
+        middleware: [],
 
         stages: {
             inputs = source!(ReplayInput => ReplaySource::new());
             effectful = effectful_transform!(
                 ReplayInput -> { ReplayOutput, ReplayEffectValue } => ReplayTransform { calls },
-                effects: [CountingEffect],
+                effects: [CountingEffect with [
+                    RateLimiterBuilder::new(1000.0).build()
+                ]],
                 middleware: []
             );
             collector = sink!(ReplayOutput => CollectSink { outputs });
@@ -1641,16 +1640,16 @@ async fn effect_rate_limiter_runtime_activity_in_stage(
         .into_iter()
         .filter_map(|event| event.runtime_context)
         .fold((0u64, 0u64, 0f64), |(ev, dl, ds), rc| {
-            let (sum_ev, sum_dl, sum_ds) = rc.effect_rate_limiters.iter().fold(
-                (0u64, 0u64, 0f64),
-                |(ev, dl, ds), entry| {
-                    (
-                        ev + entry.rl_events_total,
-                        dl + entry.rl_delayed_total,
-                        ds + entry.rl_delay_seconds_total,
-                    )
-                },
-            );
+            let (sum_ev, sum_dl, sum_ds) =
+                rc.effect_rate_limiters
+                    .iter()
+                    .fold((0u64, 0u64, 0f64), |(ev, dl, ds), entry| {
+                        (
+                            ev + entry.rl_events_total,
+                            dl + entry.rl_delayed_total,
+                            ds + entry.rl_delay_seconds_total,
+                        )
+                    });
             (ev.max(sum_ev), dl.max(sum_dl), ds.max(sum_ds))
         })
 }
@@ -1958,7 +1957,7 @@ async fn drain_waits_for_in_flight_effect_before_outputs_and_eof_complete() {
 }
 
 #[tokio::test]
-async fn flow_level_admission_limiter_replay_suppresses_delay_events_and_effects() {
+async fn source_admission_limiter_replay_suppresses_delay_events_and_effects() {
     let _guard = effect_replay_test_guard().await;
     let temp = tempfile::tempdir().expect("tempdir");
     let journal_base = temp.path().join("journals");
@@ -1967,13 +1966,13 @@ async fn flow_level_admission_limiter_replay_suppresses_delay_events_and_effects
     let live_outputs = Arc::new(Mutex::new(Vec::new()));
     FlowApplication::builder()
         .with_cli_args(["obzenflow"])
-        .run_async(build_flow_level_limiter_flow(
+        .run_async(build_source_limiter_flow(
             journal_base.clone(),
             live_calls.clone(),
             live_outputs.clone(),
         ))
         .await
-        .expect("live flow-level limiter flow should complete");
+        .expect("live source-limiter flow should complete");
 
     assert_eq!(live_calls.load(Ordering::SeqCst), 3);
     let live_domain_outputs = live_outputs.lock().expect("outputs lock poisoned").clone();
@@ -1987,18 +1986,18 @@ async fn flow_level_admission_limiter_replay_suppresses_delay_events_and_effects
             OsString::from("--replay-from"),
             archive_dir.as_os_str().to_os_string(),
         ])
-        .run_async(build_flow_level_limiter_flow(
+        .run_async(build_source_limiter_flow(
             journal_base.clone(),
             replay_calls.clone(),
             replay_outputs.clone(),
         ))
         .await
-        .expect("replay flow-level limiter flow should complete");
+        .expect("replay source-limiter flow should complete");
 
     assert_eq!(
         replay_calls.load(Ordering::SeqCst),
         0,
-        "replay must suppress live effect execution under flow-level middleware"
+        "replay must suppress live effect execution under source middleware"
     );
     assert_eq!(
         replay_outputs
@@ -2010,31 +2009,27 @@ async fn flow_level_admission_limiter_replay_suppresses_delay_events_and_effects
 
     let replay_archive = latest_run_dir(&journal_base);
 
-    // Directly assert the flow-level admission limiter consumed no tokens and moved no
+    // Directly assert the source admission limiter consumed no tokens and moved no
     // admission state during replay. The burst capacity is 1.0, so an invoked limiter
     // must delay inputs 2 and 3 and emit Delayed events; the live run proves this,
-    // making the limiter's complete silence during replay evidence that it was never
-    // invoked (zero rate-limiter events of any variant), so no tokens were consumed.
-    let live_delayed = rate_limiter_delayed_events_in_stage(&archive_dir, "inputs").await
-        + rate_limiter_delayed_events_in_stage(&archive_dir, "effectful").await
-        + rate_limiter_delayed_events_in_stage(&archive_dir, "collector").await;
+    // making the limiter's complete silence during replay evidence that the source
+    // surface was bypassed by the replay driver.
+    let live_delayed = rate_limiter_delayed_events_in_stage(&archive_dir, "inputs").await;
     assert!(
         live_delayed > 0,
         "live run must exercise the limiter (3 inputs at burst capacity 1.0), otherwise \
          the replay-silence assertion below is vacuous"
     );
 
-    let replay_rate_limiter_events = rate_limiter_events_in_stage(&replay_archive, "inputs").await
-        + rate_limiter_events_in_stage(&replay_archive, "effectful").await
-        + rate_limiter_events_in_stage(&replay_archive, "collector").await;
+    let replay_rate_limiter_events = rate_limiter_events_in_stage(&replay_archive, "inputs").await;
     assert_eq!(
         replay_rate_limiter_events, 0,
-        "strict replay must not invoke the flow-level admission limiter, so it emits no \
+        "strict replay must not invoke the source admission limiter, so it emits no \
          rate-limiter events of any kind and consumes no tokens or admission state"
     );
 
     // FLOWIP-120a regression. The journal-only assertion above is blind to the
-    // admission-middleware replay bug: a downstream sink runs the limiter's
+    // admission-middleware replay bug: a replayed deterministic shell runs the limiter's
     // `pre_handle` on every replayed event but never journals its `Delayed`
     // lifecycle records, so the limiter can pace the whole replay while the journal
     // stays silent. The runtime counters embedded in wide events do capture it.
@@ -2042,9 +2037,7 @@ async fn flow_level_admission_limiter_replay_suppresses_delay_events_and_effects
     // The limiter embeds tokens-consumed (`rl_events_total`), delayed-event
     // (`rl_delayed_total`), and delay-seconds (`rl_delay_seconds_total`) totals via
     // the instrumentation snapshotter. Strict replay must leave every one at zero on
-    // every stage. This assertion fails on the pre-fix code (`saw 3` tokens at the
-    // sink) and is deterministic, so it does not depend on wall-clock timing under
-    // parallel test load. The live run above proves the limiter is active
+    // every stage. The live run above proves the source limiter is active
     // (`live_delayed > 0`), so the zero-on-replay assertion is not vacuous.
     for stage in ["inputs", "effectful", "collector"] {
         let (events_total, delayed_total, delay_seconds) =
@@ -2630,19 +2623,17 @@ async fn resume_incomplete_archive_reexecutes_missing_effect_records_with_archiv
     );
 }
 
-/// FLOWIP-120a: incomplete-archive resume must suppress handler-level admission
-/// middleware (the replayed inputs carry replay provenance) while STILL protecting
-/// effects that execute live at the effect boundary. A blanket
-/// `event.replay_context.is_some()` bypass would wrongly disable the live effect's
-/// protection; the scoped fix keeps the effect boundary under `LiveEffectBoundary`
-/// (never suppressed) and only suppresses the reconstructed handler shell.
+/// FLOWIP-120a/120c: incomplete-archive resume must STILL protect effects that
+/// execute live at the effect boundary. A blanket `event.replay_context.is_some()`
+/// bypass would wrongly disable the live effect's protection; the scoped fix keeps
+/// the effect boundary under `LiveEffectBoundary` (never suppressed) while
+/// FLOWIP-120c makes downstream handler-level policy structurally unrepresentable.
 ///
 /// With every effect record removed, all three effects re-execute live during
 /// resume, so the effectful stage's effect-boundary limiter must run and consume
-/// tokens, while the downstream sink's handler-level admission limiter must stay
-/// silent.
+/// tokens.
 #[tokio::test]
-async fn resume_incomplete_runs_effect_boundary_limiter_but_suppresses_downstream_admission() {
+async fn resume_incomplete_runs_effect_boundary_limiter_for_missing_effect_records() {
     let _guard = effect_replay_test_guard().await;
     let temp = tempfile::tempdir().expect("tempdir");
     let journal_base = temp.path().join("journals");
@@ -2711,24 +2702,6 @@ async fn resume_incomplete_runs_effect_boundary_limiter_but_suppresses_downstrea
         effectful_tokens > 0,
         "resume must keep the effect-boundary limiter live for effects that execute \
          live, but it consumed {effectful_tokens} tokens"
-    );
-
-    // The downstream sink reconstructs deterministically from those committed-or-live
-    // outcomes; its handler-level admission limiter performs no live external work and
-    // must stay fully suppressed.
-    let (collector_tokens, collector_delayed, collector_delay_seconds) =
-        rate_limiter_runtime_activity_in_stage(&resume_archive, "collector").await;
-    assert_eq!(
-        collector_tokens, 0,
-        "resume must suppress the downstream sink's handler-level admission limiter"
-    );
-    assert_eq!(
-        collector_delayed, 0,
-        "resume sink admission limiter must delay nothing"
-    );
-    assert_eq!(
-        collector_delay_seconds, 0.0,
-        "resume sink admission limiter must accrue no delay seconds"
     );
 }
 

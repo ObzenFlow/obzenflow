@@ -93,6 +93,24 @@ pub enum FlowBuildError {
     },
 
     #[error(
+        "Flow-level policy middleware '{middleware}' is not allowed. Policy middleware attaches \
+         to live I/O units only: sources, the effect boundary of an effectful stage, or sink \
+         delivery (FLOWIP-120c H1). A flow-level policy would be broadcast onto stages that may \
+         have no protected dependency; attach it to the specific live I/O unit instead."
+    )]
+    PolicyMiddlewareOnFlowScope { middleware: String },
+
+    #[error(
+        "Stage '{stage_name}' declares policy middleware '{middleware}' on an effectful stateful \
+         stage before FLOWIP-120l installs the stateful effect boundary. Accepting this would \
+         advertise protection while stateful dispatch still has effect_boundary: None."
+    )]
+    PolicyMiddlewareOnPendingEffectfulStateful {
+        stage_name: String,
+        middleware: String,
+    },
+
+    #[error(
         "{}",
         FlowBuildError::fmt_edge_typing_mismatch(
             upstream_stage,

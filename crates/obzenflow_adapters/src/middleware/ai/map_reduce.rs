@@ -874,7 +874,10 @@ mod tests {
         );
 
         let action = middleware.pre_handle(&chunk, &mut ctx);
-        let MiddlewareAction::Skip { results: events, .. } = action else {
+        let MiddlewareAction::Skip {
+            results: events, ..
+        } = action
+        else {
             panic!("expected Skip {{ .. }}");
         };
         assert_eq!(events.len(), 1);

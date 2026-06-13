@@ -61,8 +61,8 @@ const BACKPRESSURE_WINDOW: u64 = 1_000;
 
 /// Build the demo flow.
 ///
-/// A gentle flow-level rate limit keeps logs and metrics readable, so you can
-/// watch the stage metrics and circuit-breaker gauges change over time.
+/// A gentle gateway-effect rate limit keeps logs and metrics readable, so you
+/// can watch effect policy metrics and circuit-breaker gauges change over time.
 /// Optional per-source pacing jitter (FLOWIP-095d demo knob).
 ///
 /// `PAYMENT_DEMO_SOURCE_JITTER_MS=<max>` delays each order by a deterministic
@@ -127,14 +127,12 @@ pub fn build_flow() -> obzenflow_dsl::FlowDefinition {
             OpenPolicy::EmitFallback,
         ))
         .build_typed::<GatewayPaymentFallback, GatewayPaymentRejected>();
+    let gateway_limiter = RateLimiterBuilder::new(1.0).build();
 
     flow! {
         name: "payment_gateway_resilience_demo",
         journals: disk_journals(std::path::PathBuf::from("target/payment-gateway-logs")),
-
-        middleware: [
-            RateLimiterBuilder::new(1.0).build()
-        ],
+        middleware: [],
 
         stages: {
             // Sources: two scripted order channels across three phases
@@ -214,7 +212,7 @@ pub fn build_flow() -> obzenflow_dsl::FlowDefinition {
                     OrderCancelled,
                     PaymentAuthorizationUnavailable
                 } => GatewayTransform,
-                effects: [AuthorizePayment with [gateway_breaker]],
+                effects: [AuthorizePayment with [gateway_breaker, gateway_limiter]],
                 middleware: []
             );
 

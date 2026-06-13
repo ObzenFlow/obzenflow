@@ -5,7 +5,7 @@
 //! Prometheus 100k Demo with FlowApplication Framework (FLOWIP-080h, 080j & 082a)
 //!
 //! This demo processes 100,000 events demonstrating:
-//! - Flow-level rate limiting middleware
+//! - Source-intake rate limiting middleware
 //! - Fan-out topology pattern (one stage to multiple downstream stages)
 //! - ReduceTyped for type-safe event counting (FLOWIP-080j)
 //! - TypedPayload for strongly-typed events (FLOWIP-082a)
@@ -154,7 +154,7 @@ fn main() -> Result<()> {
             .bullets(
                 "Demonstrating",
                 [
-                    "Flow-level rate limiting middleware",
+                    "Source-intake rate limiting middleware",
                     "Fan-out topology (processor -> counter + sink)",
                     "StatefulHandler for business-level counting",
                     "Framework Prometheus metrics",
@@ -179,14 +179,11 @@ fn main() -> Result<()> {
         .run_blocking(flow! {
             name: "prometheus_100k_demo",
             journals: disk_journals(std::path::PathBuf::from("target/prometheus_100k_demo_journal")),
-
-            // Flow-level rate limiting (1000 events/sec) for fast processing
-            middleware: [
-                RateLimiterBuilder::new(1000.0).build()
-            ],
+            middleware: [],
 
             stages: {
-                // Source generating 100k events
+                // Source generating 100k events. Source intake is the live I/O
+                // boundary where rate limiting belongs under FLOWIP-120c H1.
                 high_volume_source = source!(DataRequest =>
                     sources::finite_from_fn(move |index| {
                         let total = 100_000usize;
@@ -207,7 +204,8 @@ fn main() -> Result<()> {
                             should_fail: current_id % 100 == 0,
                             batch: current_id / 100,
                         })
-                    })
+                    }),
+                    [RateLimiterBuilder::new(1000.0).build()]
                 );
 
                 // Error-prone transform (every 100th event fails)

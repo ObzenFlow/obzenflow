@@ -27,8 +27,9 @@ pub struct EffectIdentity {
 /// same shape policy middleware observed through `after_effect` before this
 /// seam (FLOWIP-120c gap G7: authored facts commit inside `perform` and the
 /// boundary never sees the committed originals).
-pub type EffectExecution =
-    std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<ChainEvent>, EffectError>> + Send>>;
+pub type EffectExecution = std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<Vec<ChainEvent>, EffectError>> + Send>,
+>;
 
 /// Structured, policy-neutral reason carried by a boundary abort so the
 /// rejection is recorded under the effect cursor and replays deterministically.

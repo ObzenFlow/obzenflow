@@ -843,10 +843,12 @@ impl CircuitBreakerMiddleware {
             if !at_effect_boundary {
                 return None;
             }
-            self.typed_outcome.as_ref().map(|typed| MiddlewareAction::Skip {
-                results: (typed.build_rejection)(event, reason),
-                cause: None,
-            })
+            self.typed_outcome
+                .as_ref()
+                .map(|typed| MiddlewareAction::Skip {
+                    results: (typed.build_rejection)(event, reason),
+                    cause: None,
+                })
         };
 
         let action = match policy {
@@ -1531,11 +1533,11 @@ impl crate::middleware::EffectPolicy for CircuitBreakerMiddleware {
             MiddlewareAction::Skip { results, cause } => {
                 crate::middleware::PolicyAdmission::Synthesize { results, cause }
             }
-            MiddlewareAction::Abort { cause } => crate::middleware::PolicyAdmission::Reject(
-                cause.unwrap_or_else(|| self.rejection_abort_cause(
-                    CircuitBreakerRejectionReason::CircuitOpen,
-                )),
-            ),
+            MiddlewareAction::Abort { cause } => {
+                crate::middleware::PolicyAdmission::Reject(cause.unwrap_or_else(|| {
+                    self.rejection_abort_cause(CircuitBreakerRejectionReason::CircuitOpen)
+                }))
+            }
         }
     }
 

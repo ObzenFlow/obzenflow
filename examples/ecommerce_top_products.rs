@@ -260,7 +260,7 @@ fn main() -> Result<()> {
                         total_value,
                         timestamp: order_number, // Simulated timestamp
                     })
-                }));
+                }), [RateLimiterBuilder::new(3.0).build()]); // Pace source intake for demo visibility.
 
                 // FLOWIP-080j: TopNByTyped - Type-safe accumulation with no ChainEvent!
                 // Type-safe extraction functions instead of string field names
@@ -270,8 +270,7 @@ fn main() -> Result<()> {
                         |order: &OrderEvent| order.product_id.clone(), // Key extractor
                         |order: &OrderEvent| order.total_value,        // Score extractor
                     )
-                    .emit_every_n(5),
-                    [RateLimiterBuilder::new(3.0).build()] // Process max 3 orders per second for demo visibility
+                    .emit_every_n(5)
                 );
 
                 dashboard = sink!(|update: TopProductsUpdate| {
