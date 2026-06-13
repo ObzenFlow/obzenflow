@@ -19,5 +19,5 @@ pub use intent_context::IntentContext;
 pub use middleware_execution_scope::MiddlewareExecutionScope;
 pub use processing_context::ProcessingContext;
 pub use replay_context::ReplayContext;
-pub use runtime_context::RuntimeContext;
+pub use runtime_context::{EffectCircuitBreakerContext, EffectRateLimiterContext, RuntimeContext};
 pub use stage_type::{SimpleStageType, StageType};

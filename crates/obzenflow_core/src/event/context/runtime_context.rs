@@ -141,4 +141,47 @@ pub struct RuntimeContext {
     /// Maximum capacity of the rate limiter bucket.
     #[serde(default)]
     pub rl_bucket_capacity: f64,
+
+    // ---- Per-effect control middleware metrics (FLOWIP-120c G9) ----
+    //
+    // One policy instance guards one declared effect, so each per-effect
+    // instance snapshots under its effect type. Cardinality is bounded by
+    // the stage's declared `effects:` set. The stage-level cb_*/rl_* fields
+    // above keep their meaning for stage-level instances; no value is ever
+    // counted under both keys.
+    /// Per-effect circuit breaker counters, keyed by declared effect type.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub effect_circuit_breakers: Vec<EffectCircuitBreakerContext>,
+
+    /// Per-effect rate limiter counters, keyed by declared effect type.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub effect_rate_limiters: Vec<EffectRateLimiterContext>,
+}
+
+/// Cumulative circuit breaker metrics for one declared effect (FLOWIP-120c).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EffectCircuitBreakerContext {
+    pub effect_type: String,
+    pub cb_requests_total: u64,
+    pub cb_successes_total: u64,
+    pub cb_failures_total: u64,
+    pub cb_rejections_total: u64,
+    pub cb_opened_total: u64,
+    pub cb_time_closed_seconds: f64,
+    pub cb_time_open_seconds: f64,
+    pub cb_time_half_open_seconds: f64,
+    /// Current breaker state (0=closed, 0.5=half_open, 1=open).
+    pub cb_state: f64,
+}
+
+/// Cumulative rate limiter metrics for one declared effect (FLOWIP-120c).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EffectRateLimiterContext {
+    pub effect_type: String,
+    pub rl_events_total: u64,
+    pub rl_delayed_total: u64,
+    pub rl_tokens_consumed_total: f64,
+    pub rl_delay_seconds_total: f64,
+    pub rl_bucket_tokens: f64,
+    pub rl_bucket_capacity: f64,
 }

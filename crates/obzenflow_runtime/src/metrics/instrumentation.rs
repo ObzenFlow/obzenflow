@@ -127,6 +127,14 @@ pub struct StageInstrumentation {
 
     /// Cached circuit breaker state for control strategies (set once during stage construction).
     cb_state: Option<Arc<std::sync::atomic::AtomicU8>>,
+
+    /// Per-effect circuit breaker snapshotters keyed by declared effect type
+    /// (FLOWIP-120c G9; set once during stage construction).
+    effect_cb_snapshotters: Vec<(String, Arc<CircuitBreakerSnapshotter>)>,
+
+    /// Per-effect rate limiter snapshotters keyed by declared effect type
+    /// (FLOWIP-120c G9; set once during stage construction).
+    effect_rl_snapshotters: Vec<(String, Arc<RateLimiterSnapshotter>)>,
 }
 
 impl Default for StageInstrumentation {
@@ -190,6 +198,8 @@ impl StageInstrumentation {
             control_middleware: Arc::new(NoControlMiddleware),
             cb_snapshotter: None,
             rl_snapshotter: None,
+            effect_cb_snapshotters: Vec::new(),
+            effect_rl_snapshotters: Vec::new(),
             cb_state: None,
         }
     }
@@ -210,6 +220,8 @@ impl StageInstrumentation {
         self.cb_snapshotter = provider.circuit_breaker_snapshotter(stage_id);
         self.rl_snapshotter = provider.rate_limiter_snapshotter(stage_id);
         self.cb_state = provider.circuit_breaker_state(stage_id);
+        self.effect_cb_snapshotters = provider.effect_circuit_breaker_snapshotters(stage_id);
+        self.effect_rl_snapshotters = provider.effect_rate_limiter_snapshotters(stage_id);
 
         if expects_circuit_breaker && (self.cb_snapshotter.is_none() || self.cb_state.is_none()) {
             return Err(ControlBindError::MissingCircuitBreaker {
@@ -318,6 +330,8 @@ impl StageInstrumentation {
             rl_delay_seconds_total: 0.0,
             rl_bucket_tokens: 0.0,
             rl_bucket_capacity: 0.0,
+            effect_circuit_breakers: Vec::new(),
+            effect_rate_limiters: Vec::new(),
         }
     }
 
@@ -356,6 +370,49 @@ impl StageInstrumentation {
             ctx.rl_bucket_tokens = rl.bucket_tokens;
             ctx.rl_bucket_capacity = rl.bucket_capacity;
         }
+
+        // Per-effect policy instances (FLOWIP-120c G9), keyed by declared
+        // effect type; cardinality is bounded by the stage's `effects:` set.
+        ctx.effect_circuit_breakers = self
+            .effect_cb_snapshotters
+            .iter()
+            .map(|(effect_type, snapshotter)| {
+                let cb = snapshotter();
+                obzenflow_core::event::context::EffectCircuitBreakerContext {
+                    effect_type: effect_type.clone(),
+                    cb_requests_total: cb.requests_total,
+                    cb_successes_total: cb.successes_total,
+                    cb_failures_total: cb.failures_total,
+                    cb_rejections_total: cb.rejections_total,
+                    cb_opened_total: cb.opened_total,
+                    cb_time_closed_seconds: cb.time_closed_seconds,
+                    cb_time_open_seconds: cb.time_open_seconds,
+                    cb_time_half_open_seconds: cb.time_half_open_seconds,
+                    cb_state: match cb.state {
+                        0 => 0.0,
+                        1 => 1.0,
+                        2 => 0.5,
+                        _ => 0.0,
+                    },
+                }
+            })
+            .collect();
+        ctx.effect_rate_limiters = self
+            .effect_rl_snapshotters
+            .iter()
+            .map(|(effect_type, snapshotter)| {
+                let rl = snapshotter();
+                obzenflow_core::event::context::EffectRateLimiterContext {
+                    effect_type: effect_type.clone(),
+                    rl_events_total: rl.events_total,
+                    rl_delayed_total: rl.delayed_total,
+                    rl_tokens_consumed_total: rl.tokens_consumed_total,
+                    rl_delay_seconds_total: rl.delay_seconds_total,
+                    rl_bucket_tokens: rl.bucket_tokens,
+                    rl_bucket_capacity: rl.bucket_capacity,
+                }
+            })
+            .collect();
 
         ctx
     }

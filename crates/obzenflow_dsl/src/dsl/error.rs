@@ -147,16 +147,6 @@ pub enum FlowBuildError {
     TypeShapingConfiguration { stage_name: String, message: String },
 
     #[error(
-        "Stage '{stage_name}' declares typed-outcome middleware but has {effect_count} declared \
-         effects. Until FLOWIP-120c locks per-effect policy scope, typed-outcome middleware is \
-         limited to single-effect stages (FLOWIP-120h)."
-    )]
-    TypedOutcomeMiddlewareOnMultiEffectStage {
-        stage_name: String,
-        effect_count: usize,
-    },
-
-    #[error(
         "Stage '{stage_name}': middleware '{middleware_label}' may author branch fact '{fact}', \
          which is not a member of the stage output contract {contract}. Add it to the arrow \
          (FLOWIP-120h corrected Option A: membership is enforced, never inferred)."

@@ -158,15 +158,6 @@ Example:
 ```rust
 use obzenflow_adapters::middleware::{middleware_fn, MiddlewareAction};
 
-// Simple filter middleware
-let filter = middleware_fn(|event, ctx| {
-    if event.event_type() == "important" {
-        MiddlewareAction::Continue
-    } else {
-        MiddlewareAction::Skip { results: vec![], cause: None }
-    }
-});
-
 // Logging middleware
 let logger = middleware_fn(|event, ctx| {
     tracing::info!("Processing event: {}", event.id);
@@ -175,3 +166,10 @@ let logger = middleware_fn(|event, ctx| {
 ```
 
 This approach eliminates boilerplate for simple middleware behaviors that only need pre-processing logic.
+
+Function middleware is observation-classified (FLOWIP-120c H2): it runs in
+every execution scope, including replay reconstruction, and may not
+short-circuit the chain. A `Skip` or `Abort` returned from it is a runtime
+error naming the middleware. Filtering belongs in the handler, where
+multi-type output contracts make it natural; resilience policy belongs on
+the live I/O unit (a source, a declared effect, or sink delivery).

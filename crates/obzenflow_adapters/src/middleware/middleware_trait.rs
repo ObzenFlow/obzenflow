@@ -132,6 +132,16 @@ pub trait Middleware: Send + Sync {
     ) {
         // Default: no-op
     }
+
+    /// FLOWIP-120c: policies with a native async per-effect surface return it
+    /// here so per-effect chains use their own admission (a rate limiter
+    /// awaits its permit instead of blocking). Policy kinds without a native
+    /// implementation are adapted from this chain surface instead.
+    fn as_effect_policy(
+        self: std::sync::Arc<Self>,
+    ) -> Option<std::sync::Arc<dyn crate::middleware::EffectPolicy>> {
+        None
+    }
 }
 
 /// Structured cause attached to an abort so downstream seams, the effect

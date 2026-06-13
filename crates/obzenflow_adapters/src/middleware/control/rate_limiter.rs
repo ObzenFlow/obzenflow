@@ -287,6 +287,17 @@ impl RateLimiterMiddleware {
         config: ValidatedRateLimiterConfig,
         control_middleware: std::sync::Arc<super::ControlMiddlewareAggregator>,
     ) -> Self {
+        Self::new_keyed(stage_id, config, control_middleware, None)
+    }
+
+    /// Construct a limiter registered under a per-effect key (FLOWIP-120c):
+    /// one policy instance per protected dependency.
+    fn new_keyed(
+        stage_id: StageId,
+        config: ValidatedRateLimiterConfig,
+        control_middleware: std::sync::Arc<super::ControlMiddlewareAggregator>,
+        effect_type: Option<String>,
+    ) -> Self {
         let bucket = TokenBucket::new(config.burst_capacity, config.events_per_second);
 
         // FLOWIP-120i: under strict replay the limiter is constructed because
@@ -335,7 +346,14 @@ impl RateLimiterMiddleware {
                 metrics
             }
         });
-        control_middleware.register_rate_limiter(stage_id, snapshotter);
+        match effect_type {
+            Some(effect_type) => control_middleware.register_rate_limiter_for_effect(
+                stage_id,
+                effect_type,
+                snapshotter,
+            ),
+            None => control_middleware.register_rate_limiter(stage_id, snapshotter),
+        }
 
         Self {
             bucket,
@@ -495,6 +513,12 @@ impl Middleware for RateLimiterMiddleware {
 
     fn kind(&self) -> crate::middleware::MiddlewareKind {
         crate::middleware::MiddlewareKind::Policy
+    }
+
+    fn as_effect_policy(
+        self: std::sync::Arc<Self>,
+    ) -> Option<std::sync::Arc<dyn crate::middleware::EffectPolicy>> {
+        Some(self)
     }
 
     fn pre_handle(&self, event: &ChainEvent, ctx: &mut MiddlewareContext) -> MiddlewareAction {
@@ -908,6 +932,10 @@ impl MiddlewareFactory for RateLimiterFactory {
         ControlMiddlewareRole::RateLimiter
     }
 
+    fn kind(&self) -> crate::middleware::MiddlewareKind {
+        crate::middleware::MiddlewareKind::Policy
+    }
+
     fn plan_contribution(&self) -> MiddlewarePlanContribution {
         MiddlewarePlanContribution::None
     }
@@ -929,6 +957,24 @@ impl MiddlewareFactory for RateLimiterFactory {
             config.stage_id,
             validated,
             control_middleware,
+        )))
+    }
+
+    fn create_for_effect(
+        &self,
+        config: &StageConfig,
+        control_middleware: std::sync::Arc<super::ControlMiddlewareAggregator>,
+        effect_type: &str,
+    ) -> crate::middleware::MiddlewareFactoryResult<Box<dyn Middleware>> {
+        let validated = self.validated_config().map_err(|err| {
+            MiddlewareFactoryError::invalid_configuration(self.label(), &config.name, err)
+        })?;
+
+        Ok(Box::new(RateLimiterMiddleware::new_keyed(
+            config.stage_id,
+            validated,
+            control_middleware,
+            Some(effect_type.to_string()),
         )))
     }
 

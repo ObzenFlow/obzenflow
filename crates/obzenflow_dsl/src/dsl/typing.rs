@@ -1309,12 +1309,6 @@ pub fn validate_type_shaping_contributions(
         }
 
         let declarations = descriptor.effect_declarations();
-        if declarations.len() != 1 {
-            return Err(FlowBuildError::TypedOutcomeMiddlewareOnMultiEffectStage {
-                stage_name: name.clone(),
-                effect_count: declarations.len(),
-            });
-        }
 
         let Some(metadata) = descriptor.typing_metadata() else {
             return Err(FlowBuildError::StageMissingTypingMetadata {
@@ -1326,32 +1320,63 @@ pub fn validate_type_shaping_contributions(
             .map(|(type_id, _)| type_id)
             .collect();
 
-        let effect_fact_event_types: HashSet<String> = declarations
-            .iter()
-            .flat_map(|declaration| {
-                declaration
-                    .outcome_fact_types
-                    .iter()
-                    .map(|fact| fact.event_type.to_string())
-            })
-            .collect();
-
-        // FLOWIP-120m: one fallback shape per stage. Branch-shaped uses the
-        // Guarded carrier; outcome-shaped uses the plain perform; mixing them
-        // on one stage has no coherent perform signature.
-        let has_branch_shaped = registrations
-            .iter()
-            .any(|registration| registration.kind == SynthesizedOutcomeKind::BranchShaped);
-        let has_outcome_shaped = registrations
-            .iter()
-            .any(|registration| registration.kind == SynthesizedOutcomeKind::OutcomeShaped);
-        if has_branch_shaped && has_outcome_shaped {
-            return Err(FlowBuildError::MixedFallbackShapesOnStage {
-                stage_name: name.clone(),
-            });
-        }
+        // FLOWIP-120c H7: every registration names the effect its builder
+        // guards (the `Effect with [...]` entry position stamps it), so the
+        // checks run per named effect and multi-effect stages validate each
+        // attachment against its own declaration.
+        let mut branch_shaped_effects: HashSet<&str> = HashSet::new();
+        let mut outcome_shaped_effects: HashSet<&str> = HashSet::new();
 
         for registration in &registrations {
+            let target = match registration.effect_type.as_deref() {
+                Some(target) => target,
+                None if declarations.len() == 1 => declarations[0].effect_type,
+                None => {
+                    return Err(FlowBuildError::TypeShapingConfiguration {
+                        stage_name: name.clone(),
+                        message: format!(
+                            "typed policy builder '{}' names no effect on a multi-effect \
+                             stage; attach it to the effect it guards \
+                             (`Effect with [...]`, FLOWIP-120c H7)",
+                            registration.source_label,
+                        ),
+                    });
+                }
+            };
+            let Some(declaration) = declarations
+                .iter()
+                .find(|declaration| declaration.effect_type == target)
+            else {
+                return Err(FlowBuildError::TypeShapingConfiguration {
+                    stage_name: name.clone(),
+                    message: format!(
+                        "typed policy builder '{}' targets effect '{target}', which the \
+                         stage does not declare",
+                        registration.source_label,
+                    ),
+                });
+            };
+
+            // FLOWIP-120m, narrowed per effect under FLOWIP-120c: one
+            // fallback shape per guarded effect. Branch-shaped uses the
+            // Guarded carrier; outcome-shaped uses the plain perform; mixing
+            // them on one effect has no coherent perform signature.
+            match registration.kind {
+                SynthesizedOutcomeKind::BranchShaped => {
+                    branch_shaped_effects.insert(declaration.effect_type);
+                }
+                SynthesizedOutcomeKind::OutcomeShaped => {
+                    outcome_shaped_effects.insert(declaration.effect_type);
+                }
+            }
+            if branch_shaped_effects.contains(declaration.effect_type)
+                && outcome_shaped_effects.contains(declaration.effect_type)
+            {
+                return Err(FlowBuildError::MixedFallbackShapesOnStage {
+                    stage_name: name.clone(),
+                });
+            }
+
             match registration.kind {
                 SynthesizedOutcomeKind::BranchShaped => {
                     for fact in &registration.fact_types {
@@ -1363,7 +1388,11 @@ pub fn validate_type_shaping_contributions(
                                 contract: output_contract_display(metadata),
                             });
                         }
-                        if effect_fact_event_types.contains(fact.event_type.as_str()) {
+                        if declaration
+                            .outcome_fact_types
+                            .iter()
+                            .any(|member| member.event_type == fact.event_type)
+                        {
                             return Err(FlowBuildError::TypeShapingConfiguration {
                                 stage_name: name.clone(),
                                 message: format!(
@@ -1379,22 +1408,8 @@ pub fn validate_type_shaping_contributions(
                 SynthesizedOutcomeKind::OutcomeShaped => {
                     // The inverse rule (FLOWIP-120m): an outcome-shaped
                     // fallback produces the protected effect's own facts, so
-                    // its fact types must be contained in the declaration's
-                    // outcome fact set, and its target effect must be the
-                    // stage's single declared effect.
-                    let declaration = &declarations[0];
-                    if let Some(target) = registration.effect_type.as_deref() {
-                        if target != declaration.effect_type {
-                            return Err(FlowBuildError::TypeShapingConfiguration {
-                                stage_name: name.clone(),
-                                message: format!(
-                                    "outcome-shaped fallback targets effect '{target}' but \
-                                     the stage declares '{}'",
-                                    declaration.effect_type,
-                                ),
-                            });
-                        }
-                    }
+                    // its fact types must be contained in the target
+                    // declaration's outcome fact set.
                     for fact in &registration.fact_types {
                         if !declaration
                             .outcome_fact_types

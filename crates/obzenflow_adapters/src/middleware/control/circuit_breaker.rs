@@ -1018,6 +1018,12 @@ impl Middleware for CircuitBreakerMiddleware {
         crate::middleware::MiddlewareKind::Policy
     }
 
+    fn as_effect_policy(
+        self: std::sync::Arc<Self>,
+    ) -> Option<std::sync::Arc<dyn crate::middleware::EffectPolicy>> {
+        Some(self)
+    }
+
     fn pre_handle(&self, event: &ChainEvent, ctx: &mut MiddlewareContext) -> MiddlewareAction {
         // FLOWIP-120a: during deterministic replay the stage is reconstructed
         // from recorded events. The guarded effect is suppressed (its recorded
@@ -2399,35 +2405,14 @@ impl CircuitBreakerFactory {
     }
 }
 
-impl MiddlewareFactory for CircuitBreakerFactory {
-    fn label(&self) -> &'static str {
-        "circuit_breaker"
-    }
-
-    fn override_key(&self) -> MiddlewareOverrideKey {
-        MiddlewareOverrideKey::of::<CircuitBreakerFamily>("circuit_breaker")
-    }
-
-    fn control_role(&self) -> ControlMiddlewareRole {
-        ControlMiddlewareRole::CircuitBreaker
-    }
-
-    fn kind(&self) -> crate::middleware::MiddlewareKind {
-        crate::middleware::MiddlewareKind::Policy
-    }
-
-    fn plan_contribution(&self) -> MiddlewarePlanContribution {
-        MiddlewarePlanContribution::None
-    }
-
-    fn topology_config_slot(&self) -> Option<TopologyMiddlewareConfigSlot> {
-        Some(TopologyMiddlewareConfigSlot::CircuitBreaker)
-    }
-
-    fn create(
+impl CircuitBreakerFactory {
+    /// Shared materialization for stage-level and per-effect instances
+    /// (FLOWIP-120c): the key decides where the snapshotter registers.
+    fn create_keyed(
         &self,
         config: &StageConfig,
         control_middleware: std::sync::Arc<super::ControlMiddlewareAggregator>,
+        effect_type: Option<String>,
     ) -> crate::middleware::MiddlewareFactoryResult<Box<dyn Middleware>> {
         let validated_threshold = self.validated_threshold().map_err(|err| {
             MiddlewareFactoryError::invalid_configuration(self.label(), &config.name, err)
@@ -2536,13 +2521,64 @@ impl MiddlewareFactory for CircuitBreakerFactory {
             }
         });
 
-        control_middleware.register_circuit_breaker(
-            config.stage_id,
-            snapshotter,
-            cb_state_for_registry,
-        );
+        match effect_type {
+            Some(effect_type) => control_middleware.register_circuit_breaker_for_effect(
+                config.stage_id,
+                effect_type,
+                snapshotter,
+                cb_state_for_registry,
+            ),
+            None => control_middleware.register_circuit_breaker(
+                config.stage_id,
+                snapshotter,
+                cb_state_for_registry,
+            ),
+        }
 
         Ok(Box::new(middleware))
+    }
+}
+
+impl MiddlewareFactory for CircuitBreakerFactory {
+    fn label(&self) -> &'static str {
+        "circuit_breaker"
+    }
+
+    fn override_key(&self) -> MiddlewareOverrideKey {
+        MiddlewareOverrideKey::of::<CircuitBreakerFamily>("circuit_breaker")
+    }
+
+    fn control_role(&self) -> ControlMiddlewareRole {
+        ControlMiddlewareRole::CircuitBreaker
+    }
+
+    fn kind(&self) -> crate::middleware::MiddlewareKind {
+        crate::middleware::MiddlewareKind::Policy
+    }
+
+    fn plan_contribution(&self) -> MiddlewarePlanContribution {
+        MiddlewarePlanContribution::None
+    }
+
+    fn topology_config_slot(&self) -> Option<TopologyMiddlewareConfigSlot> {
+        Some(TopologyMiddlewareConfigSlot::CircuitBreaker)
+    }
+
+    fn create(
+        &self,
+        config: &StageConfig,
+        control_middleware: std::sync::Arc<super::ControlMiddlewareAggregator>,
+    ) -> crate::middleware::MiddlewareFactoryResult<Box<dyn Middleware>> {
+        self.create_keyed(config, control_middleware, None)
+    }
+
+    fn create_for_effect(
+        &self,
+        config: &StageConfig,
+        control_middleware: std::sync::Arc<super::ControlMiddlewareAggregator>,
+        effect_type: &str,
+    ) -> crate::middleware::MiddlewareFactoryResult<Box<dyn Middleware>> {
+        self.create_keyed(config, control_middleware, Some(effect_type.to_string()))
     }
 
     fn safety_level(&self) -> MiddlewareSafety {

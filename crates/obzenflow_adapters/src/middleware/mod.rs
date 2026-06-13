@@ -155,12 +155,13 @@ pub use transform_middleware::{
 // Common utilities
 pub use context::MiddlewareContext;
 pub use effect_policy::{
-    EffectAttemptOutcome, EffectPolicy, PerEffectPolicyBoundary, PolicyAdmission,
+    effect_policy_from_middleware, EffectAttemptOutcome, EffectPolicy, PerEffectPolicyBoundary,
+    PolicyAdmission,
 };
 pub use function::{middleware_fn, FnMiddleware};
 pub use hints::{Attempts, BackoffKind, BatchingHint, MiddlewareHints, RetryHint};
 pub use observability::timing::TimingMiddleware;
-pub use type_shaping::{OutcomeShapingMiddleware, TypeShapingMiddleware};
+pub use type_shaping::{IntoEffectPolicyParts, OutcomeShapingMiddleware, TypeShapingMiddleware};
 
 // Control middleware
 pub use control::{

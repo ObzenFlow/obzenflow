@@ -94,6 +94,40 @@ pub fn build_flow() -> obzenflow_dsl::FlowDefinition {
     let scripted_web_orders = fixtures::scripted_web_orders();
     let scripted_store_orders = fixtures::scripted_store_orders();
 
+    // The gateway breaker attaches inline to the effect it guards
+    // (FLOWIP-120c H7, `AuthorizePayment with [gateway_breaker]`): one
+    // policy instance per protected dependency. Hoisted to a named binding
+    // so the `effects:` entry reads as a declaration.
+    let gateway_breaker = CircuitBreakerBuilder::new(3)
+        .cooldown(std::time::Duration::from_secs(5))
+        .rate_based_over_last_n_calls(5, 0.6)
+        .slow_call(std::time::Duration::from_millis(250), 0.5)
+        .with_fallback_fact::<ValidatedOrder, GatewayPaymentFallback, _>(|order| {
+            GatewayPaymentFallback {
+                order_id: order.order_id.clone(),
+                customer_id: order.customer_id.clone(),
+                amount_cents: order.amount_cents,
+                phase: order.phase.clone(),
+                reason: "circuit breaker open".to_string(),
+            }
+        })
+        .with_rejection_fact::<ValidatedOrder, GatewayPaymentRejected, _>(|order, reason| {
+            GatewayPaymentRejected {
+                order_id: order.order_id.clone(),
+                customer_id: order.customer_id.clone(),
+                amount_cents: order.amount_cents,
+                phase: order.phase.clone(),
+                reason: format!("{reason:?}"),
+            }
+        })
+        .with_failure_classifier(gateway::simulated_gateway_unavailability_counts_as_failure)
+        .open_policy(OpenPolicy::EmitFallback)
+        .half_open_policy(HalfOpenPolicy::new(
+            NonZeroU32::new(1).expect("permitted_probes must be non-zero"),
+            OpenPolicy::EmitFallback,
+        ))
+        .build_typed::<GatewayPaymentFallback, GatewayPaymentRejected>();
+
     flow! {
         name: "payment_gateway_resilience_demo",
         journals: disk_journals(std::path::PathBuf::from("target/payment-gateway-logs")),
@@ -162,14 +196,15 @@ pub fn build_flow() -> obzenflow_dsl::FlowDefinition {
             //   - while open, synthesizes the named `GatewayPaymentFallback`
             //     branch fact instead of calling the gateway (EmitFallback),
             //     with a single half-open probe.
-            // The breaker is declared in the `output_middleware:` lane
-            // (FLOWIP-120h): its branch fact types are validated as arrow
-            // members at build time, and the handler performs the guarded
-            // wrapper so the branch is explicit in the type. Branch facts ride
-            // the effect cursor as recorded outcomes, so contracts stay strict
-            // with no breaker-aware compensation: every admitted input has a
-            // journaled outcome whether the gateway ran or the breaker
-            // synthesized it.
+            // The breaker attaches inline to the effect it guards
+            // (FLOWIP-120c H7): one policy instance per protected
+            // dependency. Its branch fact types are validated as arrow
+            // members at build time (FLOWIP-120h), and the handler performs
+            // the guarded wrapper so the branch is explicit in the type.
+            // Branch facts ride the effect cursor as recorded outcomes, so
+            // contracts stay strict with no breaker-aware compensation:
+            // every admitted input has a journaled outcome whether the
+            // gateway ran or the breaker synthesized it.
             authorize_payment = effectful_transform!(
                 ValidatedOrder -> {
                     PaymentAuthorized,
@@ -179,34 +214,7 @@ pub fn build_flow() -> obzenflow_dsl::FlowDefinition {
                     OrderCancelled,
                     PaymentAuthorizationUnavailable
                 } => GatewayTransform,
-                effects: [AuthorizePayment],
-                output_middleware: [
-                    CircuitBreakerBuilder::new(3)
-                        .cooldown(std::time::Duration::from_secs(5))
-                        .rate_based_over_last_n_calls(5, 0.6)
-                        .slow_call(std::time::Duration::from_millis(250), 0.5)
-                        .with_fallback_fact::<ValidatedOrder, GatewayPaymentFallback, _>(|order| GatewayPaymentFallback {
-                            order_id: order.order_id.clone(),
-                            customer_id: order.customer_id.clone(),
-                            amount_cents: order.amount_cents,
-                            phase: order.phase.clone(),
-                            reason: "circuit breaker open".to_string(),
-                        })
-                        .with_rejection_fact::<ValidatedOrder, GatewayPaymentRejected, _>(|order, reason| GatewayPaymentRejected {
-                            order_id: order.order_id.clone(),
-                            customer_id: order.customer_id.clone(),
-                            amount_cents: order.amount_cents,
-                            phase: order.phase.clone(),
-                            reason: format!("{reason:?}"),
-                        })
-                        .with_failure_classifier(gateway::simulated_gateway_unavailability_counts_as_failure)
-                        .open_policy(OpenPolicy::EmitFallback)
-                        .half_open_policy(HalfOpenPolicy::new(
-                            NonZeroU32::new(1).expect("permitted_probes must be non-zero"),
-                            OpenPolicy::EmitFallback,
-                        ))
-                        .build_typed::<GatewayPaymentFallback, GatewayPaymentRejected>()
-                ],
+                effects: [AuthorizePayment with [gateway_breaker]],
                 middleware: []
             );
 

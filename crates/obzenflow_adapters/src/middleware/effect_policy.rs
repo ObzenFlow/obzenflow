@@ -12,7 +12,7 @@
 //! out, whichever arm ended it, so lifecycle finalization is structural
 //! rather than a hook each middleware must remember (gap G8).
 
-use super::{MiddlewareAbortCause, MiddlewareContext};
+use super::{Middleware, MiddlewareAbortCause, MiddlewareContext};
 use async_trait::async_trait;
 use obzenflow_core::event::EffectFailureCause;
 use obzenflow_core::{ChainEvent, MiddlewareExecutionScope};
@@ -84,6 +84,82 @@ pub struct PerEffectPolicyBoundary {
 impl PerEffectPolicyBoundary {
     pub fn new(chains: HashMap<&'static str, Arc<Vec<Arc<dyn EffectPolicy>>>>) -> Self {
         Self { chains }
+    }
+}
+
+/// Adapt a chain middleware instance into a per-effect policy.
+///
+/// Policies with a native async surface (circuit breaker, rate limiter)
+/// return it through `Middleware::as_effect_policy`; anything else is
+/// adapted from the chain surface, mapping `pre_handle` to admission and
+/// `post_handle` to observation of executed attempts.
+pub fn effect_policy_from_middleware(instance: Arc<dyn Middleware>) -> Arc<dyn EffectPolicy> {
+    instance
+        .clone()
+        .as_effect_policy()
+        .unwrap_or_else(|| Arc::new(ChainSurfacePolicy { inner: instance }))
+}
+
+/// Generic per-effect adapter over the chain middleware surface.
+struct ChainSurfacePolicy {
+    inner: Arc<dyn Middleware>,
+}
+
+#[async_trait]
+impl EffectPolicy for ChainSurfacePolicy {
+    fn label(&self) -> &'static str {
+        self.inner.label()
+    }
+
+    async fn admit(
+        &self,
+        _identity: &EffectIdentity,
+        event: &ChainEvent,
+        ctx: &mut MiddlewareContext,
+    ) -> PolicyAdmission {
+        match self.inner.pre_handle(event, ctx) {
+            super::MiddlewareAction::Continue => PolicyAdmission::Admit,
+            super::MiddlewareAction::Skip { results, cause } => {
+                PolicyAdmission::Synthesize { results, cause }
+            }
+            super::MiddlewareAction::Abort { cause } => {
+                PolicyAdmission::Reject(cause.unwrap_or_else(|| MiddlewareAbortCause {
+                    source: obzenflow_core::event::EffectFailureSource::new(self.inner.label()),
+                    code: obzenflow_core::event::EffectFailureCode::new("aborted"),
+                    message: format!(
+                        "middleware '{}' aborted effect execution",
+                        self.inner.label()
+                    ),
+                    retry: obzenflow_core::event::RetryDisposition::NotRetryable,
+                    event: None,
+                }))
+            }
+        }
+    }
+
+    fn observe(
+        &self,
+        _identity: &EffectIdentity,
+        event: &ChainEvent,
+        attempt: &EffectAttemptOutcome<'_>,
+        ctx: &mut MiddlewareContext,
+    ) {
+        match attempt {
+            EffectAttemptOutcome::Executed(Ok(outputs)) => {
+                self.inner.post_handle(event, outputs, ctx);
+            }
+            EffectAttemptOutcome::Executed(Err(err)) => {
+                let error_event = event.clone().mark_as_error(
+                    err.to_string(),
+                    obzenflow_core::event::status::processing_status::ErrorKind::Remote,
+                );
+                self.inner
+                    .post_handle(event, std::slice::from_ref(&error_event), ctx);
+            }
+            EffectAttemptOutcome::SkippedBy(_) | EffectAttemptOutcome::RejectedBy(_) => {
+                // The protected call never went out; nothing to observe.
+            }
+        }
     }
 }
 
@@ -345,5 +421,50 @@ mod tests {
             report.outcome,
             EffectBoundaryOutcome::Executed(Ok(_))
         ));
+    }
+
+    /// FLOWIP-120c H2 kind agreement: a factory and the instance it creates
+    /// must report the same middleware kind, because build-time guards read
+    /// the factory while chain runners enforce on the instance.
+    #[test]
+    fn factory_and_instance_kinds_agree() {
+        use crate::middleware::control::rate_limiter::RateLimiterBuilder;
+        use crate::middleware::control::ControlMiddlewareAggregator;
+        use crate::middleware::{backpressure::backpressure, MiddlewareFactory, MiddlewareKind};
+        use obzenflow_runtime::pipeline::config::StageConfig;
+
+        let config = StageConfig {
+            stage_id: StageId::new(),
+            name: "kind_agreement".to_string(),
+            flow_name: "kind_agreement_flow".to_string(),
+            cycle_guard: None,
+        };
+
+        let factories: Vec<(Box<dyn MiddlewareFactory>, MiddlewareKind)> = vec![
+            (
+                crate::middleware::control::circuit_breaker::circuit_breaker(3),
+                MiddlewareKind::Policy,
+            ),
+            (RateLimiterBuilder::new(5.0).build(), MiddlewareKind::Policy),
+            (backpressure(64), MiddlewareKind::Structural),
+        ];
+
+        for (factory, expected) in factories {
+            assert_eq!(
+                factory.kind(),
+                expected,
+                "factory '{}' kind mismatch",
+                factory.label()
+            );
+            let instance = factory
+                .create(&config, Arc::new(ControlMiddlewareAggregator::new()))
+                .expect("factory should materialize");
+            assert_eq!(
+                instance.kind(),
+                factory.kind(),
+                "instance kind for '{}' must agree with its factory",
+                factory.label()
+            );
+        }
     }
 }

@@ -16,15 +16,9 @@ use super::{
 };
 use async_trait::async_trait;
 use obzenflow_core::event::status::processing_status::ProcessingStatus;
-use obzenflow_core::event::{
-    EffectFailureCause, EffectFailureCode, EffectFailureSource, RetryDisposition,
-};
 use obzenflow_core::ChainEvent;
 use obzenflow_core::MiddlewareExecutionScope;
-use obzenflow_runtime::effects::{
-    EffectAbortReason, EffectBoundaryMiddleware, EffectBoundaryOutcome, EffectBoundaryReport,
-    EffectExecution, EffectIdentity, EffectInvocationContext,
-};
+use obzenflow_runtime::effects::{EffectBoundaryMiddleware, EffectInvocationContext};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::transform::traits::UnifiedTransformHandler;
 use obzenflow_runtime::stages::common::handlers::{AsyncTransformHandler, TransformHandler};
@@ -498,130 +492,11 @@ impl<H: AsyncTransformHandler> AsyncTransformMiddlewareBuilder<H> {
 pub struct UnifiedMiddlewareTransform<H: UnifiedTransformHandler> {
     inner: H,
     middleware_chain: Arc<Vec<Arc<dyn Middleware>>>,
-}
-
-#[derive(Clone)]
-struct MiddlewareEffectBoundary {
-    middleware_chain: Arc<Vec<Arc<dyn Middleware>>>,
-}
-
-impl MiddlewareEffectBoundary {
-    fn drain_control_events(&self, ctx: &mut MiddlewareContext) -> Vec<ChainEvent> {
-        let mut control_events = ctx.take_control_events();
-        for control_event in &mut control_events {
-            for middleware in self.middleware_chain.iter() {
-                middleware.pre_write(control_event, ctx);
-            }
-        }
-        control_events
-    }
-}
-
-#[async_trait]
-impl EffectBoundaryMiddleware for MiddlewareEffectBoundary {
-    /// Transitional whole-chain boundary (FLOWIP-120a shape on the FLOWIP-120c
-    /// seam): the stage's full middleware chain runs `pre_handle` as admission
-    /// and `post_handle` as observation around the execution future. Retired
-    /// by the placement split, which installs per-effect policy chains
-    /// instead. Legacy semantics are preserved deliberately: a short-circuit
-    /// does not finalize the visited prefix, and a rate limiter's delay blocks
-    /// this future the way it blocked the worker before the seam.
-    async fn around_effect(
-        &self,
-        _identity: &EffectIdentity,
-        event: &ChainEvent,
-        execute: EffectExecution,
-    ) -> EffectBoundaryReport {
-        // The effect boundary is reached only when the effect is executing live
-        // (strict replay returns the recorded outcome before consulting it), so
-        // control middleware here must run and protect the live call.
-        let mut ctx = MiddlewareContext::with_scope(MiddlewareExecutionScope::LiveEffectBoundary);
-
-        for middleware in self.middleware_chain.iter() {
-            let action = middleware.pre_handle(event, &mut ctx);
-            if let Some(message) = observation_short_circuit(middleware.as_ref(), &action) {
-                // A misclassified short-circuit at the boundary would author
-                // synthesized outcome facts from arbitrary user code; reject
-                // it as a recorded failure so replay reproduces the error.
-                let control_events = self.drain_control_events(&mut ctx);
-                return EffectBoundaryReport {
-                    outcome: EffectBoundaryOutcome::Aborted(EffectAbortReason {
-                        cause: EffectFailureCause {
-                            source: EffectFailureSource::new(middleware.label()),
-                            code: EffectFailureCode::new("observation_short_circuit"),
-                        },
-                        message,
-                        retry: RetryDisposition::NotRetryable,
-                    }),
-                    control_events,
-                };
-            }
-            match action {
-                MiddlewareAction::Continue => continue,
-                MiddlewareAction::Skip { results, .. } => {
-                    let control_events = self.drain_control_events(&mut ctx);
-                    return EffectBoundaryReport {
-                        outcome: EffectBoundaryOutcome::Skipped {
-                            results,
-                            source: Some(middleware.label().to_string()),
-                        },
-                        control_events,
-                    };
-                }
-                MiddlewareAction::Abort { cause } => {
-                    let control_events = self.drain_control_events(&mut ctx);
-                    let reason = match cause {
-                        Some(cause) => EffectAbortReason {
-                            cause: EffectFailureCause {
-                                source: cause.source,
-                                code: cause.code,
-                            },
-                            message: cause.message,
-                            retry: cause.retry,
-                        },
-                        None => EffectAbortReason {
-                            cause: EffectFailureCause {
-                                source: EffectFailureSource::new(middleware.label()),
-                                code: EffectFailureCode::new("aborted"),
-                            },
-                            message: format!(
-                                "middleware '{}' aborted effect execution",
-                                middleware.label()
-                            ),
-                            retry: RetryDisposition::NotRetryable,
-                        },
-                    };
-                    return EffectBoundaryReport {
-                        outcome: EffectBoundaryOutcome::Aborted(reason),
-                        control_events,
-                    };
-                }
-            }
-        }
-
-        let result = execute.await;
-        match &result {
-            Ok(outputs) => {
-                for middleware in self.middleware_chain.iter().rev() {
-                    middleware.post_handle(event, outputs, &mut ctx);
-                }
-            }
-            Err(err) => {
-                let error_event = event.clone().mark_as_error(
-                    err.to_string(),
-                    obzenflow_core::event::status::processing_status::ErrorKind::Remote,
-                );
-                for middleware in self.middleware_chain.iter().rev() {
-                    middleware.post_handle(event, std::slice::from_ref(&error_event), &mut ctx);
-                }
-            }
-        }
-        let control_events = self.drain_control_events(&mut ctx);
-        EffectBoundaryReport {
-            outcome: EffectBoundaryOutcome::Executed(result),
-            control_events,
-        }
-    }
+    /// Per-effect policy boundary (FLOWIP-120c placement split): policy
+    /// kinds guard individual declared effects here, while the
+    /// `middleware_chain` carries observation and structural kinds around
+    /// the handler shell in every execution scope.
+    effect_boundary: Option<Arc<dyn EffectBoundaryMiddleware>>,
 }
 
 impl<H: UnifiedTransformHandler> std::fmt::Debug for UnifiedMiddlewareTransform<H> {
@@ -639,12 +514,28 @@ impl<H: UnifiedTransformHandler> UnifiedMiddlewareTransform<H> {
         Self {
             inner,
             middleware_chain: Arc::new(Vec::new()),
+            effect_boundary: None,
         }
     }
 
     /// Add middleware to the chain.
     pub fn with_middleware(mut self, middleware: Box<dyn Middleware>) -> Self {
         Arc::make_mut(&mut self.middleware_chain).push(Arc::from(middleware));
+        self
+    }
+
+    /// Install per-effect policy chains keyed by declared effect type
+    /// (FLOWIP-120c): one policy instance guards one declared effect.
+    pub fn with_effect_policies(
+        mut self,
+        chains: std::collections::HashMap<
+            &'static str,
+            Arc<Vec<Arc<dyn crate::middleware::EffectPolicy>>>,
+        >,
+    ) -> Self {
+        self.effect_boundary = Some(Arc::new(crate::middleware::PerEffectPolicyBoundary::new(
+            chains,
+        )));
         self
     }
 
@@ -656,9 +547,45 @@ impl<H: UnifiedTransformHandler> UnifiedMiddlewareTransform<H> {
     ) -> Result<Vec<ChainEvent>, HandlerError> {
         if let Some(mut effect_context) = effect_context {
             let boundary_control_events = effect_context.boundary_control_events.clone();
-            effect_context.effect_boundary = Some(Arc::new(MiddlewareEffectBoundary {
-                middleware_chain: self.middleware_chain.clone(),
-            }));
+            effect_context.effect_boundary = self.effect_boundary.clone();
+
+            // FLOWIP-120c placement split: the handler shell chain carries
+            // observation and structural kinds and runs in every execution
+            // scope, including reconstruction (emissions labelled per
+            // FLOWIP-120i); policy kinds guard individual effects at the
+            // boundary installed above.
+            let mut ctx = MiddlewareContext::with_scope(scope);
+
+            for middleware in self.middleware_chain.iter() {
+                let action = middleware.pre_handle(&event, &mut ctx);
+                if let Some(message) = observation_short_circuit(middleware.as_ref(), &action) {
+                    return Err(HandlerError::Other(message));
+                }
+                match action {
+                    MiddlewareAction::Continue => continue,
+                    MiddlewareAction::Skip { mut results, .. } => {
+                        for result in &mut results {
+                            for mw in self.middleware_chain.iter() {
+                                mw.pre_write(result, &ctx);
+                            }
+                        }
+                        let mut control_events = ctx.take_control_events();
+                        for control_event in &mut control_events {
+                            for mw in self.middleware_chain.iter() {
+                                mw.pre_write(control_event, &ctx);
+                            }
+                        }
+                        results.extend(control_events);
+                        return Ok(results);
+                    }
+                    MiddlewareAction::Abort { .. } => {
+                        let mut err = event.clone();
+                        err.processing_info.status =
+                            ProcessingStatus::error("aborted by middleware");
+                        return Ok(vec![err]);
+                    }
+                }
+            }
 
             let mut results = match self
                 .inner
@@ -672,12 +599,23 @@ impl<H: UnifiedTransformHandler> UnifiedMiddlewareTransform<H> {
                 }
             };
 
-            let ctx = MiddlewareContext::with_scope(scope);
+            for middleware in self.middleware_chain.iter().rev() {
+                middleware.post_handle(&event, &results, &mut ctx);
+            }
+
             for result in &mut results {
                 for middleware in self.middleware_chain.iter() {
                     middleware.pre_write(result, &ctx);
                 }
             }
+
+            let mut control_events = ctx.take_control_events();
+            for control_event in &mut control_events {
+                for middleware in self.middleware_chain.iter() {
+                    middleware.pre_write(control_event, &ctx);
+                }
+            }
+            results.extend(control_events);
 
             let mut boundary_events = {
                 let mut buffer = boundary_control_events
@@ -685,6 +623,11 @@ impl<H: UnifiedTransformHandler> UnifiedMiddlewareTransform<H> {
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
                 std::mem::take(&mut *buffer)
             };
+            for boundary_event in &mut boundary_events {
+                for middleware in self.middleware_chain.iter() {
+                    middleware.pre_write(boundary_event, &ctx);
+                }
+            }
             results.append(&mut boundary_events);
 
             return Ok(results);
@@ -789,8 +732,11 @@ mod tests {
     use super::*;
     use crate::middleware::MiddlewareAbortCause;
     use async_trait::async_trait;
-    use obzenflow_core::event::ChainEventFactory;
+    use obzenflow_core::event::{
+        ChainEventFactory, EffectFailureCode, EffectFailureSource, RetryDisposition,
+    };
     use obzenflow_core::StageId;
+    use obzenflow_runtime::effects::{EffectBoundaryOutcome, EffectExecution, EffectIdentity};
     use serde_json::json;
     use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -1257,12 +1203,18 @@ mod tests {
         }
     }
 
+    fn boundary_for(middleware: Arc<dyn Middleware>) -> crate::middleware::PerEffectPolicyBoundary {
+        let chain: Arc<Vec<Arc<dyn crate::middleware::EffectPolicy>>> = Arc::new(vec![
+            crate::middleware::effect_policy_from_middleware(middleware),
+        ]);
+        let mut chains = std::collections::HashMap::new();
+        chains.insert("test.effect", chain);
+        crate::middleware::PerEffectPolicyBoundary::new(chains)
+    }
+
     #[tokio::test]
     async fn effect_boundary_executed_returns_post_handle_control_events() {
-        let middleware: Arc<dyn Middleware> = Arc::new(EffectBoundaryPostControlMiddleware);
-        let boundary = MiddlewareEffectBoundary {
-            middleware_chain: Arc::new(vec![middleware]),
-        };
+        let boundary = boundary_for(Arc::new(EffectBoundaryPostControlMiddleware));
         let writer_id = obzenflow_core::WriterId::from(StageId::new());
         let event = ChainEventFactory::data_event(writer_id, "test.input", json!({}));
         let output = ChainEventFactory::data_event(writer_id, "test.output", json!({}));
@@ -1286,10 +1238,7 @@ mod tests {
 
     #[tokio::test]
     async fn effect_boundary_skip_returns_control_events_without_polling_execution() {
-        let middleware: Arc<dyn Middleware> = Arc::new(EffectBoundarySkipControlMiddleware);
-        let boundary = MiddlewareEffectBoundary {
-            middleware_chain: Arc::new(vec![middleware]),
-        };
+        let boundary = boundary_for(Arc::new(EffectBoundarySkipControlMiddleware));
         let event = ChainEventFactory::data_event(
             obzenflow_core::WriterId::from(StageId::new()),
             "test.input",
@@ -1567,6 +1516,54 @@ mod tests {
             0,
             "middleware after the rejecting one never sees on_rejected"
         );
+    }
+
+    /// FLOWIP-120c H2 runtime enforcement: an observation-classified
+    /// middleware (the default kind) may not short-circuit the chain, in any
+    /// scope. Filters belong in handlers.
+    struct ObservationFilter;
+
+    impl Middleware for ObservationFilter {
+        fn label(&self) -> &'static str {
+            "test.observation_filter"
+        }
+
+        fn source_phase(&self) -> crate::middleware::SourceMiddlewarePhase {
+            crate::middleware::SourceMiddlewarePhase::Ordinary
+        }
+
+        fn pre_handle(&self, _event: &ChainEvent, _ctx: &mut MiddlewareContext) -> MiddlewareAction {
+            MiddlewareAction::Skip {
+                results: vec![],
+                cause: None,
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn observation_kind_short_circuit_errors_in_every_scope() {
+        let wrapped =
+            MiddlewareTransform::new(TestTransform).with_middleware(Box::new(ObservationFilter));
+
+        for scope in [
+            MiddlewareExecutionScope::LiveHandler,
+            MiddlewareExecutionScope::StrictReplayHandler,
+        ] {
+            let event = ChainEventFactory::data_event(
+                obzenflow_core::WriterId::from(StageId::new()),
+                "test",
+                json!({}),
+            );
+            let err = UnifiedTransformHandler::process(&wrapped, event, None, scope)
+                .await
+                .expect_err("an observation-kind Skip must be a deterministic error");
+            let message = format!("{err:?}");
+            assert!(
+                message.contains("test.observation_filter")
+                    && message.contains("observation-classified"),
+                "error must name the middleware and the misclassification, got: {message}"
+            );
+        }
     }
 
     /// G6 regression (FLOWIP-120c): the effectful results path builds its

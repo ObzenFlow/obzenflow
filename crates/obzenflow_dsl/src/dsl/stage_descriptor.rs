@@ -1268,12 +1268,25 @@ impl<H: AsyncTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
     }
 }
 
+/// Per-effect policy attachment (FLOWIP-120c H7): the policies declared
+/// inline on one `effects:` entry (`Effect with [...]`), plus the
+/// typed-outcome registrations their builders carry.
+pub struct EffectPolicyAttachment {
+    pub effect_type: &'static str,
+    pub factories: Vec<Box<dyn MiddlewareFactory>>,
+    pub synthesized: Vec<SynthesizedOutcomeRegistration>,
+    pub config_errors: Vec<String>,
+}
+
 /// Descriptor for replay-safe effectful async transform stages.
 pub struct EffectfulTransformDescriptor<H: EffectfulTransformHandler + 'static> {
     pub name: String,
     pub handler: H,
     pub effects: Vec<EffectDeclaration>,
     pub middleware: Vec<Box<dyn MiddlewareFactory>>,
+    /// Per-effect policy attachments from the `effects:` clause
+    /// (FLOWIP-120c H7).
+    pub effect_policies: Vec<EffectPolicyAttachment>,
     /// Typed-outcome registrations from the `output_middleware:` lane
     /// (FLOWIP-120h). Their factories are already in `middleware`.
     pub synthesized_outcomes: Vec<SynthesizedOutcomeRegistration>,
@@ -1311,11 +1324,19 @@ impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
     }
 
     fn synthesized_outcome_registrations(&self) -> Vec<SynthesizedOutcomeRegistration> {
-        self.synthesized_outcomes.clone()
+        let mut registrations = self.synthesized_outcomes.clone();
+        for attachment in &self.effect_policies {
+            registrations.extend(attachment.synthesized.clone());
+        }
+        registrations
     }
 
     fn type_shaping_config_errors(&self) -> Vec<String> {
-        self.type_shaping_errors.clone()
+        let mut errors = self.type_shaping_errors.clone();
+        for attachment in &self.effect_policies {
+            errors.extend(attachment.config_errors.clone());
+        }
+        errors
     }
 
     fn stage_middleware_names(&self) -> Vec<String> {
@@ -1338,8 +1359,14 @@ impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
     ) -> StageCreationResult<BoxedStageHandle> {
         let effect_declarations = self.effects.clone();
         validate_effect_declarations(&self.name, &effect_declarations, &resources.effect_ports)?;
-        resources.effect_declarations = effect_declarations;
-        resources.synthesized_outcomes = self.synthesized_outcomes.clone();
+        resources.effect_declarations = effect_declarations.clone();
+        resources.synthesized_outcomes = {
+            let mut registrations = self.synthesized_outcomes.clone();
+            for attachment in &self.effect_policies {
+                registrations.extend(attachment.synthesized.clone());
+            }
+            registrations
+        };
 
         for factory in &self.middleware {
             let validation_result =
@@ -1365,31 +1392,84 @@ impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
         let control_provider: Arc<dyn obzenflow_core::ControlMiddlewareProvider> =
             control_middleware.clone();
 
-        let expects_circuit_breaker = resolved
-            .middleware
-            .iter()
-            .any(|spec| spec.factory.control_role() == ControlMiddlewareRole::CircuitBreaker);
-        let expects_rate_limiter = resolved
-            .middleware
-            .iter()
-            .any(|spec| spec.factory.control_role() == ControlMiddlewareRole::RateLimiter);
+        // FLOWIP-120c placement split: policy kinds guard individual effects
+        // at the boundary; observation and structural kinds stay on the
+        // handler shell. Policy factories still arriving through the stage
+        // `middleware:` lane (the transitional `output_middleware:` surface)
+        // attach to the stage's single declared effect; a multi-effect stage
+        // must name the guarded effect per entry.
+        let mut shell_specs = Vec::new();
+        let mut transitional_policy_specs = Vec::new();
+        for spec in resolved.middleware {
+            if spec.factory.kind() == obzenflow_adapters::middleware::MiddlewareKind::Policy {
+                transitional_policy_specs.push(spec);
+            } else {
+                shell_specs.push(spec);
+            }
+        }
+
+        let mut effect_chains: std::collections::HashMap<
+            &'static str,
+            Vec<Arc<dyn obzenflow_adapters::middleware::EffectPolicy>>,
+        > = std::collections::HashMap::new();
+
+        if !transitional_policy_specs.is_empty() {
+            if effect_declarations.len() != 1 {
+                return Err(format!(
+                    "Stage '{}' declares policy middleware in `middleware:` but {} effects; \
+                     attach each policy to the effect it guards (FLOWIP-120c H7)",
+                    self.name,
+                    effect_declarations.len()
+                )
+                .into());
+            }
+            let effect_type = effect_declarations[0].effect_type;
+            for spec in transitional_policy_specs {
+                let instance: Arc<dyn Middleware> = Arc::from(spec.factory.create_for_effect(
+                    &config,
+                    control_middleware.clone(),
+                    effect_type,
+                )?);
+                effect_chains.entry(effect_type).or_default().push(
+                    obzenflow_adapters::middleware::effect_policy_from_middleware(instance),
+                );
+            }
+        }
+
+        for attachment in &self.effect_policies {
+            for factory in &attachment.factories {
+                let instance: Arc<dyn Middleware> = Arc::from(factory.create_for_effect(
+                    &config,
+                    control_middleware.clone(),
+                    attachment.effect_type,
+                )?);
+                effect_chains.entry(attachment.effect_type).or_default().push(
+                    obzenflow_adapters::middleware::effect_policy_from_middleware(instance),
+                );
+            }
+        }
+
+        let effect_policy_chains: std::collections::HashMap<
+            &'static str,
+            Arc<Vec<Arc<dyn obzenflow_adapters::middleware::EffectPolicy>>>,
+        > = effect_chains
+            .into_iter()
+            .map(|(effect_type, chain)| (effect_type, Arc::new(chain)))
+            .collect();
 
         let mut all_middleware = create_system_middleware(&config, StageType::Transform);
 
-        let user_middleware: Vec<Box<dyn Middleware>> = resolved
-            .middleware
+        let user_middleware: Vec<Box<dyn Middleware>> = shell_specs
             .into_iter()
             .map(|spec| spec.factory.create(&config, control_middleware.clone()))
             .collect::<Result<_, _>>()?;
         all_middleware.extend(user_middleware);
 
+        // Stage-level control binding covers shell instances only; per-effect
+        // instances register under their effect key and surface through the
+        // per-effect snapshot extension (FLOWIP-120c phase 4).
         instrumentation
-            .bind_control_middleware(
-                &config.stage_id,
-                &control_provider,
-                expects_circuit_breaker,
-                expects_rate_limiter,
-            )
+            .bind_control_middleware(&config.stage_id, &control_provider, false, false)
             .map_err(|e| e.to_string())?;
         let instrumentation = Arc::new(instrumentation);
 
@@ -1409,6 +1489,7 @@ impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
         for mw in all_middleware {
             handler_with_middleware = handler_with_middleware.with_middleware(mw);
         }
+        let handler_with_middleware = handler_with_middleware.with_effect_policies(effect_policy_chains);
 
         let handle = TransformBuilder::new(handler_with_middleware, transform_config, resources)
             .with_instrumentation(instrumentation)

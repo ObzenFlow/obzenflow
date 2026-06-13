@@ -189,6 +189,20 @@ pub trait MiddlewareFactory: Send + Sync {
         control_middleware: Arc<ControlMiddlewareAggregator>,
     ) -> MiddlewareFactoryResult<Box<dyn Middleware>>;
 
+    /// Create a middleware instance guarding one declared effect
+    /// (FLOWIP-120c): one policy instance per protected dependency.
+    ///
+    /// Default delegates to `create`. Policy factories override so their
+    /// metrics register under the per-effect key and snapshot distinctly.
+    fn create_for_effect(
+        &self,
+        config: &StageConfig,
+        control_middleware: Arc<ControlMiddlewareAggregator>,
+        _effect_type: &str,
+    ) -> MiddlewareFactoryResult<Box<dyn Middleware>> {
+        self.create(config, control_middleware)
+    }
+
     /// Create a control event strategy if this middleware needs one
     ///
     /// Most middleware don't need special control event handling and can
@@ -272,6 +286,15 @@ impl<F: MiddlewareFactory + ?Sized> MiddlewareFactory for Box<F> {
         control_middleware: Arc<ControlMiddlewareAggregator>,
     ) -> MiddlewareFactoryResult<Box<dyn Middleware>> {
         (**self).create(config, control_middleware)
+    }
+
+    fn create_for_effect(
+        &self,
+        config: &StageConfig,
+        control_middleware: Arc<ControlMiddlewareAggregator>,
+        effect_type: &str,
+    ) -> MiddlewareFactoryResult<Box<dyn Middleware>> {
+        (**self).create_for_effect(config, control_middleware, effect_type)
     }
 
     fn create_control_strategy(&self) -> Option<Box<dyn ControlEventStrategy>> {
