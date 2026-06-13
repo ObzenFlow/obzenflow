@@ -54,6 +54,14 @@ pub trait Middleware: Send + Sync {
     /// Typed source-phase role used by source wrappers for control flow.
     fn source_phase(&self) -> SourceMiddlewarePhase;
 
+    /// Typed middleware kind for the FLOWIP-120c placement split (H2),
+    /// mirrored from `MiddlewareFactory::kind` because chain runners hold
+    /// instances, not factories. Implementations that override the factory
+    /// side must override here too; a kind-agreement test enforces it.
+    fn kind(&self) -> crate::middleware::MiddlewareKind {
+        crate::middleware::MiddlewareKind::Observation
+    }
+
     /// Called before the inner step processes the event.
     ///
     /// Use this to:
@@ -160,6 +168,34 @@ pub enum MiddlewareAction {
     Abort { cause: Option<MiddlewareAbortCause> },
 }
 
+/// FLOWIP-120c H2 enforcement: an observation-classified middleware may not
+/// short-circuit the chain, in any scope, on any chain. Returns the error
+/// message when the action violates the classification. This is a
+/// deterministic code-level misclassification, so chain runners fail loud
+/// even during strict-replay reconstruction.
+pub(crate) fn observation_short_circuit(
+    middleware: &dyn Middleware,
+    action: &MiddlewareAction,
+) -> Option<String> {
+    if matches!(action, MiddlewareAction::Continue) {
+        return None;
+    }
+    if middleware.kind() != crate::middleware::MiddlewareKind::Observation {
+        return None;
+    }
+    let verb = if matches!(action, MiddlewareAction::Skip { .. }) {
+        "Skip"
+    } else {
+        "Abort"
+    };
+    Some(format!(
+        "middleware '{}' is observation-classified (the default) but returned {verb}; \
+         declare MiddlewareKind::Policy or MiddlewareKind::Structural on its factory and \
+         instance, or move the filter into the handler (FLOWIP-120c H2)",
+        middleware.label()
+    ))
+}
+
 /// Actions that middleware can take when handling errors
 #[derive(Debug, Clone)]
 pub enum ErrorAction {
@@ -179,6 +215,10 @@ impl<M: Middleware + ?Sized> Middleware for Box<M> {
 
     fn source_phase(&self) -> SourceMiddlewarePhase {
         (**self).source_phase()
+    }
+
+    fn kind(&self) -> crate::middleware::MiddlewareKind {
+        (**self).kind()
     }
 
     fn pre_handle(&self, event: &ChainEvent, ctx: &mut MiddlewareContext) -> MiddlewareAction {

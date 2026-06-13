@@ -122,6 +122,25 @@ fn create_control_strategy_from_middleware_specs(
     }
 }
 
+/// Handler-surface classification for the FLOWIP-120c H1 policy-middleware
+/// guards. Coarser than handler types, finer than `StageType`: it names the
+/// surfaces whose policy placement differs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PolicyGuardSurface {
+    /// Sync transforms, sync stateful stages, joins: deterministic handler
+    /// shells with no live I/O unit. Policy middleware is build-rejected.
+    PureSync,
+    /// Async non-effectful transforms: deprecated surface; policy middleware
+    /// warns naming FLOWIP-120p and FLOWIP-120f until 120f deletes it.
+    AsyncNonEffectful,
+    /// Effectful stages: per-effect policy placement (FLOWIP-120c phase 3).
+    Effectful,
+    /// Sources are live I/O units; policy middleware attaches legitimately.
+    Source,
+    /// Sink delivery placement is deferred until FLOWIP-095g.
+    Sink,
+}
+
 /// Trait for stage descriptors that know how to create their supervisors
 #[async_trait]
 pub trait StageDescriptor: Send + Sync {
@@ -210,6 +229,23 @@ pub trait StageDescriptor: Send + Sync {
     /// Whether this stage can perform replay-suppressed user effects.
     fn is_effectful(&self) -> bool {
         false
+    }
+
+    /// Handler-surface classification for the FLOWIP-120c H1 policy guards.
+    ///
+    /// The default derives from `is_effectful()` and `stage_type()`; the
+    /// async-non-effectful transform descriptor overrides, because
+    /// `StageType` cannot distinguish it from the sync surface. Typed
+    /// wrappers must forward to their inner descriptor.
+    fn policy_guard_surface(&self) -> PolicyGuardSurface {
+        if self.is_effectful() {
+            return PolicyGuardSurface::Effectful;
+        }
+        match self.stage_type() {
+            StageType::FiniteSource | StageType::InfiniteSource => PolicyGuardSurface::Source,
+            StageType::Sink => PolicyGuardSurface::Sink,
+            _ => PolicyGuardSurface::PureSync,
+        }
     }
 
     /// Whether this stage imposes total deterministic order on N:1 input.
@@ -1107,6 +1143,10 @@ impl<H: AsyncTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
 
     fn stage_type(&self) -> StageType {
         StageType::Transform
+    }
+
+    fn policy_guard_surface(&self) -> PolicyGuardSurface {
+        PolicyGuardSurface::AsyncNonEffectful
     }
 
     fn stage_middleware_names(&self) -> Vec<String> {

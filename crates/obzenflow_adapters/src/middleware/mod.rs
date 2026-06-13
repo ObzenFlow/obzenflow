@@ -125,9 +125,11 @@ mod system;
 // Core trait exports
 pub use middleware_factory::{
     ControlMiddlewareRole, MiddlewareFactory, MiddlewareFactoryError, MiddlewareFactoryResult,
-    MiddlewareOverrideKey, MiddlewarePlanContribution, TopologyMiddlewareConfigSlot,
+    MiddlewareKind, MiddlewareOverrideKey, MiddlewarePlanContribution,
+    TopologyMiddlewareConfigSlot,
 };
 pub use middleware_safety::MiddlewareSafety;
+pub(crate) use middleware_trait::observation_short_circuit;
 pub use middleware_trait::{
     ErrorAction, Middleware, MiddlewareAbortCause, MiddlewareAction, SourceMiddlewarePhase,
 };

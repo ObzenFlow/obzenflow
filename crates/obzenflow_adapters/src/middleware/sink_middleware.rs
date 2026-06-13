@@ -69,7 +69,13 @@ impl<H: SinkHandler> MiddlewareSink<H> {
 
         // Pre-processing phase
         for middleware in self.middleware_chain.iter() {
-            match middleware.pre_handle(&event, &mut ctx) {
+            let action = middleware.pre_handle(&event, &mut ctx);
+            if let Some(message) =
+                crate::middleware::observation_short_circuit(middleware.as_ref(), &action)
+            {
+                return Err(HandlerError::Other(message));
+            }
+            match action {
                 MiddlewareAction::Continue => continue,
                 MiddlewareAction::Skip { .. } => {
                     // Skip means don't consume - return success with no delivery

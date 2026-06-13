@@ -179,6 +179,10 @@ where
         SourceMiddlewarePhase::Ordinary
     }
 
+    fn kind(&self) -> crate::middleware::MiddlewareKind {
+        crate::middleware::MiddlewareKind::Structural
+    }
+
     fn pre_handle(&self, _event: &ChainEvent, _ctx: &mut MiddlewareContext) -> MiddlewareAction {
         MiddlewareAction::Continue
     }
@@ -318,6 +322,12 @@ where
         ControlMiddlewareRole::None
     }
 
+    fn kind(&self) -> crate::middleware::MiddlewareKind {
+        // Structural-transitional (FLOWIP-120c H2): deleted when FLOWIP-120p
+        // moves the AI legs onto effects.
+        crate::middleware::MiddlewareKind::Structural
+    }
+
     fn plan_contribution(&self) -> MiddlewarePlanContribution {
         MiddlewarePlanContribution::None
     }
@@ -369,6 +379,10 @@ where
 
     fn source_phase(&self) -> SourceMiddlewarePhase {
         SourceMiddlewarePhase::Ordinary
+    }
+
+    fn kind(&self) -> crate::middleware::MiddlewareKind {
+        crate::middleware::MiddlewareKind::Structural
     }
 
     fn pre_handle(&self, event: &ChainEvent, ctx: &mut MiddlewareContext) -> MiddlewareAction {
@@ -560,6 +574,12 @@ where
 
     fn control_role(&self) -> ControlMiddlewareRole {
         ControlMiddlewareRole::None
+    }
+
+    fn kind(&self) -> crate::middleware::MiddlewareKind {
+        // Structural-transitional (FLOWIP-120c H2): deleted when FLOWIP-120p
+        // moves the AI legs onto effects.
+        crate::middleware::MiddlewareKind::Structural
     }
 
     fn plan_contribution(&self) -> MiddlewarePlanContribution {

@@ -975,6 +975,10 @@ impl StageDescriptor for TypedStageDescriptor {
         self.inner.stage_type()
     }
 
+    fn policy_guard_surface(&self) -> crate::dsl::stage_descriptor::PolicyGuardSurface {
+        self.inner.policy_guard_surface()
+    }
+
     fn is_composite(&self) -> bool {
         self.inner.is_composite()
     }
@@ -2022,6 +2026,10 @@ impl StageDescriptor for DeterministicOrdererOverride {
 
     fn stage_type(&self) -> StageType {
         self.inner.stage_type()
+    }
+
+    fn policy_guard_surface(&self) -> crate::dsl::stage_descriptor::PolicyGuardSurface {
+        self.inner.policy_guard_surface()
     }
 
     fn reference_stage_id(&self) -> Option<StageId> {

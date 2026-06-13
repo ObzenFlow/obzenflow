@@ -82,6 +82,17 @@ pub enum FlowBuildError {
     },
 
     #[error(
+        "Stage '{stage_name}' declares policy middleware '{middleware}' on a pure sync surface. \
+         Policy middleware attaches to live I/O units only: sources, the effect boundary of an \
+         effectful stage, or sink delivery (FLOWIP-120c H1). A deterministic handler shell has \
+         no unreliable call to protect; move the policy to the stage that performs the I/O."
+    )]
+    PolicyMiddlewareOnPureStage {
+        stage_name: String,
+        middleware: String,
+    },
+
+    #[error(
         "{}",
         FlowBuildError::fmt_edge_typing_mismatch(
             upstream_stage,

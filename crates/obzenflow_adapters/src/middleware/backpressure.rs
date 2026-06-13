@@ -40,6 +40,10 @@ impl MiddlewareFactory for BackpressureMiddlewareFactory {
         ControlMiddlewareRole::None
     }
 
+    fn kind(&self) -> crate::middleware::MiddlewareKind {
+        crate::middleware::MiddlewareKind::Structural
+    }
+
     fn plan_contribution(&self) -> MiddlewarePlanContribution {
         MiddlewarePlanContribution::Backpressure {
             window: self.window,
@@ -86,6 +90,10 @@ impl Middleware for BackpressureMiddleware {
 
     fn source_phase(&self) -> SourceMiddlewarePhase {
         SourceMiddlewarePhase::Ordinary
+    }
+
+    fn kind(&self) -> crate::middleware::MiddlewareKind {
+        crate::middleware::MiddlewareKind::Structural
     }
 
     fn pre_handle(&self, _event: &ChainEvent, _ctx: &mut MiddlewareContext) -> MiddlewareAction {

@@ -12,7 +12,7 @@ use super::{
         CircuitBreakerAttempt, CircuitBreakerRetryAfterMs, CircuitBreakerRetryDelayMs,
         CircuitBreakerShouldRetry, CircuitBreakerTotalRetryWallMs,
     },
-    Middleware, MiddlewareAction, MiddlewareContext,
+    observation_short_circuit, Middleware, MiddlewareAction, MiddlewareContext,
 };
 use async_trait::async_trait;
 use obzenflow_core::event::status::processing_status::ProcessingStatus;
@@ -82,7 +82,11 @@ impl<H: TransformHandler> MiddlewareTransform<H> {
 
         // Pre-processing phase
         for middleware in self.middleware_chain.iter() {
-            match middleware.pre_handle(&event, &mut ctx) {
+            let action = middleware.pre_handle(&event, &mut ctx);
+            if let Some(message) = observation_short_circuit(middleware.as_ref(), &action) {
+                return Err(HandlerError::Other(message));
+            }
+            match action {
                 MiddlewareAction::Continue => continue,
                 MiddlewareAction::Skip { mut results, .. } => {
                     // Pre-write phase for skip results
@@ -288,7 +292,11 @@ impl<H: AsyncTransformHandler> AsyncMiddlewareTransform<H> {
             // Pre-processing phase
             let mut short_circuit: Option<Vec<ChainEvent>> = None;
             for (visited, middleware) in self.middleware_chain.iter().enumerate() {
-                match middleware.pre_handle(&original, &mut ctx) {
+                let action = middleware.pre_handle(&original, &mut ctx);
+                if let Some(message) = observation_short_circuit(middleware.as_ref(), &action) {
+                    return Err(HandlerError::Other(message));
+                }
+                match action {
                     MiddlewareAction::Continue => continue,
                     MiddlewareAction::Skip { mut results, cause } => {
                         // FLOWIP-114q transitional hook: notify the visited
@@ -530,7 +538,25 @@ impl EffectBoundaryMiddleware for MiddlewareEffectBoundary {
         let mut ctx = MiddlewareContext::with_scope(MiddlewareExecutionScope::LiveEffectBoundary);
 
         for middleware in self.middleware_chain.iter() {
-            match middleware.pre_handle(event, &mut ctx) {
+            let action = middleware.pre_handle(event, &mut ctx);
+            if let Some(message) = observation_short_circuit(middleware.as_ref(), &action) {
+                // A misclassified short-circuit at the boundary would author
+                // synthesized outcome facts from arbitrary user code; reject
+                // it as a recorded failure so replay reproduces the error.
+                let control_events = self.drain_control_events(&mut ctx);
+                return EffectBoundaryReport {
+                    outcome: EffectBoundaryOutcome::Aborted(EffectAbortReason {
+                        cause: EffectFailureCause {
+                            source: EffectFailureSource::new(middleware.label()),
+                            code: EffectFailureCode::new("observation_short_circuit"),
+                        },
+                        message,
+                        retry: RetryDisposition::NotRetryable,
+                    }),
+                    control_events,
+                };
+            }
+            match action {
                 MiddlewareAction::Continue => continue,
                 MiddlewareAction::Skip { results, .. } => {
                     let control_events = self.drain_control_events(&mut ctx);
@@ -667,7 +693,11 @@ impl<H: UnifiedTransformHandler> UnifiedMiddlewareTransform<H> {
         let mut ctx = MiddlewareContext::with_scope(scope);
 
         for middleware in self.middleware_chain.iter() {
-            match middleware.pre_handle(&event, &mut ctx) {
+            let action = middleware.pre_handle(&event, &mut ctx);
+            if let Some(message) = observation_short_circuit(middleware.as_ref(), &action) {
+                return Err(HandlerError::Other(message));
+            }
+            match action {
                 MiddlewareAction::Continue => continue,
                 MiddlewareAction::Skip { mut results, .. } => {
                     for result in &mut results {
@@ -1097,6 +1127,11 @@ mod tests {
             crate::middleware::SourceMiddlewarePhase::Ordinary
         }
 
+        fn kind(&self) -> crate::middleware::MiddlewareKind {
+            // Exercises Skip mechanics, so it declares the policy kind.
+            crate::middleware::MiddlewareKind::Policy
+        }
+
         fn pre_handle(&self, _event: &ChainEvent, ctx: &mut MiddlewareContext) -> MiddlewareAction {
             // Write control event then skip
             let writer_id = obzenflow_core::WriterId::from(obzenflow_core::StageId::new());
@@ -1185,6 +1220,11 @@ mod tests {
 
         fn source_phase(&self) -> crate::middleware::SourceMiddlewarePhase {
             crate::middleware::SourceMiddlewarePhase::Ordinary
+        }
+
+        fn kind(&self) -> crate::middleware::MiddlewareKind {
+            // Exercises boundary Skip mechanics, so it declares the policy kind.
+            crate::middleware::MiddlewareKind::Policy
         }
 
         fn pre_handle(&self, event: &ChainEvent, ctx: &mut MiddlewareContext) -> MiddlewareAction {
@@ -1450,6 +1490,11 @@ mod tests {
 
         fn source_phase(&self) -> crate::middleware::SourceMiddlewarePhase {
             crate::middleware::SourceMiddlewarePhase::Ordinary
+        }
+
+        fn kind(&self) -> crate::middleware::MiddlewareKind {
+            // Exercises Abort mechanics, so it declares the policy kind.
+            crate::middleware::MiddlewareKind::Policy
         }
 
         fn pre_handle(&self, _event: &ChainEvent, _ctx: &mut MiddlewareContext) -> MiddlewareAction {

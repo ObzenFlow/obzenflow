@@ -81,7 +81,13 @@ where
 
         // Pre-processing phase
         for middleware in self.middleware_chain.iter() {
-            match middleware.pre_handle(&event, &mut ctx) {
+            let action = middleware.pre_handle(&event, &mut ctx);
+            if let Some(message) =
+                crate::middleware::observation_short_circuit(middleware.as_ref(), &action)
+            {
+                return Err(HandlerError::Other(message));
+            }
+            match action {
                 MiddlewareAction::Continue => continue,
                 MiddlewareAction::Skip { .. } => {
                     // Skip means don't accumulate this event
@@ -279,6 +285,12 @@ mod tests {
 
         fn source_phase(&self) -> crate::middleware::SourceMiddlewarePhase {
             crate::middleware::SourceMiddlewarePhase::Ordinary
+        }
+
+        fn kind(&self) -> crate::middleware::MiddlewareKind {
+            // This test middleware exercises the Skip mechanics, so it
+            // declares the policy kind (FLOWIP-120c H2).
+            crate::middleware::MiddlewareKind::Policy
         }
 
         fn pre_handle(&self, event: &ChainEvent, _ctx: &mut MiddlewareContext) -> MiddlewareAction {

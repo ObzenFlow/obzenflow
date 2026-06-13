@@ -493,6 +493,10 @@ impl Middleware for RateLimiterMiddleware {
         SourceMiddlewarePhase::RateLimiterGate
     }
 
+    fn kind(&self) -> crate::middleware::MiddlewareKind {
+        crate::middleware::MiddlewareKind::Policy
+    }
+
     fn pre_handle(&self, event: &ChainEvent, ctx: &mut MiddlewareContext) -> MiddlewareAction {
         // FLOWIP-120a: during deterministic replay the stage is reconstructed
         // from recorded events and performs no live external admission, so the

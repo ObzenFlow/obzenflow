@@ -78,25 +78,35 @@ impl<H: JoinHandler> MiddlewareJoin<H> {
     }
 
     /// Apply middleware chain and return whether to continue processing
-    fn apply_pre_middleware(&self, event: &ChainEvent, ctx: &mut MiddlewareContext) -> bool {
+    fn apply_pre_middleware(
+        &self,
+        event: &ChainEvent,
+        ctx: &mut MiddlewareContext,
+    ) -> Result<bool, HandlerError> {
         // Short-circuit if event already has Error status
         if matches!(event.processing_info.status, ProcessingStatus::Error { .. }) {
             tracing::debug!(
                 "MiddlewareJoin: Skipping pre_handle for event with Error status: {:?}",
                 event.processing_info.status
             );
-            return false;
+            return Ok(false);
         }
 
         // Pre-processing phase
         for middleware in self.middleware_chain.iter() {
-            match middleware.pre_handle(event, ctx) {
+            let action = middleware.pre_handle(event, ctx);
+            if let Some(message) =
+                crate::middleware::observation_short_circuit(middleware.as_ref(), &action)
+            {
+                return Err(HandlerError::Other(message));
+            }
+            match action {
                 MiddlewareAction::Continue => continue,
-                MiddlewareAction::Skip { .. } => return false,
-                MiddlewareAction::Abort { .. } => return false,
+                MiddlewareAction::Skip { .. } => return Ok(false),
+                MiddlewareAction::Abort { .. } => return Ok(false),
             }
         }
-        true
+        Ok(true)
     }
 
     /// Apply post-middleware and enrich results
@@ -157,7 +167,7 @@ where
         let mut ctx = MiddlewareContext::with_scope(self.execution_scope);
 
         // Apply pre-middleware (same for both reference and stream sides)
-        if !self.apply_pre_middleware(&event, &mut ctx) {
+        if !self.apply_pre_middleware(&event, &mut ctx)? {
             return Ok(vec![]);
         }
 
@@ -325,6 +335,12 @@ mod tests {
 
         fn source_phase(&self) -> crate::middleware::SourceMiddlewarePhase {
             crate::middleware::SourceMiddlewarePhase::Ordinary
+        }
+
+        fn kind(&self) -> crate::middleware::MiddlewareKind {
+            // This test middleware exercises the Skip mechanics, so it
+            // declares the policy kind (FLOWIP-120c H2).
+            crate::middleware::MiddlewareKind::Policy
         }
 
         fn pre_handle(&self, event: &ChainEvent, _ctx: &mut MiddlewareContext) -> MiddlewareAction {

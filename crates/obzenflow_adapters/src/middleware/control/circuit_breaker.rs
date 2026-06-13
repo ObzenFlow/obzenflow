@@ -1014,6 +1014,10 @@ impl Middleware for CircuitBreakerMiddleware {
         SourceMiddlewarePhase::CircuitBreakerGate
     }
 
+    fn kind(&self) -> crate::middleware::MiddlewareKind {
+        crate::middleware::MiddlewareKind::Policy
+    }
+
     fn pre_handle(&self, event: &ChainEvent, ctx: &mut MiddlewareContext) -> MiddlewareAction {
         // FLOWIP-120a: during deterministic replay the stage is reconstructed
         // from recorded events. The guarded effect is suppressed (its recorded
@@ -2406,6 +2410,10 @@ impl MiddlewareFactory for CircuitBreakerFactory {
 
     fn control_role(&self) -> ControlMiddlewareRole {
         ControlMiddlewareRole::CircuitBreaker
+    }
+
+    fn kind(&self) -> crate::middleware::MiddlewareKind {
+        crate::middleware::MiddlewareKind::Policy
     }
 
     fn plan_contribution(&self) -> MiddlewarePlanContribution {
