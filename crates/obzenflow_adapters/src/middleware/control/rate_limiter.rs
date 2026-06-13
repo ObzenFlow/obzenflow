@@ -707,10 +707,13 @@ impl Middleware for RateLimiterMiddleware {
     }
 }
 
-/// Per-effect policy adapter (FLOWIP-120c): the limiter paces one declared
-/// effect and awaits its permit instead of blocking the worker thread (the
-/// FLOWIP-114o boundary slice). Stats, lifecycle records, and the token
-/// bucket are shared with the legacy `Middleware` surface.
+/// Per-effect policy adapter (FLOWIP-120c): one limiter instance guards one
+/// declared effect. It awaits its permit at the live effect boundary instead
+/// of blocking a worker thread, while reusing the same token-bucket,
+/// accounting, and lifecycle-event helpers as the synchronous `Middleware`
+/// implementation. Each effect attachment is factory-created with an effect
+/// key, so its bucket and metrics are independent from source or chain
+/// instances.
 #[async_trait::async_trait]
 impl crate::middleware::EffectPolicy for RateLimiterMiddleware {
     fn label(&self) -> &'static str {
