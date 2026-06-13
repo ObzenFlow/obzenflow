@@ -842,20 +842,20 @@ fn build_flow(
     }
 }
 
-fn build_flow_level_limiter_flow(
+fn build_source_limiter_flow(
     journal_base: PathBuf,
     calls: Arc<AtomicUsize>,
     outputs: Arc<Mutex<Vec<ReplayOutput>>>,
 ) -> FlowDefinition {
     flow! {
-        name: "effect_replay_flow_limiter",
+        name: "effect_replay_source_limiter",
         journals: disk_journals(journal_base),
-        middleware: [
-            RateLimiterBuilder::new(1.0).build()
-        ],
+        middleware: [],
 
         stages: {
-            inputs = source!(ReplayInput => ReplaySource::new());
+            inputs = source!(ReplayInput => ReplaySource::new(), [
+                RateLimiterBuilder::new(1.0).build()
+            ]);
             effectful = effectful_transform!(
                 ReplayInput -> { ReplayOutput, ReplayEffectValue } => ReplayTransform { calls },
                 effects: [CountingEffect],
@@ -871,12 +871,11 @@ fn build_flow_level_limiter_flow(
     }
 }
 
-/// Same shape as `build_flow_level_limiter_flow` but with a high admission rate, so
+/// Same shape as `build_flow` but with a high effect-boundary admission rate, so
 /// the limiter consumes tokens and moves admission state without blocking a worker
 /// thread for seconds. The resume regression only needs token consumption at the
-/// effect boundary versus suppression at the sink, not real backpressure delay, so
-/// this keeps that test fast and avoids starving the shared runtime under parallel
-/// test execution.
+/// effect boundary, not real backpressure delay, so this keeps that test fast and
+/// avoids starving the shared runtime under parallel test execution.
 fn build_fast_limiter_flow(
     journal_base: PathBuf,
     calls: Arc<AtomicUsize>,
@@ -885,15 +884,15 @@ fn build_fast_limiter_flow(
     flow! {
         name: "effect_replay_fast_limiter",
         journals: disk_journals(journal_base),
-        middleware: [
-            RateLimiterBuilder::new(1000.0).build()
-        ],
+        middleware: [],
 
         stages: {
             inputs = source!(ReplayInput => ReplaySource::new());
             effectful = effectful_transform!(
                 ReplayInput -> { ReplayOutput, ReplayEffectValue } => ReplayTransform { calls },
-                effects: [CountingEffect],
+                effects: [CountingEffect with [
+                    RateLimiterBuilder::new(1000.0).build()
+                ]],
                 middleware: []
             );
             collector = sink!(ReplayOutput => CollectSink { outputs });
@@ -1142,8 +1141,7 @@ fn build_outcome_fallback_flow(
             inputs = source!(ReplayInput => ReplaySource::new());
             effectful = effectful_transform!(
                 ReplayInput -> { ReplayOutput, ProductFirst, ProductSecond } => OutcomeFallbackTransform { calls },
-                effects: [FailingProductEffect],
-                output_middleware: [
+                effects: [FailingProductEffect with [
                 CircuitBreakerBuilder::new(1)
                     .open_policy(OpenPolicy::EmitFallback)
                     .with_outcome_fallback::<FailingProductEffect, ReplayInput, _>(|input| ProductOutcome {
@@ -1155,7 +1153,7 @@ fn build_outcome_fallback_flow(
                         },
                     })
                     .build_outcome::<FailingProductEffect>()
-            ],
+            ]],
                 middleware: []);
             collector = sink!(ReplayOutput => CollectSink { outputs });
         },
@@ -1181,8 +1179,7 @@ fn build_either_fallback_flow(
             inputs = source!(ReplayInput => ReplaySource::new());
             effectful = effectful_transform!(
                 ReplayInput -> { ReplayOutput, ProductFirst, ProductSecond } => EitherFallbackTransform { calls },
-                effects: [FailingEitherEffect],
-                output_middleware: [
+                effects: [FailingEitherEffect with [
                 CircuitBreakerBuilder::new(1)
                     .open_policy(OpenPolicy::EmitFallback)
                     .with_outcome_fallback::<FailingEitherEffect, ReplayInput, _>(|input| {
@@ -1191,7 +1188,7 @@ fn build_either_fallback_flow(
                         })
                     })
                     .build_outcome::<FailingEitherEffect>()
-            ],
+            ]],
                 middleware: []);
             collector = sink!(ReplayOutput => CollectSink { outputs });
         },
@@ -1223,8 +1220,7 @@ fn build_mixed_fallback_shapes_flow(
             inputs = source!(ReplayInput => ReplaySource::new());
             effectful = effectful_transform!(
                 ReplayInput -> { ReplayOutput, ReplayEffectValue, ReplayFallback, ReplayRejected } => GuardedTransform { calls },
-                effects: [AlwaysFailingEffect],
-                output_middleware: [
+                effects: [AlwaysFailingEffect with [
                 CircuitBreakerBuilder::new(1)
                     .open_policy(OpenPolicy::EmitFallback)
                     .with_fallback_fact::<ReplayInput, ReplayFallback, _>(|input| ReplayFallback {
@@ -1234,7 +1230,7 @@ fn build_mixed_fallback_shapes_flow(
                         effect_value: input.value + 900,
                     })
                     .build_outcome::<AlwaysFailingEffect>()
-            ],
+            ]],
                 middleware: []);
             collector = sink!(ReplayOutput => CollectSink { outputs });
         },
@@ -1260,15 +1256,14 @@ fn build_undeclared_outcome_target_flow(
             inputs = source!(ReplayInput => ReplaySource::new());
             effectful = effectful_transform!(
                 ReplayInput -> { ReplayOutput, ReplayEffectValue } => FallbackTransform { calls },
-                effects: [AlwaysFailingEffect],
-                output_middleware: [
+                effects: [AlwaysFailingEffect with [
                 CircuitBreakerBuilder::new(1)
                     .open_policy(OpenPolicy::EmitFallback)
                     .with_outcome_fallback::<CountingEffect, ReplayInput, _>(|input| ReplayEffectValue {
                         effect_value: input.value + 900,
                     })
                     .build_outcome::<CountingEffect>()
-            ],
+            ]],
                 middleware: []);
             collector = sink!(ReplayOutput => CollectSink { outputs });
         },
@@ -1632,6 +1627,33 @@ async fn rate_limiter_runtime_activity_in_stage(
         })
 }
 
+/// Per-effect limiter activity from the wide-event snapshot (FLOWIP-120c G9):
+/// per-effect policy instances snapshot under their effect type, so boundary
+/// limiter activity lives in `effect_rate_limiters`, not the stage-level
+/// `rl_*` fields.
+async fn effect_rate_limiter_runtime_activity_in_stage(
+    run_dir: &Path,
+    stage_key: &str,
+) -> (u64, u64, f64) {
+    read_stage_events(run_dir, stage_key)
+        .await
+        .into_iter()
+        .filter_map(|event| event.runtime_context)
+        .fold((0u64, 0u64, 0f64), |(ev, dl, ds), rc| {
+            let (sum_ev, sum_dl, sum_ds) =
+                rc.effect_rate_limiters
+                    .iter()
+                    .fold((0u64, 0u64, 0f64), |(ev, dl, ds), entry| {
+                        (
+                            ev + entry.rl_events_total,
+                            dl + entry.rl_delayed_total,
+                            ds + entry.rl_delay_seconds_total,
+                        )
+                    });
+            (ev.max(sum_ev), dl.max(sum_dl), ds.max(sum_ds))
+        })
+}
+
 #[tokio::test]
 async fn effectful_sink_fails_closed_at_materialisation() {
     let _guard = effect_replay_test_guard().await;
@@ -1935,7 +1957,7 @@ async fn drain_waits_for_in_flight_effect_before_outputs_and_eof_complete() {
 }
 
 #[tokio::test]
-async fn flow_level_admission_limiter_replay_suppresses_delay_events_and_effects() {
+async fn source_admission_limiter_replay_suppresses_delay_events_and_effects() {
     let _guard = effect_replay_test_guard().await;
     let temp = tempfile::tempdir().expect("tempdir");
     let journal_base = temp.path().join("journals");
@@ -1944,13 +1966,13 @@ async fn flow_level_admission_limiter_replay_suppresses_delay_events_and_effects
     let live_outputs = Arc::new(Mutex::new(Vec::new()));
     FlowApplication::builder()
         .with_cli_args(["obzenflow"])
-        .run_async(build_flow_level_limiter_flow(
+        .run_async(build_source_limiter_flow(
             journal_base.clone(),
             live_calls.clone(),
             live_outputs.clone(),
         ))
         .await
-        .expect("live flow-level limiter flow should complete");
+        .expect("live source-limiter flow should complete");
 
     assert_eq!(live_calls.load(Ordering::SeqCst), 3);
     let live_domain_outputs = live_outputs.lock().expect("outputs lock poisoned").clone();
@@ -1964,18 +1986,18 @@ async fn flow_level_admission_limiter_replay_suppresses_delay_events_and_effects
             OsString::from("--replay-from"),
             archive_dir.as_os_str().to_os_string(),
         ])
-        .run_async(build_flow_level_limiter_flow(
+        .run_async(build_source_limiter_flow(
             journal_base.clone(),
             replay_calls.clone(),
             replay_outputs.clone(),
         ))
         .await
-        .expect("replay flow-level limiter flow should complete");
+        .expect("replay source-limiter flow should complete");
 
     assert_eq!(
         replay_calls.load(Ordering::SeqCst),
         0,
-        "replay must suppress live effect execution under flow-level middleware"
+        "replay must suppress live effect execution under source middleware"
     );
     assert_eq!(
         replay_outputs
@@ -1987,31 +2009,27 @@ async fn flow_level_admission_limiter_replay_suppresses_delay_events_and_effects
 
     let replay_archive = latest_run_dir(&journal_base);
 
-    // Directly assert the flow-level admission limiter consumed no tokens and moved no
+    // Directly assert the source admission limiter consumed no tokens and moved no
     // admission state during replay. The burst capacity is 1.0, so an invoked limiter
     // must delay inputs 2 and 3 and emit Delayed events; the live run proves this,
-    // making the limiter's complete silence during replay evidence that it was never
-    // invoked (zero rate-limiter events of any variant), so no tokens were consumed.
-    let live_delayed = rate_limiter_delayed_events_in_stage(&archive_dir, "inputs").await
-        + rate_limiter_delayed_events_in_stage(&archive_dir, "effectful").await
-        + rate_limiter_delayed_events_in_stage(&archive_dir, "collector").await;
+    // making the limiter's complete silence during replay evidence that the source
+    // surface was bypassed by the replay driver.
+    let live_delayed = rate_limiter_delayed_events_in_stage(&archive_dir, "inputs").await;
     assert!(
         live_delayed > 0,
         "live run must exercise the limiter (3 inputs at burst capacity 1.0), otherwise \
          the replay-silence assertion below is vacuous"
     );
 
-    let replay_rate_limiter_events = rate_limiter_events_in_stage(&replay_archive, "inputs").await
-        + rate_limiter_events_in_stage(&replay_archive, "effectful").await
-        + rate_limiter_events_in_stage(&replay_archive, "collector").await;
+    let replay_rate_limiter_events = rate_limiter_events_in_stage(&replay_archive, "inputs").await;
     assert_eq!(
         replay_rate_limiter_events, 0,
-        "strict replay must not invoke the flow-level admission limiter, so it emits no \
+        "strict replay must not invoke the source admission limiter, so it emits no \
          rate-limiter events of any kind and consumes no tokens or admission state"
     );
 
     // FLOWIP-120a regression. The journal-only assertion above is blind to the
-    // admission-middleware replay bug: a downstream sink runs the limiter's
+    // admission-middleware replay bug: a replayed deterministic shell runs the limiter's
     // `pre_handle` on every replayed event but never journals its `Delayed`
     // lifecycle records, so the limiter can pace the whole replay while the journal
     // stays silent. The runtime counters embedded in wide events do capture it.
@@ -2019,9 +2037,7 @@ async fn flow_level_admission_limiter_replay_suppresses_delay_events_and_effects
     // The limiter embeds tokens-consumed (`rl_events_total`), delayed-event
     // (`rl_delayed_total`), and delay-seconds (`rl_delay_seconds_total`) totals via
     // the instrumentation snapshotter. Strict replay must leave every one at zero on
-    // every stage. This assertion fails on the pre-fix code (`saw 3` tokens at the
-    // sink) and is deterministic, so it does not depend on wall-clock timing under
-    // parallel test load. The live run above proves the limiter is active
+    // every stage. The live run above proves the source limiter is active
     // (`live_delayed > 0`), so the zero-on-replay assertion is not vacuous.
     for stage in ["inputs", "effectful", "collector"] {
         let (events_total, delayed_total, delay_seconds) =
@@ -2038,6 +2054,18 @@ async fn flow_level_admission_limiter_replay_suppresses_delay_events_and_effects
             delay_seconds, 0.0,
             "stage '{stage}': strict replay must accrue zero delay seconds, saw {delay_seconds}"
         );
+
+        // Per-effect boundary instances (FLOWIP-120c) must be equally quiet:
+        // strict replay returns recorded outcomes before the boundary is
+        // consulted, so no per-effect limiter moves.
+        let (effect_events, effect_delayed, effect_delay_seconds) =
+            effect_rate_limiter_runtime_activity_in_stage(&replay_archive, stage).await;
+        assert_eq!(
+            effect_events, 0,
+            "stage '{stage}': strict replay must consume zero per-effect tokens, saw {effect_events}"
+        );
+        assert_eq!(effect_delayed, 0);
+        assert_eq!(effect_delay_seconds, 0.0);
     }
 }
 
@@ -2517,8 +2545,8 @@ async fn outcome_shaped_fallback_for_undeclared_effect_is_rejected_at_build() {
 
     let message = err.to_string();
     assert!(
-        message.contains("targets effect"),
-        "expected the FLOWIP-120m target-mismatch rejection, got: {message}"
+        message.contains("attach it to the effect it guards"),
+        "expected the FLOWIP-120c H7 target-mismatch rejection, got: {message}"
     );
 }
 
@@ -2595,19 +2623,17 @@ async fn resume_incomplete_archive_reexecutes_missing_effect_records_with_archiv
     );
 }
 
-/// FLOWIP-120a: incomplete-archive resume must suppress handler-level admission
-/// middleware (the replayed inputs carry replay provenance) while STILL protecting
-/// effects that execute live at the effect boundary. A blanket
-/// `event.replay_context.is_some()` bypass would wrongly disable the live effect's
-/// protection; the scoped fix keeps the effect boundary under `LiveEffectBoundary`
-/// (never suppressed) and only suppresses the reconstructed handler shell.
+/// FLOWIP-120a/120c: incomplete-archive resume must STILL protect effects that
+/// execute live at the effect boundary. A blanket `event.replay_context.is_some()`
+/// bypass would wrongly disable the live effect's protection; the scoped fix keeps
+/// the effect boundary under `LiveEffectBoundary` (never suppressed) while
+/// FLOWIP-120c makes downstream handler-level policy structurally unrepresentable.
 ///
 /// With every effect record removed, all three effects re-execute live during
 /// resume, so the effectful stage's effect-boundary limiter must run and consume
-/// tokens, while the downstream sink's handler-level admission limiter must stay
-/// silent.
+/// tokens.
 #[tokio::test]
-async fn resume_incomplete_runs_effect_boundary_limiter_but_suppresses_downstream_admission() {
+async fn resume_incomplete_runs_effect_boundary_limiter_for_missing_effect_records() {
     let _guard = effect_replay_test_guard().await;
     let temp = tempfile::tempdir().expect("tempdir");
     let journal_base = temp.path().join("journals");
@@ -2667,31 +2693,15 @@ async fn resume_incomplete_runs_effect_boundary_limiter_but_suppresses_downstrea
     // The effect boundary is consulted only for effects that execute live, so its
     // limiter must run and consume a token per live effect. This is the invariant a
     // naive replay-provenance bypass would break: protection must NOT be skipped just
-    // because the input carries replay provenance.
+    // because the input carries replay provenance. Under the FLOWIP-120c placement
+    // split the boundary limiter is a per-effect instance, so its activity rides the
+    // per-effect snapshot section.
     let (effectful_tokens, _, _) =
-        rate_limiter_runtime_activity_in_stage(&resume_archive, "effectful").await;
+        effect_rate_limiter_runtime_activity_in_stage(&resume_archive, "effectful").await;
     assert!(
         effectful_tokens > 0,
         "resume must keep the effect-boundary limiter live for effects that execute \
          live, but it consumed {effectful_tokens} tokens"
-    );
-
-    // The downstream sink reconstructs deterministically from those committed-or-live
-    // outcomes; its handler-level admission limiter performs no live external work and
-    // must stay fully suppressed.
-    let (collector_tokens, collector_delayed, collector_delay_seconds) =
-        rate_limiter_runtime_activity_in_stage(&resume_archive, "collector").await;
-    assert_eq!(
-        collector_tokens, 0,
-        "resume must suppress the downstream sink's handler-level admission limiter"
-    );
-    assert_eq!(
-        collector_delayed, 0,
-        "resume sink admission limiter must delay nothing"
-    );
-    assert_eq!(
-        collector_delay_seconds, 0.0,
-        "resume sink admission limiter must accrue no delay seconds"
     );
 }
 
@@ -3196,8 +3206,7 @@ fn build_typed_rejection_flow(
             inputs = source!(ReplayInput => ReplaySource::new());
             effectful = effectful_transform!(
                 ReplayInput -> { ReplayOutput, ReplayEffectValue, ReplayFallback, ReplayRejected } => GuardedTransform { calls },
-                effects: [AlwaysFailingEffect],
-                output_middleware: [
+                effects: [AlwaysFailingEffect with [
                 CircuitBreakerBuilder::new(1)
                     .open_policy(OpenPolicy::FailFast)
                     .with_fallback_fact::<ReplayInput, ReplayFallback, _>(|input| ReplayFallback {
@@ -3208,7 +3217,7 @@ fn build_typed_rejection_flow(
                         reason: format!("{reason:?}"),
                     })
                     .build_typed::<ReplayFallback, ReplayRejected>()
-            ],
+            ]],
                 middleware: []);
             collector = sink!(ReplayOutput => CollectSink { outputs });
         },
@@ -3234,8 +3243,7 @@ fn build_multi_effect_typed_outcome_flow(
             inputs = source!(ReplayInput => ReplaySource::new());
             effectful = effectful_transform!(
                 ReplayInput -> { ReplayOutput, ReplayEffectValue, ReplayFallback, ReplayRejected } => GuardedTransform { calls },
-                effects: [AlwaysFailingEffect, CountingEffect],
-                output_middleware: [
+                effects: [AlwaysFailingEffect with [
                 CircuitBreakerBuilder::new(1)
                     .open_policy(OpenPolicy::FailFast)
                     .with_fallback_fact::<ReplayInput, ReplayFallback, _>(|input| ReplayFallback {
@@ -3246,7 +3254,7 @@ fn build_multi_effect_typed_outcome_flow(
                         reason: format!("{reason:?}"),
                     })
                     .build_typed::<ReplayFallback, ReplayRejected>()
-            ],
+            ], CountingEffect],
                 middleware: []);
             collector = sink!(ReplayOutput => CollectSink { outputs });
         },
@@ -3353,10 +3361,11 @@ async fn typed_rejection_branch_completes_inputs_and_replays_without_execution()
     );
 }
 
-/// Until FLOWIP-120c locks per-effect policy scope, typed-outcome middleware
-/// on a multi-effect stage is rejected at build time.
+/// FLOWIP-120c H7 lifted the single-effect restriction: a typed-outcome
+/// policy attaches inline to the effect it guards (`Effect with [...]`), so
+/// a multi-effect stage builds and the breaker guards only its own effect.
 #[tokio::test]
-async fn typed_outcome_middleware_is_rejected_on_multi_effect_stages() {
+async fn typed_outcome_middleware_builds_on_multi_effect_stages() {
     let _guard = effect_replay_test_guard().await;
     let temp = tempfile::tempdir().expect("tempdir");
     let journal_base = temp.path().join("journals");
@@ -3364,19 +3373,58 @@ async fn typed_outcome_middleware_is_rejected_on_multi_effect_stages() {
     let calls = Arc::new(AtomicUsize::new(0));
     let outputs = Arc::new(Mutex::new(Vec::new()));
 
-    let err = FlowApplication::builder()
+    FlowApplication::builder()
         .with_cli_args(["obzenflow"])
         .run_async(build_multi_effect_typed_outcome_flow(
-            journal_base,
-            calls,
+            journal_base.clone(),
+            calls.clone(),
             outputs,
         ))
         .await
-        .expect_err("typed-outcome middleware on a multi-effect stage must fail the build");
+        .expect("a multi-effect stage with a per-effect typed policy must build and run");
 
-    let message = err.to_string();
+    // FailFast with threshold 1: the first input executes (and fails), the
+    // breaker opens, and later inputs complete through the typed rejection
+    // branch without executing.
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "only the first input should reach the failing effect"
+    );
+
+    // The per-effect instance snapshots under its effect type (FLOWIP-120c
+    // G9): the breaker that opened belongs to the guarded effect, keyed by
+    // its declared type, never conflated across the stage's other effects.
+    let run_dir = latest_run_dir(&journal_base);
+    let effect_breakers: Vec<(String, u64)> = read_stage_events(&run_dir, "effectful")
+        .await
+        .into_iter()
+        .filter_map(|event| event.runtime_context)
+        .flat_map(|rc| {
+            rc.effect_circuit_breakers
+                .into_iter()
+                .map(|cb| (cb.effect_type, cb.cb_opened_total))
+        })
+        .fold(std::collections::HashMap::new(), |mut acc, (k, v)| {
+            let entry: &mut u64 = acc.entry(k).or_default();
+            *entry = (*entry).max(v);
+            acc
+        })
+        .into_iter()
+        .collect();
+    let opened_for_failing = effect_breakers
+        .iter()
+        .find(|(effect, _)| effect == AlwaysFailingEffect::EFFECT_TYPE)
+        .map(|(_, opened)| *opened)
+        .unwrap_or(0);
     assert!(
-        message.contains("limited to single-effect stages"),
-        "expected the FLOWIP-120h multi-effect rejection, got: {message}"
+        opened_for_failing > 0,
+        "the guarded effect's breaker must open under its own effect key, got {effect_breakers:?}"
+    );
+    assert!(
+        !effect_breakers
+            .iter()
+            .any(|(effect, _)| effect == CountingEffect::EFFECT_TYPE),
+        "the unguarded effect must carry no breaker instance, got {effect_breakers:?}"
     );
 }

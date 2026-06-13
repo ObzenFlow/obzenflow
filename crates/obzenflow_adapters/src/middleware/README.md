@@ -18,7 +18,7 @@
 
 ```rust
 // 1. Context created fresh for each event
-let mut ctx = MiddlewareContext::new();
+let mut ctx = MiddlewareContext::live_handler();
 
 // 2. Flows through middleware chain
 middleware1.pre_handle(&event, &mut ctx)  // Can emit ephemeral events, insert typed slots
@@ -72,7 +72,7 @@ fn pre_handle(&self, event: &ChainEvent, ctx: &mut MiddlewareContext) -> Middlew
             15,    // failure_count
         ));
         
-        return MiddlewareAction::Skip(vec![]);
+        return MiddlewareAction::Skip { results: vec![], cause: None };
     }
     MiddlewareAction::Continue
 }
@@ -121,7 +121,7 @@ As of FLOWIP-082f, transforms automatically skip events marked with `ProcessingS
    ```rust
    let mut error_event = event.clone();
    error_event.processing_info.status = ProcessingStatus::error("unrecoverable error");
-   return MiddlewareAction::Skip(vec![error_event]);
+   return MiddlewareAction::Skip { results: vec![error_event], cause: None };
    ```
 
 2. **Transforms skip error events**: Events with Error status pass through without processing
@@ -158,15 +158,6 @@ Example:
 ```rust
 use obzenflow_adapters::middleware::{middleware_fn, MiddlewareAction};
 
-// Simple filter middleware
-let filter = middleware_fn(|event, ctx| {
-    if event.event_type() == "important" {
-        MiddlewareAction::Continue
-    } else {
-        MiddlewareAction::Skip(vec![])
-    }
-});
-
 // Logging middleware
 let logger = middleware_fn(|event, ctx| {
     tracing::info!("Processing event: {}", event.id);
@@ -175,3 +166,10 @@ let logger = middleware_fn(|event, ctx| {
 ```
 
 This approach eliminates boilerplate for simple middleware behaviors that only need pre-processing logic.
+
+Function middleware is observation-classified (FLOWIP-120c H2): it runs in
+every execution scope, including replay reconstruction, and may not
+short-circuit the chain. A `Skip` or `Abort` returned from it is a runtime
+error naming the middleware. Filtering belongs in the handler, where
+multi-type output contracts make it natural; resilience policy belongs on
+the live I/O unit (a source, a declared effect, or sink delivery).

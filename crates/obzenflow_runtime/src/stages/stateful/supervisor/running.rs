@@ -300,8 +300,13 @@ pub(super) async fn dispatch_accumulating<
                         HeartbeatProcessingGuard::new(state.clone(), upstream_stage, event_id)
                     });
 
+                    // FLOWIP-120c H3: per-event middleware execution scope.
+                    let scope = crate::effects::scope_for_dispatch(
+                        ctx.effect_runtime_mode,
+                        stage_input_position,
+                    );
                     let accumulate_result = handler
-                        .accumulate(&mut ctx.current_state, event.clone(), effect_context)
+                        .accumulate(&mut ctx.current_state, event.clone(), effect_context, scope)
                         .await;
 
                     if let Some(state) = &heartbeat_state {

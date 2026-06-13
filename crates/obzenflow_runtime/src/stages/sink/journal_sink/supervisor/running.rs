@@ -245,7 +245,15 @@ async fn dispatch_event<H: UnifiedSinkHandler + Clone + std::fmt::Debug + Send +
             let envelope_event = envelope.event.clone();
             let event_id = envelope_event.id;
             let heartbeat_state = ctx.heartbeat.as_ref().map(|h| h.state.clone());
-            if let Err(e) = ctx.handler.consume_report(envelope_event, None).await {
+            if let Err(e) = ctx
+                .handler
+                .consume_report(
+                    envelope_event,
+                    None,
+                    crate::effects::scope_for_dispatch(ctx.effect_runtime_mode, None),
+                )
+                .await
+            {
                 tracing::error!(
                     stage_name = %ctx.stage_name,
                     error = ?e,
@@ -363,7 +371,15 @@ async fn dispatch_control_event<
 
             // For non-EOF control events, let handler consume if needed.
             let envelope_event = envelope.event.clone();
-            if let Err(e) = ctx.handler.consume_report(envelope_event, None).await {
+            if let Err(e) = ctx
+                .handler
+                .consume_report(
+                    envelope_event,
+                    None,
+                    crate::effects::scope_for_dispatch(ctx.effect_runtime_mode, None),
+                )
+                .await
+            {
                 tracing::error!(
                     stage_name = %ctx.stage_name,
                     error = ?e,
@@ -468,6 +484,10 @@ async fn dispatch_data_event<
         })
     });
 
+    // FLOWIP-120c H3: per-event middleware execution scope, computed at
+    // dispatch from the delivered position.
+    let scope = crate::effects::scope_for_dispatch(ctx.effect_runtime_mode, stage_input_position);
+
     // Use instrumentation wrapper but keep handler-level failures as per-record
     // outcomes instead of stage-fatal errors.
     let ack_result = process_with_instrumentation(&ctx.instrumentation, || async {
@@ -475,9 +495,13 @@ async fn dispatch_data_event<
             .as_ref()
             .map(|state| HeartbeatProcessingGuard::new(state.clone(), upstream_stage, event_id));
 
-        let result = AssertUnwindSafe(ctx.handler.consume_report(envelope_event, effect_context))
-            .catch_unwind()
-            .await;
+        let result = AssertUnwindSafe(ctx.handler.consume_report(
+            envelope_event,
+            effect_context,
+            scope,
+        ))
+        .catch_unwind()
+        .await;
 
         match result {
             Ok(Ok(mut report)) => {

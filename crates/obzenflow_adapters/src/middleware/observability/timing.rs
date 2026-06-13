@@ -178,7 +178,7 @@ mod tests {
     #[test]
     fn test_timing_middleware_adds_processing_time() {
         let middleware = TimingMiddleware::new("test_stage");
-        let mut ctx = MiddlewareContext::new();
+        let mut ctx = MiddlewareContext::live_handler();
 
         let event = ChainEventFactory::data_event(
             WriterId::from(StageId::new()),
@@ -208,7 +208,7 @@ mod tests {
     #[test]
     fn test_timing_middleware_handles_missing_start_time() {
         let middleware = TimingMiddleware::new("test_stage");
-        let ctx = MiddlewareContext::new(); // No start time set
+        let ctx = MiddlewareContext::live_handler(); // No start time set
 
         let mut event = ChainEventFactory::data_event(
             WriterId::from(StageId::new()),

@@ -17,6 +17,7 @@ use obzenflow_core::journal::Journal;
 use obzenflow_core::{JournalOwner, StageId, WriterId};
 use obzenflow_infra::journal::MemoryJournal;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
+use obzenflow_runtime::stages::common::handlers::transform::traits::UnifiedTransformHandler;
 use obzenflow_runtime::stages::common::handlers::TransformHandler;
 use serde_json::json;
 
@@ -97,9 +98,15 @@ async fn test_middleware_control_events_flow_to_journal() {
     // Create test event
     let event = ChainEventFactory::data_event(writer_id, "test.data", json!({"value": 42}));
 
-    // Process event (simulating what TransformSupervisor does)
+    // Process event (simulating what TransformSupervisor does, which
+    // computes the middleware execution scope per event, FLOWIP-120c H3)
     let outputs = handler
-        .process(event)
+        .process(
+            event,
+            None,
+            obzenflow_core::MiddlewareExecutionScope::LiveHandler,
+        )
+        .await
         .expect("SimpleTransform should not fail in middleware control-events journal test");
 
     // Write all outputs to journal (as TransformSupervisor does)

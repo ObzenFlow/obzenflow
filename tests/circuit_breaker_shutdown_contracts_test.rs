@@ -21,11 +21,11 @@ use obzenflow_core::journal::journal_owner::JournalOwner;
 use obzenflow_core::journal::Journal;
 use obzenflow_core::TypedPayload;
 use obzenflow_core::{StageId, WriterId};
-use obzenflow_dsl::{flow, sink, source, transform};
+use obzenflow_dsl::{async_transform, flow, sink, source};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    FiniteSourceHandler, SinkHandler, TransformHandler,
+    AsyncTransformHandler, FiniteSourceHandler, SinkHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
@@ -100,9 +100,15 @@ impl FailingTransform {
     }
 }
 
+// FLOWIP-120c H1: a circuit breaker on a pure sync transform is now a build
+// error, so this test rides the async-non-effectful surface (deprecated,
+// warns) until FLOWIP-120p moves breaker-guarded work onto effects.
 #[async_trait]
-impl TransformHandler for FailingTransform {
-    fn process(&self, mut event: ChainEvent) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
+impl AsyncTransformHandler for FailingTransform {
+    async fn process(
+        &self,
+        mut event: ChainEvent,
+    ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
         let current = self.seen.fetch_add(1, Ordering::Relaxed);
 
         if current >= self.max_successes {
@@ -181,7 +187,7 @@ async fn breaker_driven_shutdown_emits_poison_eof_and_contract() -> Result<()> {
             source = source!(BreakerTestEvent => source_handler, [
                 circuit_breaker(2) // Open after 2 failures
             ]);
-            failing_transform = transform!(BreakerTestEvent -> BreakerTestEvent => transform, [
+            failing_transform = async_transform!(BreakerTestEvent -> BreakerTestEvent => transform, [
                 circuit_breaker(2)
             ]);
             sink = sink!(BreakerTestEvent => sink_handler);

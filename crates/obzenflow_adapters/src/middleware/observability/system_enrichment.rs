@@ -276,7 +276,7 @@ mod tests {
             StageId::new(),
             StageType::Transform,
         );
-        let ctx = MiddlewareContext::new();
+        let ctx = MiddlewareContext::live_handler();
 
         let mut event = ChainEventFactory::data_event(
             WriterId::from(StageId::new()),
@@ -306,7 +306,7 @@ mod tests {
             StageId::new(),
             StageType::InfiniteSource,
         );
-        let ctx = MiddlewareContext::new();
+        let ctx = MiddlewareContext::live_handler();
 
         let mut event = ChainEventFactory::data_event(
             WriterId::from(StageId::new()),
@@ -339,7 +339,7 @@ mod tests {
             StageId::new(),
             StageType::Transform,
         );
-        let ctx = MiddlewareContext::new();
+        let ctx = MiddlewareContext::live_handler();
 
         let mut event = ChainEventFactory::data_event(
             WriterId::from(StageId::new()),
@@ -367,7 +367,7 @@ mod tests {
             StageId::new(),
             StageType::Transform,
         );
-        let ctx = MiddlewareContext::new();
+        let ctx = MiddlewareContext::live_handler();
 
         let mut event = ChainEventFactory::data_event(
             WriterId::from(StageId::new()),
@@ -398,7 +398,7 @@ mod tests {
             StageId::new(),
             StageType::FiniteSource, // Even sources shouldn't add correlation to control events
         );
-        let ctx = MiddlewareContext::new();
+        let ctx = MiddlewareContext::live_handler();
 
         let writer_id = WriterId::from(StageId::new());
         let mut event = ChainEventFactory::metrics_state_snapshot(
@@ -426,7 +426,7 @@ mod tests {
             StageId::new(),
             StageType::Sink,
         );
-        let ctx = MiddlewareContext::new();
+        let ctx = MiddlewareContext::live_handler();
 
         let mut event = ChainEventFactory::data_event(
             WriterId::from(StageId::new()),

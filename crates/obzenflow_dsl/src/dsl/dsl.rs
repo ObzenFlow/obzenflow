@@ -1122,6 +1122,14 @@ macro_rules! build_typed_flow {
         for (name, descriptor) in descriptors.iter() {
             let stage_id = *name_to_id.get(name).expect("name_to_id should contain stage ids");
             let flow_middleware = create_flow_middleware();
+            for factory in &flow_middleware {
+                if factory.kind() == obzenflow_adapters::middleware::MiddlewareKind::Policy {
+                    return Err(FlowBuildError::PolicyMiddlewareOnFlowScope {
+                        middleware: factory.label().to_string(),
+                    }
+                    .into());
+                }
+            }
             let resolved_middleware_view = $crate::middleware_resolution::resolve_middleware_view(
                 &flow_middleware,
                 descriptor.stage_middleware_factories(),
@@ -1134,6 +1142,46 @@ macro_rules! build_typed_flow {
             })?;
 
             for factory in resolved_middleware_view {
+                // FLOWIP-120c H1: policy middleware attaches to live I/O
+                // units only. Flow-level broadcast policy rejects above,
+                // pure sync surfaces hard-reject, effectful-stateful rejects
+                // until FLOWIP-120l installs its boundary, and the deprecated
+                // async-non-effectful surface warns until FLOWIP-120f deletes
+                // it (FLOWIP-120p migrates its AI legs to effects).
+                if factory.kind() == obzenflow_adapters::middleware::MiddlewareKind::Policy {
+                    use $crate::dsl::stage_descriptor::PolicyGuardSurface;
+                    match descriptor.policy_guard_surface() {
+                        PolicyGuardSurface::PureSync => {
+                            return Err(FlowBuildError::PolicyMiddlewareOnPureStage {
+                                stage_name: name.clone(),
+                                middleware: factory.label().to_string(),
+                            }
+                            .into());
+                        }
+                        PolicyGuardSurface::EffectfulStatefulPendingBoundary => {
+                            return Err(
+                                FlowBuildError::PolicyMiddlewareOnPendingEffectfulStateful {
+                                    stage_name: name.clone(),
+                                    middleware: factory.label().to_string(),
+                                }
+                                .into(),
+                            );
+                        }
+                        PolicyGuardSurface::AsyncNonEffectful => {
+                            tracing::warn!(
+                                stage = %name,
+                                middleware = factory.label(),
+                                "policy middleware on the async non-effectful surface is \
+                                 deprecated: FLOWIP-120p moves these handlers onto effects and \
+                                 FLOWIP-120f removes this surface; the policy then attaches at \
+                                 the effect boundary (FLOWIP-120c H1)"
+                            );
+                        }
+                        PolicyGuardSurface::Effectful
+                        | PolicyGuardSurface::Source
+                        | PolicyGuardSurface::Sink => {}
+                    }
+                }
                 if let obzenflow_adapters::middleware::MiddlewarePlanContribution::Backpressure {
                     window,
                 } = factory.plan_contribution()

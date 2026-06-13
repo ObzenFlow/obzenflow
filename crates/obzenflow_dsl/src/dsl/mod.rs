@@ -79,6 +79,39 @@
 //! // Missing the mandatory `effects:` clause (jumping straight to `middleware:`).
 //! let _ = effectful_transform!(In -> Out => handler, middleware: []);
 //! ```
+//!
+//! ## FLOWIP-120c H7: per-effect policies attach inline in `effects:`
+//!
+//! The `output_middleware:` lane is retired from the macro surface; a policy
+//! attaches to the effect it guards (`Effect with [...]`). The lane form must
+//! not compile.
+//!
+//! ```compile_fail
+//! use obzenflow_dsl::effectful_transform;
+//!
+//! struct In;
+//! struct Out;
+//! struct MyEffect;
+//! let handler = ();
+//!
+//! // Retired lane: policies attach per effect, `MyEffect with [...]`.
+//! let _ = effectful_transform!(In -> Out => handler, effects: [MyEffect], output_middleware: [], middleware: []);
+//! ```
+//!
+//! A malformed attachment (a `with` clause without its policy list) must not
+//! compile either.
+//!
+//! ```compile_fail
+//! use obzenflow_dsl::effectful_transform;
+//!
+//! struct In;
+//! struct Out;
+//! struct MyEffect;
+//! let handler = ();
+//!
+//! // `with` must be followed by a bracketed policy list.
+//! let _ = effectful_transform!(In -> Out => handler, effects: [MyEffect with], middleware: []);
+//! ```
 
 pub mod composites;
 #[path = "dsl.rs"]

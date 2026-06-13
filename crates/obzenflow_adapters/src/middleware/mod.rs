@@ -106,6 +106,7 @@ mod transform_middleware;
 // Common middleware utilities
 mod context;
 mod context_keys;
+mod effect_policy;
 mod function;
 mod hints;
 pub mod type_shaping;
@@ -124,9 +125,11 @@ mod system;
 // Core trait exports
 pub use middleware_factory::{
     ControlMiddlewareRole, MiddlewareFactory, MiddlewareFactoryError, MiddlewareFactoryResult,
-    MiddlewareOverrideKey, MiddlewarePlanContribution, TopologyMiddlewareConfigSlot,
+    MiddlewareKind, MiddlewareOverrideKey, MiddlewarePlanContribution,
+    TopologyMiddlewareConfigSlot,
 };
 pub use middleware_safety::MiddlewareSafety;
+pub(crate) use middleware_trait::observation_short_circuit;
 pub use middleware_trait::{
     ErrorAction, Middleware, MiddlewareAbortCause, MiddlewareAction, SourceMiddlewarePhase,
 };
@@ -151,10 +154,14 @@ pub use transform_middleware::{
 
 // Common utilities
 pub use context::MiddlewareContext;
+pub use effect_policy::{
+    effect_policy_from_middleware, EffectAttemptOutcome, EffectPolicy, PerEffectPolicyBoundary,
+    PolicyAdmission,
+};
 pub use function::{middleware_fn, FnMiddleware};
 pub use hints::{Attempts, BackoffKind, BatchingHint, MiddlewareHints, RetryHint};
 pub use observability::timing::TimingMiddleware;
-pub use type_shaping::{OutcomeShapingMiddleware, TypeShapingMiddleware};
+pub use type_shaping::{IntoEffectPolicyParts, OutcomeShapingMiddleware, TypeShapingMiddleware};
 
 // Control middleware
 pub use control::{

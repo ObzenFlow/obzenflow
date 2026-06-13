@@ -287,6 +287,17 @@ impl RateLimiterMiddleware {
         config: ValidatedRateLimiterConfig,
         control_middleware: std::sync::Arc<super::ControlMiddlewareAggregator>,
     ) -> Self {
+        Self::new_keyed(stage_id, config, control_middleware, None)
+    }
+
+    /// Construct a limiter registered under a per-effect key (FLOWIP-120c):
+    /// one policy instance per protected dependency.
+    fn new_keyed(
+        stage_id: StageId,
+        config: ValidatedRateLimiterConfig,
+        control_middleware: std::sync::Arc<super::ControlMiddlewareAggregator>,
+        effect_type: Option<String>,
+    ) -> Self {
         let bucket = TokenBucket::new(config.burst_capacity, config.events_per_second);
 
         // FLOWIP-120i: under strict replay the limiter is constructed because
@@ -335,7 +346,14 @@ impl RateLimiterMiddleware {
                 metrics
             }
         });
-        control_middleware.register_rate_limiter(stage_id, snapshotter);
+        match effect_type {
+            Some(effect_type) => control_middleware.register_rate_limiter_for_effect(
+                stage_id,
+                effect_type,
+                snapshotter,
+            ),
+            None => control_middleware.register_rate_limiter(stage_id, snapshotter),
+        }
 
         Self {
             bucket,
@@ -491,6 +509,16 @@ impl Middleware for RateLimiterMiddleware {
 
     fn source_phase(&self) -> SourceMiddlewarePhase {
         SourceMiddlewarePhase::RateLimiterGate
+    }
+
+    fn kind(&self) -> crate::middleware::MiddlewareKind {
+        crate::middleware::MiddlewareKind::Policy
+    }
+
+    fn as_effect_policy(
+        self: std::sync::Arc<Self>,
+    ) -> Option<std::sync::Arc<dyn crate::middleware::EffectPolicy>> {
+        Some(self)
     }
 
     fn pre_handle(&self, event: &ChainEvent, ctx: &mut MiddlewareContext) -> MiddlewareAction {
@@ -679,6 +707,123 @@ impl Middleware for RateLimiterMiddleware {
     }
 }
 
+/// Per-effect policy adapter (FLOWIP-120c): one limiter instance guards one
+/// declared effect. It awaits its permit at the live effect boundary instead
+/// of blocking a worker thread, while reusing the same token-bucket,
+/// accounting, and lifecycle-event helpers as the synchronous `Middleware`
+/// implementation. Each effect attachment is factory-created with an effect
+/// key, so its bucket and metrics are independent from source or chain
+/// instances.
+#[async_trait::async_trait]
+impl crate::middleware::EffectPolicy for RateLimiterMiddleware {
+    fn label(&self) -> &'static str {
+        Middleware::label(self)
+    }
+
+    async fn admit(
+        &self,
+        _identity: &obzenflow_runtime::effects::EffectIdentity,
+        event: &ChainEvent,
+        ctx: &mut MiddlewareContext,
+    ) -> crate::middleware::PolicyAdmission {
+        let event_id = event.id;
+        let event_type = event.event_type();
+        let mut delayed_this_event = false;
+        loop {
+            enum AdmissionAttempt {
+                Allowed,
+                Blocked { wait_time: Duration },
+            }
+
+            let attempt = {
+                let mut bucket = self.bucket.lock().unwrap();
+                if bucket.try_consume(self.cost_per_event) {
+                    AdmissionAttempt::Allowed
+                } else {
+                    AdmissionAttempt::Blocked {
+                        wait_time: bucket
+                            .time_until_available(self.cost_per_event)
+                            .unwrap_or(Duration::from_millis(10)),
+                    }
+                }
+            };
+
+            match attempt {
+                AdmissionAttempt::Allowed => {
+                    if let Ok(mut stats) = self.stats.lock() {
+                        stats.events_total += 1;
+                        stats.tokens_consumed_total += self.cost_per_event;
+                        stats.events_window += 1;
+                        stats.tokens_consumed_window += self.cost_per_event;
+                    }
+                    return crate::middleware::PolicyAdmission::Admit;
+                }
+                AdmissionAttempt::Blocked { wait_time } => {
+                    if !delayed_this_event {
+                        delayed_this_event = true;
+                        if let Ok(mut stats) = self.stats.lock() {
+                            stats.delayed_total += 1;
+                            stats.delayed_window += 1;
+                            stats.pulse_delayed_events += 1;
+                        }
+
+                        let current_rate = if let Ok(stats) = self.stats.lock() {
+                            let elapsed_s = stats.last_summary.elapsed().as_secs_f64();
+                            if elapsed_s > 0.0 {
+                                stats.tokens_consumed_window / elapsed_s / self.cost_per_event
+                            } else {
+                                0.0
+                            }
+                        } else {
+                            0.0
+                        };
+
+                        ctx.write_control_event(ChainEventFactory::observability_event(
+                            self.writer_id,
+                            ObservabilityPayload::Middleware(MiddlewareLifecycle::RateLimiter(
+                                RateLimiterEvent::Delayed {
+                                    delay_ms: wait_time.as_millis() as u64,
+                                    current_rate,
+                                    limit_rate: self.limit_rate,
+                                },
+                            )),
+                        ));
+                    }
+
+                    debug!(
+                        event_id = %event_id,
+                        event_type = %event_type,
+                        wait_ms = wait_time.as_millis(),
+                        "Rate limited at effect boundary - awaiting permit"
+                    );
+
+                    let wait_start = Instant::now();
+                    tokio::time::sleep(wait_time).await;
+                    let waited = wait_start.elapsed();
+                    if let Ok(mut stats) = self.stats.lock() {
+                        stats.delay_seconds_total += waited.as_secs_f64();
+                        let waited_ms = waited.as_millis() as u64;
+                        stats.pulse_delay_ms_total =
+                            stats.pulse_delay_ms_total.saturating_add(waited_ms);
+                        stats.pulse_delay_ms_max = stats.pulse_delay_ms_max.max(waited_ms);
+                    }
+                }
+            }
+        }
+    }
+
+    fn observe(
+        &self,
+        _identity: &obzenflow_runtime::effects::EffectIdentity,
+        _event: &ChainEvent,
+        _attempt: &crate::middleware::EffectAttemptOutcome<'_>,
+        ctx: &mut MiddlewareContext,
+    ) {
+        self.maybe_emit_activity_pulse(ctx);
+        self.maybe_emit_summary(ctx);
+    }
+}
+
 /// Builder for constructing rate limiter middleware factories.
 #[derive(Clone)]
 pub struct RateLimiterBuilder {
@@ -790,6 +935,10 @@ impl MiddlewareFactory for RateLimiterFactory {
         ControlMiddlewareRole::RateLimiter
     }
 
+    fn kind(&self) -> crate::middleware::MiddlewareKind {
+        crate::middleware::MiddlewareKind::Policy
+    }
+
     fn plan_contribution(&self) -> MiddlewarePlanContribution {
         MiddlewarePlanContribution::None
     }
@@ -811,6 +960,24 @@ impl MiddlewareFactory for RateLimiterFactory {
             config.stage_id,
             validated,
             control_middleware,
+        )))
+    }
+
+    fn create_for_effect(
+        &self,
+        config: &StageConfig,
+        control_middleware: std::sync::Arc<super::ControlMiddlewareAggregator>,
+        effect_type: &str,
+    ) -> crate::middleware::MiddlewareFactoryResult<Box<dyn Middleware>> {
+        let validated = self.validated_config().map_err(|err| {
+            MiddlewareFactoryError::invalid_configuration(self.label(), &config.name, err)
+        })?;
+
+        Ok(Box::new(RateLimiterMiddleware::new_keyed(
+            config.stage_id,
+            validated,
+            control_middleware,
+            Some(effect_type.to_string()),
         )))
     }
 
@@ -945,7 +1112,7 @@ mod tests {
         // Create middleware directly (we only need a stage_id for writer attribution)
         let middleware = test_middleware(StageId::new(), 10.0, Some(20.0), 1.0);
 
-        let mut ctx = MiddlewareContext::new();
+        let mut ctx = MiddlewareContext::live_handler();
 
         // Should allow burst of 20 events
         for i in 0..20 {
@@ -970,7 +1137,7 @@ mod tests {
         // Create middleware directly (we only need a stage_id for writer attribution)
         let middleware = test_middleware(StageId::new(), 1.0, None, 1.0);
 
-        let mut ctx = MiddlewareContext::new();
+        let mut ctx = MiddlewareContext::live_handler();
 
         // Consume the one available token
         let data_event =
@@ -991,7 +1158,7 @@ mod tests {
     fn test_rate_limiter_lifecycle_events_pass_through() {
         let middleware = test_middleware(StageId::new(), 1.0, None, 1.0);
 
-        let mut ctx = MiddlewareContext::new();
+        let mut ctx = MiddlewareContext::live_handler();
 
         // Consume the one available token
         let data_event =
@@ -1199,7 +1366,7 @@ mod tests {
                 "test.event",
                 json!({}),
             );
-            let mut ctx = MiddlewareContext::new();
+            let mut ctx = MiddlewareContext::live_handler();
             let action = middleware_for_thread.pre_handle(&event, &mut ctx);
             tx.send(action).unwrap();
         });
@@ -1276,7 +1443,7 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::channel();
 
         let handle = std::thread::spawn(move || {
-            let mut ctx = MiddlewareContext::new();
+            let mut ctx = MiddlewareContext::live_handler();
             middleware_for_thread.maybe_emit_summary(&mut ctx);
             tx.send(ctx.control_events().len()).unwrap();
         });
@@ -1302,7 +1469,7 @@ mod tests {
             stats.last_summary = Instant::now() - Duration::from_secs(10);
         }
 
-        let mut ctx = MiddlewareContext::new();
+        let mut ctx = MiddlewareContext::live_handler();
         middleware.maybe_emit_summary(&mut ctx);
         assert_eq!(ctx.control_events().len(), 2);
 
@@ -1344,7 +1511,7 @@ mod tests {
             stats.last_summary = Instant::now() - Duration::from_secs(10);
         }
 
-        let mut ctx = MiddlewareContext::new();
+        let mut ctx = MiddlewareContext::live_handler();
         middleware.maybe_emit_summary(&mut ctx);
         assert_eq!(ctx.control_events().len(), 1);
         match &ctx.control_events()[0].content {
@@ -1362,7 +1529,7 @@ mod tests {
             stats.last_summary = Instant::now() - Duration::from_secs(10);
         }
 
-        let mut ctx = MiddlewareContext::new();
+        let mut ctx = MiddlewareContext::live_handler();
         middleware.maybe_emit_summary(&mut ctx);
         assert_eq!(ctx.control_events().len(), 2);
         match &ctx.control_events()[0].content {
@@ -1396,7 +1563,7 @@ mod tests {
             stats.pulse_delay_ms_max = 200;
         }
 
-        let mut ctx = MiddlewareContext::new();
+        let mut ctx = MiddlewareContext::live_handler();
         middleware.maybe_emit_activity_pulse(&mut ctx);
         assert_eq!(ctx.control_events().len(), 1);
 
@@ -1423,5 +1590,59 @@ mod tests {
         assert_eq!(stats.pulse_delayed_events, 0);
         assert_eq!(stats.pulse_delay_ms_total, 0);
         assert_eq!(stats.pulse_delay_ms_max, 0);
+    }
+
+    /// FLOWIP-120c (the FLOWIP-114o boundary slice): the per-effect policy
+    /// admission awaits its permit instead of blocking the worker thread.
+    /// On a current-thread runtime a blocking wait would starve the side
+    /// task until admission finished; an awaited wait lets it run first.
+    #[tokio::test]
+    async fn effect_policy_admit_awaits_permit_without_blocking_the_runtime() {
+        use crate::middleware::{EffectPolicy, PolicyAdmission};
+        use obzenflow_runtime::effects::{EffectCursor, EffectIdentity, EffectSafety};
+
+        let limiter = test_middleware(StageId::new(), 10.0, Some(1.0), 1.0);
+        let identity = EffectIdentity {
+            effect_type: "test.effect",
+            safety: EffectSafety::Idempotent,
+            cursor: EffectCursor::new("test_flow", "test_stage", 1, 0),
+            idempotency_key: None,
+        };
+        let event =
+            ChainEventFactory::data_event(WriterId::from(StageId::new()), "test.input", json!({}));
+        let mut ctx = MiddlewareContext::with_scope(
+            obzenflow_core::MiddlewareExecutionScope::LiveEffectBoundary,
+        );
+
+        // The single burst token admits immediately.
+        assert!(matches!(
+            limiter.admit(&identity, &event, &mut ctx).await,
+            PolicyAdmission::Admit
+        ));
+
+        // The second admission waits ~100ms for the refill. A side task on
+        // the same current-thread runtime must make progress during the wait.
+        let order: Arc<std::sync::Mutex<Vec<&'static str>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let side_order = order.clone();
+        let side = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            side_order.lock().unwrap().push("side");
+        });
+
+        let admission = limiter.admit(&identity, &event, &mut ctx).await;
+        order.lock().unwrap().push("admitted");
+        side.await.expect("side task completes");
+
+        assert!(matches!(admission, PolicyAdmission::Admit));
+        assert_eq!(
+            order.lock().unwrap().as_slice(),
+            ["side", "admitted"],
+            "the side task must run while admission awaits its permit"
+        );
+
+        let stats = limiter.stats.lock().unwrap();
+        assert_eq!(stats.delayed_total, 1);
+        assert!(stats.delay_seconds_total > 0.0);
     }
 }

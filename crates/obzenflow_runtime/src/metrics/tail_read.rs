@@ -457,6 +457,8 @@ mod tests {
             rl_delay_seconds_total: 0.0,
             rl_bucket_tokens: 0.0,
             rl_bucket_capacity: 0.0,
+            effect_circuit_breakers: Vec::new(),
+            effect_rate_limiters: Vec::new(),
         }
     }
 

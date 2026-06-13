@@ -2,7 +2,8 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Middleware execution scope (FLOWIP-120a).
+//! Middleware execution scope (FLOWIP-120a), a transitional bridge under
+//! FLOWIP-120c.
 //!
 //! Handler-level control middleware (rate limiters, circuit breakers) observe an
 //! unreliable boundary and react to it by sleeping, consuming tokens, mutating
@@ -11,6 +12,19 @@
 //! work, so those reactions must be suppressed: a replay that re-paces or
 //! re-trips a breaker would change timing and state without changing recorded
 //! values, and would re-emit records that already exist in the archive.
+//!
+//! FLOWIP-120c's placement split makes that suppression structural: policy
+//! middleware attaches to live I/O units only (sources, the effect boundary
+//! per effect, sink delivery), so it cannot run during reconstruction at all,
+//! the way replay bypasses source middleware through the `ReplayDriver`.
+//! This scope remains for the transition, in three roles: it suppresses the
+//! handler-level policy chains that still exist until the split retires them
+//! (the surface FLOWIP-120f deletes), it labels observation emissions during
+//! reconstruction (FLOWIP-120i), and its sink share survives until
+//! FLOWIP-095g settles re-delivery suppression. It is computed per dispatched
+//! event by the supervisors (FLOWIP-120c H3), which is the seam where
+//! FLOWIP-120n's resume phase predicate decides live versus reconstruction
+//! per position.
 //!
 //! The scope is the signal the supervisor hands to each per-event
 //! [`MiddlewareContext`](crate) so middleware can tell which of four execution

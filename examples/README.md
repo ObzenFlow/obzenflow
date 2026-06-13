@@ -61,7 +61,7 @@ These examples don't have tutorials, but they demonstrate concrete framework con
   - Run with metrics: `cargo run -p obzenflow --example payment_gateway_resilience --features obzenflow_infra/warp-server -- --config examples/payment_gateway_resilience/obzenflow.server.toml`
   - Code: [`examples/payment_gateway_resilience/flow.rs`](payment_gateway_resilience/flow.rs)
 
-- **`ecommerce_top_products`** — Bounded-memory ranked aggregation over event streams with stage-level rate limiting. Use this for a realistic Top-N-by-score pattern.
+- **`ecommerce_top_products`** — Bounded-memory ranked aggregation over event streams with source-intake rate limiting. Use this for a realistic Top-N-by-score pattern.
   - Pillars: [Composable Stage Primitives](https://obzenflow.dev/pillars/composable-stages/), [Production-Grade Primitives](https://obzenflow.dev/pillars/batteries-included/)
   - Run: `cargo run -p obzenflow --example ecommerce_top_products`
   - Code: [`examples/ecommerce_top_products.rs`](ecommerce_top_products.rs)
@@ -90,5 +90,5 @@ More niche examples that target specific API surfaces or topology patterns. We u
 - **`web_analytics_pipeline`** — Group/reduce stateful patterns with multiple emission strategies
 - **`topology_patterns_demo`** — Homogeneous fan-in with content-based routing (three sources of the same type into one aggregator, then one router to three priority sinks). Paired with `multi_source_ingest_demo` for the heterogeneous case.
 - **`multi_source_ingest_demo`** — Heterogeneous fan-in via per-branch alignment transforms (three sources of three different types normalised to one envelope, then a typed aggregator). The canonical reference for FLOWIP-114c typed authoring, including a long header comment that doubles as the authoring guide for multi-input stages.
-- **`flow_middleware_config`** — Flow-level versus stage-level middleware inheritance
+- **`flow_middleware_config`** — Targeted source middleware configuration
 - **`prometheus_100k_demo`** — High-volume Prometheus `/metrics` demo

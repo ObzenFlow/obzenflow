@@ -418,6 +418,13 @@ async fn dispatch_running_inner<
                         })
                     });
 
+                    // FLOWIP-120c H3: the middleware execution scope is
+                    // computed per dispatched event from the delivered
+                    // position, not baked into the wrapper at build time.
+                    let scope = crate::effects::scope_for_dispatch(
+                        ctx.effect_runtime_mode,
+                        stage_input_position,
+                    );
                     let result =
                         process_with_instrumentation(&ctx.instrumentation, || async move {
                             let event = envelope_clone.event.clone();
@@ -446,7 +453,7 @@ async fn dispatch_running_inner<
                                 )
                             });
 
-                            match handler.process(event, effect_context).await {
+                            match handler.process(event, effect_context, scope).await {
                                 Ok(outputs) => {
                                     if let Some(state) = &heartbeat_state {
                                         state.record_last_consumed(event_id);

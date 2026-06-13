@@ -1990,72 +1990,128 @@ macro_rules! __obzenflow_effect_declarations_vec {
     }};
 }
 
+/// Entry parser for the `effects:` clause with inline per-effect policy
+/// attachments (FLOWIP-120c H7): `Effect with [policy, ...]`. A declared
+/// effect carries its policies in place, so the macro knows by position
+/// which effect a builder guards; there is deliberately no shorthand for
+/// one policy spec across all effects, because two guarded dependencies are
+/// two policies.
+///
+/// Entry type tokens accumulate one token at a time until `with` or `,`;
+/// wrap a generic effect type containing top-level commas in parentheses.
 #[doc(hidden)]
 #[macro_export]
-macro_rules! __obzenflow_effectful_transform_untyped {
-    (name = $name:literal, handler = $handler:expr, effects = [$($effects:tt)*], output_middleware = [$($ts:expr),* $(,)?], middleware = [$($mw:expr),* $(,)?]) => {{
-        use $crate::dsl::stage_descriptor::{EffectfulTransformDescriptor, StageDescriptor};
-        let mut __middleware: Vec<Box<dyn ::obzenflow_adapters::middleware::MiddlewareFactory>> =
-            vec![$(Box::new($mw)),*];
+macro_rules! __obzenflow_effect_entries {
+    // ── end of input ───────────────────────────────────────────────────
+    (@entry $effects:ident, $atts:ident, [],) => {};
+    (@entry $effects:ident, $atts:ident, [$($acc:tt)+],) => {
+        $effects.push(::obzenflow_runtime::effects::EffectDeclaration::of::<$($acc)+>());
+    };
+
+    // ── transactional entries (recognized at entry start) ─────────────
+    (@entry $effects:ident, $atts:ident, [], transactional($effect:ty, $executor:expr) with [$($policy:expr),* $(,)?], $($rest:tt)*) => {
+        $effects.push(::obzenflow_runtime::effects::EffectDeclaration::transactional_effect::<$effect>($executor));
+        $crate::__obzenflow_effect_entries!(@attach $atts, $effect, [$($policy),*]);
+        $crate::__obzenflow_effect_entries!(@entry $effects, $atts, [], $($rest)*);
+    };
+    (@entry $effects:ident, $atts:ident, [], transactional($effect:ty, $executor:expr) with [$($policy:expr),* $(,)?]) => {
+        $effects.push(::obzenflow_runtime::effects::EffectDeclaration::transactional_effect::<$effect>($executor));
+        $crate::__obzenflow_effect_entries!(@attach $atts, $effect, [$($policy),*]);
+    };
+    (@entry $effects:ident, $atts:ident, [], transactional($effect:ty, $executor:expr), $($rest:tt)*) => {
+        $effects.push(::obzenflow_runtime::effects::EffectDeclaration::transactional_effect::<$effect>($executor));
+        $crate::__obzenflow_effect_entries!(@entry $effects, $atts, [], $($rest)*);
+    };
+    (@entry $effects:ident, $atts:ident, [], transactional($effect:ty, $executor:expr)) => {
+        $effects.push(::obzenflow_runtime::effects::EffectDeclaration::transactional_effect::<$effect>($executor));
+    };
+
+    // ── `with [...]` attachment terminator ─────────────────────────────
+    (@entry $effects:ident, $atts:ident, [$($acc:tt)+], with [$($policy:expr),* $(,)?], $($rest:tt)*) => {
+        $effects.push(::obzenflow_runtime::effects::EffectDeclaration::of::<$($acc)+>());
+        $crate::__obzenflow_effect_entries!(@attach $atts, $($acc)+, [$($policy),*]);
+        $crate::__obzenflow_effect_entries!(@entry $effects, $atts, [], $($rest)*);
+    };
+    (@entry $effects:ident, $atts:ident, [$($acc:tt)+], with [$($policy:expr),* $(,)?]) => {
+        $effects.push(::obzenflow_runtime::effects::EffectDeclaration::of::<$($acc)+>());
+        $crate::__obzenflow_effect_entries!(@attach $atts, $($acc)+, [$($policy),*]);
+    };
+
+    // ── comma terminator ────────────────────────────────────────────────
+    (@entry $effects:ident, $atts:ident, [$($acc:tt)+], , $($rest:tt)*) => {
+        $effects.push(::obzenflow_runtime::effects::EffectDeclaration::of::<$($acc)+>());
+        $crate::__obzenflow_effect_entries!(@entry $effects, $atts, [], $($rest)*);
+    };
+
+    // ── accumulate one type token ───────────────────────────────────────
+    (@entry $effects:ident, $atts:ident, [$($acc:tt)*], $next:tt $($rest:tt)*) => {
+        $crate::__obzenflow_effect_entries!(@entry $effects, $atts, [$($acc)* $next], $($rest)*);
+    };
+
+    // ── attachment construction ─────────────────────────────────────────
+    (@attach $atts:ident, $effect:ty, [$($policy:expr),*]) => {{
+        let __effect_type: &'static str =
+            <$effect as ::obzenflow_runtime::effects::Effect>::EFFECT_TYPE;
+        let mut __factories: Vec<Box<dyn ::obzenflow_adapters::middleware::MiddlewareFactory>> =
+            Vec::new();
         let mut __synthesized: Vec<::obzenflow_runtime::effects::SynthesizedOutcomeRegistration> =
             Vec::new();
-        let mut __type_shaping_errors: Vec<String> = Vec::new();
+        let mut __config_errors: Vec<String> = Vec::new();
         $(
             {
-                let (__factory, __registration, __error) = ($ts).into_registration_parts();
-                __middleware.push(__factory);
-                __synthesized.push(__registration);
-                if let Some(error) = __error {
-                    __type_shaping_errors.push(error);
+                let (__factory, __registration, __error) =
+                    ::obzenflow_adapters::middleware::IntoEffectPolicyParts::into_effect_policy_parts(
+                        $policy,
+                        __effect_type,
+                    );
+                __factories.push(__factory);
+                if let Some(__registration) = __registration {
+                    __synthesized.push(__registration);
+                }
+                if let Some(__error) = __error {
+                    __config_errors.push(__error);
                 }
             }
         )*
+        $atts.push($crate::dsl::stage_descriptor::EffectPolicyAttachment {
+            effect_type: __effect_type,
+            factories: __factories,
+            synthesized: __synthesized,
+            config_errors: __config_errors,
+        });
+    }};
+}
+
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __obzenflow_effectful_transform_untyped {
+    (name = $name:literal, handler = $handler:expr, effects = [$($effects:tt)*], middleware = [$($mw:expr),* $(,)?]) => {{
+        use $crate::dsl::stage_descriptor::{EffectfulTransformDescriptor, StageDescriptor};
+        let __middleware: Vec<Box<dyn ::obzenflow_adapters::middleware::MiddlewareFactory>> =
+            vec![$(Box::new($mw)),*];
+        let mut __obzenflow_effects: Vec<::obzenflow_runtime::effects::EffectDeclaration> =
+            Vec::new();
+        let mut __obzenflow_attachments: Vec<
+            $crate::dsl::stage_descriptor::EffectPolicyAttachment,
+        > = Vec::new();
+        $crate::__obzenflow_effect_entries!(
+            @entry __obzenflow_effects, __obzenflow_attachments, [], $($effects)*
+        );
         Box::new(EffectfulTransformDescriptor {
             name: $name.to_string(),
             handler: $handler,
-            effects: $crate::__obzenflow_effect_declarations_vec!($($effects)*),
+            effects: __obzenflow_effects,
             middleware: __middleware,
-            synthesized_outcomes: __synthesized,
-            type_shaping_errors: __type_shaping_errors,
+            effect_policies: __obzenflow_attachments,
+            synthesized_outcomes: Vec::new(),
+            type_shaping_errors: Vec::new(),
         }) as Box<dyn StageDescriptor>
-    }};
-    (name = $name:literal, handler = $handler:expr, effects = [$($effects:tt)*], middleware = [$($mw:expr),* $(,)?]) => {{
-        $crate::__obzenflow_effectful_transform_untyped!(
-            name = $name,
-            handler = $handler,
-            effects = [$($effects)*],
-            output_middleware = [],
-            middleware = [$($mw),*]
-        )
     }};
 }
 
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __obzenflow_effectful_transform_typed {
-    (input = exact($in:ty), output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = $handler:expr, effects = [$($effects:tt)*], output_middleware = [$($ts:expr),* $(,)?], middleware = [$($mw:expr),* $(,)?]) => {{
-        let __handler = $handler;
-        fn __assert_effectful_contract<H>(_handler: &H)
-        where
-            H: ::obzenflow_runtime::stages::EffectfulTransformHandler<Input = $in>,
-        {}
-        __assert_effectful_contract(&__handler);
-        let __metadata = $crate::dsl::typing::StageTypingMetadata::transform(
-            $crate::dsl::typing::TypeHint::exact_payload::<$in>(),
-            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
-            false,
-            None,
-        )
-        .with_additional_output_contract($crate::__obzenflow_output_contract_members!($($member),+));
-        let __descriptor = $crate::__obzenflow_effectful_transform_untyped!(
-            name = $name,
-            handler = __handler,
-            effects = [$($effects)*],
-            output_middleware = [$($ts),*],
-            middleware = [$($mw),*]
-        );
-        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
-    }};
     (input = exact($in:ty), output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = $handler:expr, effects = [$($effects:tt)*], middleware = [$($mw:expr),* $(,)?]) => {{
         let __handler = $handler;
         fn __assert_effectful_contract<H>(_handler: &H)
@@ -2106,18 +2162,6 @@ macro_rules! __obzenflow_effectful_transform_typed {
 macro_rules! __obzenflow_effectful_transform_exact_contract {
     (name = $name:literal, $($rest:tt)+) => {
         $crate::__obzenflow_effectful_transform_exact_contract!(@collect name = $name, in = (), $($rest)+)
-    };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => $handler:expr, effects: [$($effects:tt)*], output_middleware: [$($ts:expr),* $(,)?], middleware: [$($mw:expr),* $(,)?] $(,)?) => {
-        $crate::__obzenflow_effectful_transform_typed!(
-            input = exact($($in)+),
-            output = $first,
-            output_contract = [$first $(, $member)*],
-            name = $name,
-            handler = $handler,
-            effects = [$($effects)*],
-            output_middleware = [$($ts),*],
-            middleware = [$($mw),*]
-        )
     };
     (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => $handler:expr, effects: [$($effects:tt)*], middleware: [$($mw:expr),* $(,)?] $(,)?) => {
         $crate::__obzenflow_effectful_transform_typed!(

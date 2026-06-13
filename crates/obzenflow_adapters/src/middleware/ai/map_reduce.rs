@@ -179,6 +179,10 @@ where
         SourceMiddlewarePhase::Ordinary
     }
 
+    fn kind(&self) -> crate::middleware::MiddlewareKind {
+        crate::middleware::MiddlewareKind::Structural
+    }
+
     fn pre_handle(&self, _event: &ChainEvent, _ctx: &mut MiddlewareContext) -> MiddlewareAction {
         MiddlewareAction::Continue
     }
@@ -318,6 +322,12 @@ where
         ControlMiddlewareRole::None
     }
 
+    fn kind(&self) -> crate::middleware::MiddlewareKind {
+        // Structural-transitional (FLOWIP-120c H2): deleted when FLOWIP-120p
+        // moves the AI legs onto effects.
+        crate::middleware::MiddlewareKind::Structural
+    }
+
     fn plan_contribution(&self) -> MiddlewarePlanContribution {
         MiddlewarePlanContribution::None
     }
@@ -371,23 +381,36 @@ where
         SourceMiddlewarePhase::Ordinary
     }
 
+    fn kind(&self) -> crate::middleware::MiddlewareKind {
+        crate::middleware::MiddlewareKind::Structural
+    }
+
     fn pre_handle(&self, event: &ChainEvent, ctx: &mut MiddlewareContext) -> MiddlewareAction {
         let ChainEventContent::Data {
             event_type,
             payload,
         } = &event.content
         else {
-            return MiddlewareAction::Skip(vec![]);
+            return MiddlewareAction::Skip {
+                results: vec![],
+                cause: None,
+            };
         };
 
         // Drop framework planning manifests before the user map handler.
         if AiMapReducePlanningManifest::event_type_matches(event_type) {
-            return MiddlewareAction::Skip(vec![]);
+            return MiddlewareAction::Skip {
+                results: vec![],
+                cause: None,
+            };
         }
 
         // Only chunk envelopes are allowed to reach the user map handler.
         if !Chunk::event_type_matches(event_type) {
-            return MiddlewareAction::Skip(vec![]);
+            return MiddlewareAction::Skip {
+                results: vec![],
+                cause: None,
+            };
         }
 
         let header: ChunkEnvelopeIndexCount = match serde_json::from_value(payload.clone()) {
@@ -397,7 +420,10 @@ where
                 let error_event = event
                     .clone()
                     .mark_as_error(reason, ErrorKind::Deserialization);
-                return MiddlewareAction::Skip(vec![error_event]);
+                return MiddlewareAction::Skip {
+                    results: vec![error_event],
+                    cause: None,
+                };
             }
         };
 
@@ -550,6 +576,12 @@ where
         ControlMiddlewareRole::None
     }
 
+    fn kind(&self) -> crate::middleware::MiddlewareKind {
+        // Structural-transitional (FLOWIP-120c H2): deleted when FLOWIP-120p
+        // moves the AI legs onto effects.
+        crate::middleware::MiddlewareKind::Structural
+    }
+
     fn plan_contribution(&self) -> MiddlewarePlanContribution {
         MiddlewarePlanContribution::None
     }
@@ -649,7 +681,7 @@ mod tests {
     #[test]
     fn chunk_manifest_emits_planning_manifest_from_snapshot() {
         let middleware = mk_chunk_manifest_middleware();
-        let mut ctx = MiddlewareContext::new();
+        let mut ctx = MiddlewareContext::live_handler();
 
         let input = ChainEventFactory::data_event(writer_id(), "job", json!({}));
 
@@ -714,7 +746,7 @@ mod tests {
     #[test]
     fn chunk_manifest_falls_back_to_count_and_planning_from_first_chunk() {
         let middleware = mk_chunk_manifest_middleware();
-        let mut ctx = MiddlewareContext::new();
+        let mut ctx = MiddlewareContext::live_handler();
 
         let input = ChainEventFactory::data_event(writer_id(), "job", json!({}));
 
@@ -753,7 +785,7 @@ mod tests {
     #[test]
     fn chunk_manifest_defaults_planning_to_zero_when_missing() {
         let middleware = mk_chunk_manifest_middleware();
-        let mut ctx = MiddlewareContext::new();
+        let mut ctx = MiddlewareContext::live_handler();
 
         let input = ChainEventFactory::data_event(writer_id(), "job", json!({}));
 
@@ -799,7 +831,7 @@ mod tests {
     #[test]
     fn map_wrapper_drops_planning_manifests_before_user_handler() {
         let middleware = mk_map_middleware();
-        let mut ctx = MiddlewareContext::new();
+        let mut ctx = MiddlewareContext::live_handler();
 
         let manifest = AiMapReducePlanningManifest {
             job_key: EventId::new(),
@@ -815,25 +847,25 @@ mod tests {
         .to_event(writer_id());
 
         let action = middleware.pre_handle(&manifest, &mut ctx);
-        assert!(matches!(action, MiddlewareAction::Skip(v) if v.is_empty()));
+        assert!(matches!(action, MiddlewareAction::Skip { results: v, .. } if v.is_empty()));
         assert!(ctx.control_events().is_empty());
     }
 
     #[test]
     fn map_wrapper_skips_non_chunk_data_events() {
         let middleware = mk_map_middleware();
-        let mut ctx = MiddlewareContext::new();
+        let mut ctx = MiddlewareContext::live_handler();
 
         let other = ChainEventFactory::data_event(writer_id(), "other", json!({}));
         let action = middleware.pre_handle(&other, &mut ctx);
-        assert!(matches!(action, MiddlewareAction::Skip(v) if v.is_empty()));
+        assert!(matches!(action, MiddlewareAction::Skip { results: v, .. } if v.is_empty()));
         assert!(ctx.control_events().is_empty());
     }
 
     #[test]
     fn map_wrapper_reports_deserialization_error_when_chunk_header_decode_fails() {
         let middleware = mk_map_middleware();
-        let mut ctx = MiddlewareContext::new();
+        let mut ctx = MiddlewareContext::live_handler();
 
         let chunk = ChainEventFactory::data_event(
             writer_id(),
@@ -842,8 +874,11 @@ mod tests {
         );
 
         let action = middleware.pre_handle(&chunk, &mut ctx);
-        let MiddlewareAction::Skip(events) = action else {
-            panic!("expected Skip(...)");
+        let MiddlewareAction::Skip {
+            results: events, ..
+        } = action
+        else {
+            panic!("expected Skip {{ .. }}");
         };
         assert_eq!(events.len(), 1);
         assert_eq!(
@@ -856,7 +891,7 @@ mod tests {
     #[test]
     fn map_wrapper_sets_chunk_context_and_preallocates_failure_markers() {
         let middleware = mk_map_middleware();
-        let mut ctx = MiddlewareContext::new();
+        let mut ctx = MiddlewareContext::live_handler();
 
         let parent = ChainEventFactory::data_event(writer_id(), "job", json!({}));
         let job_key = parent.id;
@@ -923,7 +958,7 @@ mod tests {
     #[test]
     fn map_wrapper_clears_failure_markers_when_retry_will_happen() {
         let middleware = mk_map_middleware();
-        let mut ctx = MiddlewareContext::new();
+        let mut ctx = MiddlewareContext::live_handler();
 
         let parent = ChainEventFactory::data_event(writer_id(), "job", json!({}));
         let chunk_payload = TestChunkEnvelope {
@@ -957,7 +992,7 @@ mod tests {
     #[test]
     fn map_wrapper_clears_failure_markers_when_partial_output_is_observed() {
         let middleware = mk_map_middleware();
-        let mut ctx = MiddlewareContext::new();
+        let mut ctx = MiddlewareContext::live_handler();
 
         let parent = ChainEventFactory::data_event(writer_id(), "job", json!({}));
         let chunk_payload = TestChunkEnvelope {
@@ -996,7 +1031,7 @@ mod tests {
     #[test]
     fn map_wrapper_retains_failure_markers_when_no_partial_outputs_are_emitted() {
         let middleware = mk_map_middleware();
-        let mut ctx = MiddlewareContext::new();
+        let mut ctx = MiddlewareContext::live_handler();
 
         let parent = ChainEventFactory::data_event(writer_id(), "job", json!({}));
         let chunk_payload = TestChunkEnvelope {
@@ -1035,7 +1070,7 @@ mod tests {
     #[test]
     fn map_wrapper_tags_partial_outputs_in_pre_write() {
         let middleware = mk_map_middleware();
-        let mut ctx = MiddlewareContext::new();
+        let mut ctx = MiddlewareContext::live_handler();
 
         let parent = ChainEventFactory::data_event(writer_id(), "job", json!({}));
         let job_key = parent.id;
@@ -1083,7 +1118,7 @@ mod tests {
     #[test]
     fn map_wrapper_updates_chunk_failed_reason_from_cb_rejection() {
         let middleware = mk_map_middleware();
-        let mut ctx = MiddlewareContext::new();
+        let mut ctx = MiddlewareContext::live_handler();
 
         let parent = ChainEventFactory::data_event(writer_id(), "job", json!({}));
         let chunk_payload = TestChunkEnvelope {
@@ -1137,7 +1172,7 @@ mod tests {
     #[test]
     fn map_wrapper_does_not_tag_non_partial_events() {
         let middleware = mk_map_middleware();
-        let mut ctx = MiddlewareContext::new();
+        let mut ctx = MiddlewareContext::live_handler();
 
         let parent = ChainEventFactory::data_event(writer_id(), "job", json!({}));
         let chunk_payload = TestChunkEnvelope {

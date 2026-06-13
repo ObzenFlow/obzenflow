@@ -16,21 +16,22 @@ use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, Delivery
 use obzenflow_core::time::MetricsDuration;
 use obzenflow_core::ChainEvent;
 use obzenflow_core::MiddlewareExecutionScope;
+use obzenflow_runtime::effects::EffectInvocationContext;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    SinkConsumeReport, SinkHandler, SinkLifecycleReport,
+    SinkConsumeReport, SinkHandler, SinkLifecycleReport, UnifiedSinkHandler,
 };
 use std::sync::Arc;
 
-/// A SinkHandler wrapper that applies middleware
+/// A SinkHandler wrapper that applies middleware.
+///
+/// Implements `UnifiedSinkHandler` directly (not `SinkHandler`, whose blanket
+/// impl would conflict) so the supervisor's per-event execution scope reaches
+/// the middleware context (FLOWIP-120c H3).
 #[derive(Clone)]
 pub struct MiddlewareSink<H: SinkHandler> {
     inner: H,
     middleware_chain: Arc<Vec<Arc<dyn Middleware>>>,
-    /// Replay execution scope for this stage (FLOWIP-120a), stamped onto each
-    /// per-event `MiddlewareContext` so handler-level control middleware suppresses
-    /// its side effects during deterministic replay reconstruction.
-    execution_scope: MiddlewareExecutionScope,
 }
 
 impl<H: SinkHandler> std::fmt::Debug for MiddlewareSink<H> {
@@ -48,7 +49,6 @@ impl<H: SinkHandler> MiddlewareSink<H> {
         Self {
             inner,
             middleware_chain: Arc::new(Vec::new()),
-            execution_scope: MiddlewareExecutionScope::LiveHandler,
         }
     }
 
@@ -58,25 +58,26 @@ impl<H: SinkHandler> MiddlewareSink<H> {
         self
     }
 
-    /// Bind the replay execution scope for this stage (FLOWIP-120a).
-    pub fn with_execution_scope(mut self, scope: MiddlewareExecutionScope) -> Self {
-        self.execution_scope = scope;
-        self
-    }
-
     /// Apply middleware with error handling
     async fn apply_middleware_with_error_handling(
         &mut self,
         event: ChainEvent,
+        scope: MiddlewareExecutionScope,
     ) -> Result<SinkConsumeReport, HandlerError> {
         // Create ephemeral context for this processing
-        let mut ctx = MiddlewareContext::with_scope(self.execution_scope);
+        let mut ctx = MiddlewareContext::with_scope(scope);
 
         // Pre-processing phase
         for middleware in self.middleware_chain.iter() {
-            match middleware.pre_handle(&event, &mut ctx) {
+            let action = middleware.pre_handle(&event, &mut ctx);
+            if let Some(message) =
+                crate::middleware::observation_short_circuit(middleware.as_ref(), &action)
+            {
+                return Err(HandlerError::Other(message));
+            }
+            match action {
                 MiddlewareAction::Continue => continue,
-                MiddlewareAction::Skip(_) => {
+                MiddlewareAction::Skip { .. } => {
                     // Skip means don't consume - return success with no delivery
                     return Ok(SinkConsumeReport::new(DeliveryPayload::success(
                         "middleware_sink",
@@ -84,7 +85,7 @@ impl<H: SinkHandler> MiddlewareSink<H> {
                         None, // bytes_processed
                     )));
                 }
-                MiddlewareAction::Abort(_) => {
+                MiddlewareAction::Abort { .. } => {
                     // Abort is also treated as success but with a different message
                     return Ok(SinkConsumeReport::new(DeliveryPayload::success(
                         "middleware_sink",
@@ -154,36 +155,24 @@ impl<H: SinkHandler> MiddlewareSink<H> {
 }
 
 #[async_trait]
-impl<H: SinkHandler> SinkHandler for MiddlewareSink<H> {
-    async fn consume(&mut self, event: ChainEvent) -> Result<DeliveryPayload, HandlerError> {
-        Ok(self
-            .apply_middleware_with_error_handling(event)
-            .await?
-            .primary)
-    }
-
+impl<H: SinkHandler> UnifiedSinkHandler for MiddlewareSink<H> {
     async fn consume_report(
         &mut self,
         event: ChainEvent,
+        _effect_context: Option<EffectInvocationContext>,
+        scope: MiddlewareExecutionScope,
     ) -> Result<SinkConsumeReport, HandlerError> {
-        self.apply_middleware_with_error_handling(event).await
-    }
-
-    async fn flush(&mut self) -> Result<Option<DeliveryPayload>, HandlerError> {
-        // Flush is not intercepted by middleware - it's an infrastructure concern
-        self.inner.flush().await
+        self.apply_middleware_with_error_handling(event, scope)
+            .await
     }
 
     async fn flush_report(&mut self) -> Result<SinkLifecycleReport, HandlerError> {
+        // Flush is not intercepted by middleware - it's an infrastructure concern
         self.inner.flush_report().await
     }
 
-    async fn drain(&mut self) -> Result<Option<DeliveryPayload>, HandlerError> {
-        // Drain is not intercepted by middleware - it's an infrastructure concern
-        self.inner.drain().await
-    }
-
     async fn drain_report(&mut self) -> Result<SinkLifecycleReport, HandlerError> {
+        // Drain is not intercepted by middleware - it's an infrastructure concern
         self.inner.drain_report().await
     }
 }
@@ -299,7 +288,10 @@ mod tests {
         );
 
         // Should succeed after retry
-        handler.consume(event.clone()).await.unwrap();
+        handler
+            .consume_report(event.clone(), None, MiddlewareExecutionScope::LiveHandler)
+            .await
+            .expect("retry middleware should recover the failed consume");
         assert_eq!(consumed.lock().unwrap().len(), 1);
     }
 }

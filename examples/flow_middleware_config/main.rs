@@ -2,9 +2,9 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Demo: Flow-Level vs Stage-Level Middleware Configuration
+//! Demo: Targeted Middleware Configuration
 //!
-//! This demonstrates middleware inheritance - a critical concept for production flows.
+//! This demonstrates targeted policy middleware on a live source intake surface.
 //!
 //! **How to observe rate limiting in real-time:**
 //!   1. Run the example (requires `warp-server` feature):
@@ -15,15 +15,15 @@
 //!      ```
 //!      curl http://localhost:9090/metrics | grep "events_processed_total"
 //!      ```
-//!   3. Observe rate differences:
-//!      - fast_source: ~10 events/sec (stage override)
-//!      - throttled_transform: ~1.0 events/sec (inherits flow-level)
-//!      - counting_sink: ~1.0 events/sec (bottlenecked by transform)
+//!   3. Observe source intake pacing:
+//!      - fast_source: ~10 events/sec (source policy)
+//!      - throttled_transform: deterministic processing, no policy middleware
+//!      - counting_sink: receives events at the source-paced rate
 //!
 //! Key concepts demonstrated:
-//! - Flow-level middleware applies to all stages by default
-//! - Stage-level middleware overrides flow-level
-//! - Stages without overrides inherit flow-level config
+//! - Policy middleware attaches to live I/O units under FLOWIP-120c H1
+//! - Flow-level policy broadcast is intentionally not used
+//! - Deterministic transforms stay free of rate-limit/circuit-breaker policy
 //! - Backpressure naturally flows upstream
 //! - Production observability via /metrics endpoint
 
@@ -114,14 +114,14 @@ fn main() -> Result<()> {
 
     let presentation = Presentation::new(
         Banner::new("Middleware Configuration Demo")
-            .description("Flow-level vs stage-level middleware inheritance.")
+            .description("Policy middleware attached to a live source surface.")
             .bullets(
                 "Demonstrating",
                 [
-                    "Flow-level rate limit: 1.0 events/sec (applies to all stages)",
-                    "Source override: 10.0 events/sec (stage-level override)",
-                    "Transform: inherits flow-level 1.0 events/sec",
-                    "Result: Source produces at 10/sec, transform throttles to 1.0/sec",
+                    "Source rate limit: 10.0 events/sec",
+                    "Transform: deterministic processing with no policy middleware",
+                    "Flow-level policy broadcast: intentionally absent under FLOWIP-120c",
+                    "Result: source intake paces the rest of the flow",
                 ],
             )
             .section(
@@ -130,7 +130,7 @@ fn main() -> Result<()> {
             )
             .section(
                 "Run duration",
-                "Running with 120 events (will take ~120 seconds due to 1.0/sec transform rate)...",
+                "Running with 120 events paced at the source intake boundary...",
             ),
     )
     .with_footer(|outcome| {
@@ -139,18 +139,18 @@ fn main() -> Result<()> {
             .bullets(
                 "Key observations",
                 [
-                    "Source emitted at 10 events/sec (stage override worked)",
-                    "Transform processed at 1.0 events/sec (inherited flow limit)",
-                    "Sink received at 1.0 events/sec (bottlenecked by transform)",
+                    "Source emitted at the configured intake rate",
+                    "Transform processed deterministically without policy middleware",
+                    "Sink received events at the source-paced rate",
                     "Backpressure naturally flowed upstream",
                 ],
             )
             .bullets(
                 "This proves",
                 [
-                    "Stage-level middleware overrides flow-level",
-                    "Stages without overrides inherit flow-level config",
-                    "Middleware inheritance works as designed",
+                    "Policy middleware targets the protected live I/O unit",
+                    "Deterministic handler shells do not carry policy middleware",
+                    "Observation/structural middleware can still be configured separately",
                 ],
             )
             .paragraph(
@@ -164,15 +164,10 @@ fn main() -> Result<()> {
         .run_blocking(flow! {
             name: "middleware_config_demo",
             journals: disk_journals(journal_path.clone()),
-            middleware: [
-                // Flow-level rate limit: 1.0 events/sec
-                // All stages inherit this unless they override
-                RateLimiterBuilder::new(1.0).build()
-            ],
+            middleware: [],
 
             stages: {
-                // Source with stage-level override: 10 events/sec
-                // This overrides the flow-level 1.0 events/sec
+                // Source intake is a live I/O unit, so rate limiting belongs here.
                 fast_source = source!(CounterEvent => sources::finite_from_fn(|index| {
                     if index >= 120 {
                         return None;
@@ -188,8 +183,7 @@ fn main() -> Result<()> {
                     Some(CounterEvent { count })
                 }), [RateLimiterBuilder::new(10.0).build()]);
 
-                // Transform with NO override
-                // Inherits flow-level rate limit of 1.0 events/sec
+                // Deterministic transform with no policy middleware.
                 throttled_transform = transform!(CounterEvent -> CounterEvent => PassthroughTransform::new());
 
                 // Sink

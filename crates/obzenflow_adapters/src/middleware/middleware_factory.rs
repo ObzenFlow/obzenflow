@@ -168,6 +168,14 @@ pub trait MiddlewareFactory: Send + Sync {
     /// Typed control role used by the DSL for control binding.
     fn control_role(&self) -> ControlMiddlewareRole;
 
+    /// Typed middleware kind for the FLOWIP-120c placement split (H2).
+    ///
+    /// Defaults to observation, the safe kind: it runs in every scope and
+    /// may not short-circuit. Policy and structural factories override.
+    fn kind(&self) -> MiddlewareKind {
+        MiddlewareKind::Observation
+    }
+
     /// Typed plan contribution used by the DSL for runtime planning.
     fn plan_contribution(&self) -> MiddlewarePlanContribution;
 
@@ -180,6 +188,20 @@ pub trait MiddlewareFactory: Send + Sync {
         config: &StageConfig,
         control_middleware: Arc<ControlMiddlewareAggregator>,
     ) -> MiddlewareFactoryResult<Box<dyn Middleware>>;
+
+    /// Create a middleware instance guarding one declared effect
+    /// (FLOWIP-120c): one policy instance per protected dependency.
+    ///
+    /// Default delegates to `create`. Policy factories override so their
+    /// metrics register under the per-effect key and snapshot distinctly.
+    fn create_for_effect(
+        &self,
+        config: &StageConfig,
+        control_middleware: Arc<ControlMiddlewareAggregator>,
+        _effect_type: &str,
+    ) -> MiddlewareFactoryResult<Box<dyn Middleware>> {
+        self.create(config, control_middleware)
+    }
 
     /// Create a control event strategy if this middleware needs one
     ///
@@ -246,6 +268,10 @@ impl<F: MiddlewareFactory + ?Sized> MiddlewareFactory for Box<F> {
         (**self).control_role()
     }
 
+    fn kind(&self) -> MiddlewareKind {
+        (**self).kind()
+    }
+
     fn plan_contribution(&self) -> MiddlewarePlanContribution {
         (**self).plan_contribution()
     }
@@ -260,6 +286,15 @@ impl<F: MiddlewareFactory + ?Sized> MiddlewareFactory for Box<F> {
         control_middleware: Arc<ControlMiddlewareAggregator>,
     ) -> MiddlewareFactoryResult<Box<dyn Middleware>> {
         (**self).create(config, control_middleware)
+    }
+
+    fn create_for_effect(
+        &self,
+        config: &StageConfig,
+        control_middleware: Arc<ControlMiddlewareAggregator>,
+        effect_type: &str,
+    ) -> MiddlewareFactoryResult<Box<dyn Middleware>> {
+        (**self).create_for_effect(config, control_middleware, effect_type)
     }
 
     fn create_control_strategy(&self) -> Option<Box<dyn ControlEventStrategy>> {
@@ -321,6 +356,27 @@ pub enum ControlMiddlewareRole {
     None,
     CircuitBreaker,
     RateLimiter,
+}
+
+/// Typed middleware kind for the FLOWIP-120c placement split (H2).
+///
+/// Policy kinds attach to live I/O units only (sources, the effect boundary
+/// per effect, sink delivery); observation kinds run at the handler shell in
+/// every execution scope. Unclassified middleware defaults to observation,
+/// and a `Skip` or `Abort` from an observation-classified middleware is an
+/// error in every scope: filters belong in handlers, where multi-type output
+/// contracts make filtering natural.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MiddlewareKind {
+    /// Reacts to an unreliable dependency by delaying, rejecting, or
+    /// tripping (circuit breaker, rate limiter).
+    Policy,
+    /// Deterministic, value-preserving observation (timing, logging,
+    /// enrichment). May not short-circuit processing.
+    Observation,
+    /// Framework machinery: build-time plan contributors and transitional
+    /// structural middleware (backpressure, AI map-reduce, type shaping).
+    Structural,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

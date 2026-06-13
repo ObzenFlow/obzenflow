@@ -91,6 +91,27 @@ pub trait ControlMiddlewareProvider: Send + Sync {
 
     /// Get circuit breaker current state for a stage.
     fn circuit_breaker_state(&self, stage_id: &StageId) -> Option<Arc<AtomicU8>>;
+
+    // --- Per-effect instances (FLOWIP-120c) ---
+
+    /// Enumerate per-effect circuit breaker snapshotters for a stage, keyed
+    /// by the declared effect type. One policy instance guards one declared
+    /// effect, so cardinality is bounded by the stage's `effects:` set.
+    fn effect_circuit_breaker_snapshotters(
+        &self,
+        _stage_id: &StageId,
+    ) -> Vec<(String, Arc<CircuitBreakerSnapshotter>)> {
+        Vec::new()
+    }
+
+    /// Enumerate per-effect rate limiter snapshotters for a stage, keyed by
+    /// the declared effect type.
+    fn effect_rate_limiter_snapshotters(
+        &self,
+        _stage_id: &StageId,
+    ) -> Vec<(String, Arc<RateLimiterSnapshotter>)> {
+        Vec::new()
+    }
 }
 
 /// Null implementation for flows without control middleware.

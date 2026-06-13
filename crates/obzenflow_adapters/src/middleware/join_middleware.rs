@@ -66,31 +66,47 @@ impl<H: JoinHandler> MiddlewareJoin<H> {
     }
 
     /// Bind the replay execution scope for this stage (FLOWIP-120a).
+    ///
+    /// Transitional exception to the FLOWIP-120c H3 per-event scope: the join
+    /// runtime carries no effect runtime mode in its context and has no
+    /// unified handler seam yet, so the scope stays build-time-static here
+    /// until FLOWIP-120n's resume phase predicate needs joins, at which point
+    /// the seam follows the transform/sink/stateful pattern.
     pub fn with_execution_scope(mut self, scope: MiddlewareExecutionScope) -> Self {
         self.execution_scope = scope;
         self
     }
 
     /// Apply middleware chain and return whether to continue processing
-    fn apply_pre_middleware(&self, event: &ChainEvent, ctx: &mut MiddlewareContext) -> bool {
+    fn apply_pre_middleware(
+        &self,
+        event: &ChainEvent,
+        ctx: &mut MiddlewareContext,
+    ) -> Result<bool, HandlerError> {
         // Short-circuit if event already has Error status
         if matches!(event.processing_info.status, ProcessingStatus::Error { .. }) {
             tracing::debug!(
                 "MiddlewareJoin: Skipping pre_handle for event with Error status: {:?}",
                 event.processing_info.status
             );
-            return false;
+            return Ok(false);
         }
 
         // Pre-processing phase
         for middleware in self.middleware_chain.iter() {
-            match middleware.pre_handle(event, ctx) {
+            let action = middleware.pre_handle(event, ctx);
+            if let Some(message) =
+                crate::middleware::observation_short_circuit(middleware.as_ref(), &action)
+            {
+                return Err(HandlerError::Other(message));
+            }
+            match action {
                 MiddlewareAction::Continue => continue,
-                MiddlewareAction::Skip(_) => return false,
-                MiddlewareAction::Abort(_) => return false,
+                MiddlewareAction::Skip { .. } => return Ok(false),
+                MiddlewareAction::Abort { .. } => return Ok(false),
             }
         }
-        true
+        Ok(true)
     }
 
     /// Apply post-middleware and enrich results
@@ -151,7 +167,7 @@ where
         let mut ctx = MiddlewareContext::with_scope(self.execution_scope);
 
         // Apply pre-middleware (same for both reference and stream sides)
-        if !self.apply_pre_middleware(&event, &mut ctx) {
+        if !self.apply_pre_middleware(&event, &mut ctx)? {
             return Ok(vec![]);
         }
 
@@ -181,7 +197,7 @@ where
         writer_id: WriterId,
     ) -> Result<Vec<ChainEvent>, HandlerError> {
         // Create ephemeral context
-        let ctx = MiddlewareContext::new();
+        let ctx = MiddlewareContext::live_handler();
 
         // EOF handling doesn't go through pre_handle (no event to check)
         // Just delegate to inner handler
@@ -199,7 +215,7 @@ where
 
     async fn drain(&self, state: &Self::State) -> Result<Vec<ChainEvent>, HandlerError> {
         // Create ephemeral context
-        let mut ctx = MiddlewareContext::new();
+        let mut ctx = MiddlewareContext::live_handler();
 
         // Drain from inner handler
         let mut results = self.inner.drain(state).await?;
@@ -321,10 +337,19 @@ mod tests {
             crate::middleware::SourceMiddlewarePhase::Ordinary
         }
 
+        fn kind(&self) -> crate::middleware::MiddlewareKind {
+            // This test middleware exercises the Skip mechanics, so it
+            // declares the policy kind (FLOWIP-120c H2).
+            crate::middleware::MiddlewareKind::Policy
+        }
+
         fn pre_handle(&self, event: &ChainEvent, _ctx: &mut MiddlewareContext) -> MiddlewareAction {
             // Skip events with "skip" in their payload
             if event.payload().get("skip").is_some() {
-                MiddlewareAction::Skip(vec![])
+                MiddlewareAction::Skip {
+                    results: vec![],
+                    cause: None,
+                }
             } else {
                 MiddlewareAction::Continue
             }

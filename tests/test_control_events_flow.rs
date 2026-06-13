@@ -11,8 +11,10 @@ use obzenflow_adapters::middleware::{
     Middleware, MiddlewareAction, MiddlewareContext, SourceMiddlewarePhase,
 };
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
+use obzenflow_core::MiddlewareExecutionScope;
 use obzenflow_core::{StageId, WriterId};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
+use obzenflow_runtime::stages::common::handlers::transform::traits::UnifiedTransformHandler;
 use obzenflow_runtime::stages::common::handlers::TransformHandler;
 use serde_json::json;
 
@@ -78,8 +80,8 @@ impl TransformHandler for PassthroughTransform {
     }
 }
 
-#[test]
-fn test_control_events_are_appended() {
+#[tokio::test]
+async fn test_control_events_are_appended() {
     // Create transform with middleware
     let transform = PassthroughTransform;
     let wrapped =
@@ -93,7 +95,8 @@ fn test_control_events_are_appended() {
     );
 
     let results = wrapped
-        .process(input_event)
+        .process(input_event, None, MiddlewareExecutionScope::LiveHandler)
+        .await
         .expect("PassthroughTransform should not fail in control-events flow test");
 
     // Should have 3 events: original + 2 control events
@@ -114,8 +117,8 @@ fn test_control_events_are_appended() {
     println!("✓ Control events are properly appended to transform results");
 }
 
-#[test]
-fn test_circuit_breaker_emits_control_events() {
+#[tokio::test]
+async fn test_circuit_breaker_emits_control_events() {
     use obzenflow_adapters::middleware::circuit_breaker::CircuitBreakerMiddleware;
 
     let circuit_breaker = CircuitBreakerMiddleware::new(2); // Opens after 2 failures
@@ -130,7 +133,8 @@ fn test_circuit_breaker_emits_control_events() {
     );
 
     let results1 = wrapped
-        .process(event1)
+        .process(event1, None, MiddlewareExecutionScope::LiveHandler)
+        .await
         .expect("PassthroughTransform should not fail in control-events flow test");
     println!("First event produced {} results", results1.len());
 
@@ -144,7 +148,8 @@ fn test_circuit_breaker_emits_control_events() {
 
         // Process event (circuit breaker middleware will track failures)
         let results = wrapped
-            .process(fail_event)
+            .process(fail_event, None, MiddlewareExecutionScope::LiveHandler)
+            .await
             .expect("PassthroughTransform should not fail in control-events flow test");
 
         println!("Failure {} produced {} results", i + 1, results.len());

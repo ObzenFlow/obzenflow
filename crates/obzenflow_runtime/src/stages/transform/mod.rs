@@ -25,7 +25,7 @@ pub mod supervisor;
 pub use crate::stages::common::handlers::{
     AsyncTransformHandler, EffectfulTransformHandler, TransformHandler,
 };
-pub use builder::{AsyncTransformBuilder, EffectfulTransformBuilder, TransformBuilder};
+pub use builder::TransformBuilder;
 pub use config::TransformConfig;
 pub use fsm::{TransformEvent, TransformState};
 pub use handle::{TransformHandle, TransformHandleExt};

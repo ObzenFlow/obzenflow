@@ -110,3 +110,94 @@ impl OutcomeShapingMiddleware {
         (self.factory, self.registration, self.config_error)
     }
 }
+
+/// Decompose one `Effect with [...]` policy entry (FLOWIP-120c H7) into its
+/// factory plus any typed-outcome registration, stamped with the effect the
+/// entry guards. Plain policy builders carry no registration; typed builders
+/// (`build_typed`, outcome-shaped fallbacks) carry theirs to the same entry,
+/// so the macro knows by position which effect a typed builder protects.
+pub trait IntoEffectPolicyParts {
+    fn into_effect_policy_parts(
+        self,
+        effect_type: &'static str,
+    ) -> (
+        Box<dyn MiddlewareFactory>,
+        Option<SynthesizedOutcomeRegistration>,
+        Option<String>,
+    );
+}
+
+impl IntoEffectPolicyParts for Box<dyn MiddlewareFactory> {
+    fn into_effect_policy_parts(
+        self,
+        _effect_type: &'static str,
+    ) -> (
+        Box<dyn MiddlewareFactory>,
+        Option<SynthesizedOutcomeRegistration>,
+        Option<String>,
+    ) {
+        (self, None, None)
+    }
+}
+
+impl<F, R> IntoEffectPolicyParts for TypeShapingMiddleware<F, R>
+where
+    F: TypedPayload + 'static,
+    R: TypedPayload + 'static,
+{
+    fn into_effect_policy_parts(
+        self,
+        effect_type: &'static str,
+    ) -> (
+        Box<dyn MiddlewareFactory>,
+        Option<SynthesizedOutcomeRegistration>,
+        Option<String>,
+    ) {
+        let (factory, registration, config_error) = self.into_registration_parts();
+        let (registration, config_error) =
+            stamp_entry_effect(registration, config_error, effect_type);
+        (factory, Some(registration), config_error)
+    }
+}
+
+impl IntoEffectPolicyParts for OutcomeShapingMiddleware {
+    fn into_effect_policy_parts(
+        self,
+        effect_type: &'static str,
+    ) -> (
+        Box<dyn MiddlewareFactory>,
+        Option<SynthesizedOutcomeRegistration>,
+        Option<String>,
+    ) {
+        let (factory, registration, config_error) = self.into_registration_parts();
+        let (registration, config_error) =
+            stamp_entry_effect(registration, config_error, effect_type);
+        (factory, Some(registration), config_error)
+    }
+}
+
+/// The entry position names the guarded effect; a builder that already names
+/// a different effect is a configuration error rather than a silent rebind.
+fn stamp_entry_effect(
+    mut registration: SynthesizedOutcomeRegistration,
+    config_error: Option<String>,
+    effect_type: &'static str,
+) -> (SynthesizedOutcomeRegistration, Option<String>) {
+    match registration.effect_type.as_deref() {
+        Some(existing) if existing != effect_type => {
+            let mismatch = format!(
+                "typed policy builder names effect '{existing}' but is attached to \
+                 effect '{effect_type}'; attach it to the effect it guards \
+                 (FLOWIP-120c H7)"
+            );
+            (
+                registration,
+                Some(config_error.map_or(mismatch.clone(), |e| format!("{e}; {mismatch}"))),
+            )
+        }
+        _ => {
+            registration.effect_type = Some(effect_type.to_string());
+            (registration, config_error)
+        }
+    }
+}

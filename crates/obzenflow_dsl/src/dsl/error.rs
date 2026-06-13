@@ -82,6 +82,35 @@ pub enum FlowBuildError {
     },
 
     #[error(
+        "Stage '{stage_name}' declares policy middleware '{middleware}' on a pure sync surface. \
+         Policy middleware attaches to live I/O units only: sources, the effect boundary of an \
+         effectful stage, or sink delivery (FLOWIP-120c H1). A deterministic handler shell has \
+         no unreliable call to protect; move the policy to the stage that performs the I/O."
+    )]
+    PolicyMiddlewareOnPureStage {
+        stage_name: String,
+        middleware: String,
+    },
+
+    #[error(
+        "Flow-level policy middleware '{middleware}' is not allowed. Policy middleware attaches \
+         to live I/O units only: sources, the effect boundary of an effectful stage, or sink \
+         delivery (FLOWIP-120c H1). A flow-level policy would be broadcast onto stages that may \
+         have no protected dependency; attach it to the specific live I/O unit instead."
+    )]
+    PolicyMiddlewareOnFlowScope { middleware: String },
+
+    #[error(
+        "Stage '{stage_name}' declares policy middleware '{middleware}' on an effectful stateful \
+         stage before FLOWIP-120l installs the stateful effect boundary. Accepting this would \
+         advertise protection while stateful dispatch still has effect_boundary: None."
+    )]
+    PolicyMiddlewareOnPendingEffectfulStateful {
+        stage_name: String,
+        middleware: String,
+    },
+
+    #[error(
         "{}",
         FlowBuildError::fmt_edge_typing_mismatch(
             upstream_stage,
@@ -134,16 +163,6 @@ pub enum FlowBuildError {
          (FLOWIP-120h)."
     )]
     TypeShapingConfiguration { stage_name: String, message: String },
-
-    #[error(
-        "Stage '{stage_name}' declares typed-outcome middleware but has {effect_count} declared \
-         effects. Until FLOWIP-120c locks per-effect policy scope, typed-outcome middleware is \
-         limited to single-effect stages (FLOWIP-120h)."
-    )]
-    TypedOutcomeMiddlewareOnMultiEffectStage {
-        stage_name: String,
-        effect_count: usize,
-    },
 
     #[error(
         "Stage '{stage_name}': middleware '{middleware_label}' may author branch fact '{fact}', \

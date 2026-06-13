@@ -230,7 +230,7 @@ impl<H: AsyncFiniteSourceHandler> AsyncFiniteSourceHandler for MiddlewareAsyncFi
             }),
         );
 
-        let mut ctx = MiddlewareContext::new();
+        let mut ctx = MiddlewareContext::live_handler();
 
         // Phase 0: circuit breaker gate (must run before polling).
         for middleware in self.middleware_chain.iter() {
@@ -238,9 +238,15 @@ impl<H: AsyncFiniteSourceHandler> AsyncFiniteSourceHandler for MiddlewareAsyncFi
                 continue;
             }
 
-            match middleware.pre_handle(&synthetic_event, &mut ctx) {
+            let action = middleware.pre_handle(&synthetic_event, &mut ctx);
+            if let Some(message) =
+                crate::middleware::observation_short_circuit(middleware.as_ref(), &action)
+            {
+                return Err(SourceError::Other(message));
+            }
+            match action {
                 MiddlewareAction::Continue => continue,
-                MiddlewareAction::Skip(mut results) => {
+                MiddlewareAction::Skip { mut results, .. } => {
                     backoff_on_cb_rejection_async(&ctx).await;
 
                     // Pre-write enrichment for skip results
@@ -265,7 +271,7 @@ impl<H: AsyncFiniteSourceHandler> AsyncFiniteSourceHandler for MiddlewareAsyncFi
 
                     return Ok(Some(results));
                 }
-                MiddlewareAction::Abort(_) => return Ok(Some(Vec::new())),
+                MiddlewareAction::Abort { .. } => return Ok(Some(Vec::new())),
             }
         }
 
@@ -324,9 +330,15 @@ impl<H: AsyncFiniteSourceHandler> AsyncFiniteSourceHandler for MiddlewareAsyncFi
                 SourceMiddlewarePhase::RateLimiterGate | SourceMiddlewarePhase::Ordinary => {}
             }
 
-            match middleware.pre_handle(&synthetic_event, &mut ctx) {
+            let action = middleware.pre_handle(&synthetic_event, &mut ctx);
+            if let Some(message) =
+                crate::middleware::observation_short_circuit(middleware.as_ref(), &action)
+            {
+                return Err(SourceError::Other(message));
+            }
+            match action {
                 MiddlewareAction::Continue => continue,
-                MiddlewareAction::Skip(mut results) => {
+                MiddlewareAction::Skip { mut results, .. } => {
                     // Pre-write enrichment for skip results
                     for result in &mut results {
                         for mw in self.middleware_chain.iter() {
@@ -344,7 +356,7 @@ impl<H: AsyncFiniteSourceHandler> AsyncFiniteSourceHandler for MiddlewareAsyncFi
                     results.extend(control_events);
                     return Ok(Some(results));
                 }
-                MiddlewareAction::Abort(_) => return Ok(Some(Vec::new())),
+                MiddlewareAction::Abort { .. } => return Ok(Some(Vec::new())),
             }
         }
 
@@ -467,7 +479,7 @@ impl<H: AsyncInfiniteSourceHandler> AsyncInfiniteSourceHandler
             }),
         );
 
-        let mut ctx = MiddlewareContext::new();
+        let mut ctx = MiddlewareContext::live_handler();
 
         // Phase 0: gating middleware (circuit breaker + rate limiter) before polling.
         for middleware in self.middleware_chain.iter() {
@@ -478,9 +490,15 @@ impl<H: AsyncInfiniteSourceHandler> AsyncInfiniteSourceHandler
                 continue;
             }
 
-            match middleware.pre_handle(&synthetic_event, &mut ctx) {
+            let action = middleware.pre_handle(&synthetic_event, &mut ctx);
+            if let Some(message) =
+                crate::middleware::observation_short_circuit(middleware.as_ref(), &action)
+            {
+                return Err(SourceError::Other(message));
+            }
+            match action {
                 MiddlewareAction::Continue => continue,
-                MiddlewareAction::Skip(mut results) => {
+                MiddlewareAction::Skip { mut results, .. } => {
                     match phase {
                         SourceMiddlewarePhase::CircuitBreakerGate => {
                             backoff_on_cb_rejection_async(&ctx).await;
@@ -515,7 +533,7 @@ impl<H: AsyncInfiniteSourceHandler> AsyncInfiniteSourceHandler
 
                     return Ok(results);
                 }
-                MiddlewareAction::Abort(_) => return Ok(Vec::new()),
+                MiddlewareAction::Abort { .. } => return Ok(Vec::new()),
             }
         }
 
@@ -539,9 +557,15 @@ impl<H: AsyncInfiniteSourceHandler> AsyncInfiniteSourceHandler
                 SourceMiddlewarePhase::Ordinary => {}
             }
 
-            match middleware.pre_handle(&synthetic_event, &mut ctx) {
+            let action = middleware.pre_handle(&synthetic_event, &mut ctx);
+            if let Some(message) =
+                crate::middleware::observation_short_circuit(middleware.as_ref(), &action)
+            {
+                return Err(SourceError::Other(message));
+            }
+            match action {
                 MiddlewareAction::Continue => continue,
-                MiddlewareAction::Skip(mut results) => {
+                MiddlewareAction::Skip { mut results, .. } => {
                     // Pre-write enrichment for skip results
                     for result in &mut results {
                         for mw in self.middleware_chain.iter() {
@@ -559,7 +583,7 @@ impl<H: AsyncInfiniteSourceHandler> AsyncInfiniteSourceHandler
                     results.extend(control_events);
                     return Ok(results);
                 }
-                MiddlewareAction::Abort(_) => return Ok(Vec::new()),
+                MiddlewareAction::Abort { .. } => return Ok(Vec::new()),
             }
         }
 
@@ -670,16 +694,22 @@ impl<H: FiniteSourceHandler> FiniteSourceHandler for MiddlewareFiniteSource<H> {
         );
 
         // Create ephemeral context for this processing
-        let mut ctx = MiddlewareContext::new();
+        let mut ctx = MiddlewareContext::live_handler();
 
         // Phase 0: circuit breaker pre-handle (must run before polling).
         for middleware in self.middleware_chain.iter() {
             if middleware.source_phase() != SourceMiddlewarePhase::CircuitBreakerGate {
                 continue;
             }
-            match middleware.pre_handle(&synthetic_event, &mut ctx) {
+            let action = middleware.pre_handle(&synthetic_event, &mut ctx);
+            if let Some(message) =
+                crate::middleware::observation_short_circuit(middleware.as_ref(), &action)
+            {
+                return Err(SourceError::Other(message));
+            }
+            match action {
                 MiddlewareAction::Continue => continue,
-                MiddlewareAction::Skip(mut results) => {
+                MiddlewareAction::Skip { mut results, .. } => {
                     backoff_on_cb_rejection(&ctx);
 
                     // Pre-write phase for skip results
@@ -699,7 +729,7 @@ impl<H: FiniteSourceHandler> FiniteSourceHandler for MiddlewareFiniteSource<H> {
                     results.extend(control_events);
                     return Ok(Some(results));
                 }
-                MiddlewareAction::Abort(_) => {
+                MiddlewareAction::Abort { .. } => {
                     return Ok(Some(Vec::new()));
                 }
             }
@@ -750,9 +780,15 @@ impl<H: FiniteSourceHandler> FiniteSourceHandler for MiddlewareFiniteSource<H> {
                 SourceMiddlewarePhase::RateLimiterGate if !inner_succeeded_with_events => continue,
                 SourceMiddlewarePhase::RateLimiterGate | SourceMiddlewarePhase::Ordinary => {}
             }
-            match middleware.pre_handle(&synthetic_event, &mut ctx) {
+            let action = middleware.pre_handle(&synthetic_event, &mut ctx);
+            if let Some(message) =
+                crate::middleware::observation_short_circuit(middleware.as_ref(), &action)
+            {
+                return Err(SourceError::Other(message));
+            }
+            match action {
                 MiddlewareAction::Continue => continue,
-                MiddlewareAction::Skip(mut results) => {
+                MiddlewareAction::Skip { mut results, .. } => {
                     backoff_on_cb_rejection(&ctx);
 
                     for result in &mut results {
@@ -770,7 +806,7 @@ impl<H: FiniteSourceHandler> FiniteSourceHandler for MiddlewareFiniteSource<H> {
                     results.extend(control_events);
                     return Ok(Some(results));
                 }
-                MiddlewareAction::Abort(_) => return Ok(Some(Vec::new())),
+                MiddlewareAction::Abort { .. } => return Ok(Some(Vec::new())),
             }
         }
 
@@ -866,7 +902,7 @@ impl<H: InfiniteSourceHandler> InfiniteSourceHandler for MiddlewareInfiniteSourc
         );
 
         // Create ephemeral context for this processing
-        let mut ctx = MiddlewareContext::new();
+        let mut ctx = MiddlewareContext::live_handler();
 
         // Phase 0: gating middleware (circuit breaker + rate limiter) before polling.
         for middleware in self.middleware_chain.iter() {
@@ -877,9 +913,15 @@ impl<H: InfiniteSourceHandler> InfiniteSourceHandler for MiddlewareInfiniteSourc
                 continue;
             }
 
-            match middleware.pre_handle(&synthetic_event, &mut ctx) {
+            let action = middleware.pre_handle(&synthetic_event, &mut ctx);
+            if let Some(message) =
+                crate::middleware::observation_short_circuit(middleware.as_ref(), &action)
+            {
+                return Err(SourceError::Other(message));
+            }
+            match action {
                 MiddlewareAction::Continue => continue,
-                MiddlewareAction::Skip(mut results) => {
+                MiddlewareAction::Skip { mut results, .. } => {
                     match phase {
                         SourceMiddlewarePhase::CircuitBreakerGate => {
                             backoff_on_cb_rejection(&ctx);
@@ -909,7 +951,7 @@ impl<H: InfiniteSourceHandler> InfiniteSourceHandler for MiddlewareInfiniteSourc
                     results.extend(control_events);
                     return Ok(results);
                 }
-                MiddlewareAction::Abort(_) => {
+                MiddlewareAction::Abort { .. } => {
                     return Ok(Vec::new());
                 }
             }
@@ -926,9 +968,15 @@ impl<H: InfiniteSourceHandler> InfiniteSourceHandler for MiddlewareInfiniteSourc
                 SourceMiddlewarePhase::Ordinary => {}
             }
 
-            match middleware.pre_handle(&synthetic_event, &mut ctx) {
+            let action = middleware.pre_handle(&synthetic_event, &mut ctx);
+            if let Some(message) =
+                crate::middleware::observation_short_circuit(middleware.as_ref(), &action)
+            {
+                return Err(SourceError::Other(message));
+            }
+            match action {
                 MiddlewareAction::Continue => continue,
-                MiddlewareAction::Skip(mut results) => {
+                MiddlewareAction::Skip { mut results, .. } => {
                     // Pre-write phase for skip results
                     for result in &mut results {
                         for mw in self.middleware_chain.iter() {
@@ -946,7 +994,7 @@ impl<H: InfiniteSourceHandler> InfiniteSourceHandler for MiddlewareInfiniteSourc
                     results.extend(control_events);
                     return Ok(results);
                 }
-                MiddlewareAction::Abort(_) => return Ok(Vec::new()),
+                MiddlewareAction::Abort { .. } => return Ok(Vec::new()),
             }
         }
 

@@ -208,6 +208,23 @@ impl EffectRuntimeMode {
     }
 }
 
+/// Compute the middleware execution scope for one dispatched event
+/// (FLOWIP-120c H3).
+///
+/// Supervisors hold the delivered position at dispatch and call this per
+/// event, replacing the build-time-static `with_execution_scope` binding on
+/// the middleware wrappers. Today the decision depends only on the stage's
+/// runtime mode; FLOWIP-120n's resume phase predicate adds the
+/// position-versus-seeded-high-water-mark comparison here, which is why the
+/// delivered position already rides the signature.
+pub fn scope_for_dispatch(
+    mode: EffectRuntimeMode,
+    position: Option<crate::messaging::upstream_subscription::StageInputPosition>,
+) -> obzenflow_core::MiddlewareExecutionScope {
+    let _ = position;
+    mode.into()
+}
+
 /// Map a stage's effect runtime mode onto the handler-level middleware execution
 /// scope (FLOWIP-120a). Live runs reconstruct nothing, so handler middleware runs
 /// live. Strict replay and incomplete-archive resume both reconstruct the handler

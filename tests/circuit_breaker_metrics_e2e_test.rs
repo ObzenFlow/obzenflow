@@ -16,11 +16,11 @@ use obzenflow_core::{
     event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload},
     StageId, WriterId,
 };
-use obzenflow_dsl::{flow, sink, source, transform};
+use obzenflow_dsl::{async_transform, flow, sink, source};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    FiniteSourceHandler, SinkHandler, TransformHandler,
+    AsyncTransformHandler, FiniteSourceHandler, SinkHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
@@ -58,9 +58,15 @@ impl ControlledFailureTransform {
     }
 }
 
+// FLOWIP-120c H1: a circuit breaker on a pure sync transform is now a build
+// error, so this test rides the async-non-effectful surface (deprecated,
+// warns) until FLOWIP-120p moves breaker-guarded work onto effects.
 #[async_trait]
-impl TransformHandler for ControlledFailureTransform {
-    fn process(&self, mut event: ChainEvent) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
+impl AsyncTransformHandler for ControlledFailureTransform {
+    async fn process(
+        &self,
+        mut event: ChainEvent,
+    ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
         let count = {
             let mut c = self.success_count.lock().unwrap();
             *c += 1;
@@ -222,7 +228,7 @@ async fn test_circuit_breaker_metrics_end_to_end() -> Result<()> {
             cb_source = source!(CircuitMetricEvent => source);
 
             // Transform with circuit breaker (3 consecutive failures opens circuit)
-            cb_transform = transform!(CircuitMetricEvent -> CircuitMetricEvent => transform, [
+            cb_transform = async_transform!(CircuitMetricEvent -> CircuitMetricEvent => transform, [
                 circuit_breaker(3)
             ]);
 
@@ -397,8 +403,11 @@ async fn test_circuit_breaker_summary_events() -> Result<()> {
     struct PassthroughTransform;
 
     #[async_trait]
-    impl TransformHandler for PassthroughTransform {
-        fn process(&self, event: ChainEvent) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
+    impl AsyncTransformHandler for PassthroughTransform {
+        async fn process(
+            &self,
+            event: ChainEvent,
+        ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
             Ok(vec![event])
         }
 
@@ -416,7 +425,7 @@ async fn test_circuit_breaker_summary_events() -> Result<()> {
 
         stages: {
             rapid_source = source!(CircuitMetricEvent => RapidSource { count: 0, writer_id: WriterId::from(StageId::new()) });
-            cb_summary_transform = transform!(CircuitMetricEvent -> CircuitMetricEvent => PassthroughTransform, [
+            cb_summary_transform = async_transform!(CircuitMetricEvent -> CircuitMetricEvent => PassthroughTransform, [
                 circuit_breaker(10) // High threshold, won't trip
             ]);
             null_sink = sink!(CircuitMetricEvent => MetricsSink::new().0);
