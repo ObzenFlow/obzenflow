@@ -108,6 +108,22 @@ pub trait Middleware: Send + Sync {
     fn pre_write(&self, _event: &mut ChainEvent, _ctx: &MiddlewareContext) {
         // Default: no-op
     }
+
+    /// FLOWIP-114q transitional hook: fired on each middleware of the visited
+    /// prefix (those that returned `Continue`) when a later middleware
+    /// short-circuits the chain with `Skip` or `Abort`. Internal machinery
+    /// scoped to the legacy async transform runner; not a public composition
+    /// surface. The effect boundary records rejections under the effect
+    /// cursor instead (FLOWIP-120c), and FLOWIP-120p decides this hook's
+    /// fate when the AI legs move onto effects.
+    fn on_rejected(
+        &self,
+        _event: &ChainEvent,
+        _cause: Option<&MiddlewareAbortCause>,
+        _ctx: &mut MiddlewareContext,
+    ) {
+        // Default: no-op
+    }
 }
 
 /// Structured cause attached to an abort so downstream seams, the effect
@@ -122,6 +138,10 @@ pub struct MiddlewareAbortCause {
     /// Human-readable detail for the recorded failure message.
     pub message: String,
     pub retry: RetryDisposition,
+    /// Optional event payload carried with the rejection (FLOWIP-114q
+    /// unified cause), e.g. a pre-built structured error event for the
+    /// rejected input. `None` until a producer is migrated.
+    pub event: Option<ChainEvent>,
 }
 
 /// Actions that middleware can take during pre-processing
@@ -129,11 +149,15 @@ pub struct MiddlewareAbortCause {
 pub enum MiddlewareAction {
     /// Continue with normal processing
     Continue,
-    /// Skip the inner step and return these results instead
-    Skip(Vec<ChainEvent>),
+    /// Skip the inner step and return these results instead. The optional
+    /// cause attributes the short-circuit (FLOWIP-114q unified cause).
+    Skip {
+        results: Vec<ChainEvent>,
+        cause: Option<MiddlewareAbortCause>,
+    },
     /// Abort processing entirely (returns empty results). The optional cause
     /// lets the effect boundary record a structured, replayable rejection.
-    Abort(Option<MiddlewareAbortCause>),
+    Abort { cause: Option<MiddlewareAbortCause> },
 }
 
 /// Actions that middleware can take when handling errors
@@ -171,6 +195,15 @@ impl<M: Middleware + ?Sized> Middleware for Box<M> {
 
     fn pre_write(&self, event: &mut ChainEvent, ctx: &MiddlewareContext) {
         (**self).pre_write(event, ctx)
+    }
+
+    fn on_rejected(
+        &self,
+        event: &ChainEvent,
+        cause: Option<&MiddlewareAbortCause>,
+        ctx: &mut MiddlewareContext,
+    ) {
+        (**self).on_rejected(event, cause, ctx)
     }
 }
 

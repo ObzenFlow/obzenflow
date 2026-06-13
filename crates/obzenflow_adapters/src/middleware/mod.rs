@@ -106,6 +106,7 @@ mod transform_middleware;
 // Common middleware utilities
 mod context;
 mod context_keys;
+mod effect_policy;
 mod function;
 mod hints;
 pub mod type_shaping;
@@ -151,6 +152,9 @@ pub use transform_middleware::{
 
 // Common utilities
 pub use context::MiddlewareContext;
+pub use effect_policy::{
+    EffectAttemptOutcome, EffectPolicy, PerEffectPolicyBoundary, PolicyAdmission,
+};
 pub use function::{middleware_fn, FnMiddleware};
 pub use hints::{Attempts, BackoffKind, BatchingHint, MiddlewareHints, RetryHint};
 pub use observability::timing::TimingMiddleware;

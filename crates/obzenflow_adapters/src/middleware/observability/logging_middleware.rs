@@ -218,7 +218,14 @@ mod tests {
         );
 
         // Should log and succeed
-        sink.consume(event).await.unwrap();
+        use obzenflow_runtime::stages::common::handlers::UnifiedSinkHandler;
+        sink.consume_report(
+            event,
+            None,
+            obzenflow_core::MiddlewareExecutionScope::LiveHandler,
+        )
+        .await
+        .expect("logging middleware sink consume should succeed");
         assert_eq!(sink.inner().consume_count(), 1);
     }
 }

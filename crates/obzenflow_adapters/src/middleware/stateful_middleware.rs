@@ -12,17 +12,20 @@ use async_trait::async_trait;
 use obzenflow_core::event::status::processing_status::ProcessingStatus;
 use obzenflow_core::ChainEvent;
 use obzenflow_core::MiddlewareExecutionScope;
+use obzenflow_runtime::effects::EffectInvocationContext;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
-use obzenflow_runtime::stages::common::handlers::StatefulHandler;
+use obzenflow_runtime::stages::common::handlers::{StatefulHandler, UnifiedStatefulHandler};
 use std::sync::Arc;
 
-/// A StatefulHandler wrapper that applies middleware to stateful operations
+/// A StatefulHandler wrapper that applies middleware to stateful operations.
+///
+/// Implements `UnifiedStatefulHandler` directly (not `StatefulHandler`, whose
+/// blanket impl would conflict) so the supervisor's per-event execution scope
+/// reaches the middleware context (FLOWIP-120c H3).
 #[derive(Clone)]
 pub struct MiddlewareStateful<H: StatefulHandler> {
     inner: H,
     middleware_chain: Arc<Vec<Arc<dyn Middleware>>>,
-    /// Replay execution scope for this stage (FLOWIP-120a).
-    execution_scope: MiddlewareExecutionScope,
 }
 
 impl<H: StatefulHandler> std::fmt::Debug for MiddlewareStateful<H> {
@@ -40,7 +43,6 @@ impl<H: StatefulHandler> MiddlewareStateful<H> {
         Self {
             inner,
             middleware_chain: Arc::new(Vec::new()),
-            execution_scope: MiddlewareExecutionScope::LiveHandler,
         }
     }
 
@@ -49,45 +51,45 @@ impl<H: StatefulHandler> MiddlewareStateful<H> {
         Arc::make_mut(&mut self.middleware_chain).push(Arc::from(middleware));
         self
     }
-
-    /// Bind the replay execution scope for this stage (FLOWIP-120a).
-    pub fn with_execution_scope(mut self, scope: MiddlewareExecutionScope) -> Self {
-        self.execution_scope = scope;
-        self
-    }
 }
 
 #[async_trait]
-impl<H: StatefulHandler + Clone> StatefulHandler for MiddlewareStateful<H>
+impl<H: StatefulHandler + Clone> UnifiedStatefulHandler for MiddlewareStateful<H>
 where
     H::State: 'static,
 {
     type State = H::State;
 
-    fn accumulate(&mut self, state: &mut Self::State, event: ChainEvent) {
+    async fn accumulate(
+        &mut self,
+        state: &mut Self::State,
+        event: ChainEvent,
+        _effect_context: Option<EffectInvocationContext>,
+        scope: MiddlewareExecutionScope,
+    ) -> Result<(), HandlerError> {
         // Short-circuit if event already has Error status
         if matches!(event.processing_info.status, ProcessingStatus::Error { .. }) {
             tracing::debug!(
                 "MiddlewareStateful: Skipping accumulate for event with Error status: {:?}",
                 event.processing_info.status
             );
-            return;
+            return Ok(());
         }
 
         // Create ephemeral context for this processing
-        let mut ctx = MiddlewareContext::with_scope(self.execution_scope);
+        let mut ctx = MiddlewareContext::with_scope(scope);
 
         // Pre-processing phase
         for middleware in self.middleware_chain.iter() {
             match middleware.pre_handle(&event, &mut ctx) {
                 MiddlewareAction::Continue => continue,
-                MiddlewareAction::Skip(_) => {
+                MiddlewareAction::Skip { .. } => {
                     // Skip means don't accumulate this event
-                    return;
+                    return Ok(());
                 }
-                MiddlewareAction::Abort(_) => {
+                MiddlewareAction::Abort { .. } => {
                     // Abort means don't accumulate this event
-                    return;
+                    return Ok(());
                 }
             }
         }
@@ -101,6 +103,7 @@ where
         for middleware in self.middleware_chain.iter().rev() {
             middleware.post_handle(&event, &empty_results, &mut ctx);
         }
+        Ok(())
     }
 
     fn initial_state(&self) -> Self::State {
@@ -257,13 +260,13 @@ mod tests {
         }
 
         fn emit(&self, state: &mut Self::State) -> Result<Vec<ChainEvent>, HandlerError> {
-            let events = self.create_events(state)?;
+            let events = StatefulHandler::create_events(self, state)?;
             state.clear();
             Ok(events)
         }
 
         async fn drain(&self, state: &Self::State) -> Result<Vec<ChainEvent>, HandlerError> {
-            self.create_events(state)
+            StatefulHandler::create_events(self, state)
         }
     }
 
@@ -281,7 +284,10 @@ mod tests {
         fn pre_handle(&self, event: &ChainEvent, _ctx: &mut MiddlewareContext) -> MiddlewareAction {
             // Skip events with "skip" in their payload
             if event.payload().get("skip").is_some() {
-                MiddlewareAction::Skip(vec![])
+                MiddlewareAction::Skip {
+                    results: vec![],
+                    cause: None,
+                }
             } else {
                 MiddlewareAction::Continue
             }
@@ -305,17 +311,26 @@ mod tests {
 
         // Normal event should be accumulated
         let event1 = ChainEventFactory::data_event(writer_id, "test", json!({"data": 1}));
-        handler.accumulate(&mut state, event1);
+        handler
+            .accumulate(&mut state, event1, None, MiddlewareExecutionScope::LiveHandler)
+            .await
+            .expect("accumulate should not fail");
         assert_eq!(accumulated_count.load(Ordering::Relaxed), 1);
 
         // Event with "skip" should be skipped
         let event2 = ChainEventFactory::data_event(writer_id, "test", json!({"skip": true}));
-        handler.accumulate(&mut state, event2);
+        handler
+            .accumulate(&mut state, event2, None, MiddlewareExecutionScope::LiveHandler)
+            .await
+            .expect("accumulate should not fail");
         assert_eq!(accumulated_count.load(Ordering::Relaxed), 1); // Still 1
 
         // Another normal event
         let event3 = ChainEventFactory::data_event(writer_id, "test", json!({"data": 3}));
-        handler.accumulate(&mut state, event3);
+        handler
+            .accumulate(&mut state, event3, None, MiddlewareExecutionScope::LiveHandler)
+            .await
+            .expect("accumulate should not fail");
         assert_eq!(accumulated_count.load(Ordering::Relaxed), 2);
     }
 }

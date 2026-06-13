@@ -59,10 +59,7 @@ use obzenflow_runtime::{
             },
         },
         stateful::{StatefulBuilder, StatefulConfig, StatefulEvent, StatefulState},
-        transform::{
-            AsyncTransformBuilder, EffectfulTransformBuilder, TransformBuilder, TransformConfig,
-            TransformEvent, TransformState,
-        },
+        transform::{TransformBuilder, TransformConfig, TransformEvent, TransformState},
     },
     supervised_base::SupervisorBuilder as SupervisorBuilderTrait,
 };
@@ -1050,16 +1047,13 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Stag
             .map_err(|e| e.to_string())?;
         let instrumentation = Arc::new(instrumentation);
 
-        // Apply all middleware
+        // Apply all middleware. The middleware execution scope is computed
+        // per event by the supervisor at dispatch (FLOWIP-120c H3).
         let mut builder = self.handler.middleware();
         for mw in all_middleware {
             builder = builder.with(mw);
         }
-        // FLOWIP-120a: bind the stage's replay mode so handler-level control
-        // middleware suppresses its side effects during deterministic replay.
-        let handler_with_middleware = builder
-            .build()
-            .with_execution_scope(resources.effect_runtime_mode.into());
+        let handler_with_middleware = builder.build();
 
         // Create the stage configuration
         let transform_config = TransformConfig {
@@ -1193,16 +1187,13 @@ impl<H: AsyncTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
             .map_err(|e| e.to_string())?;
         let instrumentation = Arc::new(instrumentation);
 
-        // Apply all middleware
+        // Apply all middleware. The middleware execution scope is computed
+        // per event by the supervisor at dispatch (FLOWIP-120c H3).
         let mut builder = self.handler.middleware();
         for mw in all_middleware {
             builder = builder.with(mw);
         }
-        // FLOWIP-120a: bind the stage's replay mode so handler-level control
-        // middleware suppresses its side effects during deterministic replay.
-        let handler_with_middleware = builder
-            .build()
-            .with_execution_scope(resources.effect_runtime_mode.into());
+        let handler_with_middleware = builder.build();
 
         // Create the stage configuration
         let transform_config = TransformConfig {
@@ -1214,13 +1205,14 @@ impl<H: AsyncTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
             cycle_guard: config.cycle_guard,
         };
 
-        // Use the builder to create the handle
-        let handle =
-            AsyncTransformBuilder::new(handler_with_middleware, transform_config, resources)
-                .with_instrumentation(instrumentation)
-                .build()
-                .await
-                .map_err(|e| format!("Failed to build async transform: {e:?}"))?;
+        // Use the builder to create the handle. The async middleware wrapper
+        // implements the unified handler surface directly, so async stages
+        // build through the same TransformBuilder as every other transform.
+        let handle = TransformBuilder::new(handler_with_middleware, transform_config, resources)
+            .with_instrumentation(instrumentation)
+            .build()
+            .await
+            .map_err(|e| format!("Failed to build async transform: {e:?}"))?;
 
         // Create adapter to bridge to StageHandle
         let adapter = StageHandleAdapter::new(
@@ -1370,22 +1362,19 @@ impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
             cycle_guard: config.cycle_guard,
         };
 
+        // The middleware execution scope is computed per event by the
+        // supervisor at dispatch (FLOWIP-120c H3).
         let mut handler_with_middleware =
             UnifiedMiddlewareTransform::new(EffectfulTransformHandlerAdapter(self.handler));
         for mw in all_middleware {
             handler_with_middleware = handler_with_middleware.with_middleware(mw);
         }
-        // FLOWIP-120a: bind the stage's replay mode so handler-level control
-        // middleware suppresses its side effects during deterministic replay.
-        let handler_with_middleware =
-            handler_with_middleware.with_execution_scope(resources.effect_runtime_mode.into());
 
-        let handle =
-            EffectfulTransformBuilder::new(handler_with_middleware, transform_config, resources)
-                .with_instrumentation(instrumentation)
-                .build()
-                .await
-                .map_err(|e| format!("Failed to build effectful async transform: {e:?}"))?;
+        let handle = TransformBuilder::new(handler_with_middleware, transform_config, resources)
+            .with_instrumentation(instrumentation)
+            .build()
+            .await
+            .map_err(|e| format!("Failed to build effectful async transform: {e:?}"))?;
 
         let adapter = StageHandleAdapter::new(
             handle,
@@ -1502,16 +1491,13 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
             .map_err(|e| e.to_string())?;
         let instrumentation = Arc::new(instrumentation);
 
-        // Apply all middleware
+        // Apply all middleware. The middleware execution scope is computed
+        // per event by the supervisor at dispatch (FLOWIP-120c H3).
         let mut builder = self.handler.middleware();
         for mw in all_middleware {
             builder = builder.with(mw);
         }
-        // FLOWIP-120a: bind the stage's replay mode so handler-level control
-        // middleware suppresses its side effects during deterministic replay.
-        let handler_with_middleware = builder
-            .build()
-            .with_execution_scope(resources.effect_runtime_mode.into());
+        let handler_with_middleware = builder.build();
 
         // Create the stage configuration
         let sink_config = JournalSinkConfig {
@@ -1856,16 +1842,14 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Stage
             .map_err(|e| e.to_string())?;
         let instrumentation = Arc::new(instrumentation);
 
-        // Apply all middleware (FLOWIP-080o-part-2: MiddlewareStateful now exists)
+        // Apply all middleware (FLOWIP-080o-part-2: MiddlewareStateful now
+        // exists). The middleware execution scope is computed per event by
+        // the supervisor at dispatch (FLOWIP-120c H3).
         let mut builder = self.handler.middleware();
         for mw in all_middleware {
             builder = builder.with(mw);
         }
-        // FLOWIP-120a: bind the stage's replay mode so handler-level control
-        // middleware suppresses its side effects during deterministic replay.
-        let handler_with_middleware = builder
-            .build()
-            .with_execution_scope(resources.effect_runtime_mode.into());
+        let handler_with_middleware = builder.build();
 
         // Create the stage configuration
         let stateful_config = StatefulConfig {

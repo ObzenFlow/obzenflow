@@ -366,7 +366,7 @@ pub struct CircuitBreakerMiddleware {
     ///
     /// When configured, requests that would normally be rejected in the
     /// Open or HalfOpen (non‑probe) states will instead be short‑circuited
-    /// to these synthetic results via `MiddlewareAction::Skip(results)`.
+    /// to these synthetic results via `MiddlewareAction::Skip { results, .. }`.
     ///
     /// This keeps the handler itself unaware of circuit breaker policy while
     /// allowing flows to provide domain‑specific degraded responses purely
@@ -843,31 +843,45 @@ impl CircuitBreakerMiddleware {
             if !at_effect_boundary {
                 return None;
             }
-            self.typed_outcome
-                .as_ref()
-                .map(|typed| MiddlewareAction::Skip((typed.build_rejection)(event, reason)))
+            self.typed_outcome.as_ref().map(|typed| MiddlewareAction::Skip {
+                results: (typed.build_rejection)(event, reason),
+                cause: None,
+            })
         };
 
         let action = match policy {
             OpenPolicy::EmitFallback => {
                 if let Some(fallback) = &self.fallback {
                     let results = (fallback)(event);
-                    MiddlewareAction::Skip(results)
+                    MiddlewareAction::Skip {
+                        results,
+                        cause: None,
+                    }
                 } else if let Some(action) = typed_rejection(reason) {
                     action
                 } else if at_effect_boundary {
-                    MiddlewareAction::Abort(Some(self.rejection_abort_cause(reason)))
+                    MiddlewareAction::Abort {
+                        cause: Some(self.rejection_abort_cause(reason)),
+                    }
                 } else {
-                    MiddlewareAction::Skip(vec![])
+                    MiddlewareAction::Skip {
+                        results: vec![],
+                        cause: None,
+                    }
                 }
             }
             OpenPolicy::FailFast => {
                 if let Some(action) = typed_rejection(reason) {
                     action
                 } else if at_effect_boundary {
-                    MiddlewareAction::Abort(Some(self.rejection_abort_cause(reason)))
+                    MiddlewareAction::Abort {
+                        cause: Some(self.rejection_abort_cause(reason)),
+                    }
                 } else {
-                    MiddlewareAction::Skip(vec![])
+                    MiddlewareAction::Skip {
+                        results: vec![],
+                        cause: None,
+                    }
                 }
             }
             OpenPolicy::Skip => {
@@ -875,9 +889,14 @@ impl CircuitBreakerMiddleware {
                     // Transport truncation is incoherent at the effect boundary;
                     // build validation rejects this configuration on effectful
                     // stages, and this arm is the defensive backstop.
-                    MiddlewareAction::Abort(Some(self.rejection_abort_cause(reason)))
+                    MiddlewareAction::Abort {
+                        cause: Some(self.rejection_abort_cause(reason)),
+                    }
                 } else {
-                    MiddlewareAction::Skip(vec![])
+                    MiddlewareAction::Skip {
+                        results: vec![],
+                        cause: None,
+                    }
                 }
             }
         };
@@ -896,6 +915,7 @@ impl CircuitBreakerMiddleware {
             code: code.effect_code(),
             message: code.message(),
             retry: RetryDisposition::Retryable,
+            event: None,
         }
     }
 
@@ -1477,6 +1497,61 @@ impl Middleware for CircuitBreakerMiddleware {
 
         // Check if we should emit a summary
         self.maybe_emit_summary(ctx);
+    }
+}
+
+/// Per-effect policy adapter (FLOWIP-120c): the breaker guards one declared
+/// effect, reusing its admission state machine and outcome classification.
+/// Admission never waits, so the sync `pre_handle` is reused directly under
+/// the boundary scope the policy chain establishes.
+#[async_trait::async_trait]
+impl crate::middleware::EffectPolicy for CircuitBreakerMiddleware {
+    fn label(&self) -> &'static str {
+        Middleware::label(self)
+    }
+
+    async fn admit(
+        &self,
+        _identity: &obzenflow_runtime::effects::EffectIdentity,
+        event: &ChainEvent,
+        ctx: &mut MiddlewareContext,
+    ) -> crate::middleware::PolicyAdmission {
+        match self.pre_handle(event, ctx) {
+            MiddlewareAction::Continue => crate::middleware::PolicyAdmission::Admit,
+            MiddlewareAction::Skip { results, cause } => {
+                crate::middleware::PolicyAdmission::Synthesize { results, cause }
+            }
+            MiddlewareAction::Abort { cause } => crate::middleware::PolicyAdmission::Reject(
+                cause.unwrap_or_else(|| self.rejection_abort_cause(
+                    CircuitBreakerRejectionReason::CircuitOpen,
+                )),
+            ),
+        }
+    }
+
+    fn observe(
+        &self,
+        _identity: &obzenflow_runtime::effects::EffectIdentity,
+        event: &ChainEvent,
+        attempt: &crate::middleware::EffectAttemptOutcome<'_>,
+        ctx: &mut MiddlewareContext,
+    ) {
+        match attempt {
+            crate::middleware::EffectAttemptOutcome::Executed(Ok(outputs)) => {
+                self.post_handle(event, outputs, ctx);
+            }
+            crate::middleware::EffectAttemptOutcome::Executed(Err(err)) => {
+                let error_event = event
+                    .clone()
+                    .mark_as_error(err.to_string(), ErrorKind::Remote);
+                self.post_handle(event, std::slice::from_ref(&error_event), ctx);
+            }
+            crate::middleware::EffectAttemptOutcome::SkippedBy(_)
+            | crate::middleware::EffectAttemptOutcome::RejectedBy(_) => {
+                // The protected call never went out: nothing to classify.
+                // The probe-slot guard releases with the context.
+            }
+        }
     }
 }
 
@@ -2815,7 +2890,7 @@ mod tests {
         let mut ctx = MiddlewareContext::new();
         assert!(matches!(
             cb.pre_handle(&event, &mut ctx),
-            MiddlewareAction::Skip(_)
+            MiddlewareAction::Skip { .. }
         ));
         assert!(ctx_has_rejection(&ctx));
     }
@@ -3113,7 +3188,7 @@ mod tests {
         let action = cb.pre_handle(&event, &mut ctx);
 
         match action {
-            MiddlewareAction::Skip(results) => assert!(results.is_empty()),
+            MiddlewareAction::Skip { results, .. } => assert!(results.is_empty()),
             other => panic!("expected Skip action while Open, got {other:?}"),
         }
         assert!(ctx_has_rejection(&ctx));
@@ -3135,7 +3210,7 @@ mod tests {
         let action = cb.pre_handle(&event, &mut ctx);
 
         match action {
-            MiddlewareAction::Skip(results) => assert!(results.is_empty()),
+            MiddlewareAction::Skip { results, .. } => assert!(results.is_empty()),
             other => panic!("expected Skip action for HalfOpen non-probe, got {other:?}"),
         }
         assert!(ctx_has_rejection(&ctx));
@@ -3210,7 +3285,7 @@ mod tests {
         let mut blocked_ctx = MiddlewareContext::new();
         assert!(matches!(
             cb.pre_handle(&blocked_probe, &mut blocked_ctx),
-            MiddlewareAction::Skip(results) if results.is_empty()
+            MiddlewareAction::Skip { results, .. } if results.is_empty()
         ));
         assert_eq!(cb.current_state(), CircuitState::HalfOpen);
         assert_eq!(cb.probe_in_flight.load(Ordering::SeqCst), 1);
@@ -3417,7 +3492,7 @@ mod tests {
                                     cb.post_handle(&event, &[create_test_event()], &mut ctx);
                                 }
                             }
-                            MiddlewareAction::Skip(_) | MiddlewareAction::Abort(_) => {
+                            MiddlewareAction::Skip { .. } | MiddlewareAction::Abort { .. } => {
                                 // Rejected while Open or HalfOpen — normal.
                             }
                         }
@@ -3608,7 +3683,7 @@ mod tests {
         cb.force_open(&mut ctx);
 
         match cb.pre_handle(&create_test_event(), &mut ctx) {
-            MiddlewareAction::Abort(Some(cause)) => {
+            MiddlewareAction::Abort { cause: Some(cause) } => {
                 assert_eq!(cause.source, "circuit_breaker");
                 assert_eq!(cause.code, "rejected_circuit_open");
                 assert!(cause.retry.is_retryable());
@@ -3625,7 +3700,7 @@ mod tests {
 
         assert!(matches!(
             cb.pre_handle(&create_test_event(), &mut ctx),
-            MiddlewareAction::Abort(Some(_))
+            MiddlewareAction::Abort { cause: Some(_) }
         ));
     }
 
@@ -3637,7 +3712,7 @@ mod tests {
         cb.force_open(&mut ctx);
 
         match cb.pre_handle(&create_test_event(), &mut ctx) {
-            MiddlewareAction::Skip(results) => assert!(results.is_empty()),
+            MiddlewareAction::Skip { results, .. } => assert!(results.is_empty()),
             other => panic!("expected legacy empty Skip on the handler lane, got {other:?}"),
         }
     }
@@ -3653,7 +3728,7 @@ mod tests {
             &OpenPolicy::FailFast,
             CircuitBreakerRejectionReason::ProbeInProgress,
         ) {
-            MiddlewareAction::Abort(Some(cause)) => {
+            MiddlewareAction::Abort { cause: Some(cause) } => {
                 assert_eq!(cause.code, "rejected_probe_in_progress");
             }
             other => panic!("expected Abort with probe reason, got {other:?}"),

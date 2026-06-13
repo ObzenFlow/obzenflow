@@ -55,13 +55,13 @@ mod runtime;
 mod tests;
 
 pub use boundary::{
-    EffectAbortReason, EffectBoundaryAction, EffectBoundaryContext, EffectBoundaryMiddleware,
-    EffectBoundaryStart,
+    EffectAbortReason, EffectBoundaryMiddleware, EffectBoundaryOutcome, EffectBoundaryReport,
+    EffectExecution, EffectIdentity,
 };
 pub use commit::EffectCommitHandle;
 pub use context::{
-    EffectContext, EffectInvocationContext, EffectRuntimeMode, SynthesizedOutcomeKind,
-    SynthesizedOutcomeRegistration,
+    scope_for_dispatch, EffectContext, EffectInvocationContext, EffectRuntimeMode,
+    SynthesizedOutcomeKind, SynthesizedOutcomeRegistration,
 };
 pub use declaration::{
     Effect, EffectDeclaration, EffectSafety, IdempotencyKey, IdempotencyKeyPolicy,

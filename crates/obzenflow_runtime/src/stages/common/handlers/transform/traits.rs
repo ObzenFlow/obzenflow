@@ -101,10 +101,14 @@ pub trait AsyncTransformHandler: Send + Sync {
 #[doc(hidden)]
 #[async_trait]
 pub trait UnifiedTransformHandler: Send + Sync {
+    /// Process one event. `scope` is the per-event middleware execution
+    /// scope computed by the supervisor at dispatch (FLOWIP-120c H3);
+    /// handlers without middleware ignore it.
     async fn process(
         &self,
         event: ChainEvent,
         effect_context: Option<EffectInvocationContext>,
+        scope: obzenflow_core::MiddlewareExecutionScope,
     ) -> std::result::Result<Vec<ChainEvent>, HandlerError>;
 
     async fn drain(&mut self) -> std::result::Result<(), HandlerError>;
@@ -120,6 +124,7 @@ impl<T: TransformHandler + Send + Sync> UnifiedTransformHandler for T {
         &self,
         event: ChainEvent,
         _effect_context: Option<EffectInvocationContext>,
+        _scope: obzenflow_core::MiddlewareExecutionScope,
     ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
         TransformHandler::process(self, event)
     }
@@ -142,6 +147,7 @@ impl<T: AsyncTransformHandler + Send + Sync> UnifiedTransformHandler
         &self,
         event: ChainEvent,
         _effect_context: Option<EffectInvocationContext>,
+        _scope: obzenflow_core::MiddlewareExecutionScope,
     ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
         AsyncTransformHandler::process(&self.0, event).await
     }
@@ -192,6 +198,7 @@ where
         &self,
         event: ChainEvent,
         effect_context: Option<EffectInvocationContext>,
+        _scope: obzenflow_core::MiddlewareExecutionScope,
     ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
         let input = H::Input::try_from_event(&event)
             .map_err(|e| HandlerError::Deserialization(e.to_string()))?;

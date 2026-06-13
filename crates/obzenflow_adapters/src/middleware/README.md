@@ -72,7 +72,7 @@ fn pre_handle(&self, event: &ChainEvent, ctx: &mut MiddlewareContext) -> Middlew
             15,    // failure_count
         ));
         
-        return MiddlewareAction::Skip(vec![]);
+        return MiddlewareAction::Skip { results: vec![], cause: None };
     }
     MiddlewareAction::Continue
 }
@@ -121,7 +121,7 @@ As of FLOWIP-082f, transforms automatically skip events marked with `ProcessingS
    ```rust
    let mut error_event = event.clone();
    error_event.processing_info.status = ProcessingStatus::error("unrecoverable error");
-   return MiddlewareAction::Skip(vec![error_event]);
+   return MiddlewareAction::Skip { results: vec![error_event], cause: None };
    ```
 
 2. **Transforms skip error events**: Events with Error status pass through without processing
@@ -163,7 +163,7 @@ let filter = middleware_fn(|event, ctx| {
     if event.event_type() == "important" {
         MiddlewareAction::Continue
     } else {
-        MiddlewareAction::Skip(vec![])
+        MiddlewareAction::Skip { results: vec![], cause: None }
     }
 });
 

@@ -174,11 +174,15 @@ pub trait StatefulHandler: Send + Sync {
 pub trait UnifiedStatefulHandler: Send + Sync {
     type State: Clone + Send + Sync;
 
+    /// Accumulate one event. `scope` is the per-event middleware execution
+    /// scope computed by the supervisor at dispatch (FLOWIP-120c H3);
+    /// handlers without middleware ignore it.
     async fn accumulate(
         &mut self,
         state: &mut Self::State,
         event: ChainEvent,
         effect_context: Option<EffectInvocationContext>,
+        scope: obzenflow_core::MiddlewareExecutionScope,
     ) -> std::result::Result<(), HandlerError>;
 
     fn initial_state(&self) -> Self::State;
@@ -237,6 +241,7 @@ impl<T: StatefulHandler + Send + Sync> UnifiedStatefulHandler for T {
         state: &mut Self::State,
         event: ChainEvent,
         _effect_context: Option<EffectInvocationContext>,
+        _scope: obzenflow_core::MiddlewareExecutionScope,
     ) -> std::result::Result<(), HandlerError> {
         StatefulHandler::accumulate(self, state, event);
         Ok(())
@@ -361,6 +366,7 @@ where
         state: &mut Self::State,
         event: ChainEvent,
         effect_context: Option<EffectInvocationContext>,
+        _scope: obzenflow_core::MiddlewareExecutionScope,
     ) -> std::result::Result<(), HandlerError> {
         let input = H::Input::try_from_event(&event)
             .map_err(|e| HandlerError::Deserialization(e.to_string()))?;

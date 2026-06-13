@@ -517,6 +517,7 @@ fn invocation_context_with_mode(
             EffectDeclaration::of::<CountingEffect>(),
             EffectDeclaration::of::<FailingEffect>(),
             EffectDeclaration::of::<MultiFactEffect>(),
+            EffectDeclaration::of::<KeylessEffect>(),
             EffectDeclaration::transactional_effect::<TransactionalCountingEffect>("tx"),
         ],
         synthesized_outcomes: Vec::new(),
@@ -2047,10 +2048,16 @@ async fn capture_replays_recorded_value_without_using_live_value() {
 
 struct AbortingBoundary;
 
+#[async_trait]
 impl EffectBoundaryMiddleware for AbortingBoundary {
-    fn before_effect(&self, _event: &ChainEvent) -> EffectBoundaryStart {
-        EffectBoundaryStart {
-            action: EffectBoundaryAction::Abort(EffectAbortReason {
+    async fn around_effect(
+        &self,
+        _identity: &EffectIdentity,
+        _event: &ChainEvent,
+        _execute: EffectExecution,
+    ) -> EffectBoundaryReport {
+        EffectBoundaryReport {
+            outcome: EffectBoundaryOutcome::Aborted(EffectAbortReason {
                 cause: EffectFailureCause {
                     source: "circuit_breaker".into(),
                     code: "rejected_circuit_open".into(),
@@ -2058,42 +2065,28 @@ impl EffectBoundaryMiddleware for AbortingBoundary {
                 message: "circuit breaker rejected effect execution".to_string(),
                 retry: RetryDisposition::Retryable,
             }),
-            context: EffectBoundaryContext::new(()),
             control_events: Vec::new(),
         }
-    }
-
-    fn after_effect(
-        &self,
-        _context: EffectBoundaryContext,
-        _event: &ChainEvent,
-        _outputs: &[ChainEvent],
-    ) -> Vec<ChainEvent> {
-        Vec::new()
     }
 }
 
 struct EmptySkipBoundary;
 
+#[async_trait]
 impl EffectBoundaryMiddleware for EmptySkipBoundary {
-    fn before_effect(&self, _event: &ChainEvent) -> EffectBoundaryStart {
-        EffectBoundaryStart {
-            action: EffectBoundaryAction::Skip {
+    async fn around_effect(
+        &self,
+        _identity: &EffectIdentity,
+        _event: &ChainEvent,
+        _execute: EffectExecution,
+    ) -> EffectBoundaryReport {
+        EffectBoundaryReport {
+            outcome: EffectBoundaryOutcome::Skipped {
                 results: Vec::new(),
                 source: None,
             },
-            context: EffectBoundaryContext::new(()),
             control_events: Vec::new(),
         }
-    }
-
-    fn after_effect(
-        &self,
-        _context: EffectBoundaryContext,
-        _event: &ChainEvent,
-        _outputs: &[ChainEvent],
-    ) -> Vec<ChainEvent> {
-        Vec::new()
     }
 }
 
@@ -2390,4 +2383,396 @@ async fn boundary_empty_skip_records_failure_instead_of_unrecorded_error() {
         "expected RecordedFailure, got {replay_err:?}"
     );
     assert_eq!(replay_calls.load(Ordering::SeqCst), 0);
+}
+
+// ---------------------------------------------------------------------------
+// FLOWIP-120c G10: the missing idempotency-key check sits above the
+// effect-history lookup and the boundary consult, so live and replay
+// recompute the same deterministic error and admission is never charged.
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Debug)]
+struct KeylessEffect {
+    calls: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl Effect for KeylessEffect {
+    const EFFECT_TYPE: &'static str = "test.keyless";
+    const SCHEMA_VERSION: u32 = 1;
+    const SAFETY: EffectSafety = EffectSafety::NonIdempotentRequiresKey;
+
+    type Outcome = CountingOutput;
+
+    fn label(&self) -> &str {
+        "keyless"
+    }
+
+    fn canonical_input(&self) -> Value {
+        json!({ "kind": "keyless" })
+    }
+
+    async fn execute(&self, _ctx: &mut EffectContext) -> Result<Self::Outcome, EffectError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(CountingOutput { value: 1 })
+    }
+}
+
+struct CountingBoundary {
+    consults: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl EffectBoundaryMiddleware for CountingBoundary {
+    async fn around_effect(
+        &self,
+        _identity: &EffectIdentity,
+        _event: &ChainEvent,
+        execute: EffectExecution,
+    ) -> EffectBoundaryReport {
+        self.consults.fetch_add(1, Ordering::SeqCst);
+        EffectBoundaryReport {
+            outcome: EffectBoundaryOutcome::Executed(execute.await),
+            control_events: Vec::new(),
+        }
+    }
+}
+
+#[tokio::test]
+async fn missing_idempotency_key_is_unrecorded_and_unadmitted() {
+    let stage_id = StageId::new();
+    let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
+    let consults = Arc::new(AtomicUsize::new(0));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut ctx = invocation_context(
+        journal.clone(),
+        parent_envelope(WriterId::from(stage_id)),
+        None,
+    );
+    ctx.effect_boundary = Some(Arc::new(CountingBoundary {
+        consults: consults.clone(),
+    }));
+    let mut effects = Effects::new(ctx);
+
+    let err = effects
+        .perform(KeylessEffect {
+            calls: calls.clone(),
+        })
+        .await
+        .expect_err("missing key must fail before execution");
+
+    assert!(matches!(err, EffectError::MissingIdempotencyKey { .. }));
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        consults.load(Ordering::SeqCst),
+        0,
+        "boundary admission must never be charged for a doomed call"
+    );
+    assert!(
+        effect_records(&journal).is_empty(),
+        "a deterministic validation error records nothing under the cursor"
+    );
+}
+
+#[tokio::test]
+async fn missing_idempotency_key_replays_as_same_error() {
+    let stage_id = StageId::new();
+    let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
+    let history = Arc::new(
+        EffectHistory::from_records("archived_flow".to_string(), Vec::new())
+            .expect("empty history should index"),
+    );
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut effects = Effects::new(invocation_context_with_mode(
+        journal.clone(),
+        parent_envelope(WriterId::from(stage_id)),
+        Some(history),
+        EffectRuntimeMode::ReplayStrict,
+        EffectPortRegistry::new(),
+    ));
+
+    let err = effects
+        .perform(KeylessEffect {
+            calls: calls.clone(),
+        })
+        .await
+        .expect_err("strict replay must recompute the live validation error");
+
+    assert!(
+        matches!(err, EffectError::MissingIdempotencyKey { .. }),
+        "replay must reproduce MissingIdempotencyKey, not MissingRecordedEffect, got {err:?}"
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert!(effect_records(&journal).is_empty());
+}
+
+#[tokio::test]
+async fn stale_recorded_effect_fails_loud_when_key_dropped() {
+    // Documented G10 caveat: an archive recorded before a code change that
+    // later dropped the idempotency key fails loud at the check instead of
+    // reading the old record, consistent with descriptor-hash fail-loud.
+    let stage_id = StageId::new();
+    let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
+    let record = EffectRecord {
+        cursor: EffectCursor::new("archived_flow", "effect_stage", 1, 0),
+        descriptor_hash: "hash".into(),
+        descriptor: EffectDescriptor::new(
+            KeylessEffect::EFFECT_TYPE,
+            "keyless",
+            KeylessEffect::SCHEMA_VERSION,
+            "test-v1",
+            "input",
+        ),
+        outcome: EffectOutcomePayload::Succeeded {
+            output: json!({ "value": 10 }),
+        },
+        origin: None,
+    };
+    let history = Arc::new(
+        EffectHistory::from_records("archived_flow".to_string(), vec![record])
+            .expect("history should index"),
+    );
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut effects = Effects::new(invocation_context_with_mode(
+        journal.clone(),
+        parent_envelope(WriterId::from(stage_id)),
+        Some(history),
+        EffectRuntimeMode::ReplayStrict,
+        EffectPortRegistry::new(),
+    ));
+
+    let err = effects
+        .perform(KeylessEffect {
+            calls: calls.clone(),
+        })
+        .await
+        .expect_err("the dropped key fails loud even with a record at the cursor");
+
+    assert!(matches!(err, EffectError::MissingIdempotencyKey { .. }));
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+}
+
+// ---------------------------------------------------------------------------
+// FLOWIP-120c H5: transactional effects route through the boundary for
+// admission and observation; rejections record under the effect cursor.
+// ---------------------------------------------------------------------------
+
+/// Aborts transactional effects only, keyed off the seam's effect identity
+/// (FLOWIP-120c gap G3: the boundary can tell which effect it guards).
+struct TransactionalOnlyAbortBoundary;
+
+#[async_trait]
+impl EffectBoundaryMiddleware for TransactionalOnlyAbortBoundary {
+    async fn around_effect(
+        &self,
+        identity: &EffectIdentity,
+        _event: &ChainEvent,
+        execute: EffectExecution,
+    ) -> EffectBoundaryReport {
+        if matches!(identity.safety, EffectSafety::Transactional) {
+            return EffectBoundaryReport {
+                outcome: EffectBoundaryOutcome::Aborted(EffectAbortReason {
+                    cause: EffectFailureCause {
+                        source: "circuit_breaker".into(),
+                        code: "rejected_circuit_open".into(),
+                    },
+                    message: "circuit breaker rejected transactional effect".to_string(),
+                    retry: RetryDisposition::Retryable,
+                }),
+                control_events: Vec::new(),
+            };
+        }
+        EffectBoundaryReport {
+            outcome: EffectBoundaryOutcome::Executed(execute.await),
+            control_events: Vec::new(),
+        }
+    }
+}
+
+#[tokio::test]
+async fn transactional_boundary_abort_records_failure_and_replays() {
+    let stage_id = StageId::new();
+    let live_journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
+    let normal_calls = Arc::new(AtomicUsize::new(0));
+    let transactional_calls = Arc::new(AtomicUsize::new(0));
+    let mut ports = EffectPortRegistry::new();
+    ports.insert::<dyn TransactionalEffectPort<TransactionalCountingEffect>>(
+        "tx",
+        Arc::new(TransactionalCountingPort {
+            calls: transactional_calls.clone(),
+            commit: true,
+        }),
+    );
+    let mut live_ctx = invocation_context_with_mode(
+        live_journal.clone(),
+        parent_envelope(WriterId::from(stage_id)),
+        None,
+        EffectRuntimeMode::Live,
+        ports,
+    );
+    live_ctx.effect_boundary = Some(Arc::new(AbortingBoundary));
+    let mut live = Effects::new(live_ctx);
+
+    let live_err = live
+        .perform(TransactionalCountingEffect {
+            value: 7,
+            normal_calls: normal_calls.clone(),
+        })
+        .await
+        .expect_err("boundary abort must reject the transactional effect");
+
+    assert!(matches!(live_err, EffectError::BoundaryRejected { .. }));
+    assert_eq!(
+        transactional_calls.load(Ordering::SeqCst),
+        0,
+        "admission runs before execute_and_commit (H5)"
+    );
+    let records = effect_records(&live_journal);
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].cursor.effect_ordinal, 0);
+    assert!(matches!(
+        records[0].outcome,
+        EffectOutcomePayload::Failed { .. }
+    ));
+
+    // Strict replay reproduces the recorded rejection without consulting the
+    // port or the boundary.
+    let replay_journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
+    let history = Arc::new(
+        EffectHistory::from_records(
+            records[0].cursor.recorded_flow_id.as_str().to_string(),
+            records,
+        )
+        .expect("recorded rejection indexes"),
+    );
+    let mut replay_ports = EffectPortRegistry::new();
+    let replay_port_calls = Arc::new(AtomicUsize::new(0));
+    replay_ports.insert::<dyn TransactionalEffectPort<TransactionalCountingEffect>>(
+        "tx",
+        Arc::new(TransactionalCountingPort {
+            calls: replay_port_calls.clone(),
+            commit: true,
+        }),
+    );
+    let mut replay = Effects::new(invocation_context_with_mode(
+        replay_journal.clone(),
+        parent_envelope(WriterId::from(stage_id)),
+        Some(history),
+        EffectRuntimeMode::ReplayStrict,
+        replay_ports,
+    ));
+
+    let replay_err = replay
+        .perform(TransactionalCountingEffect {
+            value: 7,
+            normal_calls: normal_calls.clone(),
+        })
+        .await
+        .expect_err("strict replay returns the recorded rejection");
+
+    assert!(
+        matches!(&replay_err, EffectError::RecordedFailure { .. }),
+        "expected RecordedFailure, got {replay_err:?}"
+    );
+    assert_eq!(replay_port_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn transactional_boundary_abort_restores_output_ordinal() {
+    // An aborted transactional effect reserves an output ordinal the abort
+    // never consumes (failure records key off the cursor). The reservation
+    // must roll back, or facts authored after it would carry a different
+    // deterministic identity live than under replay reconstruction.
+    let stage_id = StageId::new();
+    let writer_id = WriterId::from(stage_id);
+    let flow_id = FlowId::new();
+    let parent = parent_envelope(writer_id);
+
+    let make_ctx = |journal: Arc<MemoryJournal<ChainEvent>>,
+                    boundary: Option<Arc<dyn EffectBoundaryMiddleware>>,
+                    ports: EffectPortRegistry| EffectInvocationContext {
+        flow_id,
+        stage_id,
+        stage_key: "effect_stage".to_string(),
+        writer_id,
+        input_seq: StageInputPosition(1),
+        stage_logic_version: "test-v1".to_string(),
+        data_journal: journal,
+        flow_context: None,
+        system_journal: None,
+        instrumentation: None,
+        heartbeat_state: None,
+        parent: parent.clone(),
+        effect_history: None,
+        effect_runtime_mode: EffectRuntimeMode::Live,
+        effect_ports: ports,
+        effect_declarations: vec![
+            EffectDeclaration::of::<CountingEffect>(),
+            EffectDeclaration::transactional_effect::<TransactionalCountingEffect>("tx"),
+        ],
+        synthesized_outcomes: Vec::new(),
+        output_contract: StageOutputContract::empty(),
+        backpressure_writer: BackpressureWriter::disabled(),
+        emit_enabled: false,
+        effect_boundary: boundary,
+        boundary_control_events: Arc::new(Mutex::new(Vec::new())),
+    };
+
+    // Run A: aborted transactional effect, then a counting effect.
+    let journal_a = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
+    let mut ports_a = EffectPortRegistry::new();
+    ports_a.insert::<dyn TransactionalEffectPort<TransactionalCountingEffect>>(
+        "tx",
+        Arc::new(TransactionalCountingPort {
+            calls: Arc::new(AtomicUsize::new(0)),
+            commit: true,
+        }),
+    );
+    let mut effects_a = Effects::new(make_ctx(
+        journal_a.clone(),
+        Some(Arc::new(TransactionalOnlyAbortBoundary)),
+        ports_a,
+    ));
+    effects_a
+        .perform(TransactionalCountingEffect {
+            value: 7,
+            normal_calls: Arc::new(AtomicUsize::new(0)),
+        })
+        .await
+        .expect_err("boundary aborts the transactional effect");
+    effects_a
+        .perform(CountingEffect {
+            value: 41,
+            label: "same",
+            calls: Arc::new(AtomicUsize::new(0)),
+        })
+        .await
+        .expect("counting effect succeeds after the abort");
+
+    // Run B: only the counting effect, same identity coordinates.
+    let journal_b = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
+    let mut effects_b = Effects::new(make_ctx(journal_b.clone(), None, EffectPortRegistry::new()));
+    effects_b
+        .perform(CountingEffect {
+            value: 41,
+            label: "same",
+            calls: Arc::new(AtomicUsize::new(0)),
+        })
+        .await
+        .expect("counting effect succeeds");
+
+    let fact_id = |journal: &MemoryJournal<ChainEvent>| {
+        journal
+            .events()
+            .into_iter()
+            .map(|envelope| envelope.event)
+            .find(|event| event.event_type().starts_with("test.counting_output"))
+            .expect("counting fact recorded")
+            .id
+    };
+    assert_eq!(
+        fact_id(&journal_a),
+        fact_id(&journal_b),
+        "an aborted transactional effect must not shift the output ordinals of later facts"
+    );
 }

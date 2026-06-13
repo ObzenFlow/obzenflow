@@ -147,10 +147,14 @@ pub trait SinkHandler: Send + Sync {
 #[doc(hidden)]
 #[async_trait]
 pub trait UnifiedSinkHandler: Send + Sync {
+    /// Consume one event. `scope` is the per-event middleware execution
+    /// scope computed by the supervisor at dispatch (FLOWIP-120c H3);
+    /// handlers without middleware ignore it.
     async fn consume_report(
         &mut self,
         event: ChainEvent,
         effect_context: Option<EffectInvocationContext>,
+        scope: obzenflow_core::MiddlewareExecutionScope,
     ) -> Result<SinkConsumeReport, HandlerError>;
 
     async fn flush_report(&mut self) -> Result<SinkLifecycleReport, HandlerError>;
@@ -168,6 +172,7 @@ impl<T: SinkHandler + Send + Sync> UnifiedSinkHandler for T {
         &mut self,
         event: ChainEvent,
         _effect_context: Option<EffectInvocationContext>,
+        _scope: obzenflow_core::MiddlewareExecutionScope,
     ) -> Result<SinkConsumeReport, HandlerError> {
         SinkHandler::consume_report(self, event).await
     }
@@ -225,6 +230,7 @@ where
         &mut self,
         event: ChainEvent,
         effect_context: Option<EffectInvocationContext>,
+        _scope: obzenflow_core::MiddlewareExecutionScope,
     ) -> Result<SinkConsumeReport, HandlerError> {
         let input = H::Input::try_from_event(&event)
             .map_err(|e| HandlerError::Deserialization(e.to_string()))?;

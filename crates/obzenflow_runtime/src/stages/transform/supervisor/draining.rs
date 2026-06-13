@@ -199,6 +199,9 @@ async fn dispatch_draining_inner<
                 })
             });
 
+            // FLOWIP-120c H3: per-event scope, same as the running path.
+            let scope =
+                crate::effects::scope_for_dispatch(ctx.effect_runtime_mode, stage_input_position);
             let transformed_events =
                 process_with_instrumentation(&ctx.instrumentation, || async move {
                     let event = envelope_clone.event.clone();
@@ -215,7 +218,7 @@ async fn dispatch_draining_inner<
                         HeartbeatProcessingGuard::new(state.clone(), upstream_stage, event_id)
                     });
 
-                    match handler.process(event, effect_context).await {
+                    match handler.process(event, effect_context, scope).await {
                         Ok(outputs) => {
                             if let Some(state) = &heartbeat_state {
                                 state.record_last_consumed(event_id);

@@ -377,17 +377,26 @@ where
             payload,
         } = &event.content
         else {
-            return MiddlewareAction::Skip(vec![]);
+            return MiddlewareAction::Skip {
+                results: vec![],
+                cause: None,
+            };
         };
 
         // Drop framework planning manifests before the user map handler.
         if AiMapReducePlanningManifest::event_type_matches(event_type) {
-            return MiddlewareAction::Skip(vec![]);
+            return MiddlewareAction::Skip {
+                results: vec![],
+                cause: None,
+            };
         }
 
         // Only chunk envelopes are allowed to reach the user map handler.
         if !Chunk::event_type_matches(event_type) {
-            return MiddlewareAction::Skip(vec![]);
+            return MiddlewareAction::Skip {
+                results: vec![],
+                cause: None,
+            };
         }
 
         let header: ChunkEnvelopeIndexCount = match serde_json::from_value(payload.clone()) {
@@ -397,7 +406,10 @@ where
                 let error_event = event
                     .clone()
                     .mark_as_error(reason, ErrorKind::Deserialization);
-                return MiddlewareAction::Skip(vec![error_event]);
+                return MiddlewareAction::Skip {
+                    results: vec![error_event],
+                    cause: None,
+                };
             }
         };
 
@@ -815,7 +827,7 @@ mod tests {
         .to_event(writer_id());
 
         let action = middleware.pre_handle(&manifest, &mut ctx);
-        assert!(matches!(action, MiddlewareAction::Skip(v) if v.is_empty()));
+        assert!(matches!(action, MiddlewareAction::Skip { results: v, .. } if v.is_empty()));
         assert!(ctx.control_events().is_empty());
     }
 
@@ -826,7 +838,7 @@ mod tests {
 
         let other = ChainEventFactory::data_event(writer_id(), "other", json!({}));
         let action = middleware.pre_handle(&other, &mut ctx);
-        assert!(matches!(action, MiddlewareAction::Skip(v) if v.is_empty()));
+        assert!(matches!(action, MiddlewareAction::Skip { results: v, .. } if v.is_empty()));
         assert!(ctx.control_events().is_empty());
     }
 
@@ -842,8 +854,8 @@ mod tests {
         );
 
         let action = middleware.pre_handle(&chunk, &mut ctx);
-        let MiddlewareAction::Skip(events) = action else {
-            panic!("expected Skip(...)");
+        let MiddlewareAction::Skip { results: events, .. } = action else {
+            panic!("expected Skip {{ .. }}");
         };
         assert_eq!(events.len(), 1);
         assert_eq!(

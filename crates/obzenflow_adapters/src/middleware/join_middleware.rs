@@ -66,6 +66,12 @@ impl<H: JoinHandler> MiddlewareJoin<H> {
     }
 
     /// Bind the replay execution scope for this stage (FLOWIP-120a).
+    ///
+    /// Transitional exception to the FLOWIP-120c H3 per-event scope: the join
+    /// runtime carries no effect runtime mode in its context and has no
+    /// unified handler seam yet, so the scope stays build-time-static here
+    /// until FLOWIP-120n's resume phase predicate needs joins, at which point
+    /// the seam follows the transform/sink/stateful pattern.
     pub fn with_execution_scope(mut self, scope: MiddlewareExecutionScope) -> Self {
         self.execution_scope = scope;
         self
@@ -86,8 +92,8 @@ impl<H: JoinHandler> MiddlewareJoin<H> {
         for middleware in self.middleware_chain.iter() {
             match middleware.pre_handle(event, ctx) {
                 MiddlewareAction::Continue => continue,
-                MiddlewareAction::Skip(_) => return false,
-                MiddlewareAction::Abort(_) => return false,
+                MiddlewareAction::Skip { .. } => return false,
+                MiddlewareAction::Abort { .. } => return false,
             }
         }
         true
@@ -324,7 +330,10 @@ mod tests {
         fn pre_handle(&self, event: &ChainEvent, _ctx: &mut MiddlewareContext) -> MiddlewareAction {
             // Skip events with "skip" in their payload
             if event.payload().get("skip").is_some() {
-                MiddlewareAction::Skip(vec![])
+                MiddlewareAction::Skip {
+                    results: vec![],
+                    cause: None,
+                }
             } else {
                 MiddlewareAction::Continue
             }
