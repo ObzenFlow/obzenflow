@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::marker::PhantomData;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crate::backpressure::{BackpressureReader, BackpressureWriter};
 use crate::effects::{EffectDeclaration, EffectHistory, EffectPortRegistry, EffectRuntimeMode};
@@ -395,7 +395,11 @@ pub struct StatefulContext<H: UnifiedStatefulHandler> {
     pub events_since_last_heartbeat: u64,
 
     /// Baseline for supervisor-driven `emit_interval` timing (FLOWIP-086h).
-    pub last_data_event_time: Option<Instant>,
+    ///
+    /// FLOWIP-114o: reads `tokio::time::Instant` (matching the sibling
+    /// `last_contract_check`) so Tokio paused time advances it in deterministic
+    /// tests. Latency measurements elsewhere keep `std::time::Instant`.
+    pub last_data_event_time: Option<tokio::time::Instant>,
 
     /// Optional supervisor-driven emit interval for timer-driven emission while idle (FLOWIP-086h).
     pub emit_interval: Option<Duration>,

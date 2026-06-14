@@ -450,7 +450,7 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> S
         // Apply all middleware
         let mut builder = handler.middleware(writer_id);
         for mw in all_middleware {
-            builder = builder.with(mw);
+            builder = builder.with_boxed(mw);
         }
         let handler_with_middleware = builder.build();
 
@@ -626,7 +626,7 @@ impl<H: AsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
             .middleware(writer_id)
             .with_poll_timeout(poll_timeout);
         for mw in all_middleware {
-            builder = builder.with(mw);
+            builder = builder.with_boxed(mw);
         }
         let handler_with_middleware = builder.build();
 
@@ -772,7 +772,7 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
         // Apply all middleware
         let mut builder = handler.middleware(writer_id);
         for mw in all_middleware {
-            builder = builder.with(mw);
+            builder = builder.with_boxed(mw);
         }
         let handler_with_middleware = builder.build();
 
@@ -945,7 +945,7 @@ impl<H: AsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
             .middleware(writer_id)
             .with_poll_timeout(poll_timeout);
         for mw in all_middleware {
-            builder = builder.with(mw);
+            builder = builder.with_boxed(mw);
         }
         let handler_with_middleware = builder.build();
 

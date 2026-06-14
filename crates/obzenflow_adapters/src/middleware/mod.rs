@@ -132,6 +132,7 @@ pub use middleware_safety::MiddlewareSafety;
 pub(crate) use middleware_trait::observation_short_circuit;
 pub use middleware_trait::{
     ErrorAction, Middleware, MiddlewareAbortCause, MiddlewareAction, SourceMiddlewarePhase,
+    SourcePacer,
 };
 
 // Handler-specific exports

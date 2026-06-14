@@ -2,14 +2,47 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Rate limiting middleware with blocking implementation
+//! Rate limiting middleware: a token-bucket limiter that creates natural
+//! backpressure when out of tokens, ensuring no events are lost.
 //!
-//! This middleware implements a blocking rate limiter that creates natural
-//! backpressure by blocking when out of tokens, ensuring no events are lost.
+//! ## Wait mechanism by placement (FLOWIP-114o)
 //!
-//! FLOWIP-114m: on finite sources, the rate limiter charges only successful non-empty batches.
-//! EOF (`Ok(None)`), empty batches (`Ok(Some(vec![]))`) and source errors (`Err(...)`) consume
-//! no token, increment no admission counter, and emit no `Delayed` event.
+//! The limiter waits in one of two ways, depending on where it is attached.
+//! Async live I/O units (the effect boundary via [`crate::middleware::EffectPolicy`]
+//! and async sources via [`crate::middleware::SourcePacer`]) await their permit
+//! with `tokio::time::sleep`, a cancellable future, so a drain, EOF,
+//! cancellation, or shutdown abandons an in-flight wait. Sync handler chains and
+//! sync sources keep the blocking `pre_handle` loop (it blocks via
+//! `block_in_place` off the worker), retained and documented as a known
+//! limitation; async sources are the recommended path for cancellable paced
+//! ingestion. All three paths share one token-bucket, accounting, and
+//! lifecycle-event implementation (`acquire_permit_async` for the async paths).
+//!
+//! ## No global bucket (FLOWIP-114o Q6, FLOWIP-050d)
+//!
+//! Each limiter instance owns its own `TokenBucket`. Flow-level `rate_limit(N)`
+//! materialises one instance per stage, and attaching the same builder to a
+//! source and to an effect yields independent buckets. There is deliberately no
+//! process-wide shared bucket: no established stream framework spans operators
+//! with one quota, and a flow-global bucket would be cross-cutting shared state
+//! across several live I/O units. Quotas are per protected dependency, matching
+//! the FLOWIP-120c per-effect model.
+//!
+//! ## Admission accounting (FLOWIP-114m, FLOWIP-114o)
+//!
+//! Counters increment at admission, not at committed output. On finite sources
+//! the limiter charges only successful non-empty batches; EOF (`Ok(None)`),
+//! empty batches (`Ok(Some(vec![]))`), and source errors (`Err(...)`) consume no
+//! token, increment no admission counter, and emit no `Delayed` event. On the
+//! legacy handler chain there is no refund: if a later middleware returns `Skip`
+//! or `Abort`, an already-charged token is not returned (the landed
+//! visited-prefix `on_rejected` hook fires on exactly that prefix, so a refund
+//! would be wired there, and is deliberately not). That handler-chain accounting
+//! is transitional and sunsets with FLOWIP-120f; the effect boundary records
+//! rejections under the effect cursor instead (FLOWIP-120c). On async sources a
+//! drain may abandon an in-flight wait after the one-shot `Delayed` event has
+//! been emitted but before a token is consumed, so the abandoned poll charges no
+//! token; `delayed_total` and `events_total` are independent counters.
 
 use crate::middleware::{
     ControlMiddlewareRole, ErrorAction, Middleware, MiddlewareAction, MiddlewareContext,
@@ -25,7 +58,12 @@ use obzenflow_core::event::payloads::observability_payload::{
 use obzenflow_core::{StageId, WriterId};
 use obzenflow_runtime::pipeline::config::StageConfig;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+// FLOWIP-114o: the limiter's token-bucket refill and stats windows read
+// `tokio::time::Instant` so Tokio paused time advances them in deterministic
+// tests. Under a normal runtime this tracks real time; outside a runtime
+// `Instant::now()` falls back to the std clock. `Duration` stays from std.
+use tokio::time::Instant;
 use thiserror::Error;
 use tracing::{debug, info, trace};
 
@@ -500,6 +538,101 @@ impl RateLimiterMiddleware {
             stats.last_summary = Instant::now();
         }
     }
+
+    /// FLOWIP-114o: the shared async token-bucket acquisition loop. Both the
+    /// effect-boundary `EffectPolicy::admit` and the source
+    /// `SourcePacer::source_admit` path delegate here, so the two live I/O
+    /// surfaces share one accounting and lifecycle-event implementation. It
+    /// awaits its permit with `tokio::time::sleep` (a cancellable future)
+    /// instead of blocking the worker thread, and returns once a token has been
+    /// consumed. The synchronous `Middleware::pre_handle` keeps its own blocking
+    /// loop for sync handler chains and sync sources.
+    async fn acquire_permit_async(&self, event: &ChainEvent, ctx: &mut MiddlewareContext) {
+        let event_id = event.id;
+        let event_type = event.event_type();
+        let mut delayed_this_event = false;
+        loop {
+            enum AdmissionAttempt {
+                Allowed,
+                Blocked { wait_time: Duration },
+            }
+
+            let attempt = {
+                let mut bucket = self.bucket.lock().unwrap();
+                if bucket.try_consume(self.cost_per_event) {
+                    AdmissionAttempt::Allowed
+                } else {
+                    AdmissionAttempt::Blocked {
+                        wait_time: bucket
+                            .time_until_available(self.cost_per_event)
+                            .unwrap_or(Duration::from_millis(10)),
+                    }
+                }
+            };
+
+            match attempt {
+                AdmissionAttempt::Allowed => {
+                    if let Ok(mut stats) = self.stats.lock() {
+                        stats.events_total += 1;
+                        stats.tokens_consumed_total += self.cost_per_event;
+                        stats.events_window += 1;
+                        stats.tokens_consumed_window += self.cost_per_event;
+                    }
+                    return;
+                }
+                AdmissionAttempt::Blocked { wait_time } => {
+                    if !delayed_this_event {
+                        delayed_this_event = true;
+                        if let Ok(mut stats) = self.stats.lock() {
+                            stats.delayed_total += 1;
+                            stats.delayed_window += 1;
+                            stats.pulse_delayed_events += 1;
+                        }
+
+                        let current_rate = if let Ok(stats) = self.stats.lock() {
+                            let elapsed_s = stats.last_summary.elapsed().as_secs_f64();
+                            if elapsed_s > 0.0 {
+                                stats.tokens_consumed_window / elapsed_s / self.cost_per_event
+                            } else {
+                                0.0
+                            }
+                        } else {
+                            0.0
+                        };
+
+                        ctx.write_control_event(ChainEventFactory::observability_event(
+                            self.writer_id,
+                            ObservabilityPayload::Middleware(MiddlewareLifecycle::RateLimiter(
+                                RateLimiterEvent::Delayed {
+                                    delay_ms: wait_time.as_millis() as u64,
+                                    current_rate,
+                                    limit_rate: self.limit_rate,
+                                },
+                            )),
+                        ));
+                    }
+
+                    debug!(
+                        event_id = %event_id,
+                        event_type = %event_type,
+                        wait_ms = wait_time.as_millis(),
+                        "Rate limited - awaiting permit"
+                    );
+
+                    let wait_start = Instant::now();
+                    tokio::time::sleep(wait_time).await;
+                    let waited = wait_start.elapsed();
+                    if let Ok(mut stats) = self.stats.lock() {
+                        stats.delay_seconds_total += waited.as_secs_f64();
+                        let waited_ms = waited.as_millis() as u64;
+                        stats.pulse_delay_ms_total =
+                            stats.pulse_delay_ms_total.saturating_add(waited_ms);
+                        stats.pulse_delay_ms_max = stats.pulse_delay_ms_max.max(waited_ms);
+                    }
+                }
+            }
+        }
+    }
 }
 
 impl Middleware for RateLimiterMiddleware {
@@ -518,6 +651,12 @@ impl Middleware for RateLimiterMiddleware {
     fn as_effect_policy(
         self: std::sync::Arc<Self>,
     ) -> Option<std::sync::Arc<dyn crate::middleware::EffectPolicy>> {
+        Some(self)
+    }
+
+    fn as_source_pacer(
+        self: std::sync::Arc<Self>,
+    ) -> Option<std::sync::Arc<dyn crate::middleware::SourcePacer>> {
         Some(self)
     }
 
@@ -726,90 +865,11 @@ impl crate::middleware::EffectPolicy for RateLimiterMiddleware {
         event: &ChainEvent,
         ctx: &mut MiddlewareContext,
     ) -> crate::middleware::PolicyAdmission {
-        let event_id = event.id;
-        let event_type = event.event_type();
-        let mut delayed_this_event = false;
-        loop {
-            enum AdmissionAttempt {
-                Allowed,
-                Blocked { wait_time: Duration },
-            }
-
-            let attempt = {
-                let mut bucket = self.bucket.lock().unwrap();
-                if bucket.try_consume(self.cost_per_event) {
-                    AdmissionAttempt::Allowed
-                } else {
-                    AdmissionAttempt::Blocked {
-                        wait_time: bucket
-                            .time_until_available(self.cost_per_event)
-                            .unwrap_or(Duration::from_millis(10)),
-                    }
-                }
-            };
-
-            match attempt {
-                AdmissionAttempt::Allowed => {
-                    if let Ok(mut stats) = self.stats.lock() {
-                        stats.events_total += 1;
-                        stats.tokens_consumed_total += self.cost_per_event;
-                        stats.events_window += 1;
-                        stats.tokens_consumed_window += self.cost_per_event;
-                    }
-                    return crate::middleware::PolicyAdmission::Admit;
-                }
-                AdmissionAttempt::Blocked { wait_time } => {
-                    if !delayed_this_event {
-                        delayed_this_event = true;
-                        if let Ok(mut stats) = self.stats.lock() {
-                            stats.delayed_total += 1;
-                            stats.delayed_window += 1;
-                            stats.pulse_delayed_events += 1;
-                        }
-
-                        let current_rate = if let Ok(stats) = self.stats.lock() {
-                            let elapsed_s = stats.last_summary.elapsed().as_secs_f64();
-                            if elapsed_s > 0.0 {
-                                stats.tokens_consumed_window / elapsed_s / self.cost_per_event
-                            } else {
-                                0.0
-                            }
-                        } else {
-                            0.0
-                        };
-
-                        ctx.write_control_event(ChainEventFactory::observability_event(
-                            self.writer_id,
-                            ObservabilityPayload::Middleware(MiddlewareLifecycle::RateLimiter(
-                                RateLimiterEvent::Delayed {
-                                    delay_ms: wait_time.as_millis() as u64,
-                                    current_rate,
-                                    limit_rate: self.limit_rate,
-                                },
-                            )),
-                        ));
-                    }
-
-                    debug!(
-                        event_id = %event_id,
-                        event_type = %event_type,
-                        wait_ms = wait_time.as_millis(),
-                        "Rate limited at effect boundary - awaiting permit"
-                    );
-
-                    let wait_start = Instant::now();
-                    tokio::time::sleep(wait_time).await;
-                    let waited = wait_start.elapsed();
-                    if let Ok(mut stats) = self.stats.lock() {
-                        stats.delay_seconds_total += waited.as_secs_f64();
-                        let waited_ms = waited.as_millis() as u64;
-                        stats.pulse_delay_ms_total =
-                            stats.pulse_delay_ms_total.saturating_add(waited_ms);
-                        stats.pulse_delay_ms_max = stats.pulse_delay_ms_max.max(waited_ms);
-                    }
-                }
-            }
-        }
+        // FLOWIP-114o: shared with the source pacing path. Replay suppression at
+        // the effect boundary happens before `admit` is consulted, so this path
+        // carries no scope guard of its own.
+        self.acquire_permit_async(event, ctx).await;
+        crate::middleware::PolicyAdmission::Admit
     }
 
     fn observe(
@@ -824,7 +884,47 @@ impl crate::middleware::EffectPolicy for RateLimiterMiddleware {
     }
 }
 
+/// Source pacing adapter (FLOWIP-114o): an async source supervisor awaits its
+/// permit here instead of blocking the worker thread in `pre_handle`, so the
+/// supervisor's `biased` select can interrupt the wait on drain, EOF,
+/// cancellation, or shutdown. It shares the token bucket, accounting, and
+/// lifecycle events with the synchronous `Middleware` and the effect-boundary
+/// `EffectPolicy` paths through `acquire_permit_async`.
+#[async_trait::async_trait]
+impl crate::middleware::SourcePacer for RateLimiterMiddleware {
+    async fn source_admit(
+        &self,
+        event: &ChainEvent,
+        ctx: &mut MiddlewareContext,
+    ) -> MiddlewareAction {
+        // Mirror the `pre_handle` preamble. The replay guard is defence-in-depth:
+        // sources always run under `LiveHandler` scope (the replay driver bypasses
+        // the source surface entirely), so this is never deterministic replay, but
+        // keeping it matches the sync path exactly.
+        if ctx.execution_scope().is_deterministic_replay() {
+            return MiddlewareAction::Continue;
+        }
+
+        if event.is_control() || event.is_lifecycle() {
+            trace!(
+                event_id = %event.id,
+                event_type = %event.event_type(),
+                "Control/lifecycle event bypassing rate limiter"
+            );
+            return MiddlewareAction::Continue;
+        }
+
+        self.acquire_permit_async(event, ctx).await;
+        MiddlewareAction::Continue
+    }
+}
+
 /// Builder for constructing rate limiter middleware factories.
+///
+/// Every factory built here produces independent per-attachment buckets; see the
+/// module docs for the no-global-bucket decision (FLOWIP-114o Q6), the
+/// async-await vs blocking wait by placement, and the admission accounting
+/// contract.
 #[derive(Clone)]
 pub struct RateLimiterBuilder {
     events_per_second: f64,
@@ -1021,12 +1121,21 @@ impl MiddlewareFactory for RateLimiterFactory {
     }
 }
 
-/// Helper function for common module
+/// Attach a token-bucket rate limiter admitting `events_per_second`.
+///
+/// Each attachment owns its own bucket: flow-level `rate_limit(N)` materialises
+/// one instance per stage (FLOWIP-050d), and there is no process-wide shared
+/// bucket (FLOWIP-114o Q6). On async sources and the effect boundary the limiter
+/// awaits its permit as a cancellable future; on sync sources and handler chains
+/// it blocks. Counters increment at admission with no refund on a downstream
+/// `Skip`/`Abort` (FLOWIP-114m, FLOWIP-114o). See the module docs for the full
+/// wait, bucket, and accounting contract.
 pub fn rate_limit(events_per_second: f64) -> Box<dyn MiddlewareFactory> {
     RateLimiterBuilder::new(events_per_second).build()
 }
 
-/// Helper function with burst capacity
+/// Attach a rate limiter with an explicit burst capacity. Same per-instance
+/// bucket, wait, and accounting contract as [`rate_limit`].
 pub fn rate_limit_with_burst(events_per_second: f64, burst: f64) -> Box<dyn MiddlewareFactory> {
     RateLimiterBuilder::new(events_per_second)
         .with_burst(burst)
