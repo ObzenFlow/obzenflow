@@ -142,6 +142,15 @@ pub trait Middleware: Send + Sync {
     ) -> Option<std::sync::Arc<dyn crate::middleware::EffectPolicy>> {
         None
     }
+
+    /// FLOWIP-114o: sources with a native async pacing surface return it here so
+    /// async source supervisors await a permit (a cancellable future) instead of
+    /// blocking the worker thread in `pre_handle`. Only the rate limiter
+    /// overrides this; every other middleware falls through to the synchronous
+    /// `pre_handle` at the source gate.
+    fn as_source_pacer(self: std::sync::Arc<Self>) -> Option<std::sync::Arc<dyn SourcePacer>> {
+        None
+    }
 }
 
 /// Structured cause attached to an abort so downstream seams, the effect
@@ -176,6 +185,27 @@ pub enum MiddlewareAction {
     /// Abort processing entirely (returns empty results). The optional cause
     /// lets the effect boundary record a structured, replayable rejection.
     Abort { cause: Option<MiddlewareAbortCause> },
+}
+
+/// FLOWIP-114o: an async pacing surface for source middleware. A policy that
+/// would otherwise block a worker thread while throttling (the rate limiter)
+/// implements this so async source supervisors can `.await` admission as a
+/// cancellable future. The supervisor's `biased` select then interrupts the
+/// wait on drain, EOF, cancellation, or shutdown. Sync source supervisors have
+/// no await point and keep the blocking `pre_handle` path (FLOWIP-114o Q4,
+/// retain-and-document).
+#[async_trait::async_trait]
+pub trait SourcePacer: Send + Sync {
+    /// Await admission for one source poll, returning the gate decision. The
+    /// rate limiter returns `Continue` once it has consumed a token, awaiting
+    /// its permit first if throttled. Accounting and lifecycle events are
+    /// identical to the synchronous `pre_handle` path; only the wait becomes a
+    /// cancellable future.
+    async fn source_admit(
+        &self,
+        event: &ChainEvent,
+        ctx: &mut MiddlewareContext,
+    ) -> MiddlewareAction;
 }
 
 /// FLOWIP-120c H2 enforcement: an observation-classified middleware may not

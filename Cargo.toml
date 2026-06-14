@@ -219,6 +219,11 @@ path = "tests/rate_limiter_integration_test.rs"
 required-features = ["test-support"]
 
 [[test]]
+name = "source_rate_limiter_interruption_test"
+path = "tests/source_rate_limiter_interruption_test.rs"
+required-features = ["test-support"]
+
+[[test]]
 name = "divergence_mid_flight_abort_test"
 path = "tests/divergence_mid_flight_abort_test.rs"
 required-features = ["test-support"]
