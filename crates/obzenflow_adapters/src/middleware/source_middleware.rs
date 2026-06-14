@@ -1119,6 +1119,10 @@ impl<H: FiniteSourceHandler> FiniteSourceMiddlewareBuilder<H> {
     /// dispatches through the `Box` blanket impl, which cannot forward the
     /// `self: Arc<Self>` hooks (`as_source_pacer`, `as_effect_policy`). This
     /// preserves the concrete vtable so those hooks resolve to the real policy.
+    ///
+    /// Transitional: this exists to keep the `as_source_pacer` downcast working.
+    /// FLOWIP-114s retires the downcast (typed source policy chains), after which
+    /// `with_boxed` and the double-box hazard go away.
     pub fn with_boxed(mut self, middleware: Box<dyn Middleware>) -> Self {
         self.handler = self.handler.with_middleware(middleware);
         self

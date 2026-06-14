@@ -247,7 +247,21 @@ pub enum ErrorAction {
     Retry,
 }
 
-// Implementation for Box<dyn Middleware> to allow boxed middleware
+// Implementation for Box<dyn Middleware> to allow boxed middleware.
+//
+// FLOWIP-114o footgun: this blanket impl forwards the `&self` methods, but it
+// CANNOT forward the `self: Arc<Self>` hooks (`as_effect_policy`,
+// `as_source_pacer`) because there is no safe way to turn `Arc<Box<M>>` into
+// `Arc<M>`. Those two methods therefore fall through to the trait defaults
+// (`None`) for any `Box`-wrapped middleware. Consequently, double-boxing a
+// `Box<dyn Middleware>` (e.g. passing one into a generic `with<M: Middleware>`
+// that re-boxes) silently drops the native async policy/pacer surface. Build
+// chains that need those hooks from a single box: `Arc::from(factory.create())`
+// or the `with_boxed(Box<dyn Middleware>)` builder methods, never the re-boxing
+// generic `with`. Source chains learned this the hard way; effect-policy chains
+// stay safe via `Arc::from(create_for_effect(...))`. FLOWIP-114s retires the
+// `as_*` capability-downcast entirely in favour of typed policy chains on live
+// I/O units, which removes this footgun as a class.
 impl<M: Middleware + ?Sized> Middleware for Box<M> {
     fn label(&self) -> &'static str {
         (**self).label()
