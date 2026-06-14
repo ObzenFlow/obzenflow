@@ -323,7 +323,14 @@ impl From<u8> for CircuitState {
     }
 }
 
-/// Circuit breaker middleware that prevents cascading failures
+/// Circuit breaker middleware that prevents cascading failures.
+///
+/// FLOWIP-114o (no-refund note): the breaker and the rate limiter are
+/// independent instances with independent buckets. A breaker rejection does not
+/// refund a rate-limiter token already consumed earlier in the chain: an event
+/// that the limiter admitted (and possibly delayed) and that the breaker then
+/// rejects still counted its limiter admission. Admission accounting is
+/// per-policy and is not reconciled across policies.
 pub struct CircuitBreakerMiddleware {
     /// Current state of the circuit breaker
     state: Arc<AtomicU8>,

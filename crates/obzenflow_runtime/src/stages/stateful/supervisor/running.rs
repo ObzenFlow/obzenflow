@@ -293,7 +293,9 @@ pub(super) async fn dispatch_accumulating<
                         .fetch_add(1, Ordering::Relaxed);
                     let start = Instant::now();
                     if ctx.emit_interval.is_some() && ctx.last_data_event_time.is_none() {
-                        ctx.last_data_event_time = Some(start);
+                        // FLOWIP-114o: the emit-interval baseline reads tokio time
+                        // (paused-aware); `start` stays std for the latency metric.
+                        ctx.last_data_event_time = Some(tokio::time::Instant::now());
                     }
 
                     let _processing = heartbeat_state.as_ref().map(|state| {
@@ -497,7 +499,7 @@ pub(super) async fn dispatch_accumulating<
                     }
 
                     // Reset baseline regardless to avoid hammering `should_emit` once the interval has elapsed.
-                    ctx.last_data_event_time = Some(Instant::now());
+                    ctx.last_data_event_time = Some(tokio::time::Instant::now());
                 }
             }
 
@@ -674,14 +676,14 @@ pub(super) async fn dispatch_emitting<
             ctx.pending_transition = Some(PendingTransition::EmitComplete);
 
             if ctx.emit_interval.is_some() {
-                ctx.last_data_event_time = Some(Instant::now());
+                ctx.last_data_event_time = Some(tokio::time::Instant::now());
             }
 
             Ok(EventLoopDirective::Continue)
         }
         Ok(_) => {
             if ctx.emit_interval.is_some() {
-                ctx.last_data_event_time = Some(Instant::now());
+                ctx.last_data_event_time = Some(tokio::time::Instant::now());
             }
             Ok(EventLoopDirective::Transition(StatefulEvent::EmitComplete))
         }

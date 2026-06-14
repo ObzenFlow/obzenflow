@@ -330,7 +330,14 @@ impl<H: AsyncFiniteSourceHandler> AsyncFiniteSourceHandler for MiddlewareAsyncFi
                 SourceMiddlewarePhase::RateLimiterGate | SourceMiddlewarePhase::Ordinary => {}
             }
 
-            let action = middleware.pre_handle(&synthetic_event, &mut ctx);
+            // FLOWIP-114o: the rate limiter awaits its permit as a cancellable
+            // future via `source_admit`, so the supervisor's biased select can
+            // interrupt the wait on drain/EOF/cancellation/shutdown. Every other
+            // middleware falls through to the synchronous `pre_handle`.
+            let action = match middleware.clone().as_source_pacer() {
+                Some(pacer) => pacer.source_admit(&synthetic_event, &mut ctx).await,
+                None => middleware.pre_handle(&synthetic_event, &mut ctx),
+            };
             if let Some(message) =
                 crate::middleware::observation_short_circuit(middleware.as_ref(), &action)
             {
@@ -490,7 +497,15 @@ impl<H: AsyncInfiniteSourceHandler> AsyncInfiniteSourceHandler
                 continue;
             }
 
-            let action = middleware.pre_handle(&synthetic_event, &mut ctx);
+            // FLOWIP-114o: the rate limiter awaits its permit as a cancellable
+            // future via `source_admit`, so the supervisor's biased select can
+            // interrupt the wait on drain/EOF/cancellation/shutdown. The circuit
+            // breaker and any other gate fall through to the synchronous
+            // `pre_handle`.
+            let action = match middleware.clone().as_source_pacer() {
+                Some(pacer) => pacer.source_admit(&synthetic_event, &mut ctx).await,
+                None => middleware.pre_handle(&synthetic_event, &mut ctx),
+            };
             if let Some(message) =
                 crate::middleware::observation_short_circuit(middleware.as_ref(), &action)
             {
@@ -504,8 +519,11 @@ impl<H: AsyncInfiniteSourceHandler> AsyncInfiniteSourceHandler
                             backoff_on_cb_rejection_async(&ctx).await;
                         }
                         SourceMiddlewarePhase::RateLimiterGate => {
-                            // Future-proofing: if a non-blocking rate limiter returns Skip,
-                            // add a small sleep to avoid hot-looping.
+                            // FLOWIP-114o: the rate limiter now admits after
+                            // awaiting its permit in `source_admit` and never
+                            // returns Skip on throttle, so this arm is inert for
+                            // it. Retained only as a hot-loop guard if a future
+                            // non-blocking limiter returns Skip.
                             tokio::time::sleep(Duration::from_millis(1)).await;
                         }
                         SourceMiddlewarePhase::Ordinary => {}
@@ -780,6 +798,10 @@ impl<H: FiniteSourceHandler> FiniteSourceHandler for MiddlewareFiniteSource<H> {
                 SourceMiddlewarePhase::RateLimiterGate if !inner_succeeded_with_events => continue,
                 SourceMiddlewarePhase::RateLimiterGate | SourceMiddlewarePhase::Ordinary => {}
             }
+            // FLOWIP-114o Q4 (retain-and-document): sync source handlers have no
+            // await point, so the rate-limiter gate keeps the blocking `pre_handle`
+            // loop (it blocks via `block_in_place` off the worker). Async sources
+            // are the recommended path for cancellable paced ingestion.
             let action = middleware.pre_handle(&synthetic_event, &mut ctx);
             if let Some(message) =
                 crate::middleware::observation_short_circuit(middleware.as_ref(), &action)
@@ -913,6 +935,10 @@ impl<H: InfiniteSourceHandler> InfiniteSourceHandler for MiddlewareInfiniteSourc
                 continue;
             }
 
+            // FLOWIP-114o Q4 (retain-and-document): sync source handlers have no
+            // await point, so the rate-limiter gate keeps the blocking `pre_handle`
+            // loop (it blocks via `block_in_place` off the worker). Async sources
+            // are the recommended path for cancellable paced ingestion.
             let action = middleware.pre_handle(&synthetic_event, &mut ctx);
             if let Some(message) =
                 crate::middleware::observation_short_circuit(middleware.as_ref(), &action)
@@ -1086,6 +1112,22 @@ impl<H: FiniteSourceHandler> FiniteSourceMiddlewareBuilder<H> {
         self
     }
 
+    /// Add an already-boxed middleware without re-boxing.
+    ///
+    /// FLOWIP-114o: the generic `with` boxes its argument, so passing a
+    /// `Box<dyn Middleware>` through it double-boxes and the chain element
+    /// dispatches through the `Box` blanket impl, which cannot forward the
+    /// `self: Arc<Self>` hooks (`as_source_pacer`, `as_effect_policy`). This
+    /// preserves the concrete vtable so those hooks resolve to the real policy.
+    ///
+    /// Transitional: this exists to keep the `as_source_pacer` downcast working.
+    /// FLOWIP-114s retires the downcast (typed source policy chains), after which
+    /// `with_boxed` and the double-box hazard go away.
+    pub fn with_boxed(mut self, middleware: Box<dyn Middleware>) -> Self {
+        self.handler = self.handler.with_middleware(middleware);
+        self
+    }
+
     /// Build the final middleware-wrapped handler
     pub fn build(self) -> MiddlewareFiniteSource<H> {
         self.handler
@@ -1112,6 +1154,13 @@ impl<H: AsyncFiniteSourceHandler> AsyncFiniteSourceMiddlewareBuilder<H> {
     /// Add a middleware to the chain.
     pub fn with<M: Middleware + 'static>(mut self, middleware: M) -> Self {
         self.handler = self.handler.with_middleware(Box::new(middleware));
+        self
+    }
+
+    /// Add an already-boxed middleware without re-boxing (FLOWIP-114o; see
+    /// `FiniteSourceMiddlewareBuilder::with_boxed`).
+    pub fn with_boxed(mut self, middleware: Box<dyn Middleware>) -> Self {
+        self.handler = self.handler.with_middleware(middleware);
         self
     }
 
@@ -1144,6 +1193,13 @@ impl<H: AsyncInfiniteSourceHandler> AsyncInfiniteSourceMiddlewareBuilder<H> {
         self
     }
 
+    /// Add an already-boxed middleware without re-boxing (FLOWIP-114o; see
+    /// `FiniteSourceMiddlewareBuilder::with_boxed`).
+    pub fn with_boxed(mut self, middleware: Box<dyn Middleware>) -> Self {
+        self.handler = self.handler.with_middleware(middleware);
+        self
+    }
+
     /// Build the final middleware-wrapped handler.
     pub fn build(self) -> MiddlewareAsyncInfiniteSource<H> {
         self.handler
@@ -1165,6 +1221,13 @@ impl<H: InfiniteSourceHandler> InfiniteSourceMiddlewareBuilder<H> {
     /// Add a middleware to the chain
     pub fn with<M: Middleware + 'static>(mut self, middleware: M) -> Self {
         self.handler = self.handler.with_middleware(Box::new(middleware));
+        self
+    }
+
+    /// Add an already-boxed middleware without re-boxing (FLOWIP-114o; see
+    /// `FiniteSourceMiddlewareBuilder::with_boxed`).
+    pub fn with_boxed(mut self, middleware: Box<dyn Middleware>) -> Self {
+        self.handler = self.handler.with_middleware(middleware);
         self
     }
 
