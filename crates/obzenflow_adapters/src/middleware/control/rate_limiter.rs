@@ -63,8 +63,8 @@ use std::time::Duration;
 // `tokio::time::Instant` so Tokio paused time advances them in deterministic
 // tests. Under a normal runtime this tracks real time; outside a runtime
 // `Instant::now()` falls back to the std clock. `Duration` stays from std.
-use tokio::time::Instant;
 use thiserror::Error;
+use tokio::time::Instant;
 use tracing::{debug, info, trace};
 
 const ACTIVITY_PULSE_WINDOW_MS: u64 = 1000;
