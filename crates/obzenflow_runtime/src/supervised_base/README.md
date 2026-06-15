@@ -303,7 +303,7 @@ Supervisor acts on ControlResolution
     ├── ForwardAndDrain:     write signal downstream, return Transition(BeginDrain)
     ├── Suppress:            drop signal, return Continue
     ├── BufferAtEntryPoint:  store signal for later release (cycle convergence)
-    ├── Delay(d):            suspend_until the deadline, then forward
+    ├── Delay(d):            suspend_until the deadline, then re-resolve
     └── Skip:                drop signal, return Continue
 ```
 
@@ -317,7 +317,7 @@ A gate never awaits. When the supervisor acts on a `Delay`, it calls `suspend_un
 pub(crate) async fn suspend_until(wake: &WakeOn, max_wait: Option<Duration>) -> WakeOutcome
 ```
 
-`At(instant)` sleeps to the deadline, `Immediate` yields once, and `Notify(credit_waker)` selects between the producer's notify and a stall cap. The bounded-wake rule lives here: every non-source pause is bounded by a deadline or a runtime-supplied stall cap, so a wedged downstream can never hang the loop. A `Notify` wake offered with no cap trips a `debug_assert`. The seven former `Delay` sleep sites across the transform, stateful, sink, and join supervisors all route through this helper, which is also the only target the CI barrier-sleep guard needs to police.
+`At(instant)` sleeps to the deadline, `Immediate` yields once, and `Notify(credit_waker)` selects between the producer's notify and a stall cap. The bounded-wake rule lives here: every non-source pause is bounded by a deadline or a runtime-supplied stall cap, so a wedged downstream can never hang the loop. A `Notify` wake offered with no cap panics because the cap is part of the runtime contract. The seven former `Delay` sleep sites across the transform, stateful, sink, and join supervisors all route through this helper, which is also the only target the CI barrier-sleep guard needs to police.
 
 ### Finalization: settling an attempt exactly once
 
@@ -330,13 +330,13 @@ Earlier, middleware exposed signal strategies through `MiddlewareFactory::create
 ```text
 pub struct ControlPointRegistration {
     pub signal: bool,
-    pub admission: bool,
+    pub admission_positions: Vec<AdmissionPosition>,
     pub completion: bool,
     pub observation: bool,
 }
 ```
 
-The declaration defaults to none, so observation-only or purely structural middleware needs no override. The binding slices (source 115a, effect 115b, sink 115d, backpressure 115e) wire the concrete gates at the points a factory declares. Until then, the live signal gate is the default `JonestownSignalStrategy`, installed during stage materialization.
+The declaration defaults to none, so purely structural middleware needs no override. Admission is position-aware because source pre-poll, finite-source post-admit, effect, and output-commit gates answer different runtime questions. The binding slices (source 115a, effect 115b, sink 115d, backpressure 115e) wire the concrete gates at the points a factory declares. Until then, the live signal gate is the default `JonestownSignalStrategy`, installed during stage materialization.
 
 ### Where this lives relative to the supervised base
 

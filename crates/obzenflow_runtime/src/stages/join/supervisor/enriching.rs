@@ -7,7 +7,7 @@ use crate::stages::common::handlers::JoinHandler;
 use crate::stages::common::heartbeat::HeartbeatProcessingGuard;
 use crate::stages::common::supervision::backpressure_drain::{drain_one_pending, DrainOutcome};
 use crate::stages::common::supervision::control_resolution::{
-    resolve_control_event, resolve_forward_control_event, ControlResolution,
+    resolve_control_event, ControlResolution,
 };
 use crate::stages::common::supervision::error_routing::route_to_error_journal;
 use crate::stages::common::supervision::flow_context_factory::make_flow_context;
@@ -92,7 +92,7 @@ pub(super) async fn dispatch_enriching<
                         /* drain_is_terminal */ false,
                     );
 
-                    if let ControlResolution::Delay(duration) = resolution {
+                    while let ControlResolution::Delay(duration) = resolution {
                         tracing::info!(
                             stage_name = %ctx.stage_name,
                             event_type = envelope.event.event_type(),
@@ -107,9 +107,11 @@ pub(super) async fn dispatch_enriching<
                         )
                         .await;
 
-                        resolution = resolve_forward_control_event(
+                        resolution = resolve_control_event(
                             signal,
                             &envelope,
+                            ctx.control_strategy.as_ref(),
+                            &mut ctx.processing_context,
                             /* cycle_config */ None,
                             /* cycle_guard */ None,
                             last_eof_outcome.as_ref(),

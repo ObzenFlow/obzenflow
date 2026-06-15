@@ -11,6 +11,7 @@
 use super::{Middleware, MiddlewareHints, MiddlewareSafety};
 use obzenflow_core::event::context::StageType;
 use obzenflow_runtime::pipeline::config::StageConfig;
+use obzenflow_runtime::stages::common::control_strategies::AdmissionPosition;
 use std::any::TypeId;
 use std::error::Error as StdError;
 use std::hash::{Hash, Hasher};
@@ -256,18 +257,25 @@ pub trait MiddlewareFactory: Send + Sync {
 /// Typed declaration of which runtime control points a policy registers
 /// (FLOWIP-115c). Replaces the retired `create_control_strategy` downcast lane:
 /// a factory states the points it binds gates at, and the binding slices wire
-/// the concrete gates. Defaults to none, so observation-only or structural
-/// middleware needs no override.
+/// the concrete gates. Defaults to none, so structural middleware needs no
+/// override.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ControlPointRegistration {
     /// Registers an inbound-signal gate.
     pub signal: bool,
-    /// Registers an admission gate at one or more positions.
-    pub admission: bool,
+    /// Registers admission gates at these named positions.
+    pub admission_positions: Vec<AdmissionPosition>,
     /// Registers a completion gate (source terminal emission).
     pub completion: bool,
     /// Registers an attempt observer.
     pub observation: bool,
+}
+
+impl ControlPointRegistration {
+    /// Whether this factory declares an admission gate at `position`.
+    pub fn admits_at(&self, position: AdmissionPosition) -> bool {
+        self.admission_positions.contains(&position)
+    }
 }
 
 // Implementation for Box<dyn MiddlewareFactory> to allow boxed factories

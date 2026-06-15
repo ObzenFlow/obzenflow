@@ -53,9 +53,8 @@ impl CreditWaker {
         self.0.notify_one();
     }
 
-    // Reached only by the supervisor suspension helper, which the signal path
-    // wires in a later 115c PR and backpressure (115e) extends; no non-test
-    // caller yet.
+    // Reached only by the supervisor suspension helper. Signal pauses use
+    // deadline wakes; backpressure (115e) consumes credit wakes.
     #[allow(dead_code)]
     pub(crate) fn inner(&self) -> &Arc<tokio::sync::Notify> {
         &self.0

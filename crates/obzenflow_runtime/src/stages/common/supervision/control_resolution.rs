@@ -32,7 +32,7 @@ pub(crate) enum ControlResolution {
     BufferAtEntryPoint { is_drain: bool },
     /// Suppress the event entirely (e.g. internal cycle peer or non-terminal forwarded EOF).
     Suppress,
-    /// Delay by the given duration, then forward.
+    /// Delay by the given duration, then re-resolve the same signal.
     Delay(std::time::Duration),
     /// Skip the event entirely (dangerous, used by control strategies).
     Skip,

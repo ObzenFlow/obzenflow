@@ -6,7 +6,7 @@ use crate::messaging::PollResult;
 use crate::stages::common::handlers::JoinHandler;
 use crate::stages::common::heartbeat::HeartbeatProcessingGuard;
 use crate::stages::common::supervision::control_resolution::{
-    resolve_control_event, resolve_forward_control_event, ControlResolution,
+    resolve_control_event, ControlResolution,
 };
 use crate::supervised_base::EventLoopDirective;
 use obzenflow_fsm::StateVariant;
@@ -79,7 +79,7 @@ pub(super) async fn dispatch_hydrating<
                         /* drain_is_terminal */ false,
                     );
 
-                    if let ControlResolution::Delay(duration) = resolution {
+                    while let ControlResolution::Delay(duration) = resolution {
                         tracing::info!(
                             stage_name = %ctx.stage_name,
                             event_type = envelope.event.event_type(),
@@ -94,9 +94,11 @@ pub(super) async fn dispatch_hydrating<
                         )
                         .await;
 
-                        resolution = resolve_forward_control_event(
+                        resolution = resolve_control_event(
                             signal,
                             &envelope,
+                            ctx.control_strategy.as_ref(),
+                            &mut ctx.processing_context,
                             /* cycle_config */ None,
                             /* cycle_guard */ None,
                             last_eof_outcome.as_ref(),

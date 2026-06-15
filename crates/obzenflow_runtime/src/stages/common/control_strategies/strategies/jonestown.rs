@@ -2,18 +2,17 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Default Jonestown strategy - forward EOF and terminate immediately
+//! Default Jonestown strategy - continue to the runtime's poison-pill rule.
 
 use super::super::{ProcessingContext, SignalDecision, SignalGate};
 use obzenflow_core::event::event_envelope::EventEnvelope;
 use obzenflow_core::ChainEvent;
 
-/// The default "Jonestown Protocol" strategy
+/// The default "Jonestown Protocol" strategy.
 ///
-/// Named after the infamous event where everyone "drank the Kool-Aid" together,
-/// this strategy ensures coordinated shutdown across the entire pipeline.
-/// When an EOF is received, it is immediately forwarded downstream and the
-/// stage terminates its processing loop.
+/// The strategy itself does not decide the concrete lifecycle transition. It
+/// returns [`SignalDecision::Continue`], and the runtime resolves EOF, Drain,
+/// cycle buffering, and terminal state through the normal poison-pill rule.
 pub struct JonestownSignalStrategy;
 
 impl SignalGate for JonestownSignalStrategy {
@@ -22,7 +21,6 @@ impl SignalGate for JonestownSignalStrategy {
         _envelope: &EventEnvelope<ChainEvent>,
         _ctx: &mut ProcessingContext,
     ) -> SignalDecision {
-        // Simple and direct: forward EOF immediately
         SignalDecision::Continue
     }
 }

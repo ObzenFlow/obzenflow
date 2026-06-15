@@ -78,6 +78,25 @@ impl SignalGate for FixedActionStrategy {
     }
 }
 
+#[derive(Debug)]
+struct PauseEofOnceStrategy;
+
+impl SignalGate for PauseEofOnceStrategy {
+    fn handle_eof(
+        &self,
+        _envelope: &EventEnvelope<ChainEvent>,
+        ctx: &mut ProcessingContext,
+    ) -> SignalDecision {
+        if ctx.custom_state.contains_key("paused_eof_once") {
+            return SignalDecision::Continue;
+        }
+
+        ctx.custom_state
+            .insert("paused_eof_once".to_string(), "true".to_string());
+        SignalDecision::Pause(std::time::Duration::from_millis(1))
+    }
+}
+
 fn entry_point_config(external: StageId) -> CycleGuardConfig {
     CycleGuardConfig {
         max_iterations: MaxIterations::new(30),
@@ -425,7 +444,7 @@ fn resolve_control_event_delay_does_not_note_cycle_guard() {
 }
 
 #[test]
-fn resolve_control_event_delay_then_forward_notes_cycle_guard_on_second_pass() {
+fn resolve_control_event_delay_then_reconsult_notes_cycle_guard_on_second_pass() {
     let upstream = StageId::new_const(1);
 
     let eof = ChainEventFactory::eof_event(WriterId::from(upstream), true);
@@ -435,11 +454,7 @@ fn resolve_control_event_delay_then_forward_notes_cycle_guard_on_second_pass() {
         _ => unreachable!(),
     };
 
-    let strategy = FixedActionStrategy {
-        eof: SignalDecision::Pause(std::time::Duration::from_millis(1)),
-        drain: SignalDecision::Continue,
-        other: SignalDecision::Continue,
-    };
+    let strategy = PauseEofOnceStrategy;
 
     let mut guard = CycleGuard::new(
         MaxIterations::new(30),
@@ -448,11 +463,13 @@ fn resolve_control_event_delay_then_forward_notes_cycle_guard_on_second_pass() {
         "t",
     );
 
+    let mut processing_ctx = crate::stages::common::control_strategies::ProcessingContext::new();
+
     let first_pass = resolve_control_event(
         signal,
         &envelope,
         &strategy,
-        &mut crate::stages::common::control_strategies::ProcessingContext::new(),
+        &mut processing_ctx,
         None,
         Some(&mut guard),
         None,
@@ -469,9 +486,11 @@ fn resolve_control_event_delay_then_forward_notes_cycle_guard_on_second_pass() {
         "Delay pass must not note upstream EOF"
     );
 
-    let second_pass = resolve_forward_control_event(
+    let second_pass = resolve_control_event(
         signal,
         &envelope,
+        &strategy,
+        &mut processing_ctx,
         None,
         Some(&mut guard),
         None,

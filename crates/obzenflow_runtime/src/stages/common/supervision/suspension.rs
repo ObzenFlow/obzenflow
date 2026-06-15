@@ -16,10 +16,10 @@
 //! as the effect boundary and is realigned by 115b.
 //!
 //! These items are the reusable machinery the supervisor loop and the binding
-//! slices consume: `suspend_until` is wired into the signal `Pause` path in a
-//! later 115c PR, and `AdmittedAttempt` is consumed by the admission seams in
-//! 115a/115b/115d. Until then they have no non-test caller, so the module
-//! permits dead code; the allowance is removed as each consumer lands.
+//! slices consume: `suspend_until` is wired into the signal `Pause` path, and
+//! `AdmittedAttempt` is consumed by the admission seams in 115a/115b/115d.
+//! Until admission has a non-test caller, the module permits dead code; the
+//! allowance is removed as each consumer lands.
 #![allow(dead_code)]
 
 use crate::stages::common::control_strategies::{
@@ -57,11 +57,7 @@ pub(crate) async fn suspend_until(wake: &WakeOn, max_wait: Option<Duration>) -> 
             WakeOutcome::Woke
         }
         WakeOn::Notify(waker) => {
-            debug_assert!(
-                max_wait.is_some(),
-                "a CreditAvailable pause must carry a stall cap"
-            );
-            let cap = max_wait.unwrap_or(Duration::ZERO);
+            let cap = max_wait.expect("a Notify pause must carry a stall cap");
             let notify = waker.inner().clone();
             tokio::select! {
                 biased;
@@ -100,18 +96,30 @@ impl AdmittedAttempt {
         }
     }
 
-    /// Durable settle. Notifies each observer's `observe` then `settle` once;
-    /// the subsequent `Drop` is a no-op.
+    /// Durable settle. Notifies every observer's `observe` once, then attempts
+    /// every observer's async `settle`; the subsequent `Drop` is a no-op.
     pub(crate) async fn settle(
         mut self,
         outcome: AttemptOutcome,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        self.settled = true;
         for observer in &self.observers {
             observer.observe(self.position, &outcome);
-            observer.settle(self.position, &outcome).await?;
         }
-        Ok(())
+        self.settled = true;
+
+        let mut first_error = None;
+        for observer in &self.observers {
+            if let Err(error) = observer.settle(self.position, &outcome).await {
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+            }
+        }
+
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
     }
 }
 
@@ -172,10 +180,9 @@ mod tests {
         );
     }
 
-    #[cfg(debug_assertions)]
     #[tokio::test(start_paused = true)]
-    #[should_panic(expected = "must carry a stall cap")]
-    async fn credit_wake_without_cap_panics_in_debug() {
+    #[should_panic(expected = "Notify pause must carry a stall cap")]
+    async fn credit_wake_without_cap_panics() {
         let wake = WakeOn::Notify(CreditWaker::new());
         let _ = suspend_until(&wake, None).await;
     }
@@ -185,6 +192,7 @@ mod tests {
         observed: Arc<AtomicUsize>,
         settled: Arc<AtomicUsize>,
         last_was_abort: Arc<AtomicUsize>,
+        fail_settle: bool,
     }
 
     #[async_trait::async_trait]
@@ -202,6 +210,9 @@ mod tests {
             _outcome: &AttemptOutcome,
         ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             self.settled.fetch_add(1, Ordering::SeqCst);
+            if self.fail_settle {
+                return Err(Box::new(std::io::Error::other("settle failed")));
+            }
             Ok(())
         }
     }
@@ -218,6 +229,31 @@ mod tests {
             .expect("settle should succeed");
         assert_eq!(observed.load(Ordering::SeqCst), 1);
         assert_eq!(settled.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn settle_failure_still_notifies_all_observers_once() {
+        let failing = Arc::new(CountingObserver {
+            fail_settle: true,
+            ..CountingObserver::default()
+        });
+        let succeeding = Arc::new(CountingObserver::default());
+        let failing_observed = failing.observed.clone();
+        let failing_settled = failing.settled.clone();
+        let succeeding_observed = succeeding.observed.clone();
+        let succeeding_settled = succeeding.settled.clone();
+        let attempt = AdmittedAttempt::new(
+            AdmissionPosition::BeforeEffect,
+            vec![failing.clone(), succeeding.clone()],
+        );
+
+        let result = attempt.settle(AttemptOutcome::Succeeded).await;
+
+        assert!(result.is_err());
+        assert_eq!(failing_observed.load(Ordering::SeqCst), 1);
+        assert_eq!(failing_settled.load(Ordering::SeqCst), 1);
+        assert_eq!(succeeding_observed.load(Ordering::SeqCst), 1);
+        assert_eq!(succeeding_settled.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
