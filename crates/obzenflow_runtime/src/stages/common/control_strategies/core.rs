@@ -12,22 +12,22 @@ use obzenflow_core::ChainEvent;
 use std::time::Duration;
 
 /// Strategy for handling control events in stage supervisors
-pub trait ControlEventStrategy: Send + Sync {
+pub trait SignalGate: Send + Sync {
     /// Handle an EOF event
     fn handle_eof(
         &self,
         envelope: &EventEnvelope<ChainEvent>,
         ctx: &mut ProcessingContext,
-    ) -> ControlEventAction;
+    ) -> SignalDecision;
 
     /// Handle a watermark event
     fn handle_watermark(
         &self,
         _envelope: &EventEnvelope<ChainEvent>,
         _ctx: &mut ProcessingContext,
-    ) -> ControlEventAction {
+    ) -> SignalDecision {
         // Default: always forward watermarks
-        ControlEventAction::Forward
+        SignalDecision::Continue
     }
 
     /// Handle a checkpoint event (when implemented)
@@ -35,9 +35,9 @@ pub trait ControlEventStrategy: Send + Sync {
         &self,
         _envelope: &EventEnvelope<ChainEvent>,
         _ctx: &mut ProcessingContext,
-    ) -> ControlEventAction {
+    ) -> SignalDecision {
         // Default: always forward checkpoints
-        ControlEventAction::Forward
+        SignalDecision::Continue
     }
 
     /// Handle a drain signal (when implemented)
@@ -45,25 +45,25 @@ pub trait ControlEventStrategy: Send + Sync {
         &self,
         _envelope: &EventEnvelope<ChainEvent>,
         _ctx: &mut ProcessingContext,
-    ) -> ControlEventAction {
+    ) -> SignalDecision {
         // Default: always forward drain signals
-        ControlEventAction::Forward
+        SignalDecision::Continue
     }
 }
 
-/// Actions that a control event strategy can return
+/// What a signal gate decides for an inbound control signal (FLOWIP-115c).
 #[derive(Debug, Clone, PartialEq)]
-pub enum ControlEventAction {
-    /// Forward the control event downstream immediately
-    Forward,
+pub enum SignalDecision {
+    /// Let runtime run its normal rule for this signal: forward, forward and
+    /// drain, buffer at a cycle entry, or suppress a non-terminal signal.
+    Continue,
 
-    /// Delay forwarding the control event.
-    ///
-    /// Supervisors implement this as: sleep for the requested duration, then forward.
-    Delay(Duration),
+    /// Hold the signal for the given duration, then re-resolve. Time is
+    /// relative; the supervisor turns it into a deadline when it suspends.
+    Pause(Duration),
 
-    /// Skip this control event (dangerous! use with extreme caution)
-    Skip,
+    /// Suppress this signal entirely (dangerous; the hook-local stop result).
+    SuppressSignal,
 }
 
 /// Mutable context passed to control event strategies

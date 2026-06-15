@@ -156,6 +156,7 @@ async fn handle_reference_envelope<
                 signal,
                 &envelope,
                 ctx.control_strategy.as_ref(),
+                &mut ctx.processing_context,
                 /* cycle_config */ None,
                 /* cycle_guard */ None,
                 last_eof_outcome.as_ref(),
@@ -165,7 +166,13 @@ async fn handle_reference_envelope<
             );
 
             if let ControlResolution::Delay(duration) = resolution {
-                tokio::time::sleep(duration).await;
+                let _ = crate::stages::common::supervision::suspension::suspend_until(
+                    &crate::stages::common::control_strategies::WakeOn::At(
+                        std::time::Instant::now() + duration,
+                    ),
+                    None,
+                )
+                .await;
                 resolution = resolve_forward_control_event(
                     signal,
                     &envelope,
@@ -386,6 +393,7 @@ async fn handle_stream_envelope<
                 signal,
                 &envelope,
                 ctx.control_strategy.as_ref(),
+                &mut ctx.processing_context,
                 /* cycle_config */ None,
                 /* cycle_guard */ None,
                 last_eof_outcome.as_ref(),
@@ -395,7 +403,13 @@ async fn handle_stream_envelope<
             );
 
             if let ControlResolution::Delay(duration) = resolution {
-                tokio::time::sleep(duration).await;
+                let _ = crate::stages::common::supervision::suspension::suspend_until(
+                    &crate::stages::common::control_strategies::WakeOn::At(
+                        std::time::Instant::now() + duration,
+                    ),
+                    None,
+                )
+                .await;
                 resolution = resolve_forward_control_event(
                     signal,
                     &envelope,

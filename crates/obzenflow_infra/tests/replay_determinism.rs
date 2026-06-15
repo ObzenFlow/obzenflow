@@ -16,7 +16,7 @@ use obzenflow_core::{FlowId, StageId, SystemId, TypedPayload, WriterId};
 use obzenflow_infra::journal::disk::disk_journal::DiskJournal;
 use obzenflow_infra::journal::MemoryJournal;
 use obzenflow_runtime::id_conversions::StageIdExt;
-use obzenflow_runtime::stages::common::control_strategies::JonestownStrategy;
+use obzenflow_runtime::stages::common::control_strategies::JonestownSignalStrategy;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::StatefulHandler;
 use obzenflow_runtime::stages::join::handle::JoinHandleExt;
@@ -696,7 +696,7 @@ async fn run_join_supervisor_once() -> Vec<JoinedRow> {
         reference_stage,
         stream_stage,
     );
-    join_config.control_strategy = Some(Arc::new(JonestownStrategy));
+    join_config.control_strategy = Some(Arc::new(JonestownSignalStrategy));
 
     let handle = JoinBuilder::new(
         handler,
@@ -707,7 +707,7 @@ async fn run_join_supervisor_once() -> Vec<JoinedRow> {
             stream_stage,
             stream_journal.clone() as Arc<dyn Journal<ChainEvent>>,
         )],
-        Arc::new(JonestownStrategy),
+        Arc::new(JonestownSignalStrategy),
     )
     .expect("build join builder")
     .build()

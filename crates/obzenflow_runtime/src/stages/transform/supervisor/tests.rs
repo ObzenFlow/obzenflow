@@ -10,7 +10,7 @@ use crate::effects::{EffectPortRegistry, EffectRuntimeMode};
 use crate::feed_plan::StageOutputContract;
 use crate::id_conversions::StageIdExt;
 use crate::pipeline::config::CycleGuardConfig;
-use crate::stages::common::control_strategies::JonestownStrategy;
+use crate::stages::common::control_strategies::JonestownSignalStrategy;
 use crate::stages::common::cycle_guard::CycleGuard;
 use crate::stages::common::handler_error::HandlerError;
 use crate::stages::common::handlers::TransformHandler;
@@ -88,8 +88,8 @@ async fn build_cycle_entry_harness<
     upstream_subscription_factory.owner_label = "t".to_string();
 
     let instrumentation = Arc::new(crate::metrics::instrumentation::StageInstrumentation::new());
-    let control_strategy: Arc<dyn crate::stages::common::control_strategies::ControlEventStrategy> =
-        Arc::new(JonestownStrategy);
+    let control_strategy: Arc<dyn crate::stages::common::control_strategies::SignalGate> =
+        Arc::new(JonestownSignalStrategy);
 
     let mut backpressure_readers = HashMap::new();
     backpressure_readers.insert(s, registry.reader(s, t));
@@ -125,6 +125,7 @@ async fn build_cycle_entry_harness<
         contract_state: Vec::new(),
         last_contract_check: None,
         control_strategy,
+        processing_context: crate::stages::common::control_strategies::ProcessingContext::default(),
         buffered_eof: None,
         instrumentation,
         upstream_subscription_factory,
@@ -388,8 +389,8 @@ async fn build_transform_harness<
     upstream_subscription_factory.owner_label = "t".to_string();
 
     let instrumentation = Arc::new(crate::metrics::instrumentation::StageInstrumentation::new());
-    let control_strategy: Arc<dyn crate::stages::common::control_strategies::ControlEventStrategy> =
-        Arc::new(JonestownStrategy);
+    let control_strategy: Arc<dyn crate::stages::common::control_strategies::SignalGate> =
+        Arc::new(JonestownSignalStrategy);
 
     let mut backpressure_readers = HashMap::new();
     backpressure_readers.insert(s, registry.reader(s, t));
@@ -415,6 +416,7 @@ async fn build_transform_harness<
         contract_state: Vec::new(),
         last_contract_check: None,
         control_strategy,
+        processing_context: crate::stages::common::control_strategies::ProcessingContext::default(),
         buffered_eof: None,
         instrumentation,
         upstream_subscription_factory,

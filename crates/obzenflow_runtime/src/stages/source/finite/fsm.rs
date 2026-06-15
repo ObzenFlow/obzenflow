@@ -33,7 +33,7 @@ use crate::stages::common::backpressure_activity_pulse::BackpressureActivityPuls
 use crate::stages::common::stage_handle::{
     FORCE_SHUTDOWN_MESSAGE, STOP_REASON_TIMEOUT, STOP_REASON_USER_STOP,
 };
-use crate::stages::source::strategies::{SourceControlContext, SourceControlStrategy};
+use crate::stages::source::strategies::{CompletionContext, CompletionGate};
 use crate::supervised_base::idle_backoff::IdleBackoff;
 
 // ============================================================================
@@ -274,10 +274,10 @@ pub struct FiniteSourceContext<H> {
     pub instrumentation: Arc<StageInstrumentation>,
 
     /// Source control strategy for this stage
-    pub control_strategy: Arc<dyn SourceControlStrategy>,
+    pub control_strategy: Arc<dyn CompletionGate>,
 
     /// Mutable context for the source control strategy
-    pub control_context: SourceControlContext,
+    pub control_context: CompletionContext,
 
     /// Backpressure writer handle for this stage's journal (FLOWIP-086k).
     pub backpressure_writer: BackpressureWriter,
@@ -309,7 +309,7 @@ pub struct FiniteSourceContextInit {
     pub replay_archive: Option<Arc<dyn ReplayArchive>>,
     pub bus: Arc<crate::message_bus::FsmMessageBus>,
     pub instrumentation: Arc<StageInstrumentation>,
-    pub control_strategy: Arc<dyn SourceControlStrategy>,
+    pub control_strategy: Arc<dyn CompletionGate>,
     pub backpressure_writer: BackpressureWriter,
     pub output_contract: StageOutputContract,
 }
@@ -329,7 +329,7 @@ impl<H> FiniteSourceContext<H> {
             writer_id: None,
             instrumentation: init.instrumentation,
             control_strategy: init.control_strategy,
-            control_context: SourceControlContext::new(),
+            control_context: CompletionContext::new(),
             backpressure_writer: init.backpressure_writer,
             output_contract: init.output_contract,
             pending_outputs: VecDeque::new(),
@@ -420,7 +420,7 @@ impl<H: Send + Sync + 'static> FsmAction for FiniteSourceAction<H> {
                 // Determine whether EOF should be natural or poison.
                 let eof_kind = if matches!(
                     decision,
-                    crate::stages::source::strategies::SourceShutdownDecision::PoisonEof
+                    crate::stages::source::strategies::CompletionDecision::PoisonEof
                 ) {
                     EofKind::Poison
                 } else {
@@ -685,28 +685,28 @@ mod tests {
 
     use crate::stages::common::handlers::FiniteSourceHandler as TestFiniteSourceHandler;
     use crate::stages::source::strategies::{
-        SourceControlContext, SourceControlStrategy, SourceShutdownDecision,
+        CompletionContext, CompletionDecision, CompletionGate,
     };
 
     /// Test stand-in for a degraded-mode source strategy: emits a poison EOF
     /// when the shared flag is non-zero. The breaker-backed implementation
     /// lives in `obzenflow_adapters`; this FSM test only exercises the
-    /// policy-neutral `SourceShutdownDecision::PoisonEof` path.
+    /// policy-neutral `CompletionDecision::PoisonEof` path.
     #[derive(Debug)]
     struct FlagPoisonStrategy {
         state: Arc<AtomicU8>,
     }
 
-    impl SourceControlStrategy for FlagPoisonStrategy {
-        fn on_natural_completion(&self, _ctx: &mut SourceControlContext) -> SourceShutdownDecision {
+    impl CompletionGate for FlagPoisonStrategy {
+        fn on_natural_completion(&self, _ctx: &mut CompletionContext) -> CompletionDecision {
             if self.state.load(std::sync::atomic::Ordering::SeqCst) != 0 {
-                SourceShutdownDecision::PoisonEof
+                CompletionDecision::PoisonEof
             } else {
-                SourceShutdownDecision::DefaultEof
+                CompletionDecision::DefaultEof
             }
         }
 
-        fn on_begin_drain(&self, ctx: &mut SourceControlContext) -> SourceShutdownDecision {
+        fn on_begin_drain(&self, ctx: &mut CompletionContext) -> CompletionDecision {
             self.on_natural_completion(ctx)
         }
     }
@@ -862,7 +862,7 @@ mod tests {
 
         let bus = Arc::new(FsmMessageBus::new());
         // Helper to build a fresh context with a given control strategy
-        let build_ctx = |control_strategy: Arc<dyn SourceControlStrategy>| {
+        let build_ctx = |control_strategy: Arc<dyn CompletionGate>| {
             let instrumentation = Arc::new(StageInstrumentation::new());
             FiniteSourceContext::<DummySource>::new(FiniteSourceContextInit {
                 stage_id,

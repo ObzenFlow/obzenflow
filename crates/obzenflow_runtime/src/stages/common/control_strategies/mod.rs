@@ -9,11 +9,19 @@
 
 // Core types and traits
 mod core;
-pub use core::{ControlEventAction, ControlEventStrategy, ProcessingContext};
+pub use core::{ProcessingContext, SignalDecision, SignalGate};
 
 // Control signal dispatch helper
 pub(crate) mod dispatch;
 
 // Concrete strategy implementations
 mod strategies;
-pub use strategies::{BackoffStrategy, CompositeStrategy, JonestownStrategy};
+pub use strategies::{BackoffStrategy, CompositeStrategy, JonestownSignalStrategy};
+
+// Runtime control-strategy hooks (FLOWIP-115c): the admission and observation
+// hooks plus the shared `Pause` vocabulary the binding slices consume.
+mod hooks;
+pub use hooks::{
+    AdmissionDecision, AdmissionGate, AdmissionPosition, AttemptObserver, AttemptOutcome,
+    CreditWaker, PostAdmitDecision, WakeOn,
+};

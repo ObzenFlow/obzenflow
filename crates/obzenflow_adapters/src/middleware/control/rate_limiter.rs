@@ -1315,13 +1315,14 @@ mod tests {
     }
 
     #[test]
-    fn test_rate_limiter_does_not_export_control_strategy() {
+    fn test_rate_limiter_does_not_register_signal_control_point() {
         let factory = RateLimiterFactory::new(100.0).with_burst(500.0);
 
-        let strategy = factory.create_control_strategy();
+        // FLOWIP-115c: the dead `create_control_strategy` lane is gone. A rate
+        // limiter declares no inbound-signal control point.
         assert!(
-            strategy.is_none(),
-            "Rate limiter should not export a fake EOF/windowing strategy"
+            !factory.control_points().signal,
+            "Rate limiter should not register a signal control point"
         );
     }
 

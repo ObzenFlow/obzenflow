@@ -284,6 +284,7 @@ async fn dispatch_control_event<
         signal,
         envelope,
         ctx.control_strategy.as_ref(),
+        &mut ctx.processing_context,
         /* cycle_config */ None,
         /* cycle_guard */ None,
         last_eof_outcome.as_ref(),
@@ -299,7 +300,13 @@ async fn dispatch_control_event<
             duration = ?duration,
             "Sink delaying control event"
         );
-        tokio::time::sleep(duration).await;
+        let _ = crate::stages::common::supervision::suspension::suspend_until(
+            &crate::stages::common::control_strategies::WakeOn::At(
+                std::time::Instant::now() + duration,
+            ),
+            None,
+        )
+        .await;
 
         resolution = resolve_forward_control_event(
             signal,

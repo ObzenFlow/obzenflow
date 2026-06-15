@@ -14,9 +14,7 @@ use obzenflow_core::{ChainEvent, EventEnvelope, StageId};
 use crate::messaging::upstream_subscription::EofOutcome;
 use crate::pipeline::config::CycleGuardConfig;
 use crate::stages::common::control_strategies::dispatch::dispatch_control_signal;
-use crate::stages::common::control_strategies::{
-    ControlEventAction, ControlEventStrategy, ProcessingContext,
-};
+use crate::stages::common::control_strategies::{ProcessingContext, SignalDecision, SignalGate};
 use crate::stages::common::cycle_guard::CycleGuard;
 
 /// What the supervisor should do after resolving a control event.
@@ -48,7 +46,8 @@ pub(crate) enum ControlResolution {
 pub(crate) fn resolve_control_event(
     signal: &FlowControlPayload,
     envelope: &EventEnvelope<ChainEvent>,
-    strategy: &dyn ControlEventStrategy,
+    strategy: &dyn SignalGate,
+    processing_ctx: &mut ProcessingContext,
     cycle_config: Option<&CycleGuardConfig>,
     cycle_guard: Option<&mut CycleGuard>,
     eof_outcome: Option<&EofOutcome>,
@@ -56,13 +55,12 @@ pub(crate) fn resolve_control_event(
     contract_reader_count: usize,
     drain_is_terminal: bool,
 ) -> ControlResolution {
-    let mut processing_ctx = ProcessingContext::new();
-    let action = dispatch_control_signal(strategy, signal, envelope, &mut processing_ctx);
+    let action = dispatch_control_signal(strategy, signal, envelope, processing_ctx);
 
     match action {
-        ControlEventAction::Delay(duration) => ControlResolution::Delay(duration),
-        ControlEventAction::Skip => ControlResolution::Skip,
-        ControlEventAction::Forward => resolve_forward_control_event(
+        SignalDecision::Pause(duration) => ControlResolution::Delay(duration),
+        SignalDecision::SuppressSignal => ControlResolution::Skip,
+        SignalDecision::Continue => resolve_forward_control_event(
             signal,
             envelope,
             cycle_config,

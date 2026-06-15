@@ -5,7 +5,7 @@
 //! Source control strategies
 //!
 //! This module defines control strategies that are specific to
-//! source stages. While `ControlEventStrategy` in
+//! source stages. While `SignalGate` in
 //! `stages::common::control_strategies` is concerned with how
 //! stages handle *incoming* FlowControl (EOF/Drain/etc), source
 //! strategies govern how sources decide to emit FlowControl on
@@ -22,7 +22,7 @@ use std::collections::HashMap;
 /// These are intentionally stage-agnostic; individual finite / infinite
 /// source implementations map them to concrete FlowControl payloads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SourceShutdownDecision {
+pub enum CompletionDecision {
     /// Use the stage's existing / default EOF semantics.
     ///
     /// - Finite sources: natural EOF based on handler completion.
@@ -33,18 +33,6 @@ pub enum SourceShutdownDecision {
     ///
     /// Stages typically map this to `natural = false` in EOF payloads.
     PoisonEof,
-
-    /// Emit a Drain control signal without EOF.
-    ///
-    /// This allows sources to request downstream shutdown while leaving
-    /// EOF coordination to other components.
-    DrainOnly,
-
-    /// Take no action; allow the supervisor / FSM to behave as today.
-    ///
-    /// This is useful for strategies that only want to influence timing
-    /// (e.g. delay) without changing the control action.
-    Noop,
 }
 
 /// Mutable context passed to source control strategies
@@ -53,7 +41,7 @@ pub enum SourceShutdownDecision {
 /// it allows strategies to track attempts, delays, and custom state across
 /// multiple invocations for a given source.
 #[derive(Debug, Clone)]
-pub struct SourceControlContext {
+pub struct CompletionContext {
     /// Number of times shutdown has been attempted (for retry-like strategies)
     pub shutdown_attempts: usize,
 
@@ -64,7 +52,7 @@ pub struct SourceControlContext {
     pub custom_state: HashMap<String, String>,
 }
 
-impl SourceControlContext {
+impl CompletionContext {
     pub fn new() -> Self {
         Self {
             shutdown_attempts: 0,
@@ -74,7 +62,7 @@ impl SourceControlContext {
     }
 }
 
-impl Default for SourceControlContext {
+impl Default for CompletionContext {
     fn default() -> Self {
         Self::new()
     }
@@ -84,21 +72,21 @@ impl Default for SourceControlContext {
 ///
 /// Implementations can influence how finite and infinite sources behave
 /// when they complete naturally or when a drain/shutdown is requested.
-pub trait SourceControlStrategy: Send + Sync + std::fmt::Debug {
+pub trait CompletionGate: Send + Sync + std::fmt::Debug {
     /// Handle a natural completion for a finite source
     ///
     /// Called when a finite source's handler reports completion via
     /// `is_complete() == true` and the supervisor is ready to shut down.
-    fn on_natural_completion(&self, _ctx: &mut SourceControlContext) -> SourceShutdownDecision {
-        SourceShutdownDecision::DefaultEof
+    fn on_natural_completion(&self, _ctx: &mut CompletionContext) -> CompletionDecision {
+        CompletionDecision::DefaultEof
     }
 
     /// Handle a drain / shutdown request (finite or infinite)
     ///
     /// Called when the supervisor is initiating a graceful drain, e.g.
     /// due to BeginDrain or external shutdown signals.
-    fn on_begin_drain(&self, _ctx: &mut SourceControlContext) -> SourceShutdownDecision {
-        SourceShutdownDecision::DefaultEof
+    fn on_begin_drain(&self, _ctx: &mut CompletionContext) -> CompletionDecision {
+        CompletionDecision::DefaultEof
     }
 }
 
@@ -113,4 +101,4 @@ pub trait SourceControlStrategy: Send + Sync + std::fmt::Debug {
 #[derive(Debug)]
 pub struct JonestownSourceStrategy;
 
-impl SourceControlStrategy for JonestownSourceStrategy {}
+impl CompletionGate for JonestownSourceStrategy {}

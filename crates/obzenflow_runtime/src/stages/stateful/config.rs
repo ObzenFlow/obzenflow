@@ -4,7 +4,7 @@
 
 //! Configuration for stateful stages
 
-use crate::stages::common::control_strategies::ControlEventStrategy;
+use crate::stages::common::control_strategies::SignalGate;
 use obzenflow_core::StageId;
 use std::sync::Arc;
 use std::time::Duration;
@@ -27,6 +27,6 @@ pub struct StatefulConfig {
     /// Optional supervisor-driven emit interval for timer-driven emission while idle.
     pub emit_interval: Option<Duration>,
 
-    /// Control event handling strategy (defaults to JonestownStrategy if not specified)
-    pub control_strategy: Option<Arc<dyn ControlEventStrategy>>,
+    /// Control event handling strategy (defaults to JonestownSignalStrategy if not specified)
+    pub control_strategy: Option<Arc<dyn SignalGate>>,
 }

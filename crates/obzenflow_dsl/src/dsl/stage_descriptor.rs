@@ -35,7 +35,7 @@ use obzenflow_runtime::{
     pipeline::config::StageConfig,
     stages::{
         common::{
-            control_strategies::{CompositeStrategy, ControlEventStrategy, JonestownStrategy},
+            control_strategies::{JonestownSignalStrategy, SignalGate},
             handlers::{
                 AsyncFiniteSourceHandler, AsyncInfiniteSourceHandler, AsyncTransformHandler,
                 EffectfulSinkHandler, EffectfulStatefulHandler, EffectfulStatefulHandlerAdapter,
@@ -99,27 +99,14 @@ fn create_system_middleware(
     ]
 }
 
-/// Helper function to create a control strategy from resolved middleware.
+/// The signal strategy attached to every stage. FLOWIP-115c retired the dead
+/// `create_control_strategy` middleware lane (no factory ever overrode it), so
+/// every stage gets the default Jonestown poison-pill signal strategy. Policies
+/// bind to typed runtime control points instead of synthesizing a strategy.
 fn create_control_strategy_from_middleware_specs(
-    middleware: &[crate::middleware_resolution::MiddlewareSpec],
-) -> Arc<dyn ControlEventStrategy> {
-    let strategies: Vec<Box<dyn ControlEventStrategy>> = middleware
-        .iter()
-        .filter_map(|spec| spec.factory.create_control_strategy())
-        .collect();
-
-    match strategies.len() {
-        0 => Arc::new(JonestownStrategy), // Default
-        1 => {
-            // Convert Box<dyn> to Arc<dyn> for single strategy
-            let boxed = strategies.into_iter().next().unwrap();
-            Arc::from(boxed)
-        }
-        _ => {
-            // Multiple strategies - compose them
-            Arc::new(CompositeStrategy::new(strategies))
-        }
-    }
+    _middleware: &[crate::middleware_resolution::MiddlewareSpec],
+) -> Arc<dyn SignalGate> {
+    Arc::new(JonestownSignalStrategy)
 }
 
 /// Handler-surface classification for the FLOWIP-120c H1 policy-middleware

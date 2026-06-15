@@ -5,25 +5,25 @@
 //! Control signal dispatch helper
 //!
 //! Replaces the duplicated match block that every supervisor uses to map a
-//! `FlowControlPayload` variant to the appropriate `ControlEventStrategy`
+//! `FlowControlPayload` variant to the appropriate `SignalGate`
 //! method call.
 
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::{ChainEvent, EventEnvelope};
 
-use super::core::{ControlEventAction, ControlEventStrategy, ProcessingContext};
+use super::core::{ProcessingContext, SignalDecision, SignalGate};
 
 /// Dispatch a control signal to the appropriate strategy method and return the
 /// resulting action.
 ///
 /// This eliminates the per-supervisor match block that maps
-/// `FlowControlPayload` variants to `ControlEventStrategy` method calls.
+/// `FlowControlPayload` variants to `SignalGate` method calls.
 pub(crate) fn dispatch_control_signal(
-    strategy: &dyn ControlEventStrategy,
+    strategy: &dyn SignalGate,
     signal: &FlowControlPayload,
     envelope: &EventEnvelope<ChainEvent>,
     processing_ctx: &mut ProcessingContext,
-) -> ControlEventAction {
+) -> SignalDecision {
     match signal {
         FlowControlPayload::Eof { .. } => strategy.handle_eof(envelope, processing_ctx),
         FlowControlPayload::Watermark { .. } => strategy.handle_watermark(envelope, processing_ctx),
@@ -31,6 +31,6 @@ pub(crate) fn dispatch_control_signal(
             strategy.handle_checkpoint(envelope, processing_ctx)
         }
         FlowControlPayload::Drain => strategy.handle_drain(envelope, processing_ctx),
-        _ => ControlEventAction::Forward,
+        _ => SignalDecision::Continue,
     }
 }

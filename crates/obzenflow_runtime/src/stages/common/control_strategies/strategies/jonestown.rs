@@ -4,7 +4,7 @@
 
 //! Default Jonestown strategy - forward EOF and terminate immediately
 
-use super::super::{ControlEventAction, ControlEventStrategy, ProcessingContext};
+use super::super::{ProcessingContext, SignalDecision, SignalGate};
 use obzenflow_core::event::event_envelope::EventEnvelope;
 use obzenflow_core::ChainEvent;
 
@@ -14,15 +14,15 @@ use obzenflow_core::ChainEvent;
 /// this strategy ensures coordinated shutdown across the entire pipeline.
 /// When an EOF is received, it is immediately forwarded downstream and the
 /// stage terminates its processing loop.
-pub struct JonestownStrategy;
+pub struct JonestownSignalStrategy;
 
-impl ControlEventStrategy for JonestownStrategy {
+impl SignalGate for JonestownSignalStrategy {
     fn handle_eof(
         &self,
         _envelope: &EventEnvelope<ChainEvent>,
         _ctx: &mut ProcessingContext,
-    ) -> ControlEventAction {
+    ) -> SignalDecision {
         // Simple and direct: forward EOF immediately
-        ControlEventAction::Forward
+        SignalDecision::Continue
     }
 }
