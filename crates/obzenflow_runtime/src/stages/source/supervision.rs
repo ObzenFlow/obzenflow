@@ -12,9 +12,13 @@ use crate::feed_plan::StageOutputContract;
 use crate::metrics::instrumentation::StageInstrumentation;
 use crate::stages::common::backpressure_activity_pulse::BackpressureActivityPulse;
 use crate::stages::common::heartbeat::HeartbeatState;
+use crate::stages::common::control_strategies::{
+    AdmissionDecision, AdmissionGate, AdmissionPosition, PostAdmitDecision,
+};
 use crate::stages::common::supervision::backpressure_drain::{
     drain_one_pending, drain_one_pending_resolve, DrainAttempt, DrainOutcome,
 };
+use crate::stages::common::supervision::suspension::suspend_until;
 use crate::supervised_base::idle_backoff::IdleBackoff;
 use crate::supervised_base::{EventLoopDirective, EventReceiver};
 use obzenflow_core::event::context::FlowContext;
@@ -194,6 +198,126 @@ where
     }
 
     Ok(None)
+}
+
+/// Outcome of consulting the source `PrePoll` admission gate around one poll
+/// (FLOWIP-115a).
+pub(crate) enum PrePollDecision<E> {
+    /// The gate allows the poll, or there is no gate.
+    Proceed,
+    /// An external control event (drain, EOF, cancellation, shutdown) won the
+    /// race against a gate pause; the supervisor transitions on it.
+    Interrupted(EventLoopDirective<E>),
+    /// A circuit breaker rejected the attempt terminally; the supervisor routes
+    /// this to the completion path so the `CompletionGate` emits a poison EOF.
+    RejectToCompletion { reason: String },
+}
+
+/// Outcome of consulting the source `PostAdmit` admission gate for a held finite
+/// batch (the FLOWIP-114m charge point).
+pub(crate) enum HeldDecision<E> {
+    /// The held batch may be staged.
+    Proceed,
+    /// An external control event won the race; the caller aborts the held batch
+    /// and transitions on the event.
+    Interrupted(EventLoopDirective<E>),
+}
+
+/// Consult the source `PrePoll` admission gate, with the supervisor owning any
+/// pause wait (FLOWIP-115a, FLOWIP-115c).
+///
+/// When `external_events` is `Some` (async sources) a gate `Pause` is raced in a
+/// `biased` select against the control channel, so drain, EOF, cancellation, and
+/// shutdown interrupt the wait (FLOWIP-114o). When `None` (sync sources) the wait
+/// is documented-blocking. Source policies pause with `WakeOn::At`, which is
+/// self-bounded, so no stall cap is passed.
+pub(crate) async fn admit_prepoll<E>(
+    gate: Option<&Arc<dyn AdmissionGate>>,
+    external_events: Option<&mut EventReceiver<E>>,
+    on_channel_closed: impl FnOnce() -> E,
+) -> PrePollDecision<E> {
+    let Some(gate) = gate else {
+        return PrePollDecision::Proceed;
+    };
+    let mut external_events = external_events;
+    let mut on_channel_closed = Some(on_channel_closed);
+    loop {
+        match gate.admit(AdmissionPosition::PrePoll) {
+            AdmissionDecision::Continue => return PrePollDecision::Proceed,
+            AdmissionDecision::RejectAttempt { reason } => {
+                return PrePollDecision::RejectToCompletion { reason }
+            }
+            // Source policies do not synthesize a fallback in 115a; proceed.
+            AdmissionDecision::SynthesizeFallback { .. } => return PrePollDecision::Proceed,
+            AdmissionDecision::Pause { wake } => match external_events.as_deref_mut() {
+                Some(receiver) => {
+                    tokio::select! {
+                        biased;
+                        maybe_event = receiver.recv() => {
+                            let event = match maybe_event {
+                                Some(event) => event,
+                                None => (on_channel_closed
+                                    .take()
+                                    .expect("on_channel_closed available"))(),
+                            };
+                            return PrePollDecision::Interrupted(
+                                EventLoopDirective::Transition(event),
+                            );
+                        }
+                        _ = suspend_until(&wake, None) => {}
+                    }
+                }
+                None => {
+                    suspend_until(&wake, None).await;
+                }
+            },
+        }
+    }
+}
+
+/// Consult the source `PostAdmit` admission gate for a held finite batch
+/// (FLOWIP-115a, FLOWIP-114m).
+///
+/// Same interruption contract as [`admit_prepoll`]. On `Interrupted` the caller
+/// must abort the held batch, settling its attempt as aborted and dropping the
+/// batch without staging, so the batch is never delivered, charged, or counted.
+pub(crate) async fn admit_held<E>(
+    gate: Option<&Arc<dyn AdmissionGate>>,
+    external_events: Option<&mut EventReceiver<E>>,
+    on_channel_closed: impl FnOnce() -> E,
+) -> HeldDecision<E> {
+    let Some(gate) = gate else {
+        return HeldDecision::Proceed;
+    };
+    let mut external_events = external_events;
+    let mut on_channel_closed = Some(on_channel_closed);
+    loop {
+        match gate.admit_held() {
+            PostAdmitDecision::Continue => return HeldDecision::Proceed,
+            PostAdmitDecision::Pause { wake } => match external_events.as_deref_mut() {
+                Some(receiver) => {
+                    tokio::select! {
+                        biased;
+                        maybe_event = receiver.recv() => {
+                            let event = match maybe_event {
+                                Some(event) => event,
+                                None => (on_channel_closed
+                                    .take()
+                                    .expect("on_channel_closed available"))(),
+                            };
+                            return HeldDecision::Interrupted(
+                                EventLoopDirective::Transition(event),
+                            );
+                        }
+                        _ = suspend_until(&wake, None) => {}
+                    }
+                }
+                None => {
+                    suspend_until(&wake, None).await;
+                }
+            },
+        }
+    }
 }
 
 #[cfg(test)]

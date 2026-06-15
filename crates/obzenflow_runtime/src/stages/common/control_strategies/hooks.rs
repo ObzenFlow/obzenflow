@@ -16,7 +16,6 @@
 //! yet. The signal hook lives in [`super::core`] (adapted in place) and the
 //! completion hook in the source FSMs.
 
-use super::ProcessingContext;
 use std::sync::Arc;
 
 /// Why and when a paused supervisor should re-check its gate.
@@ -130,11 +129,11 @@ pub enum AttemptOutcome {
 /// wire the consultation sites.
 pub trait AdmissionGate: Send + Sync {
     /// Decide whether an attempt may proceed at a rejecting position.
-    fn admit(&self, position: AdmissionPosition, ctx: &mut ProcessingContext) -> AdmissionDecision;
+    fn admit(&self, position: AdmissionPosition) -> AdmissionDecision;
 
     /// Decide whether an already-produced unit may proceed (`PostAdmit`). The
     /// return type cannot reject, preserving FLOWIP-114m's no-drop rule.
-    fn admit_held(&self, _ctx: &mut ProcessingContext) -> PostAdmitDecision {
+    fn admit_held(&self) -> PostAdmitDecision {
         PostAdmitDecision::Continue
     }
 }
@@ -187,11 +186,7 @@ mod tests {
     }
 
     impl AdmissionGate for FixedGate {
-        fn admit(
-            &self,
-            position: AdmissionPosition,
-            _ctx: &mut ProcessingContext,
-        ) -> AdmissionDecision {
+        fn admit(&self, position: AdmissionPosition) -> AdmissionDecision {
             match self.decision {
                 "continue" => AdmissionDecision::Continue,
                 "reject" => AdmissionDecision::RejectAttempt {
@@ -206,14 +201,13 @@ mod tests {
 
     #[test]
     fn admission_gate_answers_per_position() {
-        let mut ctx = ProcessingContext::new();
         let gate = FixedGate { decision: "reject" };
-        match gate.admit(AdmissionPosition::PrePoll, &mut ctx) {
+        match gate.admit(AdmissionPosition::PrePoll) {
             AdmissionDecision::RejectAttempt { reason } => assert!(reason.contains("PrePoll")),
             other => panic!("expected reject, got {other:?}"),
         }
         // `admit_held` cannot reject: its type has only Continue / Pause.
-        match gate.admit_held(&mut ctx) {
+        match gate.admit_held() {
             PostAdmitDecision::Continue => {}
             PostAdmitDecision::Pause { .. } => {}
         }

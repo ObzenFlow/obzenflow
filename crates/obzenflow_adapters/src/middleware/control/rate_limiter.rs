@@ -57,6 +57,9 @@ use obzenflow_core::event::payloads::observability_payload::{
 };
 use obzenflow_core::{StageId, WriterId};
 use obzenflow_runtime::pipeline::config::StageConfig;
+use obzenflow_runtime::stages::common::control_strategies::{
+    AdmissionDecision, AdmissionGate, AdmissionPosition, PostAdmitDecision, WakeOn,
+};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 // FLOWIP-114o: the limiter's token-bucket refill and stats windows read
@@ -919,6 +922,102 @@ impl crate::middleware::SourcePacer for RateLimiterMiddleware {
     }
 }
 
+/// FLOWIP-115a: source admission gate for the token-bucket rate limiter.
+///
+/// Shares the bucket and stats with [`RateLimiterMiddleware`], so the metrics
+/// snapshotter stays accurate regardless of which surface admits. The supervisor
+/// owns the wait: the gate reports `Pause { wake: WakeOn::At(..) }` rather than
+/// sleeping internally (the FLOWIP-115c control inversion). Finite sources charge
+/// at `PostAdmit` (FLOWIP-114m delivery-side charging, only a successful
+/// non-empty poll); infinite sources gate at `PrePoll`.
+#[allow(dead_code)] // Constructed and registered by FLOWIP-115a Step 4 wiring.
+struct RateLimiterAdmissionGate {
+    bucket: Arc<Mutex<TokenBucket>>,
+    stats: Arc<Mutex<RateLimiterStats>>,
+    cost_per_event: f64,
+    charge_at: AdmissionPosition,
+}
+
+#[allow(dead_code)]
+impl RateLimiterAdmissionGate {
+    fn new(
+        bucket: Arc<Mutex<TokenBucket>>,
+        stats: Arc<Mutex<RateLimiterStats>>,
+        cost_per_event: f64,
+        charge_at: AdmissionPosition,
+    ) -> Self {
+        Self {
+            bucket,
+            stats,
+            cost_per_event,
+            charge_at,
+        }
+    }
+
+    /// Consume one event's cost, or report the wait until the next token.
+    /// Updates the shared stats so the metrics snapshotter stays accurate
+    /// (`delay_seconds_total` is omitted here because the supervisor, not the
+    /// gate, owns the wait).
+    fn charge_or_wait(&self) -> Option<Duration> {
+        let mut bucket = self.bucket.lock().expect("rate-limiter bucket poisoned");
+        if bucket.try_consume(self.cost_per_event) {
+            drop(bucket);
+            if let Ok(mut stats) = self.stats.lock() {
+                stats.events_total += 1;
+                stats.tokens_consumed_total += self.cost_per_event;
+                stats.events_window += 1;
+                stats.tokens_consumed_window += self.cost_per_event;
+            }
+            None
+        } else {
+            let wait = bucket
+                .time_until_available(self.cost_per_event)
+                .unwrap_or(Duration::from_millis(10));
+            drop(bucket);
+            if let Ok(mut stats) = self.stats.lock() {
+                stats.delayed_total += 1;
+                stats.delayed_window += 1;
+                stats.pulse_delayed_events += 1;
+            }
+            Some(wait)
+        }
+    }
+
+    /// Anchor the deadline to the same Tokio clock the bucket refills against
+    /// (FLOWIP-114o), then hand the runtime a std `Instant` for `WakeOn::At`.
+    fn wake_at(wait: Duration) -> WakeOn {
+        WakeOn::At((Instant::now() + wait).into_std())
+    }
+}
+
+impl AdmissionGate for RateLimiterAdmissionGate {
+    fn admit(&self, position: AdmissionPosition) -> AdmissionDecision {
+        // Only charge at this limiter's configured position. On a finite source
+        // the PrePoll consult passes through; the charge happens at PostAdmit.
+        if position != self.charge_at {
+            return AdmissionDecision::Continue;
+        }
+        match self.charge_or_wait() {
+            None => AdmissionDecision::Continue,
+            Some(wait) => AdmissionDecision::Pause {
+                wake: Self::wake_at(wait),
+            },
+        }
+    }
+
+    fn admit_held(&self) -> PostAdmitDecision {
+        if self.charge_at != AdmissionPosition::PostAdmit {
+            return PostAdmitDecision::Continue;
+        }
+        match self.charge_or_wait() {
+            None => PostAdmitDecision::Continue,
+            Some(wait) => PostAdmitDecision::Pause {
+                wake: Self::wake_at(wait),
+            },
+        }
+    }
+}
+
 /// Builder for constructing rate limiter middleware factories.
 ///
 /// Every factory built here produces independent per-attachment buckets; see the
@@ -1079,6 +1178,37 @@ impl MiddlewareFactory for RateLimiterFactory {
             control_middleware,
             Some(effect_type.to_string()),
         )))
+    }
+
+    fn register_source_policy(
+        &self,
+        config: &StageConfig,
+        stage_type: obzenflow_core::event::context::StageType,
+        control_middleware: &std::sync::Arc<super::ControlMiddlewareAggregator>,
+    ) {
+        use obzenflow_core::event::context::StageType as St;
+        let Ok(validated) = self.validated_config() else {
+            // An invalid config surfaces through `create`; nothing to register.
+            return;
+        };
+        // FLOWIP-114m: finite (and any non-infinite) source charges on a
+        // successful delivery at PostAdmit; an infinite source paces pre-poll.
+        let charge_at = match stage_type {
+            St::InfiniteSource => AdmissionPosition::PrePoll,
+            _ => AdmissionPosition::PostAdmit,
+        };
+        // Building the limiter registers its metrics snapshotter exactly as the
+        // chain path does; the gate shares the bucket and stats, and the limiter
+        // value itself is dropped (only its Arc state lives on through the gate).
+        let middleware =
+            RateLimiterMiddleware::new(config.stage_id, validated, control_middleware.clone());
+        let gate = RateLimiterAdmissionGate::new(
+            middleware.bucket.clone(),
+            middleware.stats.clone(),
+            middleware.cost_per_event,
+            charge_at,
+        );
+        control_middleware.register_source_admission(config.stage_id, std::sync::Arc::new(gate));
     }
 
     fn supported_stage_types(&self) -> &[StageType] {

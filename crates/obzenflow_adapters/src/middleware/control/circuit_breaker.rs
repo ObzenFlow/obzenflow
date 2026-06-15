@@ -36,7 +36,10 @@ use obzenflow_core::MiddlewareExecutionScope;
 use obzenflow_core::TypedPayload;
 use obzenflow_core::{StageId, WriterId};
 use obzenflow_runtime::pipeline::config::StageConfig;
-use obzenflow_runtime::stages::common::control_strategies::BackoffStrategy;
+use obzenflow_runtime::stages::common::control_strategies::{
+    AdmissionDecision, AdmissionGate, AdmissionPosition, AttemptObserver, AttemptOutcome,
+    BackoffStrategy, WakeOn,
+};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::json;
@@ -352,6 +355,10 @@ pub struct CircuitBreakerMiddleware {
     probe_gate: Arc<Mutex<()>>,
     /// Monotonic epoch for half-open probe outcomes.
     probe_generation: Arc<AtomicU64>,
+    /// FLOWIP-115a: the probe generation reserved by the source admission gate,
+    /// read by the paired attempt observer to settle it. Plain instance state is
+    /// safe because a source supervisor polls sequentially.
+    source_pending_probe: Arc<Mutex<Option<u64>>>,
     /// Statistics for periodic summaries
     stats: Arc<Mutex<CircuitBreakerStats>>,
     /// When the last state change occurred
@@ -477,6 +484,7 @@ impl CircuitBreakerMiddleware {
             probe_in_flight: Arc::new(AtomicU32::new(0)),
             probe_gate: Arc::new(Mutex::new(())),
             probe_generation: Arc::new(AtomicU64::new(0)),
+            source_pending_probe: Arc::new(Mutex::new(None)),
             stats: Arc::new(Mutex::new(CircuitBreakerStats {
                 requests_processed: 0,
                 requests_rejected: 0,
@@ -664,10 +672,10 @@ impl CircuitBreakerMiddleware {
     /// Attempt an atomic state transition. Returns `true` if this call won
     /// the CAS race and the transition was applied, `false` if another thread
     /// already moved the state (or old == new).
-    fn transition_to(&self, new_state: CircuitState, ctx: &mut MiddlewareContext) -> bool {
+    fn transition_to_inner(&self, new_state: CircuitState) -> (bool, Option<ChainEvent>) {
         let old_state = self.current_state();
         if old_state == new_state {
-            return false;
+            return (false, None);
         }
 
         // Atomically swap old → new so that concurrent callers cannot both
@@ -683,7 +691,7 @@ impl CircuitBreakerMiddleware {
             .is_err()
         {
             // Another thread already moved the state; our transition is stale.
-            return false;
+            return (false, None);
         }
 
         // Accumulate time-in-state for the state we're leaving and advance the transition timer.
@@ -780,15 +788,26 @@ impl CircuitBreakerMiddleware {
             }
         };
 
-        ctx.write_control_event(event);
-
         tracing::info!(
             "Circuit breaker state transition: {:?} -> {:?}",
             old_state,
             new_state
         );
 
-        true
+        (true, Some(event))
+    }
+
+    /// Context-aware wrapper around [`transition_to_inner`] that writes the
+    /// lifecycle event into the middleware context (the effect and handler
+    /// paths). The FLOWIP-115a source control ports call `transition_to_inner`
+    /// directly and defer the lifecycle event; the metrics snapshotter still
+    /// reflects the transition.
+    fn transition_to(&self, new_state: CircuitState, ctx: &mut MiddlewareContext) -> bool {
+        let (transitioned, event) = self.transition_to_inner(new_state);
+        if let Some(event) = event {
+            ctx.write_control_event(event);
+        }
+        transitioned
     }
 
     /// Force the circuit breaker into the Closed state, resetting failure
@@ -817,6 +836,128 @@ impl CircuitBreakerMiddleware {
             }
         } else {
             false
+        }
+    }
+
+    /// FLOWIP-115a: source `PrePoll` admission, reusing the same state machine as
+    /// `pre_handle` without a middleware context. Reserves a probe slot in
+    /// HalfOpen and records its generation for the paired observer settle.
+    fn source_admit(&self) -> SourceAdmit {
+        match self.current_state() {
+            CircuitState::Closed => SourceAdmit::Continue,
+            CircuitState::Open => {
+                if self.should_attempt_reset() {
+                    {
+                        let _probe_gate = self.probe_gate.lock().ok();
+                        let (transitioned, _event) =
+                            self.transition_to_inner(CircuitState::HalfOpen);
+                        if transitioned {
+                            self.probe_generation.fetch_add(1, Ordering::SeqCst);
+                            self.success_count.store(0, Ordering::Relaxed);
+                        }
+                    }
+                    self.source_reserve_probe()
+                } else {
+                    let cooldown_remaining = self
+                        .opened_at
+                        .lock()
+                        .ok()
+                        .and_then(|guard| *guard)
+                        .map(|opened_at| self.cooldown.saturating_sub(opened_at.elapsed()))
+                        .unwrap_or(self.cooldown);
+                    SourceAdmit::Pause(cooldown_remaining)
+                }
+            }
+            CircuitState::HalfOpen => self.source_reserve_probe(),
+        }
+    }
+
+    /// Reserve a half-open probe slot via the same CAS loop as `pre_handle`,
+    /// or back off briefly when all slots are in use.
+    fn source_reserve_probe(&self) -> SourceAdmit {
+        let _probe_gate = self.probe_gate.lock().ok();
+        let generation = self.probe_generation.load(Ordering::SeqCst);
+        let permitted = self.half_open_policy.permitted_probes.get();
+        let mut current = self.probe_in_flight.load(Ordering::SeqCst);
+        loop {
+            if current >= permitted {
+                return SourceAdmit::Pause(Duration::from_millis(1));
+            }
+            match self.probe_in_flight.compare_exchange(
+                current,
+                current + 1,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(_) => {
+                    if let Ok(mut pending) = self.source_pending_probe.lock() {
+                        *pending = Some(generation);
+                    }
+                    return SourceAdmit::Continue;
+                }
+                Err(actual) => current = actual,
+            }
+        }
+    }
+
+    /// FLOWIP-115a: settle a source attempt against the per-poll outcome (the
+    /// ratified per-attempt model). A probe closes on success and reopens on
+    /// failure; a Closed-state poll error counts toward opening in Consecutive
+    /// mode. RateBased source breakers count failures but are not yet tripped on
+    /// this path. Lifecycle events are deferred; counters stay accurate.
+    fn source_settle(&self, outcome: SourceOutcome) {
+        let pending = self
+            .source_pending_probe
+            .lock()
+            .ok()
+            .and_then(|mut pending| pending.take());
+
+        if let Some(generation) = pending {
+            let _probe_gate = self.probe_gate.lock().ok();
+            self.probe_in_flight.fetch_sub(1, Ordering::SeqCst);
+
+            if generation == self.probe_generation.load(Ordering::SeqCst)
+                && matches!(self.current_state(), CircuitState::HalfOpen)
+            {
+                match outcome {
+                    SourceOutcome::Success => {
+                        self.success_count.fetch_add(1, Ordering::Relaxed);
+                        self.successes_total.fetch_add(1, Ordering::Relaxed);
+                        if self.transition_to_inner(CircuitState::Closed).0 {
+                            self.failure_count.store(0, Ordering::SeqCst);
+                        }
+                    }
+                    SourceOutcome::Failure => {
+                        self.failures_total.fetch_add(1, Ordering::Relaxed);
+                        self.transition_to_inner(CircuitState::Open);
+                    }
+                    SourceOutcome::Inconclusive => {}
+                }
+            }
+            return;
+        }
+
+        match outcome {
+            SourceOutcome::Success => {
+                self.successes_total.fetch_add(1, Ordering::Relaxed);
+                self.failure_count.store(0, Ordering::SeqCst);
+            }
+            SourceOutcome::Failure => {
+                self.failures_total.fetch_add(1, Ordering::Relaxed);
+                let consecutive = self.failure_count.fetch_add(1, Ordering::SeqCst) + 1;
+                match &self.failure_mode {
+                    CircuitBreakerFailureMode::Consecutive { max_failures } => {
+                        if (consecutive as u32) >= max_failures.get() {
+                            self.transition_to_inner(CircuitState::Open);
+                        }
+                    }
+                    CircuitBreakerFailureMode::RateBased { .. } => {
+                        // FLOWIP-115a: rate-based source breakers count failures
+                        // but are not yet tripped on the source path.
+                    }
+                }
+            }
+            SourceOutcome::Inconclusive => {}
         }
     }
 
@@ -1011,6 +1152,69 @@ impl CircuitBreakerMiddleware {
             open.as_secs_f64(),
             half_open.as_secs_f64(),
         )
+    }
+}
+
+/// FLOWIP-115a: the source `PrePoll` admission answer from
+/// [`CircuitBreakerMiddleware::source_admit`].
+#[derive(Debug, Clone, Copy)]
+#[allow(dead_code)] // Used by the source control ports wired in Step 4.
+enum SourceAdmit {
+    Continue,
+    Pause(Duration),
+}
+
+/// FLOWIP-115a: the source-path outcome handed to
+/// [`CircuitBreakerMiddleware::source_settle`].
+#[derive(Debug, Clone, Copy)]
+#[allow(dead_code)] // Used by the source control ports wired in Step 4.
+enum SourceOutcome {
+    /// The poll produced output or reached a clean EOF.
+    Success,
+    /// The poll returned an error.
+    Failure,
+    /// The attempt was aborted or skipped (drain, shutdown) before an outcome;
+    /// the probe slot is released but breaker state is unchanged.
+    Inconclusive,
+}
+
+/// FLOWIP-115a: source admission gate for the circuit breaker. Shares one
+/// `Arc<CircuitBreakerMiddleware>` with the attempt observer and the completion
+/// strategy, so all three faces read and write the same breaker state.
+#[allow(dead_code)] // Constructed and registered by FLOWIP-115a Step 4 wiring.
+struct CircuitBreakerAdmissionGate {
+    breaker: Arc<CircuitBreakerMiddleware>,
+}
+
+impl AdmissionGate for CircuitBreakerAdmissionGate {
+    fn admit(&self, _position: AdmissionPosition) -> AdmissionDecision {
+        match self.breaker.source_admit() {
+            SourceAdmit::Continue => AdmissionDecision::Continue,
+            // The breaker is std-clocked (its cooldown uses `std::time::Instant`),
+            // so the back-off deadline is a std `Instant`.
+            SourceAdmit::Pause(delay) => AdmissionDecision::Pause {
+                wake: WakeOn::At(Instant::now() + delay),
+            },
+        }
+    }
+}
+
+/// FLOWIP-115a: source attempt observer that settles the circuit breaker probe
+/// and Closed-state failure counting against the per-poll outcome.
+#[allow(dead_code)] // Constructed and registered by FLOWIP-115a Step 4 wiring.
+struct CircuitBreakerAttemptObserver {
+    breaker: Arc<CircuitBreakerMiddleware>,
+}
+
+#[async_trait::async_trait]
+impl AttemptObserver for CircuitBreakerAttemptObserver {
+    fn observe(&self, _position: AdmissionPosition, outcome: &AttemptOutcome) {
+        let source_outcome = match outcome {
+            AttemptOutcome::Succeeded => SourceOutcome::Success,
+            AttemptOutcome::Failed { .. } => SourceOutcome::Failure,
+            AttemptOutcome::Aborted { .. } | AttemptOutcome::Skipped => SourceOutcome::Inconclusive,
+        };
+        self.breaker.source_settle(source_outcome);
     }
 }
 
@@ -2417,12 +2621,12 @@ impl CircuitBreakerFactory {
 impl CircuitBreakerFactory {
     /// Shared materialization for stage-level and per-effect instances
     /// (FLOWIP-120c): the key decides where the snapshotter registers.
-    fn create_keyed(
+    fn build_middleware_keyed(
         &self,
         config: &StageConfig,
         control_middleware: std::sync::Arc<super::ControlMiddlewareAggregator>,
         effect_type: Option<String>,
-    ) -> crate::middleware::MiddlewareFactoryResult<Box<dyn Middleware>> {
+    ) -> crate::middleware::MiddlewareFactoryResult<CircuitBreakerMiddleware> {
         let validated_threshold = self.validated_threshold().map_err(|err| {
             MiddlewareFactoryError::invalid_configuration(self.label(), &config.name, err)
         })?;
@@ -2544,7 +2748,23 @@ impl CircuitBreakerFactory {
             ),
         }
 
-        Ok(Box::new(middleware))
+        Ok(middleware)
+    }
+
+    /// Box the breaker middleware for the per-event chain (effect and handler
+    /// paths). FLOWIP-115a sources build the same instance as an `Arc` via
+    /// [`build_middleware_keyed`] and drive it through the runtime control ports.
+    fn create_keyed(
+        &self,
+        config: &StageConfig,
+        control_middleware: std::sync::Arc<super::ControlMiddlewareAggregator>,
+        effect_type: Option<String>,
+    ) -> crate::middleware::MiddlewareFactoryResult<Box<dyn Middleware>> {
+        Ok(Box::new(self.build_middleware_keyed(
+            config,
+            control_middleware,
+            effect_type,
+        )?))
     }
 }
 
@@ -2588,6 +2808,33 @@ impl MiddlewareFactory for CircuitBreakerFactory {
         effect_type: &str,
     ) -> crate::middleware::MiddlewareFactoryResult<Box<dyn Middleware>> {
         self.create_keyed(config, control_middleware, Some(effect_type.to_string()))
+    }
+
+    fn register_source_policy(
+        &self,
+        config: &StageConfig,
+        _stage_type: obzenflow_core::event::context::StageType,
+        control_middleware: &std::sync::Arc<super::ControlMiddlewareAggregator>,
+    ) {
+        // Build one breaker instance (registering its cb_state and snapshotter,
+        // which the CompletionGate and metrics path read), then share it across
+        // the admission gate and the attempt observer. The breaker gates
+        // pre-poll regardless of source kind, so stage type is irrelevant here.
+        let Ok(middleware) = self.build_middleware_keyed(config, control_middleware.clone(), None)
+        else {
+            return;
+        };
+        let breaker = std::sync::Arc::new(middleware);
+        control_middleware.register_source_admission(
+            config.stage_id,
+            std::sync::Arc::new(CircuitBreakerAdmissionGate {
+                breaker: breaker.clone(),
+            }),
+        );
+        control_middleware.register_source_observer(
+            config.stage_id,
+            std::sync::Arc::new(CircuitBreakerAttemptObserver { breaker }),
+        );
     }
 
     fn safety_level(&self) -> MiddlewareSafety {

@@ -12,6 +12,7 @@ use obzenflow_core::control_middleware::{
     CircuitBreakerSnapshotter, ControlMiddlewareProvider, RateLimiterSnapshotter,
 };
 use obzenflow_core::id::StageId;
+use obzenflow_runtime::stages::common::control_strategies::{AdmissionGate, AttemptObserver};
 use std::collections::HashMap;
 use std::sync::atomic::AtomicU8;
 use std::sync::{Arc, RwLock};
@@ -38,6 +39,12 @@ type ControlKey = (StageId, Option<String>);
 pub struct ControlMiddlewareAggregator {
     circuit_breakers: RwLock<HashMap<ControlKey, CircuitBreakerRegistration>>,
     rate_limiters: RwLock<HashMap<ControlKey, RateLimiterRegistration>>,
+    // FLOWIP-115a: runtime-owned source control ports, registered by the rate
+    // limiter and circuit breaker and looked up by the source descriptor. A
+    // source can carry several policies (e.g. a rate limiter and a circuit
+    // breaker), so each key holds a list the supervisor consults in order.
+    source_admission_gates: RwLock<HashMap<ControlKey, Vec<Arc<dyn AdmissionGate>>>>,
+    source_attempt_observers: RwLock<HashMap<ControlKey, Vec<Arc<dyn AttemptObserver>>>>,
 }
 
 impl ControlMiddlewareAggregator {
@@ -109,6 +116,51 @@ impl ControlMiddlewareAggregator {
             .write()
             .expect("ControlMiddlewareAggregator: rate_limiters poisoned write lock")
             .insert((stage_id, effect_type), registration);
+    }
+
+    /// FLOWIP-115a: append a source admission gate (rate limiter or circuit
+    /// breaker) for a stage, looked up by the source descriptor and driven by
+    /// the source supervisor.
+    pub fn register_source_admission(&self, stage_id: StageId, gate: Arc<dyn AdmissionGate>) {
+        self.source_admission_gates
+            .write()
+            .expect("ControlMiddlewareAggregator: source_admission_gates poisoned write lock")
+            .entry((stage_id, None))
+            .or_default()
+            .push(gate);
+    }
+
+    /// FLOWIP-115a: append a source attempt observer (circuit breaker
+    /// probe-settle) for a stage.
+    pub fn register_source_observer(&self, stage_id: StageId, observer: Arc<dyn AttemptObserver>) {
+        self.source_attempt_observers
+            .write()
+            .expect("ControlMiddlewareAggregator: source_attempt_observers poisoned write lock")
+            .entry((stage_id, None))
+            .or_default()
+            .push(observer);
+    }
+
+    /// FLOWIP-115a: the source admission gates registered for a stage, in
+    /// registration order.
+    pub fn source_admission_gates(&self, stage_id: &StageId) -> Vec<Arc<dyn AdmissionGate>> {
+        self.source_admission_gates
+            .read()
+            .expect("ControlMiddlewareAggregator: source_admission_gates poisoned read lock")
+            .get(&(*stage_id, None))
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// FLOWIP-115a: the source attempt observers registered for a stage, in
+    /// registration order.
+    pub fn source_attempt_observers(&self, stage_id: &StageId) -> Vec<Arc<dyn AttemptObserver>> {
+        self.source_attempt_observers
+            .read()
+            .expect("ControlMiddlewareAggregator: source_attempt_observers poisoned read lock")
+            .get(&(*stage_id, None))
+            .cloned()
+            .unwrap_or_default()
     }
 }
 
