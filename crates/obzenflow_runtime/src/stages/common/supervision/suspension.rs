@@ -112,6 +112,11 @@ impl AdmittedAttempt {
             if let Err(error) = observer.settle(self.position, &outcome).await {
                 if first_error.is_none() {
                     first_error = Some(error);
+                } else {
+                    tracing::warn!(
+                        error = %error,
+                        "additional admitted-attempt observer settle failed"
+                    );
                 }
             }
         }

@@ -281,33 +281,32 @@ When more than one strategy is active, `CompositeStrategy` runs all of them and 
 
 ### How a signal flows through the supervisor
 
-The gate's decision feeds into `resolve_control_event`, a pure function in `stages/common/supervision/control_resolution.rs`. It takes the signal, the gate, the durable `ProcessingContext`, and the cycle and contract context, and returns a runtime-internal `ControlResolution`:
+The supervisor calls `resolve_control_event_awaiting_pauses` in `stages/common/supervision/control_resolution.rs`. That helper repeatedly calls the pure `resolve_control_event`, owns any `Pause` wait, and returns only after the signal has resolved to a non-delay runtime action:
 
 ```text
 Control signal arrives in dispatch_state
     │
     ▼
-resolve_control_event(signal, gate, &mut processing_ctx, cycle_config, ...)
+resolve_control_event_awaiting_pauses(signal, gate, &mut processing_ctx, cycle_config, ...)
     │
     ├── gate.handle_eof() / handle_drain() / ...
     │   returns SignalDecision (Continue / Pause / SuppressSignal)
     │
     ├── Continue:       apply cycle guard and EOF logic
     │                   returns ControlResolution (Forward / ForwardAndDrain / Suppress / BufferAtEntryPoint)
-    │   Pause(d)        maps to ControlResolution::Delay(d)
+    │   Pause(d)        maps to ControlResolution::Delay(d), waits, then re-resolves
     │   SuppressSignal  maps to ControlResolution::Skip
     │
     ▼
-Supervisor acts on ControlResolution
+Supervisor acts on ReadyControlResolution
     ├── Forward:             write signal downstream, return Continue
     ├── ForwardAndDrain:     write signal downstream, return Transition(BeginDrain)
     ├── Suppress:            drop signal, return Continue
     ├── BufferAtEntryPoint:  store signal for later release (cycle convergence)
-    ├── Delay(d):            suspend_until the deadline, then re-resolve
     └── Skip:                drop signal, return Continue
 ```
 
-`resolve_control_event` is a pure function. It computes the decision without performing I/O. The supervisor then executes it, by writing to journals, suspending, or returning the appropriate `EventLoopDirective`. This is the same "decide then act" separation the run loop enforces for FSM transitions.
+`resolve_control_event` remains pure. It computes the decision without performing I/O. The async helper owns only the bounded pause/re-check loop. The supervisor then executes the delay-free result, by writing to journals or returning the appropriate `EventLoopDirective`. This is the same "decide then act" separation the run loop enforces for FSM transitions.
 
 ### Bounded suspension: the one place a pause becomes an await
 

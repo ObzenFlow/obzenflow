@@ -4,9 +4,10 @@
 
 //! Control event resolution helpers.
 //!
-//! Pure/sync functions that compute what a supervisor should do when it
-//! encounters EOF or Drain signals. The actual execution (forwarding, state
-//! transitions) is left to the caller.
+//! The pure resolver computes what a supervisor should do when it encounters
+//! EOF or Drain signals. The async driver owns signal `Pause` waits and
+//! re-consults the same hook until the strategy returns a non-delay outcome.
+//! The actual execution (forwarding, state transitions) is left to the caller.
 
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::{ChainEvent, EventEnvelope, StageId};
@@ -14,8 +15,11 @@ use obzenflow_core::{ChainEvent, EventEnvelope, StageId};
 use crate::messaging::upstream_subscription::EofOutcome;
 use crate::pipeline::config::CycleGuardConfig;
 use crate::stages::common::control_strategies::dispatch::dispatch_control_signal;
-use crate::stages::common::control_strategies::{ProcessingContext, SignalDecision, SignalGate};
+use crate::stages::common::control_strategies::{
+    ProcessingContext, SignalDecision, SignalGate, WakeOn,
+};
 use crate::stages::common::cycle_guard::CycleGuard;
+use crate::stages::common::supervision::suspension::suspend_until;
 
 /// What the supervisor should do after resolving a control event.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -36,6 +40,71 @@ pub(crate) enum ControlResolution {
     Delay(std::time::Duration),
     /// Skip the event entirely (dangerous, used by control strategies).
     Skip,
+}
+
+/// A control resolution after all signal pauses have been awaited.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ReadyControlResolution {
+    Forward,
+    ForwardAndDrain,
+    BufferAtEntryPoint { is_drain: bool },
+    Suppress,
+    Skip,
+}
+
+/// Resolve a control event, awaiting every `Pause` and re-consulting the same
+/// signal hook after each wake.
+///
+/// Non-source supervisors are not interrupted by wrapper-level control events
+/// while they are inside this wait. That is intentional: strategies that return
+/// repeated pauses must be self-limiting through a bounded deadline, attempt
+/// count, or other state in [`ProcessingContext`].
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn resolve_control_event_awaiting_pauses(
+    signal: &FlowControlPayload,
+    envelope: &EventEnvelope<ChainEvent>,
+    strategy: &dyn SignalGate,
+    processing_ctx: &mut ProcessingContext,
+    cycle_config: Option<&CycleGuardConfig>,
+    mut cycle_guard: Option<&mut CycleGuard>,
+    eof_outcome: Option<&EofOutcome>,
+    upstream_stage: Option<StageId>,
+    contract_reader_count: usize,
+    drain_is_terminal: bool,
+    stage_name: &str,
+) -> ReadyControlResolution {
+    loop {
+        match resolve_control_event(
+            signal,
+            envelope,
+            strategy,
+            processing_ctx,
+            cycle_config,
+            cycle_guard.as_deref_mut(),
+            eof_outcome,
+            upstream_stage,
+            contract_reader_count,
+            drain_is_terminal,
+        ) {
+            ControlResolution::Forward => return ReadyControlResolution::Forward,
+            ControlResolution::ForwardAndDrain => return ReadyControlResolution::ForwardAndDrain,
+            ControlResolution::BufferAtEntryPoint { is_drain } => {
+                return ReadyControlResolution::BufferAtEntryPoint { is_drain };
+            }
+            ControlResolution::Suppress => return ReadyControlResolution::Suppress,
+            ControlResolution::Skip => return ReadyControlResolution::Skip,
+            ControlResolution::Delay(duration) => {
+                tracing::info!(
+                    stage_name = %stage_name,
+                    event_type = envelope.event.event_type(),
+                    duration = ?duration,
+                    "Delaying control event"
+                );
+                let _ =
+                    suspend_until(&WakeOn::At(std::time::Instant::now() + duration), None).await;
+            }
+        }
+    }
 }
 
 /// Resolve a control event into a `ControlResolution`.
