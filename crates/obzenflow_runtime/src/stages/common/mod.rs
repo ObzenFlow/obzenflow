@@ -32,6 +32,12 @@ pub use handler_error::HandlerError;
 
 // Re-export control strategies
 pub use control_strategies::{
-    BackoffStrategy, CompositeStrategy, ControlEventAction, ControlEventStrategy,
-    JonestownStrategy, ProcessingContext,
+    BackoffStrategy, CompositeStrategy, JonestownSignalStrategy, ProcessingContext, SignalDecision,
+    SignalGate,
+};
+
+// Re-export the FLOWIP-115c runtime control-strategy hooks.
+pub use control_strategies::{
+    AdmissionDecision, AdmissionGate, AdmissionPosition, AttemptObserver, AttemptOutcome,
+    CreditWaker, PostAdmitDecision, WakeOn,
 };

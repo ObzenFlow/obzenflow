@@ -9,5 +9,5 @@ mod jonestown;
 mod retry;
 
 pub use composite::CompositeStrategy;
-pub use jonestown::JonestownStrategy;
+pub use jonestown::JonestownSignalStrategy;
 pub use retry::BackoffStrategy;

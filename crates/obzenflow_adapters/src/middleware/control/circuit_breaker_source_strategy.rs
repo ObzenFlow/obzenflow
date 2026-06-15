@@ -5,7 +5,7 @@
 //! Circuit breaker-aware source control strategy.
 //!
 //! FLOWIP-120h relocated this from `obzenflow_runtime`: the runtime owns the
-//! policy-neutral `SourceControlStrategy` port and the `Poison` EOF signal,
+//! policy-neutral `CompletionGate` port and the `Poison` EOF signal,
 //! while this breaker-named implementation belongs with the breaker in the
 //! adapters ring.
 
@@ -13,7 +13,7 @@ use obzenflow_core::control_middleware::{cb_state, ControlMiddlewareProvider};
 use obzenflow_core::StageId;
 use obzenflow_runtime::metrics::instrumentation::ControlBindError;
 use obzenflow_runtime::stages::source::strategies::{
-    SourceControlContext, SourceControlStrategy, SourceShutdownDecision,
+    CompletionContext, CompletionDecision, CompletionGate,
 };
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
@@ -53,21 +53,21 @@ impl CircuitBreakerSourceStrategy {
     }
 }
 
-impl SourceControlStrategy for CircuitBreakerSourceStrategy {
-    fn on_natural_completion(&self, _ctx: &mut SourceControlContext) -> SourceShutdownDecision {
+impl CompletionGate for CircuitBreakerSourceStrategy {
+    fn on_natural_completion(&self, _ctx: &mut CompletionContext) -> CompletionDecision {
         if self.is_breaker_open() {
-            SourceShutdownDecision::PoisonEof
+            CompletionDecision::PoisonEof
         } else {
-            SourceShutdownDecision::DefaultEof
+            CompletionDecision::DefaultEof
         }
     }
 
-    fn on_begin_drain(&self, _ctx: &mut SourceControlContext) -> SourceShutdownDecision {
+    fn on_begin_drain(&self, _ctx: &mut CompletionContext) -> CompletionDecision {
         if self.is_breaker_open() {
             // For now, align drain with poison EOF semantics when breaker is open.
-            SourceShutdownDecision::PoisonEof
+            CompletionDecision::PoisonEof
         } else {
-            SourceShutdownDecision::DefaultEof
+            CompletionDecision::DefaultEof
         }
     }
 }

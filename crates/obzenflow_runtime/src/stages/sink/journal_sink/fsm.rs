@@ -14,7 +14,7 @@ use crate::messaging::upstream_subscription::{ContractConfig, ContractsWiring, R
 use crate::messaging::UpstreamSubscription;
 use crate::metrics::instrumentation::StageInstrumentation;
 use crate::replay::ReplayArchive;
-use crate::stages::common::control_strategies::ControlEventStrategy;
+use crate::stages::common::control_strategies::SignalGate;
 use crate::stages::common::handlers::UnifiedSinkHandler;
 use crate::stages::common::heartbeat::HeartbeatHandle;
 use crate::stages::common::supervision::lifecycle_actions;
@@ -339,7 +339,10 @@ pub struct JournalSinkContext<H: UnifiedSinkHandler> {
     pub upstream_subscription_factory: BoundSubscriptionFactory,
 
     /// Control strategy for FlowControl events
-    pub control_strategy: Arc<dyn ControlEventStrategy>,
+    pub control_strategy: Arc<dyn SignalGate>,
+
+    /// Durable per-stage signal-strategy scratch (FLOWIP-115c).
+    pub processing_context: crate::stages::common::control_strategies::ProcessingContext,
 
     /// Backpressure writer handle for this stage's journal (FLOWIP-086k).
     pub backpressure_writer: BackpressureWriter,

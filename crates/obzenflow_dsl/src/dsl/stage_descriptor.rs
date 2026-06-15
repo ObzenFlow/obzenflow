@@ -35,7 +35,7 @@ use obzenflow_runtime::{
     pipeline::config::StageConfig,
     stages::{
         common::{
-            control_strategies::{CompositeStrategy, ControlEventStrategy, JonestownStrategy},
+            control_strategies::{JonestownSignalStrategy, SignalGate},
             handlers::{
                 AsyncFiniteSourceHandler, AsyncInfiniteSourceHandler, AsyncTransformHandler,
                 EffectfulSinkHandler, EffectfulStatefulHandler, EffectfulStatefulHandlerAdapter,
@@ -99,27 +99,14 @@ fn create_system_middleware(
     ]
 }
 
-/// Helper function to create a control strategy from resolved middleware.
-fn create_control_strategy_from_middleware_specs(
-    middleware: &[crate::middleware_resolution::MiddlewareSpec],
-) -> Arc<dyn ControlEventStrategy> {
-    let strategies: Vec<Box<dyn ControlEventStrategy>> = middleware
-        .iter()
-        .filter_map(|spec| spec.factory.create_control_strategy())
-        .collect();
-
-    match strategies.len() {
-        0 => Arc::new(JonestownStrategy), // Default
-        1 => {
-            // Convert Box<dyn> to Arc<dyn> for single strategy
-            let boxed = strategies.into_iter().next().unwrap();
-            Arc::from(boxed)
-        }
-        _ => {
-            // Multiple strategies - compose them
-            Arc::new(CompositeStrategy::new(strategies))
-        }
-    }
+/// The signal strategy attached to every stage. FLOWIP-115c retired the dead
+/// `create_control_strategy` middleware lane (no factory ever overrode it), so
+/// every stage gets the default Jonestown poison-pill signal strategy. Policies
+/// bind to typed runtime control points instead of synthesizing a strategy.
+fn create_default_signal_strategy(
+    _middleware: &[crate::middleware_resolution::MiddlewareSpec],
+) -> Arc<dyn SignalGate> {
+    Arc::new(JonestownSignalStrategy)
 }
 
 /// Handler-surface classification for the FLOWIP-120c H1 policy-middleware
@@ -1048,7 +1035,7 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Stag
 
         // Log the resolution
         crate::middleware_resolution::log_resolved_middleware(&config.name, &resolved);
-        let control_strategy = create_control_strategy_from_middleware_specs(&resolved.middleware);
+        let control_strategy = create_default_signal_strategy(&resolved.middleware);
 
         // Create instrumentation configuration
         let instrumentation_config = InstrumentationConfig::default();
@@ -1192,7 +1179,7 @@ impl<H: AsyncTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
 
         // Log the resolution
         crate::middleware_resolution::log_resolved_middleware(&config.name, &resolved);
-        let control_strategy = create_control_strategy_from_middleware_specs(&resolved.middleware);
+        let control_strategy = create_default_signal_strategy(&resolved.middleware);
 
         // Create instrumentation configuration
         let instrumentation_config = InstrumentationConfig::default();
@@ -1388,7 +1375,7 @@ impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
             &config.name,
         )?;
         crate::middleware_resolution::log_resolved_middleware(&config.name, &resolved);
-        let control_strategy = create_control_strategy_from_middleware_specs(&resolved.middleware);
+        let control_strategy = create_default_signal_strategy(&resolved.middleware);
 
         let instrumentation_config = InstrumentationConfig::default();
         let mut instrumentation = StageInstrumentation::new_with_config(instrumentation_config);
@@ -1580,7 +1567,7 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
 
         // Log the resolution
         crate::middleware_resolution::log_resolved_middleware(&config.name, &resolved);
-        let control_strategy = create_control_strategy_from_middleware_specs(&resolved.middleware);
+        let control_strategy = create_default_signal_strategy(&resolved.middleware);
 
         // Create instrumentation configuration
         let instrumentation_config = InstrumentationConfig::default();
@@ -1931,7 +1918,7 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Stage
 
         // Log the resolution
         crate::middleware_resolution::log_resolved_middleware(&config.name, &resolved);
-        let control_strategy = create_control_strategy_from_middleware_specs(&resolved.middleware);
+        let control_strategy = create_default_signal_strategy(&resolved.middleware);
 
         // Create instrumentation configuration
         let instrumentation_config = InstrumentationConfig::default();
@@ -2122,7 +2109,7 @@ impl<H: EffectfulStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
             &config.name,
         )?;
         crate::middleware_resolution::log_resolved_middleware(&config.name, &resolved);
-        let control_strategy = create_control_strategy_from_middleware_specs(&resolved.middleware);
+        let control_strategy = create_default_signal_strategy(&resolved.middleware);
 
         let instrumentation_config = InstrumentationConfig::default();
         let mut instrumentation = StageInstrumentation::new_with_config(instrumentation_config);
@@ -2300,7 +2287,7 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
 
         // Log the resolution
         crate::middleware_resolution::log_resolved_middleware(&config.name, &resolved);
-        let control_strategy = create_control_strategy_from_middleware_specs(&resolved.middleware);
+        let control_strategy = create_default_signal_strategy(&resolved.middleware);
 
         // Create instrumentation configuration
         let instrumentation_config = InstrumentationConfig::default();

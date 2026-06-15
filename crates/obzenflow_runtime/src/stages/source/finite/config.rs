@@ -4,7 +4,7 @@
 
 //! Configuration for finite source stages
 
-use crate::stages::source::strategies::SourceControlStrategy;
+use crate::stages::source::strategies::CompletionGate;
 use obzenflow_core::StageId;
 use std::sync::Arc;
 
@@ -22,5 +22,5 @@ pub struct FiniteSourceConfig {
 
     /// Optional source control strategy for shutdown / FlowControl decisions.
     /// When not provided, the builder will default to JonestownSourceStrategy.
-    pub control_strategy: Option<Arc<dyn SourceControlStrategy>>,
+    pub control_strategy: Option<Arc<dyn CompletionGate>>,
 }

@@ -4,7 +4,7 @@
 
 use super::backpressure_drain::{drain_one_pending, DrainOutcome};
 use super::control_resolution::{
-    resolve_control_event, resolve_forward_control_event, ControlResolution,
+    resolve_control_event, resolve_forward_control_event, ControlAction, ControlResolution,
 };
 use super::flow_context_factory::make_flow_context;
 use crate::backpressure::{BackpressurePlan, BackpressureRegistry, BackpressureWriter};
@@ -15,9 +15,7 @@ use crate::metrics::instrumentation::StageInstrumentation;
 use crate::pipeline::config::CycleGuardConfig;
 use crate::pipeline::MaxIterations;
 use crate::stages::common::backpressure_activity_pulse::BackpressureActivityPulse;
-use crate::stages::common::control_strategies::{
-    ControlEventAction, ControlEventStrategy, ProcessingContext,
-};
+use crate::stages::common::control_strategies::{ProcessingContext, SignalDecision, SignalGate};
 use crate::stages::common::cycle_guard::CycleGuard;
 use crate::supervised_base::idle_backoff::IdleBackoff;
 use async_trait::async_trait;
@@ -41,17 +39,17 @@ use ulid::Ulid;
 
 #[derive(Debug)]
 struct FixedActionStrategy {
-    eof: ControlEventAction,
-    drain: ControlEventAction,
-    other: ControlEventAction,
+    eof: SignalDecision,
+    drain: SignalDecision,
+    other: SignalDecision,
 }
 
-impl ControlEventStrategy for FixedActionStrategy {
+impl SignalGate for FixedActionStrategy {
     fn handle_eof(
         &self,
         _envelope: &EventEnvelope<ChainEvent>,
         _ctx: &mut ProcessingContext,
-    ) -> ControlEventAction {
+    ) -> SignalDecision {
         self.eof.clone()
     }
 
@@ -59,7 +57,7 @@ impl ControlEventStrategy for FixedActionStrategy {
         &self,
         _envelope: &EventEnvelope<ChainEvent>,
         _ctx: &mut ProcessingContext,
-    ) -> ControlEventAction {
+    ) -> SignalDecision {
         self.other.clone()
     }
 
@@ -67,7 +65,7 @@ impl ControlEventStrategy for FixedActionStrategy {
         &self,
         _envelope: &EventEnvelope<ChainEvent>,
         _ctx: &mut ProcessingContext,
-    ) -> ControlEventAction {
+    ) -> SignalDecision {
         self.other.clone()
     }
 
@@ -75,8 +73,27 @@ impl ControlEventStrategy for FixedActionStrategy {
         &self,
         _envelope: &EventEnvelope<ChainEvent>,
         _ctx: &mut ProcessingContext,
-    ) -> ControlEventAction {
+    ) -> SignalDecision {
         self.drain.clone()
+    }
+}
+
+#[derive(Debug)]
+struct PauseEofOnceStrategy;
+
+impl SignalGate for PauseEofOnceStrategy {
+    fn handle_eof(
+        &self,
+        _envelope: &EventEnvelope<ChainEvent>,
+        ctx: &mut ProcessingContext,
+    ) -> SignalDecision {
+        if ctx.custom_state.contains_key("paused_eof_once") {
+            return SignalDecision::Continue;
+        }
+
+        ctx.custom_state
+            .insert("paused_eof_once".to_string(), "true".to_string());
+        SignalDecision::Pause(std::time::Duration::from_millis(1))
     }
 }
 
@@ -104,9 +121,9 @@ fn resolve_control_event_entry_point_suppresses_non_terminal_forwarded_eof() {
     };
 
     let strategy = FixedActionStrategy {
-        eof: ControlEventAction::Forward,
-        drain: ControlEventAction::Forward,
-        other: ControlEventAction::Forward,
+        eof: SignalDecision::Continue,
+        drain: SignalDecision::Continue,
+        other: SignalDecision::Continue,
     };
 
     let cfg = entry_point_config(upstream);
@@ -116,6 +133,7 @@ fn resolve_control_event_entry_point_suppresses_non_terminal_forwarded_eof() {
         signal,
         &envelope,
         &strategy,
+        &mut crate::stages::common::control_strategies::ProcessingContext::new(),
         Some(&cfg),
         Some(&mut guard),
         None,
@@ -124,7 +142,10 @@ fn resolve_control_event_entry_point_suppresses_non_terminal_forwarded_eof() {
         true,
     );
 
-    assert_eq!(resolution, ControlResolution::Suppress);
+    assert_eq!(
+        resolution,
+        ControlResolution::Ready(ControlAction::Suppress)
+    );
 }
 
 #[test]
@@ -139,9 +160,9 @@ fn resolve_control_event_entry_point_buffers_external_terminal_eof() {
     };
 
     let strategy = FixedActionStrategy {
-        eof: ControlEventAction::Forward,
-        drain: ControlEventAction::Forward,
-        other: ControlEventAction::Forward,
+        eof: SignalDecision::Continue,
+        drain: SignalDecision::Continue,
+        other: SignalDecision::Continue,
     };
 
     let cfg = entry_point_config(upstream);
@@ -151,6 +172,7 @@ fn resolve_control_event_entry_point_buffers_external_terminal_eof() {
         signal,
         &envelope,
         &strategy,
+        &mut crate::stages::common::control_strategies::ProcessingContext::new(),
         Some(&cfg),
         Some(&mut guard),
         None,
@@ -161,7 +183,7 @@ fn resolve_control_event_entry_point_buffers_external_terminal_eof() {
 
     assert_eq!(
         resolution,
-        ControlResolution::BufferAtEntryPoint { is_drain: false }
+        ControlResolution::Ready(ControlAction::BufferAtEntryPoint { is_drain: false })
     );
 }
 
@@ -178,9 +200,9 @@ fn resolve_control_event_entry_point_suppresses_internal_terminal_eof() {
     };
 
     let strategy = FixedActionStrategy {
-        eof: ControlEventAction::Forward,
-        drain: ControlEventAction::Forward,
-        other: ControlEventAction::Forward,
+        eof: SignalDecision::Continue,
+        drain: SignalDecision::Continue,
+        other: SignalDecision::Continue,
     };
 
     let cfg = entry_point_config(external);
@@ -190,6 +212,7 @@ fn resolve_control_event_entry_point_suppresses_internal_terminal_eof() {
         signal,
         &envelope,
         &strategy,
+        &mut crate::stages::common::control_strategies::ProcessingContext::new(),
         Some(&cfg),
         Some(&mut guard),
         None,
@@ -198,7 +221,10 @@ fn resolve_control_event_entry_point_suppresses_internal_terminal_eof() {
         true,
     );
 
-    assert_eq!(resolution, ControlResolution::Suppress);
+    assert_eq!(
+        resolution,
+        ControlResolution::Ready(ControlAction::Suppress)
+    );
 }
 
 #[test]
@@ -213,9 +239,9 @@ fn resolve_control_event_drain_respects_stage_policy() {
     };
 
     let strategy = FixedActionStrategy {
-        eof: ControlEventAction::Forward,
-        drain: ControlEventAction::Forward,
-        other: ControlEventAction::Forward,
+        eof: SignalDecision::Continue,
+        drain: SignalDecision::Continue,
+        other: SignalDecision::Continue,
     };
 
     let mut guard = CycleGuard::new(
@@ -229,6 +255,7 @@ fn resolve_control_event_drain_respects_stage_policy() {
         signal,
         &envelope,
         &strategy,
+        &mut crate::stages::common::control_strategies::ProcessingContext::new(),
         None,
         Some(&mut guard),
         None,
@@ -236,12 +263,16 @@ fn resolve_control_event_drain_respects_stage_policy() {
         1,
         true,
     );
-    assert_eq!(terminal, ControlResolution::ForwardAndDrain);
+    assert_eq!(
+        terminal,
+        ControlResolution::Ready(ControlAction::ForwardAndDrain)
+    );
 
     let non_terminal = resolve_control_event(
         signal,
         &envelope,
         &strategy,
+        &mut crate::stages::common::control_strategies::ProcessingContext::new(),
         None,
         Some(&mut guard),
         None,
@@ -249,7 +280,10 @@ fn resolve_control_event_drain_respects_stage_policy() {
         1,
         false,
     );
-    assert_eq!(non_terminal, ControlResolution::Forward);
+    assert_eq!(
+        non_terminal,
+        ControlResolution::Ready(ControlAction::Forward)
+    );
 }
 
 #[test]
@@ -289,7 +323,7 @@ fn resolve_forward_control_event_notes_cycle_eof_before_resolving() {
         true,
     );
 
-    assert_eq!(resolution, ControlResolution::ForwardAndDrain);
+    assert_eq!(resolution, ControlAction::ForwardAndDrain);
     assert!(guard.has_seen_all_upstream_eofs(1));
 }
 
@@ -323,7 +357,7 @@ fn resolve_forward_control_event_does_not_note_non_terminal_forwarded_eof() {
         true,
     );
 
-    assert_eq!(resolution, ControlResolution::Forward);
+    assert_eq!(resolution, ControlAction::Forward);
     assert!(!guard.has_seen_all_upstream_eofs(1));
 }
 
@@ -339,9 +373,9 @@ fn resolve_control_event_strategy_skip_prevents_cycle_guard_note() {
     };
 
     let strategy = FixedActionStrategy {
-        eof: ControlEventAction::Skip,
-        drain: ControlEventAction::Forward,
-        other: ControlEventAction::Forward,
+        eof: SignalDecision::SuppressSignal,
+        drain: SignalDecision::Continue,
+        other: SignalDecision::Continue,
     };
 
     let eof_outcome = EofOutcome {
@@ -364,6 +398,7 @@ fn resolve_control_event_strategy_skip_prevents_cycle_guard_note() {
         signal,
         &envelope,
         &strategy,
+        &mut crate::stages::common::control_strategies::ProcessingContext::new(),
         None,
         Some(&mut guard),
         Some(&eof_outcome),
@@ -372,7 +407,7 @@ fn resolve_control_event_strategy_skip_prevents_cycle_guard_note() {
         true,
     );
 
-    assert_eq!(resolution, ControlResolution::Skip);
+    assert_eq!(resolution, ControlResolution::Ready(ControlAction::Skip));
     assert!(!guard.has_seen_all_upstream_eofs(1));
 }
 
@@ -388,9 +423,9 @@ fn resolve_control_event_delay_does_not_note_cycle_guard() {
     };
 
     let strategy = FixedActionStrategy {
-        eof: ControlEventAction::Delay(std::time::Duration::from_millis(1)),
-        drain: ControlEventAction::Forward,
-        other: ControlEventAction::Forward,
+        eof: SignalDecision::Pause(std::time::Duration::from_millis(1)),
+        drain: SignalDecision::Continue,
+        other: SignalDecision::Continue,
     };
 
     let mut guard = CycleGuard::new(
@@ -404,6 +439,7 @@ fn resolve_control_event_delay_does_not_note_cycle_guard() {
         signal,
         &envelope,
         &strategy,
+        &mut crate::stages::common::control_strategies::ProcessingContext::new(),
         None,
         Some(&mut guard),
         None,
@@ -414,13 +450,13 @@ fn resolve_control_event_delay_does_not_note_cycle_guard() {
 
     assert_eq!(
         resolution,
-        ControlResolution::Delay(std::time::Duration::from_millis(1))
+        ControlResolution::Pause(std::time::Duration::from_millis(1))
     );
     assert!(!guard.has_seen_all_upstream_eofs(1));
 }
 
 #[test]
-fn resolve_control_event_delay_then_forward_notes_cycle_guard_on_second_pass() {
+fn resolve_control_event_delay_then_reconsult_notes_cycle_guard_on_second_pass() {
     let upstream = StageId::new_const(1);
 
     let eof = ChainEventFactory::eof_event(WriterId::from(upstream), true);
@@ -430,11 +466,7 @@ fn resolve_control_event_delay_then_forward_notes_cycle_guard_on_second_pass() {
         _ => unreachable!(),
     };
 
-    let strategy = FixedActionStrategy {
-        eof: ControlEventAction::Delay(std::time::Duration::from_millis(1)),
-        drain: ControlEventAction::Forward,
-        other: ControlEventAction::Forward,
-    };
+    let strategy = PauseEofOnceStrategy;
 
     let mut guard = CycleGuard::new(
         MaxIterations::new(30),
@@ -443,10 +475,13 @@ fn resolve_control_event_delay_then_forward_notes_cycle_guard_on_second_pass() {
         "t",
     );
 
+    let mut processing_ctx = crate::stages::common::control_strategies::ProcessingContext::new();
+
     let first_pass = resolve_control_event(
         signal,
         &envelope,
         &strategy,
+        &mut processing_ctx,
         None,
         Some(&mut guard),
         None,
@@ -456,16 +491,18 @@ fn resolve_control_event_delay_then_forward_notes_cycle_guard_on_second_pass() {
     );
     assert_eq!(
         first_pass,
-        ControlResolution::Delay(std::time::Duration::from_millis(1))
+        ControlResolution::Pause(std::time::Duration::from_millis(1))
     );
     assert!(
         !guard.has_seen_all_upstream_eofs(1),
         "Delay pass must not note upstream EOF"
     );
 
-    let second_pass = resolve_forward_control_event(
+    let second_pass = resolve_control_event(
         signal,
         &envelope,
+        &strategy,
+        &mut processing_ctx,
         None,
         Some(&mut guard),
         None,
@@ -473,7 +510,10 @@ fn resolve_control_event_delay_then_forward_notes_cycle_guard_on_second_pass() {
         1,
         true,
     );
-    assert_eq!(second_pass, ControlResolution::ForwardAndDrain);
+    assert_eq!(
+        second_pass,
+        ControlResolution::Ready(ControlAction::ForwardAndDrain)
+    );
     assert!(
         guard.has_seen_all_upstream_eofs(1),
         "forward pass must note upstream EOF"

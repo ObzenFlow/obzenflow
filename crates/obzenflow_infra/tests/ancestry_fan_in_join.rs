@@ -16,7 +16,7 @@ use obzenflow_core::journal::Journal;
 use obzenflow_core::{FlowId, StageId, SystemId, TypedPayload, WriterId};
 use obzenflow_infra::journal::disk::disk_journal::DiskJournal;
 use obzenflow_runtime::id_conversions::StageIdExt;
-use obzenflow_runtime::stages::common::control_strategies::JonestownStrategy;
+use obzenflow_runtime::stages::common::control_strategies::JonestownSignalStrategy;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::join::handle::JoinHandleExt;
 use obzenflow_runtime::stages::join::{JoinBuilder, JoinConfig};
@@ -374,7 +374,7 @@ async fn drain_only_output_inherits_reference_and_stream_ancestry_even_if_no_out
         .take_stage_resources(join_stage)
         .expect("join resources exist");
 
-    let control = Arc::new(JonestownStrategy);
+    let control = Arc::new(JonestownSignalStrategy);
     let mut join_config = JoinConfig::new(
         join_stage,
         "ancestry_drain_only",
@@ -570,7 +570,7 @@ async fn conservative_reference_ancestry_overclaims_distinct_reference_writers()
         .take_stage_resources(join_stage)
         .expect("join resources exist");
 
-    let control = Arc::new(JonestownStrategy);
+    let control = Arc::new(JonestownSignalStrategy);
     let mut join_config = JoinConfig::new(
         join_stage,
         "ancestry_overclaim",
@@ -758,7 +758,7 @@ async fn fan_out_outputs_all_carry_merged_ancestry_from_both_sides() {
         .take_stage_resources(join_stage)
         .expect("join resources exist");
 
-    let control = Arc::new(JonestownStrategy);
+    let control = Arc::new(JonestownSignalStrategy);
     let mut join_config = JoinConfig::new(
         join_stage,
         "ancestry_fan_out",
@@ -965,7 +965,7 @@ async fn error_journal_entries_carry_merged_parent_ancestry() {
         .take_stage_resources(join_stage)
         .expect("join resources exist");
 
-    let control = Arc::new(JonestownStrategy);
+    let control = Arc::new(JonestownSignalStrategy);
     let mut join_config = JoinConfig::new(
         join_stage,
         "ancestry_error_journal",

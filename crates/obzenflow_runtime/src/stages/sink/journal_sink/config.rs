@@ -4,7 +4,7 @@
 
 //! Configuration for journal sink stages
 
-use crate::stages::common::control_strategies::ControlEventStrategy;
+use crate::stages::common::control_strategies::SignalGate;
 use obzenflow_core::StageId;
 use std::sync::Arc;
 
@@ -30,5 +30,5 @@ pub struct JournalSinkConfig {
     pub flush_interval_ms: Option<u64>,
 
     /// Control strategy for handling FlowControl events (defaults applied in builder)
-    pub control_strategy: Option<Arc<dyn ControlEventStrategy>>,
+    pub control_strategy: Option<Arc<dyn SignalGate>>,
 }

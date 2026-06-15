@@ -11,7 +11,7 @@
 use super::{Middleware, MiddlewareHints, MiddlewareSafety};
 use obzenflow_core::event::context::StageType;
 use obzenflow_runtime::pipeline::config::StageConfig;
-use obzenflow_runtime::stages::common::control_strategies::ControlEventStrategy;
+use obzenflow_runtime::stages::common::control_strategies::AdmissionPosition;
 use std::any::TypeId;
 use std::error::Error as StdError;
 use std::hash::{Hash, Hasher};
@@ -203,13 +203,13 @@ pub trait MiddlewareFactory: Send + Sync {
         self.create(config, control_middleware)
     }
 
-    /// Create a control event strategy if this middleware needs one
-    ///
-    /// Most middleware don't need special control event handling and can
-    /// return None. Middleware that needs delay or barrier logic (like
-    /// windowing) should return their strategy.
-    fn create_control_strategy(&self) -> Option<Box<dyn ControlEventStrategy>> {
-        None
+    /// Declare which runtime control points (FLOWIP-115c) this factory's policy
+    /// registers gates at. The dead `create_control_strategy` downcast lane is
+    /// retired; policies bind to typed control points in the source (115a),
+    /// effect (115b), sink (115d), and backpressure (115e) slices. Defaults to
+    /// none.
+    fn control_points(&self) -> ControlPointRegistration {
+        ControlPointRegistration::default()
     }
 
     /// Which stage types this middleware supports
@@ -251,6 +251,30 @@ pub trait MiddlewareFactory: Send + Sync {
     /// Default returns None for middleware that doesn't need config exposure.
     fn config_snapshot(&self) -> Option<serde_json::Value> {
         None
+    }
+}
+
+/// Typed declaration of which runtime control points a policy registers
+/// (FLOWIP-115c). Replaces the retired `create_control_strategy` downcast lane:
+/// a factory states the points it binds gates at, and the binding slices wire
+/// the concrete gates. Defaults to none, so structural middleware needs no
+/// override.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ControlPointRegistration {
+    /// Registers an inbound-signal gate.
+    pub signal: bool,
+    /// Registers admission gates at these named positions.
+    pub admission_positions: Vec<AdmissionPosition>,
+    /// Registers a completion gate (source terminal emission).
+    pub completion: bool,
+    /// Registers an attempt observer.
+    pub observation: bool,
+}
+
+impl ControlPointRegistration {
+    /// Whether this factory declares an admission gate at `position`.
+    pub fn admits_at(&self, position: AdmissionPosition) -> bool {
+        self.admission_positions.contains(&position)
     }
 }
 
@@ -297,8 +321,8 @@ impl<F: MiddlewareFactory + ?Sized> MiddlewareFactory for Box<F> {
         (**self).create_for_effect(config, control_middleware, effect_type)
     }
 
-    fn create_control_strategy(&self) -> Option<Box<dyn ControlEventStrategy>> {
-        (**self).create_control_strategy()
+    fn control_points(&self) -> ControlPointRegistration {
+        (**self).control_points()
     }
 
     fn supported_stage_types(&self) -> &[StageType] {

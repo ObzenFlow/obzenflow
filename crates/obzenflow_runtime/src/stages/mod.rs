@@ -16,10 +16,15 @@ pub mod transform;
 pub use common::handlers::source::SourceError;
 pub use common::{new_liveness_snapshots, LivenessSnapshots};
 pub use common::{
-    ControlEventAction, ControlEventStrategy, EffectfulSinkHandler, EffectfulStatefulHandler,
-    EffectfulTransformHandler, FiniteSourceHandler, HeartbeatConfig, InfiniteSourceHandler,
-    ObserverHandler, ProcessingContext, ResourceManaged, SinkHandler, StatefulHandler,
-    TransformHandler,
+    EffectfulSinkHandler, EffectfulStatefulHandler, EffectfulTransformHandler, FiniteSourceHandler,
+    HeartbeatConfig, InfiniteSourceHandler, ObserverHandler, ProcessingContext, ResourceManaged,
+    SignalDecision, SignalGate, SinkHandler, StatefulHandler, TransformHandler,
+};
+
+// FLOWIP-115c runtime control-strategy hooks.
+pub use common::{
+    AdmissionDecision, AdmissionGate, AdmissionPosition, AttemptObserver, AttemptOutcome,
+    CreditWaker, PostAdmitDecision, WakeOn,
 };
 
 // Re-export JoinHandler from common::handlers

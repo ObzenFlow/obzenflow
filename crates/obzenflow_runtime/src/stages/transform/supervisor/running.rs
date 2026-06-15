@@ -11,7 +11,7 @@ use crate::stages::common::handlers::transform::traits::UnifiedTransformHandler;
 use crate::stages::common::heartbeat::HeartbeatProcessingGuard;
 use crate::stages::common::supervision::backpressure_drain::{drain_one_pending, DrainOutcome};
 use crate::stages::common::supervision::control_resolution::{
-    is_terminal_eof, resolve_control_event, resolve_forward_control_event, ControlResolution,
+    is_terminal_eof, resolve_control_event_awaiting_pauses, ControlAction,
 };
 use crate::stages::common::supervision::error_routing::route_to_error_journal;
 use crate::stages::common::supervision::flow_context_factory::make_flow_context;
@@ -238,41 +238,23 @@ async fn dispatch_running_inner<
                     let is_cycle_entry_point = cycle_config.is_some_and(|cfg| cfg.is_entry_point);
                     let contract_reader_count = ctx.contract_state.len();
 
-                    let mut resolution = resolve_control_event(
+                    let resolution = resolve_control_event_awaiting_pauses(
                         signal,
                         &envelope,
                         ctx.control_strategy.as_ref(),
+                        &mut ctx.processing_context,
                         cycle_config,
                         sup.cycle_guard.as_mut(),
                         last_eof_outcome.as_ref(),
                         upstream_stage,
                         contract_reader_count,
                         /* drain_is_terminal */ true,
-                    );
-
-                    if let ControlResolution::Delay(duration) = resolution {
-                        tracing::info!(
-                            stage_name = %ctx.stage_name,
-                            event_type = envelope.event.event_type(),
-                            duration = ?duration,
-                            "Delaying control event"
-                        );
-                        tokio::time::sleep(duration).await;
-
-                        resolution = resolve_forward_control_event(
-                            signal,
-                            &envelope,
-                            cycle_config,
-                            sup.cycle_guard.as_mut(),
-                            last_eof_outcome.as_ref(),
-                            upstream_stage,
-                            contract_reader_count,
-                            /* drain_is_terminal */ true,
-                        );
-                    }
+                        &ctx.stage_name,
+                    )
+                    .await;
 
                     match resolution {
-                        ControlResolution::Forward => {
+                        ControlAction::Forward => {
                             if envelope.event.is_eof() {
                                 if let Some(subscription) = sup.subscription.as_mut() {
                                     if is_cycle_entry_point {
@@ -297,7 +279,7 @@ async fn dispatch_running_inner<
                             sup.forward_control_event_guarded(&envelope).await?;
                             EventLoopDirective::Continue
                         }
-                        ControlResolution::ForwardAndDrain => {
+                        ControlAction::ForwardAndDrain => {
                             ctx.buffered_eof = Some(envelope.event.clone());
 
                             if envelope.event.is_eof() {
@@ -321,7 +303,7 @@ async fn dispatch_running_inner<
                             sup.forward_control_event_guarded(&envelope).await?;
                             EventLoopDirective::Transition(TransformEvent::ReceivedEOF)
                         }
-                        ControlResolution::BufferAtEntryPoint { is_drain } => {
+                        ControlAction::BufferAtEntryPoint { is_drain } => {
                             ctx.buffered_terminal_envelope
                                 .get_or_insert_with(|| envelope.clone());
 
@@ -356,7 +338,7 @@ async fn dispatch_running_inner<
 
                             EventLoopDirective::Continue
                         }
-                        ControlResolution::Suppress => {
+                        ControlAction::Suppress => {
                             if envelope.event.is_eof()
                                 && is_cycle_entry_point
                                 && is_terminal_eof(&envelope, upstream_stage)
@@ -372,10 +354,7 @@ async fn dispatch_running_inner<
 
                             EventLoopDirective::Continue
                         }
-                        ControlResolution::Delay(_) => {
-                            unreachable!("Delay is handled before executing the resolution")
-                        }
-                        ControlResolution::Skip => {
+                        ControlAction::Skip => {
                             tracing::warn!(
                                 stage_name = %ctx.stage_name,
                                 event_type = envelope.event.event_type(),

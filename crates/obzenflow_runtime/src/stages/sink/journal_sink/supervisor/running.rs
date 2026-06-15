@@ -12,7 +12,7 @@ use crate::metrics::instrumentation::process_with_instrumentation;
 use crate::stages::common::handlers::UnifiedSinkHandler;
 use crate::stages::common::heartbeat::HeartbeatProcessingGuard;
 use crate::stages::common::supervision::control_resolution::{
-    resolve_control_event, resolve_forward_control_event, ControlResolution,
+    resolve_control_event_awaiting_pauses, ControlAction,
 };
 use crate::stages::common::supervision::error_routing::route_to_error_journal;
 use crate::stages::common::supervision::flow_context_factory::make_flow_context;
@@ -280,41 +280,23 @@ async fn dispatch_control_event<
     let last_eof_outcome = subscription.last_eof_outcome().cloned();
     let contract_reader_count = ctx.contract_state.len();
 
-    let mut resolution = resolve_control_event(
+    let resolution = resolve_control_event_awaiting_pauses(
         signal,
         envelope,
         ctx.control_strategy.as_ref(),
+        &mut ctx.processing_context,
         /* cycle_config */ None,
         /* cycle_guard */ None,
         last_eof_outcome.as_ref(),
         upstream_stage,
         contract_reader_count,
         /* drain_is_terminal */ false,
-    );
-
-    if let ControlResolution::Delay(duration) = resolution {
-        tracing::info!(
-            stage_name = %ctx.stage_name,
-            event_type = envelope.event.event_type(),
-            duration = ?duration,
-            "Sink delaying control event"
-        );
-        tokio::time::sleep(duration).await;
-
-        resolution = resolve_forward_control_event(
-            signal,
-            envelope,
-            /* cycle_config */ None,
-            /* cycle_guard */ None,
-            last_eof_outcome.as_ref(),
-            upstream_stage,
-            contract_reader_count,
-            /* drain_is_terminal */ false,
-        );
-    }
+        &ctx.stage_name,
+    )
+    .await;
 
     match resolution {
-        ControlResolution::Forward => {
+        ControlAction::Forward => {
             if envelope.event.is_eof() {
                 drop(
                     subscription
@@ -388,7 +370,7 @@ async fn dispatch_control_event<
             }
             Ok(EventLoopDirective::Continue)
         }
-        ControlResolution::ForwardAndDrain => {
+        ControlAction::ForwardAndDrain => {
             // Final EOF (all authoritative upstream EOFs observed).
             drop(
                 subscription
@@ -422,7 +404,7 @@ async fn dispatch_control_event<
                 JournalSinkEvent::ReceivedEOF,
             ))
         }
-        ControlResolution::BufferAtEntryPoint { .. } | ControlResolution::Suppress => {
+        ControlAction::BufferAtEntryPoint { .. } | ControlAction::Suppress => {
             tracing::warn!(
                 stage_name = %ctx.stage_name,
                 event_type = envelope.event.event_type(),
@@ -430,10 +412,7 @@ async fn dispatch_control_event<
             );
             Ok(EventLoopDirective::Continue)
         }
-        ControlResolution::Delay(_) => {
-            unreachable!("Delay is handled before executing the resolution");
-        }
-        ControlResolution::Skip => {
+        ControlAction::Skip => {
             tracing::warn!(
                 stage_name = %ctx.stage_name,
                 event_type = envelope.event.event_type(),

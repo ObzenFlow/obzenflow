@@ -15,7 +15,7 @@ use obzenflow_core::journal::Journal;
 use obzenflow_core::{ChainEvent, FlowId, StageId, SystemId, TypedPayload, WriterId};
 use obzenflow_infra::journal::disk::disk_journal::DiskJournal;
 use obzenflow_runtime::id_conversions::StageIdExt;
-use obzenflow_runtime::stages::common::control_strategies::JonestownStrategy;
+use obzenflow_runtime::stages::common::control_strategies::JonestownSignalStrategy;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::join::handle::JoinHandleExt;
 use obzenflow_runtime::stages::join::{JoinBuilder, JoinConfig, JoinReferenceMode};
@@ -201,7 +201,7 @@ async fn live_join_processes_stream_without_reference_eof() {
             key: stream.key,
         });
 
-    let control = Arc::new(JonestownStrategy);
+    let control = Arc::new(JonestownSignalStrategy);
     let mut join_config = JoinConfig::new(
         join_stage,
         "live_join_no_ref_eof",
@@ -494,7 +494,7 @@ async fn live_join_on_source_eof_outputs_carry_reference_and_stream_ancestry() {
         .take_stage_resources(join_stage)
         .expect("join resources exist");
 
-    let control = Arc::new(JonestownStrategy);
+    let control = Arc::new(JonestownSignalStrategy);
     let mut join_config = JoinConfig::new(
         join_stage,
         "live_join_on_source_eof_ancestry",
@@ -674,7 +674,7 @@ async fn live_join_reference_batch_cap_prevents_stream_starvation() {
         .take_stage_resources(join_stage)
         .expect("join resources exist");
 
-    let control = Arc::new(JonestownStrategy);
+    let control = Arc::new(JonestownSignalStrategy);
     let mut join_config = JoinConfig::new(
         join_stage,
         "live_join_batch_cap",
@@ -860,7 +860,7 @@ async fn live_join_forwards_reference_eof() {
             key: stream.key,
         });
 
-    let control = Arc::new(JonestownStrategy);
+    let control = Arc::new(JonestownSignalStrategy);
     let mut join_config = JoinConfig::new(
         join_stage,
         "live_join_reference_eof_forwarded",
@@ -1103,7 +1103,7 @@ async fn live_join_reference_errors_are_per_record() {
         .take_stage_resources(join_stage)
         .expect("join resources exist");
 
-    let control = Arc::new(JonestownStrategy);
+    let control = Arc::new(JonestownSignalStrategy);
     let mut join_config = JoinConfig::new(
         join_stage,
         "live_join_reference_error_per_record",

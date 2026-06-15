@@ -233,92 +233,115 @@ Concrete example (transform stage):
 
 ## Control strategies: how middleware influences flow control
 
-When a stage supervisor encounters a control signal (EOF, Drain, Watermark, Checkpoint), it does not hard-code what to do. Instead, it delegates the decision to a `ControlEventStrategy`, which is a trait that middleware can implement to influence how the supervisor handles that signal. This is how the circuit breaker, windowing, retry, and other middleware participate in flow control without reaching into the FSM or the run loop.
+When a stage supervisor reaches a decision point, an inbound control signal, an admission check before live work, a source's terminal emission, or the end of an attempt, it does not hard-code what to do. It consults a small set of typed control-strategy hooks that middleware implements. This is how the circuit breaker, windowing, retry, rate limiting, and backpressure participate in flow control without reaching into the FSM or the run loop.
 
 ### The problem this solves
 
-Consider what happens when a circuit breaker is in the `HalfOpen` state and an EOF signal arrives. The supervisor's default behaviour is to forward EOF downstream and transition to Draining. But the circuit breaker is mid-recovery, probing to see if the downstream service is healthy again. If EOF fires immediately, the stage shuts down before the breaker can complete its recovery probe, and the next run starts from scratch with a breaker that never got to close.
+Consider what happens when a circuit breaker is in the `HalfOpen` state and an EOF signal arrives. The supervisor's default behaviour is to forward EOF downstream and transition to Draining. The circuit breaker, though, is mid-recovery, probing to see if the downstream service is healthy again. If EOF fires immediately, the stage shuts down before the breaker can complete its recovery probe, and the next run starts from scratch with a breaker that never got to close.
 
-The naive fix would be to put circuit-breaker-aware `if` statements inside the supervisor's control signal handling. But the supervisor should not know about circuit breakers. And if windowing middleware also needs to delay EOF (to flush its current window), and retry middleware also needs to delay EOF (to finish in-flight retries), the supervisor becomes a tangle of middleware-specific conditionals.
+The naive fix would put circuit-breaker-aware `if` statements inside the supervisor's control-signal handling. The supervisor should not know about circuit breakers, though. And if windowing middleware also needs to hold EOF to flush its current window, and rate limiting needs to pace admission, and backpressure needs to stall a producer, the supervisor becomes a tangle of middleware-specific conditionals. The hooks keep each concern in its own policy, consulted by the supervisor through a typed contract.
 
-### The solution: strategy pattern with precedence
+### Four hooks, one driving vocabulary
 
-Each middleware that needs to influence control signal handling registers a `ControlEventStrategy` at build time. The strategies are composed via `CompositeStrategy`, which runs all of them and keeps the most restrictive result.
+The supervisor consults four hooks, each at its own named decision point. Three of them drive the loop and share the same shape, `Continue` or `Pause`, plus a hook-local stop whose name says what stopping means at that point. The type system keeps an admission rejection distinct from a suppressed signal or a poison EOF, so a stop at one point cannot be mistaken for a stop at another. The fourth hook observes and never steers.
 
-```rust
-pub trait ControlEventStrategy: Send + Sync {
-    fn handle_eof(&self, envelope: &EventEnvelope<ChainEvent>, ctx: &mut ProcessingContext)
-        -> ControlEventAction;
-    fn handle_drain(&self, envelope: &EventEnvelope<ChainEvent>, ctx: &mut ProcessingContext)
-        -> ControlEventAction;
-    fn handle_watermark(&self, ...) -> ControlEventAction;
-    fn handle_checkpoint(&self, ...) -> ControlEventAction;
+- **`SignalGate`** governs inbound control signals (EOF, Drain, Watermark, Checkpoint). It is the live hook today. Its stop is `SuppressSignal`.
+- **`AdmissionGate`** governs whether an attempt may proceed at an `AdmissionPosition` (before a poll, after a held unit, before an effect, before an output commit). Its stops are `RejectAttempt` and `SynthesizeFallback`. 115c defines it; the source, effect, and sink slices wire the consultation sites.
+- **`CompletionGate`** governs a source's terminal emission, choosing between `DefaultEof` and a `PoisonEof`. It is live on the source FSMs.
+- **`AttemptObserver`** observes how an admitted attempt ended. It is a callback, returns nothing, and cannot change the loop. 115c defines it; the binding slices wire it.
+
+`Pause` carries how the supervisor should wait. The signal gate pauses for a relative `Duration`, since time is relative and the supervisor turns it into a deadline when it suspends. The admission gate pauses with a `WakeOn`, which names why and when to re-check: `At(instant)` is self-bounded, `Notify(CreditWaker)` waits on a producer signal and must be paired with a stall cap, and `Immediate` yields once.
+
+### The signal gate
+
+```text
+pub trait SignalGate: Send + Sync {
+    fn handle_eof(&self, envelope, ctx: &mut ProcessingContext) -> SignalDecision;
+    fn handle_watermark(&self, ...) -> SignalDecision;   // default: Continue
+    fn handle_checkpoint(&self, ...) -> SignalDecision;  // default: Continue
+    fn handle_drain(&self, ...) -> SignalDecision;       // default: Continue
+}
+
+pub enum SignalDecision {
+    Continue,          // run the runtime's normal rule for this signal
+    Pause(Duration),   // hold for a relative duration, then re-resolve
+    SuppressSignal,    // drop the signal entirely (the hook-local stop)
 }
 ```
 
-Each method returns a `ControlEventAction`:
+`Continue` lets the runtime apply its normal rule for the signal: forward, forward and drain, buffer at a cycle entry, or suppress a non-terminal signal. `Pause(d)` holds the signal for a relative duration and then re-resolves it. `SuppressSignal` drops the signal, which is dangerous and reserved for signals that are semantically meaningless in context.
 
-- **`Forward`**: Accept and forward the signal. This is the default.
-- **`Delay(duration)`**: Wait for a duration, then forward. Used by the circuit breaker to give the breaker time to close.
-- **`Retry`**: Don't accept the signal yet, come back to it on the next iteration. Used when middleware has in-flight work that must complete first.
-- **`Skip`**: Drop the signal entirely. Dangerous, used only when the signal is semantically meaningless in context.
+`ProcessingContext` is durable scratch the gate carries across calls, so a strategy can count its own deferrals. The `eof_attempts` counter accumulates across `Pause` cycles rather than resetting each call, which is what lets a strategy hold EOF for a bounded number of attempts and then give up.
 
-When multiple strategies are composed, `CompositeStrategy` applies precedence rules: `Delay` beats everything (and the longest delay wins among multiple delays), `Retry` beats `Forward` and `Skip`, `Skip` beats `Forward`. The most restrictive middleware always wins, which is the safe default.
+`JonestownSignalStrategy` is the default gate. It returns `Continue` for every signal, preserving the framework's poison-pill shutdown semantics with no added behaviour.
 
-### How it flows through the supervisor
+### Precedence under composition
 
-The strategy decision feeds into the supervisor through `resolve_control_event`, a pure function in `stages/common/supervision/control_resolution.rs`. This function takes the signal, the strategy, and various context (cycle guard state, EOF outcomes, contract reader counts) and returns a `ControlResolution`:
+When more than one strategy is active, `CompositeStrategy` runs all of them and keeps the most restrictive result: `Pause` beats `Continue`, the longest pause wins among several, and `SuppressSignal` beats `Continue`. The most restrictive middleware always wins, which is the safe default.
+
+### How a signal flows through the supervisor
+
+The supervisor calls `resolve_control_event_awaiting_pauses` in `stages/common/supervision/control_resolution.rs`. That helper repeatedly calls the pure `resolve_control_event`, owns any `Pause` wait, and returns only after the signal has resolved to a non-delay runtime action:
 
 ```text
 Control signal arrives in dispatch_state
     │
     ▼
-resolve_control_event(signal, strategy, cycle_config, ...)
+resolve_control_event_awaiting_pauses(signal, gate, &mut processing_ctx, cycle_config, ...)
     │
-    ├── strategy.handle_eof() / handle_drain() / etc.
-    │   returns ControlEventAction (Forward / Delay / Retry / Skip)
+    ├── gate.handle_eof() / handle_drain() / ...
+    │   returns SignalDecision (Continue / Pause / SuppressSignal)
     │
-    ├── If Forward: apply cycle guard and EOF logic
-    │   returns ControlResolution (Forward / ForwardAndDrain / Suppress / BufferAtEntryPoint)
+    ├── Continue:       apply cycle guard and EOF logic
+    │                   returns ControlResolution::Ready(ControlAction)
+    │   Pause(d)        maps to ControlResolution::Pause(d), waits, then re-resolves
+    │   SuppressSignal  maps to ControlResolution::Ready(ControlAction::Skip)
     │
     ▼
-Supervisor acts on ControlResolution
+Supervisor acts on ControlAction
     ├── Forward:             write signal downstream, return Continue
     ├── ForwardAndDrain:     write signal downstream, return Transition(BeginDrain)
     ├── Suppress:            drop signal, return Continue
     ├── BufferAtEntryPoint:  store signal for later release (cycle convergence)
-    ├── Delay(d):            sleep(d), then forward
     └── Skip:                drop signal, return Continue
 ```
 
-The key design point is that `resolve_control_event` is a pure function. It computes the decision without performing any I/O. The supervisor then executes the decision by writing to journals, sleeping, or returning the appropriate `EventLoopDirective`. This is the same "decide then act" separation that the run loop enforces for FSM transitions.
+`resolve_control_event` remains pure. It computes the decision without performing I/O. The async helper owns only the bounded pause/re-check loop. The supervisor then executes the delay-free result, by writing to journals or returning the appropriate `EventLoopDirective`. This is the same "decide then act" separation the run loop enforces for FSM transitions.
 
-### Concrete example: composing control strategies
+### Bounded suspension: the one place a pause becomes an await
 
-Builders can compose multiple strategies into a single `ControlEventStrategy` via `CompositeStrategy`.
-In practice, stage materialisation collects any control strategies produced by middleware factories and
-composes them when more than one is present:
+A gate never awaits. When the supervisor acts on a `Delay`, it calls `suspend_until` in `stages/common/supervision/suspension.rs`, the single place a wake becomes an `await`:
 
-```rust
-let strategies: Vec<Box<dyn ControlEventStrategy>> = middleware
-    .iter()
-    .filter_map(|spec| spec.factory.create_control_strategy())
-    .collect();
-
-let strategy: Arc<dyn ControlEventStrategy> = match strategies.len() {
-    0 => Arc::new(JonestownStrategy),
-    1 => Arc::from(strategies.into_iter().next().unwrap()),
-    _ => Arc::new(CompositeStrategy::new(strategies)),
-};
+```text
+pub(crate) async fn suspend_until(wake: &WakeOn, max_wait: Option<Duration>) -> WakeOutcome
 ```
 
-The supervisor never knows which strategies are active. It calls `resolve_control_event`, gets back a `ControlResolution`, and acts on it.
+`At(instant)` sleeps to the deadline, `Immediate` yields once, and `Notify(credit_waker)` selects between the producer's notify and a stall cap. The bounded-wake rule lives here: every non-source pause is bounded by a deadline or a runtime-supplied stall cap, so a wedged downstream can never hang the loop. A `Notify` wake offered with no cap panics because the cap is part of the runtime contract. The seven former `Delay` sleep sites across the transform, stateful, sink, and join supervisors all route through this helper, which is also the only target the CI barrier-sleep guard needs to police.
+
+### Finalization: settling an attempt exactly once
+
+`AdmittedAttempt`, in the same module, is the loop-driven finalization guard. It holds the observers that admitted an attempt and guarantees each is notified of the terminal outcome exactly once, on every exit path. Calling `settle(outcome).await` runs each observer's synchronous `observe` and then its durable async `settle`. If the guard is dropped without an explicit settle, `Drop` runs only the synchronous `observe` with a default `Aborted` outcome, because `Drop` cannot await durable journal work. By the event-sourcing model, an attempt ended by a drop is simply not recorded as complete and is re-attempted on restart. This is the same RAII shape as the circuit-breaker probe-slot guard.
+
+### Typed registration replaces the dead downcast lane
+
+Earlier, middleware exposed signal strategies through `MiddlewareFactory::create_control_strategy`, a lane no factory overrode, so it always yielded the default, and policy capability was then recovered from an erased `dyn Middleware` by capability-downcast. 115c retires that lane. A factory now declares which control points its policy binds through a typed `control_points()`:
+
+```text
+pub struct ControlPointRegistration {
+    pub signal: bool,
+    pub admission_positions: Vec<AdmissionPosition>,
+    pub completion: bool,
+    pub observation: bool,
+}
+```
+
+The declaration defaults to none, so purely structural middleware needs no override. Admission is position-aware because source pre-poll, finite-source post-admit, effect, and output-commit gates answer different runtime questions. The binding slices (source 115a, effect 115b, sink 115d, backpressure 115e) wire the concrete gates at the points a factory declares. Until then, the live signal gate is the default `JonestownSignalStrategy`, installed during stage materialization.
 
 ### Where this lives relative to the supervised base
 
-Control strategies are not part of `supervised_base` itself. They live in `stages/common/control_strategies/` and are wired into the FSM context at build time. The shared resolution helper `resolve_control_event` lives in `stages/common/supervision/control_resolution.rs`. The `supervised_base` run loop and the `WithExternalEvents` decorator know nothing about control strategies. They operate at the level of `EventLoopDirective`, which is one layer above. The supervisor's `dispatch_state` method is the integration point where control resolution results are translated into directives.
+The control-strategy hooks are not part of `supervised_base` itself. They live in `stages/common/control_strategies/` (the signal, admission, and observation hooks and their vocabulary) and `stages/source/strategies/` (the completion hook), with the suspension helper and finalization guard in `stages/common/supervision/`. The shared resolution helper `resolve_control_event` also lives under `stages/common/supervision/`. The `supervised_base` run loop and the `WithExternalEvents` decorator know nothing about control strategies. They operate at the level of `EventLoopDirective`, one layer above. The supervisor's `dispatch_state` method is the integration point where resolution results become directives.
 
-This separation is deliberate. The run loop owns the FSM lifecycle (transitions, actions, errors). The `WithExternalEvents` decorator owns external control-plane bridging (handle events, state publishing). Control strategies own middleware-influenced flow control decisions. Each concern has its own module and its own tests, and they compose through the `dispatch_state` return value.
+This separation is deliberate. The run loop owns the FSM lifecycle, its transitions, actions, and errors. The `WithExternalEvents` decorator owns external control-plane bridging, its handle events and state publishing. The control-strategy hooks own middleware-influenced flow control decisions. Each concern has its own module and its own tests, and they compose through the `dispatch_state` return value.
 
 ## Recommended module layout
 

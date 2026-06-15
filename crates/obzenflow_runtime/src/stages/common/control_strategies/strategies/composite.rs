@@ -4,7 +4,7 @@
 
 //! Composite strategy that combines multiple control event strategies
 
-use super::super::{ControlEventAction, ControlEventStrategy, ProcessingContext};
+use super::super::{ProcessingContext, SignalDecision, SignalGate};
 use obzenflow_core::event::event_envelope::EventEnvelope;
 use obzenflow_core::ChainEvent;
 
@@ -13,23 +13,23 @@ use obzenflow_core::ChainEvent;
 /// When multiple middleware have control event requirements, this strategy
 /// combines them using precedence rules: most restrictive action wins.
 pub struct CompositeStrategy {
-    strategies: Vec<Box<dyn ControlEventStrategy>>,
+    strategies: Vec<Box<dyn SignalGate>>,
 }
 
 impl CompositeStrategy {
-    pub fn new(strategies: Vec<Box<dyn ControlEventStrategy>>) -> Self {
+    pub fn new(strategies: Vec<Box<dyn SignalGate>>) -> Self {
         Self { strategies }
     }
 }
 
-impl ControlEventStrategy for CompositeStrategy {
+impl SignalGate for CompositeStrategy {
     fn handle_eof(
         &self,
         envelope: &EventEnvelope<ChainEvent>,
         ctx: &mut ProcessingContext,
-    ) -> ControlEventAction {
+    ) -> SignalDecision {
         // Start with the least restrictive action
-        let mut result = ControlEventAction::Forward;
+        let mut result = SignalDecision::Continue;
 
         // Let each strategy vote, keeping the most restrictive action
         for strategy in &self.strategies {
@@ -44,8 +44,8 @@ impl ControlEventStrategy for CompositeStrategy {
         &self,
         envelope: &EventEnvelope<ChainEvent>,
         ctx: &mut ProcessingContext,
-    ) -> ControlEventAction {
-        let mut result = ControlEventAction::Forward;
+    ) -> SignalDecision {
+        let mut result = SignalDecision::Continue;
 
         for strategy in &self.strategies {
             let action = strategy.handle_checkpoint(envelope, ctx);
@@ -59,8 +59,8 @@ impl ControlEventStrategy for CompositeStrategy {
         &self,
         envelope: &EventEnvelope<ChainEvent>,
         ctx: &mut ProcessingContext,
-    ) -> ControlEventAction {
-        let mut result = ControlEventAction::Forward;
+    ) -> SignalDecision {
+        let mut result = SignalDecision::Continue;
 
         for strategy in &self.strategies {
             let action = strategy.handle_watermark(envelope, ctx);
@@ -74,8 +74,8 @@ impl ControlEventStrategy for CompositeStrategy {
         &self,
         envelope: &EventEnvelope<ChainEvent>,
         ctx: &mut ProcessingContext,
-    ) -> ControlEventAction {
-        let mut result = ControlEventAction::Forward;
+    ) -> SignalDecision {
+        let mut result = SignalDecision::Continue;
 
         for strategy in &self.strategies {
             let action = strategy.handle_drain(envelope, ctx);
@@ -89,23 +89,23 @@ impl ControlEventStrategy for CompositeStrategy {
 /// Combine two actions using precedence rules
 ///
 /// Precedence (most to least restrictive):
-/// 1. Delay - Must wait for time-based conditions
-/// 2. Skip - Dangerous, only if explicitly needed
-/// 3. Forward - Default when all strategies agree
-fn combine_actions(current: ControlEventAction, new: ControlEventAction) -> ControlEventAction {
-    use ControlEventAction::*;
+/// 1. Pause - Must wait for time-based conditions
+/// 2. SuppressSignal - Dangerous, only if explicitly needed
+/// 3. Continue - Default when all strategies agree
+fn combine_actions(current: SignalDecision, new: SignalDecision) -> SignalDecision {
+    use SignalDecision::*;
 
     match (current, new) {
-        // Delay always wins - can't do anything while waiting
-        (Delay(d1), Delay(d2)) => Delay(d1.max(d2)), // Take longer delay
-        (Delay(d), _) | (_, Delay(d)) => Delay(d),
+        // Pause always wins - can't do anything while waiting
+        (Pause(d1), Pause(d2)) => Pause(d1.max(d2)), // Take longer delay
+        (Pause(d), _) | (_, Pause(d)) => Pause(d),
 
-        // Skip only wins over Forward
-        (Skip, Forward) | (Forward, Skip) => Skip,
+        // SuppressSignal only wins over Continue
+        (SuppressSignal, Continue) | (Continue, SuppressSignal) => SuppressSignal,
 
-        // Both Forward or both Skip
-        (Forward, Forward) => Forward,
-        (Skip, Skip) => Skip,
+        // Both Continue or both SuppressSignal
+        (Continue, Continue) => Continue,
+        (SuppressSignal, SuppressSignal) => SuppressSignal,
     }
 }
 
@@ -116,28 +116,28 @@ mod tests {
 
     #[test]
     fn test_action_precedence() {
-        use ControlEventAction::*;
+        use SignalDecision::*;
 
-        // Delay beats everything
+        // Pause beats everything
         assert_eq!(
-            combine_actions(Delay(Duration::from_secs(5)), Forward),
-            Delay(Duration::from_secs(5))
+            combine_actions(Pause(Duration::from_secs(5)), Continue),
+            Pause(Duration::from_secs(5))
         );
         assert_eq!(
-            combine_actions(Skip, Delay(Duration::from_secs(3))),
-            Delay(Duration::from_secs(3))
+            combine_actions(SuppressSignal, Pause(Duration::from_secs(3))),
+            Pause(Duration::from_secs(3))
         );
 
         // Longer delay wins
         assert_eq!(
             combine_actions(
-                Delay(Duration::from_secs(5)),
-                Delay(Duration::from_secs(10))
+                Pause(Duration::from_secs(5)),
+                Pause(Duration::from_secs(10))
             ),
-            Delay(Duration::from_secs(10))
+            Pause(Duration::from_secs(10))
         );
 
-        // Skip only beats Forward
-        assert_eq!(combine_actions(Skip, Forward), Skip);
+        // SuppressSignal only beats Continue
+        assert_eq!(combine_actions(SuppressSignal, Continue), SuppressSignal);
     }
 }

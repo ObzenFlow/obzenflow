@@ -11,7 +11,7 @@ use super::fsm::{JournalSinkContext, JournalSinkState};
 use super::handle::JournalSinkHandle;
 use super::supervisor::JournalSinkSupervisor;
 use crate::metrics::instrumentation::StageInstrumentation;
-use crate::stages::common::control_strategies::{ControlEventStrategy, JonestownStrategy};
+use crate::stages::common::control_strategies::{JonestownSignalStrategy, SignalGate};
 use crate::stages::common::handlers::UnifiedSinkHandler;
 use crate::stages::common::heartbeat::{spawn_heartbeat, HeartbeatConfig, HeartbeatState};
 use crate::stages::resources_builder::StageResources;
@@ -75,10 +75,10 @@ impl<H: UnifiedSinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Su
             .unwrap_or_else(|| Arc::new(StageInstrumentation::new()));
 
         // Create context
-        let control_strategy: Arc<dyn ControlEventStrategy> = self
+        let control_strategy: Arc<dyn SignalGate> = self
             .config
             .control_strategy
-            .unwrap_or_else(|| Arc::new(JonestownStrategy));
+            .unwrap_or_else(|| Arc::new(JonestownSignalStrategy));
 
         let heartbeat_config = self.heartbeat_config.clone();
         let heartbeat = if self.resources.replay_archive.is_some() || !heartbeat_config.enabled {
@@ -118,6 +118,8 @@ impl<H: UnifiedSinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Su
             instrumentation,
             upstream_subscription_factory: self.resources.upstream_subscription_factory,
             control_strategy,
+            processing_context:
+                crate::stages::common::control_strategies::ProcessingContext::default(),
             backpressure_writer: self.resources.backpressure_writer.clone(),
             backpressure_readers: self.resources.backpressure_readers.clone(),
             heartbeat,

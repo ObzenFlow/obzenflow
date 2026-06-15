@@ -4,7 +4,7 @@
 
 //! Join stage configuration
 
-use crate::stages::common::control_strategies::ControlEventStrategy;
+use crate::stages::common::control_strategies::SignalGate;
 use obzenflow_core::StageId;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -55,7 +55,7 @@ pub struct JoinConfig {
 
     /// Control strategy for handling control events
     #[serde(skip)]
-    pub control_strategy: Option<Arc<dyn ControlEventStrategy>>,
+    pub control_strategy: Option<Arc<dyn SignalGate>>,
 
     /// List of upstream stage IDs
     pub upstream_stages: Vec<StageId>,

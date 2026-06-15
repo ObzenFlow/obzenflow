@@ -3081,8 +3081,8 @@ mod tests {
         };
         let factory = CircuitBreakerFactory::new(3);
         assert!(
-            factory.create_control_strategy().is_none(),
-            "circuit breaker should not export a control strategy before materialization"
+            !factory.control_points().signal,
+            "circuit breaker should not register a signal control point"
         );
 
         let _middleware = factory
@@ -3090,8 +3090,8 @@ mod tests {
             .expect("circuit breaker middleware should materialize");
 
         assert!(
-            factory.create_control_strategy().is_none(),
-            "circuit breaker should not export a control strategy after materialization"
+            !factory.control_points().signal,
+            "circuit breaker still registers no signal control point after materialization"
         );
 
         let _state = control_middleware

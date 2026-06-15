@@ -37,7 +37,7 @@ pub struct JoinBuilder<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 
     resources: StageResources,
     reference_journal: Arc<dyn Journal<ChainEvent>>,
     stream_journals: Vec<(StageId, Arc<dyn Journal<ChainEvent>>)>,
-    control_strategy: Arc<dyn crate::stages::common::control_strategies::ControlEventStrategy>,
+    control_strategy: Arc<dyn crate::stages::common::control_strategies::SignalGate>,
     instrumentation: Option<Arc<StageInstrumentation>>,
     heartbeat_config: HeartbeatConfig,
 }
@@ -50,7 +50,7 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> JoinBuild
         resources: StageResources,
         reference_journal: Arc<dyn Journal<ChainEvent>>,
         stream_journals: Vec<(StageId, Arc<dyn Journal<ChainEvent>>)>,
-        control_strategy: Arc<dyn crate::stages::common::control_strategies::ControlEventStrategy>,
+        control_strategy: Arc<dyn crate::stages::common::control_strategies::SignalGate>,
     ) -> Result<Self, JoinBuilderError> {
         tracing::info!(
             "JoinBuilder: Creating join with reference_stage_id={:?}, stream_stages={:?}",
@@ -166,6 +166,8 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Superviso
             reference_high_water_clock: VectorClock::new(),
             instrumentation: instrumentation.clone(),
             control_strategy: self.control_strategy.clone(),
+            processing_context:
+                crate::stages::common::control_strategies::ProcessingContext::default(),
             reference_subscription_factory,
             stream_subscription_factory,
             reference_mode: self.config.reference_mode,

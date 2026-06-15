@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use crate::metrics::instrumentation::StageInstrumentation;
-use crate::stages::common::control_strategies::{ControlEventStrategy, JonestownStrategy};
+use crate::stages::common::control_strategies::{JonestownSignalStrategy, SignalGate};
 use crate::stages::common::handlers::UnifiedStatefulHandler;
 use crate::stages::common::heartbeat::{spawn_heartbeat, HeartbeatConfig, HeartbeatState};
 use crate::stages::resources_builder::StageResources;
@@ -52,8 +52,8 @@ impl<H: UnifiedStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static
         self
     }
 
-    /// Set a custom control strategy (defaults to JonestownStrategy)
-    pub fn with_control_strategy(mut self, strategy: Arc<dyn ControlEventStrategy>) -> Self {
+    /// Set a custom control strategy (defaults to JonestownSignalStrategy)
+    pub fn with_control_strategy(mut self, strategy: Arc<dyn SignalGate>) -> Self {
         self.config.control_strategy = Some(strategy);
         self
     }
@@ -76,11 +76,11 @@ impl<H: UnifiedStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static
         let (event_sender, event_receiver, state_watcher) =
             ChannelBuilder::new().build(StatefulState::<H>::Created);
 
-        // Use provided strategy or default to JonestownStrategy
+        // Use provided strategy or default to JonestownSignalStrategy
         let control_strategy = self
             .config
             .control_strategy
-            .unwrap_or_else(|| Arc::new(JonestownStrategy));
+            .unwrap_or_else(|| Arc::new(JonestownSignalStrategy));
 
         // Create instrumentation if not provided
         let instrumentation = self
@@ -132,6 +132,8 @@ impl<H: UnifiedStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static
             contract_state: Vec::new(),
             last_contract_check: None,
             control_strategy,
+            processing_context:
+                crate::stages::common::control_strategies::ProcessingContext::default(),
             buffered_eof: None,
             last_consumed_envelope: None,
             instrumentation,

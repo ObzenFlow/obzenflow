@@ -11,7 +11,7 @@ use crate::metrics::instrumentation::StageInstrumentation;
 use crate::stages::common::handlers::FiniteSourceHandler;
 use crate::stages::resources_builder::StageResources;
 use crate::stages::source::replay_lifecycle::ReplayCompletionGuard;
-use crate::stages::source::strategies::{JonestownSourceStrategy, SourceControlStrategy};
+use crate::stages::source::strategies::{CompletionGate, JonestownSourceStrategy};
 use crate::supervised_base::{
     BuilderError, ChannelBuilder, HandleBuilder, HandlerSupervisedExt,
     HandlerSupervisedWithExternalEvents, SupervisorBuilder, SupervisorTaskBuilder,
@@ -53,7 +53,7 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
     }
 
     /// Set a custom source control strategy (defaults to JonestownSourceStrategy)
-    pub fn with_control_strategy(mut self, strategy: Arc<dyn SourceControlStrategy>) -> Self {
+    pub fn with_control_strategy(mut self, strategy: Arc<dyn CompletionGate>) -> Self {
         self.config.control_strategy = Some(strategy);
         self
     }

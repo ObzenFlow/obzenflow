@@ -352,7 +352,10 @@ pub struct JoinContext<H: JoinHandler> {
     pub instrumentation: Arc<StageInstrumentation>,
 
     /// Control event handling strategy
-    pub control_strategy: Arc<dyn crate::stages::common::control_strategies::ControlEventStrategy>,
+    pub control_strategy: Arc<dyn crate::stages::common::control_strategies::SignalGate>,
+
+    /// Durable per-stage signal-strategy scratch (FLOWIP-115c).
+    pub processing_context: crate::stages::common::control_strategies::ProcessingContext,
 
     /// Bound factories for reference and stream subscriptions
     pub reference_subscription_factory: BoundSubscriptionFactory,

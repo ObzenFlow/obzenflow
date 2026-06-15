@@ -4,9 +4,10 @@
 
 //! Control event resolution helpers.
 //!
-//! Pure/sync functions that compute what a supervisor should do when it
-//! encounters EOF or Drain signals. The actual execution (forwarding, state
-//! transitions) is left to the caller.
+//! The pure resolver computes what a supervisor should do when it encounters
+//! EOF or Drain signals. The async driver owns signal `Pause` waits and
+//! re-consults the same hook until the strategy returns a non-delay outcome.
+//! The actual execution (forwarding, state transitions) is left to the caller.
 
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::{ChainEvent, EventEnvelope, StageId};
@@ -15,13 +16,14 @@ use crate::messaging::upstream_subscription::EofOutcome;
 use crate::pipeline::config::CycleGuardConfig;
 use crate::stages::common::control_strategies::dispatch::dispatch_control_signal;
 use crate::stages::common::control_strategies::{
-    ControlEventAction, ControlEventStrategy, ProcessingContext,
+    ProcessingContext, SignalDecision, SignalGate, WakeOn,
 };
 use crate::stages::common::cycle_guard::CycleGuard;
+use crate::stages::common::supervision::suspension::suspend_until;
 
-/// What the supervisor should do after resolving a control event.
+/// Final action the supervisor should execute for a resolved control event.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ControlResolution {
+pub(crate) enum ControlAction {
     /// Forward the control event downstream and continue in the current state.
     Forward,
     /// Forward the control event downstream and then transition to Draining.
@@ -34,10 +36,66 @@ pub(crate) enum ControlResolution {
     BufferAtEntryPoint { is_drain: bool },
     /// Suppress the event entirely (e.g. internal cycle peer or non-terminal forwarded EOF).
     Suppress,
-    /// Delay by the given duration, then forward.
-    Delay(std::time::Duration),
     /// Skip the event entirely (dangerous, used by control strategies).
     Skip,
+}
+
+/// Result of asking the signal strategy and deterministic control resolver.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ControlResolution {
+    /// A final action is ready for the supervisor to execute.
+    Ready(ControlAction),
+    /// Wait for the duration, then re-resolve the same signal.
+    Pause(std::time::Duration),
+}
+
+/// Resolve a control event, awaiting every `Pause` and re-consulting the same
+/// signal hook after each wake.
+///
+/// Non-source supervisors are not interrupted by wrapper-level control events
+/// while they are inside this wait. That is intentional: strategies that return
+/// repeated pauses must be self-limiting through a bounded deadline, attempt
+/// count, or other state in [`ProcessingContext`].
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn resolve_control_event_awaiting_pauses(
+    signal: &FlowControlPayload,
+    envelope: &EventEnvelope<ChainEvent>,
+    strategy: &dyn SignalGate,
+    processing_ctx: &mut ProcessingContext,
+    cycle_config: Option<&CycleGuardConfig>,
+    mut cycle_guard: Option<&mut CycleGuard>,
+    eof_outcome: Option<&EofOutcome>,
+    upstream_stage: Option<StageId>,
+    contract_reader_count: usize,
+    drain_is_terminal: bool,
+    stage_name: &str,
+) -> ControlAction {
+    loop {
+        match resolve_control_event(
+            signal,
+            envelope,
+            strategy,
+            processing_ctx,
+            cycle_config,
+            cycle_guard.as_deref_mut(),
+            eof_outcome,
+            upstream_stage,
+            contract_reader_count,
+            drain_is_terminal,
+        ) {
+            ControlResolution::Ready(action) => return action,
+            ControlResolution::Pause(duration) => {
+                tracing::info!(
+                    stage_name = %stage_name,
+                    event_type = envelope.event.event_type(),
+                    duration = ?duration,
+                    "Delaying control event"
+                );
+                let _ =
+                    suspend_until(&WakeOn::At(std::time::Instant::now() + duration), None).await;
+            }
+        }
+    }
 }
 
 /// Resolve a control event into a `ControlResolution`.
@@ -48,7 +106,8 @@ pub(crate) enum ControlResolution {
 pub(crate) fn resolve_control_event(
     signal: &FlowControlPayload,
     envelope: &EventEnvelope<ChainEvent>,
-    strategy: &dyn ControlEventStrategy,
+    strategy: &dyn SignalGate,
+    processing_ctx: &mut ProcessingContext,
     cycle_config: Option<&CycleGuardConfig>,
     cycle_guard: Option<&mut CycleGuard>,
     eof_outcome: Option<&EofOutcome>,
@@ -56,13 +115,12 @@ pub(crate) fn resolve_control_event(
     contract_reader_count: usize,
     drain_is_terminal: bool,
 ) -> ControlResolution {
-    let mut processing_ctx = ProcessingContext::new();
-    let action = dispatch_control_signal(strategy, signal, envelope, &mut processing_ctx);
+    let action = dispatch_control_signal(strategy, signal, envelope, processing_ctx);
 
     match action {
-        ControlEventAction::Delay(duration) => ControlResolution::Delay(duration),
-        ControlEventAction::Skip => ControlResolution::Skip,
-        ControlEventAction::Forward => resolve_forward_control_event(
+        SignalDecision::Pause(duration) => ControlResolution::Pause(duration),
+        SignalDecision::SuppressSignal => ControlResolution::Ready(ControlAction::Skip),
+        SignalDecision::Continue => ControlResolution::Ready(resolve_forward_control_event(
             signal,
             envelope,
             cycle_config,
@@ -71,7 +129,7 @@ pub(crate) fn resolve_control_event(
             upstream_stage,
             contract_reader_count,
             drain_is_terminal,
-        ),
+        )),
     }
 }
 
@@ -85,7 +143,7 @@ pub(crate) fn resolve_forward_control_event(
     upstream_stage: Option<StageId>,
     contract_reader_count: usize,
     drain_is_terminal: bool,
-) -> ControlResolution {
+) -> ControlAction {
     if envelope.event.is_eof() {
         // The SCC entry point buffers external EOF and suppresses all other EOF
         // signals, so it does not participate in cycle-boundary drain readiness.
@@ -110,10 +168,10 @@ pub(crate) fn resolve_forward_control_event(
         return resolve_drain(cycle_config, drain_is_terminal);
     }
 
-    ControlResolution::Forward
+    ControlAction::Forward
 }
 
-/// Resolve an EOF event into a `ControlResolution`.
+/// Resolve an EOF event into a `ControlAction`.
 ///
 pub(crate) fn resolve_eof(
     envelope: &EventEnvelope<ChainEvent>,
@@ -122,54 +180,54 @@ pub(crate) fn resolve_eof(
     eof_outcome: Option<&EofOutcome>,
     upstream_stage: Option<StageId>,
     contract_reader_count: usize,
-) -> ControlResolution {
+) -> ControlAction {
     let is_terminal_eof = is_terminal_eof(envelope, upstream_stage);
 
     // SCC entry point logic (FLOWIP-051n).
     if let Some(cfg) = cycle_guard_config {
         if cfg.is_entry_point {
             if !is_terminal_eof {
-                return ControlResolution::Suppress;
+                return ControlAction::Suppress;
             }
 
             if let Some(upstream) = upstream_stage {
                 if cfg.external_upstreams.contains(&upstream) {
-                    return ControlResolution::BufferAtEntryPoint { is_drain: false };
+                    return ControlAction::BufferAtEntryPoint { is_drain: false };
                 }
             }
 
             // Internal or unknown upstream EOF at entry point: suppress.
-            return ControlResolution::Suppress;
+            return ControlAction::Suppress;
         }
     }
 
     // Cycle drain boundary (FLOWIP-051l).
     if cycle_guard.is_some_and(|guard| guard.has_seen_all_upstream_eofs(contract_reader_count)) {
-        return ControlResolution::ForwardAndDrain;
+        return ControlAction::ForwardAndDrain;
     }
 
     // Normal (non-cycle) EOF resolution.
     match eof_outcome {
-        Some(outcome) if outcome.is_final => ControlResolution::ForwardAndDrain,
-        _ => ControlResolution::Forward,
+        Some(outcome) if outcome.is_final => ControlAction::ForwardAndDrain,
+        _ => ControlAction::Forward,
     }
 }
 
-/// Resolve a Drain signal into a `ControlResolution`.
+/// Resolve a Drain signal into a `ControlAction`.
 pub(crate) fn resolve_drain(
     cycle_guard_config: Option<&CycleGuardConfig>,
     drain_is_terminal: bool,
-) -> ControlResolution {
+) -> ControlAction {
     if let Some(cfg) = cycle_guard_config {
         if cfg.is_entry_point {
-            return ControlResolution::BufferAtEntryPoint { is_drain: true };
+            return ControlAction::BufferAtEntryPoint { is_drain: true };
         }
     }
 
     if drain_is_terminal {
-        ControlResolution::ForwardAndDrain
+        ControlAction::ForwardAndDrain
     } else {
-        ControlResolution::Forward
+        ControlAction::Forward
     }
 }
 

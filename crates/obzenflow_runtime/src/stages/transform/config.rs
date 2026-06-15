@@ -5,7 +5,7 @@
 //! Configuration for transform stages
 
 use crate::pipeline::config::CycleGuardConfig;
-use crate::stages::common::control_strategies::ControlEventStrategy;
+use crate::stages::common::control_strategies::SignalGate;
 use obzenflow_core::StageId;
 use std::sync::Arc;
 
@@ -24,8 +24,8 @@ pub struct TransformConfig {
     /// IDs of upstream stages this transform reads from
     pub upstream_stages: Vec<StageId>,
 
-    /// Control event handling strategy (defaults to JonestownStrategy if not specified)
-    pub control_strategy: Option<Arc<dyn ControlEventStrategy>>,
+    /// Control event handling strategy (defaults to JonestownSignalStrategy if not specified)
+    pub control_strategy: Option<Arc<dyn SignalGate>>,
 
     /// Supervisor-level cycle protection configuration (FLOWIP-051l).
     ///

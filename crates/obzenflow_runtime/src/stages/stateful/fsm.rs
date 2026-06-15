@@ -32,7 +32,7 @@ use crate::messaging::UpstreamSubscription;
 use crate::metrics::instrumentation::StageInstrumentation;
 use crate::replay::ReplayArchive;
 use crate::stages::common::backpressure_activity_pulse::BackpressureActivityPulse;
-use crate::stages::common::control_strategies::ControlEventStrategy;
+use crate::stages::common::control_strategies::SignalGate;
 use crate::stages::common::handlers::UnifiedStatefulHandler;
 use crate::stages::common::heartbeat::HeartbeatHandle;
 use crate::stages::common::supervision::lifecycle_actions;
@@ -371,7 +371,10 @@ pub struct StatefulContext<H: UnifiedStatefulHandler> {
     pub(crate) last_contract_check: Option<tokio::time::Instant>,
 
     /// Control event handling strategy
-    pub control_strategy: Arc<dyn ControlEventStrategy>,
+    pub control_strategy: Arc<dyn SignalGate>,
+
+    /// Durable per-stage signal-strategy scratch (FLOWIP-115c).
+    pub processing_context: crate::stages::common::control_strategies::ProcessingContext,
 
     /// EOF event to forward when draining completes
     pub buffered_eof: Option<ChainEvent>,

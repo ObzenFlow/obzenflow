@@ -32,7 +32,7 @@ use crate::stages::common::backpressure_activity_pulse::BackpressureActivityPuls
 use crate::stages::common::stage_handle::{
     FORCE_SHUTDOWN_MESSAGE, STOP_REASON_TIMEOUT, STOP_REASON_USER_STOP,
 };
-use crate::stages::source::strategies::{SourceControlContext, SourceControlStrategy};
+use crate::stages::source::strategies::{CompletionContext, CompletionGate};
 use crate::supervised_base::idle_backoff::IdleBackoff;
 
 // ============================================================================
@@ -281,10 +281,10 @@ pub struct InfiniteSourceContext<H> {
     pub instrumentation: Arc<StageInstrumentation>,
 
     /// Source control strategy for this stage
-    pub control_strategy: Arc<dyn SourceControlStrategy>,
+    pub control_strategy: Arc<dyn CompletionGate>,
 
     /// Mutable context for the source control strategy
-    pub control_context: SourceControlContext,
+    pub control_context: CompletionContext,
 
     /// Backpressure writer handle for this stage's journal (FLOWIP-086k).
     pub backpressure_writer: BackpressureWriter,
@@ -316,7 +316,7 @@ pub struct InfiniteSourceContextInit {
     pub replay_archive: Option<Arc<dyn ReplayArchive>>,
     pub bus: Arc<crate::message_bus::FsmMessageBus>,
     pub instrumentation: Arc<StageInstrumentation>,
-    pub control_strategy: Arc<dyn SourceControlStrategy>,
+    pub control_strategy: Arc<dyn CompletionGate>,
     pub backpressure_writer: BackpressureWriter,
     pub output_contract: StageOutputContract,
 }
@@ -337,7 +337,7 @@ impl<H> InfiniteSourceContext<H> {
             completion_reason: InfiniteSourceCompletionReason::ExternalDrain,
             instrumentation: init.instrumentation,
             control_strategy: init.control_strategy,
-            control_context: SourceControlContext::new(),
+            control_context: CompletionContext::new(),
             backpressure_writer: init.backpressure_writer,
             output_contract: init.output_contract,
             pending_outputs: VecDeque::new(),
@@ -433,7 +433,7 @@ impl<H: Send + Sync + 'static> FsmAction for InfiniteSourceAction<H> {
                     InfiniteSourceCompletionReason::ArchiveExhausted => {
                         if matches!(
                             decision,
-                            crate::stages::source::strategies::SourceShutdownDecision::PoisonEof
+                            crate::stages::source::strategies::CompletionDecision::PoisonEof
                         ) {
                             EofKind::Poison
                         } else {

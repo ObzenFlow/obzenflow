@@ -7,7 +7,7 @@ use crate::stages::common::handlers::JoinHandler;
 use crate::stages::common::heartbeat::HeartbeatProcessingGuard;
 use crate::stages::common::supervision::backpressure_drain::{drain_one_pending, DrainOutcome};
 use crate::stages::common::supervision::control_resolution::{
-    resolve_control_event, resolve_forward_control_event, ControlResolution,
+    resolve_control_event_awaiting_pauses, ControlAction,
 };
 use crate::stages::common::supervision::error_routing::route_to_error_journal;
 use crate::stages::common::supervision::flow_context_factory::make_flow_context;
@@ -79,48 +79,30 @@ pub(super) async fn dispatch_enriching<
                     let upstream_stage = subscription.last_delivered_upstream_stage();
                     let last_eof_outcome = subscription.last_eof_outcome().cloned();
 
-                    let mut resolution = resolve_control_event(
+                    let resolution = resolve_control_event_awaiting_pauses(
                         signal,
                         &envelope,
                         ctx.control_strategy.as_ref(),
+                        &mut ctx.processing_context,
                         /* cycle_config */ None,
                         /* cycle_guard */ None,
                         last_eof_outcome.as_ref(),
                         upstream_stage,
                         contract_reader_count,
                         /* drain_is_terminal */ false,
-                    );
-
-                    if let ControlResolution::Delay(duration) = resolution {
-                        tracing::info!(
-                            stage_name = %ctx.stage_name,
-                            event_type = envelope.event.event_type(),
-                            duration = ?duration,
-                            "Join delaying control event during Enriching"
-                        );
-                        tokio::time::sleep(duration).await;
-
-                        resolution = resolve_forward_control_event(
-                            signal,
-                            &envelope,
-                            /* cycle_config */ None,
-                            /* cycle_guard */ None,
-                            last_eof_outcome.as_ref(),
-                            upstream_stage,
-                            contract_reader_count,
-                            /* drain_is_terminal */ false,
-                        );
-                    }
+                        &ctx.stage_name,
+                    )
+                    .await;
 
                     match resolution {
-                        ControlResolution::Forward => {
+                        ControlAction::Forward => {
                             common::forward_control_event_and_mirror(ctx, &envelope).await?;
                             if envelope.event.is_eof() {
                                 let _ = subscription.take_last_eof_outcome();
                             }
                             EventLoopDirective::Continue
                         }
-                        ControlResolution::ForwardAndDrain => {
+                        ControlAction::ForwardAndDrain => {
                             common::forward_control_event_and_mirror(ctx, &envelope).await?;
 
                             if envelope.event.is_eof() {
@@ -141,8 +123,7 @@ pub(super) async fn dispatch_enriching<
 
                             EventLoopDirective::Transition(JoinEvent::ReceivedEOF)
                         }
-                        ControlResolution::Suppress
-                        | ControlResolution::BufferAtEntryPoint { .. } => {
+                        ControlAction::Suppress | ControlAction::BufferAtEntryPoint { .. } => {
                             tracing::warn!(
                                 stage_name = %ctx.stage_name,
                                 event_type = envelope.event.event_type(),
@@ -150,10 +131,7 @@ pub(super) async fn dispatch_enriching<
                             );
                             EventLoopDirective::Continue
                         }
-                        ControlResolution::Delay(_) => {
-                            unreachable!("Delay is handled before executing the resolution")
-                        }
-                        ControlResolution::Skip => {
+                        ControlAction::Skip => {
                             tracing::warn!(
                                 stage_name = %ctx.stage_name,
                                 event_type = envelope.event.event_type(),
