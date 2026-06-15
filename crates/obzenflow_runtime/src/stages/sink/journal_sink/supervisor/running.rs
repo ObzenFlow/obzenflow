@@ -12,7 +12,7 @@ use crate::metrics::instrumentation::process_with_instrumentation;
 use crate::stages::common::handlers::UnifiedSinkHandler;
 use crate::stages::common::heartbeat::HeartbeatProcessingGuard;
 use crate::stages::common::supervision::control_resolution::{
-    resolve_control_event_awaiting_pauses, ReadyControlResolution,
+    resolve_control_event_awaiting_pauses, ControlAction,
 };
 use crate::stages::common::supervision::error_routing::route_to_error_journal;
 use crate::stages::common::supervision::flow_context_factory::make_flow_context;
@@ -296,7 +296,7 @@ async fn dispatch_control_event<
     .await;
 
     match resolution {
-        ReadyControlResolution::Forward => {
+        ControlAction::Forward => {
             if envelope.event.is_eof() {
                 drop(
                     subscription
@@ -370,7 +370,7 @@ async fn dispatch_control_event<
             }
             Ok(EventLoopDirective::Continue)
         }
-        ReadyControlResolution::ForwardAndDrain => {
+        ControlAction::ForwardAndDrain => {
             // Final EOF (all authoritative upstream EOFs observed).
             drop(
                 subscription
@@ -404,7 +404,7 @@ async fn dispatch_control_event<
                 JournalSinkEvent::ReceivedEOF,
             ))
         }
-        ReadyControlResolution::BufferAtEntryPoint { .. } | ReadyControlResolution::Suppress => {
+        ControlAction::BufferAtEntryPoint { .. } | ControlAction::Suppress => {
             tracing::warn!(
                 stage_name = %ctx.stage_name,
                 event_type = envelope.event.event_type(),
@@ -412,7 +412,7 @@ async fn dispatch_control_event<
             );
             Ok(EventLoopDirective::Continue)
         }
-        ReadyControlResolution::Skip => {
+        ControlAction::Skip => {
             tracing::warn!(
                 stage_name = %ctx.stage_name,
                 event_type = envelope.event.event_type(),

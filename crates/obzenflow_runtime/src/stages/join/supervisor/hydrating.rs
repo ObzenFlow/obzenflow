@@ -6,7 +6,7 @@ use crate::messaging::PollResult;
 use crate::stages::common::handlers::JoinHandler;
 use crate::stages::common::heartbeat::HeartbeatProcessingGuard;
 use crate::stages::common::supervision::control_resolution::{
-    resolve_control_event_awaiting_pauses, ReadyControlResolution,
+    resolve_control_event_awaiting_pauses, ControlAction,
 };
 use crate::supervised_base::EventLoopDirective;
 use obzenflow_fsm::StateVariant;
@@ -82,7 +82,7 @@ pub(super) async fn dispatch_hydrating<
                     .await;
 
                     match resolution {
-                        ReadyControlResolution::Forward => {
+                        ControlAction::Forward => {
                             common::forward_control_event_and_mirror(ctx, &envelope).await?;
 
                             if envelope.event.is_eof() {
@@ -103,7 +103,7 @@ pub(super) async fn dispatch_hydrating<
 
                             EventLoopDirective::Continue
                         }
-                        ReadyControlResolution::ForwardAndDrain => {
+                        ControlAction::ForwardAndDrain => {
                             common::forward_control_event_and_mirror(ctx, &envelope).await?;
 
                             if envelope.event.is_eof() {
@@ -112,8 +112,7 @@ pub(super) async fn dispatch_hydrating<
 
                             EventLoopDirective::Transition(JoinEvent::ReceivedEOF)
                         }
-                        ReadyControlResolution::Suppress
-                        | ReadyControlResolution::BufferAtEntryPoint { .. } => {
+                        ControlAction::Suppress | ControlAction::BufferAtEntryPoint { .. } => {
                             tracing::warn!(
                                 stage_name = %ctx.stage_name,
                                 event_type = envelope.event.event_type(),
@@ -121,7 +120,7 @@ pub(super) async fn dispatch_hydrating<
                             );
                             EventLoopDirective::Continue
                         }
-                        ReadyControlResolution::Skip => {
+                        ControlAction::Skip => {
                             tracing::warn!(
                                 stage_name = %ctx.stage_name,
                                 event_type = envelope.event.event_type(),

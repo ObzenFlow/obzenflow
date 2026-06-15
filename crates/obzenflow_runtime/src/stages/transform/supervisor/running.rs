@@ -11,7 +11,7 @@ use crate::stages::common::handlers::transform::traits::UnifiedTransformHandler;
 use crate::stages::common::heartbeat::HeartbeatProcessingGuard;
 use crate::stages::common::supervision::backpressure_drain::{drain_one_pending, DrainOutcome};
 use crate::stages::common::supervision::control_resolution::{
-    is_terminal_eof, resolve_control_event_awaiting_pauses, ReadyControlResolution,
+    is_terminal_eof, resolve_control_event_awaiting_pauses, ControlAction,
 };
 use crate::stages::common::supervision::error_routing::route_to_error_journal;
 use crate::stages::common::supervision::flow_context_factory::make_flow_context;
@@ -254,7 +254,7 @@ async fn dispatch_running_inner<
                     .await;
 
                     match resolution {
-                        ReadyControlResolution::Forward => {
+                        ControlAction::Forward => {
                             if envelope.event.is_eof() {
                                 if let Some(subscription) = sup.subscription.as_mut() {
                                     if is_cycle_entry_point {
@@ -279,7 +279,7 @@ async fn dispatch_running_inner<
                             sup.forward_control_event_guarded(&envelope).await?;
                             EventLoopDirective::Continue
                         }
-                        ReadyControlResolution::ForwardAndDrain => {
+                        ControlAction::ForwardAndDrain => {
                             ctx.buffered_eof = Some(envelope.event.clone());
 
                             if envelope.event.is_eof() {
@@ -303,7 +303,7 @@ async fn dispatch_running_inner<
                             sup.forward_control_event_guarded(&envelope).await?;
                             EventLoopDirective::Transition(TransformEvent::ReceivedEOF)
                         }
-                        ReadyControlResolution::BufferAtEntryPoint { is_drain } => {
+                        ControlAction::BufferAtEntryPoint { is_drain } => {
                             ctx.buffered_terminal_envelope
                                 .get_or_insert_with(|| envelope.clone());
 
@@ -338,7 +338,7 @@ async fn dispatch_running_inner<
 
                             EventLoopDirective::Continue
                         }
-                        ReadyControlResolution::Suppress => {
+                        ControlAction::Suppress => {
                             if envelope.event.is_eof()
                                 && is_cycle_entry_point
                                 && is_terminal_eof(&envelope, upstream_stage)
@@ -354,7 +354,7 @@ async fn dispatch_running_inner<
 
                             EventLoopDirective::Continue
                         }
-                        ReadyControlResolution::Skip => {
+                        ControlAction::Skip => {
                             tracing::warn!(
                                 stage_name = %ctx.stage_name,
                                 event_type = envelope.event.event_type(),

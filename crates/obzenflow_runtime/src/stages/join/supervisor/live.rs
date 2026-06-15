@@ -7,7 +7,7 @@ use crate::stages::common::handlers::JoinHandler;
 use crate::stages::common::heartbeat::HeartbeatProcessingGuard;
 use crate::stages::common::supervision::backpressure_drain::{drain_one_pending, DrainOutcome};
 use crate::stages::common::supervision::control_resolution::{
-    resolve_control_event_awaiting_pauses, ReadyControlResolution,
+    resolve_control_event_awaiting_pauses, ControlAction,
 };
 use crate::stages::common::supervision::error_routing::route_to_error_journal;
 use crate::stages::common::supervision::flow_context_factory::make_flow_context;
@@ -168,21 +168,20 @@ async fn handle_reference_envelope<
             .await;
 
             match resolution {
-                ReadyControlResolution::Forward | ReadyControlResolution::ForwardAndDrain => {
+                ControlAction::Forward | ControlAction::ForwardAndDrain => {
                     common::forward_control_event_and_mirror(ctx, &envelope).await?;
                     if envelope.event.is_eof() {
                         let _ = subscription.take_last_eof_outcome();
                     }
                 }
-                ReadyControlResolution::Suppress
-                | ReadyControlResolution::BufferAtEntryPoint { .. } => {
+                ControlAction::Suppress | ControlAction::BufferAtEntryPoint { .. } => {
                     tracing::warn!(
                         stage_name = %ctx.stage_name,
                         event_type = envelope.event.event_type(),
                         "Join received cycle-only control resolution without cycle config"
                     );
                 }
-                ReadyControlResolution::Skip => {
+                ControlAction::Skip => {
                     tracing::warn!(
                         stage_name = %ctx.stage_name,
                         event_type = envelope.event.event_type(),
@@ -385,22 +384,21 @@ async fn handle_stream_envelope<
             .await;
 
             match resolution {
-                ReadyControlResolution::Forward => {
+                ControlAction::Forward => {
                     common::forward_control_event_and_mirror(ctx, &envelope).await?;
                     if envelope.event.is_eof() {
                         let _ = subscription.take_last_eof_outcome();
                     }
                     Some(EventLoopDirective::Continue)
                 }
-                ReadyControlResolution::ForwardAndDrain => {
+                ControlAction::ForwardAndDrain => {
                     common::forward_control_event_and_mirror(ctx, &envelope).await?;
                     if envelope.event.is_eof() {
                         let _ = subscription.take_last_eof_outcome();
                     }
                     Some(EventLoopDirective::Transition(JoinEvent::ReceivedEOF))
                 }
-                ReadyControlResolution::Suppress
-                | ReadyControlResolution::BufferAtEntryPoint { .. } => {
+                ControlAction::Suppress | ControlAction::BufferAtEntryPoint { .. } => {
                     tracing::warn!(
                         stage_name = %ctx.stage_name,
                         event_type = envelope.event.event_type(),
@@ -408,7 +406,7 @@ async fn handle_stream_envelope<
                     );
                     Some(EventLoopDirective::Continue)
                 }
-                ReadyControlResolution::Skip => {
+                ControlAction::Skip => {
                     tracing::warn!(
                         stage_name = %ctx.stage_name,
                         event_type = envelope.event.event_type(),

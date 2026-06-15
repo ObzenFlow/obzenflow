@@ -293,12 +293,12 @@ resolve_control_event_awaiting_pauses(signal, gate, &mut processing_ctx, cycle_c
     │   returns SignalDecision (Continue / Pause / SuppressSignal)
     │
     ├── Continue:       apply cycle guard and EOF logic
-    │                   returns ControlResolution (Forward / ForwardAndDrain / Suppress / BufferAtEntryPoint)
-    │   Pause(d)        maps to ControlResolution::Delay(d), waits, then re-resolves
-    │   SuppressSignal  maps to ControlResolution::Skip
+    │                   returns ControlResolution::Ready(ControlAction)
+    │   Pause(d)        maps to ControlResolution::Pause(d), waits, then re-resolves
+    │   SuppressSignal  maps to ControlResolution::Ready(ControlAction::Skip)
     │
     ▼
-Supervisor acts on ReadyControlResolution
+Supervisor acts on ControlAction
     ├── Forward:             write signal downstream, return Continue
     ├── ForwardAndDrain:     write signal downstream, return Transition(BeginDrain)
     ├── Suppress:            drop signal, return Continue

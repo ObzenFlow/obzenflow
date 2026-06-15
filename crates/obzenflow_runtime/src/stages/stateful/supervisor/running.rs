@@ -11,7 +11,7 @@ use crate::stages::common::handlers::{StatefulOutputContext, UnifiedStatefulHand
 use crate::stages::common::heartbeat::HeartbeatProcessingGuard;
 use crate::stages::common::supervision::backpressure_drain::{drain_one_pending, DrainOutcome};
 use crate::stages::common::supervision::control_resolution::{
-    resolve_control_event_awaiting_pauses, ReadyControlResolution,
+    resolve_control_event_awaiting_pauses, ControlAction,
 };
 use crate::stages::common::supervision::error_routing::route_to_error_journal;
 use crate::stages::common::supervision::flow_context_factory::make_flow_context;
@@ -181,7 +181,7 @@ pub(super) async fn dispatch_accumulating<
                     .await;
 
                     match resolution {
-                        ReadyControlResolution::Forward => {
+                        ControlAction::Forward => {
                             if envelope.event.is_eof() {
                                 if let Some(subscription) = sup.subscription.as_mut() {
                                     drop(
@@ -195,13 +195,13 @@ pub(super) async fn dispatch_accumulating<
                             sup.forward_control_event(ctx, &envelope).await?;
                             EventLoopDirective::Continue
                         }
-                        ReadyControlResolution::ForwardAndDrain => {
+                        ControlAction::ForwardAndDrain => {
                             ctx.buffered_eof = Some(envelope.event.clone());
                             sup.forward_control_event(ctx, &envelope).await?;
                             EventLoopDirective::Transition(StatefulEvent::ReceivedEOF)
                         }
-                        ReadyControlResolution::Suppress => EventLoopDirective::Continue,
-                        ReadyControlResolution::BufferAtEntryPoint { .. } => {
+                        ControlAction::Suppress => EventLoopDirective::Continue,
+                        ControlAction::BufferAtEntryPoint { .. } => {
                             tracing::error!(
                                 stage_name = %ctx.stage_name,
                                 event_type = envelope.event.event_type(),
@@ -212,7 +212,7 @@ pub(super) async fn dispatch_accumulating<
                                 envelope.event.event_type()
                             )))
                         }
-                        ReadyControlResolution::Skip => {
+                        ControlAction::Skip => {
                             tracing::warn!(
                                 stage_name = %ctx.stage_name,
                                 event_type = envelope.event.event_type(),

@@ -4,7 +4,7 @@
 
 use super::backpressure_drain::{drain_one_pending, DrainOutcome};
 use super::control_resolution::{
-    resolve_control_event, resolve_forward_control_event, ControlResolution,
+    resolve_control_event, resolve_forward_control_event, ControlAction, ControlResolution,
 };
 use super::flow_context_factory::make_flow_context;
 use crate::backpressure::{BackpressurePlan, BackpressureRegistry, BackpressureWriter};
@@ -142,7 +142,10 @@ fn resolve_control_event_entry_point_suppresses_non_terminal_forwarded_eof() {
         true,
     );
 
-    assert_eq!(resolution, ControlResolution::Suppress);
+    assert_eq!(
+        resolution,
+        ControlResolution::Ready(ControlAction::Suppress)
+    );
 }
 
 #[test]
@@ -180,7 +183,7 @@ fn resolve_control_event_entry_point_buffers_external_terminal_eof() {
 
     assert_eq!(
         resolution,
-        ControlResolution::BufferAtEntryPoint { is_drain: false }
+        ControlResolution::Ready(ControlAction::BufferAtEntryPoint { is_drain: false })
     );
 }
 
@@ -218,7 +221,10 @@ fn resolve_control_event_entry_point_suppresses_internal_terminal_eof() {
         true,
     );
 
-    assert_eq!(resolution, ControlResolution::Suppress);
+    assert_eq!(
+        resolution,
+        ControlResolution::Ready(ControlAction::Suppress)
+    );
 }
 
 #[test]
@@ -257,7 +263,10 @@ fn resolve_control_event_drain_respects_stage_policy() {
         1,
         true,
     );
-    assert_eq!(terminal, ControlResolution::ForwardAndDrain);
+    assert_eq!(
+        terminal,
+        ControlResolution::Ready(ControlAction::ForwardAndDrain)
+    );
 
     let non_terminal = resolve_control_event(
         signal,
@@ -271,7 +280,10 @@ fn resolve_control_event_drain_respects_stage_policy() {
         1,
         false,
     );
-    assert_eq!(non_terminal, ControlResolution::Forward);
+    assert_eq!(
+        non_terminal,
+        ControlResolution::Ready(ControlAction::Forward)
+    );
 }
 
 #[test]
@@ -311,7 +323,7 @@ fn resolve_forward_control_event_notes_cycle_eof_before_resolving() {
         true,
     );
 
-    assert_eq!(resolution, ControlResolution::ForwardAndDrain);
+    assert_eq!(resolution, ControlAction::ForwardAndDrain);
     assert!(guard.has_seen_all_upstream_eofs(1));
 }
 
@@ -345,7 +357,7 @@ fn resolve_forward_control_event_does_not_note_non_terminal_forwarded_eof() {
         true,
     );
 
-    assert_eq!(resolution, ControlResolution::Forward);
+    assert_eq!(resolution, ControlAction::Forward);
     assert!(!guard.has_seen_all_upstream_eofs(1));
 }
 
@@ -395,7 +407,7 @@ fn resolve_control_event_strategy_skip_prevents_cycle_guard_note() {
         true,
     );
 
-    assert_eq!(resolution, ControlResolution::Skip);
+    assert_eq!(resolution, ControlResolution::Ready(ControlAction::Skip));
     assert!(!guard.has_seen_all_upstream_eofs(1));
 }
 
@@ -438,7 +450,7 @@ fn resolve_control_event_delay_does_not_note_cycle_guard() {
 
     assert_eq!(
         resolution,
-        ControlResolution::Delay(std::time::Duration::from_millis(1))
+        ControlResolution::Pause(std::time::Duration::from_millis(1))
     );
     assert!(!guard.has_seen_all_upstream_eofs(1));
 }
@@ -479,7 +491,7 @@ fn resolve_control_event_delay_then_reconsult_notes_cycle_guard_on_second_pass()
     );
     assert_eq!(
         first_pass,
-        ControlResolution::Delay(std::time::Duration::from_millis(1))
+        ControlResolution::Pause(std::time::Duration::from_millis(1))
     );
     assert!(
         !guard.has_seen_all_upstream_eofs(1),
@@ -498,7 +510,10 @@ fn resolve_control_event_delay_then_reconsult_notes_cycle_guard_on_second_pass()
         1,
         true,
     );
-    assert_eq!(second_pass, ControlResolution::ForwardAndDrain);
+    assert_eq!(
+        second_pass,
+        ControlResolution::Ready(ControlAction::ForwardAndDrain)
+    );
     assert!(
         guard.has_seen_all_upstream_eofs(1),
         "forward pass must note upstream EOF"
