@@ -106,6 +106,9 @@ impl<H: AsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
             replay_driver: None,
             replay_started_at: None,
             replay_completion: ReplayCompletionGuard::default(),
+            source_boundary: self.config.source_boundary,
+            pending_boundary_begin_drain: false,
+            pending_boundary_error: None,
         };
 
         let supervisor_name = format!("async_infinite_source_{}", self.config.stage_name);

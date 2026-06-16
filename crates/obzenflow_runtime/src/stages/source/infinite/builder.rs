@@ -116,6 +116,9 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
             replay_driver: None,
             replay_started_at: None,
             replay_completion: ReplayCompletionGuard::default(),
+            source_boundary: self.config.source_boundary,
+            pending_boundary_begin_drain: false,
+            pending_boundary_error: None,
         };
 
         // Clone what we need for the task

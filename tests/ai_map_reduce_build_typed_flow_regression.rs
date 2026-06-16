@@ -22,8 +22,9 @@
 //! validate_edge_typing); it does not drive the runtime.
 
 use async_trait::async_trait;
+use obzenflow_core::event::chain_event::{ChainEvent, ChainEventContent, ChainEventFactory};
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
-use obzenflow_core::{ChainEvent, TypedPayload};
+use obzenflow_core::{id::StageId, TypedPayload, WriterId};
 use obzenflow_dsl::{ai_map_reduce, flow, sink, source};
 use obzenflow_infra::journal::memory_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
@@ -34,6 +35,9 @@ use obzenflow_runtime::stages::common::handlers::{
 use obzenflow_runtime::stages::stateful::CollectByInput;
 use obzenflow_runtime::typing::{SourceTyping, TransformTyping};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::Arc;
 
 // ── Typed payloads for each stage of the ai_map_reduce composite ──────────
 
@@ -47,7 +51,9 @@ impl TypedPayload for BuildOnlySeed {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct BuildOnlyChunk {
-    index: usize,
+    chunk_index: usize,
+    chunk_count: usize,
+    value: u64,
 }
 impl TypedPayload for BuildOnlyChunk {
     const EVENT_TYPE: &'static str = "regression.amr.chunk";
@@ -146,6 +152,172 @@ impl SinkHandler for NoopSink {
     }
 }
 
+#[derive(Clone, Debug)]
+struct CountingOutSink {
+    delivered: Arc<AtomicUsize>,
+    total: Arc<AtomicU64>,
+}
+
+impl CountingOutSink {
+    fn new() -> (Self, Arc<AtomicUsize>, Arc<AtomicU64>) {
+        let delivered = Arc::new(AtomicUsize::new(0));
+        let total = Arc::new(AtomicU64::new(0));
+        (
+            Self {
+                delivered: Arc::clone(&delivered),
+                total: Arc::clone(&total),
+            },
+            delivered,
+            total,
+        )
+    }
+}
+
+#[async_trait]
+impl SinkHandler for CountingOutSink {
+    async fn consume(&mut self, event: ChainEvent) -> Result<DeliveryPayload, HandlerError> {
+        if let ChainEventContent::Data {
+            event_type,
+            payload,
+        } = &event.content
+        {
+            if BuildOnlyOut::event_type_matches(event_type) {
+                let out: BuildOnlyOut = serde_json::from_value(payload.clone()).map_err(|err| {
+                    HandlerError::Deserialization(format!(
+                        "counting sink output decode failed: {err}"
+                    ))
+                })?;
+                self.delivered.fetch_add(1, Ordering::SeqCst);
+                self.total.store(out.total, Ordering::SeqCst);
+            }
+        }
+
+        Ok(DeliveryPayload::success(
+            "counting",
+            DeliveryMethod::Custom("CountingOut".to_string()),
+            None,
+        ))
+    }
+}
+
+#[derive(Clone, Debug)]
+struct OneSeedSource {
+    emitted: bool,
+    writer_id: WriterId,
+}
+
+impl OneSeedSource {
+    fn new() -> Self {
+        Self {
+            emitted: false,
+            writer_id: WriterId::from(StageId::new()),
+        }
+    }
+}
+
+impl SourceTyping for OneSeedSource {
+    type Output = BuildOnlySeed;
+}
+
+impl FiniteSourceHandler for OneSeedSource {
+    fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
+        if self.emitted {
+            return Ok(None);
+        }
+        self.emitted = true;
+        Ok(Some(vec![ChainEventFactory::data_event(
+            self.writer_id,
+            BuildOnlySeed::EVENT_TYPE,
+            json!(BuildOnlySeed { n: 2 }),
+        )]))
+    }
+}
+
+#[derive(Clone, Debug)]
+struct RuntimeChunker;
+
+impl TransformTyping for RuntimeChunker {
+    type Input = BuildOnlySeed;
+    type Output = BuildOnlyChunk;
+}
+
+#[async_trait]
+impl TransformHandler for RuntimeChunker {
+    fn process(&self, event: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> {
+        let chunk_count = 2;
+        let mut out = Vec::new();
+        for chunk_index in 0..chunk_count {
+            out.push(ChainEventFactory::derived_data_event(
+                event.writer_id,
+                &event,
+                BuildOnlyChunk::EVENT_TYPE,
+                json!(BuildOnlyChunk {
+                    chunk_index,
+                    chunk_count,
+                    value: (chunk_index as u64) + 1,
+                }),
+            ));
+        }
+        Ok(out)
+    }
+
+    async fn drain(&mut self) -> Result<(), HandlerError> {
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug)]
+struct RuntimeMap;
+
+#[async_trait]
+impl AsyncTransformHandler for RuntimeMap {
+    async fn process(&self, event: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> {
+        let ChainEventContent::Data { payload, .. } = &event.content else {
+            return Ok(Vec::new());
+        };
+        let chunk: BuildOnlyChunk = serde_json::from_value(payload.clone()).map_err(|err| {
+            HandlerError::Deserialization(format!("runtime map chunk decode failed: {err}"))
+        })?;
+        Ok(vec![ChainEventFactory::derived_data_event(
+            event.writer_id,
+            &event,
+            BuildOnlyPartial::EVENT_TYPE,
+            json!(BuildOnlyPartial { value: chunk.value }),
+        )])
+    }
+
+    async fn drain(&mut self) -> Result<(), HandlerError> {
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug)]
+struct RuntimeFinalize;
+
+#[async_trait]
+impl AsyncTransformHandler for RuntimeFinalize {
+    async fn process(&self, event: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> {
+        let ChainEventContent::Data { payload, .. } = &event.content else {
+            return Ok(Vec::new());
+        };
+        let collected: BuildOnlyCollected =
+            serde_json::from_value(payload.clone()).map_err(|err| {
+                HandlerError::Deserialization(format!("runtime finalize decode failed: {err}"))
+            })?;
+        let total = collected.values.iter().copied().sum();
+        Ok(vec![ChainEventFactory::derived_data_event(
+            event.writer_id,
+            &event,
+            BuildOnlyOut::EVENT_TYPE,
+            json!(BuildOnlyOut { total }),
+        )])
+    }
+
+    async fn drain(&mut self) -> Result<(), HandlerError> {
+        Ok(())
+    }
+}
+
 #[tokio::test]
 async fn build_typed_flow_accepts_ai_map_reduce_with_subgraph_attached() {
     // The build is the assertion. If `validate_edge_typing` ran against a
@@ -193,4 +365,54 @@ async fn build_typed_flow_accepts_ai_map_reduce_with_subgraph_attached() {
              {err:?}"
         )
     });
+}
+
+#[tokio::test]
+async fn ai_map_reduce_runtime_commits_framework_internal_transport_events() {
+    let (sink_handler, delivered, total) = CountingOutSink::new();
+
+    let handle = flow! {
+        name: "amr_runtime_internal_contracts",
+        journals: memory_journals(),
+        middleware: [],
+
+        stages: {
+            seed = source!(BuildOnlySeed => OneSeedSource::new());
+            digest = ai_map_reduce!(
+                chunk: BuildOnlySeed -> BuildOnlyChunk => RuntimeChunker,
+                map: BuildOnlyChunk -> BuildOnlyPartial => RuntimeMap,
+                collect: BuildOnlyPartial -> BuildOnlyCollected => CollectByInput::new(
+                    BuildOnlyCollected::default(),
+                    |acc: &mut BuildOnlyCollected, partial: &BuildOnlyPartial| {
+                        acc.values.push(partial.value);
+                    },
+                ),
+                reduce: BuildOnlyCollected -> BuildOnlyOut => RuntimeFinalize,
+            );
+            sink_stage = sink!(BuildOnlyOut => sink_handler);
+        },
+
+        topology: {
+            seed |> digest;
+            digest |> sink_stage;
+        }
+    }
+    .await
+    .expect("ai_map_reduce runtime flow should build");
+
+    handle
+        .run()
+        .await
+        .expect("ai_map_reduce should commit planning manifests and tagged partials");
+
+    assert_eq!(
+        delivered.load(Ordering::SeqCst),
+        1,
+        "ai_map_reduce should deliver one reduced output to the downstream sink"
+    );
+    assert_eq!(
+        total.load(Ordering::SeqCst),
+        3,
+        "collector should route tagged partials and finalise their sum"
+    );
 }

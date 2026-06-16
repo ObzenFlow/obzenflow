@@ -18,8 +18,9 @@ use obzenflow_adapters::middleware::{
     validate_middleware_safety, AsyncFiniteSourceHandlerExt, AsyncInfiniteSourceHandlerExt,
     AsyncTransformHandlerExt, ControlMiddlewareRole, FiniteSourceHandlerExt,
     InfiniteSourceHandlerExt, JoinHandlerMiddlewareExt, Middleware, MiddlewareFactory,
-    OutcomeEnrichmentMiddleware, SinkHandlerExt, StatefulHandlerMiddlewareExt,
-    SystemEnrichmentMiddleware, TimingMiddleware, TransformHandlerExt, UnifiedMiddlewareTransform,
+    OutcomeEnrichmentMiddleware, PerSourcePolicyBoundary, SinkHandlerExt,
+    StatefulHandlerMiddlewareExt, SystemEnrichmentMiddleware, TimingMiddleware,
+    TransformHandlerExt, UnifiedMiddlewareTransform,
 };
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::{StageId, WriterId};
@@ -57,6 +58,7 @@ use obzenflow_runtime::{
                 AsyncInfiniteSourceBuilder, InfiniteSourceBuilder, InfiniteSourceConfig,
                 InfiniteSourceEvent, InfiniteSourceState,
             },
+            SourceBoundaryMiddleware,
         },
         stateful::{StatefulBuilder, StatefulConfig, StatefulEvent, StatefulState},
         transform::{TransformBuilder, TransformConfig, TransformEvent, TransformState},
@@ -97,6 +99,69 @@ fn create_system_middleware(
         )),
         Box::new(OutcomeEnrichmentMiddleware::new(&config.name)),
     ]
+}
+
+struct SourceMiddlewareBinding {
+    all_middleware: Vec<Box<dyn Middleware>>,
+    source_boundary: Option<Arc<dyn SourceBoundaryMiddleware>>,
+    has_circuit_breaker: bool,
+    expects_circuit_breaker: bool,
+    expects_rate_limiter: bool,
+}
+
+fn build_source_middleware_and_register_policies(
+    config: &StageConfig,
+    stage_type: StageType,
+    writer_id: WriterId,
+    resolved: crate::middleware_resolution::ResolvedMiddleware,
+    control_middleware: &Arc<ControlMiddlewareAggregator>,
+) -> StageCreationResult<SourceMiddlewareBinding> {
+    let mut all_middleware = create_system_middleware(config, stage_type);
+    let expects_circuit_breaker = resolved
+        .middleware
+        .iter()
+        .any(|spec| spec.factory.control_role() == ControlMiddlewareRole::CircuitBreaker);
+    let expects_rate_limiter = resolved
+        .middleware
+        .iter()
+        .any(|spec| spec.factory.control_role() == ControlMiddlewareRole::RateLimiter);
+
+    let mut has_circuit_breaker = false;
+
+    for spec in resolved.middleware {
+        match spec.factory.control_role() {
+            ControlMiddlewareRole::CircuitBreaker => {
+                has_circuit_breaker = true;
+                spec.factory
+                    .register_source_policy(config, stage_type, control_middleware)?;
+            }
+            ControlMiddlewareRole::RateLimiter => {
+                spec.factory
+                    .register_source_policy(config, stage_type, control_middleware)?;
+            }
+            ControlMiddlewareRole::None => {
+                all_middleware.push(spec.factory.create(config, control_middleware.clone())?);
+            }
+        }
+    }
+
+    let source_policies = control_middleware.source_policies(&config.stage_id);
+    let source_boundary = if source_policies.is_empty() {
+        None
+    } else {
+        Some(
+            Arc::new(PerSourcePolicyBoundary::new(source_policies, writer_id))
+                as Arc<dyn SourceBoundaryMiddleware>,
+        )
+    };
+
+    Ok(SourceMiddlewareBinding {
+        all_middleware,
+        source_boundary,
+        has_circuit_breaker,
+        expects_circuit_breaker,
+        expects_rate_limiter,
+    })
 }
 
 /// The signal strategy attached to every stage. FLOWIP-115c retired the dead
@@ -390,42 +455,20 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> S
         // Log the resolution
         crate::middleware_resolution::log_resolved_middleware(&config.name, &resolved);
 
-        // Create system middleware with instrumentation
-        let mut all_middleware = create_system_middleware(&config, StageType::FiniteSource);
-
-        let expects_circuit_breaker = resolved
-            .middleware
-            .iter()
-            .any(|spec| spec.factory.control_role() == ControlMiddlewareRole::CircuitBreaker);
-        let expects_rate_limiter = resolved
-            .middleware
-            .iter()
-            .any(|spec| spec.factory.control_role() == ControlMiddlewareRole::RateLimiter);
-
-        // Add resolved user middleware, tracking whether circuit_breaker is present.
-        //
-        // Note: circuit_breaker middleware MUST be attached for sources so it can:
-        // - observe SourceError-derived error events
-        // - trip/open and prevent hammering upstream dependencies
-        // - export correct per-stage breaker metrics
-        let mut has_circuit_breaker = false;
-        let mut user_middleware: Vec<Box<dyn Middleware>> = Vec::new();
-        for spec in resolved.middleware.into_iter() {
-            if spec.factory.control_role() == ControlMiddlewareRole::CircuitBreaker {
-                has_circuit_breaker = true;
-                user_middleware.push(spec.factory.create(&config, control_middleware.clone())?);
-                continue;
-            }
-            user_middleware.push(spec.factory.create(&config, control_middleware.clone())?);
-        }
-        all_middleware.extend(user_middleware);
+        let source_binding = build_source_middleware_and_register_policies(
+            &config,
+            StageType::FiniteSource,
+            writer_id,
+            resolved,
+            &control_middleware,
+        )?;
 
         instrumentation
             .bind_control_middleware(
                 &config.stage_id,
                 &control_provider,
-                expects_circuit_breaker,
-                expects_rate_limiter,
+                source_binding.expects_circuit_breaker,
+                source_binding.expects_rate_limiter,
             )
             .map_err(|e| e.to_string())?;
         let instrumentation = Arc::new(instrumentation);
@@ -436,7 +479,7 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> S
 
         // Apply all middleware
         let mut builder = handler.middleware(writer_id);
-        for mw in all_middleware {
+        for mw in source_binding.all_middleware {
             builder = builder.with_boxed(mw);
         }
         let handler_with_middleware = builder.build();
@@ -446,7 +489,7 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> S
             stage_id: config.stage_id,
             stage_name: config.name.clone(),
             flow_name: config.flow_name.clone(),
-            control_strategy: if has_circuit_breaker {
+            control_strategy: if source_binding.has_circuit_breaker {
                 Some(Arc::new(
                     CircuitBreakerSourceStrategy::try_new(config.stage_id, &control_provider)
                         .map_err(|e| e.to_string())?,
@@ -454,6 +497,7 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> S
             } else {
                 None
             },
+            source_boundary: source_binding.source_boundary,
         };
 
         // Use the builder to create the handle
@@ -571,35 +615,20 @@ impl<H: AsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
 
         crate::middleware_resolution::log_resolved_middleware(&config.name, &resolved);
 
-        let mut all_middleware = create_system_middleware(&config, StageType::FiniteSource);
-
-        let expects_circuit_breaker = resolved
-            .middleware
-            .iter()
-            .any(|spec| spec.factory.control_role() == ControlMiddlewareRole::CircuitBreaker);
-        let expects_rate_limiter = resolved
-            .middleware
-            .iter()
-            .any(|spec| spec.factory.control_role() == ControlMiddlewareRole::RateLimiter);
-
-        let mut has_circuit_breaker = false;
-        let mut user_middleware: Vec<Box<dyn Middleware>> = Vec::new();
-        for spec in resolved.middleware.into_iter() {
-            if spec.factory.control_role() == ControlMiddlewareRole::CircuitBreaker {
-                has_circuit_breaker = true;
-                user_middleware.push(spec.factory.create(&config, control_middleware.clone())?);
-                continue;
-            }
-            user_middleware.push(spec.factory.create(&config, control_middleware.clone())?);
-        }
-        all_middleware.extend(user_middleware);
+        let source_binding = build_source_middleware_and_register_policies(
+            &config,
+            StageType::FiniteSource,
+            writer_id,
+            resolved,
+            &control_middleware,
+        )?;
 
         instrumentation
             .bind_control_middleware(
                 &config.stage_id,
                 &control_provider,
-                expects_circuit_breaker,
-                expects_rate_limiter,
+                source_binding.expects_circuit_breaker,
+                source_binding.expects_rate_limiter,
             )
             .map_err(|e| e.to_string())?;
         let instrumentation = Arc::new(instrumentation);
@@ -612,7 +641,7 @@ impl<H: AsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
         let mut builder = handler
             .middleware(writer_id)
             .with_poll_timeout(poll_timeout);
-        for mw in all_middleware {
+        for mw in source_binding.all_middleware {
             builder = builder.with_boxed(mw);
         }
         let handler_with_middleware = builder.build();
@@ -622,7 +651,7 @@ impl<H: AsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
             stage_id: config.stage_id,
             stage_name: config.name.clone(),
             flow_name: config.flow_name.clone(),
-            control_strategy: if has_circuit_breaker {
+            control_strategy: if source_binding.has_circuit_breaker {
                 Some(Arc::new(
                     CircuitBreakerSourceStrategy::try_new(config.stage_id, &control_provider)
                         .map_err(|e| e.to_string())?,
@@ -630,6 +659,7 @@ impl<H: AsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
             } else {
                 None
             },
+            source_boundary: source_binding.source_boundary,
         };
 
         // Use the builder to create the handle
@@ -712,42 +742,20 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
         // Log the resolution
         crate::middleware_resolution::log_resolved_middleware(&config.name, &resolved);
 
-        // Create system middleware with instrumentation
-        let mut all_middleware = create_system_middleware(&config, StageType::InfiniteSource);
-
-        let expects_circuit_breaker = resolved
-            .middleware
-            .iter()
-            .any(|spec| spec.factory.control_role() == ControlMiddlewareRole::CircuitBreaker);
-        let expects_rate_limiter = resolved
-            .middleware
-            .iter()
-            .any(|spec| spec.factory.control_role() == ControlMiddlewareRole::RateLimiter);
-
-        // Add resolved user middleware, tracking whether circuit_breaker is present.
-        //
-        // Note: circuit_breaker middleware MUST be attached for sources so it can:
-        // - observe SourceError-derived error events
-        // - trip/open and prevent hammering upstream dependencies
-        // - export correct per-stage breaker metrics
-        let mut has_circuit_breaker = false;
-        let mut user_middleware: Vec<Box<dyn Middleware>> = Vec::new();
-        for spec in resolved.middleware.into_iter() {
-            if spec.factory.control_role() == ControlMiddlewareRole::CircuitBreaker {
-                has_circuit_breaker = true;
-                user_middleware.push(spec.factory.create(&config, control_middleware.clone())?);
-                continue;
-            }
-            user_middleware.push(spec.factory.create(&config, control_middleware.clone())?);
-        }
-        all_middleware.extend(user_middleware);
+        let source_binding = build_source_middleware_and_register_policies(
+            &config,
+            StageType::InfiniteSource,
+            writer_id,
+            resolved,
+            &control_middleware,
+        )?;
 
         instrumentation
             .bind_control_middleware(
                 &config.stage_id,
                 &control_provider,
-                expects_circuit_breaker,
-                expects_rate_limiter,
+                source_binding.expects_circuit_breaker,
+                source_binding.expects_rate_limiter,
             )
             .map_err(|e| e.to_string())?;
         let instrumentation = Arc::new(instrumentation);
@@ -758,7 +766,7 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
 
         // Apply all middleware
         let mut builder = handler.middleware(writer_id);
-        for mw in all_middleware {
+        for mw in source_binding.all_middleware {
             builder = builder.with_boxed(mw);
         }
         let handler_with_middleware = builder.build();
@@ -768,7 +776,7 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
             stage_id: config.stage_id,
             stage_name: config.name.clone(),
             flow_name: config.flow_name.clone(),
-            control_strategy: if has_circuit_breaker {
+            control_strategy: if source_binding.has_circuit_breaker {
                 Some(Arc::new(
                     CircuitBreakerSourceStrategy::try_new(config.stage_id, &control_provider)
                         .map_err(|e| e.to_string())?,
@@ -776,6 +784,7 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
             } else {
                 None
             },
+            source_boundary: source_binding.source_boundary,
         };
 
         // Use the builder to create the handle
@@ -891,35 +900,20 @@ impl<H: AsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
 
         crate::middleware_resolution::log_resolved_middleware(&config.name, &resolved);
 
-        let mut all_middleware = create_system_middleware(&config, StageType::InfiniteSource);
-
-        let expects_circuit_breaker = resolved
-            .middleware
-            .iter()
-            .any(|spec| spec.factory.control_role() == ControlMiddlewareRole::CircuitBreaker);
-        let expects_rate_limiter = resolved
-            .middleware
-            .iter()
-            .any(|spec| spec.factory.control_role() == ControlMiddlewareRole::RateLimiter);
-
-        let mut has_circuit_breaker = false;
-        let mut user_middleware: Vec<Box<dyn Middleware>> = Vec::new();
-        for spec in resolved.middleware.into_iter() {
-            if spec.factory.control_role() == ControlMiddlewareRole::CircuitBreaker {
-                has_circuit_breaker = true;
-                user_middleware.push(spec.factory.create(&config, control_middleware.clone())?);
-                continue;
-            }
-            user_middleware.push(spec.factory.create(&config, control_middleware.clone())?);
-        }
-        all_middleware.extend(user_middleware);
+        let source_binding = build_source_middleware_and_register_policies(
+            &config,
+            StageType::InfiniteSource,
+            writer_id,
+            resolved,
+            &control_middleware,
+        )?;
 
         instrumentation
             .bind_control_middleware(
                 &config.stage_id,
                 &control_provider,
-                expects_circuit_breaker,
-                expects_rate_limiter,
+                source_binding.expects_circuit_breaker,
+                source_binding.expects_rate_limiter,
             )
             .map_err(|e| e.to_string())?;
         let instrumentation = Arc::new(instrumentation);
@@ -931,7 +925,7 @@ impl<H: AsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
         let mut builder = handler
             .middleware(writer_id)
             .with_poll_timeout(poll_timeout);
-        for mw in all_middleware {
+        for mw in source_binding.all_middleware {
             builder = builder.with_boxed(mw);
         }
         let handler_with_middleware = builder.build();
@@ -940,7 +934,7 @@ impl<H: AsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
             stage_id: config.stage_id,
             stage_name: config.name.clone(),
             flow_name: config.flow_name.clone(),
-            control_strategy: if has_circuit_breaker {
+            control_strategy: if source_binding.has_circuit_breaker {
                 Some(Arc::new(
                     CircuitBreakerSourceStrategy::try_new(config.stage_id, &control_provider)
                         .map_err(|e| e.to_string())?,
@@ -948,6 +942,7 @@ impl<H: AsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
             } else {
                 None
             },
+            source_boundary: source_binding.source_boundary,
         };
 
         let handle =

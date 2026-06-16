@@ -9,7 +9,11 @@ use crate::stages::common::handlers::AsyncFiniteSourceHandler;
 use crate::stages::common::supervision::flow_context_factory::make_flow_context;
 use crate::stages::source::replay_lifecycle::ReplayCompletionGuard;
 use crate::stages::source::supervision::{
-    drain_pending_outputs_async, emit_batch_to_pending_outputs, per_data_event_duration_for_batch,
+    around_source_boundary, drain_pending_outputs_async, emit_batch_to_pending_outputs,
+    per_data_event_duration_for_batch, stage_boundary_control_events,
+};
+use crate::stages::source::{
+    SourceBoundaryMiddleware, SourceBoundaryOutcome, SourcePollCompletion, SourcePollReport,
 };
 use crate::supervised_base::base::Supervisor;
 use crate::supervised_base::{EventLoopDirective, EventReceiver, HandlerSupervised, StateWatcher};
@@ -56,6 +60,21 @@ pub(crate) struct AsyncFiniteSourceSupervisor<
 
     /// Guard that ensures ReplayLifecycle::Completed is emitted once (FLOWIP-095a).
     pub(crate) replay_completion: ReplayCompletionGuard,
+
+    /// Runtime-neutral source boundary seam (FLOWIP-115a).
+    pub(crate) source_boundary: Option<Arc<dyn SourceBoundaryMiddleware>>,
+
+    /// EOF was observed by the source boundary after emitting control events;
+    /// drain those events before transitioning to completion.
+    pub(crate) pending_boundary_eof: bool,
+
+    /// Error was observed by the source boundary after emitting control events;
+    /// drain those events before transitioning to failure.
+    pub(crate) pending_boundary_error: Option<String>,
+
+    /// Rejection was observed by the source boundary after emitting control
+    /// events; drain those events before transitioning to completion.
+    pub(crate) pending_boundary_rejected: bool,
 }
 
 impl<H: AsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Supervisor
@@ -376,6 +395,20 @@ impl<H: AsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
                     return Ok(directive);
                 }
 
+                if self.pending_boundary_eof {
+                    self.pending_boundary_eof = false;
+                    return Ok(EventLoopDirective::Transition(FiniteSourceEvent::Completed));
+                }
+                if let Some(error) = self.pending_boundary_error.take() {
+                    return Ok(EventLoopDirective::Transition(FiniteSourceEvent::Error(
+                        error,
+                    )));
+                }
+                if self.pending_boundary_rejected {
+                    self.pending_boundary_rejected = false;
+                    return Ok(EventLoopDirective::Transition(FiniteSourceEvent::Completed));
+                }
+
                 ctx.instrumentation
                     .event_loops_total
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -495,8 +528,23 @@ impl<H: AsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
                         ))),
                     }
                 } else {
-                    let tick_started_at = Instant::now();
-                    let next_result = tokio::select! {
+                    let source_boundary = self.source_boundary.clone();
+                    let boundary_future = around_source_boundary(
+                        source_boundary,
+                        Box::pin(async {
+                            let poll_started_at = Instant::now();
+                            let result = self.handler.next().await.map(|next| match next {
+                                Some(events) => SourcePollCompletion::Batch(events),
+                                None => SourcePollCompletion::Eof,
+                            });
+                            SourcePollReport {
+                                result,
+                                poll_duration: poll_started_at.elapsed(),
+                            }
+                        }),
+                    );
+
+                    let report = tokio::select! {
                         biased;
                         maybe_event = self.external_events.recv() => {
                             match maybe_event {
@@ -508,46 +556,103 @@ impl<H: AsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
                                 }
                             }
                         }
-                        result = self.handler.next() => result,
+                        report = boundary_future => report,
                     };
-                    let tick_duration = tick_started_at.elapsed();
 
-                    match next_result {
-                        Ok(Some(events)) if !events.is_empty() => {
-                            ctx.instrumentation
-                                .event_loops_with_work_total
-                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-
-                            let data_events_in_tick =
-                                events.iter().filter(|event| event.is_data()).count();
-                            let per_data_event_duration = per_data_event_duration_for_batch(
-                                tick_duration,
-                                data_events_in_tick,
+                    match report.outcome {
+                        SourceBoundaryOutcome::Rejected { reason } => {
+                            tracing::warn!(
+                                stage_name = %ctx.stage_name,
+                                reason = %reason,
+                                "Async finite source boundary rejected; completing source"
                             );
-                            emit_batch_to_pending_outputs(
-                                events,
+                            if stage_boundary_control_events(
+                                report.control_events,
                                 &stage_flow_context,
                                 &ctx.instrumentation,
-                                per_data_event_duration,
                                 &mut ctx.pending_outputs,
-                            );
+                            ) {
+                                self.pending_boundary_rejected = true;
+                                Ok(EventLoopDirective::Continue)
+                            } else {
+                                Ok(EventLoopDirective::Transition(FiniteSourceEvent::Completed))
+                            }
+                        }
+                        SourceBoundaryOutcome::Polled(poll) => match poll.result {
+                            Ok(SourcePollCompletion::Batch(mut events)) if !events.is_empty() => {
+                                ctx.instrumentation
+                                    .event_loops_with_work_total
+                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-                            Ok(EventLoopDirective::Continue)
-                        }
-                        Ok(Some(_events)) => Ok(EventLoopDirective::Continue),
-                        Ok(None) => {
-                            Ok(EventLoopDirective::Transition(FiniteSourceEvent::Completed))
-                        }
-                        Err(e) => {
-                            tracing::error!(
-                                stage_name = %ctx.stage_name,
-                                error = %e,
-                                "Async finite source handler.next() returned error"
-                            );
-                            Ok(EventLoopDirective::Transition(FiniteSourceEvent::Error(
-                                e.to_string(),
-                            )))
-                        }
+                                events.extend(report.control_events);
+                                let data_events_in_tick =
+                                    events.iter().filter(|event| event.is_data()).count();
+                                let per_data_event_duration = per_data_event_duration_for_batch(
+                                    poll.poll_duration,
+                                    data_events_in_tick,
+                                );
+                                emit_batch_to_pending_outputs(
+                                    events,
+                                    &stage_flow_context,
+                                    &ctx.instrumentation,
+                                    per_data_event_duration,
+                                    &mut ctx.pending_outputs,
+                                );
+
+                                Ok(EventLoopDirective::Continue)
+                            }
+                            Ok(SourcePollCompletion::Batch(mut events)) => {
+                                events.extend(report.control_events);
+                                if !events.is_empty() {
+                                    emit_batch_to_pending_outputs(
+                                        events,
+                                        &stage_flow_context,
+                                        &ctx.instrumentation,
+                                        Duration::from_nanos(0),
+                                        &mut ctx.pending_outputs,
+                                    );
+                                }
+                                Ok(EventLoopDirective::Continue)
+                            }
+                            Ok(SourcePollCompletion::Eof) => {
+                                if report.control_events.is_empty() {
+                                    Ok(EventLoopDirective::Transition(FiniteSourceEvent::Completed))
+                                } else {
+                                    emit_batch_to_pending_outputs(
+                                        report.control_events,
+                                        &stage_flow_context,
+                                        &ctx.instrumentation,
+                                        Duration::from_nanos(0),
+                                        &mut ctx.pending_outputs,
+                                    );
+                                    self.pending_boundary_eof = true;
+                                    Ok(EventLoopDirective::Continue)
+                                }
+                            }
+                            Err(e) => {
+                                tracing::error!(
+                                    stage_name = %ctx.stage_name,
+                                    error = %e,
+                                    "Async finite source handler.next() returned error"
+                                );
+                                let error = e.to_string();
+                                if report.control_events.is_empty() {
+                                    Ok(EventLoopDirective::Transition(FiniteSourceEvent::Error(
+                                        error,
+                                    )))
+                                } else {
+                                    emit_batch_to_pending_outputs(
+                                        report.control_events,
+                                        &stage_flow_context,
+                                        &ctx.instrumentation,
+                                        Duration::from_nanos(0),
+                                        &mut ctx.pending_outputs,
+                                    );
+                                    self.pending_boundary_error = Some(error);
+                                    Ok(EventLoopDirective::Continue)
+                                }
+                            }
+                        },
                     }
                 }
             }

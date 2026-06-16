@@ -212,6 +212,22 @@ pub trait MiddlewareFactory: Send + Sync {
         ControlPointRegistration::default()
     }
 
+    /// FLOWIP-115a: register this factory's source control ports (admission
+    /// gate, attempt observer) for a source stage, sharing state with the
+    /// policy. Policy factories override; observation and structural factories
+    /// do nothing. `stage_type` selects the rate limiter charge position
+    /// (finite: post-admit delivery charging per FLOWIP-114m; infinite:
+    /// pre-poll). A policy registered here is driven through the runtime port
+    /// and is not added to the source middleware chain.
+    fn register_source_policy(
+        &self,
+        _config: &StageConfig,
+        _stage_type: obzenflow_core::event::context::StageType,
+        _control_middleware: &Arc<ControlMiddlewareAggregator>,
+    ) -> MiddlewareFactoryResult<()> {
+        Ok(())
+    }
+
     /// Which stage types this middleware supports
     ///
     /// Default implementation supports all stage types. Override this
@@ -323,6 +339,15 @@ impl<F: MiddlewareFactory + ?Sized> MiddlewareFactory for Box<F> {
 
     fn control_points(&self) -> ControlPointRegistration {
         (**self).control_points()
+    }
+
+    fn register_source_policy(
+        &self,
+        config: &StageConfig,
+        stage_type: obzenflow_core::event::context::StageType,
+        control_middleware: &Arc<ControlMiddlewareAggregator>,
+    ) -> MiddlewareFactoryResult<()> {
+        (**self).register_source_policy(config, stage_type, control_middleware)
     }
 
     fn supported_stage_types(&self) -> &[StageType] {

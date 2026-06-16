@@ -11,7 +11,7 @@ use obzenflow_core::{
     event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload},
     event::payloads::flow_control_payload::FlowControlPayload,
     event::payloads::observability_payload::{
-        CircuitBreakerEvent, MiddlewareLifecycle, ObservabilityPayload, RateLimiterEvent,
+        CircuitBreakerEvent, MiddlewareLifecycle, ObservabilityPayload,
     },
     event::{ChainEventContent, SystemEvent, SystemEventType},
     id::{StageId, SystemId},
@@ -1515,21 +1515,6 @@ fn recorded_effect_cursor(event: &ChainEvent) -> Option<EffectCursor> {
     None
 }
 
-async fn rate_limiter_delayed_events_in_stage(run_dir: &Path, stage_key: &str) -> usize {
-    read_stage_events(run_dir, stage_key)
-        .await
-        .into_iter()
-        .filter(|event| {
-            matches!(
-                event.content,
-                ChainEventContent::Observability(ObservabilityPayload::Middleware(
-                    MiddlewareLifecycle::RateLimiter(RateLimiterEvent::Delayed { .. })
-                ))
-            )
-        })
-        .count()
-}
-
 async fn circuit_breaker_events_in_stage(run_dir: &Path, stage_key: &str) -> usize {
     read_stage_events(run_dir, stage_key)
         .await
@@ -1581,10 +1566,9 @@ async fn mirrored_circuit_breaker_events_in_system(run_dir: &Path, stage_name: &
         .count()
 }
 
-/// Count rate-limiter observability events of any variant (Delayed, ActivityPulse,
-/// ModeChange) in a stage. Used to assert the limiter was never invoked during
-/// replay: an invoked limiter under the test workload leaves a journal trace, so
-/// zero events of any kind means it consumed no tokens and moved no admission state.
+/// Count rate-limiter observability events of any variant in a stage journal.
+/// Source admission gate observability is deferred under FLOWIP-115a, so runtime
+/// counters are the authoritative replay-silence assertion for source policies.
 async fn rate_limiter_events_in_stage(run_dir: &Path, stage_key: &str) -> usize {
     read_stage_events(run_dir, stage_key)
         .await
@@ -2011,10 +1995,11 @@ async fn source_admission_limiter_replay_suppresses_delay_events_and_effects() {
 
     // Directly assert the source admission limiter consumed no tokens and moved no
     // admission state during replay. The burst capacity is 1.0, so an invoked limiter
-    // must delay inputs 2 and 3 and emit Delayed events; the live run proves this,
-    // making the limiter's complete silence during replay evidence that the source
-    // surface was bypassed by the replay driver.
-    let live_delayed = rate_limiter_delayed_events_in_stage(&archive_dir, "inputs").await;
+    // must delay inputs 2 and 3. Under FLOWIP-115a source gate observability is no
+    // longer journaled as Delayed events; the live runtime counter proves this test
+    // workload still exercised the limiter.
+    let (_live_events_total, live_delayed, _live_delay_seconds) =
+        rate_limiter_runtime_activity_in_stage(&archive_dir, "inputs").await;
     assert!(
         live_delayed > 0,
         "live run must exercise the limiter (3 inputs at burst capacity 1.0), otherwise \

@@ -8,6 +8,7 @@
 //! rate limiter middleware instances and exposes them through the core trait so
 //! runtime_services can consume control middleware state without global state.
 
+use crate::middleware::SourcePolicy;
 use obzenflow_core::control_middleware::{
     CircuitBreakerSnapshotter, ControlMiddlewareProvider, RateLimiterSnapshotter,
 };
@@ -38,6 +39,9 @@ type ControlKey = (StageId, Option<String>);
 pub struct ControlMiddlewareAggregator {
     circuit_breakers: RwLock<HashMap<ControlKey, CircuitBreakerRegistration>>,
     rate_limiters: RwLock<HashMap<ControlKey, RateLimiterRegistration>>,
+    // FLOWIP-115a: adapter-owned source policy chains. The descriptor turns
+    // these into one runtime-neutral source boundary.
+    source_policies: RwLock<HashMap<ControlKey, Vec<Arc<dyn SourcePolicy>>>>,
 }
 
 impl ControlMiddlewareAggregator {
@@ -109,6 +113,27 @@ impl ControlMiddlewareAggregator {
             .write()
             .expect("ControlMiddlewareAggregator: rate_limiters poisoned write lock")
             .insert((stage_id, effect_type), registration);
+    }
+
+    /// FLOWIP-115a: append a source policy for a stage, in declared order.
+    pub fn register_source_policy(&self, stage_id: StageId, policy: Arc<dyn SourcePolicy>) {
+        self.source_policies
+            .write()
+            .expect("ControlMiddlewareAggregator: source_policies poisoned write lock")
+            .entry((stage_id, None))
+            .or_default()
+            .push(policy);
+    }
+
+    /// FLOWIP-115a: the source policies registered for a stage, in declared
+    /// order.
+    pub fn source_policies(&self, stage_id: &StageId) -> Vec<Arc<dyn SourcePolicy>> {
+        self.source_policies
+            .read()
+            .expect("ControlMiddlewareAggregator: source_policies poisoned read lock")
+            .get(&(*stage_id, None))
+            .cloned()
+            .unwrap_or_default()
     }
 }
 

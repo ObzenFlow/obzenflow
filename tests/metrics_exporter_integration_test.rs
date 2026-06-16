@@ -671,8 +671,8 @@ async fn metrics_circuit_breaker_cumulative_are_exported_and_trippable() -> Resu
     )
     .ok_or_else(|| anyhow!("missing circuit_breaker_successes_total for {cb_stage_label}"))?;
     assert!(
-        (successes_total - 3.0).abs() < f64::EPSILON,
-        "expected circuit_breaker_successes_total=3 for source data/recovery/terminal polls, got {successes_total}"
+        (successes_total - 2.0).abs() < f64::EPSILON,
+        "expected circuit_breaker_successes_total=2 for successful source attempts, got {successes_total}"
     );
 
     let failures_total = metric_line_value(
@@ -719,6 +719,92 @@ async fn metrics_circuit_breaker_cumulative_are_exported_and_trippable() -> Resu
             "missing circuit_breaker_time_in_state_seconds_total series for {state_label}"
         );
     }
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn metrics_source_rate_based_circuit_breaker_opens_and_exports_lifecycle() -> Result<()> {
+    let timeout_flow = Duration::from_secs(30);
+
+    let test_handle = test_flow! {
+        name: "metrics_source_rate_based_cb",
+        journals: disk_journals(unique_journal_dir("metrics_source_rate_based_cb")),
+        middleware: [],
+
+        stages: {
+            src = source!(MetricEvent => ErrorAfterFirstSource::new(), [
+                CircuitBreakerBuilder::new(10)
+                    .cooldown(Duration::from_millis(0))
+                    .rate_based_over_last_n_calls(2, 0.5)
+                    .build()
+            ]);
+            trans = transform!(MetricEvent -> MetricEvent => DropTransform);
+            snk = sink!(MetricEvent => CountingSink::new().0);
+        },
+
+        topology: {
+            src |> trans;
+            trans |> snk;
+        }
+    }
+    .await
+    .map_err(|e| anyhow!("Flow creation failed: {e:?}"))?;
+
+    let topology = test_handle
+        .topology()
+        .expect("FlowHandle should expose the canonical topology with middleware annotations");
+    let cb_stage_id = stage_id_with_middleware(&topology, "circuit_breaker")?;
+
+    let exporter = run_with_metrics_barrier(test_handle, timeout_flow).await?;
+
+    let cb_stage_label = format!("stage_id=\"{cb_stage_id}\"");
+    let flow_label = "flow=\"metrics_source_rate_based_cb\"".to_string();
+    let debug_patterns = vec![
+        "obzenflow_circuit_breaker_opened_total".to_string(),
+        "obzenflow_circuit_breaker_state_transitions_total".to_string(),
+        flow_label.clone(),
+        cb_stage_label.clone(),
+    ];
+
+    let metrics_text = render_metrics_checked(&exporter, &debug_patterns, |text| {
+        text.contains("obzenflow_circuit_breaker_opened_total")
+            && text.contains("obzenflow_circuit_breaker_state_transitions_total")
+            && text.contains(&flow_label)
+            && text.contains(&cb_stage_label)
+    })?;
+
+    let opened_total = metric_line_value(
+        &metrics_text,
+        "obzenflow_circuit_breaker_opened_total{",
+        &[flow_label.clone(), cb_stage_label.clone()],
+    )
+    .ok_or_else(|| anyhow!("missing circuit_breaker_opened_total for {cb_stage_label}"))?;
+    assert!(
+        (opened_total - 1.0).abs() < f64::EPSILON,
+        "expected source rate-based circuit_breaker_opened_total=1, got {opened_total}"
+    );
+
+    let transitions_total = metric_line_value(
+        &metrics_text,
+        "obzenflow_circuit_breaker_state_transitions_total{",
+        &[
+            flow_label.clone(),
+            cb_stage_label.clone(),
+            "from_state=\"closed\"".to_string(),
+            "to_state=\"open\"".to_string(),
+        ],
+    )
+    .ok_or_else(|| {
+        anyhow!(
+            "missing source rate-based closed->open transition for {cb_stage_label}\n{}",
+            filter_metrics_lines(&metrics_text, &debug_patterns, 120)
+        )
+    })?;
+    assert!(
+        (transitions_total - 1.0).abs() < f64::EPSILON,
+        "expected source rate-based closed->open transition count=1, got {transitions_total}"
+    );
 
     Ok(())
 }

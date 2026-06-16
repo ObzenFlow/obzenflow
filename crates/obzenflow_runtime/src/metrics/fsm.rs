@@ -1057,15 +1057,6 @@ impl MetricsStore {
             .insert(stage_id, next_state.to_string());
     }
 
-    fn set_circuit_breaker_last_state(&mut self, stage_id: StageId, state: &str) {
-        let Some(state) = normalize_circuit_breaker_state_label(state) else {
-            return;
-        };
-
-        self.circuit_breaker_last_state
-            .insert(stage_id, state.to_string());
-    }
-
     fn update_control_metrics_from_runtime_context(
         &mut self,
         stage_id: StageId,
@@ -1127,14 +1118,10 @@ impl MetricsStore {
                 .and_modify(|v| *v = (*v).max(runtime_ctx.cb_time_half_open_seconds))
                 .or_insert(runtime_ctx.cb_time_half_open_seconds);
 
-            let state_label = if (runtime_ctx.cb_state - 0.5).abs() < f64::EPSILON {
-                "half_open"
-            } else if (runtime_ctx.cb_state - 1.0).abs() < f64::EPSILON {
-                "open"
-            } else {
-                "closed"
-            };
-            self.set_circuit_breaker_last_state(stage_id, state_label);
+            // Runtime snapshots are point-in-time gauges/cumulative totals. Do not
+            // let them advance the lifecycle transition cursor: a snapshot showing
+            // Open may be processed before the explicit Opened event and would
+            // otherwise suppress the real closed->open transition count.
         }
 
         let rl_present = runtime_ctx.rl_events_total > 0
@@ -1611,8 +1598,6 @@ impl FsmAction for MetricsAggregatorAction {
                             time_in_half_open_seconds,
                             ..
                         } => {
-                            store.set_circuit_breaker_last_state(stage_id, state);
-
                             store
                                 .circuit_breaker_rejection_rate
                                 .insert(stage_id, *rejection_rate);
@@ -2269,6 +2254,7 @@ pub fn build_metrics_aggregator_fsm() -> MetricsAggregatorFsm {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::metrics::instrumentation::StageInstrumentation;
     use async_trait::async_trait;
     use obzenflow_core::event::context::StageType;
     use obzenflow_core::event::payloads::correlation_payload::CorrelationPayload;
@@ -2328,6 +2314,36 @@ mod tests {
                 .stage_lifecycle_states
                 .get(&(failed, "completed".to_string())),
             None
+        );
+    }
+
+    #[test]
+    fn circuit_breaker_snapshot_does_not_suppress_lifecycle_transition() {
+        let stage_id = StageId::new();
+        let mut store = MetricsStore::default();
+        let mut runtime_ctx = StageInstrumentation::new().snapshot();
+        runtime_ctx.cb_requests_total = 1;
+        runtime_ctx.cb_opened_total = 1;
+        runtime_ctx.cb_state = 1.0;
+
+        store.update_control_metrics_from_runtime_context(stage_id, &runtime_ctx);
+
+        assert_eq!(store.circuit_breaker_state.get(&stage_id), Some(&1.0));
+        assert_eq!(store.circuit_breaker_opened_total.get(&stage_id), Some(&1));
+        assert!(
+            !store.circuit_breaker_last_state.contains_key(&stage_id),
+            "point-in-time snapshots must not advance lifecycle transition state"
+        );
+
+        store.record_circuit_breaker_transition(stage_id, "open");
+
+        assert_eq!(
+            store.circuit_breaker_state_transitions_total.get(&(
+                stage_id,
+                "closed".to_string(),
+                "open".to_string()
+            )),
+            Some(&1)
         );
     }
 

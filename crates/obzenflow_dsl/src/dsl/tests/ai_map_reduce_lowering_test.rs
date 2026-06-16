@@ -25,6 +25,9 @@ mod tests {
     use crate::dsl::composites::lower_composites;
     use crate::dsl::stage_descriptor::{StageDescriptor, TransformDescriptor};
     use crate::dsl::typing::TypeHint;
+    use obzenflow_core::ai::{
+        AiMapReduceChunkFailed, AiMapReducePlanningManifest, AiMapReduceTaggedPartial,
+    };
 
     struct TestMiddleware(&'static str);
 
@@ -421,6 +424,50 @@ mod tests {
             entry_meta.input_type,
             TypeHint::exact_payload::<TestIn>(),
             "entry stage input_type must equal the composite's declared outer input"
+        );
+        assert_eq!(
+            entry_meta.output_type,
+            TypeHint::exact_payload::<TestChunk>(),
+            "entry stage output_type remains the user-facing chunk type"
+        );
+        assert!(
+            entry_meta
+                .output_contract
+                .contains(&TypeHint::exact_payload::<TestChunk>()),
+            "entry output contract must include chunk envelopes"
+        );
+        assert!(
+            entry_meta
+                .output_contract
+                .contains(&TypeHint::exact_payload::<AiMapReducePlanningManifest>()),
+            "entry output contract must include the framework planning manifest"
+        );
+
+        let map = stages
+            .get("digest__map")
+            .expect("map stage 'digest__map' should exist after lowering");
+        let map_meta = map
+            .typing_metadata()
+            .expect("map stage should carry typing metadata");
+        assert!(
+            map_meta
+                .output_contract
+                .contains(&TypeHint::exact_payload::<TestPartial>()),
+            "map output contract keeps the user-facing partial type"
+        );
+        assert!(
+            map_meta
+                .output_contract
+                .contains(&TypeHint::exact_payload::<
+                    AiMapReduceTaggedPartial<serde_json::Value>,
+                >()),
+            "map output contract must include tagged partial transport events"
+        );
+        assert!(
+            map_meta
+                .output_contract
+                .contains(&TypeHint::exact_payload::<AiMapReduceChunkFailed>()),
+            "map output contract must include chunk failure transport events"
         );
 
         let exit = stages

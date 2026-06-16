@@ -9,7 +9,11 @@ use crate::stages::common::handlers::InfiniteSourceHandler;
 use crate::stages::common::supervision::flow_context_factory::make_flow_context;
 use crate::stages::source::replay_lifecycle::ReplayCompletionGuard;
 use crate::stages::source::supervision::{
-    drain_pending_outputs_sync, emit_batch_to_pending_outputs, per_data_event_duration_for_batch,
+    around_source_boundary, drain_pending_outputs_sync, emit_batch_to_pending_outputs,
+    per_data_event_duration_for_batch, stage_boundary_control_events,
+};
+use crate::stages::source::{
+    SourceBoundaryMiddleware, SourceBoundaryOutcome, SourcePollCompletion, SourcePollReport,
 };
 use crate::supervised_base::base::Supervisor;
 use crate::supervised_base::idle_backoff::IdleBackoff;
@@ -56,6 +60,17 @@ pub(crate) struct InfiniteSourceSupervisor<
 
     /// Guard that ensures ReplayLifecycle::Completed is emitted once (FLOWIP-095a).
     pub(crate) replay_completion: ReplayCompletionGuard,
+
+    /// Runtime-neutral source boundary seam (FLOWIP-115a).
+    pub(crate) source_boundary: Option<Arc<dyn SourceBoundaryMiddleware>>,
+
+    /// Completion was observed by the source boundary after emitting control
+    /// events; drain those events before beginning source drain.
+    pub(crate) pending_boundary_begin_drain: bool,
+
+    /// Error was observed by the source boundary after emitting control events;
+    /// drain those events before transitioning to failure.
+    pub(crate) pending_boundary_error: Option<String>,
 }
 
 impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Supervisor
@@ -373,6 +388,18 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
                     return Ok(EventLoopDirective::Continue);
                 }
 
+                if let Some(error) = self.pending_boundary_error.take() {
+                    return Ok(EventLoopDirective::Transition(InfiniteSourceEvent::Error(
+                        error,
+                    )));
+                }
+                if self.pending_boundary_begin_drain {
+                    self.pending_boundary_begin_drain = false;
+                    return Ok(EventLoopDirective::Transition(
+                        InfiniteSourceEvent::BeginDrain,
+                    ));
+                }
+
                 ctx.instrumentation
                     .event_loops_total
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -489,60 +516,131 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
                         ))),
                     }
                 } else {
-                    // Get next batch of events from handler.
-                    // 051b: handler now returns Result<Vec<ChainEvent>, SourceError>.
-                    let tick_started_at = Instant::now();
-                    let next_result = self.handler.next();
-                    let tick_duration = tick_started_at.elapsed();
+                    let source_boundary = self.source_boundary.clone();
+                    let report = around_source_boundary(
+                        source_boundary,
+                        Box::pin(async {
+                            let poll_started_at = Instant::now();
+                            let result = self.handler.next().map(SourcePollCompletion::Batch);
+                            SourcePollReport {
+                                result,
+                                poll_duration: poll_started_at.elapsed(),
+                            }
+                        }),
+                    )
+                    .await;
 
-                    match next_result {
-                        Ok(events) if !events.is_empty() => {
-                            self.idle_backoff.reset();
-                            // We have work - increment loops with work
-                            ctx.instrumentation
-                                .event_loops_with_work_total
-                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-
-                            let data_events_in_tick =
-                                events.iter().filter(|event| event.is_data()).count();
-                            let per_data_event_duration = per_data_event_duration_for_batch(
-                                tick_duration,
-                                data_events_in_tick,
+                    match report.outcome {
+                        SourceBoundaryOutcome::Rejected { reason } => {
+                            tracing::warn!(
+                                stage_name = %ctx.stage_name,
+                                reason = %reason,
+                                "Infinite source boundary rejected; beginning completion"
                             );
-                            emit_batch_to_pending_outputs(
-                                events,
+                            ctx.completion_reason =
+                                InfiniteSourceCompletionReason::ArchiveExhausted;
+                            if stage_boundary_control_events(
+                                report.control_events,
                                 &stage_flow_context,
                                 &ctx.instrumentation,
-                                per_data_event_duration,
                                 &mut ctx.pending_outputs,
-                            );
+                            ) {
+                                self.pending_boundary_begin_drain = true;
+                                Ok(EventLoopDirective::Continue)
+                            } else {
+                                Ok(EventLoopDirective::Transition(
+                                    InfiniteSourceEvent::BeginDrain,
+                                ))
+                            }
+                        }
+                        SourceBoundaryOutcome::Polled(poll) => match poll.result {
+                            Ok(SourcePollCompletion::Batch(mut events)) if !events.is_empty() => {
+                                self.idle_backoff.reset();
+                                ctx.instrumentation
+                                    .event_loops_with_work_total
+                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-                            tracing::trace!(
-                                stage_name = %ctx.stage_name,
-                                "Infinite source emitted batch of events"
-                            );
+                                events.extend(report.control_events);
+                                let data_events_in_tick =
+                                    events.iter().filter(|event| event.is_data()).count();
+                                let per_data_event_duration = per_data_event_duration_for_batch(
+                                    poll.poll_duration,
+                                    data_events_in_tick,
+                                );
+                                emit_batch_to_pending_outputs(
+                                    events,
+                                    &stage_flow_context,
+                                    &ctx.instrumentation,
+                                    per_data_event_duration,
+                                    &mut ctx.pending_outputs,
+                                );
 
-                            Ok(EventLoopDirective::Continue)
-                        }
-                        Ok(_events) => {
-                            // Handler advanced but produced no data/control events this tick.
-                            let delay = self.idle_backoff.next_delay();
-                            tokio::time::sleep(delay).await;
-                            Ok(EventLoopDirective::Continue)
-                        }
-                        Err(e) => {
-                            self.idle_backoff.reset();
-                            // SourceError surfaced from handler; delegate to control strategy
-                            // via the standard error path.
-                            tracing::error!(
-                                stage_name = %ctx.stage_name,
-                                error = %e,
-                                "Infinite source handler.next() returned error"
-                            );
-                            Ok(EventLoopDirective::Transition(InfiniteSourceEvent::Error(
-                                e.to_string(),
-                            )))
-                        }
+                                tracing::trace!(
+                                    stage_name = %ctx.stage_name,
+                                    "Infinite source emitted batch of events"
+                                );
+
+                                Ok(EventLoopDirective::Continue)
+                            }
+                            Ok(SourcePollCompletion::Batch(mut events)) => {
+                                events.extend(report.control_events);
+                                if !events.is_empty() {
+                                    emit_batch_to_pending_outputs(
+                                        events,
+                                        &stage_flow_context,
+                                        &ctx.instrumentation,
+                                        Duration::from_nanos(0),
+                                        &mut ctx.pending_outputs,
+                                    );
+                                }
+                                let delay = self.idle_backoff.next_delay();
+                                tokio::time::sleep(delay).await;
+                                Ok(EventLoopDirective::Continue)
+                            }
+                            Ok(SourcePollCompletion::Eof) => {
+                                ctx.completion_reason =
+                                    InfiniteSourceCompletionReason::ArchiveExhausted;
+                                if report.control_events.is_empty() {
+                                    Ok(EventLoopDirective::Transition(
+                                        InfiniteSourceEvent::BeginDrain,
+                                    ))
+                                } else {
+                                    emit_batch_to_pending_outputs(
+                                        report.control_events,
+                                        &stage_flow_context,
+                                        &ctx.instrumentation,
+                                        Duration::from_nanos(0),
+                                        &mut ctx.pending_outputs,
+                                    );
+                                    self.pending_boundary_begin_drain = true;
+                                    Ok(EventLoopDirective::Continue)
+                                }
+                            }
+                            Err(e) => {
+                                self.idle_backoff.reset();
+                                tracing::error!(
+                                    stage_name = %ctx.stage_name,
+                                    error = %e,
+                                    "Infinite source handler.next() returned error"
+                                );
+                                let error = e.to_string();
+                                if report.control_events.is_empty() {
+                                    Ok(EventLoopDirective::Transition(InfiniteSourceEvent::Error(
+                                        error,
+                                    )))
+                                } else {
+                                    emit_batch_to_pending_outputs(
+                                        report.control_events,
+                                        &stage_flow_context,
+                                        &ctx.instrumentation,
+                                        Duration::from_nanos(0),
+                                        &mut ctx.pending_outputs,
+                                    );
+                                    self.pending_boundary_error = Some(error);
+                                    Ok(EventLoopDirective::Continue)
+                                }
+                            }
+                        },
                     }
                 }
             }

@@ -5,12 +5,8 @@
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use obzenflow_adapters::middleware::{rate_limit_with_burst, RateLimiterBuilder};
-use obzenflow_core::event::chain_event::ChainEventContent;
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
-use obzenflow_core::event::payloads::observability_payload::{
-    MiddlewareLifecycle, ObservabilityPayload, RateLimiterEvent,
-};
 use obzenflow_core::journal::Journal;
 use obzenflow_core::TypedPayload;
 use obzenflow_core::{StageId, WriterId};
@@ -47,26 +43,23 @@ fn unique_journal_dir(prefix: &str) -> std::path::PathBuf {
     std::path::PathBuf::from("target").join(format!("{prefix}_{suffix}"))
 }
 
-async fn rate_limiter_delayed_events(
+async fn rate_limiter_delayed_total_from_runtime_context(
     stage_journal: &Arc<dyn Journal<ChainEvent>>,
-) -> Result<usize> {
+) -> Result<u64> {
     let mut reader = stage_journal
         .reader()
         .await
         .map_err(|e| anyhow!("failed to create stage journal reader: {e}"))?;
 
-    let mut delayed: usize = 0;
+    let mut delayed_total: u64 = 0;
     loop {
         match reader.next().await {
             Ok(Some(envelope)) => {
-                if let ChainEventContent::Observability(ObservabilityPayload::Middleware(
-                    MiddlewareLifecycle::RateLimiter(RateLimiterEvent::Delayed { .. }),
-                )) = &envelope.event.content
-                {
-                    delayed += 1;
+                if let Some(runtime_context) = &envelope.event.runtime_context {
+                    delayed_total = delayed_total.max(runtime_context.rl_delayed_total);
                 }
             }
-            Ok(None) => return Ok(delayed),
+            Ok(None) => return Ok(delayed_total),
             Err(e) => return Err(anyhow!("failed to read stage journal: {e}")),
         }
     }
@@ -239,10 +232,10 @@ async fn rate_limiter_low_rate_half_eps_processes_all_events() -> Result<()> {
         .map_err(|e| anyhow!("low-rate flow run failed: {e}"))?;
 
     assert_eq!(count.load(Ordering::Relaxed), 2);
-    let delayed = rate_limiter_delayed_events(&throttled_journal).await?;
+    let delayed = rate_limiter_delayed_total_from_runtime_context(&throttled_journal).await?;
     assert!(
         delayed >= 1,
-        "expected at least one rate limiter delayed event on the throttled stage journal"
+        "expected at least one source rate limiter delayed admission in runtime context"
     );
 
     Ok(())
@@ -468,10 +461,10 @@ async fn rate_limiter_source_stage_limits_per_poll_and_documents_batching() -> R
         .map_err(|e| anyhow!("source poll-gating flow run failed: {e}"))?;
 
     assert_eq!(count.load(Ordering::Relaxed), 4);
-    let delayed = rate_limiter_delayed_events(&src_journal).await?;
+    let delayed = rate_limiter_delayed_total_from_runtime_context(&src_journal).await?;
     assert!(
         delayed >= 1,
-        "expected at least one rate limiter delayed event on the src stage journal"
+        "expected at least one source rate limiter delayed admission in runtime context"
     );
 
     Ok(())
@@ -528,7 +521,7 @@ async fn rate_limiter_async_finite_does_not_charge_eof_poll() -> Result<()> {
         .map_err(|e| anyhow!("async EOF no-charge flow run failed: {e}"))?;
 
     assert_eq!(count.load(Ordering::Relaxed), 2);
-    let delayed = rate_limiter_delayed_events(&src_journal).await?;
+    let delayed = rate_limiter_delayed_total_from_runtime_context(&src_journal).await?;
     assert_eq!(
         delayed, 0,
         "FLOWIP-114m: async finite EOF poll must not consume a rate-limiter token"
@@ -573,7 +566,7 @@ async fn rate_limiter_sync_finite_does_not_charge_eof_poll() -> Result<()> {
         .map_err(|e| anyhow!("sync EOF no-charge flow run failed: {e}"))?;
 
     assert_eq!(count.load(Ordering::Relaxed), 2);
-    let delayed = rate_limiter_delayed_events(&src_journal).await?;
+    let delayed = rate_limiter_delayed_total_from_runtime_context(&src_journal).await?;
     assert_eq!(
         delayed, 0,
         "FLOWIP-114m: sync finite EOF poll must not consume a rate-limiter token"
@@ -619,7 +612,7 @@ async fn rate_limiter_async_finite_does_not_charge_empty_batch() -> Result<()> {
         .map_err(|e| anyhow!("async empty-batch no-charge flow run failed: {e}"))?;
 
     assert_eq!(count.load(Ordering::Relaxed), 2);
-    let delayed = rate_limiter_delayed_events(&src_journal).await?;
+    let delayed = rate_limiter_delayed_total_from_runtime_context(&src_journal).await?;
     assert_eq!(
         delayed, 0,
         "FLOWIP-114m: empty async batch must not consume a rate-limiter token"
@@ -665,7 +658,7 @@ async fn rate_limiter_sync_finite_does_not_charge_empty_batch() -> Result<()> {
         .map_err(|e| anyhow!("sync empty-batch no-charge flow run failed: {e}"))?;
 
     assert_eq!(count.load(Ordering::Relaxed), 2);
-    let delayed = rate_limiter_delayed_events(&src_journal).await?;
+    let delayed = rate_limiter_delayed_total_from_runtime_context(&src_journal).await?;
     assert_eq!(
         delayed, 0,
         "FLOWIP-114m: empty sync batch must not consume a rate-limiter token"
@@ -711,7 +704,7 @@ async fn rate_limiter_async_finite_does_not_charge_source_error() -> Result<()> 
         .map_err(|e| anyhow!("async error no-charge flow run failed: {e}"))?;
 
     assert_eq!(count.load(Ordering::Relaxed), 2);
-    let delayed = rate_limiter_delayed_events(&src_journal).await?;
+    let delayed = rate_limiter_delayed_total_from_runtime_context(&src_journal).await?;
     assert_eq!(
         delayed, 0,
         "FLOWIP-114m: async source error must not consume a rate-limiter token"
@@ -757,7 +750,7 @@ async fn rate_limiter_sync_finite_does_not_charge_source_error() -> Result<()> {
         .map_err(|e| anyhow!("sync error no-charge flow run failed: {e}"))?;
 
     assert_eq!(count.load(Ordering::Relaxed), 2);
-    let delayed = rate_limiter_delayed_events(&src_journal).await?;
+    let delayed = rate_limiter_delayed_total_from_runtime_context(&src_journal).await?;
     assert_eq!(
         delayed, 0,
         "FLOWIP-114m: sync source error must not consume a rate-limiter token"

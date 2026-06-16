@@ -9,7 +9,7 @@
 //!
 //! The limiter waits in one of two ways, depending on where it is attached.
 //! Async live I/O units (the effect boundary via [`crate::middleware::EffectPolicy`]
-//! and async sources via [`crate::middleware::SourcePacer`]) await their permit
+//! and the source boundary via [`crate::middleware::SourcePolicy`]) await their permit
 //! with `tokio::time::sleep`, a cancellable future, so a drain, EOF,
 //! cancellation, or shutdown abandons an in-flight wait. Sync handler chains and
 //! sync sources keep the blocking `pre_handle` loop (it blocks via
@@ -44,6 +44,10 @@
 //! been emitted but before a token is consumed, so the abandoned poll charges no
 //! token; `delayed_total` and `events_total` are independent counters.
 
+use crate::middleware::{
+    batch_has_error_marked, SourceAdmission, SourceAfterPoll, SourcePolicy, SourcePolicyCtx,
+    SourcePollOutcome,
+};
 use crate::middleware::{
     ControlMiddlewareRole, ErrorAction, Middleware, MiddlewareAction, MiddlewareContext,
     MiddlewareFactory, MiddlewareFactoryError, MiddlewareOverrideKey, MiddlewarePlanContribution,
@@ -539,11 +543,11 @@ impl RateLimiterMiddleware {
         }
     }
 
-    /// FLOWIP-114o: the shared async token-bucket acquisition loop. Both the
-    /// effect-boundary `EffectPolicy::admit` and the source
-    /// `SourcePacer::source_admit` path delegate here, so the two live I/O
-    /// surfaces share one accounting and lifecycle-event implementation. It
-    /// awaits its permit with `tokio::time::sleep` (a cancellable future)
+    /// Shared async token-bucket acquisition loop. Both the effect-boundary
+    /// `EffectPolicy::admit` and the source-boundary `SourcePolicy` path
+    /// delegate here, so the two live I/O surfaces share one accounting and
+    /// lifecycle-event implementation. It awaits its permit with
+    /// `tokio::time::sleep` (a cancellable future)
     /// instead of blocking the worker thread, and returns once a token has been
     /// consumed. The synchronous `Middleware::pre_handle` keeps its own blocking
     /// loop for sync handler chains and sync sources.
@@ -884,12 +888,9 @@ impl crate::middleware::EffectPolicy for RateLimiterMiddleware {
     }
 }
 
-/// Source pacing adapter (FLOWIP-114o): an async source supervisor awaits its
-/// permit here instead of blocking the worker thread in `pre_handle`, so the
-/// supervisor's `biased` select can interrupt the wait on drain, EOF,
-/// cancellation, or shutdown. It shares the token bucket, accounting, and
-/// lifecycle events with the synchronous `Middleware` and the effect-boundary
-/// `EffectPolicy` paths through `acquire_permit_async`.
+/// Legacy source pacing adapter retained until the 115f cleanup removes the old
+/// downcast surface. The production source path uses `RateLimiterSourcePolicy`
+/// below and delegates to the same `acquire_permit_async` implementation.
 #[async_trait::async_trait]
 impl crate::middleware::SourcePacer for RateLimiterMiddleware {
     async fn source_admit(
@@ -916,6 +917,63 @@ impl crate::middleware::SourcePacer for RateLimiterMiddleware {
 
         self.acquire_permit_async(event, ctx).await;
         MiddlewareAction::Continue
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SourceRateLimitPosition {
+    PrePoll,
+    AfterPoll,
+}
+
+/// Source-boundary policy for the token-bucket rate limiter (FLOWIP-115a).
+///
+/// It reuses [`RateLimiterMiddleware::acquire_permit_async`], so source pacing
+/// waits internally with cancellable Tokio sleep, matching FLOWIP-114o. Finite
+/// sources charge after a clean non-empty delivery; infinite sources charge
+/// before polling.
+struct RateLimiterSourcePolicy {
+    inner: Arc<RateLimiterMiddleware>,
+    charge_at: SourceRateLimitPosition,
+}
+
+impl RateLimiterSourcePolicy {
+    fn new(inner: Arc<RateLimiterMiddleware>, charge_at: SourceRateLimitPosition) -> Self {
+        Self { inner, charge_at }
+    }
+
+    async fn acquire(&self, ctx: &mut SourcePolicyCtx) {
+        let event = ctx.synthetic_event_clone();
+        self.inner
+            .acquire_permit_async(&event, ctx.middleware_context_mut())
+            .await;
+    }
+}
+
+#[async_trait::async_trait]
+impl SourcePolicy for RateLimiterSourcePolicy {
+    fn label(&self) -> &'static str {
+        Middleware::label(self.inner.as_ref())
+    }
+
+    async fn admit(&self, ctx: &mut SourcePolicyCtx) -> SourceAdmission {
+        if self.charge_at == SourceRateLimitPosition::PrePoll {
+            self.acquire(ctx).await;
+        }
+        SourceAdmission::Admit(None)
+    }
+
+    async fn after_poll(&self, batch: &[ChainEvent], ctx: &mut SourcePolicyCtx) -> SourceAfterPoll {
+        if self.charge_at == SourceRateLimitPosition::AfterPoll && !batch_has_error_marked(batch) {
+            self.acquire(ctx).await;
+        }
+        SourceAfterPoll::Proceed
+    }
+
+    fn observe(&self, _outcome: &SourcePollOutcome<'_>, ctx: &mut SourcePolicyCtx) {
+        let middleware_ctx = ctx.middleware_context_mut();
+        self.inner.maybe_emit_activity_pulse(middleware_ctx);
+        self.inner.maybe_emit_summary(middleware_ctx);
     }
 }
 
@@ -1079,6 +1137,36 @@ impl MiddlewareFactory for RateLimiterFactory {
             control_middleware,
             Some(effect_type.to_string()),
         )))
+    }
+
+    fn register_source_policy(
+        &self,
+        config: &StageConfig,
+        stage_type: obzenflow_core::event::context::StageType,
+        control_middleware: &std::sync::Arc<super::ControlMiddlewareAggregator>,
+    ) -> crate::middleware::MiddlewareFactoryResult<()> {
+        use obzenflow_core::event::context::StageType as St;
+        let validated = self.validated_config().map_err(|err| {
+            MiddlewareFactoryError::invalid_configuration(self.label(), &config.name, err)
+        })?;
+        // FLOWIP-114m: finite (and any non-infinite) source charges after a
+        // clean successful delivery; an infinite source paces pre-poll.
+        let charge_at = match stage_type {
+            St::InfiniteSource => SourceRateLimitPosition::PrePoll,
+            _ => SourceRateLimitPosition::AfterPoll,
+        };
+        // Building the limiter registers its metrics snapshotter exactly as the
+        // chain path does; the source policy owns the same limiter instance.
+        let middleware = std::sync::Arc::new(RateLimiterMiddleware::new(
+            config.stage_id,
+            validated,
+            control_middleware.clone(),
+        ));
+        control_middleware.register_source_policy(
+            config.stage_id,
+            std::sync::Arc::new(RateLimiterSourcePolicy::new(middleware, charge_at)),
+        );
+        Ok(())
     }
 
     fn supported_stage_types(&self) -> &[StageType] {
@@ -1289,6 +1377,79 @@ mod tests {
             MiddlewareAction::Continue => {}
             other => panic!("Expected Continue for lifecycle event, got {other:?}"),
         }
+    }
+
+    /// FLOWIP-115a / FLOWIP-114m: the source-boundary rate-limiter policy charges
+    /// a permit only at its declared position, and never on an error-marked
+    /// delivery. Asserted in isolation through the monotonic
+    /// `tokens_consumed_total`, which the admission path bumps by `cost_per_event`
+    /// on every charge (refill-independent, unlike `available_tokens`).
+    #[tokio::test]
+    async fn source_rate_limiter_policy_charges_by_position_and_skips_error_marked() {
+        use obzenflow_core::event::status::processing_status::ErrorKind;
+
+        let writer = WriterId::from(StageId::new());
+        let clean_batch = vec![ChainEventFactory::data_event(
+            writer,
+            "test.event",
+            json!({ "index": 0 }),
+        )];
+        let error_batch =
+            vec![
+                ChainEventFactory::data_event(writer, "test.event", json!({ "index": 0 }))
+                    .mark_as_error("boom", ErrorKind::Remote),
+            ];
+
+        // The rules read raw facts, so an error-marked batch is an error delivery.
+        assert!(batch_has_error_marked(&error_batch));
+        assert!(!batch_has_error_marked(&clean_batch));
+
+        let charged = |mw: &Arc<RateLimiterMiddleware>| {
+            mw.stats.lock().expect("stats lock").tokens_consumed_total
+        };
+
+        // Finite source (AfterPoll): admit is a no-op; after_poll charges a clean
+        // non-empty delivery.
+        let finite = Arc::new(test_middleware(StageId::new(), 100.0, Some(5.0), 1.0));
+        let finite_policy =
+            RateLimiterSourcePolicy::new(finite.clone(), SourceRateLimitPosition::AfterPoll);
+        let mut ctx = SourcePolicyCtx::new(writer);
+        let _ = finite_policy.admit(&mut ctx).await;
+        assert_eq!(charged(&finite), 0.0, "AfterPoll admit must not charge");
+        finite_policy.after_poll(&clean_batch, &mut ctx).await;
+        assert_eq!(
+            charged(&finite),
+            1.0,
+            "AfterPoll must charge a clean non-empty delivery"
+        );
+
+        // Error-marked delivery: after_poll must not charge.
+        let finite_err = Arc::new(test_middleware(StageId::new(), 100.0, Some(5.0), 1.0));
+        let finite_err_policy =
+            RateLimiterSourcePolicy::new(finite_err.clone(), SourceRateLimitPosition::AfterPoll);
+        let mut ctx_err = SourcePolicyCtx::new(writer);
+        finite_err_policy
+            .after_poll(&error_batch, &mut ctx_err)
+            .await;
+        assert_eq!(
+            charged(&finite_err),
+            0.0,
+            "FLOWIP-114m: an error-marked delivery must not be charged"
+        );
+
+        // Infinite source (PrePoll): admit charges; after_poll is a no-op.
+        let infinite = Arc::new(test_middleware(StageId::new(), 100.0, Some(5.0), 1.0));
+        let infinite_policy =
+            RateLimiterSourcePolicy::new(infinite.clone(), SourceRateLimitPosition::PrePoll);
+        let mut ctx_inf = SourcePolicyCtx::new(writer);
+        let _ = infinite_policy.admit(&mut ctx_inf).await;
+        assert_eq!(charged(&infinite), 1.0, "PrePoll admit must charge");
+        infinite_policy.after_poll(&clean_batch, &mut ctx_inf).await;
+        assert_eq!(
+            charged(&infinite),
+            1.0,
+            "PrePoll after_poll must be a no-op"
+        );
     }
 
     #[test]

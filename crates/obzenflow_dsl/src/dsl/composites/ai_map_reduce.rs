@@ -20,6 +20,9 @@ use obzenflow_adapters::middleware::ai::map_reduce::{
     AiMapReduceChunkManifestFactory, AiMapReduceMapFactory,
 };
 use obzenflow_adapters::middleware::MiddlewareFactory;
+use obzenflow_core::ai::{
+    AiMapReduceChunkFailed, AiMapReducePlanningManifest, AiMapReduceTaggedPartial,
+};
 use obzenflow_core::TypedPayload;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{AsyncTransformHandler, TransformHandler};
@@ -447,7 +450,10 @@ where
                 TypeHint::exact_payload::<Chunk>(),
                 false,
                 None,
-            ),
+            )
+            .with_additional_output_contract(vec![TypeHint::exact_payload::<
+                AiMapReducePlanningManifest,
+            >()]),
         );
 
         // ---------------------------------------------------------------------
@@ -470,7 +476,11 @@ where
                 TypeHint::exact_payload::<Partial>(),
                 false,
                 None,
-            ),
+            )
+            .with_additional_output_contract(vec![
+                TypeHint::exact_payload::<AiMapReduceTaggedPartial<serde_json::Value>>(),
+                TypeHint::exact_payload::<AiMapReduceChunkFailed>(),
+            ]),
         );
 
         // ---------------------------------------------------------------------

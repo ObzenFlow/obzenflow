@@ -9,6 +9,9 @@
 //! monitoring and SLI middleware.
 
 use crate::middleware::{
+    batch_has_error_marked, SourceAdmission, SourcePolicy, SourcePolicyCtx, SourcePollOutcome,
+};
+use crate::middleware::{
     context_keys::{
         CircuitBreakerAttempt, CircuitBreakerIsProbe, CircuitBreakerProbeGeneration,
         CircuitBreakerProbeSlot, CircuitBreakerProbeSlotGuard, CircuitBreakerRetryAfterMs,
@@ -352,6 +355,10 @@ pub struct CircuitBreakerMiddleware {
     probe_gate: Arc<Mutex<()>>,
     /// Monotonic epoch for half-open probe outcomes.
     probe_generation: Arc<AtomicU64>,
+    /// FLOWIP-115a: the probe generation reserved by the source boundary policy,
+    /// read by observation to classify the probe. The RAII guard releases the
+    /// slot and clears this marker on cancellation.
+    source_pending_probe: Arc<Mutex<Option<u64>>>,
     /// Statistics for periodic summaries
     stats: Arc<Mutex<CircuitBreakerStats>>,
     /// When the last state change occurred
@@ -477,6 +484,7 @@ impl CircuitBreakerMiddleware {
             probe_in_flight: Arc::new(AtomicU32::new(0)),
             probe_gate: Arc::new(Mutex::new(())),
             probe_generation: Arc::new(AtomicU64::new(0)),
+            source_pending_probe: Arc::new(Mutex::new(None)),
             stats: Arc::new(Mutex::new(CircuitBreakerStats {
                 requests_processed: 0,
                 requests_rejected: 0,
@@ -514,6 +522,118 @@ impl CircuitBreakerMiddleware {
 
     fn current_state(&self) -> CircuitState {
         CircuitState::from(self.state.load(Ordering::SeqCst))
+    }
+
+    fn record_closed_outcome(
+        &self,
+        counted_as_failure: bool,
+        call_duration: Option<Duration>,
+        now: Instant,
+    ) -> Option<ChainEvent> {
+        let consecutive_failures = if counted_as_failure {
+            self.failure_count.fetch_add(1, Ordering::SeqCst) + 1
+        } else {
+            self.failure_count.store(0, Ordering::SeqCst);
+            0
+        };
+
+        match &self.failure_mode {
+            CircuitBreakerFailureMode::Consecutive { max_failures } => {
+                if counted_as_failure && (consecutive_failures as u32) >= max_failures.get() {
+                    let event = self.transition_to_inner(CircuitState::Open).1;
+                    if event.is_some() {
+                        tracing::warn!(
+                            "Circuit breaker opened after {} consecutive failures",
+                            consecutive_failures
+                        );
+                    }
+                    return event;
+                }
+            }
+            CircuitBreakerFailureMode::RateBased {
+                window,
+                failure_rate_threshold,
+                slow_call_rate_threshold,
+                slow_call_duration_threshold,
+                minimum_calls,
+            } => {
+                let is_slow = match (slow_call_duration_threshold, call_duration) {
+                    (Some(threshold), Some(duration)) => duration >= *threshold,
+                    _ => false,
+                };
+
+                if let Some(state_mutex) = &self.rate_window {
+                    if let Ok(mut state) = state_mutex.lock() {
+                        let capacity = state.capacity();
+                        if capacity > 0 {
+                            state.push(CallSample {
+                                timestamp: now,
+                                is_failure: counted_as_failure,
+                                is_slow,
+                            });
+                        }
+
+                        let mut observed = 0usize;
+                        let mut failures = 0usize;
+                        let mut slow_calls = 0usize;
+
+                        match window {
+                            FailureWindow::Count { size } => {
+                                let max = (*size as usize).min(state.capacity());
+                                for sample in state.iter().take(max) {
+                                    observed += 1;
+                                    if sample.is_failure {
+                                        failures += 1;
+                                    }
+                                    if sample.is_slow {
+                                        slow_calls += 1;
+                                    }
+                                }
+                            }
+                            FailureWindow::Time { duration } => {
+                                for sample in state.iter() {
+                                    if now.duration_since(sample.timestamp) <= *duration {
+                                        observed += 1;
+                                        if sample.is_failure {
+                                            failures += 1;
+                                        }
+                                        if sample.is_slow {
+                                            slow_calls += 1;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        if (observed as u32) >= minimum_calls.get() {
+                            let denom = (observed as f32).max(1.0);
+                            let failure_rate = failures as f32 / denom;
+                            let slow_rate = slow_calls as f32 / denom;
+
+                            let open_on_failures = failure_rate >= *failure_rate_threshold;
+                            let open_on_slow = match slow_call_rate_threshold {
+                                Some(threshold) if *threshold > 0.0 => slow_rate >= *threshold,
+                                _ => false,
+                            };
+
+                            if open_on_failures || open_on_slow {
+                                let event = self.transition_to_inner(CircuitState::Open).1;
+                                if event.is_some() {
+                                    tracing::warn!(
+                                        "Circuit breaker opened (rate-based) after {} calls (failures: {})",
+                                        observed,
+                                        failures
+                                    );
+                                }
+                                return event;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        None
     }
 
     fn counts_as_failure(&self, classification: &FailureClassification) -> bool {
@@ -664,10 +784,10 @@ impl CircuitBreakerMiddleware {
     /// Attempt an atomic state transition. Returns `true` if this call won
     /// the CAS race and the transition was applied, `false` if another thread
     /// already moved the state (or old == new).
-    fn transition_to(&self, new_state: CircuitState, ctx: &mut MiddlewareContext) -> bool {
+    fn transition_to_inner(&self, new_state: CircuitState) -> (bool, Option<ChainEvent>) {
         let old_state = self.current_state();
         if old_state == new_state {
-            return false;
+            return (false, None);
         }
 
         // Atomically swap old → new so that concurrent callers cannot both
@@ -683,7 +803,7 @@ impl CircuitBreakerMiddleware {
             .is_err()
         {
             // Another thread already moved the state; our transition is stale.
-            return false;
+            return (false, None);
         }
 
         // Accumulate time-in-state for the state we're leaving and advance the transition timer.
@@ -780,15 +900,26 @@ impl CircuitBreakerMiddleware {
             }
         };
 
-        ctx.write_control_event(event);
-
         tracing::info!(
             "Circuit breaker state transition: {:?} -> {:?}",
             old_state,
             new_state
         );
 
-        true
+        (true, Some(event))
+    }
+
+    /// Context-aware wrapper around [`transition_to_inner`] that writes the
+    /// lifecycle event into the middleware context (the effect and handler
+    /// paths). The FLOWIP-115a source control ports call `transition_to_inner`
+    /// directly and defer the lifecycle event; the metrics snapshotter still
+    /// reflects the transition.
+    fn transition_to(&self, new_state: CircuitState, ctx: &mut MiddlewareContext) -> bool {
+        let (transitioned, event) = self.transition_to_inner(new_state);
+        if let Some(event) = event {
+            ctx.write_control_event(event);
+        }
+        transitioned
     }
 
     /// Force the circuit breaker into the Closed state, resetting failure
@@ -817,6 +948,140 @@ impl CircuitBreakerMiddleware {
             }
         } else {
             false
+        }
+    }
+
+    /// FLOWIP-115a: source-boundary admission, reusing the same state machine as
+    /// `pre_handle` without exposing middleware policy details to the runtime.
+    /// Reserves a probe slot in HalfOpen and returns an RAII guard that releases
+    /// the slot on normal return or cancellation.
+    fn source_admit(&self) -> SourceAdmit {
+        match self.current_state() {
+            CircuitState::Closed => SourceAdmit::Continue {
+                guard: None,
+                event: None,
+            },
+            CircuitState::Open => {
+                if self.should_attempt_reset() {
+                    let transition_event = {
+                        let _probe_gate = self.probe_gate.lock().ok();
+                        let (transitioned, event) =
+                            self.transition_to_inner(CircuitState::HalfOpen);
+                        if transitioned {
+                            self.probe_generation.fetch_add(1, Ordering::SeqCst);
+                            self.success_count.store(0, Ordering::Relaxed);
+                        }
+                        event
+                    };
+                    self.source_reserve_probe(transition_event)
+                } else {
+                    let cooldown_remaining = self
+                        .opened_at
+                        .lock()
+                        .ok()
+                        .and_then(|guard| *guard)
+                        .map(|opened_at| self.cooldown.saturating_sub(opened_at.elapsed()))
+                        .unwrap_or(self.cooldown);
+                    SourceAdmit::Pause(cooldown_remaining)
+                }
+            }
+            CircuitState::HalfOpen => self.source_reserve_probe(None),
+        }
+    }
+
+    /// Reserve a half-open probe slot via the same CAS loop as `pre_handle`,
+    /// or back off briefly when all slots are in use.
+    fn source_reserve_probe(&self, event: Option<ChainEvent>) -> SourceAdmit {
+        let _probe_gate = self.probe_gate.lock().ok();
+        let generation = self.probe_generation.load(Ordering::SeqCst);
+        let permitted = self.half_open_policy.permitted_probes.get();
+        let mut current = self.probe_in_flight.load(Ordering::SeqCst);
+        loop {
+            if current >= permitted {
+                return SourceAdmit::Pause(Duration::from_millis(1));
+            }
+            match self.probe_in_flight.compare_exchange(
+                current,
+                current + 1,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(_) => {
+                    if let Ok(mut pending) = self.source_pending_probe.lock() {
+                        *pending = Some(generation);
+                    }
+                    return SourceAdmit::Continue {
+                        guard: Some(SourceProbeGuard::new(
+                            self.probe_in_flight.clone(),
+                            self.source_pending_probe.clone(),
+                            generation,
+                        )),
+                        event: event.map(Box::new),
+                    };
+                }
+                Err(actual) => current = actual,
+            }
+        }
+    }
+
+    /// FLOWIP-115a: classify one source-boundary poll outcome. A probe closes
+    /// on success and reopens on failure; a Closed-state poll error counts
+    /// toward opening through the configured failure mode.
+    fn source_settle(&self, outcome: SourceOutcome) -> Option<ChainEvent> {
+        if !matches!(outcome, SourceOutcome::Inconclusive) {
+            if let Ok(mut stats) = self.stats.lock() {
+                stats.requests_processed += 1;
+            }
+        }
+
+        let pending = self
+            .source_pending_probe
+            .lock()
+            .ok()
+            .and_then(|mut pending| pending.take());
+
+        if let Some(generation) = pending {
+            let _probe_gate = self.probe_gate.lock().ok();
+
+            if generation == self.probe_generation.load(Ordering::SeqCst)
+                && matches!(self.current_state(), CircuitState::HalfOpen)
+            {
+                return match outcome {
+                    SourceOutcome::Success { .. } => {
+                        self.success_count.fetch_add(1, Ordering::Relaxed);
+                        self.successes_total.fetch_add(1, Ordering::Relaxed);
+                        let (transitioned, event) = self.transition_to_inner(CircuitState::Closed);
+                        if transitioned {
+                            self.failure_count.store(0, Ordering::SeqCst);
+                        }
+                        event
+                    }
+                    SourceOutcome::Failure { .. } => {
+                        self.failures_total.fetch_add(1, Ordering::Relaxed);
+                        self.transition_to_inner(CircuitState::Open).1
+                    }
+                    SourceOutcome::Inconclusive => None,
+                };
+            }
+            return None;
+        }
+
+        match outcome {
+            SourceOutcome::Success { poll_duration } => {
+                self.successes_total.fetch_add(1, Ordering::Relaxed);
+                if matches!(self.current_state(), CircuitState::Closed) {
+                    return self.record_closed_outcome(false, Some(poll_duration), Instant::now());
+                }
+                None
+            }
+            SourceOutcome::Failure { poll_duration } => {
+                self.failures_total.fetch_add(1, Ordering::Relaxed);
+                if matches!(self.current_state(), CircuitState::Closed) {
+                    return self.record_closed_outcome(true, Some(poll_duration), Instant::now());
+                }
+                None
+            }
+            SourceOutcome::Inconclusive => None,
         }
     }
 
@@ -1011,6 +1276,123 @@ impl CircuitBreakerMiddleware {
             open.as_secs_f64(),
             half_open.as_secs_f64(),
         )
+    }
+}
+
+/// RAII guard for one source half-open probe slot.
+struct SourceProbeGuard {
+    probe_in_flight: Arc<AtomicU32>,
+    source_pending_probe: Arc<Mutex<Option<u64>>>,
+    generation: u64,
+    released: bool,
+}
+
+impl SourceProbeGuard {
+    fn new(
+        probe_in_flight: Arc<AtomicU32>,
+        source_pending_probe: Arc<Mutex<Option<u64>>>,
+        generation: u64,
+    ) -> Self {
+        Self {
+            probe_in_flight,
+            source_pending_probe,
+            generation,
+            released: false,
+        }
+    }
+}
+
+impl Drop for SourceProbeGuard {
+    fn drop(&mut self) {
+        if self.released {
+            return;
+        }
+        self.released = true;
+        if let Ok(mut pending) = self.source_pending_probe.lock() {
+            if pending.as_ref() == Some(&self.generation) {
+                *pending = None;
+            }
+        }
+        self.probe_in_flight.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// FLOWIP-115a: the source-boundary admission answer from
+/// [`CircuitBreakerMiddleware::source_admit`].
+enum SourceAdmit {
+    Continue {
+        guard: Option<SourceProbeGuard>,
+        event: Option<Box<ChainEvent>>,
+    },
+    Pause(Duration),
+}
+
+/// FLOWIP-115a: the source-path outcome handed to
+/// [`CircuitBreakerMiddleware::source_settle`].
+#[derive(Debug, Clone, Copy)]
+enum SourceOutcome {
+    /// The poll produced output or reached a clean EOF.
+    Success { poll_duration: Duration },
+    /// The poll returned an error.
+    Failure { poll_duration: Duration },
+    /// The attempt was aborted or skipped (drain, shutdown) before an outcome;
+    /// the probe slot is released but breaker state is unchanged.
+    Inconclusive,
+}
+
+/// FLOWIP-115a: source-boundary policy for the circuit breaker.
+struct CircuitBreakerSourcePolicy {
+    breaker: Arc<CircuitBreakerMiddleware>,
+}
+
+#[async_trait::async_trait]
+impl SourcePolicy for CircuitBreakerSourcePolicy {
+    fn label(&self) -> &'static str {
+        Middleware::label(self.breaker.as_ref())
+    }
+
+    async fn admit(&self, ctx: &mut SourcePolicyCtx) -> SourceAdmission {
+        loop {
+            match self.breaker.source_admit() {
+                SourceAdmit::Continue { guard, event } => {
+                    if let Some(event) = event {
+                        ctx.write_control_event(*event);
+                    }
+                    return SourceAdmission::Admit(guard.map(|guard| {
+                        Box::new(guard) as Box<dyn crate::middleware::SourceAdmissionGuard>
+                    }));
+                }
+                SourceAdmit::Pause(delay) => {
+                    tokio::time::sleep(delay).await;
+                }
+            }
+        }
+    }
+
+    fn observe(&self, outcome: &SourcePollOutcome<'_>, ctx: &mut SourcePolicyCtx) {
+        let source_outcome = match outcome {
+            SourcePollOutcome::Delivered {
+                events,
+                poll_duration,
+            } if batch_has_error_marked(events) => SourceOutcome::Failure {
+                poll_duration: *poll_duration,
+            },
+            SourcePollOutcome::Delivered { poll_duration, .. }
+            | SourcePollOutcome::Eof { poll_duration } => SourceOutcome::Success {
+                poll_duration: *poll_duration,
+            },
+            SourcePollOutcome::Failed { poll_duration, .. } => SourceOutcome::Failure {
+                poll_duration: *poll_duration,
+            },
+            SourcePollOutcome::Empty { .. } | SourcePollOutcome::RejectedBy { .. } => {
+                SourceOutcome::Inconclusive
+            }
+        };
+        if let Some(event) = self.breaker.source_settle(source_outcome) {
+            ctx.write_control_event(event);
+        }
+        self.breaker
+            .maybe_emit_summary(ctx.middleware_context_mut());
     }
 }
 
@@ -1394,114 +1776,10 @@ impl Middleware for CircuitBreakerMiddleware {
 
         match self.current_state() {
             CircuitState::Closed => {
-                // Track consecutive failures regardless of failure mode so the
-                // `circuit_breaker_consecutive_failures` gauge remains meaningful
-                // in both consecutive and rate-based configurations.
-                let consecutive_failures = if counted_as_failure {
-                    self.failure_count.fetch_add(1, Ordering::SeqCst) + 1
-                } else {
-                    self.failure_count.store(0, Ordering::SeqCst);
-                    0
-                };
-
-                // Update failure tracking depending on configured failure mode.
-                match &self.failure_mode {
-                    CircuitBreakerFailureMode::Consecutive { max_failures } => {
-                        if counted_as_failure
-                            && (consecutive_failures as u32) >= max_failures.get()
-                            && self.transition_to(CircuitState::Open, ctx)
-                        {
-                            tracing::warn!(
-                                "Circuit breaker opened after {} consecutive failures",
-                                consecutive_failures
-                            );
-                        }
-                    }
-                    CircuitBreakerFailureMode::RateBased {
-                        window,
-                        failure_rate_threshold,
-                        slow_call_rate_threshold,
-                        slow_call_duration_threshold,
-                        minimum_calls,
-                    } => {
-                        let is_slow = match (slow_call_duration_threshold, call_duration) {
-                            (Some(threshold), Some(dur)) => dur >= *threshold,
-                            _ => false,
-                        };
-
-                        // Update rate window state.
-                        if let Some(state_mutex) = &self.rate_window {
-                            if let Ok(mut state) = state_mutex.lock() {
-                                let capacity = state.capacity();
-                                if capacity > 0 {
-                                    state.push(CallSample {
-                                        timestamp: now,
-                                        is_failure: counted_as_failure,
-                                        is_slow,
-                                    });
-                                }
-
-                                // Compute effective window contents based on policy.
-                                let mut observed = 0usize;
-                                let mut failures = 0usize;
-                                let mut slow_calls = 0usize;
-
-                                match window {
-                                    FailureWindow::Count { size } => {
-                                        let max = (*size as usize).min(state.capacity());
-                                        // For count-based windows we just consider the
-                                        // most recent `max` samples.
-                                        for sample in state.iter().take(max) {
-                                            observed += 1;
-                                            if sample.is_failure {
-                                                failures += 1;
-                                            }
-                                            if sample.is_slow {
-                                                slow_calls += 1;
-                                            }
-                                        }
-                                    }
-                                    FailureWindow::Time { duration } => {
-                                        for sample in state.iter() {
-                                            if now.duration_since(sample.timestamp) <= *duration {
-                                                observed += 1;
-                                                if sample.is_failure {
-                                                    failures += 1;
-                                                }
-                                                if sample.is_slow {
-                                                    slow_calls += 1;
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-
-                                if (observed as u32) >= minimum_calls.get() {
-                                    let denom = (observed as f32).max(1.0);
-                                    let failure_rate = failures as f32 / denom;
-                                    let slow_rate = slow_calls as f32 / denom;
-
-                                    let open_on_failures = failure_rate >= *failure_rate_threshold;
-                                    let open_on_slow = match slow_call_rate_threshold {
-                                        Some(threshold) if *threshold > 0.0 => {
-                                            slow_rate >= *threshold
-                                        }
-                                        _ => false,
-                                    };
-
-                                    if (open_on_failures || open_on_slow)
-                                        && self.transition_to(CircuitState::Open, ctx)
-                                    {
-                                        tracing::warn!(
-                                            "Circuit breaker opened (rate-based) after {} calls (failures: {})",
-                                            observed,
-                                            failures
-                                        );
-                                    }
-                                }
-                            }
-                        }
-                    }
+                if let Some(event) =
+                    self.record_closed_outcome(counted_as_failure, call_duration, now)
+                {
+                    ctx.write_control_event(event);
                 }
             }
 
@@ -2417,12 +2695,12 @@ impl CircuitBreakerFactory {
 impl CircuitBreakerFactory {
     /// Shared materialization for stage-level and per-effect instances
     /// (FLOWIP-120c): the key decides where the snapshotter registers.
-    fn create_keyed(
+    fn build_middleware_keyed(
         &self,
         config: &StageConfig,
         control_middleware: std::sync::Arc<super::ControlMiddlewareAggregator>,
         effect_type: Option<String>,
-    ) -> crate::middleware::MiddlewareFactoryResult<Box<dyn Middleware>> {
+    ) -> crate::middleware::MiddlewareFactoryResult<CircuitBreakerMiddleware> {
         let validated_threshold = self.validated_threshold().map_err(|err| {
             MiddlewareFactoryError::invalid_configuration(self.label(), &config.name, err)
         })?;
@@ -2544,7 +2822,23 @@ impl CircuitBreakerFactory {
             ),
         }
 
-        Ok(Box::new(middleware))
+        Ok(middleware)
+    }
+
+    /// Box the breaker middleware for the per-event chain (effect and handler
+    /// paths). FLOWIP-115a sources build the same instance as an `Arc` via
+    /// [`build_middleware_keyed`] and drive it through the runtime control ports.
+    fn create_keyed(
+        &self,
+        config: &StageConfig,
+        control_middleware: std::sync::Arc<super::ControlMiddlewareAggregator>,
+        effect_type: Option<String>,
+    ) -> crate::middleware::MiddlewareFactoryResult<Box<dyn Middleware>> {
+        Ok(Box::new(self.build_middleware_keyed(
+            config,
+            control_middleware,
+            effect_type,
+        )?))
     }
 }
 
@@ -2588,6 +2882,25 @@ impl MiddlewareFactory for CircuitBreakerFactory {
         effect_type: &str,
     ) -> crate::middleware::MiddlewareFactoryResult<Box<dyn Middleware>> {
         self.create_keyed(config, control_middleware, Some(effect_type.to_string()))
+    }
+
+    fn register_source_policy(
+        &self,
+        config: &StageConfig,
+        _stage_type: obzenflow_core::event::context::StageType,
+        control_middleware: &std::sync::Arc<super::ControlMiddlewareAggregator>,
+    ) -> crate::middleware::MiddlewareFactoryResult<()> {
+        // Build one breaker instance (registering its cb_state and snapshotter,
+        // which the CompletionGate and metrics path read), then register it as
+        // one source-boundary policy. The breaker guards pre-poll regardless
+        // of source kind, so stage type is irrelevant here.
+        let middleware = self.build_middleware_keyed(config, control_middleware.clone(), None)?;
+        let breaker = std::sync::Arc::new(middleware);
+        control_middleware.register_source_policy(
+            config.stage_id,
+            std::sync::Arc::new(CircuitBreakerSourcePolicy { breaker }),
+        );
+        Ok(())
     }
 
     fn safety_level(&self) -> MiddlewareSafety {
@@ -3198,6 +3511,119 @@ mod tests {
         assert!(
             matches!(cb.current_state(), CircuitState::Open),
             "expected circuit to be Open after slow-call rate threshold exceeded"
+        );
+    }
+
+    #[test]
+    fn source_rate_based_count_window_opens_after_failure_rate_threshold() {
+        let mut cb = CircuitBreakerMiddleware::with_cooldown_and_fallback(
+            1,
+            StdDuration::from_secs(60),
+            None,
+            None,
+            None,
+            None,
+        );
+        cb.failure_mode = CircuitBreakerFailureMode::RateBased {
+            window: FailureWindow::Count { size: 5 },
+            failure_rate_threshold: 0.6,
+            slow_call_rate_threshold: None,
+            slow_call_duration_threshold: None,
+            minimum_calls: NonZeroU32::new(5).unwrap(),
+        };
+        cb.rate_window = Some(Arc::new(Mutex::new(FailureWindowState::new(5))));
+
+        for is_failure in [true, true, false, true, false] {
+            let outcome = if is_failure {
+                SourceOutcome::Failure {
+                    poll_duration: StdDuration::from_millis(1),
+                }
+            } else {
+                SourceOutcome::Success {
+                    poll_duration: StdDuration::from_millis(1),
+                }
+            };
+            cb.source_settle(outcome);
+        }
+
+        assert!(
+            matches!(cb.current_state(), CircuitState::Open),
+            "expected source circuit to open after rate-based failure threshold"
+        );
+    }
+
+    #[test]
+    fn source_rate_based_slow_call_opens_after_slow_threshold() {
+        let mut cb = CircuitBreakerMiddleware::with_cooldown_and_fallback(
+            1,
+            StdDuration::from_secs(60),
+            None,
+            None,
+            None,
+            None,
+        );
+        cb.failure_mode = CircuitBreakerFailureMode::RateBased {
+            window: FailureWindow::Count { size: 5 },
+            failure_rate_threshold: 1.0,
+            slow_call_rate_threshold: Some(0.6),
+            slow_call_duration_threshold: Some(StdDuration::from_millis(50)),
+            minimum_calls: NonZeroU32::new(5).unwrap(),
+        };
+        cb.rate_window = Some(Arc::new(Mutex::new(FailureWindowState::new(5))));
+
+        for is_slow in [true, true, false, true, false] {
+            cb.source_settle(SourceOutcome::Success {
+                poll_duration: if is_slow {
+                    StdDuration::from_millis(100)
+                } else {
+                    StdDuration::from_millis(10)
+                },
+            });
+        }
+
+        assert!(
+            matches!(cb.current_state(), CircuitState::Open),
+            "expected source circuit to open after slow-call rate threshold"
+        );
+    }
+
+    #[test]
+    fn source_policy_error_marked_delivery_counts_as_breaker_failure() {
+        let breaker = Arc::new(CircuitBreakerMiddleware::with_cooldown(
+            1,
+            StdDuration::from_secs(60),
+        ));
+        let policy = CircuitBreakerSourcePolicy {
+            breaker: breaker.clone(),
+        };
+        let mut failed = create_test_event();
+        failed.processing_info.status = ProcessingStatus::error("source_error_marked_delivery");
+        let mut ctx = SourcePolicyCtx::new(WriterId::from(StageId::new()));
+
+        policy.observe(
+            &SourcePollOutcome::Delivered {
+                events: std::slice::from_ref(&failed),
+                poll_duration: StdDuration::from_millis(1),
+            },
+            &mut ctx,
+        );
+
+        assert!(
+            matches!(breaker.current_state(), CircuitState::Open),
+            "error-marked delivered source batch must count as a breaker failure"
+        );
+        assert!(
+            ctx.take_control_events().iter().any(|event| {
+                matches!(
+                    &event.content,
+                    obzenflow_core::event::ChainEventContent::Observability(
+                        ObservabilityPayload::Middleware(MiddlewareLifecycle::CircuitBreaker(
+                            CircuitBreakerEvent::Opened { .. }
+                        ))
+                    )
+                )
+            }),
+            "source breaker opening must be returned through the boundary outbox"
         );
     }
 
@@ -3896,5 +4322,131 @@ mod tests {
         cb.force_close(&mut admin_ctx);
         assert_eq!(cb.current_state(), CircuitState::Closed);
         assert_eq!(cb.failure_count.load(Ordering::SeqCst), 0);
+    }
+
+    /// FLOWIP-115a (Risk 1): the source probe slot, reserved by `source_admit`
+    /// and released by `source_settle`, must return to zero on every terminal
+    /// outcome including an aborted attempt, now that the slot rides the runtime
+    /// attempt rather than a middleware-context guard. A leak would wedge the
+    /// breaker in HalfOpen; a double-release would underflow the counter.
+    #[test]
+    fn source_breaker_probe_slot_released_on_every_outcome() {
+        // Threshold 1 opens on a single Closed-state failure; zero cooldown makes
+        // HalfOpen reachable immediately, so the test needs no wall-clock wait.
+        let open_breaker = || {
+            let cb = CircuitBreakerMiddleware::with_cooldown(1, Duration::ZERO);
+            cb.source_settle(SourceOutcome::Failure {
+                poll_duration: Duration::from_millis(1),
+            });
+            assert_eq!(
+                cb.current_state(),
+                CircuitState::Open,
+                "one Closed-state failure opens a threshold-1 breaker"
+            );
+            assert_eq!(
+                cb.probe_in_flight.load(Ordering::SeqCst),
+                0,
+                "no probe slot is reserved while Open"
+            );
+            cb
+        };
+
+        let admit_probe = |cb: &CircuitBreakerMiddleware| match cb.source_admit() {
+            SourceAdmit::Continue {
+                guard: Some(guard),
+                event: _,
+            } => guard,
+            SourceAdmit::Continue { guard: None, .. } => {
+                panic!("expected source admission to reserve a probe slot")
+            }
+            SourceAdmit::Pause(delay) => {
+                panic!("expected source admission to proceed, got pause {delay:?}")
+            }
+        };
+
+        // A successful probe closes the breaker and releases the slot.
+        let cb = open_breaker();
+        let guard = admit_probe(&cb);
+        assert_eq!(cb.current_state(), CircuitState::HalfOpen);
+        assert_eq!(
+            cb.probe_in_flight.load(Ordering::SeqCst),
+            1,
+            "admitting a probe reserves exactly one slot"
+        );
+        cb.source_settle(SourceOutcome::Success {
+            poll_duration: Duration::from_millis(1),
+        });
+        drop(guard);
+        assert_eq!(
+            cb.current_state(),
+            CircuitState::Closed,
+            "a successful probe closes the breaker"
+        );
+        assert_eq!(
+            cb.probe_in_flight.load(Ordering::SeqCst),
+            0,
+            "the probe slot is released on success"
+        );
+
+        // A failed probe reopens the breaker and releases the slot.
+        let cb = open_breaker();
+        let guard = admit_probe(&cb);
+        assert_eq!(cb.probe_in_flight.load(Ordering::SeqCst), 1);
+        cb.source_settle(SourceOutcome::Failure {
+            poll_duration: Duration::from_millis(1),
+        });
+        drop(guard);
+        assert_eq!(
+            cb.current_state(),
+            CircuitState::Open,
+            "a failed probe reopens the breaker"
+        );
+        assert_eq!(
+            cb.probe_in_flight.load(Ordering::SeqCst),
+            0,
+            "the probe slot is released on failure"
+        );
+
+        // An empty probe is inconclusive: it releases the slot without changing
+        // state, leaving the breaker HalfOpen for a retry.
+        let cb = open_breaker();
+        let guard = admit_probe(&cb);
+        assert_eq!(cb.current_state(), CircuitState::HalfOpen);
+        assert_eq!(cb.probe_in_flight.load(Ordering::SeqCst), 1);
+        cb.source_settle(SourceOutcome::Inconclusive);
+        drop(guard);
+        assert_eq!(
+            cb.current_state(),
+            CircuitState::HalfOpen,
+            "an inconclusive probe leaves the breaker HalfOpen for the next probe"
+        );
+        assert_eq!(
+            cb.probe_in_flight.load(Ordering::SeqCst),
+            0,
+            "the probe slot is released on inconclusive poll"
+        );
+
+        // A cancelled boundary drops the guard without observing an outcome;
+        // the state remains HalfOpen and the slot is still released.
+        let cb = open_breaker();
+        let guard = admit_probe(&cb);
+        assert_eq!(cb.current_state(), CircuitState::HalfOpen);
+        assert_eq!(cb.probe_in_flight.load(Ordering::SeqCst), 1);
+        drop(guard);
+        assert_eq!(
+            cb.current_state(),
+            CircuitState::HalfOpen,
+            "a cancelled probe leaves the breaker HalfOpen for the next probe"
+        );
+        assert_eq!(
+            cb.probe_in_flight.load(Ordering::SeqCst),
+            0,
+            "the probe slot is released when the source boundary future is dropped"
+        );
+
+        // A fresh probe can be reserved after cancellation, proving the slot is
+        // genuinely free (not just decremented past a leaked reservation).
+        let _guard = admit_probe(&cb);
+        assert_eq!(cb.probe_in_flight.load(Ordering::SeqCst), 1);
     }
 }

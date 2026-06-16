@@ -10,13 +10,12 @@
 //! rejection distinct from a suppressed signal or a poison EOF. Observation is
 //! a callback that never steers the loop.
 //!
-//! This slice defines the contract. Concrete policies bind to these hooks in
-//! the source (115a), effect (115b), sink (115d), and backpressure (115e)
-//! slices, so the admission and observation hooks have no consultation site
-//! yet. The signal hook lives in [`super::core`] (adapted in place) and the
-//! completion hook in the source FSMs.
+//! This slice defines the contract for loop-level controls. Live I/O policies
+//! (source/effect/sink delivery) compose as boundary middleware outside this
+//! gate model. Admission/observation remain available for output-commit
+//! backpressure, where there is no single inner future to wrap. The signal hook
+//! lives in [`super::core`] and the completion hook in the source FSMs.
 
-use super::ProcessingContext;
 use std::sync::Arc;
 
 /// Why and when a paused supervisor should re-check its gate.
@@ -73,26 +72,19 @@ impl std::fmt::Debug for CreditWaker {
     }
 }
 
-/// The positions at which the admission hook may be consulted. The position is
-/// data, so one [`AdmissionGate`] answers across positions and the supervisor
-/// passes the position it is at. 115c defines the positions; the binding slices
-/// wire the consultation sites.
+/// The positions at which the admission hook may be consulted. FLOWIP-115a
+/// keeps live I/O policy composition out of this gate model; the remaining
+/// admission use is output-commit/backpressure, where the supervisor owns the
+/// wait because no single inner future exists to wrap.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AdmissionPosition {
-    /// Before pulling the next unit from a source.
-    PrePoll,
-    /// After a finite source produced a held unit (FLOWIP-114m). Continue or
-    /// Pause only; the held unit cannot be rejected.
-    PostAdmit,
-    /// Before invoking a declared effect.
-    BeforeEffect,
     /// Before committing a produced output downstream.
     BeforeOutputCommit,
 }
 
 /// Result of consulting the admission hook at a rejecting position
-/// (`PrePoll` / `BeforeEffect` / `BeforeOutputCommit`). `RejectAttempt` and
-/// `SynthesizeFallback` are this hook's stop.
+/// (`BeforeOutputCommit`). `RejectAttempt` and `SynthesizeFallback` are this
+/// hook's stop.
 #[derive(Debug, Clone)]
 pub enum AdmissionDecision {
     /// Proceed with the attempt.
@@ -106,14 +98,6 @@ pub enum AdmissionDecision {
     SynthesizeFallback { source: Option<String> },
 }
 
-/// Result at the `PostAdmit` position (FLOWIP-114m). Continue or Pause only:
-/// the held unit already exists and the narrower type forbids dropping it.
-#[derive(Debug, Clone)]
-pub enum PostAdmitDecision {
-    Continue,
-    Pause { wake: WakeOn },
-}
-
 /// How one admitted attempt ended. Handed to every observer that admitted it.
 /// Mirrors the effect boundary's outcome arms without importing the effect
 /// type, preserving the crate onion.
@@ -125,18 +109,12 @@ pub enum AttemptOutcome {
     Aborted { reason: String },
 }
 
-/// Admission hook. Consulted at an [`AdmissionPosition`] before live work runs.
-/// 115c defines the trait; the source / effect / sink / backpressure slices
-/// wire the consultation sites.
+/// Admission hook. Consulted at an [`AdmissionPosition`] before committing
+/// output under backpressure. Live source/effect/sink-delivery policy uses
+/// boundary middleware instead.
 pub trait AdmissionGate: Send + Sync {
     /// Decide whether an attempt may proceed at a rejecting position.
-    fn admit(&self, position: AdmissionPosition, ctx: &mut ProcessingContext) -> AdmissionDecision;
-
-    /// Decide whether an already-produced unit may proceed (`PostAdmit`). The
-    /// return type cannot reject, preserving FLOWIP-114m's no-drop rule.
-    fn admit_held(&self, _ctx: &mut ProcessingContext) -> PostAdmitDecision {
-        PostAdmitDecision::Continue
-    }
+    fn admit(&self, position: AdmissionPosition) -> AdmissionDecision;
 }
 
 /// Attempt-observation hook. Pure observation: it returns nothing and cannot
@@ -165,10 +143,9 @@ mod tests {
 
     #[test]
     fn admission_position_is_copy_and_eq() {
-        let p = AdmissionPosition::PostAdmit;
+        let p = AdmissionPosition::BeforeOutputCommit;
         let q = p; // Copy
         assert_eq!(p, q);
-        assert_ne!(AdmissionPosition::PrePoll, AdmissionPosition::BeforeEffect);
     }
 
     #[test]
@@ -187,11 +164,7 @@ mod tests {
     }
 
     impl AdmissionGate for FixedGate {
-        fn admit(
-            &self,
-            position: AdmissionPosition,
-            _ctx: &mut ProcessingContext,
-        ) -> AdmissionDecision {
+        fn admit(&self, position: AdmissionPosition) -> AdmissionDecision {
             match self.decision {
                 "continue" => AdmissionDecision::Continue,
                 "reject" => AdmissionDecision::RejectAttempt {
@@ -206,16 +179,12 @@ mod tests {
 
     #[test]
     fn admission_gate_answers_per_position() {
-        let mut ctx = ProcessingContext::new();
         let gate = FixedGate { decision: "reject" };
-        match gate.admit(AdmissionPosition::PrePoll, &mut ctx) {
-            AdmissionDecision::RejectAttempt { reason } => assert!(reason.contains("PrePoll")),
+        match gate.admit(AdmissionPosition::BeforeOutputCommit) {
+            AdmissionDecision::RejectAttempt { reason } => {
+                assert!(reason.contains("BeforeOutputCommit"))
+            }
             other => panic!("expected reject, got {other:?}"),
-        }
-        // `admit_held` cannot reject: its type has only Continue / Pause.
-        match gate.admit_held(&mut ctx) {
-            PostAdmitDecision::Continue => {}
-            PostAdmitDecision::Pause { .. } => {}
         }
     }
 }

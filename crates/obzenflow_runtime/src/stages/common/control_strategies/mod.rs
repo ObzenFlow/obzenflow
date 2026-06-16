@@ -18,10 +18,10 @@ pub(crate) mod dispatch;
 mod strategies;
 pub use strategies::{BackoffStrategy, CompositeStrategy, JonestownSignalStrategy};
 
-// Runtime control-strategy hooks (FLOWIP-115c): the admission and observation
-// hooks plus the shared `Pause` vocabulary the binding slices consume.
+// Runtime control-strategy hooks (FLOWIP-115c): loop-level admission and
+// observation hooks plus the shared `Pause` vocabulary.
 mod hooks;
 pub use hooks::{
     AdmissionDecision, AdmissionGate, AdmissionPosition, AttemptObserver, AttemptOutcome,
-    CreditWaker, PostAdmitDecision, WakeOn,
+    CreditWaker, WakeOn,
 };

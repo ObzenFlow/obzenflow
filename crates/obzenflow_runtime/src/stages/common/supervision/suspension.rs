@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Bounded suspension and attempt finalization (FLOWIP-115c).
+//! Bounded suspension and output-commit attempt finalization (FLOWIP-115c).
 //!
 //! A control-strategy gate never awaits. It returns a [`WakeOn`] and the
 //! supervisor calls [`suspend_until`], the single place a wake becomes an
@@ -10,17 +10,14 @@
 //! by a deadline or a runtime-supplied stall cap, so a wedged downstream can
 //! never hang the loop.
 //!
-//! [`AdmittedAttempt`] is the loop-driven finalization shape: a guard that
-//! settles its observers once, on every exit path, modelled on the
-//! circuit-breaker probe-slot guard. The wrap-the-future shape already exists
-//! as the effect boundary and is realigned by 115b.
+//! [`AdmittedAttempt`] is the loop-driven finalization shape for future
+//! output-commit/backpressure use: a guard that settles its observers once, on
+//! every exit path, modelled on the circuit-breaker probe-slot guard. Live I/O
+//! attempts use boundary middleware instead.
 //!
 //! These items are the reusable machinery the supervisor loop and the binding
 //! slices consume: `suspend_until` is wired into the signal `Pause` path, and
-//! `AdmittedAttempt` is consumed by the admission seams in 115a/115b/115d.
-//! Until admission has a non-test caller, the module permits dead code; the
-//! allowance is removed as each consumer lands.
-#![allow(dead_code)]
+//! `AdmittedAttempt` is reserved for output-commit/backpressure binding.
 
 use crate::stages::common::control_strategies::{
     AdmissionPosition, AttemptObserver, AttemptOutcome, WakeOn,
@@ -78,12 +75,14 @@ pub(crate) async fn suspend_until(wake: &WakeOn, max_wait: Option<Duration>) -> 
 /// runs the durable `settle`; an attempt ended by a drop is, by the
 /// event-sourcing model, simply not recorded as complete and is re-attempted on
 /// restart.
+#[allow(dead_code)]
 pub(crate) struct AdmittedAttempt {
     position: AdmissionPosition,
     observers: Vec<Arc<dyn AttemptObserver>>,
     settled: bool,
 }
 
+#[allow(dead_code)]
 impl AdmittedAttempt {
     pub(crate) fn new(
         position: AdmissionPosition,
@@ -227,7 +226,10 @@ mod tests {
         let observer = Arc::new(CountingObserver::default());
         let observed = observer.observed.clone();
         let settled = observer.settled.clone();
-        let attempt = AdmittedAttempt::new(AdmissionPosition::BeforeEffect, vec![observer.clone()]);
+        let attempt = AdmittedAttempt::new(
+            AdmissionPosition::BeforeOutputCommit,
+            vec![observer.clone()],
+        );
         attempt
             .settle(AttemptOutcome::Succeeded)
             .await
@@ -248,7 +250,7 @@ mod tests {
         let succeeding_observed = succeeding.observed.clone();
         let succeeding_settled = succeeding.settled.clone();
         let attempt = AdmittedAttempt::new(
-            AdmissionPosition::BeforeEffect,
+            AdmissionPosition::BeforeOutputCommit,
             vec![failing.clone(), succeeding.clone()],
         );
 
@@ -268,7 +270,10 @@ mod tests {
         let settled = observer.settled.clone();
         let aborts = observer.last_was_abort.clone();
         {
-            let _attempt = AdmittedAttempt::new(AdmissionPosition::PrePoll, vec![observer.clone()]);
+            let _attempt = AdmittedAttempt::new(
+                AdmissionPosition::BeforeOutputCommit,
+                vec![observer.clone()],
+            );
             // dropped here without settle
         }
         assert_eq!(
