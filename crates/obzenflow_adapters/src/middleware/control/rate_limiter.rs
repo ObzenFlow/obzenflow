@@ -1379,6 +1379,75 @@ mod tests {
         }
     }
 
+    /// FLOWIP-115a / FLOWIP-114m: the source-boundary rate-limiter policy charges
+    /// a permit only at its declared position, and never on an error-marked
+    /// delivery. Asserted in isolation through the monotonic
+    /// `tokens_consumed_total`, which the admission path bumps by `cost_per_event`
+    /// on every charge (refill-independent, unlike `available_tokens`).
+    #[tokio::test]
+    async fn source_rate_limiter_policy_charges_by_position_and_skips_error_marked() {
+        use obzenflow_core::event::status::processing_status::ErrorKind;
+
+        let writer = WriterId::from(StageId::new());
+        let clean_batch = vec![ChainEventFactory::data_event(
+            writer,
+            "test.event",
+            json!({ "index": 0 }),
+        )];
+        let error_batch = vec![ChainEventFactory::data_event(
+            writer,
+            "test.event",
+            json!({ "index": 0 }),
+        )
+        .mark_as_error("boom", ErrorKind::Remote)];
+
+        // The rules read raw facts, so an error-marked batch is an error delivery.
+        assert!(batch_has_error_marked(&error_batch));
+        assert!(!batch_has_error_marked(&clean_batch));
+
+        let charged =
+            |mw: &Arc<RateLimiterMiddleware>| mw.stats.lock().expect("stats lock").tokens_consumed_total;
+
+        // Finite source (AfterPoll): admit is a no-op; after_poll charges a clean
+        // non-empty delivery.
+        let finite = Arc::new(test_middleware(StageId::new(), 100.0, Some(5.0), 1.0));
+        let finite_policy =
+            RateLimiterSourcePolicy::new(finite.clone(), SourceRateLimitPosition::AfterPoll);
+        let mut ctx = SourcePolicyCtx::new(writer);
+        let _ = finite_policy.admit(&mut ctx).await;
+        assert_eq!(charged(&finite), 0.0, "AfterPoll admit must not charge");
+        finite_policy.after_poll(&clean_batch, &mut ctx).await;
+        assert_eq!(
+            charged(&finite),
+            1.0,
+            "AfterPoll must charge a clean non-empty delivery"
+        );
+
+        // Error-marked delivery: after_poll must not charge.
+        let finite_err = Arc::new(test_middleware(StageId::new(), 100.0, Some(5.0), 1.0));
+        let finite_err_policy =
+            RateLimiterSourcePolicy::new(finite_err.clone(), SourceRateLimitPosition::AfterPoll);
+        let mut ctx_err = SourcePolicyCtx::new(writer);
+        finite_err_policy
+            .after_poll(&error_batch, &mut ctx_err)
+            .await;
+        assert_eq!(
+            charged(&finite_err),
+            0.0,
+            "FLOWIP-114m: an error-marked delivery must not be charged"
+        );
+
+        // Infinite source (PrePoll): admit charges; after_poll is a no-op.
+        let infinite = Arc::new(test_middleware(StageId::new(), 100.0, Some(5.0), 1.0));
+        let infinite_policy =
+            RateLimiterSourcePolicy::new(infinite.clone(), SourceRateLimitPosition::PrePoll);
+        let mut ctx_inf = SourcePolicyCtx::new(writer);
+        let _ = infinite_policy.admit(&mut ctx_inf).await;
+        assert_eq!(charged(&infinite), 1.0, "PrePoll admit must charge");
+        infinite_policy.after_poll(&clean_batch, &mut ctx_inf).await;
+        assert_eq!(charged(&infinite), 1.0, "PrePoll after_poll must be a no-op");
+    }
+
     #[test]
     fn test_rate_limiter_supported_stage_types_includes_join() {
         let factory = RateLimiterFactory::new(10.0);
