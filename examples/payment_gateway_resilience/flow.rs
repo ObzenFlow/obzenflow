@@ -58,11 +58,14 @@ use obzenflow_runtime::stages::sink::SinkTyped;
 use std::num::NonZeroU32;
 
 const BACKPRESSURE_WINDOW: u64 = 1_000;
+const SOURCE_RATE_LIMIT_EVENTS_PER_SECOND: f64 = 20.0;
+const SOURCE_RATE_LIMIT_BURST: f64 = 1.0;
 
 /// Build the demo flow.
 ///
-/// A gentle gateway-effect rate limit keeps logs and metrics readable, so you
-/// can watch effect policy metrics and circuit-breaker gauges change over time.
+/// Gentle source and gateway-effect rate limits keep logs and metrics readable,
+/// so you can watch source-boundary and effect-boundary policy metrics change
+/// over time.
 /// Optional per-source pacing jitter (FLOWIP-095d demo knob).
 ///
 /// `PAYMENT_DEMO_SOURCE_JITTER_MS=<max>` delays each order by a deterministic
@@ -143,6 +146,11 @@ pub fn build_flow() -> obzenflow_dsl::FlowDefinition {
             // Optional jitter (PAYMENT_DEMO_SOURCE_JITTER_MS) varies arrival
             // timing without changing the merged delivery order, because the
             // canonical merge at validate_order orders by stream content.
+            //
+            // The source rate limiter is the source-boundary example
+            // (FLOWIP-115a). These are local scripted fixtures, so a source
+            // circuit breaker would be misleading here; the breaker belongs
+            // on external dependencies such as the gateway effect below.
             web_orders = source!(CustomerOrderPlaced => typed_sources::finite_from_fn(move |index| {
                 let order = scripted_web_orders.get(index).cloned();
                 if order.is_some() {
@@ -150,6 +158,9 @@ pub fn build_flow() -> obzenflow_dsl::FlowDefinition {
                 }
                 order
             }), [
+                RateLimiterBuilder::new(SOURCE_RATE_LIMIT_EVENTS_PER_SECOND)
+                    .with_burst(SOURCE_RATE_LIMIT_BURST)
+                    .build(),
                 backpressure(BACKPRESSURE_WINDOW)
             ]);
             store_orders = source!(CustomerOrderPlaced => typed_sources::finite_from_fn(move |index| {
@@ -159,6 +170,9 @@ pub fn build_flow() -> obzenflow_dsl::FlowDefinition {
                 }
                 order
             }), [
+                RateLimiterBuilder::new(SOURCE_RATE_LIMIT_EVENTS_PER_SECOND)
+                    .with_burst(SOURCE_RATE_LIMIT_BURST)
+                    .build(),
                 backpressure(BACKPRESSURE_WINDOW)
             ]);
 
