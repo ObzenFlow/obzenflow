@@ -233,20 +233,20 @@ Concrete example (transform stage):
 
 ## Control strategies: how middleware influences flow control
 
-When a stage supervisor reaches a decision point, an inbound control signal, an admission check before live work, a source's terminal emission, or the end of an attempt, it does not hard-code what to do. It consults a small set of typed control-strategy hooks that middleware implements. This is how the circuit breaker, windowing, retry, rate limiting, and backpressure participate in flow control without reaching into the FSM or the run loop.
+When a stage supervisor reaches a loop-level decision point, an inbound control signal, an output-commit readiness check, or a source's terminal emission, it does not hard-code what to do. It consults a small set of typed control-strategy hooks that middleware-backed adapters implement. Live I/O attempts themselves, such as source poll, effect invocation, and sink delivery, compose policy as boundary middleware around a single inner future. That keeps the supervisor at the gas/brake/steering level: it sees only typed runtime pedals and reports, not the concrete middleware driving them.
 
 ### The problem this solves
 
 Consider what happens when a circuit breaker is in the `HalfOpen` state and an EOF signal arrives. The supervisor's default behaviour is to forward EOF downstream and transition to Draining. The circuit breaker, though, is mid-recovery, probing to see if the downstream service is healthy again. If EOF fires immediately, the stage shuts down before the breaker can complete its recovery probe, and the next run starts from scratch with a breaker that never got to close.
 
-The naive fix would put circuit-breaker-aware `if` statements inside the supervisor's control-signal handling. The supervisor should not know about circuit breakers, though. And if windowing middleware also needs to hold EOF to flush its current window, and rate limiting needs to pace admission, and backpressure needs to stall a producer, the supervisor becomes a tangle of middleware-specific conditionals. The hooks keep each concern in its own policy, consulted by the supervisor through a typed contract.
+The naive fix would put circuit-breaker-aware `if` statements inside the supervisor's control-signal handling. The supervisor should not know about circuit breakers, though. And if windowing middleware also needs to hold EOF to flush its current window, and backpressure needs to stall a producer, the supervisor becomes a tangle of middleware-specific conditionals. The hooks keep loop-level concerns in their own policy, consulted by the supervisor through a typed contract. Pacing and breaker checks around live I/O use the boundary-onion shape instead, so the supervisor never becomes the policy combinator.
 
 ### Four hooks, one driving vocabulary
 
 The supervisor consults four hooks, each at its own named decision point. Three of them drive the loop and share the same shape, `Continue` or `Pause`, plus a hook-local stop whose name says what stopping means at that point. The type system keeps an admission rejection distinct from a suppressed signal or a poison EOF, so a stop at one point cannot be mistaken for a stop at another. The fourth hook observes and never steers.
 
 - **`SignalGate`** governs inbound control signals (EOF, Drain, Watermark, Checkpoint). It is the live hook today. Its stop is `SuppressSignal`.
-- **`AdmissionGate`** governs whether an attempt may proceed at an `AdmissionPosition` (before a poll, after a held unit, before an effect, before an output commit). Its stops are `RejectAttempt` and `SynthesizeFallback`. 115c defines it; the source, effect, and sink slices wire the consultation sites.
+- **`AdmissionGate`** governs whether an output commit may proceed at `AdmissionPosition::BeforeOutputCommit`. Its stops are `RejectAttempt` and `SynthesizeFallback`. Live source/effect/sink-delivery attempts do not use this hook; they compose as boundary middleware around the inner future.
 - **`CompletionGate`** governs a source's terminal emission, choosing between `DefaultEof` and a `PoisonEof`. It is live on the source FSMs.
 - **`AttemptObserver`** observes how an admitted attempt ended. It is a callback, returns nothing, and cannot change the loop. 115c defines it; the binding slices wire it.
 
@@ -320,11 +320,11 @@ pub(crate) async fn suspend_until(wake: &WakeOn, max_wait: Option<Duration>) -> 
 
 ### Finalization: settling an attempt exactly once
 
-`AdmittedAttempt`, in the same module, is the loop-driven finalization guard. It holds the observers that admitted an attempt and guarantees each is notified of the terminal outcome exactly once, on every exit path. Calling `settle(outcome).await` runs each observer's synchronous `observe` and then its durable async `settle`. If the guard is dropped without an explicit settle, `Drop` runs only the synchronous `observe` with a default `Aborted` outcome, because `Drop` cannot await durable journal work. By the event-sourcing model, an attempt ended by a drop is simply not recorded as complete and is re-attempted on restart. This is the same RAII shape as the circuit-breaker probe-slot guard.
+`AdmittedAttempt`, in the same module, is the loop-driven finalization guard reserved for output-commit/backpressure binding. It holds the observers that admitted an attempt and guarantees each is notified of the terminal outcome exactly once, on every exit path. Calling `settle(outcome).await` runs each observer's synchronous `observe` and then its durable async `settle`. If the guard is dropped without an explicit settle, `Drop` runs only the synchronous `observe` with a default `Aborted` outcome, because `Drop` cannot await durable journal work. By the event-sourcing model, an attempt ended by a drop is simply not recorded as complete and is re-attempted on restart. Live I/O attempts use boundary middleware and policy-owned guards instead.
 
 ### Typed registration replaces the dead downcast lane
 
-Earlier, middleware exposed signal strategies through `MiddlewareFactory::create_control_strategy`, a lane no factory overrode, so it always yielded the default, and policy capability was then recovered from an erased `dyn Middleware` by capability-downcast. 115c retires that lane. A factory now declares which control points its policy binds through a typed `control_points()`:
+Earlier, middleware exposed signal strategies through `MiddlewareFactory::create_control_strategy`, a lane no factory overrode, so it always yielded the default, and policy capability was then recovered from an erased `dyn Middleware` by capability-downcast. 115c retires that lane for loop-level controls. A factory now declares which loop-level control points its policy binds through a typed `control_points()`:
 
 ```text
 pub struct ControlPointRegistration {
@@ -335,7 +335,7 @@ pub struct ControlPointRegistration {
 }
 ```
 
-The declaration defaults to none, so purely structural middleware needs no override. Admission is position-aware because source pre-poll, finite-source post-admit, effect, and output-commit gates answer different runtime questions. The binding slices (source 115a, effect 115b, sink 115d, backpressure 115e) wire the concrete gates at the points a factory declares. Until then, the live signal gate is the default `JonestownSignalStrategy`, installed during stage materialization.
+The declaration defaults to none, so purely structural middleware needs no override. Admission remains position-aware so future loop-level gates can be added deliberately, but 115a moves source pre-poll and finite post-poll policy into the source boundary onion, and 120c already uses the same pattern for effects. Until a binding slice installs an admission gate, the live signal gate is the default `JonestownSignalStrategy`, installed during stage materialization.
 
 ### Where this lives relative to the supervised base
 

@@ -9,6 +9,9 @@
 //! monitoring and SLI middleware.
 
 use crate::middleware::{
+    batch_has_error_marked, SourceAdmission, SourcePolicy, SourcePolicyCtx, SourcePollOutcome,
+};
+use crate::middleware::{
     context_keys::{
         CircuitBreakerAttempt, CircuitBreakerIsProbe, CircuitBreakerProbeGeneration,
         CircuitBreakerProbeSlot, CircuitBreakerProbeSlotGuard, CircuitBreakerRetryAfterMs,
@@ -36,10 +39,7 @@ use obzenflow_core::MiddlewareExecutionScope;
 use obzenflow_core::TypedPayload;
 use obzenflow_core::{StageId, WriterId};
 use obzenflow_runtime::pipeline::config::StageConfig;
-use obzenflow_runtime::stages::common::control_strategies::{
-    AdmissionDecision, AdmissionGate, AdmissionPosition, AttemptObserver, AttemptOutcome,
-    BackoffStrategy, WakeOn,
-};
+use obzenflow_runtime::stages::common::control_strategies::BackoffStrategy;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::json;
@@ -355,9 +355,9 @@ pub struct CircuitBreakerMiddleware {
     probe_gate: Arc<Mutex<()>>,
     /// Monotonic epoch for half-open probe outcomes.
     probe_generation: Arc<AtomicU64>,
-    /// FLOWIP-115a: the probe generation reserved by the source admission gate,
-    /// read by the paired attempt observer to settle it. Plain instance state is
-    /// safe because a source supervisor polls sequentially.
+    /// FLOWIP-115a: the probe generation reserved by the source boundary policy,
+    /// read by observation to classify the probe. The RAII guard releases the
+    /// slot and clears this marker on cancellation.
     source_pending_probe: Arc<Mutex<Option<u64>>>,
     /// Statistics for periodic summaries
     stats: Arc<Mutex<CircuitBreakerStats>>,
@@ -839,24 +839,29 @@ impl CircuitBreakerMiddleware {
         }
     }
 
-    /// FLOWIP-115a: source `PrePoll` admission, reusing the same state machine as
-    /// `pre_handle` without a middleware context. Reserves a probe slot in
-    /// HalfOpen and records its generation for the paired observer settle.
+    /// FLOWIP-115a: source-boundary admission, reusing the same state machine as
+    /// `pre_handle` without exposing middleware policy details to the runtime.
+    /// Reserves a probe slot in HalfOpen and returns an RAII guard that releases
+    /// the slot on normal return or cancellation.
     fn source_admit(&self) -> SourceAdmit {
         match self.current_state() {
-            CircuitState::Closed => SourceAdmit::Continue,
+            CircuitState::Closed => SourceAdmit::Continue {
+                guard: None,
+                event: None,
+            },
             CircuitState::Open => {
                 if self.should_attempt_reset() {
-                    {
+                    let transition_event = {
                         let _probe_gate = self.probe_gate.lock().ok();
-                        let (transitioned, _event) =
+                        let (transitioned, event) =
                             self.transition_to_inner(CircuitState::HalfOpen);
                         if transitioned {
                             self.probe_generation.fetch_add(1, Ordering::SeqCst);
                             self.success_count.store(0, Ordering::Relaxed);
                         }
-                    }
-                    self.source_reserve_probe()
+                        event
+                    };
+                    self.source_reserve_probe(transition_event)
                 } else {
                     let cooldown_remaining = self
                         .opened_at
@@ -865,23 +870,16 @@ impl CircuitBreakerMiddleware {
                         .and_then(|guard| *guard)
                         .map(|opened_at| self.cooldown.saturating_sub(opened_at.elapsed()))
                         .unwrap_or(self.cooldown);
-                    if let Ok(mut stats) = self.stats.lock() {
-                        stats.requests_rejected += 1;
-                    }
-                    self.rejections_total.fetch_add(1, Ordering::Relaxed);
-                    SourceAdmit::Reject(format!(
-                        "circuit breaker open; cooldown remaining {}ms",
-                        cooldown_remaining.as_millis()
-                    ))
+                    SourceAdmit::Pause(cooldown_remaining)
                 }
             }
-            CircuitState::HalfOpen => self.source_reserve_probe(),
+            CircuitState::HalfOpen => self.source_reserve_probe(None),
         }
     }
 
     /// Reserve a half-open probe slot via the same CAS loop as `pre_handle`,
     /// or back off briefly when all slots are in use.
-    fn source_reserve_probe(&self) -> SourceAdmit {
+    fn source_reserve_probe(&self, event: Option<ChainEvent>) -> SourceAdmit {
         let _probe_gate = self.probe_gate.lock().ok();
         let generation = self.probe_generation.load(Ordering::SeqCst);
         let permitted = self.half_open_policy.permitted_probes.get();
@@ -900,19 +898,25 @@ impl CircuitBreakerMiddleware {
                     if let Ok(mut pending) = self.source_pending_probe.lock() {
                         *pending = Some(generation);
                     }
-                    return SourceAdmit::Continue;
+                    return SourceAdmit::Continue {
+                        guard: Some(SourceProbeGuard::new(
+                            self.probe_in_flight.clone(),
+                            self.source_pending_probe.clone(),
+                            generation,
+                        )),
+                        event: event.map(Box::new),
+                    };
                 }
                 Err(actual) => current = actual,
             }
         }
     }
 
-    /// FLOWIP-115a: settle a source attempt against the per-poll outcome (the
-    /// ratified per-attempt model). A probe closes on success and reopens on
-    /// failure; a Closed-state poll error counts toward opening in Consecutive
-    /// mode. RateBased source breakers count failures but are not yet tripped on
-    /// this path. Lifecycle events are deferred; counters stay accurate.
-    fn source_settle(&self, outcome: SourceOutcome) {
+    /// FLOWIP-115a: classify one source-boundary poll outcome. A probe closes
+    /// on success and reopens on failure; a Closed-state poll error counts
+    /// toward opening in Consecutive mode. RateBased source breakers count
+    /// failures but are not yet tripped on the source path.
+    fn source_settle(&self, outcome: SourceOutcome) -> Option<ChainEvent> {
         if !matches!(outcome, SourceOutcome::Inconclusive) {
             if let Ok(mut stats) = self.stats.lock() {
                 stats.requests_processed += 1;
@@ -927,33 +931,35 @@ impl CircuitBreakerMiddleware {
 
         if let Some(generation) = pending {
             let _probe_gate = self.probe_gate.lock().ok();
-            self.probe_in_flight.fetch_sub(1, Ordering::SeqCst);
 
             if generation == self.probe_generation.load(Ordering::SeqCst)
                 && matches!(self.current_state(), CircuitState::HalfOpen)
             {
-                match outcome {
+                return match outcome {
                     SourceOutcome::Success => {
                         self.success_count.fetch_add(1, Ordering::Relaxed);
                         self.successes_total.fetch_add(1, Ordering::Relaxed);
-                        if self.transition_to_inner(CircuitState::Closed).0 {
+                        let (transitioned, event) = self.transition_to_inner(CircuitState::Closed);
+                        if transitioned {
                             self.failure_count.store(0, Ordering::SeqCst);
                         }
+                        event
                     }
                     SourceOutcome::Failure => {
                         self.failures_total.fetch_add(1, Ordering::Relaxed);
-                        self.transition_to_inner(CircuitState::Open);
+                        self.transition_to_inner(CircuitState::Open).1
                     }
-                    SourceOutcome::Inconclusive => {}
-                }
+                    SourceOutcome::Inconclusive => None,
+                };
             }
-            return;
+            return None;
         }
 
         match outcome {
             SourceOutcome::Success => {
                 self.successes_total.fetch_add(1, Ordering::Relaxed);
                 self.failure_count.store(0, Ordering::SeqCst);
+                None
             }
             SourceOutcome::Failure => {
                 self.failures_total.fetch_add(1, Ordering::Relaxed);
@@ -961,7 +967,7 @@ impl CircuitBreakerMiddleware {
                 match &self.failure_mode {
                     CircuitBreakerFailureMode::Consecutive { max_failures } => {
                         if (consecutive as u32) >= max_failures.get() {
-                            self.transition_to_inner(CircuitState::Open);
+                            return self.transition_to_inner(CircuitState::Open).1;
                         }
                     }
                     CircuitBreakerFailureMode::RateBased { .. } => {
@@ -969,8 +975,9 @@ impl CircuitBreakerMiddleware {
                         // but are not yet tripped on the source path.
                     }
                 }
+                None
             }
-            SourceOutcome::Inconclusive => {}
+            SourceOutcome::Inconclusive => None,
         }
     }
 
@@ -1168,13 +1175,52 @@ impl CircuitBreakerMiddleware {
     }
 }
 
-/// FLOWIP-115a: the source `PrePoll` admission answer from
+/// RAII guard for one source half-open probe slot.
+struct SourceProbeGuard {
+    probe_in_flight: Arc<AtomicU32>,
+    source_pending_probe: Arc<Mutex<Option<u64>>>,
+    generation: u64,
+    released: bool,
+}
+
+impl SourceProbeGuard {
+    fn new(
+        probe_in_flight: Arc<AtomicU32>,
+        source_pending_probe: Arc<Mutex<Option<u64>>>,
+        generation: u64,
+    ) -> Self {
+        Self {
+            probe_in_flight,
+            source_pending_probe,
+            generation,
+            released: false,
+        }
+    }
+}
+
+impl Drop for SourceProbeGuard {
+    fn drop(&mut self) {
+        if self.released {
+            return;
+        }
+        self.released = true;
+        if let Ok(mut pending) = self.source_pending_probe.lock() {
+            if pending.as_ref() == Some(&self.generation) {
+                *pending = None;
+            }
+        }
+        self.probe_in_flight.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// FLOWIP-115a: the source-boundary admission answer from
 /// [`CircuitBreakerMiddleware::source_admit`].
-#[derive(Debug, Clone)]
 enum SourceAdmit {
-    Continue,
+    Continue {
+        guard: Option<SourceProbeGuard>,
+        event: Option<Box<ChainEvent>>,
+    },
     Pause(Duration),
-    Reject(String),
 }
 
 /// FLOWIP-115a: the source-path outcome handed to
@@ -1190,42 +1236,49 @@ enum SourceOutcome {
     Inconclusive,
 }
 
-/// FLOWIP-115a: source admission gate for the circuit breaker. Shares one
-/// `Arc<CircuitBreakerMiddleware>` with the attempt observer and the completion
-/// strategy, so all three faces read and write the same breaker state.
-struct CircuitBreakerAdmissionGate {
-    breaker: Arc<CircuitBreakerMiddleware>,
-}
-
-impl AdmissionGate for CircuitBreakerAdmissionGate {
-    fn admit(&self, _position: AdmissionPosition) -> AdmissionDecision {
-        match self.breaker.source_admit() {
-            SourceAdmit::Continue => AdmissionDecision::Continue,
-            // The breaker is std-clocked (its cooldown uses `std::time::Instant`),
-            // so the back-off deadline is a std `Instant`.
-            SourceAdmit::Pause(delay) => AdmissionDecision::Pause {
-                wake: WakeOn::At(Instant::now() + delay),
-            },
-            SourceAdmit::Reject(reason) => AdmissionDecision::RejectAttempt { reason },
-        }
-    }
-}
-
-/// FLOWIP-115a: source attempt observer that settles the circuit breaker probe
-/// and Closed-state failure counting against the per-poll outcome.
-struct CircuitBreakerAttemptObserver {
+/// FLOWIP-115a: source-boundary policy for the circuit breaker.
+struct CircuitBreakerSourcePolicy {
     breaker: Arc<CircuitBreakerMiddleware>,
 }
 
 #[async_trait::async_trait]
-impl AttemptObserver for CircuitBreakerAttemptObserver {
-    fn observe(&self, _position: AdmissionPosition, outcome: &AttemptOutcome) {
+impl SourcePolicy for CircuitBreakerSourcePolicy {
+    fn label(&self) -> &'static str {
+        Middleware::label(self.breaker.as_ref())
+    }
+
+    async fn admit(&self, ctx: &mut SourcePolicyCtx) -> SourceAdmission {
+        loop {
+            match self.breaker.source_admit() {
+                SourceAdmit::Continue { guard, event } => {
+                    if let Some(event) = event {
+                        ctx.write_control_event(*event);
+                    }
+                    return SourceAdmission::Admit(guard.map(|guard| {
+                        Box::new(guard) as Box<dyn crate::middleware::SourceAdmissionGuard>
+                    }));
+                }
+                SourceAdmit::Pause(delay) => {
+                    tokio::time::sleep(delay).await;
+                }
+            }
+        }
+    }
+
+    fn observe(&self, outcome: &SourcePollOutcome<'_>, ctx: &mut SourcePolicyCtx) {
         let source_outcome = match outcome {
-            AttemptOutcome::Succeeded => SourceOutcome::Success,
-            AttemptOutcome::Failed { .. } => SourceOutcome::Failure,
-            AttemptOutcome::Aborted { .. } | AttemptOutcome::Skipped => SourceOutcome::Inconclusive,
+            SourcePollOutcome::Delivered(events) if batch_has_error_marked(events) => {
+                SourceOutcome::Failure
+            }
+            SourcePollOutcome::Delivered(_) | SourcePollOutcome::Eof => SourceOutcome::Success,
+            SourcePollOutcome::Failed(_) => SourceOutcome::Failure,
+            SourcePollOutcome::Empty => SourceOutcome::Inconclusive,
         };
-        self.breaker.source_settle(source_outcome);
+        if let Some(event) = self.breaker.source_settle(source_outcome) {
+            ctx.write_control_event(event);
+        }
+        self.breaker
+            .maybe_emit_summary(ctx.middleware_context_mut());
     }
 }
 
@@ -2828,20 +2881,14 @@ impl MiddlewareFactory for CircuitBreakerFactory {
         control_middleware: &std::sync::Arc<super::ControlMiddlewareAggregator>,
     ) -> crate::middleware::MiddlewareFactoryResult<()> {
         // Build one breaker instance (registering its cb_state and snapshotter,
-        // which the CompletionGate and metrics path read), then share it across
-        // the admission gate and the attempt observer. The breaker gates
-        // pre-poll regardless of source kind, so stage type is irrelevant here.
+        // which the CompletionGate and metrics path read), then register it as
+        // one source-boundary policy. The breaker guards pre-poll regardless
+        // of source kind, so stage type is irrelevant here.
         let middleware = self.build_middleware_keyed(config, control_middleware.clone(), None)?;
         let breaker = std::sync::Arc::new(middleware);
-        control_middleware.register_source_admission(
+        control_middleware.register_source_policy(
             config.stage_id,
-            std::sync::Arc::new(CircuitBreakerAdmissionGate {
-                breaker: breaker.clone(),
-            }),
-        );
-        control_middleware.register_source_observer(
-            config.stage_id,
-            std::sync::Arc::new(CircuitBreakerAttemptObserver { breaker }),
+            std::sync::Arc::new(CircuitBreakerSourcePolicy { breaker }),
         );
         Ok(())
     }
@@ -4152,5 +4199,125 @@ mod tests {
         cb.force_close(&mut admin_ctx);
         assert_eq!(cb.current_state(), CircuitState::Closed);
         assert_eq!(cb.failure_count.load(Ordering::SeqCst), 0);
+    }
+
+    /// FLOWIP-115a (Risk 1): the source probe slot, reserved by `source_admit`
+    /// and released by `source_settle`, must return to zero on every terminal
+    /// outcome including an aborted attempt, now that the slot rides the runtime
+    /// attempt rather than a middleware-context guard. A leak would wedge the
+    /// breaker in HalfOpen; a double-release would underflow the counter.
+    #[test]
+    fn source_breaker_probe_slot_released_on_every_outcome() {
+        // Threshold 1 opens on a single Closed-state failure; zero cooldown makes
+        // HalfOpen reachable immediately, so the test needs no wall-clock wait.
+        let open_breaker = || {
+            let cb = CircuitBreakerMiddleware::with_cooldown(1, Duration::ZERO);
+            cb.source_settle(SourceOutcome::Failure);
+            assert_eq!(
+                cb.current_state(),
+                CircuitState::Open,
+                "one Closed-state failure opens a threshold-1 breaker"
+            );
+            assert_eq!(
+                cb.probe_in_flight.load(Ordering::SeqCst),
+                0,
+                "no probe slot is reserved while Open"
+            );
+            cb
+        };
+
+        let admit_probe = |cb: &CircuitBreakerMiddleware| match cb.source_admit() {
+            SourceAdmit::Continue {
+                guard: Some(guard),
+                event: _,
+            } => guard,
+            SourceAdmit::Continue { guard: None, .. } => {
+                panic!("expected source admission to reserve a probe slot")
+            }
+            SourceAdmit::Pause(delay) => {
+                panic!("expected source admission to proceed, got pause {delay:?}")
+            }
+        };
+
+        // A successful probe closes the breaker and releases the slot.
+        let cb = open_breaker();
+        let guard = admit_probe(&cb);
+        assert_eq!(cb.current_state(), CircuitState::HalfOpen);
+        assert_eq!(
+            cb.probe_in_flight.load(Ordering::SeqCst),
+            1,
+            "admitting a probe reserves exactly one slot"
+        );
+        cb.source_settle(SourceOutcome::Success);
+        drop(guard);
+        assert_eq!(
+            cb.current_state(),
+            CircuitState::Closed,
+            "a successful probe closes the breaker"
+        );
+        assert_eq!(
+            cb.probe_in_flight.load(Ordering::SeqCst),
+            0,
+            "the probe slot is released on success"
+        );
+
+        // A failed probe reopens the breaker and releases the slot.
+        let cb = open_breaker();
+        let guard = admit_probe(&cb);
+        assert_eq!(cb.probe_in_flight.load(Ordering::SeqCst), 1);
+        cb.source_settle(SourceOutcome::Failure);
+        drop(guard);
+        assert_eq!(
+            cb.current_state(),
+            CircuitState::Open,
+            "a failed probe reopens the breaker"
+        );
+        assert_eq!(
+            cb.probe_in_flight.load(Ordering::SeqCst),
+            0,
+            "the probe slot is released on failure"
+        );
+
+        // An empty probe is inconclusive: it releases the slot without changing
+        // state, leaving the breaker HalfOpen for a retry.
+        let cb = open_breaker();
+        let guard = admit_probe(&cb);
+        assert_eq!(cb.current_state(), CircuitState::HalfOpen);
+        assert_eq!(cb.probe_in_flight.load(Ordering::SeqCst), 1);
+        cb.source_settle(SourceOutcome::Inconclusive);
+        drop(guard);
+        assert_eq!(
+            cb.current_state(),
+            CircuitState::HalfOpen,
+            "an inconclusive probe leaves the breaker HalfOpen for the next probe"
+        );
+        assert_eq!(
+            cb.probe_in_flight.load(Ordering::SeqCst),
+            0,
+            "the probe slot is released on inconclusive poll"
+        );
+
+        // A cancelled boundary drops the guard without observing an outcome;
+        // the state remains HalfOpen and the slot is still released.
+        let cb = open_breaker();
+        let guard = admit_probe(&cb);
+        assert_eq!(cb.current_state(), CircuitState::HalfOpen);
+        assert_eq!(cb.probe_in_flight.load(Ordering::SeqCst), 1);
+        drop(guard);
+        assert_eq!(
+            cb.current_state(),
+            CircuitState::HalfOpen,
+            "a cancelled probe leaves the breaker HalfOpen for the next probe"
+        );
+        assert_eq!(
+            cb.probe_in_flight.load(Ordering::SeqCst),
+            0,
+            "the probe slot is released when the source boundary future is dropped"
+        );
+
+        // A fresh probe can be reserved after cancellation, proving the slot is
+        // genuinely free (not just decremented past a leaked reservation).
+        let _guard = admit_probe(&cb);
+        assert_eq!(cb.probe_in_flight.load(Ordering::SeqCst), 1);
     }
 }

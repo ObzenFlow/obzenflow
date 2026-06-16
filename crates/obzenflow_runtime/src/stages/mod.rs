@@ -24,7 +24,7 @@ pub use common::{
 // FLOWIP-115c runtime control-strategy hooks.
 pub use common::{
     AdmissionDecision, AdmissionGate, AdmissionPosition, AttemptObserver, AttemptOutcome,
-    CreditWaker, PostAdmitDecision, WakeOn,
+    CreditWaker, WakeOn,
 };
 
 // Re-export JoinHandler from common::handlers

@@ -8,6 +8,7 @@
 //! - Finite: Sources that eventually complete (files, bounded collections)
 //! - Infinite: Sources that run indefinitely (Kafka, WebSocket, etc)
 
+pub mod boundary;
 pub mod finite;
 pub mod infinite;
 pub(crate) mod replay_lifecycle;
@@ -15,6 +16,10 @@ pub mod strategies;
 pub(crate) mod supervision;
 pub mod typed;
 
+pub use boundary::{
+    SourceBoundaryFuture, SourceBoundaryMiddleware, SourceBoundaryOutcome, SourceBoundaryReport,
+    SourcePollCompletion, SourcePollExecution, SourcePollReport,
+};
 pub use typed::{
     AsyncFiniteSourceTyped, AsyncInfiniteSourceTyped, FallibleAsyncFiniteSourceTyped,
     FallibleAsyncInfiniteSourceTyped, FallibleFiniteSourceTyped, FallibleInfiniteSourceTyped,

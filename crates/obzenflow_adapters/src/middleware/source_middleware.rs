@@ -10,11 +10,9 @@
 use super::{Middleware, MiddlewareAction, MiddlewareContext, SourceMiddlewarePhase};
 use async_trait::async_trait;
 use obzenflow_core::event::payloads::observability_payload::{
-    CircuitBreakerEvent, CircuitBreakerRejectionReason, MetricsLifecycle, MiddlewareLifecycle,
-    ObservabilityPayload,
+    MetricsLifecycle, ObservabilityPayload,
 };
 use obzenflow_core::event::status::processing_status::ErrorKind;
-use obzenflow_core::event::ChainEventContent;
 use obzenflow_core::event::ChainEventFactory;
 use obzenflow_core::{ChainEvent, WriterId};
 use obzenflow_runtime::stages::common::handlers::{
@@ -27,7 +25,6 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::time::timeout;
 
-const MAX_CB_BACKOFF_MS: u64 = 250;
 const DEFAULT_ASYNC_POLL_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Debug)]
@@ -58,68 +55,6 @@ impl ExponentialBackoff {
     fn reset(&mut self) {
         self.next_ms = self.base_ms;
     }
-}
-
-fn cb_rejection_backoff(ctx: &MiddlewareContext) -> Option<Duration> {
-    let (reason, cooldown_ms) = ctx
-        .ephemeral_events()
-        .iter()
-        .rev()
-        // Invariant: only the circuit-breaker middleware emits CircuitBreakerEvent::Rejected.
-        // If multiple such events exist in a pass, the most recent one wins.
-        .find_map(|event| match &event.content {
-            ChainEventContent::Observability(ObservabilityPayload::Middleware(
-                MiddlewareLifecycle::CircuitBreaker(CircuitBreakerEvent::Rejected {
-                    reason,
-                    cooldown_remaining_ms,
-                    ..
-                }),
-            )) => Some((*reason, *cooldown_remaining_ms)),
-            _ => None,
-        })?;
-
-    // Avoid hot-looping when circuit breaker is Open or when a probe is already in-flight.
-    match (reason, cooldown_ms) {
-        (CircuitBreakerRejectionReason::CircuitOpen, Some(ms)) if ms > 0 => {
-            Some(Duration::from_millis(ms.min(MAX_CB_BACKOFF_MS)))
-        }
-        (CircuitBreakerRejectionReason::ProbeInProgress, _) => Some(Duration::from_millis(1)),
-        _ => None,
-    }
-}
-
-fn backoff_on_cb_rejection(ctx: &MiddlewareContext) {
-    let Some(sleep_for) = cb_rejection_backoff(ctx) else {
-        return;
-    };
-
-    if sleep_for <= Duration::from_millis(1) {
-        std::thread::yield_now();
-        return;
-    }
-
-    // Source handlers are synchronous; block but avoid stalling tokio worker threads.
-    match tokio::runtime::Handle::try_current() {
-        Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
-            tokio::task::block_in_place(|| {
-                std::thread::sleep(sleep_for);
-            });
-        }
-        _ => std::thread::sleep(sleep_for),
-    }
-}
-
-async fn backoff_on_cb_rejection_async(ctx: &MiddlewareContext) {
-    let Some(sleep_for) = cb_rejection_backoff(ctx) else {
-        return;
-    };
-
-    if sleep_for <= Duration::from_millis(1) {
-        tokio::task::yield_now().await;
-        return;
-    }
-
-    tokio::time::sleep(sleep_for).await;
 }
 
 fn source_error_kind(err: &SourceError) -> ErrorKind {
@@ -232,49 +167,6 @@ impl<H: AsyncFiniteSourceHandler> AsyncFiniteSourceHandler for MiddlewareAsyncFi
 
         let mut ctx = MiddlewareContext::live_handler();
 
-        // Phase 0: circuit breaker gate (must run before polling).
-        for middleware in self.middleware_chain.iter() {
-            if middleware.source_phase() != SourceMiddlewarePhase::CircuitBreakerGate {
-                continue;
-            }
-
-            let action = middleware.pre_handle(&synthetic_event, &mut ctx);
-            if let Some(message) =
-                crate::middleware::observation_short_circuit(middleware.as_ref(), &action)
-            {
-                return Err(SourceError::Other(message));
-            }
-            match action {
-                MiddlewareAction::Continue => continue,
-                MiddlewareAction::Skip { mut results, .. } => {
-                    backoff_on_cb_rejection_async(&ctx).await;
-
-                    // Pre-write enrichment for skip results
-                    for result in &mut results {
-                        for mw in self.middleware_chain.iter() {
-                            mw.pre_write(result, &ctx);
-                        }
-                    }
-
-                    // Append control events
-                    let mut control_events = ctx.take_control_events();
-                    for control_event in &mut control_events {
-                        for mw in self.middleware_chain.iter() {
-                            mw.pre_write(control_event, &ctx);
-                        }
-                    }
-                    results.extend(control_events);
-
-                    if results.iter().any(|e| e.is_data()) {
-                        self.empty_poll_backoff.reset();
-                    }
-
-                    return Ok(Some(results));
-                }
-                MiddlewareAction::Abort { .. } => return Ok(Some(Vec::new())),
-            }
-        }
-
         // Poll the inner source with an optional timeout.
         let inner_result = match self.poll_timeout {
             Some(poll_timeout) => match timeout(poll_timeout, self.inner.next()).await {
@@ -287,52 +179,18 @@ impl<H: AsyncFiniteSourceHandler> AsyncFiniteSourceHandler for MiddlewareAsyncFi
             None => self.inner.next().await,
         };
 
-        // Completion short-circuit: do not run post-poll middleware on the final completion poll.
+        // Completion short-circuit: do not run handler middleware on the final completion poll.
         if matches!(inner_result, Ok(None)) {
-            ctx.clear_control_events();
-
-            // Give circuit breaker a chance to settle probe state (HalfOpen).
-            for middleware in self
-                .middleware_chain
-                .iter()
-                .filter(|mw| mw.source_phase() == SourceMiddlewarePhase::CircuitBreakerGate)
-            {
-                middleware.post_handle(&synthetic_event, &[], &mut ctx);
-            }
-
-            if ctx.control_events().is_empty() {
-                return Ok(None);
-            }
-
-            let mut control_events = ctx.take_control_events();
-            for control_event in &mut control_events {
-                for mw in self.middleware_chain.iter() {
-                    mw.pre_write(control_event, &ctx);
-                }
-            }
-            return Ok(Some(control_events));
+            return Ok(None);
         }
 
-        // Per FLOWIP-114m, rate-limiter admission charges only successful non-empty batches.
-        // Empty successful polls (`Ok(Some(vec![]))`) and source errors (`Err(...)`) flow
-        // through Phase 1 without touching the rate limiter. EOF (`Ok(None)`) was handled
-        // by the completion short-circuit above.
-        let inner_succeeded_with_events = matches!(
-            &inner_result,
-            Ok(Some(events)) if !events.is_empty()
-        );
-
-        // Phase 1: post-poll middleware pre-handle.
+        // Handler middleware remains ordinary-only. Source policies are composed
+        // by the adapter-owned source boundary outside this wrapper.
         for middleware in self.middleware_chain.iter() {
-            match middleware.source_phase() {
-                SourceMiddlewarePhase::CircuitBreakerGate => continue,
-                SourceMiddlewarePhase::RateLimiterGate if !inner_succeeded_with_events => continue,
-                SourceMiddlewarePhase::RateLimiterGate | SourceMiddlewarePhase::Ordinary => {}
+            if middleware.source_phase() != SourceMiddlewarePhase::Ordinary {
+                continue;
             }
 
-            // FLOWIP-115a: source policies are driven structurally by the
-            // supervisor. Any remaining middleware in this wrapper is ordinary
-            // observation/enrichment and uses the regular handler hook.
             let action = middleware.pre_handle(&synthetic_event, &mut ctx);
             if let Some(message) =
                 crate::middleware::observation_short_circuit(middleware.as_ref(), &action)
@@ -345,6 +203,9 @@ impl<H: AsyncFiniteSourceHandler> AsyncFiniteSourceHandler for MiddlewareAsyncFi
                     // Pre-write enrichment for skip results
                     for result in &mut results {
                         for mw in self.middleware_chain.iter() {
+                            if mw.source_phase() != SourceMiddlewarePhase::Ordinary {
+                                continue;
+                            }
                             mw.pre_write(result, &ctx);
                         }
                     }
@@ -353,6 +214,9 @@ impl<H: AsyncFiniteSourceHandler> AsyncFiniteSourceHandler for MiddlewareAsyncFi
                     let mut control_events = ctx.take_control_events();
                     for control_event in &mut control_events {
                         for mw in self.middleware_chain.iter() {
+                            if mw.source_phase() != SourceMiddlewarePhase::Ordinary {
+                                continue;
+                            }
                             mw.pre_write(control_event, &ctx);
                         }
                     }
@@ -371,12 +235,18 @@ impl<H: AsyncFiniteSourceHandler> AsyncFiniteSourceHandler for MiddlewareAsyncFi
 
         // Post-processing phase (observation)
         for middleware in self.middleware_chain.iter() {
+            if middleware.source_phase() != SourceMiddlewarePhase::Ordinary {
+                continue;
+            }
             middleware.post_handle(&synthetic_event, &results, &mut ctx);
         }
 
         // Pre-write phase: enrich each result event
         for result in &mut results {
             for middleware in self.middleware_chain.iter() {
+                if middleware.source_phase() != SourceMiddlewarePhase::Ordinary {
+                    continue;
+                }
                 middleware.pre_write(result, &ctx);
             }
         }
@@ -385,6 +255,9 @@ impl<H: AsyncFiniteSourceHandler> AsyncFiniteSourceHandler for MiddlewareAsyncFi
         let mut control_events = ctx.take_control_events();
         for control_event in &mut control_events {
             for mw in self.middleware_chain.iter() {
+                if mw.source_phase() != SourceMiddlewarePhase::Ordinary {
+                    continue;
+                }
                 mw.pre_write(control_event, &ctx);
             }
         }
@@ -484,68 +357,6 @@ impl<H: AsyncInfiniteSourceHandler> AsyncInfiniteSourceHandler
 
         let mut ctx = MiddlewareContext::live_handler();
 
-        // Phase 0: gating middleware (circuit breaker + rate limiter) before polling.
-        for middleware in self.middleware_chain.iter() {
-            let phase = middleware.source_phase();
-            if phase != SourceMiddlewarePhase::CircuitBreakerGate
-                && phase != SourceMiddlewarePhase::RateLimiterGate
-            {
-                continue;
-            }
-
-            // FLOWIP-115a: source policies are driven structurally by the
-            // supervisor. Any remaining middleware in this wrapper is ordinary
-            // observation/enrichment and uses the regular handler hook.
-            let action = middleware.pre_handle(&synthetic_event, &mut ctx);
-            if let Some(message) =
-                crate::middleware::observation_short_circuit(middleware.as_ref(), &action)
-            {
-                return Err(SourceError::Other(message));
-            }
-            match action {
-                MiddlewareAction::Continue => continue,
-                MiddlewareAction::Skip { mut results, .. } => {
-                    match phase {
-                        SourceMiddlewarePhase::CircuitBreakerGate => {
-                            backoff_on_cb_rejection_async(&ctx).await;
-                        }
-                        SourceMiddlewarePhase::RateLimiterGate => {
-                            // FLOWIP-114o: the rate limiter now admits after
-                            // awaiting its permit in `source_admit` and never
-                            // returns Skip on throttle, so this arm is inert for
-                            // it. Retained only as a hot-loop guard if a future
-                            // non-blocking limiter returns Skip.
-                            tokio::time::sleep(Duration::from_millis(1)).await;
-                        }
-                        SourceMiddlewarePhase::Ordinary => {}
-                    };
-
-                    // Pre-write enrichment for skip results
-                    for result in &mut results {
-                        for mw in self.middleware_chain.iter() {
-                            mw.pre_write(result, &ctx);
-                        }
-                    }
-
-                    // Append control events
-                    let mut control_events = ctx.take_control_events();
-                    for control_event in &mut control_events {
-                        for mw in self.middleware_chain.iter() {
-                            mw.pre_write(control_event, &ctx);
-                        }
-                    }
-                    results.extend(control_events);
-
-                    if results.iter().any(|e| e.is_data()) {
-                        self.empty_poll_backoff.reset();
-                    }
-
-                    return Ok(results);
-                }
-                MiddlewareAction::Abort { .. } => return Ok(Vec::new()),
-            }
-        }
-
         // Poll the inner source with an optional timeout.
         let inner_result = match self.poll_timeout {
             Some(poll_timeout) => match timeout(poll_timeout, self.inner.next()).await {
@@ -558,12 +369,11 @@ impl<H: AsyncInfiniteSourceHandler> AsyncInfiniteSourceHandler
             None => self.inner.next().await,
         };
 
-        // Phase 1: post-poll middleware pre-handle.
+        // Handler middleware remains ordinary-only. Source policies are composed
+        // by the adapter-owned source boundary outside this wrapper.
         for middleware in self.middleware_chain.iter() {
-            match middleware.source_phase() {
-                SourceMiddlewarePhase::CircuitBreakerGate
-                | SourceMiddlewarePhase::RateLimiterGate => continue,
-                SourceMiddlewarePhase::Ordinary => {}
+            if middleware.source_phase() != SourceMiddlewarePhase::Ordinary {
+                continue;
             }
 
             let action = middleware.pre_handle(&synthetic_event, &mut ctx);
@@ -578,6 +388,9 @@ impl<H: AsyncInfiniteSourceHandler> AsyncInfiniteSourceHandler
                     // Pre-write enrichment for skip results
                     for result in &mut results {
                         for mw in self.middleware_chain.iter() {
+                            if mw.source_phase() != SourceMiddlewarePhase::Ordinary {
+                                continue;
+                            }
                             mw.pre_write(result, &ctx);
                         }
                     }
@@ -586,6 +399,9 @@ impl<H: AsyncInfiniteSourceHandler> AsyncInfiniteSourceHandler
                     let mut control_events = ctx.take_control_events();
                     for control_event in &mut control_events {
                         for mw in self.middleware_chain.iter() {
+                            if mw.source_phase() != SourceMiddlewarePhase::Ordinary {
+                                continue;
+                            }
                             mw.pre_write(control_event, &ctx);
                         }
                     }
@@ -603,12 +419,18 @@ impl<H: AsyncInfiniteSourceHandler> AsyncInfiniteSourceHandler
 
         // Post-processing phase (observation)
         for middleware in self.middleware_chain.iter() {
+            if middleware.source_phase() != SourceMiddlewarePhase::Ordinary {
+                continue;
+            }
             middleware.post_handle(&synthetic_event, &results, &mut ctx);
         }
 
         // Pre-write phase: enrich each result event
         for result in &mut results {
             for middleware in self.middleware_chain.iter() {
+                if middleware.source_phase() != SourceMiddlewarePhase::Ordinary {
+                    continue;
+                }
                 middleware.pre_write(result, &ctx);
             }
         }
@@ -617,6 +439,9 @@ impl<H: AsyncInfiniteSourceHandler> AsyncInfiniteSourceHandler
         let mut control_events = ctx.take_control_events();
         for control_event in &mut control_events {
             for mw in self.middleware_chain.iter() {
+                if mw.source_phase() != SourceMiddlewarePhase::Ordinary {
+                    continue;
+                }
                 mw.pre_write(control_event, &ctx);
             }
         }
@@ -705,9 +530,18 @@ impl<H: FiniteSourceHandler> FiniteSourceHandler for MiddlewareFiniteSource<H> {
         // Create ephemeral context for this processing
         let mut ctx = MiddlewareContext::live_handler();
 
-        // Phase 0: circuit breaker pre-handle (must run before polling).
+        // Poll the inner source.
+        let inner_result = self.inner.next();
+
+        // Completion short-circuit: no handler middleware on the final poll.
+        if matches!(inner_result, Ok(None)) {
+            return Ok(None);
+        }
+
+        // Handler middleware remains ordinary-only. Source policies are composed
+        // by the adapter-owned source boundary outside this wrapper.
         for middleware in self.middleware_chain.iter() {
-            if middleware.source_phase() != SourceMiddlewarePhase::CircuitBreakerGate {
+            if middleware.source_phase() != SourceMiddlewarePhase::Ordinary {
                 continue;
             }
             let action = middleware.pre_handle(&synthetic_event, &mut ctx);
@@ -719,93 +553,11 @@ impl<H: FiniteSourceHandler> FiniteSourceHandler for MiddlewareFiniteSource<H> {
             match action {
                 MiddlewareAction::Continue => continue,
                 MiddlewareAction::Skip { mut results, .. } => {
-                    backoff_on_cb_rejection(&ctx);
-
-                    // Pre-write phase for skip results
                     for result in &mut results {
                         for mw in self.middleware_chain.iter() {
-                            mw.pre_write(result, &ctx);
-                        }
-                    }
-
-                    // Append any control events emitted during skip
-                    let mut control_events = ctx.take_control_events();
-                    for control_event in &mut control_events {
-                        for mw in self.middleware_chain.iter() {
-                            mw.pre_write(control_event, &ctx);
-                        }
-                    }
-                    results.extend(control_events);
-                    return Ok(Some(results));
-                }
-                MiddlewareAction::Abort { .. } => {
-                    return Ok(Some(Vec::new()));
-                }
-            }
-        }
-
-        // Poll the inner source.
-        let inner_result = self.inner.next();
-
-        // Completion short-circuit: no rate limiting / non-CB middleware on the final poll.
-        if matches!(inner_result, Ok(None)) {
-            ctx.clear_control_events();
-
-            // Still give circuit breaker a chance to settle probe state (HalfOpen).
-            for middleware in self
-                .middleware_chain
-                .iter()
-                .filter(|mw| mw.source_phase() == SourceMiddlewarePhase::CircuitBreakerGate)
-            {
-                middleware.post_handle(&synthetic_event, &[], &mut ctx);
-            }
-
-            if ctx.control_events().is_empty() {
-                return Ok(None);
-            }
-
-            let mut control_events = ctx.take_control_events();
-            for control_event in &mut control_events {
-                for mw in self.middleware_chain.iter() {
-                    mw.pre_write(control_event, &ctx);
-                }
-            }
-            return Ok(Some(control_events));
-        }
-
-        // Per FLOWIP-114m, rate-limiter admission charges only successful non-empty batches.
-        // Empty polls (`Ok(Some(vec![]))`) and source errors (`Err(...)`) skip the rate
-        // limiter. EOF (`Ok(None)`) was handled by the completion short-circuit above.
-        let inner_succeeded_with_events = matches!(
-            &inner_result,
-            Ok(Some(events)) if !events.is_empty()
-        );
-
-        // Phase 1: all other middleware pre-handle (runs after polling, preserving existing
-        // source semantics while still allowing CB gating above).
-        for middleware in self.middleware_chain.iter() {
-            match middleware.source_phase() {
-                SourceMiddlewarePhase::CircuitBreakerGate => continue,
-                SourceMiddlewarePhase::RateLimiterGate if !inner_succeeded_with_events => continue,
-                SourceMiddlewarePhase::RateLimiterGate | SourceMiddlewarePhase::Ordinary => {}
-            }
-            // FLOWIP-114o Q4 (retain-and-document): sync source handlers have no
-            // await point, so the rate-limiter gate keeps the blocking `pre_handle`
-            // loop (it blocks via `block_in_place` off the worker). Async sources
-            // are the recommended path for cancellable paced ingestion.
-            let action = middleware.pre_handle(&synthetic_event, &mut ctx);
-            if let Some(message) =
-                crate::middleware::observation_short_circuit(middleware.as_ref(), &action)
-            {
-                return Err(SourceError::Other(message));
-            }
-            match action {
-                MiddlewareAction::Continue => continue,
-                MiddlewareAction::Skip { mut results, .. } => {
-                    backoff_on_cb_rejection(&ctx);
-
-                    for result in &mut results {
-                        for mw in self.middleware_chain.iter() {
+                            if mw.source_phase() != SourceMiddlewarePhase::Ordinary {
+                                continue;
+                            }
                             mw.pre_write(result, &ctx);
                         }
                     }
@@ -813,6 +565,9 @@ impl<H: FiniteSourceHandler> FiniteSourceHandler for MiddlewareFiniteSource<H> {
                     let mut control_events = ctx.take_control_events();
                     for control_event in &mut control_events {
                         for mw in self.middleware_chain.iter() {
+                            if mw.source_phase() != SourceMiddlewarePhase::Ordinary {
+                                continue;
+                            }
                             mw.pre_write(control_event, &ctx);
                         }
                     }
@@ -831,12 +586,18 @@ impl<H: FiniteSourceHandler> FiniteSourceHandler for MiddlewareFiniteSource<H> {
 
         // Post-processing phase (observation)
         for middleware in self.middleware_chain.iter() {
+            if middleware.source_phase() != SourceMiddlewarePhase::Ordinary {
+                continue;
+            }
             middleware.post_handle(&synthetic_event, &results, &mut ctx);
         }
 
         // Pre-write phase: enrich each result event
         for result in &mut results {
             for middleware in self.middleware_chain.iter() {
+                if middleware.source_phase() != SourceMiddlewarePhase::Ordinary {
+                    continue;
+                }
                 middleware.pre_write(result, &ctx);
             }
         }
@@ -845,6 +606,9 @@ impl<H: FiniteSourceHandler> FiniteSourceHandler for MiddlewareFiniteSource<H> {
         let mut control_events = ctx.take_control_events();
         for control_event in &mut control_events {
             for middleware in self.middleware_chain.iter() {
+                if middleware.source_phase() != SourceMiddlewarePhase::Ordinary {
+                    continue;
+                }
                 middleware.pre_write(control_event, &ctx);
             }
         }
@@ -917,72 +681,14 @@ impl<H: InfiniteSourceHandler> InfiniteSourceHandler for MiddlewareInfiniteSourc
         // Create ephemeral context for this processing
         let mut ctx = MiddlewareContext::live_handler();
 
-        // Phase 0: gating middleware (circuit breaker + rate limiter) before polling.
-        for middleware in self.middleware_chain.iter() {
-            let phase = middleware.source_phase();
-            if phase != SourceMiddlewarePhase::CircuitBreakerGate
-                && phase != SourceMiddlewarePhase::RateLimiterGate
-            {
-                continue;
-            }
-
-            // FLOWIP-114o Q4 (retain-and-document): sync source handlers have no
-            // await point, so the rate-limiter gate keeps the blocking `pre_handle`
-            // loop (it blocks via `block_in_place` off the worker). Async sources
-            // are the recommended path for cancellable paced ingestion.
-            let action = middleware.pre_handle(&synthetic_event, &mut ctx);
-            if let Some(message) =
-                crate::middleware::observation_short_circuit(middleware.as_ref(), &action)
-            {
-                return Err(SourceError::Other(message));
-            }
-            match action {
-                MiddlewareAction::Continue => continue,
-                MiddlewareAction::Skip { mut results, .. } => {
-                    match phase {
-                        SourceMiddlewarePhase::CircuitBreakerGate => {
-                            backoff_on_cb_rejection(&ctx);
-                        }
-                        SourceMiddlewarePhase::RateLimiterGate => {
-                            // Future-proofing: if a non-blocking rate limiter returns Skip,
-                            // add a small sleep to avoid hot-looping.
-                            std::thread::sleep(Duration::from_millis(1));
-                        }
-                        SourceMiddlewarePhase::Ordinary => {}
-                    };
-
-                    // Pre-write phase for skip results
-                    for result in &mut results {
-                        for mw in self.middleware_chain.iter() {
-                            mw.pre_write(result, &ctx);
-                        }
-                    }
-
-                    // Append any control events emitted during skip
-                    let mut control_events = ctx.take_control_events();
-                    for control_event in &mut control_events {
-                        for mw in self.middleware_chain.iter() {
-                            mw.pre_write(control_event, &ctx);
-                        }
-                    }
-                    results.extend(control_events);
-                    return Ok(results);
-                }
-                MiddlewareAction::Abort { .. } => {
-                    return Ok(Vec::new());
-                }
-            }
-        }
-
         // Get next batch from inner source
         let inner_result = self.inner.next();
 
-        // Phase 1: ordinary middleware post-poll.
+        // Handler middleware remains ordinary-only. Source policies are composed
+        // by the adapter-owned source boundary outside this wrapper.
         for middleware in self.middleware_chain.iter() {
-            match middleware.source_phase() {
-                SourceMiddlewarePhase::CircuitBreakerGate
-                | SourceMiddlewarePhase::RateLimiterGate => continue,
-                SourceMiddlewarePhase::Ordinary => {}
+            if middleware.source_phase() != SourceMiddlewarePhase::Ordinary {
+                continue;
             }
 
             let action = middleware.pre_handle(&synthetic_event, &mut ctx);
@@ -997,6 +703,9 @@ impl<H: InfiniteSourceHandler> InfiniteSourceHandler for MiddlewareInfiniteSourc
                     // Pre-write phase for skip results
                     for result in &mut results {
                         for mw in self.middleware_chain.iter() {
+                            if mw.source_phase() != SourceMiddlewarePhase::Ordinary {
+                                continue;
+                            }
                             mw.pre_write(result, &ctx);
                         }
                     }
@@ -1005,6 +714,9 @@ impl<H: InfiniteSourceHandler> InfiniteSourceHandler for MiddlewareInfiniteSourc
                     let mut control_events = ctx.take_control_events();
                     for control_event in &mut control_events {
                         for mw in self.middleware_chain.iter() {
+                            if mw.source_phase() != SourceMiddlewarePhase::Ordinary {
+                                continue;
+                            }
                             mw.pre_write(control_event, &ctx);
                         }
                     }
@@ -1022,12 +734,18 @@ impl<H: InfiniteSourceHandler> InfiniteSourceHandler for MiddlewareInfiniteSourc
 
         // Post-processing phase (observation)
         for middleware in self.middleware_chain.iter() {
+            if middleware.source_phase() != SourceMiddlewarePhase::Ordinary {
+                continue;
+            }
             middleware.post_handle(&synthetic_event, &results, &mut ctx);
         }
 
         // Pre-write phase: enrich each result event
         for result in &mut results {
             for middleware in self.middleware_chain.iter() {
+                if middleware.source_phase() != SourceMiddlewarePhase::Ordinary {
+                    continue;
+                }
                 middleware.pre_write(result, &ctx);
             }
         }
@@ -1036,6 +754,9 @@ impl<H: InfiniteSourceHandler> InfiniteSourceHandler for MiddlewareInfiniteSourc
         let mut control_events = ctx.take_control_events();
         for control_event in &mut control_events {
             for middleware in self.middleware_chain.iter() {
+                if middleware.source_phase() != SourceMiddlewarePhase::Ordinary {
+                    continue;
+                }
                 middleware.pre_write(control_event, &ctx);
             }
         }
@@ -1107,13 +828,8 @@ impl<H: FiniteSourceHandler> FiniteSourceMiddlewareBuilder<H> {
     ///
     /// FLOWIP-114o: the generic `with` boxes its argument, so passing a
     /// `Box<dyn Middleware>` through it double-boxes and the chain element
-    /// dispatches through the `Box` blanket impl, which cannot forward the
-    /// `self: Arc<Self>` hooks (`as_source_pacer`, `as_effect_policy`). This
-    /// preserves the concrete vtable so those hooks resolve to the real policy.
-    ///
-    /// Transitional: this exists to keep the `as_source_pacer` downcast working.
-    /// FLOWIP-114s retires the downcast (typed source policy chains), after which
-    /// `with_boxed` and the double-box hazard go away.
+    /// dispatches through the `Box` blanket impl. This preserves the concrete
+    /// vtable for boxed middleware supplied by the DSL.
     pub fn with_boxed(mut self, middleware: Box<dyn Middleware>) -> Self {
         self.handler = self.handler.with_middleware(middleware);
         self
@@ -1148,7 +864,7 @@ impl<H: AsyncFiniteSourceHandler> AsyncFiniteSourceMiddlewareBuilder<H> {
         self
     }
 
-    /// Add an already-boxed middleware without re-boxing (FLOWIP-114o; see
+    /// Add an already-boxed middleware without re-boxing (FLOWIP-115a; see
     /// `FiniteSourceMiddlewareBuilder::with_boxed`).
     pub fn with_boxed(mut self, middleware: Box<dyn Middleware>) -> Self {
         self.handler = self.handler.with_middleware(middleware);
@@ -1184,7 +900,7 @@ impl<H: AsyncInfiniteSourceHandler> AsyncInfiniteSourceMiddlewareBuilder<H> {
         self
     }
 
-    /// Add an already-boxed middleware without re-boxing (FLOWIP-114o; see
+    /// Add an already-boxed middleware without re-boxing (FLOWIP-115a; see
     /// `FiniteSourceMiddlewareBuilder::with_boxed`).
     pub fn with_boxed(mut self, middleware: Box<dyn Middleware>) -> Self {
         self.handler = self.handler.with_middleware(middleware);
@@ -1215,7 +931,7 @@ impl<H: InfiniteSourceHandler> InfiniteSourceMiddlewareBuilder<H> {
         self
     }
 
-    /// Add an already-boxed middleware without re-boxing (FLOWIP-114o; see
+    /// Add an already-boxed middleware without re-boxing (FLOWIP-115a; see
     /// `FiniteSourceMiddlewareBuilder::with_boxed`).
     pub fn with_boxed(mut self, middleware: Box<dyn Middleware>) -> Self {
         self.handler = self.handler.with_middleware(middleware);
@@ -1257,7 +973,7 @@ mod tests {
     }
 
     #[test]
-    fn finite_source_errors_trip_circuit_breaker_and_prevent_polling() {
+    fn finite_source_policy_middleware_is_not_driven_by_handler_wrapper() {
         let calls = Arc::new(AtomicUsize::new(0));
         let inner = ErringFiniteSource {
             calls: calls.clone(),
@@ -1266,7 +982,8 @@ mod tests {
         let stage_id = StageId::new();
         let writer_id = WriterId::from(stage_id);
 
-        // Cooldown is non-zero so the breaker stays Open long enough for the next call.
+        // Policy middleware is intentionally inert in the handler wrapper. Source
+        // policies are driven by PerSourcePolicyBoundary instead.
         let cb = CircuitBreakerMiddleware::with_cooldown(1, Duration::from_millis(50));
 
         let mut wrapped =
@@ -1302,14 +1019,14 @@ mod tests {
             _ => unreachable!("filtered to Error events"),
         }
 
-        // Second call should be rejected by the breaker and must not poll the inner source again.
+        // A policy inserted directly into the wrapper does not gate the poll.
         let _ = wrapped
             .next()
             .expect("finite source wrapper should not propagate SourceError");
         assert_eq!(
             calls.load(Ordering::SeqCst),
-            1,
-            "breaker should prevent further inner.next() calls while Open"
+            2,
+            "source policy middleware must not be driven by the handler wrapper"
         );
     }
 
@@ -1326,7 +1043,7 @@ mod tests {
     }
 
     #[test]
-    fn infinite_source_errors_trip_circuit_breaker_and_prevent_polling() {
+    fn infinite_source_policy_middleware_is_not_driven_by_handler_wrapper() {
         let calls = Arc::new(AtomicUsize::new(0));
         let inner = ErringInfiniteSource {
             calls: calls.clone(),
@@ -1335,7 +1052,8 @@ mod tests {
         let stage_id = StageId::new();
         let writer_id = WriterId::from(stage_id);
 
-        // Cooldown is non-zero so the breaker stays Open long enough for the next call.
+        // Policy middleware is intentionally inert in the handler wrapper. Source
+        // policies are driven by PerSourcePolicyBoundary instead.
         let cb = CircuitBreakerMiddleware::with_cooldown(1, Duration::from_millis(50));
 
         let mut wrapped =
@@ -1352,14 +1070,14 @@ mod tests {
             "expected an error-marked event"
         );
 
-        // Second call should be rejected by the breaker and must not poll the inner source again.
+        // A policy inserted directly into the wrapper does not gate the poll.
         let _ = wrapped
             .next()
             .expect("infinite source wrapper should not propagate SourceError");
         assert_eq!(
             calls.load(Ordering::SeqCst),
-            1,
-            "breaker should prevent further inner.next() calls while Open"
+            2,
+            "source policy middleware must not be driven by the handler wrapper"
         );
     }
 
@@ -1377,7 +1095,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn async_finite_source_errors_trip_circuit_breaker_and_prevent_polling() {
+    async fn async_finite_source_policy_middleware_is_not_driven_by_handler_wrapper() {
         let calls = Arc::new(AtomicUsize::new(0));
         let inner = ErringAsyncFiniteSource {
             calls: calls.clone(),
@@ -1386,7 +1104,8 @@ mod tests {
         let stage_id = StageId::new();
         let writer_id = WriterId::from(stage_id);
 
-        // Cooldown is non-zero so the breaker stays Open long enough for the next call.
+        // Policy middleware is intentionally inert in the handler wrapper. Source
+        // policies are driven by PerSourcePolicyBoundary instead.
         let cb = CircuitBreakerMiddleware::with_cooldown(1, Duration::from_millis(50));
 
         let mut wrapped =
@@ -1406,15 +1125,15 @@ mod tests {
             "expected an error-marked event"
         );
 
-        // Second call should be rejected by the breaker and must not poll the inner source again.
+        // A policy inserted directly into the wrapper does not gate the poll.
         let _ = wrapped
             .next()
             .await
             .expect("async finite source wrapper should not propagate SourceError");
         assert_eq!(
             calls.load(Ordering::SeqCst),
-            1,
-            "breaker should prevent further inner.next() calls while Open"
+            2,
+            "source policy middleware must not be driven by the handler wrapper"
         );
     }
 
@@ -1510,7 +1229,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn async_infinite_source_errors_trip_circuit_breaker_and_prevent_polling() {
+    async fn async_infinite_source_policy_middleware_is_not_driven_by_handler_wrapper() {
         let calls = Arc::new(AtomicUsize::new(0));
         let inner = ErringAsyncInfiniteSource {
             calls: calls.clone(),
@@ -1519,7 +1238,8 @@ mod tests {
         let stage_id = StageId::new();
         let writer_id = WriterId::from(stage_id);
 
-        // Cooldown is non-zero so the breaker stays Open long enough for the next call.
+        // Policy middleware is intentionally inert in the handler wrapper. Source
+        // policies are driven by PerSourcePolicyBoundary instead.
         let cb = CircuitBreakerMiddleware::with_cooldown(1, Duration::from_millis(50));
 
         let mut wrapped =
@@ -1537,15 +1257,15 @@ mod tests {
             "expected an error-marked event"
         );
 
-        // Second call should be rejected by the breaker and must not poll the inner source again.
+        // A policy inserted directly into the wrapper does not gate the poll.
         let _ = wrapped
             .next()
             .await
             .expect("async infinite source wrapper should not propagate SourceError");
         assert_eq!(
             calls.load(Ordering::SeqCst),
-            1,
-            "breaker should prevent further inner.next() calls while Open"
+            2,
+            "source policy middleware must not be driven by the handler wrapper"
         );
     }
 }

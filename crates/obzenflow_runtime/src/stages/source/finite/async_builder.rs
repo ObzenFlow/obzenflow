@@ -106,8 +106,9 @@ impl<H: AsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
             replay_driver: None,
             replay_started_at: None,
             replay_completion: ReplayCompletionGuard::default(),
-            admission_gates: self.config.admission_gates,
-            attempt_observers: self.config.attempt_observers,
+            source_boundary: self.config.source_boundary,
+            pending_boundary_eof: false,
+            pending_boundary_error: None,
         };
 
         let supervisor_name = format!("async_finite_source_{}", self.config.stage_name);

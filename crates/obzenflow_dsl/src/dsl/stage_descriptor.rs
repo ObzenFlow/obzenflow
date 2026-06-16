@@ -18,8 +18,9 @@ use obzenflow_adapters::middleware::{
     validate_middleware_safety, AsyncFiniteSourceHandlerExt, AsyncInfiniteSourceHandlerExt,
     AsyncTransformHandlerExt, ControlMiddlewareRole, FiniteSourceHandlerExt,
     InfiniteSourceHandlerExt, JoinHandlerMiddlewareExt, Middleware, MiddlewareFactory,
-    OutcomeEnrichmentMiddleware, SinkHandlerExt, StatefulHandlerMiddlewareExt,
-    SystemEnrichmentMiddleware, TimingMiddleware, TransformHandlerExt, UnifiedMiddlewareTransform,
+    OutcomeEnrichmentMiddleware, PerSourcePolicyBoundary, SinkHandlerExt,
+    StatefulHandlerMiddlewareExt, SystemEnrichmentMiddleware, TimingMiddleware,
+    TransformHandlerExt, UnifiedMiddlewareTransform,
 };
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::{StageId, WriterId};
@@ -57,6 +58,7 @@ use obzenflow_runtime::{
                 AsyncInfiniteSourceBuilder, InfiniteSourceBuilder, InfiniteSourceConfig,
                 InfiniteSourceEvent, InfiniteSourceState,
             },
+            SourceBoundaryMiddleware,
         },
         stateful::{StatefulBuilder, StatefulConfig, StatefulEvent, StatefulState},
         transform::{TransformBuilder, TransformConfig, TransformEvent, TransformState},
@@ -101,6 +103,7 @@ fn create_system_middleware(
 
 struct SourceMiddlewareBinding {
     all_middleware: Vec<Box<dyn Middleware>>,
+    source_boundary: Option<Arc<dyn SourceBoundaryMiddleware>>,
     has_circuit_breaker: bool,
     expects_circuit_breaker: bool,
     expects_rate_limiter: bool,
@@ -109,6 +112,7 @@ struct SourceMiddlewareBinding {
 fn build_source_middleware_and_register_policies(
     config: &StageConfig,
     stage_type: StageType,
+    writer_id: WriterId,
     resolved: crate::middleware_resolution::ResolvedMiddleware,
     control_middleware: &Arc<ControlMiddlewareAggregator>,
 ) -> StageCreationResult<SourceMiddlewareBinding> {
@@ -122,36 +126,38 @@ fn build_source_middleware_and_register_policies(
         .iter()
         .any(|spec| spec.factory.control_role() == ControlMiddlewareRole::RateLimiter);
 
-    let mut circuit_breaker_policies = Vec::new();
-    let mut rate_limiter_policies = Vec::new();
-    let mut ordinary_middleware = Vec::new();
+    let mut has_circuit_breaker = false;
 
     for spec in resolved.middleware {
         match spec.factory.control_role() {
-            ControlMiddlewareRole::CircuitBreaker => circuit_breaker_policies.push(spec),
-            ControlMiddlewareRole::RateLimiter => rate_limiter_policies.push(spec),
-            ControlMiddlewareRole::None => ordinary_middleware.push(spec),
+            ControlMiddlewareRole::CircuitBreaker => {
+                has_circuit_breaker = true;
+                spec.factory
+                    .register_source_policy(config, stage_type, control_middleware)?;
+            }
+            ControlMiddlewareRole::RateLimiter => {
+                spec.factory
+                    .register_source_policy(config, stage_type, control_middleware)?;
+            }
+            ControlMiddlewareRole::None => {
+                all_middleware.push(spec.factory.create(config, control_middleware.clone())?);
+            }
         }
     }
 
-    let has_circuit_breaker = !circuit_breaker_policies.is_empty();
-
-    // Register breaker before rate limiter. For infinite sources both are
-    // PrePoll gates, and breaker rejection must not consume a rate-limit token.
-    for spec in circuit_breaker_policies {
-        spec.factory
-            .register_source_policy(config, stage_type, control_middleware)?;
-    }
-    for spec in rate_limiter_policies {
-        spec.factory
-            .register_source_policy(config, stage_type, control_middleware)?;
-    }
-    for spec in ordinary_middleware {
-        all_middleware.push(spec.factory.create(config, control_middleware.clone())?);
-    }
+    let source_policies = control_middleware.source_policies(&config.stage_id);
+    let source_boundary = if source_policies.is_empty() {
+        None
+    } else {
+        Some(
+            Arc::new(PerSourcePolicyBoundary::new(source_policies, writer_id))
+                as Arc<dyn SourceBoundaryMiddleware>,
+        )
+    };
 
     Ok(SourceMiddlewareBinding {
         all_middleware,
+        source_boundary,
         has_circuit_breaker,
         expects_circuit_breaker,
         expects_rate_limiter,
@@ -452,6 +458,7 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> S
         let source_binding = build_source_middleware_and_register_policies(
             &config,
             StageType::FiniteSource,
+            writer_id,
             resolved,
             &control_middleware,
         )?;
@@ -490,8 +497,7 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> S
             } else {
                 None
             },
-            admission_gates: control_middleware.source_admission_gates(&config.stage_id),
-            attempt_observers: control_middleware.source_attempt_observers(&config.stage_id),
+            source_boundary: source_binding.source_boundary,
         };
 
         // Use the builder to create the handle
@@ -612,6 +618,7 @@ impl<H: AsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
         let source_binding = build_source_middleware_and_register_policies(
             &config,
             StageType::FiniteSource,
+            writer_id,
             resolved,
             &control_middleware,
         )?;
@@ -652,8 +659,7 @@ impl<H: AsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
             } else {
                 None
             },
-            admission_gates: control_middleware.source_admission_gates(&config.stage_id),
-            attempt_observers: control_middleware.source_attempt_observers(&config.stage_id),
+            source_boundary: source_binding.source_boundary,
         };
 
         // Use the builder to create the handle
@@ -739,6 +745,7 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
         let source_binding = build_source_middleware_and_register_policies(
             &config,
             StageType::InfiniteSource,
+            writer_id,
             resolved,
             &control_middleware,
         )?;
@@ -777,8 +784,7 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
             } else {
                 None
             },
-            admission_gates: control_middleware.source_admission_gates(&config.stage_id),
-            attempt_observers: control_middleware.source_attempt_observers(&config.stage_id),
+            source_boundary: source_binding.source_boundary,
         };
 
         // Use the builder to create the handle
@@ -897,6 +903,7 @@ impl<H: AsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
         let source_binding = build_source_middleware_and_register_policies(
             &config,
             StageType::InfiniteSource,
+            writer_id,
             resolved,
             &control_middleware,
         )?;
@@ -935,8 +942,7 @@ impl<H: AsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
             } else {
                 None
             },
-            admission_gates: control_middleware.source_admission_gates(&config.stage_id),
-            attempt_observers: control_middleware.source_attempt_observers(&config.stage_id),
+            source_boundary: source_binding.source_boundary,
         };
 
         let handle =

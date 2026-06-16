@@ -100,6 +100,7 @@ mod backpressure;
 mod join_middleware;
 mod sink_middleware;
 mod source_middleware;
+mod source_policy;
 mod stateful_middleware;
 mod transform_middleware;
 
@@ -143,6 +144,10 @@ pub use source_middleware::{
     AsyncInfiniteSourceMiddlewareBuilder, FiniteSourceHandlerExt, FiniteSourceMiddlewareBuilder,
     InfiniteSourceHandlerExt, InfiniteSourceMiddlewareBuilder, MiddlewareAsyncFiniteSource,
     MiddlewareAsyncInfiniteSource, MiddlewareFiniteSource, MiddlewareInfiniteSource,
+};
+pub use source_policy::{
+    batch_has_error_marked, PerSourcePolicyBoundary, SourceAdmission, SourceAdmissionGuard,
+    SourceAfterPoll, SourcePolicy, SourcePolicyCtx, SourcePollOutcome,
 };
 pub use stateful_middleware::{
     MiddlewareStateful, StatefulHandlerMiddlewareExt, StatefulMiddlewareBuilder,

@@ -4,7 +4,7 @@
 
 //! Configuration for finite source stages
 
-use crate::stages::common::control_strategies::{AdmissionGate, AttemptObserver};
+use crate::stages::source::boundary::SourceBoundaryMiddleware;
 use crate::stages::source::strategies::CompletionGate;
 use obzenflow_core::StageId;
 use std::sync::Arc;
@@ -25,11 +25,8 @@ pub struct FiniteSourceConfig {
     /// When not provided, the builder will default to JonestownSourceStrategy.
     pub control_strategy: Option<Arc<dyn CompletionGate>>,
 
-    /// Runtime-owned source admission gates (FLOWIP-115a).
-    pub admission_gates: Vec<Arc<dyn AdmissionGate>>,
-
-    /// Runtime-owned source attempt observers (FLOWIP-115a).
-    pub attempt_observers: Vec<Arc<dyn AttemptObserver>>,
+    /// Runtime-neutral source boundary seam (FLOWIP-115a).
+    pub source_boundary: Option<Arc<dyn SourceBoundaryMiddleware>>,
 }
 
 impl std::fmt::Debug for FiniteSourceConfig {
@@ -39,8 +36,7 @@ impl std::fmt::Debug for FiniteSourceConfig {
             .field("stage_name", &self.stage_name)
             .field("flow_name", &self.flow_name)
             .field("control_strategy", &self.control_strategy)
-            .field("admission_gates", &self.admission_gates.len())
-            .field("attempt_observers", &self.attempt_observers.len())
+            .field("has_source_boundary", &self.source_boundary.is_some())
             .finish()
     }
 }

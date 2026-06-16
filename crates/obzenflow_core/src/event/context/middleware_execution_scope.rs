@@ -34,13 +34,11 @@
 //! replay reconstruction at a downstream stage. The authoritative signal is the
 //! stage's replay mode, mapped onto this scope by the runtime.
 //!
-//! The effect boundary is distinguished from handler reconstruction on purpose.
-//! Replay returns a recorded effect outcome before the effect boundary is ever
-//! consulted, so when boundary middleware does run, the effect is executing live
-//! (including the resume-incomplete case where an input carries replay provenance
-//! but its effect record is missing and must execute live). Boundary middleware
-//! therefore runs under [`LiveEffectBoundary`](MiddlewareExecutionScope::LiveEffectBoundary)
-//! and is never suppressed.
+//! Live I/O boundaries are distinguished from handler reconstruction on purpose.
+//! Replay returns recorded source/effect/sink work before a boundary is ever
+//! consulted, so when boundary middleware does run, it is guarding live I/O.
+//! Boundary middleware therefore runs under a live boundary scope and is never
+//! suppressed.
 
 /// The execution context a piece of middleware is running in for one event.
 ///
@@ -68,6 +66,10 @@ pub enum MiddlewareExecutionScope {
     /// an effect is executing live (replay returns the recorded outcome first), so
     /// boundary middleware runs and protects the live call. Never suppressed.
     LiveEffectBoundary,
+
+    /// Live source-boundary execution. The source boundary wraps only the live
+    /// poll branch; replay bypasses it structurally. Never suppressed.
+    LiveSourceBoundary,
 }
 
 impl MiddlewareExecutionScope {
@@ -75,9 +77,9 @@ impl MiddlewareExecutionScope {
     /// events and handler-level control middleware must suppress all side effects
     /// (state mutation, delay, rejection, lifecycle emission).
     ///
-    /// This is the handler-reconstruction predicate only. The effect boundary
-    /// reports [`LiveEffectBoundary`](MiddlewareExecutionScope::LiveEffectBoundary)
-    /// and is intentionally excluded: it only runs for live effect execution.
+    /// This is the handler-reconstruction predicate only. Live I/O boundaries
+    /// report boundary scopes and are intentionally excluded: they only run for
+    /// live execution.
     pub fn is_deterministic_replay(&self) -> bool {
         matches!(self, Self::StrictReplayHandler | Self::ResumeHandler)
     }
@@ -100,7 +102,8 @@ mod tests {
         assert!(!MiddlewareExecutionScope::LiveHandler.is_deterministic_replay());
         assert!(MiddlewareExecutionScope::StrictReplayHandler.is_deterministic_replay());
         assert!(MiddlewareExecutionScope::ResumeHandler.is_deterministic_replay());
-        // The effect boundary only runs for live effect execution; never suppress it.
+        // Live I/O boundaries only run for live execution; never suppress them.
         assert!(!MiddlewareExecutionScope::LiveEffectBoundary.is_deterministic_replay());
+        assert!(!MiddlewareExecutionScope::LiveSourceBoundary.is_deterministic_replay());
     }
 }

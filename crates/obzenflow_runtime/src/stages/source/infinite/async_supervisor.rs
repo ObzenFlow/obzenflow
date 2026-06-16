@@ -5,13 +5,15 @@
 //! Async infinite source supervisor implementation using HandlerSupervised pattern
 
 use crate::replay::{ReplayContextTemplate, ReplayDriver};
-use crate::stages::common::control_strategies::{AdmissionGate, AttemptObserver, AttemptOutcome};
 use crate::stages::common::handlers::AsyncInfiniteSourceHandler;
 use crate::stages::common::supervision::flow_context_factory::make_flow_context;
 use crate::stages::source::replay_lifecycle::ReplayCompletionGuard;
 use crate::stages::source::supervision::{
-    admit_prepoll, batch_attempt_outcome, drain_pending_outputs_async,
-    emit_batch_to_pending_outputs, per_data_event_duration_for_batch, PrePollDecision,
+    around_source_boundary, drain_pending_outputs_async, emit_batch_to_pending_outputs,
+    per_data_event_duration_for_batch,
+};
+use crate::stages::source::{
+    SourceBoundaryMiddleware, SourceBoundaryOutcome, SourcePollCompletion, SourcePollReport,
 };
 use crate::supervised_base::base::Supervisor;
 use crate::supervised_base::{EventLoopDirective, EventReceiver, HandlerSupervised, StateWatcher};
@@ -62,11 +64,16 @@ pub(crate) struct AsyncInfiniteSourceSupervisor<
     /// Guard that ensures ReplayLifecycle::Completed is emitted once (FLOWIP-095a).
     pub(crate) replay_completion: ReplayCompletionGuard,
 
-    /// Runtime-owned source admission gates (FLOWIP-115a).
-    pub(crate) admission_gates: Vec<Arc<dyn AdmissionGate>>,
+    /// Runtime-neutral source boundary seam (FLOWIP-115a).
+    pub(crate) source_boundary: Option<Arc<dyn SourceBoundaryMiddleware>>,
 
-    /// Runtime-owned source attempt observers (FLOWIP-115a).
-    pub(crate) attempt_observers: Vec<Arc<dyn AttemptObserver>>,
+    /// Completion was observed by the source boundary after emitting control
+    /// events; drain those events before beginning source drain.
+    pub(crate) pending_boundary_begin_drain: bool,
+
+    /// Error was observed by the source boundary after emitting control events;
+    /// drain those events before transitioning to failure.
+    pub(crate) pending_boundary_error: Option<String>,
 }
 
 impl<H: AsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Supervisor
@@ -378,6 +385,18 @@ impl<H: AsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
                     return Ok(directive);
                 }
 
+                if let Some(error) = self.pending_boundary_error.take() {
+                    return Ok(EventLoopDirective::Transition(InfiniteSourceEvent::Error(
+                        error,
+                    )));
+                }
+                if self.pending_boundary_begin_drain {
+                    self.pending_boundary_begin_drain = false;
+                    return Ok(EventLoopDirective::Transition(
+                        InfiniteSourceEvent::BeginDrain,
+                    ));
+                }
+
                 ctx.instrumentation
                     .event_loops_total
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -501,43 +520,22 @@ impl<H: AsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
                         ))),
                     }
                 } else {
-                    let attempt = match admit_prepoll(
-                        &self.admission_gates,
-                        self.attempt_observers.clone(),
-                        Some(&mut self.external_events),
-                        || {
-                            InfiniteSourceEvent::Error(
-                                "External control channel closed".to_string(),
-                            )
-                        },
-                    )
-                    .await?
-                    {
-                        PrePollDecision::Proceed(attempt) => attempt,
-                        PrePollDecision::Interrupted(directive) => return Ok(directive),
-                        PrePollDecision::RejectToCompletion { reason } => {
-                            tracing::warn!(
-                                stage_name = %ctx.stage_name,
-                                reason = %reason,
-                                "Async infinite source admission rejected; beginning completion"
-                            );
-                            ctx.completion_reason =
-                                InfiniteSourceCompletionReason::ArchiveExhausted;
-                            return Ok(EventLoopDirective::Transition(
-                                InfiniteSourceEvent::BeginDrain,
-                            ));
-                        }
-                    };
+                    let source_boundary = self.source_boundary.clone();
+                    let boundary_future = around_source_boundary(
+                        source_boundary,
+                        Box::pin(async {
+                            let poll_started_at = Instant::now();
+                            let result = self.handler.next().await.map(SourcePollCompletion::Batch);
+                            SourcePollReport {
+                                result,
+                                poll_duration: poll_started_at.elapsed(),
+                            }
+                        }),
+                    );
 
-                    let tick_started_at = Instant::now();
-                    let next_result = tokio::select! {
+                    let report = tokio::select! {
                         biased;
                         maybe_event = self.external_events.recv() => {
-                            attempt
-                                .settle(AttemptOutcome::Aborted {
-                                    reason: "async infinite source poll interrupted".to_string(),
-                                })
-                                .await?;
                             match maybe_event {
                                 Some(event) => return Ok(EventLoopDirective::Transition(event)),
                                 None => {
@@ -547,53 +545,101 @@ impl<H: AsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
                                 }
                             }
                         }
-                        result = self.handler.next() => result,
+                        report = boundary_future => report,
                     };
-                    let tick_duration = tick_started_at.elapsed();
 
-                    match next_result {
-                        Ok(events) if !events.is_empty() => {
-                            ctx.instrumentation
-                                .event_loops_with_work_total
-                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-
-                            let data_events_in_tick =
-                                events.iter().filter(|event| event.is_data()).count();
-                            let per_data_event_duration = per_data_event_duration_for_batch(
-                                tick_duration,
-                                data_events_in_tick,
-                            );
-                            let outcome = batch_attempt_outcome(&events);
-                            emit_batch_to_pending_outputs(
-                                events,
-                                &stage_flow_context,
-                                &ctx.instrumentation,
-                                per_data_event_duration,
-                                &mut ctx.pending_outputs,
-                            );
-                            attempt.settle(outcome).await?;
-
-                            Ok(EventLoopDirective::Continue)
-                        }
-                        Ok(_events) => {
-                            attempt.settle(AttemptOutcome::Succeeded).await?;
-                            Ok(EventLoopDirective::Continue)
-                        }
-                        Err(e) => {
-                            attempt
-                                .settle(AttemptOutcome::Failed {
-                                    cause: e.to_string(),
-                                })
-                                .await?;
-                            tracing::error!(
+                    match report.outcome {
+                        SourceBoundaryOutcome::Rejected { reason } => {
+                            tracing::warn!(
                                 stage_name = %ctx.stage_name,
-                                error = %e,
-                                "Async infinite source handler.next() returned error"
+                                reason = %reason,
+                                "Async infinite source boundary rejected; beginning completion"
                             );
-                            Ok(EventLoopDirective::Transition(InfiniteSourceEvent::Error(
-                                e.to_string(),
-                            )))
+                            ctx.completion_reason =
+                                InfiniteSourceCompletionReason::ArchiveExhausted;
+                            Ok(EventLoopDirective::Transition(
+                                InfiniteSourceEvent::BeginDrain,
+                            ))
                         }
+                        SourceBoundaryOutcome::Polled(poll) => match poll.result {
+                            Ok(SourcePollCompletion::Batch(mut events)) if !events.is_empty() => {
+                                ctx.instrumentation
+                                    .event_loops_with_work_total
+                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+                                events.extend(report.control_events);
+                                let data_events_in_tick =
+                                    events.iter().filter(|event| event.is_data()).count();
+                                let per_data_event_duration = per_data_event_duration_for_batch(
+                                    poll.poll_duration,
+                                    data_events_in_tick,
+                                );
+                                emit_batch_to_pending_outputs(
+                                    events,
+                                    &stage_flow_context,
+                                    &ctx.instrumentation,
+                                    per_data_event_duration,
+                                    &mut ctx.pending_outputs,
+                                );
+
+                                Ok(EventLoopDirective::Continue)
+                            }
+                            Ok(SourcePollCompletion::Batch(mut events)) => {
+                                events.extend(report.control_events);
+                                if !events.is_empty() {
+                                    emit_batch_to_pending_outputs(
+                                        events,
+                                        &stage_flow_context,
+                                        &ctx.instrumentation,
+                                        Duration::from_nanos(0),
+                                        &mut ctx.pending_outputs,
+                                    );
+                                }
+                                Ok(EventLoopDirective::Continue)
+                            }
+                            Ok(SourcePollCompletion::Eof) => {
+                                ctx.completion_reason =
+                                    InfiniteSourceCompletionReason::ArchiveExhausted;
+                                if report.control_events.is_empty() {
+                                    Ok(EventLoopDirective::Transition(
+                                        InfiniteSourceEvent::BeginDrain,
+                                    ))
+                                } else {
+                                    emit_batch_to_pending_outputs(
+                                        report.control_events,
+                                        &stage_flow_context,
+                                        &ctx.instrumentation,
+                                        Duration::from_nanos(0),
+                                        &mut ctx.pending_outputs,
+                                    );
+                                    self.pending_boundary_begin_drain = true;
+                                    Ok(EventLoopDirective::Continue)
+                                }
+                            }
+                            Err(e) => {
+                                tracing::error!(
+                                    stage_name = %ctx.stage_name,
+                                    error = %e,
+                                    "Async infinite source handler.next() returned error"
+                                );
+                                let error = e.to_string();
+                                if report.control_events.is_empty() {
+                                    Ok(EventLoopDirective::Transition(InfiniteSourceEvent::Error(
+                                        error,
+                                    )))
+                                } else {
+                                    emit_batch_to_pending_outputs(
+                                        report.control_events,
+                                        &stage_flow_context,
+                                        &ctx.instrumentation,
+                                        Duration::from_nanos(0),
+                                        &mut ctx.pending_outputs,
+                                    );
+                                    self.pending_boundary_error = Some(error);
+                                    Ok(EventLoopDirective::Continue)
+                                }
+                            }
+                        },
                     }
                 }
             }
