@@ -17,9 +17,8 @@ use obzenflow_runtime::stages::source::{
     SourceBoundaryFuture, SourceBoundaryMiddleware, SourceBoundaryOutcome, SourceBoundaryReport,
     SourcePollCompletion, SourcePollExecution, SourcePollReport,
 };
-use serde_json::json;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// RAII guard returned by source-policy admission for reserved resources.
 pub trait SourceAdmissionGuard: Send + Sync {}
@@ -43,37 +42,39 @@ pub enum SourceAfterPoll {
 
 /// Raw source-poll outcome shown independently to each policy.
 pub enum SourcePollOutcome<'a> {
-    Delivered(&'a [ChainEvent]),
-    Empty,
-    Eof,
-    Failed(&'a SourceError),
+    Delivered {
+        events: &'a [ChainEvent],
+        poll_duration: Duration,
+    },
+    Empty {
+        poll_duration: Duration,
+    },
+    Eof {
+        poll_duration: Duration,
+    },
+    Failed {
+        error: &'a SourceError,
+        poll_duration: Duration,
+    },
+    RejectedBy {
+        policy: &'static str,
+        reason: &'a str,
+    },
 }
 
 /// Source-shaped policy context. It owns the observability outbox returned by
 /// the boundary report and never crosses into the runtime supervisor.
 pub struct SourcePolicyCtx {
     writer_id: WriterId,
-    synthetic_event: ChainEvent,
+    synthetic_event: Option<ChainEvent>,
     middleware_ctx: MiddlewareContext,
 }
 
 impl SourcePolicyCtx {
     pub fn new(writer_id: WriterId) -> Self {
-        let synthetic_event = ChainEventFactory::data_event(
-            writer_id,
-            "system.source.next",
-            json!({
-                "source_type": "boundary",
-                "timestamp_ms": SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis()
-            }),
-        );
-
         Self {
             writer_id,
-            synthetic_event,
+            synthetic_event: None,
             middleware_ctx: MiddlewareContext::with_scope(
                 MiddlewareExecutionScope::LiveSourceBoundary,
             ),
@@ -84,12 +85,8 @@ impl SourcePolicyCtx {
         self.writer_id
     }
 
-    pub fn synthetic_event(&self) -> &ChainEvent {
-        &self.synthetic_event
-    }
-
-    pub fn synthetic_event_clone(&self) -> ChainEvent {
-        self.synthetic_event.clone()
+    pub fn synthetic_event_clone(&mut self) -> ChainEvent {
+        self.synthetic_event().clone()
     }
 
     pub fn write_control_event(&mut self, event: ChainEvent) {
@@ -102,6 +99,25 @@ impl SourcePolicyCtx {
 
     pub(crate) fn middleware_context_mut(&mut self) -> &mut MiddlewareContext {
         &mut self.middleware_ctx
+    }
+
+    fn synthetic_event(&mut self) -> &ChainEvent {
+        if self.synthetic_event.is_none() {
+            self.synthetic_event = Some(ChainEventFactory::data_event(
+                self.writer_id,
+                "system.source.next",
+                serde_json::json!({
+                    "source_type": "boundary",
+                    "timestamp_ms": SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis()
+                }),
+            ));
+        }
+        self.synthetic_event
+            .as_ref()
+            .expect("synthetic event must be initialized")
     }
 }
 
@@ -161,7 +177,10 @@ impl SourceBoundaryMiddleware for PerSourcePolicyBoundary {
                 match policy.admit(&mut ctx).await {
                     SourceAdmission::Admit(guard) => admitted.push((policy, guard)),
                     SourceAdmission::Reject { reason } => {
-                        let outcome = SourcePollOutcome::Empty;
+                        let outcome = SourcePollOutcome::RejectedBy {
+                            policy: policy.label(),
+                            reason: &reason,
+                        };
                         for (prior, _) in admitted.iter().rev() {
                             prior.observe(&outcome, &mut ctx);
                         }
@@ -199,10 +218,20 @@ impl SourceBoundaryMiddleware for PerSourcePolicyBoundary {
 
 fn source_poll_outcome(report: &SourcePollReport) -> SourcePollOutcome<'_> {
     match &report.result {
-        Ok(SourcePollCompletion::Batch(batch)) if batch.is_empty() => SourcePollOutcome::Empty,
-        Ok(SourcePollCompletion::Batch(batch)) => SourcePollOutcome::Delivered(batch),
-        Ok(SourcePollCompletion::Eof) => SourcePollOutcome::Eof,
-        Err(err) => SourcePollOutcome::Failed(err),
+        Ok(SourcePollCompletion::Batch(batch)) if batch.is_empty() => SourcePollOutcome::Empty {
+            poll_duration: report.poll_duration,
+        },
+        Ok(SourcePollCompletion::Batch(batch)) => SourcePollOutcome::Delivered {
+            events: batch,
+            poll_duration: report.poll_duration,
+        },
+        Ok(SourcePollCompletion::Eof) => SourcePollOutcome::Eof {
+            poll_duration: report.poll_duration,
+        },
+        Err(err) => SourcePollOutcome::Failed {
+            error: err,
+            poll_duration: report.poll_duration,
+        },
     }
 }
 
@@ -219,6 +248,7 @@ mod tests {
     use super::*;
     use obzenflow_core::event::ChainEventFactory;
     use obzenflow_core::StageId;
+    use serde_json::json;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
     use std::time::Duration;
@@ -306,6 +336,99 @@ mod tests {
                 "after:b",
                 "observe:b",
                 "observe:a",
+            ]
+        );
+    }
+
+    struct RejectingPolicy {
+        log: Arc<Mutex<Vec<String>>>,
+    }
+
+    #[async_trait]
+    impl SourcePolicy for RejectingPolicy {
+        fn label(&self) -> &'static str {
+            "rejecting"
+        }
+
+        async fn admit(&self, ctx: &mut SourcePolicyCtx) -> SourceAdmission {
+            self.log.lock().unwrap().push("admit:rejecting".to_string());
+            ctx.write_control_event(test_event());
+            SourceAdmission::Reject {
+                reason: "not now".to_string(),
+            }
+        }
+
+        fn observe(&self, _outcome: &SourcePollOutcome<'_>, _ctx: &mut SourcePolicyCtx) {
+            panic!("rejecting policy should not observe its own rejection")
+        }
+    }
+
+    struct RejectObservingPolicy {
+        log: Arc<Mutex<Vec<String>>>,
+    }
+
+    #[async_trait]
+    impl SourcePolicy for RejectObservingPolicy {
+        fn label(&self) -> &'static str {
+            "observer"
+        }
+
+        async fn admit(&self, _ctx: &mut SourcePolicyCtx) -> SourceAdmission {
+            self.log.lock().unwrap().push("admit:observer".to_string());
+            SourceAdmission::Admit(None)
+        }
+
+        fn observe(&self, outcome: &SourcePollOutcome<'_>, _ctx: &mut SourcePolicyCtx) {
+            match outcome {
+                SourcePollOutcome::RejectedBy { policy, reason } => {
+                    self.log
+                        .lock()
+                        .unwrap()
+                        .push(format!("observe:rejected_by:{policy}:{reason}"));
+                }
+                SourcePollOutcome::Empty { .. } => {
+                    self.log.lock().unwrap().push("observe:empty".to_string());
+                }
+                _ => self.log.lock().unwrap().push("observe:other".to_string()),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn source_boundary_reject_observes_not_polled_and_returns_outbox() {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let executed = Arc::new(AtomicUsize::new(0));
+        let boundary = PerSourcePolicyBoundary::new(
+            vec![
+                Arc::new(RejectObservingPolicy { log: log.clone() }),
+                Arc::new(RejectingPolicy { log: log.clone() }),
+            ],
+            WriterId::from(StageId::new()),
+        );
+
+        let executed_in_future = executed.clone();
+        let report = boundary
+            .around_poll(Box::pin(async move {
+                executed_in_future.fetch_add(1, Ordering::SeqCst);
+                SourcePollReport {
+                    result: Ok(SourcePollCompletion::Batch(vec![test_event()])),
+                    poll_duration: Duration::from_millis(1),
+                }
+            }))
+            .await;
+
+        assert_eq!(executed.load(Ordering::SeqCst), 0);
+        assert!(matches!(
+            report.outcome,
+            SourceBoundaryOutcome::Rejected { ref reason } if reason == "not now"
+        ));
+        assert_eq!(report.control_events.len(), 1);
+        assert_eq!(
+            *log.lock().unwrap(),
+            vec![
+                "admit:observer",
+                "admit:rejecting",
+                "observe:rejected_by:rejecting:not now",
             ]
         );
     }

@@ -109,6 +109,7 @@ impl<H: AsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
             source_boundary: self.config.source_boundary,
             pending_boundary_eof: false,
             pending_boundary_error: None,
+            pending_boundary_rejected: false,
         };
 
         let supervisor_name = format!("async_finite_source_{}", self.config.stage_name);

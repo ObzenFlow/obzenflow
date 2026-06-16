@@ -1394,19 +1394,19 @@ mod tests {
             "test.event",
             json!({ "index": 0 }),
         )];
-        let error_batch = vec![ChainEventFactory::data_event(
-            writer,
-            "test.event",
-            json!({ "index": 0 }),
-        )
-        .mark_as_error("boom", ErrorKind::Remote)];
+        let error_batch =
+            vec![
+                ChainEventFactory::data_event(writer, "test.event", json!({ "index": 0 }))
+                    .mark_as_error("boom", ErrorKind::Remote),
+            ];
 
         // The rules read raw facts, so an error-marked batch is an error delivery.
         assert!(batch_has_error_marked(&error_batch));
         assert!(!batch_has_error_marked(&clean_batch));
 
-        let charged =
-            |mw: &Arc<RateLimiterMiddleware>| mw.stats.lock().expect("stats lock").tokens_consumed_total;
+        let charged = |mw: &Arc<RateLimiterMiddleware>| {
+            mw.stats.lock().expect("stats lock").tokens_consumed_total
+        };
 
         // Finite source (AfterPoll): admit is a no-op; after_poll charges a clean
         // non-empty delivery.
@@ -1445,7 +1445,11 @@ mod tests {
         let _ = infinite_policy.admit(&mut ctx_inf).await;
         assert_eq!(charged(&infinite), 1.0, "PrePoll admit must charge");
         infinite_policy.after_poll(&clean_batch, &mut ctx_inf).await;
-        assert_eq!(charged(&infinite), 1.0, "PrePoll after_poll must be a no-op");
+        assert_eq!(
+            charged(&infinite),
+            1.0,
+            "PrePoll after_poll must be a no-op"
+        );
     }
 
     #[test]

@@ -524,6 +524,118 @@ impl CircuitBreakerMiddleware {
         CircuitState::from(self.state.load(Ordering::SeqCst))
     }
 
+    fn record_closed_outcome(
+        &self,
+        counted_as_failure: bool,
+        call_duration: Option<Duration>,
+        now: Instant,
+    ) -> Option<ChainEvent> {
+        let consecutive_failures = if counted_as_failure {
+            self.failure_count.fetch_add(1, Ordering::SeqCst) + 1
+        } else {
+            self.failure_count.store(0, Ordering::SeqCst);
+            0
+        };
+
+        match &self.failure_mode {
+            CircuitBreakerFailureMode::Consecutive { max_failures } => {
+                if counted_as_failure && (consecutive_failures as u32) >= max_failures.get() {
+                    let event = self.transition_to_inner(CircuitState::Open).1;
+                    if event.is_some() {
+                        tracing::warn!(
+                            "Circuit breaker opened after {} consecutive failures",
+                            consecutive_failures
+                        );
+                    }
+                    return event;
+                }
+            }
+            CircuitBreakerFailureMode::RateBased {
+                window,
+                failure_rate_threshold,
+                slow_call_rate_threshold,
+                slow_call_duration_threshold,
+                minimum_calls,
+            } => {
+                let is_slow = match (slow_call_duration_threshold, call_duration) {
+                    (Some(threshold), Some(duration)) => duration >= *threshold,
+                    _ => false,
+                };
+
+                if let Some(state_mutex) = &self.rate_window {
+                    if let Ok(mut state) = state_mutex.lock() {
+                        let capacity = state.capacity();
+                        if capacity > 0 {
+                            state.push(CallSample {
+                                timestamp: now,
+                                is_failure: counted_as_failure,
+                                is_slow,
+                            });
+                        }
+
+                        let mut observed = 0usize;
+                        let mut failures = 0usize;
+                        let mut slow_calls = 0usize;
+
+                        match window {
+                            FailureWindow::Count { size } => {
+                                let max = (*size as usize).min(state.capacity());
+                                for sample in state.iter().take(max) {
+                                    observed += 1;
+                                    if sample.is_failure {
+                                        failures += 1;
+                                    }
+                                    if sample.is_slow {
+                                        slow_calls += 1;
+                                    }
+                                }
+                            }
+                            FailureWindow::Time { duration } => {
+                                for sample in state.iter() {
+                                    if now.duration_since(sample.timestamp) <= *duration {
+                                        observed += 1;
+                                        if sample.is_failure {
+                                            failures += 1;
+                                        }
+                                        if sample.is_slow {
+                                            slow_calls += 1;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        if (observed as u32) >= minimum_calls.get() {
+                            let denom = (observed as f32).max(1.0);
+                            let failure_rate = failures as f32 / denom;
+                            let slow_rate = slow_calls as f32 / denom;
+
+                            let open_on_failures = failure_rate >= *failure_rate_threshold;
+                            let open_on_slow = match slow_call_rate_threshold {
+                                Some(threshold) if *threshold > 0.0 => slow_rate >= *threshold,
+                                _ => false,
+                            };
+
+                            if open_on_failures || open_on_slow {
+                                let event = self.transition_to_inner(CircuitState::Open).1;
+                                if event.is_some() {
+                                    tracing::warn!(
+                                        "Circuit breaker opened (rate-based) after {} calls (failures: {})",
+                                        observed,
+                                        failures
+                                    );
+                                }
+                                return event;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        None
+    }
+
     fn counts_as_failure(&self, classification: &FailureClassification) -> bool {
         match classification {
             FailureClassification::Success => false,
@@ -914,8 +1026,7 @@ impl CircuitBreakerMiddleware {
 
     /// FLOWIP-115a: classify one source-boundary poll outcome. A probe closes
     /// on success and reopens on failure; a Closed-state poll error counts
-    /// toward opening in Consecutive mode. RateBased source breakers count
-    /// failures but are not yet tripped on the source path.
+    /// toward opening through the configured failure mode.
     fn source_settle(&self, outcome: SourceOutcome) -> Option<ChainEvent> {
         if !matches!(outcome, SourceOutcome::Inconclusive) {
             if let Ok(mut stats) = self.stats.lock() {
@@ -936,7 +1047,7 @@ impl CircuitBreakerMiddleware {
                 && matches!(self.current_state(), CircuitState::HalfOpen)
             {
                 return match outcome {
-                    SourceOutcome::Success => {
+                    SourceOutcome::Success { .. } => {
                         self.success_count.fetch_add(1, Ordering::Relaxed);
                         self.successes_total.fetch_add(1, Ordering::Relaxed);
                         let (transitioned, event) = self.transition_to_inner(CircuitState::Closed);
@@ -945,7 +1056,7 @@ impl CircuitBreakerMiddleware {
                         }
                         event
                     }
-                    SourceOutcome::Failure => {
+                    SourceOutcome::Failure { .. } => {
                         self.failures_total.fetch_add(1, Ordering::Relaxed);
                         self.transition_to_inner(CircuitState::Open).1
                     }
@@ -956,24 +1067,17 @@ impl CircuitBreakerMiddleware {
         }
 
         match outcome {
-            SourceOutcome::Success => {
+            SourceOutcome::Success { poll_duration } => {
                 self.successes_total.fetch_add(1, Ordering::Relaxed);
-                self.failure_count.store(0, Ordering::SeqCst);
+                if matches!(self.current_state(), CircuitState::Closed) {
+                    return self.record_closed_outcome(false, Some(poll_duration), Instant::now());
+                }
                 None
             }
-            SourceOutcome::Failure => {
+            SourceOutcome::Failure { poll_duration } => {
                 self.failures_total.fetch_add(1, Ordering::Relaxed);
-                let consecutive = self.failure_count.fetch_add(1, Ordering::SeqCst) + 1;
-                match &self.failure_mode {
-                    CircuitBreakerFailureMode::Consecutive { max_failures } => {
-                        if (consecutive as u32) >= max_failures.get() {
-                            return self.transition_to_inner(CircuitState::Open).1;
-                        }
-                    }
-                    CircuitBreakerFailureMode::RateBased { .. } => {
-                        // FLOWIP-115a: rate-based source breakers count failures
-                        // but are not yet tripped on the source path.
-                    }
+                if matches!(self.current_state(), CircuitState::Closed) {
+                    return self.record_closed_outcome(true, Some(poll_duration), Instant::now());
                 }
                 None
             }
@@ -1228,9 +1332,9 @@ enum SourceAdmit {
 #[derive(Debug, Clone, Copy)]
 enum SourceOutcome {
     /// The poll produced output or reached a clean EOF.
-    Success,
+    Success { poll_duration: Duration },
     /// The poll returned an error.
-    Failure,
+    Failure { poll_duration: Duration },
     /// The attempt was aborted or skipped (drain, shutdown) before an outcome;
     /// the probe slot is released but breaker state is unchanged.
     Inconclusive,
@@ -1267,12 +1371,22 @@ impl SourcePolicy for CircuitBreakerSourcePolicy {
 
     fn observe(&self, outcome: &SourcePollOutcome<'_>, ctx: &mut SourcePolicyCtx) {
         let source_outcome = match outcome {
-            SourcePollOutcome::Delivered(events) if batch_has_error_marked(events) => {
-                SourceOutcome::Failure
+            SourcePollOutcome::Delivered {
+                events,
+                poll_duration,
+            } if batch_has_error_marked(events) => SourceOutcome::Failure {
+                poll_duration: *poll_duration,
+            },
+            SourcePollOutcome::Delivered { poll_duration, .. }
+            | SourcePollOutcome::Eof { poll_duration } => SourceOutcome::Success {
+                poll_duration: *poll_duration,
+            },
+            SourcePollOutcome::Failed { poll_duration, .. } => SourceOutcome::Failure {
+                poll_duration: *poll_duration,
+            },
+            SourcePollOutcome::Empty { .. } | SourcePollOutcome::RejectedBy { .. } => {
+                SourceOutcome::Inconclusive
             }
-            SourcePollOutcome::Delivered(_) | SourcePollOutcome::Eof => SourceOutcome::Success,
-            SourcePollOutcome::Failed(_) => SourceOutcome::Failure,
-            SourcePollOutcome::Empty => SourceOutcome::Inconclusive,
         };
         if let Some(event) = self.breaker.source_settle(source_outcome) {
             ctx.write_control_event(event);
@@ -1662,114 +1776,10 @@ impl Middleware for CircuitBreakerMiddleware {
 
         match self.current_state() {
             CircuitState::Closed => {
-                // Track consecutive failures regardless of failure mode so the
-                // `circuit_breaker_consecutive_failures` gauge remains meaningful
-                // in both consecutive and rate-based configurations.
-                let consecutive_failures = if counted_as_failure {
-                    self.failure_count.fetch_add(1, Ordering::SeqCst) + 1
-                } else {
-                    self.failure_count.store(0, Ordering::SeqCst);
-                    0
-                };
-
-                // Update failure tracking depending on configured failure mode.
-                match &self.failure_mode {
-                    CircuitBreakerFailureMode::Consecutive { max_failures } => {
-                        if counted_as_failure
-                            && (consecutive_failures as u32) >= max_failures.get()
-                            && self.transition_to(CircuitState::Open, ctx)
-                        {
-                            tracing::warn!(
-                                "Circuit breaker opened after {} consecutive failures",
-                                consecutive_failures
-                            );
-                        }
-                    }
-                    CircuitBreakerFailureMode::RateBased {
-                        window,
-                        failure_rate_threshold,
-                        slow_call_rate_threshold,
-                        slow_call_duration_threshold,
-                        minimum_calls,
-                    } => {
-                        let is_slow = match (slow_call_duration_threshold, call_duration) {
-                            (Some(threshold), Some(dur)) => dur >= *threshold,
-                            _ => false,
-                        };
-
-                        // Update rate window state.
-                        if let Some(state_mutex) = &self.rate_window {
-                            if let Ok(mut state) = state_mutex.lock() {
-                                let capacity = state.capacity();
-                                if capacity > 0 {
-                                    state.push(CallSample {
-                                        timestamp: now,
-                                        is_failure: counted_as_failure,
-                                        is_slow,
-                                    });
-                                }
-
-                                // Compute effective window contents based on policy.
-                                let mut observed = 0usize;
-                                let mut failures = 0usize;
-                                let mut slow_calls = 0usize;
-
-                                match window {
-                                    FailureWindow::Count { size } => {
-                                        let max = (*size as usize).min(state.capacity());
-                                        // For count-based windows we just consider the
-                                        // most recent `max` samples.
-                                        for sample in state.iter().take(max) {
-                                            observed += 1;
-                                            if sample.is_failure {
-                                                failures += 1;
-                                            }
-                                            if sample.is_slow {
-                                                slow_calls += 1;
-                                            }
-                                        }
-                                    }
-                                    FailureWindow::Time { duration } => {
-                                        for sample in state.iter() {
-                                            if now.duration_since(sample.timestamp) <= *duration {
-                                                observed += 1;
-                                                if sample.is_failure {
-                                                    failures += 1;
-                                                }
-                                                if sample.is_slow {
-                                                    slow_calls += 1;
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-
-                                if (observed as u32) >= minimum_calls.get() {
-                                    let denom = (observed as f32).max(1.0);
-                                    let failure_rate = failures as f32 / denom;
-                                    let slow_rate = slow_calls as f32 / denom;
-
-                                    let open_on_failures = failure_rate >= *failure_rate_threshold;
-                                    let open_on_slow = match slow_call_rate_threshold {
-                                        Some(threshold) if *threshold > 0.0 => {
-                                            slow_rate >= *threshold
-                                        }
-                                        _ => false,
-                                    };
-
-                                    if (open_on_failures || open_on_slow)
-                                        && self.transition_to(CircuitState::Open, ctx)
-                                    {
-                                        tracing::warn!(
-                                            "Circuit breaker opened (rate-based) after {} calls (failures: {})",
-                                            observed,
-                                            failures
-                                        );
-                                    }
-                                }
-                            }
-                        }
-                    }
+                if let Some(event) =
+                    self.record_closed_outcome(counted_as_failure, call_duration, now)
+                {
+                    ctx.write_control_event(event);
                 }
             }
 
@@ -3505,6 +3515,119 @@ mod tests {
     }
 
     #[test]
+    fn source_rate_based_count_window_opens_after_failure_rate_threshold() {
+        let mut cb = CircuitBreakerMiddleware::with_cooldown_and_fallback(
+            1,
+            StdDuration::from_secs(60),
+            None,
+            None,
+            None,
+            None,
+        );
+        cb.failure_mode = CircuitBreakerFailureMode::RateBased {
+            window: FailureWindow::Count { size: 5 },
+            failure_rate_threshold: 0.6,
+            slow_call_rate_threshold: None,
+            slow_call_duration_threshold: None,
+            minimum_calls: NonZeroU32::new(5).unwrap(),
+        };
+        cb.rate_window = Some(Arc::new(Mutex::new(FailureWindowState::new(5))));
+
+        for is_failure in [true, true, false, true, false] {
+            let outcome = if is_failure {
+                SourceOutcome::Failure {
+                    poll_duration: StdDuration::from_millis(1),
+                }
+            } else {
+                SourceOutcome::Success {
+                    poll_duration: StdDuration::from_millis(1),
+                }
+            };
+            cb.source_settle(outcome);
+        }
+
+        assert!(
+            matches!(cb.current_state(), CircuitState::Open),
+            "expected source circuit to open after rate-based failure threshold"
+        );
+    }
+
+    #[test]
+    fn source_rate_based_slow_call_opens_after_slow_threshold() {
+        let mut cb = CircuitBreakerMiddleware::with_cooldown_and_fallback(
+            1,
+            StdDuration::from_secs(60),
+            None,
+            None,
+            None,
+            None,
+        );
+        cb.failure_mode = CircuitBreakerFailureMode::RateBased {
+            window: FailureWindow::Count { size: 5 },
+            failure_rate_threshold: 1.0,
+            slow_call_rate_threshold: Some(0.6),
+            slow_call_duration_threshold: Some(StdDuration::from_millis(50)),
+            minimum_calls: NonZeroU32::new(5).unwrap(),
+        };
+        cb.rate_window = Some(Arc::new(Mutex::new(FailureWindowState::new(5))));
+
+        for is_slow in [true, true, false, true, false] {
+            cb.source_settle(SourceOutcome::Success {
+                poll_duration: if is_slow {
+                    StdDuration::from_millis(100)
+                } else {
+                    StdDuration::from_millis(10)
+                },
+            });
+        }
+
+        assert!(
+            matches!(cb.current_state(), CircuitState::Open),
+            "expected source circuit to open after slow-call rate threshold"
+        );
+    }
+
+    #[test]
+    fn source_policy_error_marked_delivery_counts_as_breaker_failure() {
+        let breaker = Arc::new(CircuitBreakerMiddleware::with_cooldown(
+            1,
+            StdDuration::from_secs(60),
+        ));
+        let policy = CircuitBreakerSourcePolicy {
+            breaker: breaker.clone(),
+        };
+        let mut failed = create_test_event();
+        failed.processing_info.status = ProcessingStatus::error("source_error_marked_delivery");
+        let mut ctx = SourcePolicyCtx::new(WriterId::from(StageId::new()));
+
+        policy.observe(
+            &SourcePollOutcome::Delivered {
+                events: std::slice::from_ref(&failed),
+                poll_duration: StdDuration::from_millis(1),
+            },
+            &mut ctx,
+        );
+
+        assert!(
+            matches!(breaker.current_state(), CircuitState::Open),
+            "error-marked delivered source batch must count as a breaker failure"
+        );
+        assert!(
+            ctx.take_control_events().iter().any(|event| {
+                matches!(
+                    &event.content,
+                    obzenflow_core::event::ChainEventContent::Observability(
+                        ObservabilityPayload::Middleware(MiddlewareLifecycle::CircuitBreaker(
+                            CircuitBreakerEvent::Opened { .. }
+                        ))
+                    )
+                )
+            }),
+            "source breaker opening must be returned through the boundary outbox"
+        );
+    }
+
+    #[test]
     fn default_failure_classifier_uses_errorkind() {
         let cb = CircuitBreakerMiddleware::new(1);
         let event = create_test_event();
@@ -4212,7 +4335,9 @@ mod tests {
         // HalfOpen reachable immediately, so the test needs no wall-clock wait.
         let open_breaker = || {
             let cb = CircuitBreakerMiddleware::with_cooldown(1, Duration::ZERO);
-            cb.source_settle(SourceOutcome::Failure);
+            cb.source_settle(SourceOutcome::Failure {
+                poll_duration: Duration::from_millis(1),
+            });
             assert_eq!(
                 cb.current_state(),
                 CircuitState::Open,
@@ -4248,7 +4373,9 @@ mod tests {
             1,
             "admitting a probe reserves exactly one slot"
         );
-        cb.source_settle(SourceOutcome::Success);
+        cb.source_settle(SourceOutcome::Success {
+            poll_duration: Duration::from_millis(1),
+        });
         drop(guard);
         assert_eq!(
             cb.current_state(),
@@ -4265,7 +4392,9 @@ mod tests {
         let cb = open_breaker();
         let guard = admit_probe(&cb);
         assert_eq!(cb.probe_in_flight.load(Ordering::SeqCst), 1);
-        cb.source_settle(SourceOutcome::Failure);
+        cb.source_settle(SourceOutcome::Failure {
+            poll_duration: Duration::from_millis(1),
+        });
         drop(guard);
         assert_eq!(
             cb.current_state(),

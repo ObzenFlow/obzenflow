@@ -84,6 +84,26 @@ pub(crate) fn emit_batch_to_pending_outputs(
     }
 }
 
+pub(crate) fn stage_boundary_control_events(
+    control_events: Vec<ChainEvent>,
+    stage_flow_context: &FlowContext,
+    instrumentation: &Arc<StageInstrumentation>,
+    pending_outputs: &mut VecDeque<ChainEvent>,
+) -> bool {
+    if control_events.is_empty() {
+        return false;
+    }
+
+    emit_batch_to_pending_outputs(
+        control_events,
+        stage_flow_context,
+        instrumentation,
+        Duration::from_nanos(0),
+        pending_outputs,
+    );
+    true
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn drain_pending_outputs_sync(
     pending_outputs: &mut VecDeque<ChainEvent>,
@@ -330,6 +350,44 @@ mod tests {
     enum TestEvent {
         BeginDrain,
         ChannelClosed,
+    }
+
+    #[test]
+    fn stage_boundary_control_events_stages_rejected_outbox() {
+        let stage_id = StageId::new();
+        let instrumentation = Arc::new(StageInstrumentation::new());
+        let stage_flow_context = FlowContext {
+            flow_name: "flow".to_string(),
+            flow_id: "flow_id".to_string(),
+            stage_name: "source".to_string(),
+            stage_id,
+            stage_type: obzenflow_core::event::context::StageType::FiniteSource,
+        };
+        let control_event = ChainEventFactory::data_event(
+            WriterId::from(stage_id),
+            "test.boundary_control",
+            serde_json::json!({"value": 1}),
+        );
+        let mut pending_outputs = VecDeque::new();
+
+        assert!(stage_boundary_control_events(
+            vec![control_event],
+            &stage_flow_context,
+            &instrumentation,
+            &mut pending_outputs,
+        ));
+        assert_eq!(pending_outputs.len(), 1);
+        let staged = pending_outputs.pop_front().expect("staged control event");
+        assert_eq!(staged.flow_context.stage_name, "source");
+        assert_eq!(staged.flow_context.stage_id, stage_id);
+
+        assert!(!stage_boundary_control_events(
+            Vec::new(),
+            &stage_flow_context,
+            &instrumentation,
+            &mut pending_outputs,
+        ));
+        assert!(pending_outputs.is_empty());
     }
 
     #[tokio::test]

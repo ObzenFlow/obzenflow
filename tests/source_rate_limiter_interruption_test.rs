@@ -18,9 +18,14 @@ use async_trait::async_trait;
 use obzenflow_adapters::middleware::rate_limit_with_burst;
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
+use obzenflow_core::event::payloads::observability_payload::{
+    MiddlewareLifecycle, ObservabilityPayload, RateLimiterEvent,
+};
+use obzenflow_core::event::ChainEventContent;
+use obzenflow_core::journal::{journal_owner::JournalOwner, Journal};
 use obzenflow_core::{StageId, TypedPayload, WriterId};
 use obzenflow_dsl::{async_source, flow, sink};
-use obzenflow_infra::journal::disk_journals;
+use obzenflow_infra::journal::{disk_journals, DiskJournal};
 use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{AsyncFiniteSourceHandler, SinkHandler};
@@ -28,6 +33,7 @@ use obzenflow_runtime::stages::SourceError;
 use obzenflow_runtime::supervised_base::SupervisorHandle;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -115,14 +121,67 @@ async fn wait_for_running(handle: &FlowHandle) -> Result<()> {
     .map_err(|_| anyhow!("timeout waiting for pipeline to reach Running"))?
 }
 
+fn latest_run_dir(base: &Path) -> PathBuf {
+    let flows_dir = base.join("flows");
+    let mut entries: Vec<PathBuf> = std::fs::read_dir(&flows_dir)
+        .expect("flows directory should exist")
+        .map(|entry| entry.expect("flow dir entry").path())
+        .filter(|path| path.join("run_manifest.json").exists())
+        .collect();
+    entries.sort();
+    entries
+        .pop()
+        .expect("run should have produced a replay archive")
+}
+
+async fn read_stage_events(run_dir: &Path, stage_key: &str) -> Vec<ChainEvent> {
+    let manifest: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(run_dir.join("run_manifest.json"))
+            .expect("run_manifest.json should be readable"),
+    )
+    .expect("run_manifest.json should parse");
+    let stage_journal = manifest["stages"][stage_key]["data_journal_file"]
+        .as_str()
+        .unwrap_or_else(|| panic!("manifest should contain data journal for '{stage_key}'"));
+    let journal: DiskJournal<ChainEvent> = DiskJournal::with_owner(
+        run_dir.join(stage_journal),
+        JournalOwner::stage(StageId::new()),
+    )
+    .expect("stage journal should open");
+
+    journal
+        .read_causally_ordered()
+        .await
+        .expect("stage journal should read")
+        .into_iter()
+        .map(|envelope| envelope.event)
+        .collect()
+}
+
+fn delayed_rate_limiter_events(events: &[ChainEvent]) -> usize {
+    events
+        .iter()
+        .filter(|event| {
+            matches!(
+                &event.content,
+                ChainEventContent::Observability(ObservabilityPayload::Middleware(
+                    MiddlewareLifecycle::RateLimiter(RateLimiterEvent::Delayed { .. })
+                ))
+            )
+        })
+        .count()
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn async_source_rate_limit_wait_is_interrupted_by_stop() -> Result<()> {
     // burst 1, refill 0.2/s: the first poll admits immediately, the second must
     // wait ~5s for the next token. A graceful stop drains the source while it is
     // in that wait.
+    let journal_base = unique_journal_dir("source_rate_limiter_interruption");
+    let journal_base_for_flow = journal_base.clone();
     let handle = flow! {
         name: "source_rate_limiter_interruption",
-        journals: disk_journals(unique_journal_dir("source_rate_limiter_interruption")),
+        journals: disk_journals(journal_base_for_flow),
         middleware: [],
 
         stages: {
@@ -203,6 +262,26 @@ async fn async_source_rate_limit_wait_is_interrupted_by_stop() -> Result<()> {
         "expected exactly 1 admitted event (the second poll's rate-limit wait was interrupted by \
          drain); events_in_total={} means the in-flight async source wait was not cancelled",
         metrics.events_in_total
+    );
+
+    let run_dir = latest_run_dir(&journal_base);
+    let source_events = read_stage_events(&run_dir, "src").await;
+    let source_payload_indices: Vec<u64> = source_events
+        .iter()
+        .filter(|event| event.event_type() == DripEvent::versioned_event_type())
+        .filter_map(|event| event.payload()["index"].as_u64())
+        .collect();
+    assert_eq!(
+        source_payload_indices,
+        vec![0],
+        "the second finite source batch was polled but cancelled during after_poll pacing; \
+         it must not be staged in the source data journal"
+    );
+    assert_eq!(
+        delayed_rate_limiter_events(&source_events),
+        0,
+        "the delayed outbox event produced while holding the cancelled second batch must not be \
+         staged in the source data journal"
     );
 
     Ok(())

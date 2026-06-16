@@ -10,7 +10,7 @@ use crate::stages::common::supervision::flow_context_factory::make_flow_context;
 use crate::stages::source::replay_lifecycle::ReplayCompletionGuard;
 use crate::stages::source::supervision::{
     around_source_boundary, drain_pending_outputs_sync, emit_batch_to_pending_outputs,
-    per_data_event_duration_for_batch,
+    per_data_event_duration_for_batch, stage_boundary_control_events,
 };
 use crate::stages::source::{
     SourceBoundaryMiddleware, SourceBoundaryOutcome, SourcePollCompletion, SourcePollReport,
@@ -68,6 +68,10 @@ pub(crate) struct FiniteSourceSupervisor<
     /// Error was observed by the source boundary after emitting control events;
     /// drain those events before transitioning to failure.
     pub(crate) pending_boundary_error: Option<String>,
+
+    /// Rejection was observed by the source boundary after emitting control
+    /// events; drain those events before transitioning to completion.
+    pub(crate) pending_boundary_rejected: bool,
 }
 
 impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Supervisor
@@ -399,6 +403,10 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> H
                         error,
                     )));
                 }
+                if self.pending_boundary_rejected {
+                    self.pending_boundary_rejected = false;
+                    return Ok(EventLoopDirective::Transition(FiniteSourceEvent::Completed));
+                }
 
                 ctx.instrumentation
                     .event_loops_total
@@ -536,7 +544,17 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> H
                                 reason = %reason,
                                 "Finite source boundary rejected; completing source"
                             );
-                            Ok(EventLoopDirective::Transition(FiniteSourceEvent::Completed))
+                            if stage_boundary_control_events(
+                                report.control_events,
+                                &stage_flow_context,
+                                &ctx.instrumentation,
+                                &mut ctx.pending_outputs,
+                            ) {
+                                self.pending_boundary_rejected = true;
+                                Ok(EventLoopDirective::Continue)
+                            } else {
+                                Ok(EventLoopDirective::Transition(FiniteSourceEvent::Completed))
+                            }
                         }
                         SourceBoundaryOutcome::Polled(poll) => match poll.result {
                             Ok(SourcePollCompletion::Batch(mut events)) if !events.is_empty() => {
