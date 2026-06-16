@@ -5,11 +5,14 @@
 //! Finite source supervisor implementation using HandlerSupervised pattern
 
 use crate::replay::{ReplayContextTemplate, ReplayDriver};
+use crate::stages::common::control_strategies::{AdmissionGate, AttemptObserver, AttemptOutcome};
 use crate::stages::common::handlers::FiniteSourceHandler;
 use crate::stages::common::supervision::flow_context_factory::make_flow_context;
 use crate::stages::source::replay_lifecycle::ReplayCompletionGuard;
 use crate::stages::source::supervision::{
-    drain_pending_outputs_sync, emit_batch_to_pending_outputs, per_data_event_duration_for_batch,
+    admit_held, admit_prepoll, batch_attempt_outcome, drain_pending_outputs_sync,
+    emit_batch_to_pending_outputs, per_data_event_duration_for_batch, HeldDecision,
+    PrePollDecision,
 };
 use crate::supervised_base::base::Supervisor;
 use crate::supervised_base::idle_backoff::IdleBackoff;
@@ -53,6 +56,12 @@ pub(crate) struct FiniteSourceSupervisor<
 
     /// Guard that ensures ReplayLifecycle::Completed is emitted once (FLOWIP-095a).
     pub(crate) replay_completion: ReplayCompletionGuard,
+
+    /// Runtime-owned source admission gates (FLOWIP-115a).
+    pub(crate) admission_gates: Vec<Arc<dyn AdmissionGate>>,
+
+    /// Runtime-owned source attempt observers (FLOWIP-115a).
+    pub(crate) attempt_observers: Vec<Arc<dyn AttemptObserver>>,
 }
 
 impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Supervisor
@@ -487,6 +496,28 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> H
                         ))),
                     }
                 } else {
+                    let attempt = match admit_prepoll(
+                        &self.admission_gates,
+                        self.attempt_observers.clone(),
+                        None,
+                        || FiniteSourceEvent::Error("External control channel closed".to_string()),
+                    )
+                    .await?
+                    {
+                        PrePollDecision::Proceed(attempt) => attempt,
+                        PrePollDecision::Interrupted(directive) => return Ok(directive),
+                        PrePollDecision::RejectToCompletion { reason } => {
+                            tracing::warn!(
+                                stage_name = %ctx.stage_name,
+                                reason = %reason,
+                                "Finite source admission rejected; completing source"
+                            );
+                            return Ok(EventLoopDirective::Transition(
+                                FiniteSourceEvent::Completed,
+                            ));
+                        }
+                    };
+
                     // Get next batch of events from handler (synchronous, no locks needed).
                     // 051b: handler now returns Result<Option<Vec<ChainEvent>>, SourceError>
                     let tick_started_at = Instant::now();
@@ -501,6 +532,29 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> H
                                 .event_loops_with_work_total
                                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
+                            let outcome = batch_attempt_outcome(&events);
+                            if matches!(outcome, AttemptOutcome::Succeeded) {
+                                match admit_held(&self.admission_gates, None, || {
+                                    FiniteSourceEvent::Error(
+                                        "External control channel closed".to_string(),
+                                    )
+                                })
+                                .await
+                                {
+                                    HeldDecision::Proceed => {}
+                                    HeldDecision::Interrupted(directive) => {
+                                        attempt
+                                            .settle(AttemptOutcome::Aborted {
+                                                reason:
+                                                    "finite source held batch admission interrupted"
+                                                        .to_string(),
+                                            })
+                                            .await?;
+                                        return Ok(directive);
+                                    }
+                                }
+                            }
+
                             let data_events_in_tick =
                                 events.iter().filter(|event| event.is_data()).count();
                             let per_data_event_duration = per_data_event_duration_for_batch(
@@ -514,6 +568,7 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> H
                                 per_data_event_duration,
                                 &mut ctx.pending_outputs,
                             );
+                            attempt.settle(outcome).await?;
 
                             tracing::trace!(
                                 stage_name = %ctx.stage_name,
@@ -523,16 +578,23 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> H
                             Ok(EventLoopDirective::Continue)
                         }
                         Ok(Some(_events)) => {
+                            attempt.settle(AttemptOutcome::Succeeded).await?;
                             // No events produced; apply adaptive idle backoff (FLOWIP-086i).
                             let delay = self.idle_backoff.next_delay();
                             tokio::time::sleep(delay).await;
                             Ok(EventLoopDirective::Continue)
                         }
                         Ok(None) => {
+                            attempt.settle(AttemptOutcome::Succeeded).await?;
                             // Natural completion signalled by handler.
                             Ok(EventLoopDirective::Transition(FiniteSourceEvent::Completed))
                         }
                         Err(e) => {
+                            attempt
+                                .settle(AttemptOutcome::Failed {
+                                    cause: e.to_string(),
+                                })
+                                .await?;
                             // SourceError surfaced from handler; delegate to control strategy
                             // via the standard error path.
                             tracing::error!(

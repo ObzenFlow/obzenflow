@@ -224,7 +224,8 @@ pub trait MiddlewareFactory: Send + Sync {
         _config: &StageConfig,
         _stage_type: obzenflow_core::event::context::StageType,
         _control_middleware: &Arc<ControlMiddlewareAggregator>,
-    ) {
+    ) -> MiddlewareFactoryResult<()> {
+        Ok(())
     }
 
     /// Which stage types this middleware supports
@@ -338,6 +339,15 @@ impl<F: MiddlewareFactory + ?Sized> MiddlewareFactory for Box<F> {
 
     fn control_points(&self) -> ControlPointRegistration {
         (**self).control_points()
+    }
+
+    fn register_source_policy(
+        &self,
+        config: &StageConfig,
+        stage_type: obzenflow_core::event::context::StageType,
+        control_middleware: &Arc<ControlMiddlewareAggregator>,
+    ) -> MiddlewareFactoryResult<()> {
+        (**self).register_source_policy(config, stage_type, control_middleware)
     }
 
     fn supported_stage_types(&self) -> &[StageType] {

@@ -116,6 +116,8 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> S
             replay_driver: None,
             replay_started_at: None,
             replay_completion: ReplayCompletionGuard::default(),
+            admission_gates: self.config.admission_gates,
+            attempt_observers: self.config.attempt_observers,
         };
 
         // Clone what we need for the task

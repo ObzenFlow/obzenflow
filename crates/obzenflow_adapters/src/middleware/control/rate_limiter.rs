@@ -930,7 +930,6 @@ impl crate::middleware::SourcePacer for RateLimiterMiddleware {
 /// sleeping internally (the FLOWIP-115c control inversion). Finite sources charge
 /// at `PostAdmit` (FLOWIP-114m delivery-side charging, only a successful
 /// non-empty poll); infinite sources gate at `PrePoll`.
-#[allow(dead_code)] // Constructed and registered by FLOWIP-115a Step 4 wiring.
 struct RateLimiterAdmissionGate {
     bucket: Arc<Mutex<TokenBucket>>,
     stats: Arc<Mutex<RateLimiterStats>>,
@@ -938,7 +937,6 @@ struct RateLimiterAdmissionGate {
     charge_at: AdmissionPosition,
 }
 
-#[allow(dead_code)]
 impl RateLimiterAdmissionGate {
     fn new(
         bucket: Arc<Mutex<TokenBucket>>,
@@ -955,9 +953,9 @@ impl RateLimiterAdmissionGate {
     }
 
     /// Consume one event's cost, or report the wait until the next token.
-    /// Updates the shared stats so the metrics snapshotter stays accurate
-    /// (`delay_seconds_total` is omitted here because the supervisor, not the
-    /// gate, owns the wait).
+    /// Updates shared stats so the metrics snapshotter stays accurate. The
+    /// gate reports scheduled wait time because the supervisor owns the actual
+    /// sleep after the FLOWIP-115a control inversion.
     fn charge_or_wait(&self) -> Option<Duration> {
         let mut bucket = self.bucket.lock().expect("rate-limiter bucket poisoned");
         if bucket.try_consume(self.cost_per_event) {
@@ -978,6 +976,10 @@ impl RateLimiterAdmissionGate {
                 stats.delayed_total += 1;
                 stats.delayed_window += 1;
                 stats.pulse_delayed_events += 1;
+                stats.delay_seconds_total += wait.as_secs_f64();
+                let wait_ms = wait.as_millis() as u64;
+                stats.pulse_delay_ms_total = stats.pulse_delay_ms_total.saturating_add(wait_ms);
+                stats.pulse_delay_ms_max = stats.pulse_delay_ms_max.max(wait_ms);
             }
             Some(wait)
         }
@@ -1185,12 +1187,11 @@ impl MiddlewareFactory for RateLimiterFactory {
         config: &StageConfig,
         stage_type: obzenflow_core::event::context::StageType,
         control_middleware: &std::sync::Arc<super::ControlMiddlewareAggregator>,
-    ) {
+    ) -> crate::middleware::MiddlewareFactoryResult<()> {
         use obzenflow_core::event::context::StageType as St;
-        let Ok(validated) = self.validated_config() else {
-            // An invalid config surfaces through `create`; nothing to register.
-            return;
-        };
+        let validated = self.validated_config().map_err(|err| {
+            MiddlewareFactoryError::invalid_configuration(self.label(), &config.name, err)
+        })?;
         // FLOWIP-114m: finite (and any non-infinite) source charges on a
         // successful delivery at PostAdmit; an infinite source paces pre-poll.
         let charge_at = match stage_type {
@@ -1209,6 +1210,7 @@ impl MiddlewareFactory for RateLimiterFactory {
             charge_at,
         );
         control_middleware.register_source_admission(config.stage_id, std::sync::Arc::new(gate));
+        Ok(())
     }
 
     fn supported_stage_types(&self) -> &[StageType] {

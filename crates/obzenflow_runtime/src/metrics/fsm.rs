@@ -1134,6 +1134,21 @@ impl MetricsStore {
             } else {
                 "closed"
             };
+            if state_label == "open" {
+                let from_state = self
+                    .circuit_breaker_last_state
+                    .get(&stage_id)
+                    .map(String::as_str)
+                    .unwrap_or("closed");
+                if from_state != "open" {
+                    let transition_key = (stage_id, from_state.to_string(), "open".to_string());
+                    let count = self
+                        .circuit_breaker_state_transitions_total
+                        .entry(transition_key)
+                        .or_insert(0);
+                    *count = (*count).max(runtime_ctx.cb_opened_total.max(1));
+                }
+            }
             self.set_circuit_breaker_last_state(stage_id, state_label);
         }
 

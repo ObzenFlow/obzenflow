@@ -5,11 +5,14 @@
 //! Async finite source supervisor implementation using HandlerSupervised pattern
 
 use crate::replay::{ReplayContextTemplate, ReplayDriver};
+use crate::stages::common::control_strategies::{AdmissionGate, AttemptObserver, AttemptOutcome};
 use crate::stages::common::handlers::AsyncFiniteSourceHandler;
 use crate::stages::common::supervision::flow_context_factory::make_flow_context;
 use crate::stages::source::replay_lifecycle::ReplayCompletionGuard;
 use crate::stages::source::supervision::{
-    drain_pending_outputs_async, emit_batch_to_pending_outputs, per_data_event_duration_for_batch,
+    admit_held, admit_prepoll, batch_attempt_outcome, drain_pending_outputs_async,
+    emit_batch_to_pending_outputs, per_data_event_duration_for_batch, HeldDecision,
+    PrePollDecision,
 };
 use crate::supervised_base::base::Supervisor;
 use crate::supervised_base::{EventLoopDirective, EventReceiver, HandlerSupervised, StateWatcher};
@@ -56,6 +59,12 @@ pub(crate) struct AsyncFiniteSourceSupervisor<
 
     /// Guard that ensures ReplayLifecycle::Completed is emitted once (FLOWIP-095a).
     pub(crate) replay_completion: ReplayCompletionGuard,
+
+    /// Runtime-owned source admission gates (FLOWIP-115a).
+    pub(crate) admission_gates: Vec<Arc<dyn AdmissionGate>>,
+
+    /// Runtime-owned source attempt observers (FLOWIP-115a).
+    pub(crate) attempt_observers: Vec<Arc<dyn AttemptObserver>>,
 }
 
 impl<H: AsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Supervisor
@@ -495,10 +504,37 @@ impl<H: AsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
                         ))),
                     }
                 } else {
+                    let attempt = match admit_prepoll(
+                        &self.admission_gates,
+                        self.attempt_observers.clone(),
+                        Some(&mut self.external_events),
+                        || FiniteSourceEvent::Error("External control channel closed".to_string()),
+                    )
+                    .await?
+                    {
+                        PrePollDecision::Proceed(attempt) => attempt,
+                        PrePollDecision::Interrupted(directive) => return Ok(directive),
+                        PrePollDecision::RejectToCompletion { reason } => {
+                            tracing::warn!(
+                                stage_name = %ctx.stage_name,
+                                reason = %reason,
+                                "Async finite source admission rejected; completing source"
+                            );
+                            return Ok(EventLoopDirective::Transition(
+                                FiniteSourceEvent::Completed,
+                            ));
+                        }
+                    };
+
                     let tick_started_at = Instant::now();
                     let next_result = tokio::select! {
                         biased;
                         maybe_event = self.external_events.recv() => {
+                            attempt
+                                .settle(AttemptOutcome::Aborted {
+                                    reason: "async finite source poll interrupted".to_string(),
+                                })
+                                .await?;
                             match maybe_event {
                                 Some(event) => return Ok(EventLoopDirective::Transition(event)),
                                 None => {
@@ -518,6 +554,33 @@ impl<H: AsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
                                 .event_loops_with_work_total
                                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
+                            let outcome = batch_attempt_outcome(&events);
+                            if matches!(outcome, AttemptOutcome::Succeeded) {
+                                match admit_held(
+                                    &self.admission_gates,
+                                    Some(&mut self.external_events),
+                                    || {
+                                        FiniteSourceEvent::Error(
+                                            "External control channel closed".to_string(),
+                                        )
+                                    },
+                                )
+                                .await
+                                {
+                                    HeldDecision::Proceed => {}
+                                    HeldDecision::Interrupted(directive) => {
+                                        attempt
+                                            .settle(AttemptOutcome::Aborted {
+                                                reason:
+                                                    "async finite source held batch admission interrupted"
+                                                        .to_string(),
+                                            })
+                                            .await?;
+                                        return Ok(directive);
+                                    }
+                                }
+                            }
+
                             let data_events_in_tick =
                                 events.iter().filter(|event| event.is_data()).count();
                             let per_data_event_duration = per_data_event_duration_for_batch(
@@ -531,14 +594,24 @@ impl<H: AsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
                                 per_data_event_duration,
                                 &mut ctx.pending_outputs,
                             );
+                            attempt.settle(outcome).await?;
 
                             Ok(EventLoopDirective::Continue)
                         }
-                        Ok(Some(_events)) => Ok(EventLoopDirective::Continue),
+                        Ok(Some(_events)) => {
+                            attempt.settle(AttemptOutcome::Succeeded).await?;
+                            Ok(EventLoopDirective::Continue)
+                        }
                         Ok(None) => {
+                            attempt.settle(AttemptOutcome::Succeeded).await?;
                             Ok(EventLoopDirective::Transition(FiniteSourceEvent::Completed))
                         }
                         Err(e) => {
+                            attempt
+                                .settle(AttemptOutcome::Failed {
+                                    cause: e.to_string(),
+                                })
+                                .await?;
                             tracing::error!(
                                 stage_name = %ctx.stage_name,
                                 error = %e,

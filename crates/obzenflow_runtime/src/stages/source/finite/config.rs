@@ -4,12 +4,13 @@
 
 //! Configuration for finite source stages
 
+use crate::stages::common::control_strategies::{AdmissionGate, AttemptObserver};
 use crate::stages::source::strategies::CompletionGate;
 use obzenflow_core::StageId;
 use std::sync::Arc;
 
 /// Configuration for a finite source stage
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct FiniteSourceConfig {
     /// Stage ID
     pub stage_id: StageId,
@@ -23,4 +24,23 @@ pub struct FiniteSourceConfig {
     /// Optional source control strategy for shutdown / FlowControl decisions.
     /// When not provided, the builder will default to JonestownSourceStrategy.
     pub control_strategy: Option<Arc<dyn CompletionGate>>,
+
+    /// Runtime-owned source admission gates (FLOWIP-115a).
+    pub admission_gates: Vec<Arc<dyn AdmissionGate>>,
+
+    /// Runtime-owned source attempt observers (FLOWIP-115a).
+    pub attempt_observers: Vec<Arc<dyn AttemptObserver>>,
+}
+
+impl std::fmt::Debug for FiniteSourceConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FiniteSourceConfig")
+            .field("stage_id", &self.stage_id)
+            .field("stage_name", &self.stage_name)
+            .field("flow_name", &self.flow_name)
+            .field("control_strategy", &self.control_strategy)
+            .field("admission_gates", &self.admission_gates.len())
+            .field("attempt_observers", &self.attempt_observers.len())
+            .finish()
+    }
 }

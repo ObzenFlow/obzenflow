@@ -5,11 +5,13 @@
 //! Infinite source supervisor implementation using HandlerSupervised pattern
 
 use crate::replay::{ReplayContextTemplate, ReplayDriver};
+use crate::stages::common::control_strategies::{AdmissionGate, AttemptObserver, AttemptOutcome};
 use crate::stages::common::handlers::InfiniteSourceHandler;
 use crate::stages::common::supervision::flow_context_factory::make_flow_context;
 use crate::stages::source::replay_lifecycle::ReplayCompletionGuard;
 use crate::stages::source::supervision::{
-    drain_pending_outputs_sync, emit_batch_to_pending_outputs, per_data_event_duration_for_batch,
+    admit_prepoll, batch_attempt_outcome, drain_pending_outputs_sync,
+    emit_batch_to_pending_outputs, per_data_event_duration_for_batch, PrePollDecision,
 };
 use crate::supervised_base::base::Supervisor;
 use crate::supervised_base::idle_backoff::IdleBackoff;
@@ -56,6 +58,12 @@ pub(crate) struct InfiniteSourceSupervisor<
 
     /// Guard that ensures ReplayLifecycle::Completed is emitted once (FLOWIP-095a).
     pub(crate) replay_completion: ReplayCompletionGuard,
+
+    /// Runtime-owned source admission gates (FLOWIP-115a).
+    pub(crate) admission_gates: Vec<Arc<dyn AdmissionGate>>,
+
+    /// Runtime-owned source attempt observers (FLOWIP-115a).
+    pub(crate) attempt_observers: Vec<Arc<dyn AttemptObserver>>,
 }
 
 impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Supervisor
@@ -489,6 +497,34 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
                         ))),
                     }
                 } else {
+                    let attempt = match admit_prepoll(
+                        &self.admission_gates,
+                        self.attempt_observers.clone(),
+                        None,
+                        || {
+                            InfiniteSourceEvent::Error(
+                                "External control channel closed".to_string(),
+                            )
+                        },
+                    )
+                    .await?
+                    {
+                        PrePollDecision::Proceed(attempt) => attempt,
+                        PrePollDecision::Interrupted(directive) => return Ok(directive),
+                        PrePollDecision::RejectToCompletion { reason } => {
+                            tracing::warn!(
+                                stage_name = %ctx.stage_name,
+                                reason = %reason,
+                                "Infinite source admission rejected; beginning completion"
+                            );
+                            ctx.completion_reason =
+                                InfiniteSourceCompletionReason::ArchiveExhausted;
+                            return Ok(EventLoopDirective::Transition(
+                                InfiniteSourceEvent::BeginDrain,
+                            ));
+                        }
+                    };
+
                     // Get next batch of events from handler.
                     // 051b: handler now returns Result<Vec<ChainEvent>, SourceError>.
                     let tick_started_at = Instant::now();
@@ -509,6 +545,7 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
                                 tick_duration,
                                 data_events_in_tick,
                             );
+                            let outcome = batch_attempt_outcome(&events);
                             emit_batch_to_pending_outputs(
                                 events,
                                 &stage_flow_context,
@@ -516,6 +553,7 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
                                 per_data_event_duration,
                                 &mut ctx.pending_outputs,
                             );
+                            attempt.settle(outcome).await?;
 
                             tracing::trace!(
                                 stage_name = %ctx.stage_name,
@@ -525,12 +563,18 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
                             Ok(EventLoopDirective::Continue)
                         }
                         Ok(_events) => {
+                            attempt.settle(AttemptOutcome::Succeeded).await?;
                             // Handler advanced but produced no data/control events this tick.
                             let delay = self.idle_backoff.next_delay();
                             tokio::time::sleep(delay).await;
                             Ok(EventLoopDirective::Continue)
                         }
                         Err(e) => {
+                            attempt
+                                .settle(AttemptOutcome::Failed {
+                                    cause: e.to_string(),
+                                })
+                                .await?;
                             self.idle_backoff.reset();
                             // SourceError surfaced from handler; delegate to control strategy
                             // via the standard error path.

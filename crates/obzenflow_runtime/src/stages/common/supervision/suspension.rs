@@ -18,9 +18,6 @@
 //! These items are the reusable machinery the supervisor loop and the binding
 //! slices consume: `suspend_until` is wired into the signal `Pause` path, and
 //! `AdmittedAttempt` is consumed by the admission seams in 115a/115b/115d.
-//! Until admission has a non-test caller, the module permits dead code; the
-//! allowance is removed as each consumer lands.
-#![allow(dead_code)]
 
 use crate::stages::common::control_strategies::{
     AdmissionPosition, AttemptObserver, AttemptOutcome, WakeOn,

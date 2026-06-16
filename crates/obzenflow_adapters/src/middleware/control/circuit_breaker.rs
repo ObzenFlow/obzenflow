@@ -865,7 +865,14 @@ impl CircuitBreakerMiddleware {
                         .and_then(|guard| *guard)
                         .map(|opened_at| self.cooldown.saturating_sub(opened_at.elapsed()))
                         .unwrap_or(self.cooldown);
-                    SourceAdmit::Pause(cooldown_remaining)
+                    if let Ok(mut stats) = self.stats.lock() {
+                        stats.requests_rejected += 1;
+                    }
+                    self.rejections_total.fetch_add(1, Ordering::Relaxed);
+                    SourceAdmit::Reject(format!(
+                        "circuit breaker open; cooldown remaining {}ms",
+                        cooldown_remaining.as_millis()
+                    ))
                 }
             }
             CircuitState::HalfOpen => self.source_reserve_probe(),
@@ -906,6 +913,12 @@ impl CircuitBreakerMiddleware {
     /// mode. RateBased source breakers count failures but are not yet tripped on
     /// this path. Lifecycle events are deferred; counters stay accurate.
     fn source_settle(&self, outcome: SourceOutcome) {
+        if !matches!(outcome, SourceOutcome::Inconclusive) {
+            if let Ok(mut stats) = self.stats.lock() {
+                stats.requests_processed += 1;
+            }
+        }
+
         let pending = self
             .source_pending_probe
             .lock()
@@ -1157,17 +1170,16 @@ impl CircuitBreakerMiddleware {
 
 /// FLOWIP-115a: the source `PrePoll` admission answer from
 /// [`CircuitBreakerMiddleware::source_admit`].
-#[derive(Debug, Clone, Copy)]
-#[allow(dead_code)] // Used by the source control ports wired in Step 4.
+#[derive(Debug, Clone)]
 enum SourceAdmit {
     Continue,
     Pause(Duration),
+    Reject(String),
 }
 
 /// FLOWIP-115a: the source-path outcome handed to
 /// [`CircuitBreakerMiddleware::source_settle`].
 #[derive(Debug, Clone, Copy)]
-#[allow(dead_code)] // Used by the source control ports wired in Step 4.
 enum SourceOutcome {
     /// The poll produced output or reached a clean EOF.
     Success,
@@ -1181,7 +1193,6 @@ enum SourceOutcome {
 /// FLOWIP-115a: source admission gate for the circuit breaker. Shares one
 /// `Arc<CircuitBreakerMiddleware>` with the attempt observer and the completion
 /// strategy, so all three faces read and write the same breaker state.
-#[allow(dead_code)] // Constructed and registered by FLOWIP-115a Step 4 wiring.
 struct CircuitBreakerAdmissionGate {
     breaker: Arc<CircuitBreakerMiddleware>,
 }
@@ -1195,13 +1206,13 @@ impl AdmissionGate for CircuitBreakerAdmissionGate {
             SourceAdmit::Pause(delay) => AdmissionDecision::Pause {
                 wake: WakeOn::At(Instant::now() + delay),
             },
+            SourceAdmit::Reject(reason) => AdmissionDecision::RejectAttempt { reason },
         }
     }
 }
 
 /// FLOWIP-115a: source attempt observer that settles the circuit breaker probe
 /// and Closed-state failure counting against the per-poll outcome.
-#[allow(dead_code)] // Constructed and registered by FLOWIP-115a Step 4 wiring.
 struct CircuitBreakerAttemptObserver {
     breaker: Arc<CircuitBreakerMiddleware>,
 }
@@ -2815,15 +2826,12 @@ impl MiddlewareFactory for CircuitBreakerFactory {
         config: &StageConfig,
         _stage_type: obzenflow_core::event::context::StageType,
         control_middleware: &std::sync::Arc<super::ControlMiddlewareAggregator>,
-    ) {
+    ) -> crate::middleware::MiddlewareFactoryResult<()> {
         // Build one breaker instance (registering its cb_state and snapshotter,
         // which the CompletionGate and metrics path read), then share it across
         // the admission gate and the attempt observer. The breaker gates
         // pre-poll regardless of source kind, so stage type is irrelevant here.
-        let Ok(middleware) = self.build_middleware_keyed(config, control_middleware.clone(), None)
-        else {
-            return;
-        };
+        let middleware = self.build_middleware_keyed(config, control_middleware.clone(), None)?;
         let breaker = std::sync::Arc::new(middleware);
         control_middleware.register_source_admission(
             config.stage_id,
@@ -2835,6 +2843,7 @@ impl MiddlewareFactory for CircuitBreakerFactory {
             config.stage_id,
             std::sync::Arc::new(CircuitBreakerAttemptObserver { breaker }),
         );
+        Ok(())
     }
 
     fn safety_level(&self) -> MiddlewareSafety {

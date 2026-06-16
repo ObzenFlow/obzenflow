@@ -330,14 +330,10 @@ impl<H: AsyncFiniteSourceHandler> AsyncFiniteSourceHandler for MiddlewareAsyncFi
                 SourceMiddlewarePhase::RateLimiterGate | SourceMiddlewarePhase::Ordinary => {}
             }
 
-            // FLOWIP-114o: the rate limiter awaits its permit as a cancellable
-            // future via `source_admit`, so the supervisor's biased select can
-            // interrupt the wait on drain/EOF/cancellation/shutdown. Every other
-            // middleware falls through to the synchronous `pre_handle`.
-            let action = match middleware.clone().as_source_pacer() {
-                Some(pacer) => pacer.source_admit(&synthetic_event, &mut ctx).await,
-                None => middleware.pre_handle(&synthetic_event, &mut ctx),
-            };
+            // FLOWIP-115a: source policies are driven structurally by the
+            // supervisor. Any remaining middleware in this wrapper is ordinary
+            // observation/enrichment and uses the regular handler hook.
+            let action = middleware.pre_handle(&synthetic_event, &mut ctx);
             if let Some(message) =
                 crate::middleware::observation_short_circuit(middleware.as_ref(), &action)
             {
@@ -497,15 +493,10 @@ impl<H: AsyncInfiniteSourceHandler> AsyncInfiniteSourceHandler
                 continue;
             }
 
-            // FLOWIP-114o: the rate limiter awaits its permit as a cancellable
-            // future via `source_admit`, so the supervisor's biased select can
-            // interrupt the wait on drain/EOF/cancellation/shutdown. The circuit
-            // breaker and any other gate fall through to the synchronous
-            // `pre_handle`.
-            let action = match middleware.clone().as_source_pacer() {
-                Some(pacer) => pacer.source_admit(&synthetic_event, &mut ctx).await,
-                None => middleware.pre_handle(&synthetic_event, &mut ctx),
-            };
+            // FLOWIP-115a: source policies are driven structurally by the
+            // supervisor. Any remaining middleware in this wrapper is ordinary
+            // observation/enrichment and uses the regular handler hook.
+            let action = middleware.pre_handle(&synthetic_event, &mut ctx);
             if let Some(message) =
                 crate::middleware::observation_short_circuit(middleware.as_ref(), &action)
             {

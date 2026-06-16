@@ -671,8 +671,8 @@ async fn metrics_circuit_breaker_cumulative_are_exported_and_trippable() -> Resu
     )
     .ok_or_else(|| anyhow!("missing circuit_breaker_successes_total for {cb_stage_label}"))?;
     assert!(
-        (successes_total - 3.0).abs() < f64::EPSILON,
-        "expected circuit_breaker_successes_total=3 for source data/recovery/terminal polls, got {successes_total}"
+        (successes_total - 2.0).abs() < f64::EPSILON,
+        "expected circuit_breaker_successes_total=2 for successful source attempts, got {successes_total}"
     );
 
     let failures_total = metric_line_value(
