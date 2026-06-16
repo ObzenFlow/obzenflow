@@ -8,6 +8,9 @@ use crate::dsl::stage_descriptor::StageDescriptor;
 use crate::dsl::StageCreationResult;
 use async_trait::async_trait;
 use obzenflow_adapters::middleware::{control::ControlMiddlewareAggregator, MiddlewareFactory};
+use obzenflow_core::ai::{
+    AiMapReduceChunkFailed, AiMapReducePlanningManifest, AiMapReduceTaggedPartial,
+};
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
 use obzenflow_core::TypedPayload;
@@ -1082,6 +1085,33 @@ fn select_downstream_input_hint<'a>(
     (EdgeInputRole::Input, &downstream_metadata.input_type)
 }
 
+fn ai_map_reduce_internal_transport_feeds(
+    topology: &Topology,
+    edge: &obzenflow_topology::DirectedEdge,
+) -> Option<Vec<TypeHint>> {
+    let upstream = topology.stage_info(edge.from)?.subgraph.as_ref()?;
+    let downstream = topology.stage_info(edge.to)?.subgraph.as_ref()?;
+
+    if upstream.subgraph_id != downstream.subgraph_id
+        || upstream.kind != "ai_map_reduce"
+        || downstream.kind != "ai_map_reduce"
+        || downstream.role != "collect"
+    {
+        return None;
+    }
+
+    match upstream.role.as_str() {
+        "chunk" => Some(vec![
+            TypeHint::exact_payload::<AiMapReducePlanningManifest>(),
+        ]),
+        "map" => Some(vec![
+            TypeHint::exact_payload::<AiMapReduceTaggedPartial<serde_json::Value>>(),
+            TypeHint::exact_payload::<AiMapReduceChunkFailed>(),
+        ]),
+        _ => None,
+    }
+}
+
 /// Derive the runtime-owned feed plan from DSL descriptors and forward edges.
 ///
 /// This is the authoritative runtime projection for FLOWIP-120b. It deliberately
@@ -1129,6 +1159,30 @@ pub fn derive_feed_plan(
         let Some(downstream_metadata) = downstream_descriptor.typing_metadata() else {
             continue;
         };
+
+        if let Some(transport_feeds) = ai_map_reduce_internal_transport_feeds(topology, edge) {
+            for selected_hint in transport_feeds {
+                if matches!(selected_hint, TypeHint::Unspecified) {
+                    continue;
+                }
+
+                let selected_payload =
+                    payload_descriptor_from_type_hint(&selected_hint, FactVisibility::Routable);
+                let selected_payload_key = selected_payload.payload_key();
+
+                feeds.push(LogicalFeed {
+                    key: FeedKey::new(
+                        upstream_stage_id,
+                        downstream_stage_id,
+                        selected_payload_key,
+                        FeedRole::Input,
+                    ),
+                    selected_payload,
+                });
+            }
+
+            continue;
+        }
 
         let (input_role, downstream_input_hint) = select_downstream_input_hint(
             upstream_stage_id,
