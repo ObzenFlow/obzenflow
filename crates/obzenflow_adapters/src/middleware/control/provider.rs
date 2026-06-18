@@ -2,24 +2,27 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Concrete implementation of `ControlMiddlewareProvider`.
+//! Concrete implementation of `ControlPlaneProvider`.
 //!
 //! This flow-scoped aggregator collects registrations from circuit breaker and
-//! rate limiter middleware instances and exposes them through the core trait so
-//! runtime_services can consume control middleware state without global state.
+//! rate limiter middleware instances and exposes them through the runtime
+//! control-plane port so runtime services can consume read-only control state
+//! without depending on adapter middleware traits.
 
-use crate::middleware::SourcePolicy;
-use obzenflow_core::control_middleware::{
-    CircuitBreakerSnapshotter, ControlMiddlewareProvider, RateLimiterSnapshotter,
-};
+use crate::middleware::{EffectTypeKey, SourcePolicy};
 use obzenflow_core::id::StageId;
+use obzenflow_runtime::control_plane::{
+    CircuitBreakerSnapshotter, CircuitBreakerStateView, ControlPlaneProvider,
+    RateLimiterSnapshotter,
+};
 use std::collections::HashMap;
-use std::sync::atomic::AtomicU8;
 use std::sync::{Arc, RwLock};
 
 struct CircuitBreakerRegistration {
     metrics_fn: Arc<CircuitBreakerSnapshotter>,
-    state: Arc<AtomicU8>,
+    /// FLOWIP-115b: typed read-only state view published by the breaker, the
+    /// single breaker state authority.
+    state_view: Arc<dyn CircuitBreakerStateView>,
 }
 
 struct RateLimiterRegistration {
@@ -30,7 +33,7 @@ struct RateLimiterRegistration {
 /// instance under `Some(effect_type)` (FLOWIP-120c gap G3). One policy
 /// instance guards one protected dependency, so per-effect cardinality is
 /// bounded by the stage's declared `effects:` set.
-type ControlKey = (StageId, Option<String>);
+type ControlKey = (StageId, Option<EffectTypeKey>);
 
 /// Aggregates control middleware from multiple stages.
 ///
@@ -53,30 +56,33 @@ impl ControlMiddlewareAggregator {
         &self,
         stage_id: StageId,
         metrics_fn: Arc<CircuitBreakerSnapshotter>,
-        state: Arc<AtomicU8>,
+        state_view: Arc<dyn CircuitBreakerStateView>,
     ) {
-        self.register_circuit_breaker_keyed(stage_id, None, metrics_fn, state);
+        self.register_circuit_breaker_keyed(stage_id, None, metrics_fn, state_view);
     }
 
     /// Register a per-effect circuit breaker instance (FLOWIP-120c).
     pub fn register_circuit_breaker_for_effect(
         &self,
         stage_id: StageId,
-        effect_type: String,
+        effect_type: EffectTypeKey,
         metrics_fn: Arc<CircuitBreakerSnapshotter>,
-        state: Arc<AtomicU8>,
+        state_view: Arc<dyn CircuitBreakerStateView>,
     ) {
-        self.register_circuit_breaker_keyed(stage_id, Some(effect_type), metrics_fn, state);
+        self.register_circuit_breaker_keyed(stage_id, Some(effect_type), metrics_fn, state_view);
     }
 
     fn register_circuit_breaker_keyed(
         &self,
         stage_id: StageId,
-        effect_type: Option<String>,
+        effect_type: Option<EffectTypeKey>,
         metrics_fn: Arc<CircuitBreakerSnapshotter>,
-        state: Arc<AtomicU8>,
+        state_view: Arc<dyn CircuitBreakerStateView>,
     ) {
-        let registration = CircuitBreakerRegistration { metrics_fn, state };
+        let registration = CircuitBreakerRegistration {
+            metrics_fn,
+            state_view,
+        };
 
         self.circuit_breakers
             .write()
@@ -96,7 +102,7 @@ impl ControlMiddlewareAggregator {
     pub fn register_rate_limiter_for_effect(
         &self,
         stage_id: StageId,
-        effect_type: String,
+        effect_type: EffectTypeKey,
         metrics_fn: Arc<RateLimiterSnapshotter>,
     ) {
         self.register_rate_limiter_keyed(stage_id, Some(effect_type), metrics_fn);
@@ -105,7 +111,7 @@ impl ControlMiddlewareAggregator {
     fn register_rate_limiter_keyed(
         &self,
         stage_id: StageId,
-        effect_type: Option<String>,
+        effect_type: Option<EffectTypeKey>,
         metrics_fn: Arc<RateLimiterSnapshotter>,
     ) {
         let registration = RateLimiterRegistration { metrics_fn };
@@ -137,7 +143,7 @@ impl ControlMiddlewareAggregator {
     }
 }
 
-impl ControlMiddlewareProvider for ControlMiddlewareAggregator {
+impl ControlPlaneProvider for ControlMiddlewareAggregator {
     fn circuit_breaker_snapshotter(
         &self,
         stage_id: &StageId,
@@ -157,12 +163,15 @@ impl ControlMiddlewareProvider for ControlMiddlewareAggregator {
             .map(|reg| reg.metrics_fn.clone())
     }
 
-    fn circuit_breaker_state(&self, stage_id: &StageId) -> Option<Arc<AtomicU8>> {
+    fn circuit_breaker_state_view(
+        &self,
+        stage_id: &StageId,
+    ) -> Option<Arc<dyn CircuitBreakerStateView>> {
         self.circuit_breakers
             .read()
             .expect("ControlMiddlewareAggregator: circuit_breakers poisoned read lock")
             .get(&(*stage_id, None))
-            .map(|reg| reg.state.clone())
+            .map(|reg| reg.state_view.clone())
     }
 
     fn effect_circuit_breaker_snapshotters(
@@ -176,7 +185,11 @@ impl ControlMiddlewareProvider for ControlMiddlewareAggregator {
             .iter()
             .filter_map(|((sid, effect), reg)| {
                 (sid == stage_id)
-                    .then(|| effect.clone().map(|e| (e, reg.metrics_fn.clone())))
+                    .then(|| {
+                        effect
+                            .clone()
+                            .map(|e| (e.as_str().to_string(), reg.metrics_fn.clone()))
+                    })
                     .flatten()
             })
             .collect();
@@ -195,7 +208,11 @@ impl ControlMiddlewareProvider for ControlMiddlewareAggregator {
             .iter()
             .filter_map(|((sid, effect), reg)| {
                 (sid == stage_id)
-                    .then(|| effect.clone().map(|e| (e, reg.metrics_fn.clone())))
+                    .then(|| {
+                        effect
+                            .clone()
+                            .map(|e| (e.as_str().to_string(), reg.metrics_fn.clone()))
+                    })
                     .flatten()
             })
             .collect();

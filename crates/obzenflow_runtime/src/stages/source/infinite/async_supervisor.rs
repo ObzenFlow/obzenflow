@@ -13,7 +13,7 @@ use crate::stages::source::supervision::{
     per_data_event_duration_for_batch, stage_boundary_control_events,
 };
 use crate::stages::source::{
-    SourceBoundaryMiddleware, SourceBoundaryOutcome, SourcePollCompletion, SourcePollReport,
+    SourceBoundary, SourceBoundaryOutcome, SourcePollCompletion, SourcePollReport,
 };
 use crate::supervised_base::base::Supervisor;
 use crate::supervised_base::{EventLoopDirective, EventReceiver, HandlerSupervised, StateWatcher};
@@ -65,7 +65,7 @@ pub(crate) struct AsyncInfiniteSourceSupervisor<
     pub(crate) replay_completion: ReplayCompletionGuard,
 
     /// Runtime-neutral source boundary seam (FLOWIP-115a).
-    pub(crate) source_boundary: Option<Arc<dyn SourceBoundaryMiddleware>>,
+    pub(crate) source_boundary: Option<Arc<dyn SourceBoundary>>,
 
     /// Completion was observed by the source boundary after emitting control
     /// events; drain those events before beginning source drain.

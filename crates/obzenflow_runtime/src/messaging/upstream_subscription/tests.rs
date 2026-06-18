@@ -6,6 +6,7 @@ use super::{
     ContractConfig, ContractStatus, ContractsWiring, FeedIdentity, PollResult, ReaderProgress,
     ReaderSelectionPolicy, SelectedFeedMetadata, SelectedFeedRole, UpstreamSubscription,
 };
+use crate::control_plane::{ControlPlaneProvider, NoControlPlane};
 use async_trait::async_trait;
 use obzenflow_core::event::context::causality_context::CausalityContext;
 use obzenflow_core::event::event_envelope::EventEnvelope;
@@ -29,10 +30,7 @@ use obzenflow_core::journal::journal_error::JournalError;
 use obzenflow_core::journal::journal_owner::JournalOwner;
 use obzenflow_core::journal::journal_reader::JournalReader;
 use obzenflow_core::journal::Journal;
-use obzenflow_core::{
-    ControlMiddlewareProvider, EventId, EventType, NoControlMiddleware, StageId, TransportContract,
-    WriterId,
-};
+use obzenflow_core::{EventId, EventType, StageId, TransportContract, WriterId};
 use serde_json::json;
 use std::collections::HashMap;
 use std::io;
@@ -396,7 +394,7 @@ async fn progress_append_failure_does_not_advance_progress_state() {
         config: ContractConfig::default(),
         system_journal: None,
         reader_stage: None,
-        control_middleware: Arc::new(NoControlMiddleware),
+        control_plane: Arc::new(NoControlPlane),
         include_delivery_contract: false,
         cycle_guard_config: None,
     });
@@ -440,7 +438,7 @@ async fn final_append_failure_keeps_final_emitted_false() {
         config: ContractConfig::default(),
         system_journal: None,
         reader_stage: None,
-        control_middleware: Arc::new(NoControlMiddleware),
+        control_plane: Arc::new(NoControlPlane),
         include_delivery_contract: false,
         cycle_guard_config: None,
     });
@@ -485,7 +483,7 @@ async fn diagnostics_only_eof_check_does_not_emit_final_or_latch_state() {
         config: ContractConfig::default(),
         system_journal: None,
         reader_stage: None,
-        control_middleware: Arc::new(NoControlMiddleware),
+        control_plane: Arc::new(NoControlPlane),
         include_delivery_contract: true,
         cycle_guard_config: None,
     });
@@ -546,7 +544,7 @@ async fn diagnostics_only_eof_check_does_not_emit_stall() {
         config,
         system_journal: Some(system_journal.clone()),
         reader_stage: Some(reader_stage),
-        control_middleware: Arc::new(NoControlMiddleware),
+        control_plane: Arc::new(NoControlPlane),
         include_delivery_contract: true,
         cycle_guard_config: None,
     });
@@ -614,7 +612,7 @@ async fn contract_status_append_failure_keeps_final_emitted_false() {
         config: ContractConfig::default(),
         system_journal: Some(system_journal.clone()),
         reader_stage: Some(reader_stage),
-        control_middleware: Arc::new(NoControlMiddleware),
+        control_plane: Arc::new(NoControlPlane),
         include_delivery_contract: false,
         cycle_guard_config: None,
     });
@@ -670,7 +668,7 @@ async fn progress_contract_heartbeats_are_suppressed_until_data_observed() {
         config: ContractConfig::default(),
         system_journal: Some(system_journal.clone()),
         reader_stage: Some(reader_stage),
-        control_middleware: Arc::new(NoControlMiddleware),
+        control_plane: Arc::new(NoControlPlane),
         include_delivery_contract: false,
         cycle_guard_config: None,
     });
@@ -732,7 +730,7 @@ async fn progress_emission_uses_receipt_watermark_when_delivery_contract_enabled
         config: ContractConfig::default(),
         system_journal: None,
         reader_stage: None,
-        control_middleware: Arc::new(NoControlMiddleware),
+        control_plane: Arc::new(NoControlPlane),
         include_delivery_contract: true,
         cycle_guard_config: None,
     });
@@ -796,7 +794,7 @@ async fn record_delivery_receipt_advances_only_when_receipts_become_contiguous()
         config: ContractConfig::default(),
         system_journal: None,
         reader_stage: None,
-        control_middleware: Arc::new(NoControlMiddleware),
+        control_plane: Arc::new(NoControlPlane),
         include_delivery_contract: true,
         cycle_guard_config: None,
     });
@@ -882,7 +880,7 @@ async fn stall_append_failure_does_not_set_stalled_since() {
         config,
         system_journal: None,
         reader_stage: None,
-        control_middleware: Arc::new(NoControlMiddleware),
+        control_plane: Arc::new(NoControlPlane),
         include_delivery_contract: false,
         cycle_guard_config: None,
     });
@@ -933,7 +931,7 @@ async fn stall_cooloff_suppresses_repeat_stalled_emission() {
         config,
         system_journal: None,
         reader_stage: None,
-        control_middleware: Arc::new(NoControlMiddleware),
+        control_plane: Arc::new(NoControlPlane),
         include_delivery_contract: false,
         cycle_guard_config: None,
     });
@@ -1013,7 +1011,7 @@ async fn idle_reader_without_any_reads_does_not_emit_stall() {
         config,
         system_journal: None,
         reader_stage: None,
-        control_middleware: Arc::new(NoControlMiddleware),
+        control_plane: Arc::new(NoControlPlane),
         include_delivery_contract: false,
         cycle_guard_config: None,
     });
@@ -1077,7 +1075,7 @@ async fn multi_reader_progress_isolated_under_partial_append_failure() {
         config: ContractConfig::default(),
         system_journal: None,
         reader_stage: None,
-        control_middleware: Arc::new(NoControlMiddleware),
+        control_plane: Arc::new(NoControlPlane),
         include_delivery_contract: false,
         cycle_guard_config: None,
     });
@@ -1102,7 +1100,7 @@ async fn multi_reader_progress_isolated_under_partial_append_failure() {
 }
 
 async fn build_upstream_with_seq_divergence(
-    control_middleware: Arc<dyn ControlMiddlewareProvider>,
+    control_plane: Arc<dyn ControlPlaneProvider>,
 ) -> (
     UpstreamSubscription<ChainEvent>,
     Arc<dyn Journal<ChainEvent>>,
@@ -1152,7 +1150,7 @@ async fn build_upstream_with_seq_divergence(
         config: contract_config,
         system_journal: Some(system_journal.clone()),
         reader_stage: Some(reader_stage),
-        control_middleware,
+        control_plane,
         include_delivery_contract: false,
         cycle_guard_config: None,
     });
@@ -1187,7 +1185,7 @@ async fn drive_subscription_to_eof(
 #[tokio::test]
 async fn strict_mode_produces_seq_divergence_and_gap_event() {
     let (mut subscription, contract_journal, system_journal, upstream_stage, reader_stage) =
-        build_upstream_with_seq_divergence(Arc::new(NoControlMiddleware)).await;
+        build_upstream_with_seq_divergence(Arc::new(NoControlPlane)).await;
 
     let mut reader_progress = [ReaderProgress::new(upstream_stage)];
     drive_subscription_to_eof(&mut subscription, &mut reader_progress).await;
@@ -1459,7 +1457,7 @@ async fn transport_only_filters_unselected_data_and_reconciles_selected_writer_s
             config: ContractConfig::default(),
             system_journal: Some(system_journal.clone()),
             reader_stage: Some(reader_stage),
-            control_middleware: Arc::new(NoControlMiddleware),
+            control_plane: Arc::new(NoControlPlane),
             include_delivery_contract: false,
             cycle_guard_config: None,
         })
@@ -1619,7 +1617,7 @@ async fn multi_selected_feeds_emit_direct_contract_status_per_feed() {
             config: ContractConfig::default(),
             system_journal: Some(system_journal.clone()),
             reader_stage: Some(reader_stage),
-            control_middleware: Arc::new(NoControlMiddleware),
+            control_plane: Arc::new(NoControlPlane),
             include_delivery_contract: false,
             cycle_guard_config: None,
         })
@@ -1756,7 +1754,7 @@ async fn multi_selected_feeds_emit_midflight_contract_results_per_feed() {
             config: ContractConfig::default(),
             system_journal: Some(system_journal.clone()),
             reader_stage: Some(reader_stage),
-            control_middleware: Arc::new(NoControlMiddleware),
+            control_plane: Arc::new(NoControlPlane),
             include_delivery_contract: false,
             cycle_guard_config: None,
         })
@@ -2566,7 +2564,7 @@ async fn canonical_merge_contract_read_accounting_fires_at_delivery_not_at_hold(
         config: ContractConfig::default(),
         system_journal: None,
         reader_stage: Some(reader_stage),
-        control_middleware: Arc::new(NoControlMiddleware),
+        control_plane: Arc::new(NoControlPlane),
         include_delivery_contract: false,
         cycle_guard_config: None,
     });

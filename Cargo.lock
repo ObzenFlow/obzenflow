@@ -1580,6 +1580,7 @@ dependencies = [
  "http 1.4.0",
  "obzenflow_core",
  "obzenflow_runtime",
+ "ring",
  "serde",
  "serde_json",
  "tempfile",

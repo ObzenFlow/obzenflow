@@ -75,7 +75,7 @@ pub struct EffectBoundaryReport {
 /// every policy that admitted observes how the attempt ended on the way out,
 /// whichever arm ended it.
 #[async_trait]
-pub trait EffectBoundaryMiddleware: Send + Sync {
+pub trait EffectBoundary: Send + Sync {
     async fn around_effect(
         &self,
         identity: &EffectIdentity,

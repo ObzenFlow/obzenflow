@@ -11,16 +11,15 @@ use crate::dsl::typing::StageTypingMetadata;
 use crate::dsl::StageCreationResult;
 use crate::stage_handle_adapter::StageHandleAdapter;
 use async_trait::async_trait;
-use obzenflow_adapters::middleware::control::{
-    CircuitBreakerSourceStrategy, ControlMiddlewareAggregator,
-};
+use obzenflow_adapters::middleware::control::ControlMiddlewareAggregator;
 use obzenflow_adapters::middleware::{
     validate_middleware_safety, AsyncFiniteSourceHandlerExt, AsyncInfiniteSourceHandlerExt,
     AsyncTransformHandlerExt, ControlMiddlewareRole, FiniteSourceHandlerExt,
-    InfiniteSourceHandlerExt, JoinHandlerMiddlewareExt, Middleware, MiddlewareFactory,
-    OutcomeEnrichmentMiddleware, PerSourcePolicyBoundary, SinkHandlerExt,
+    InfiniteSourceHandlerExt, JoinHandlerMiddlewareExt, Middleware, MiddlewareDeclarationIndex,
+    MiddlewareFactory, MiddlewareSurfaceKind, OutcomeEnrichmentMiddleware,
+    PerSinkDeliveryPolicyBoundary, PerSourcePolicyBoundary, SinkHandlerExt, SinkPolicy,
     StatefulHandlerMiddlewareExt, SystemEnrichmentMiddleware, TimingMiddleware,
-    TransformHandlerExt, UnifiedMiddlewareTransform,
+    TopologyMiddlewareConfigSlot, TransformHandlerExt, UnifiedMiddlewareTransform,
 };
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::{StageId, WriterId};
@@ -48,6 +47,7 @@ use obzenflow_runtime::{
         join::{JoinBuilder, JoinConfig, JoinEvent, JoinReferenceMode, JoinState},
         sink::journal_sink::{
             JournalSinkBuilder, JournalSinkConfig, JournalSinkEvent, JournalSinkState,
+            SinkDeliveryBoundary,
         },
         source::{
             finite::{
@@ -58,7 +58,8 @@ use obzenflow_runtime::{
                 AsyncInfiniteSourceBuilder, InfiniteSourceBuilder, InfiniteSourceConfig,
                 InfiniteSourceEvent, InfiniteSourceState,
             },
-            SourceBoundaryMiddleware,
+            strategies::CompletionGate,
+            SourceBoundary,
         },
         stateful::{StatefulBuilder, StatefulConfig, StatefulEvent, StatefulState},
         transform::{TransformBuilder, TransformConfig, TransformEvent, TransformState},
@@ -69,6 +70,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 const DEFAULT_ASYNC_SOURCE_POLL_TIMEOUT: Duration = Duration::from_secs(30);
+
+fn factory_declares_circuit_breaker(factory: &dyn MiddlewareFactory) -> bool {
+    factory.topology_config_slot() == Some(TopologyMiddlewareConfigSlot::CircuitBreaker)
+}
 
 /// Marker name used by stage macros when the runtime name should be derived from the enclosing
 /// `flow!` binding.
@@ -103,8 +108,11 @@ fn create_system_middleware(
 
 struct SourceMiddlewareBinding {
     all_middleware: Vec<Box<dyn Middleware>>,
-    source_boundary: Option<Arc<dyn SourceBoundaryMiddleware>>,
-    has_circuit_breaker: bool,
+    source_boundary: Option<Arc<dyn SourceBoundary>>,
+    /// FLOWIP-115b: the source completion gate companion supplied by a
+    /// hook-bound source control middleware (the circuit breaker), sharing its
+    /// state view. Replaces the old `has_circuit_breaker` + `try_new` lookup.
+    completion_gate: Option<Arc<dyn CompletionGate>>,
     expects_circuit_breaker: bool,
     expects_rate_limiter: bool,
 }
@@ -120,24 +128,53 @@ fn build_source_middleware_and_register_policies(
     let expects_circuit_breaker = resolved
         .middleware
         .iter()
-        .any(|spec| spec.factory.control_role() == ControlMiddlewareRole::CircuitBreaker);
+        .any(|spec| factory_declares_circuit_breaker(spec.factory.as_ref()));
     let expects_rate_limiter = resolved
         .middleware
         .iter()
         .any(|spec| spec.factory.control_role() == ControlMiddlewareRole::RateLimiter);
 
-    let mut has_circuit_breaker = false;
+    let mut completion_gate: Option<Arc<dyn CompletionGate>> = None;
 
-    for spec in resolved.middleware {
-        match spec.factory.control_role() {
-            ControlMiddlewareRole::CircuitBreaker => {
-                has_circuit_breaker = true;
-                spec.factory
-                    .register_source_policy(config, stage_type, control_middleware)?;
+    for (middleware_index, spec) in resolved.middleware.into_iter().enumerate() {
+        // FLOWIP-115b: hook-bound control middleware that attaches to the source
+        // poll surface is placed by its declaration, not by ControlMiddlewareRole.
+        // It is materialized into a source policy registered in declared order so
+        // it composes with any still-legacy source policy (the rate limiter), and
+        // it supplies the completion-gate companion that shares its state view.
+        let declaration = spec.factory.declaration();
+        if declaration.is_control() && declaration.supports(MiddlewareSurfaceKind::SourcePoll) {
+            let origin = crate::dsl::binder::middleware_origin_from_source(&spec.source);
+            let binding = crate::dsl::binder::materialize_source_poll(
+                spec.factory.as_ref(),
+                config,
+                control_middleware,
+                &origin,
+                MiddlewareDeclarationIndex::resolved(middleware_index),
+            )?;
+            control_middleware.register_source_policy(config.stage_id, binding.policy);
+            if binding.completion_gate.is_some() {
+                completion_gate = binding.completion_gate;
             }
+            continue;
+        }
+
+        match spec.factory.control_role() {
             ControlMiddlewareRole::RateLimiter => {
                 spec.factory
                     .register_source_policy(config, stage_type, control_middleware)?;
+            }
+            ControlMiddlewareRole::CircuitBreaker => {
+                // FLOWIP-115b AC59: a breaker reaching the legacy source role path
+                // did not declare source hooks. Fail closed rather than silently
+                // registering it through the retired route.
+                return Err(format!(
+                    "Stage {:?}: circuit breaker reached the legacy source role path \
+                     without declaring source hooks; hook-bound control must \
+                     materialize onto the SourcePoll surface (FLOWIP-115b)",
+                    config.stage_id
+                )
+                .into());
             }
             ControlMiddlewareRole::None => {
                 all_middleware.push(spec.factory.create(config, control_middleware.clone())?);
@@ -151,14 +188,14 @@ fn build_source_middleware_and_register_policies(
     } else {
         Some(
             Arc::new(PerSourcePolicyBoundary::new(source_policies, writer_id))
-                as Arc<dyn SourceBoundaryMiddleware>,
+                as Arc<dyn SourceBoundary>,
         )
     };
 
     Ok(SourceMiddlewareBinding {
         all_middleware,
         source_boundary,
-        has_circuit_breaker,
+        completion_gate,
         expects_circuit_breaker,
         expects_rate_limiter,
     })
@@ -442,7 +479,7 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> S
         // Create instrumentation configuration
         let instrumentation_config = InstrumentationConfig::default();
         let mut instrumentation = StageInstrumentation::new_with_config(instrumentation_config);
-        let control_provider: Arc<dyn obzenflow_core::ControlMiddlewareProvider> =
+        let control_provider: Arc<dyn obzenflow_runtime::control_plane::ControlPlaneProvider> =
             control_middleware.clone();
 
         // Resolve flow and stage middleware
@@ -464,7 +501,7 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> S
         )?;
 
         instrumentation
-            .bind_control_middleware(
+            .bind_control_plane(
                 &config.stage_id,
                 &control_provider,
                 source_binding.expects_circuit_breaker,
@@ -489,14 +526,7 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> S
             stage_id: config.stage_id,
             stage_name: config.name.clone(),
             flow_name: config.flow_name.clone(),
-            control_strategy: if source_binding.has_circuit_breaker {
-                Some(Arc::new(
-                    CircuitBreakerSourceStrategy::try_new(config.stage_id, &control_provider)
-                        .map_err(|e| e.to_string())?,
-                ))
-            } else {
-                None
-            },
+            control_strategy: source_binding.completion_gate,
             source_boundary: source_binding.source_boundary,
         };
 
@@ -603,7 +633,7 @@ impl<H: AsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
         // Create instrumentation configuration
         let instrumentation_config = InstrumentationConfig::default();
         let mut instrumentation = StageInstrumentation::new_with_config(instrumentation_config);
-        let control_provider: Arc<dyn obzenflow_core::ControlMiddlewareProvider> =
+        let control_provider: Arc<dyn obzenflow_runtime::control_plane::ControlPlaneProvider> =
             control_middleware.clone();
 
         // Resolve flow and stage middleware
@@ -624,7 +654,7 @@ impl<H: AsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
         )?;
 
         instrumentation
-            .bind_control_middleware(
+            .bind_control_plane(
                 &config.stage_id,
                 &control_provider,
                 source_binding.expects_circuit_breaker,
@@ -651,14 +681,7 @@ impl<H: AsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
             stage_id: config.stage_id,
             stage_name: config.name.clone(),
             flow_name: config.flow_name.clone(),
-            control_strategy: if source_binding.has_circuit_breaker {
-                Some(Arc::new(
-                    CircuitBreakerSourceStrategy::try_new(config.stage_id, &control_provider)
-                        .map_err(|e| e.to_string())?,
-                ))
-            } else {
-                None
-            },
+            control_strategy: source_binding.completion_gate,
             source_boundary: source_binding.source_boundary,
         };
 
@@ -729,7 +752,7 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
         // Create instrumentation configuration
         let instrumentation_config = InstrumentationConfig::default();
         let mut instrumentation = StageInstrumentation::new_with_config(instrumentation_config);
-        let control_provider: Arc<dyn obzenflow_core::ControlMiddlewareProvider> =
+        let control_provider: Arc<dyn obzenflow_runtime::control_plane::ControlPlaneProvider> =
             control_middleware.clone();
 
         // Resolve flow and stage middleware
@@ -751,7 +774,7 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
         )?;
 
         instrumentation
-            .bind_control_middleware(
+            .bind_control_plane(
                 &config.stage_id,
                 &control_provider,
                 source_binding.expects_circuit_breaker,
@@ -776,14 +799,7 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
             stage_id: config.stage_id,
             stage_name: config.name.clone(),
             flow_name: config.flow_name.clone(),
-            control_strategy: if source_binding.has_circuit_breaker {
-                Some(Arc::new(
-                    CircuitBreakerSourceStrategy::try_new(config.stage_id, &control_provider)
-                        .map_err(|e| e.to_string())?,
-                ))
-            } else {
-                None
-            },
+            control_strategy: source_binding.completion_gate,
             source_boundary: source_binding.source_boundary,
         };
 
@@ -889,7 +905,7 @@ impl<H: AsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
 
         let instrumentation_config = InstrumentationConfig::default();
         let mut instrumentation = StageInstrumentation::new_with_config(instrumentation_config);
-        let control_provider: Arc<dyn obzenflow_core::ControlMiddlewareProvider> =
+        let control_provider: Arc<dyn obzenflow_runtime::control_plane::ControlPlaneProvider> =
             control_middleware.clone();
 
         let resolved = crate::middleware_resolution::resolve_middleware(
@@ -909,7 +925,7 @@ impl<H: AsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
         )?;
 
         instrumentation
-            .bind_control_middleware(
+            .bind_control_plane(
                 &config.stage_id,
                 &control_provider,
                 source_binding.expects_circuit_breaker,
@@ -934,14 +950,7 @@ impl<H: AsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
             stage_id: config.stage_id,
             stage_name: config.name.clone(),
             flow_name: config.flow_name.clone(),
-            control_strategy: if source_binding.has_circuit_breaker {
-                Some(Arc::new(
-                    CircuitBreakerSourceStrategy::try_new(config.stage_id, &control_provider)
-                        .map_err(|e| e.to_string())?,
-                ))
-            } else {
-                None
-            },
+            control_strategy: source_binding.completion_gate,
             source_boundary: source_binding.source_boundary,
         };
 
@@ -1035,7 +1044,7 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Stag
         // Create instrumentation configuration
         let instrumentation_config = InstrumentationConfig::default();
         let mut instrumentation = StageInstrumentation::new_with_config(instrumentation_config);
-        let control_provider: Arc<dyn obzenflow_core::ControlMiddlewareProvider> =
+        let control_provider: Arc<dyn obzenflow_runtime::control_plane::ControlPlaneProvider> =
             control_middleware.clone();
 
         // Create system middleware with instrumentation
@@ -1044,7 +1053,7 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Stag
         let expects_circuit_breaker = resolved
             .middleware
             .iter()
-            .any(|spec| spec.factory.control_role() == ControlMiddlewareRole::CircuitBreaker);
+            .any(|spec| factory_declares_circuit_breaker(spec.factory.as_ref()));
         let expects_rate_limiter = resolved
             .middleware
             .iter()
@@ -1059,7 +1068,7 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Stag
         all_middleware.extend(user_middleware);
 
         instrumentation
-            .bind_control_middleware(
+            .bind_control_plane(
                 &config.stage_id,
                 &control_provider,
                 expects_circuit_breaker,
@@ -1179,7 +1188,7 @@ impl<H: AsyncTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
         // Create instrumentation configuration
         let instrumentation_config = InstrumentationConfig::default();
         let mut instrumentation = StageInstrumentation::new_with_config(instrumentation_config);
-        let control_provider: Arc<dyn obzenflow_core::ControlMiddlewareProvider> =
+        let control_provider: Arc<dyn obzenflow_runtime::control_plane::ControlPlaneProvider> =
             control_middleware.clone();
 
         // Create system middleware with instrumentation
@@ -1188,7 +1197,7 @@ impl<H: AsyncTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
         let expects_circuit_breaker = resolved
             .middleware
             .iter()
-            .any(|spec| spec.factory.control_role() == ControlMiddlewareRole::CircuitBreaker);
+            .any(|spec| factory_declares_circuit_breaker(spec.factory.as_ref()));
         let expects_rate_limiter = resolved
             .middleware
             .iter()
@@ -1203,7 +1212,7 @@ impl<H: AsyncTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
         all_middleware.extend(user_middleware);
 
         instrumentation
-            .bind_control_middleware(
+            .bind_control_plane(
                 &config.stage_id,
                 &control_provider,
                 expects_circuit_breaker,
@@ -1374,7 +1383,7 @@ impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
 
         let instrumentation_config = InstrumentationConfig::default();
         let mut instrumentation = StageInstrumentation::new_with_config(instrumentation_config);
-        let control_provider: Arc<dyn obzenflow_core::ControlMiddlewareProvider> =
+        let control_provider: Arc<dyn obzenflow_runtime::control_plane::ControlPlaneProvider> =
             control_middleware.clone();
 
         // FLOWIP-120c placement split: policy kinds guard individual effects
@@ -1385,9 +1394,9 @@ impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
         // must name the guarded effect per entry.
         let mut shell_specs = Vec::new();
         let mut transitional_policy_specs = Vec::new();
-        for spec in resolved.middleware {
+        for (middleware_index, spec) in resolved.middleware.into_iter().enumerate() {
             if spec.factory.kind() == obzenflow_adapters::middleware::MiddlewareKind::Policy {
-                transitional_policy_specs.push(spec);
+                transitional_policy_specs.push((middleware_index, spec));
             } else {
                 shell_specs.push(spec);
             }
@@ -1409,30 +1418,34 @@ impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
                 .into());
             }
             let effect_type = effect_declarations[0].effect_type;
-            for spec in transitional_policy_specs {
-                let instance: Arc<dyn Middleware> = Arc::from(spec.factory.create_for_effect(
+            for (middleware_index, spec) in transitional_policy_specs {
+                let origin = crate::dsl::binder::middleware_origin_from_source(&spec.source);
+                let policy = crate::dsl::binder::bind_effect_policy(
+                    spec.factory.as_ref(),
                     &config,
-                    control_middleware.clone(),
+                    &control_middleware,
                     effect_type,
-                )?);
-                effect_chains
-                    .entry(effect_type)
-                    .or_default()
-                    .push(obzenflow_adapters::middleware::effect_policy_from_middleware(instance));
+                    &origin,
+                    MiddlewareDeclarationIndex::resolved(middleware_index),
+                )?;
+                effect_chains.entry(effect_type).or_default().push(policy);
             }
         }
 
         for attachment in &self.effect_policies {
-            for factory in &attachment.factories {
-                let instance: Arc<dyn Middleware> = Arc::from(factory.create_for_effect(
+            for (middleware_index, factory) in attachment.factories.iter().enumerate() {
+                let policy = crate::dsl::binder::bind_effect_policy(
+                    factory.as_ref(),
                     &config,
-                    control_middleware.clone(),
+                    &control_middleware,
                     attachment.effect_type,
-                )?);
+                    &obzenflow_adapters::middleware::MiddlewareOrigin::Stage,
+                    MiddlewareDeclarationIndex::effect_policy(middleware_index),
+                )?;
                 effect_chains
                     .entry(attachment.effect_type)
                     .or_default()
-                    .push(obzenflow_adapters::middleware::effect_policy_from_middleware(instance));
+                    .push(policy);
             }
         }
 
@@ -1456,7 +1469,7 @@ impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
         // instances register under their effect key and surface through the
         // per-effect snapshot extension (FLOWIP-120c phase 4).
         instrumentation
-            .bind_control_middleware(&config.stage_id, &control_provider, false, false)
+            .bind_control_plane(&config.stage_id, &control_provider, false, false)
             .map_err(|e| e.to_string())?;
         let instrumentation = Arc::new(instrumentation);
 
@@ -1567,7 +1580,7 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
         // Create instrumentation configuration
         let instrumentation_config = InstrumentationConfig::default();
         let mut instrumentation = StageInstrumentation::new_with_config(instrumentation_config);
-        let control_provider: Arc<dyn obzenflow_core::ControlMiddlewareProvider> =
+        let control_provider: Arc<dyn obzenflow_runtime::control_plane::ControlPlaneProvider> =
             control_middleware.clone();
 
         // Create system middleware with instrumentation
@@ -1576,22 +1589,43 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
         let expects_circuit_breaker = resolved
             .middleware
             .iter()
-            .any(|spec| spec.factory.control_role() == ControlMiddlewareRole::CircuitBreaker);
+            .any(|spec| factory_declares_circuit_breaker(spec.factory.as_ref()));
         let expects_rate_limiter = resolved
             .middleware
             .iter()
             .any(|spec| spec.factory.control_role() == ControlMiddlewareRole::RateLimiter);
 
-        // Add resolved user middleware
-        let user_middleware: Vec<Box<dyn Middleware>> = resolved
-            .middleware
-            .into_iter()
-            .map(|spec| spec.factory.create(&config, control_middleware.clone()))
-            .collect::<Result<_, _>>()?;
-        all_middleware.extend(user_middleware);
+        // FLOWIP-115b: hook-bound control middleware that attaches to the
+        // sink-delivery surface is materialized into a sink policy composed at
+        // the delivery boundary; everything else stays on the handler shell.
+        let mut sink_policies: Vec<Arc<dyn SinkPolicy>> = Vec::new();
+        for (middleware_index, spec) in resolved.middleware.into_iter().enumerate() {
+            let declaration = spec.factory.declaration();
+            if declaration.is_control() && declaration.supports(MiddlewareSurfaceKind::SinkDelivery)
+            {
+                let origin = crate::dsl::binder::middleware_origin_from_source(&spec.source);
+                let policy = crate::dsl::binder::materialize_sink_delivery(
+                    spec.factory.as_ref(),
+                    &config,
+                    &control_middleware,
+                    &origin,
+                    MiddlewareDeclarationIndex::resolved(middleware_index),
+                )?;
+                sink_policies.push(policy);
+            } else {
+                all_middleware.push(spec.factory.create(&config, control_middleware.clone())?);
+            }
+        }
+        let sink_delivery_boundary: Option<Arc<dyn SinkDeliveryBoundary>> =
+            if sink_policies.is_empty() {
+                None
+            } else {
+                Some(Arc::new(PerSinkDeliveryPolicyBoundary::new(sink_policies))
+                    as Arc<dyn SinkDeliveryBoundary>)
+            };
 
         instrumentation
-            .bind_control_middleware(
+            .bind_control_plane(
                 &config.stage_id,
                 &control_provider,
                 expects_circuit_breaker,
@@ -1617,6 +1651,7 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
             buffer_size: None,
             flush_interval_ms: None,
             control_strategy: Some(control_strategy),
+            sink_delivery_boundary,
         };
 
         // Use the builder to create the handle
@@ -1918,7 +1953,7 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Stage
         // Create instrumentation configuration
         let instrumentation_config = InstrumentationConfig::default();
         let mut instrumentation = StageInstrumentation::new_with_config(instrumentation_config);
-        let control_provider: Arc<dyn obzenflow_core::ControlMiddlewareProvider> =
+        let control_provider: Arc<dyn obzenflow_runtime::control_plane::ControlPlaneProvider> =
             control_middleware.clone();
 
         // Create system middleware with instrumentation (FLOWIP-080o-part-2)
@@ -1927,7 +1962,7 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Stage
         let expects_circuit_breaker = resolved
             .middleware
             .iter()
-            .any(|spec| spec.factory.control_role() == ControlMiddlewareRole::CircuitBreaker);
+            .any(|spec| factory_declares_circuit_breaker(spec.factory.as_ref()));
         let expects_rate_limiter = resolved
             .middleware
             .iter()
@@ -1942,7 +1977,7 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Stage
         all_middleware.extend(user_middleware);
 
         instrumentation
-            .bind_control_middleware(
+            .bind_control_plane(
                 &config.stage_id,
                 &control_provider,
                 expects_circuit_breaker,
@@ -2108,13 +2143,13 @@ impl<H: EffectfulStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
 
         let instrumentation_config = InstrumentationConfig::default();
         let mut instrumentation = StageInstrumentation::new_with_config(instrumentation_config);
-        let control_provider: Arc<dyn obzenflow_core::ControlMiddlewareProvider> =
+        let control_provider: Arc<dyn obzenflow_runtime::control_plane::ControlPlaneProvider> =
             control_middleware.clone();
 
         let expects_circuit_breaker = resolved
             .middleware
             .iter()
-            .any(|spec| spec.factory.control_role() == ControlMiddlewareRole::CircuitBreaker);
+            .any(|spec| factory_declares_circuit_breaker(spec.factory.as_ref()));
         let expects_rate_limiter = resolved
             .middleware
             .iter()
@@ -2127,7 +2162,7 @@ impl<H: EffectfulStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
             .collect::<Result<_, _>>()?;
 
         instrumentation
-            .bind_control_middleware(
+            .bind_control_plane(
                 &config.stage_id,
                 &control_provider,
                 expects_circuit_breaker,
@@ -2287,7 +2322,7 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
         // Create instrumentation configuration
         let instrumentation_config = InstrumentationConfig::default();
         let mut instrumentation = StageInstrumentation::new_with_config(instrumentation_config);
-        let control_provider: Arc<dyn obzenflow_core::ControlMiddlewareProvider> =
+        let control_provider: Arc<dyn obzenflow_runtime::control_plane::ControlPlaneProvider> =
             control_middleware.clone();
 
         // Create system middleware with instrumentation (FLOWIP-080o-part-2)
@@ -2296,7 +2331,7 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
         let expects_circuit_breaker = resolved
             .middleware
             .iter()
-            .any(|spec| spec.factory.control_role() == ControlMiddlewareRole::CircuitBreaker);
+            .any(|spec| factory_declares_circuit_breaker(spec.factory.as_ref()));
         let expects_rate_limiter = resolved
             .middleware
             .iter()
@@ -2311,7 +2346,7 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
         all_middleware.extend(user_middleware);
 
         instrumentation
-            .bind_control_middleware(
+            .bind_control_plane(
                 &config.stage_id,
                 &control_provider,
                 expects_circuit_breaker,
@@ -2435,8 +2470,8 @@ mod tests {
     use super::*;
     use obzenflow_adapters::middleware::control::circuit_breaker::circuit_breaker;
     use obzenflow_core::event::{JournalEvent, SystemEvent};
-    use obzenflow_core::ControlMiddlewareProvider;
     use obzenflow_core::{ChainEvent, EventEnvelope, FlowId, TypedPayload};
+    use obzenflow_runtime::control_plane::ControlPlaneProvider;
     use obzenflow_runtime::effects::{
         Effect, EffectCommitHandle, EffectContext, EffectError, TransactionalEffectPort,
     };
@@ -2926,10 +2961,10 @@ mod tests {
             .expect("handle creation should succeed");
 
         // Ensure the breaker state is registered via the flow-scoped provider.
-        let cb_state = control_middleware.circuit_breaker_state(&stage_id);
+        let cb_state = control_middleware.circuit_breaker_state_view(&stage_id);
         assert!(
             cb_state.is_some(),
-            "circuit breaker state should be registered for source with circuit_breaker middleware"
+            "circuit breaker state view should be registered for source with circuit_breaker middleware"
         );
 
         // Avoid unused variable warning

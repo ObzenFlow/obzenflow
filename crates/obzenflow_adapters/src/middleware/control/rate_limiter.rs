@@ -49,17 +49,18 @@ use crate::middleware::{
     SourcePollOutcome,
 };
 use crate::middleware::{
-    ControlMiddlewareRole, ErrorAction, Middleware, MiddlewareAction, MiddlewareContext,
-    MiddlewareFactory, MiddlewareFactoryError, MiddlewareOverrideKey, MiddlewarePlanContribution,
-    MiddlewareSafety, SourceMiddlewarePhase, TopologyMiddlewareConfigSlot,
+    ControlMiddlewareRole, EffectTypeKey, ErrorAction, Middleware, MiddlewareAction,
+    MiddlewareContext, MiddlewareFactory, MiddlewareFactoryError, MiddlewareOverrideKey,
+    MiddlewarePlanContribution, MiddlewareSafety, SourceMiddlewarePhase,
+    TopologyMiddlewareConfigSlot,
 };
-use obzenflow_core::control_middleware::{RateLimiterMetrics, RateLimiterSnapshotter};
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::payloads::observability_payload::{
     MiddlewareLifecycle, ObservabilityPayload, RateLimiterEvent,
 };
 use obzenflow_core::{StageId, WriterId};
+use obzenflow_runtime::control_plane::{RateLimiterMetrics, RateLimiterSnapshotter};
 use obzenflow_runtime::pipeline::config::StageConfig;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -338,7 +339,7 @@ impl RateLimiterMiddleware {
         stage_id: StageId,
         config: ValidatedRateLimiterConfig,
         control_middleware: std::sync::Arc<super::ControlMiddlewareAggregator>,
-        effect_type: Option<String>,
+        effect_type: Option<EffectTypeKey>,
     ) -> Self {
         let bucket = TokenBucket::new(config.burst_capacity, config.events_per_second);
 
@@ -1135,7 +1136,7 @@ impl MiddlewareFactory for RateLimiterFactory {
             config.stage_id,
             validated,
             control_middleware,
-            Some(effect_type.to_string()),
+            Some(EffectTypeKey::from(effect_type)),
         )))
     }
 
@@ -1234,9 +1235,9 @@ pub fn rate_limit_with_burst(events_per_second: f64, burst: f64) -> Box<dyn Midd
 mod tests {
     use super::*;
     use crate::middleware::control::ControlMiddlewareAggregator;
-    use obzenflow_core::control_middleware::ControlMiddlewareProvider;
     use obzenflow_core::event::chain_event::ChainEventContent;
     use obzenflow_core::event::{ChainEventFactory, WriterId};
+    use obzenflow_runtime::control_plane::ControlPlaneProvider;
     use obzenflow_runtime::pipeline::config::StageConfig;
     use serde_json::json;
 

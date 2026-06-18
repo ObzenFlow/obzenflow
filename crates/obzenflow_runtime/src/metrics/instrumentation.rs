@@ -4,11 +4,11 @@
 
 //! FSM instrumentation for HandlerSupervised stages
 
-use hdrhistogram::Histogram;
-use obzenflow_core::control_middleware::{
-    CircuitBreakerSnapshotter, ControlMiddlewareProvider, NoControlMiddleware,
+use crate::control_plane::{
+    CircuitBreakerSnapshotter, CircuitBreakerStateView, ControlPlaneProvider, NoControlPlane,
     RateLimiterSnapshotter,
 };
+use hdrhistogram::Histogram;
 use obzenflow_core::event::event_envelope::EventEnvelope;
 use obzenflow_core::event::identity::journal_writer_id::JournalWriterId;
 use obzenflow_core::event::vector_clock::VectorClock;
@@ -114,10 +114,10 @@ pub struct StageInstrumentation {
     config: InstrumentationConfig,
 
     // =========================================================================
-    // Control middleware bindings (FLOWIP-059a-3)
+    // Control-plane bindings (FLOWIP-059a-3)
     // =========================================================================
-    /// Flow-scoped provider for control middleware state/metrics.
-    control_middleware: Arc<dyn ControlMiddlewareProvider>,
+    /// Flow-scoped provider for control-plane state/metrics.
+    control_plane: Arc<dyn ControlPlaneProvider>,
 
     /// Cached snapshotter for circuit breaker metrics (set once during stage construction).
     cb_snapshotter: Option<Arc<CircuitBreakerSnapshotter>>,
@@ -125,8 +125,9 @@ pub struct StageInstrumentation {
     /// Cached snapshotter for rate limiter metrics (set once during stage construction).
     rl_snapshotter: Option<Arc<RateLimiterSnapshotter>>,
 
-    /// Cached circuit breaker state for control strategies (set once during stage construction).
-    cb_state: Option<Arc<std::sync::atomic::AtomicU8>>,
+    /// Cached typed circuit breaker state view (FLOWIP-115b; set once during
+    /// stage construction).
+    cb_state_view: Option<Arc<dyn CircuitBreakerStateView>>,
 
     /// Per-effect circuit breaker snapshotters keyed by declared effect type
     /// (FLOWIP-120c G9; set once during stage construction).
@@ -195,35 +196,37 @@ impl StageInstrumentation {
 
             config,
 
-            control_middleware: Arc::new(NoControlMiddleware),
+            control_plane: Arc::new(NoControlPlane),
             cb_snapshotter: None,
             rl_snapshotter: None,
             effect_cb_snapshotters: Vec::new(),
             effect_rl_snapshotters: Vec::new(),
-            cb_state: None,
+            cb_state_view: None,
         }
     }
 
-    /// Bind control middleware from the provider for this stage.
+    /// Bind control-plane publishers from the provider for this stage.
     ///
     /// Called once during stage construction. Caches snapshotters and state to
-    /// avoid per-event lookups. Fails if expected middleware is missing.
-    pub fn bind_control_middleware(
+    /// avoid per-event lookups. Fails if expected control publishers are missing.
+    pub fn bind_control_plane(
         &mut self,
         stage_id: &StageId,
-        provider: &Arc<dyn ControlMiddlewareProvider>,
+        provider: &Arc<dyn ControlPlaneProvider>,
         expects_circuit_breaker: bool,
         expects_rate_limiter: bool,
     ) -> Result<(), ControlBindError> {
-        self.control_middleware = provider.clone();
+        self.control_plane = provider.clone();
 
         self.cb_snapshotter = provider.circuit_breaker_snapshotter(stage_id);
         self.rl_snapshotter = provider.rate_limiter_snapshotter(stage_id);
-        self.cb_state = provider.circuit_breaker_state(stage_id);
+        self.cb_state_view = provider.circuit_breaker_state_view(stage_id);
         self.effect_cb_snapshotters = provider.effect_circuit_breaker_snapshotters(stage_id);
         self.effect_rl_snapshotters = provider.effect_rate_limiter_snapshotters(stage_id);
 
-        if expects_circuit_breaker && (self.cb_snapshotter.is_none() || self.cb_state.is_none()) {
+        if expects_circuit_breaker
+            && (self.cb_snapshotter.is_none() || self.cb_state_view.is_none())
+        {
             return Err(ControlBindError::MissingCircuitBreaker {
                 stage_id: *stage_id,
             });
@@ -353,12 +356,9 @@ impl StageInstrumentation {
             ctx.cb_time_closed_seconds = cb.time_closed_seconds;
             ctx.cb_time_open_seconds = cb.time_open_seconds;
             ctx.cb_time_half_open_seconds = cb.time_half_open_seconds;
-            ctx.cb_state = match cb.state {
-                0 => 0.0, // closed
-                1 => 1.0, // open
-                2 => 0.5, // half_open
-                _ => 0.0,
-            };
+            // Serialized wide-event context is a compatibility edge: project the
+            // typed state to the stable 0/0.5/1 gauge here (FLOWIP-115b AC28/AC57).
+            ctx.cb_state = cb.state.stable_gauge();
         }
 
         if let Some(rl_snapshotter) = &self.rl_snapshotter {
@@ -388,12 +388,7 @@ impl StageInstrumentation {
                     cb_time_closed_seconds: cb.time_closed_seconds,
                     cb_time_open_seconds: cb.time_open_seconds,
                     cb_time_half_open_seconds: cb.time_half_open_seconds,
-                    cb_state: match cb.state {
-                        0 => 0.0,
-                        1 => 1.0,
-                        2 => 0.5,
-                        _ => 0.0,
-                    },
+                    cb_state: cb.state.stable_gauge(),
                 }
             })
             .collect();
@@ -417,14 +412,14 @@ impl StageInstrumentation {
         ctx
     }
 
-    /// Access the flow-scoped control middleware provider.
-    pub fn control_middleware(&self) -> &Arc<dyn ControlMiddlewareProvider> {
-        &self.control_middleware
+    /// Access the flow-scoped control-plane provider.
+    pub fn control_plane(&self) -> &Arc<dyn ControlPlaneProvider> {
+        &self.control_plane
     }
 
-    /// Access cached circuit breaker state (if bound).
-    pub fn circuit_breaker_state(&self) -> Option<&Arc<std::sync::atomic::AtomicU8>> {
-        self.cb_state.as_ref()
+    /// Access the cached typed circuit breaker state view (if bound).
+    pub fn circuit_breaker_state_view(&self) -> Option<&Arc<dyn CircuitBreakerStateView>> {
+        self.cb_state_view.as_ref()
     }
 
     /// Note a consumed envelope so downstream events capture reader position and origin.

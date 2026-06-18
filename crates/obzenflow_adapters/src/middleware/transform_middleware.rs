@@ -18,7 +18,7 @@ use async_trait::async_trait;
 use obzenflow_core::event::status::processing_status::ProcessingStatus;
 use obzenflow_core::ChainEvent;
 use obzenflow_core::MiddlewareExecutionScope;
-use obzenflow_runtime::effects::{EffectBoundaryMiddleware, EffectInvocationContext};
+use obzenflow_runtime::effects::{EffectBoundary, EffectInvocationContext};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::transform::traits::UnifiedTransformHandler;
 use obzenflow_runtime::stages::common::handlers::{AsyncTransformHandler, TransformHandler};
@@ -496,7 +496,7 @@ pub struct UnifiedMiddlewareTransform<H: UnifiedTransformHandler> {
     /// kinds guard individual declared effects here, while the
     /// `middleware_chain` carries observation and structural kinds around
     /// the handler shell in every execution scope.
-    effect_boundary: Option<Arc<dyn EffectBoundaryMiddleware>>,
+    effect_boundary: Option<Arc<dyn EffectBoundary>>,
 }
 
 impl<H: UnifiedTransformHandler> std::fmt::Debug for UnifiedMiddlewareTransform<H> {
@@ -1299,7 +1299,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn async_middleware_transform_retries_via_circuit_breaker_context() {
+    async fn async_middleware_transform_retry_config_is_ignored() {
+        // FLOWIP-115b: production retry is removed (warn-and-ignore). A breaker
+        // built with a retry policy binds and runs, but the transform is invoked
+        // exactly once; a handler error surfaces immediately with no retry
+        // lifecycle events. FLOWIP-115h reintroduces boundary-owned retry.
         use crate::middleware::control::{CircuitBreakerBuilder, ControlMiddlewareAggregator};
         use crate::middleware::MiddlewareFactory;
         use obzenflow_core::StageId;
@@ -1324,7 +1328,7 @@ mod tests {
         let control = Arc::new(ControlMiddlewareAggregator::new());
         let cb = factory
             .create(&config, control)
-            .expect("circuit breaker should materialize for async transform retry test");
+            .expect("circuit breaker should materialize for async transform test");
 
         let wrapped = handler.middleware().with(cb).build();
 
@@ -1337,18 +1341,22 @@ mod tests {
         let results = wrapped
             .process(event, None, MiddlewareExecutionScope::LiveHandler)
             .await
-            .expect("handler errors should be retried and eventually succeed");
+            .expect("a handler error surfaces as an error event, not a process error");
 
-        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        // No retry: the transform is invoked once and the first failure surfaces.
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
 
-        let data_events = results.iter().filter(|e| e.is_data()).count();
+        let error_events = results
+            .iter()
+            .filter(|e| matches!(e.processing_info.status, ProcessingStatus::Error { .. }))
+            .count();
         let control_events = results.iter().filter(|e| e.is_lifecycle()).count();
-        assert_eq!(data_events, 1);
-        assert_eq!(control_events, 3);
+        assert_eq!(error_events, 1);
+        assert_eq!(control_events, 0);
     }
 
     #[tokio::test]
-    async fn async_middleware_transform_exhausts_retries_and_returns_error_event() {
+    async fn async_middleware_transform_permanent_failure_returns_error_event_without_retry() {
         use crate::middleware::control::{CircuitBreakerBuilder, ControlMiddlewareAggregator};
         use crate::middleware::MiddlewareFactory;
         use obzenflow_core::StageId;
@@ -1388,7 +1396,9 @@ mod tests {
             .await
             .expect("handler errors should be converted into error events");
 
-        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        // No retry: the transform is invoked once; the permanent failure
+        // surfaces immediately as a single error event with no retry events.
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
 
         let error_events = results
             .iter()
@@ -1396,7 +1406,7 @@ mod tests {
             .count();
         let control_events = results.iter().filter(|e| e.is_lifecycle()).count();
         assert_eq!(error_events, 1);
-        assert_eq!(control_events, 3);
+        assert_eq!(control_events, 0);
     }
 
     /// FLOWIP-114q transitional hook: middleware that returned `Continue`

@@ -13,13 +13,11 @@ use crate::middleware::{
 use crate::monitoring::metrics::core::{Metric, MetricSnapshot, MetricType, MetricValue};
 use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::event::context::StageType;
+use obzenflow_core::FlowId;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
-
-/// Flow ID is just a string for now
-type FlowId = String;
 
 /// Type of boundary crossing
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -6,7 +6,7 @@
 //!
 //! The runtime owns this seam and the source supervisors drive it around a live
 //! poll. Concrete middleware policy composition lives outside the runtime and
-//! implements [`SourceBoundaryMiddleware`].
+//! implements [`SourceBoundary`].
 
 use crate::stages::common::handlers::source::SourceError;
 use obzenflow_core::ChainEvent;
@@ -58,6 +58,6 @@ pub struct SourceBoundaryReport {
 /// The supervisor drives this single future and performs lifecycle transitions
 /// from the returned report. It does not know which, if any, middleware policies
 /// are composed behind the boundary.
-pub trait SourceBoundaryMiddleware: Send + Sync {
+pub trait SourceBoundary: Send + Sync {
     fn around_poll<'a>(&'a self, execute: SourcePollExecution<'a>) -> SourceBoundaryFuture<'a>;
 }

@@ -11,9 +11,9 @@ use super::{
     UpstreamSubscription,
 };
 use crate::contracts::ContractChain;
+use crate::control_plane::NoControlPlane;
 use crate::messaging::upstream_subscription_policy::build_policy_stack_for_upstream;
 use async_trait::async_trait;
-use obzenflow_core::control_middleware::NoControlMiddleware;
 use obzenflow_core::event::types::SeqNo;
 use obzenflow_core::event::JournalEvent;
 use obzenflow_core::journal::journal_error::JournalError;
@@ -203,7 +203,7 @@ where
             contract_chains: Vec::new(),
             contract_feed_chains: Vec::new(),
             contract_policies: Vec::new(),
-            control_middleware: Arc::new(NoControlMiddleware),
+            control_plane: Arc::new(NoControlPlane),
             last_eof_outcome: None,
             last_delivered_upstream_stage: None,
             next_stage_input_position: 1,
@@ -376,12 +376,12 @@ where
             config,
             system_journal,
             reader_stage,
-            control_middleware,
+            control_plane,
             include_delivery_contract,
             cycle_guard_config,
         } = wiring;
 
-        self.control_middleware = control_middleware.clone();
+        self.control_plane = control_plane.clone();
 
         self.contract_tracker = Some(ContractTracker {
             config,

@@ -17,8 +17,8 @@ use async_trait::async_trait;
 use obzenflow_core::event::EffectFailureCause;
 use obzenflow_core::{ChainEvent, MiddlewareExecutionScope};
 use obzenflow_runtime::effects::{
-    EffectAbortReason, EffectBoundaryMiddleware, EffectBoundaryOutcome, EffectBoundaryReport,
-    EffectError, EffectExecution, EffectIdentity,
+    EffectAbortReason, EffectBoundary, EffectBoundaryOutcome, EffectBoundaryReport, EffectError,
+    EffectExecution, EffectIdentity,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -175,7 +175,7 @@ fn abort_reason_from_cause(cause: MiddlewareAbortCause) -> EffectAbortReason {
 }
 
 #[async_trait]
-impl EffectBoundaryMiddleware for PerEffectPolicyBoundary {
+impl EffectBoundary for PerEffectPolicyBoundary {
     async fn around_effect(
         &self,
         identity: &EffectIdentity,

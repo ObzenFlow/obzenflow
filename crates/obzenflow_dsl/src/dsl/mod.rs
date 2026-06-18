@@ -113,6 +113,7 @@
 //! let _ = effectful_transform!(In -> Out => handler, effects: [MyEffect with], middleware: []);
 //! ```
 
+mod binder;
 pub mod composites;
 #[path = "dsl.rs"]
 mod dsl_impl;

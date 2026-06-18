@@ -4,7 +4,7 @@
 
 //! Configuration for infinite source stages
 
-use crate::stages::source::boundary::SourceBoundaryMiddleware;
+use crate::stages::source::boundary::SourceBoundary;
 use crate::stages::source::strategies::CompletionGate;
 use obzenflow_core::StageId;
 use std::sync::Arc;
@@ -26,7 +26,7 @@ pub struct InfiniteSourceConfig {
     pub control_strategy: Option<Arc<dyn CompletionGate>>,
 
     /// Runtime-neutral source boundary seam (FLOWIP-115a).
-    pub source_boundary: Option<Arc<dyn SourceBoundaryMiddleware>>,
+    pub source_boundary: Option<Arc<dyn SourceBoundary>>,
 }
 
 impl std::fmt::Debug for InfiniteSourceConfig {

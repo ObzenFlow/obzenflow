@@ -18,6 +18,10 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use thiserror::Error;
 
+use super::carrier::{
+    MiddlewareAttachmentRequest, MiddlewareDeclaration, MiddlewareMaterializationContext,
+    MiddlewareSurfaceAttachment,
+};
 use super::control::ControlMiddlewareAggregator;
 
 pub type MiddlewareFactorySource = Box<dyn StdError + Send + Sync + 'static>;
@@ -48,6 +52,12 @@ pub enum MiddlewareFactoryError {
         #[source]
         source: MiddlewareFactorySource,
     },
+
+    #[error(
+        "Middleware '{middleware}' is legacy shell middleware with no hook surface; \
+         it must be created via `create()` rather than materialized (FLOWIP-115b)"
+    )]
+    NotHookBound { middleware: String },
 }
 
 pub type MiddlewareFactoryResult<T> = Result<T, MiddlewareFactoryError>;
@@ -86,6 +96,12 @@ impl MiddlewareFactoryError {
             middleware: middleware.into(),
             stage_name: stage_name.into(),
             source: Box::new(source),
+        }
+    }
+
+    pub fn not_hook_bound(middleware: impl Into<String>) -> Self {
+        Self::NotHookBound {
+            middleware: middleware.into(),
         }
     }
 }
@@ -268,6 +284,28 @@ pub trait MiddlewareFactory: Send + Sync {
     fn config_snapshot(&self) -> Option<serde_json::Value> {
         None
     }
+
+    /// FLOWIP-115b: static, pre-erasure hook declaration. The DSL binder reads
+    /// this to validate `surface x capability` and to plan the attachment
+    /// without first constructing a `Box<dyn Middleware>`. Defaults to a
+    /// legacy-shell declaration, so existing shell factories need no change.
+    fn declaration(&self) -> MiddlewareDeclaration {
+        MiddlewareDeclaration::legacy_shell(self.label(), self.override_key().family_label())
+    }
+
+    /// FLOWIP-115b: materialize one typed surface attachment for one concrete
+    /// protected unit. Hook-bound factories (the circuit breaker, and later the
+    /// rate limiter and user control middleware) override this. The default is a
+    /// clear error: legacy shell middleware has no hook surface and must be
+    /// created via `create()`.
+    fn materialize(
+        &self,
+        request: MiddlewareAttachmentRequest<'_>,
+        context: &MiddlewareMaterializationContext<'_>,
+    ) -> MiddlewareFactoryResult<MiddlewareSurfaceAttachment> {
+        let _ = (request, context);
+        Err(MiddlewareFactoryError::not_hook_bound(self.label()))
+    }
 }
 
 /// Typed declaration of which runtime control points a policy registers
@@ -364,6 +402,18 @@ impl<F: MiddlewareFactory + ?Sized> MiddlewareFactory for Box<F> {
 
     fn config_snapshot(&self) -> Option<serde_json::Value> {
         (**self).config_snapshot()
+    }
+
+    fn declaration(&self) -> MiddlewareDeclaration {
+        (**self).declaration()
+    }
+
+    fn materialize(
+        &self,
+        request: MiddlewareAttachmentRequest<'_>,
+        context: &MiddlewareMaterializationContext<'_>,
+    ) -> MiddlewareFactoryResult<MiddlewareSurfaceAttachment> {
+        (**self).materialize(request, context)
     }
 }
 

@@ -99,12 +99,14 @@ pub(crate) fn strict_replay_active() -> bool {
 mod backpressure;
 mod join_middleware;
 mod sink_middleware;
+mod sink_policy;
 mod source_middleware;
 mod source_policy;
 mod stateful_middleware;
 mod transform_middleware;
 
 // Common middleware utilities
+mod carrier;
 mod context;
 mod context_keys;
 mod effect_policy;
@@ -139,6 +141,10 @@ pub use middleware_trait::{
 // Handler-specific exports
 pub use join_middleware::{JoinHandlerMiddlewareExt, JoinMiddlewareBuilder, MiddlewareJoin};
 pub use sink_middleware::{MiddlewareSink, SinkHandlerExt, SinkMiddlewareBuilder};
+pub use sink_policy::{
+    PerSinkDeliveryPolicyBoundary, SinkAdmission, SinkAdmissionGuard, SinkDeliveryPolicyOutcome,
+    SinkPolicy, SinkPolicyCtx,
+};
 pub use source_middleware::{
     AsyncFiniteSourceHandlerExt, AsyncFiniteSourceMiddlewareBuilder, AsyncInfiniteSourceHandlerExt,
     AsyncInfiniteSourceMiddlewareBuilder, FiniteSourceHandlerExt, FiniteSourceMiddlewareBuilder,
@@ -159,6 +165,15 @@ pub use transform_middleware::{
 };
 
 // Common utilities
+pub use carrier::{
+    validate_attachment_request, EffectSurface, EffectTypeKey, EffectUnitId,
+    MiddlewareAttachmentId, MiddlewareAttachmentRequest, MiddlewareAttachmentValidationError,
+    MiddlewareCapability, MiddlewareDeclaration, MiddlewareDeclarationIndex,
+    MiddlewareDeclarationScope, MiddlewareMaterializationContext, MiddlewareOrigin,
+    MiddlewareSurface, MiddlewareSurfaceAttachment, MiddlewareSurfaceKind, ProtectedUnit,
+    ProtectedUnitId, SinkConfiguredTargetKey, SinkDeliverySurface, SinkDeliveryTarget,
+    SinkDeliveryUnitId, SourcePollAttachment, SourcePollSurface, SourcePollUnitId,
+};
 pub use context::MiddlewareContext;
 pub use effect_policy::{
     effect_policy_from_middleware, EffectAttemptOutcome, EffectPolicy, PerEffectPolicyBoundary,

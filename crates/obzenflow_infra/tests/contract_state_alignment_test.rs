@@ -7,8 +7,9 @@ use std::sync::Arc;
 use obzenflow_core::event::types::{Count, DurationMs, SeqNo, ViolationCause};
 use obzenflow_core::event::{ChainEvent, ChainEventContent, ChainEventFactory};
 use obzenflow_core::journal::Journal;
-use obzenflow_core::{JournalOwner, NoControlMiddleware, StageId, WriterId};
+use obzenflow_core::{JournalOwner, StageId, WriterId};
 use obzenflow_infra::journal::{DiskJournal, MemoryJournal};
+use obzenflow_runtime::control_plane::NoControlPlane;
 use obzenflow_runtime::messaging::upstream_subscription::{
     ContractConfig, ContractsWiring, ReaderProgress, UpstreamSubscription,
 };
@@ -91,7 +92,7 @@ async fn build_subscription_with_contracts(
         config,
         system_journal: None,
         reader_stage: Some(stage_id),
-        control_middleware: Arc::new(NoControlMiddleware),
+        control_plane: Arc::new(NoControlPlane),
         include_delivery_contract: false,
         cycle_guard_config: None,
     });

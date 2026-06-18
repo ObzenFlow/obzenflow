@@ -341,6 +341,10 @@ pub struct JournalSinkContext<H: UnifiedSinkHandler> {
     /// Control strategy for FlowControl events
     pub control_strategy: Arc<dyn SignalGate>,
 
+    /// Runtime-neutral sink-delivery boundary seam (FLOWIP-115b). Wraps the
+    /// data-event `consume_report` attempt only.
+    pub sink_delivery_boundary: Option<Arc<dyn super::boundary::SinkDeliveryBoundary>>,
+
     /// Durable per-stage signal-strategy scratch (FLOWIP-115c).
     pub processing_context: crate::stages::common::control_strategies::ProcessingContext,
 
@@ -384,7 +388,7 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAct
                         config: ContractConfig::default(),
                         system_journal: Some(ctx.system_journal.clone()),
                         reader_stage: Some(ctx.stage_id),
-                        control_middleware: ctx.instrumentation.control_middleware().clone(),
+                        control_plane: ctx.instrumentation.control_plane().clone(),
                         include_delivery_contract: true,
                         cycle_guard_config: None,
                     })

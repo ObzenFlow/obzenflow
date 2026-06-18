@@ -21,7 +21,6 @@
 
 use std::sync::Arc;
 
-use obzenflow_core::control_middleware::NoControlMiddleware;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::system_event::SystemEvent;
 use obzenflow_core::event::types::{Count, DurationMs, SeqNo};
@@ -29,6 +28,7 @@ use obzenflow_core::event::{ChainEvent, ChainEventContent, SystemEventType};
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{JournalOwner, StageId, WriterId};
 use obzenflow_infra::journal::MemoryJournal;
+use obzenflow_runtime::control_plane::NoControlPlane;
 use obzenflow_runtime::messaging::upstream_subscription::{
     ContractConfig, ContractStatus, ContractsWiring, ReaderProgress, UpstreamSubscription,
 };
@@ -68,7 +68,7 @@ async fn stall_detection_does_not_emit_system_contract_failure() {
         config,
         system_journal: Some(system_journal.clone()),
         reader_stage: Some(stage_id),
-        control_middleware: Arc::new(NoControlMiddleware),
+        control_plane: Arc::new(NoControlPlane),
         include_delivery_contract: false,
         cycle_guard_config: None,
     });
