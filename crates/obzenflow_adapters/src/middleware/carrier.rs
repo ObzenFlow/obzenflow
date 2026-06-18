@@ -1,0 +1,363 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
+// https://obzenflow.dev
+
+//! FLOWIP-115b: the public hook-declaration carrier.
+//!
+//! A middleware factory declares, before runtime erasure, which surface and
+//! capability it attaches to, and materializes one typed surface attachment for
+//! one concrete protected unit. The DSL binder (`obzenflow_dsl`) is the only
+//! layer that sees both these adapter-owned carrier types and the
+//! runtime/infra neutral boundary seams; runtime and infra receive only neutral
+//! seams.
+//!
+//! This slice implements the `SourcePoll` and `Effect` surfaces consumed by the
+//! circuit breaker. `SinkDelivery` is added by the sink-boundary phase once the
+//! runtime `SinkDeliveryBoundary` seam exists; `Ingress` (FLOWIP-115d) and the
+//! observer surfaces (FLOWIP-115f) are reserved in the non-exhaustive
+//! vocabulary so later slices fill them additively.
+
+use super::control::ControlMiddlewareAggregator;
+use super::effect_policy::EffectPolicy;
+use super::source_policy::SourcePolicy;
+use obzenflow_core::StageId;
+use obzenflow_runtime::pipeline::config::StageConfig;
+use obzenflow_runtime::stages::source::strategies::CompletionGate;
+use std::sync::Arc;
+
+// ---------------------------------------------------------------------------
+// Typed identity newtypes (FLOWIP-115b "Typed identity")
+// ---------------------------------------------------------------------------
+
+/// Effect-type identity for the carrier.
+///
+/// Effects are keyed by `&'static str` at the runtime effect boundary, so the
+/// carrier carries an owned typed value and bridges to the static key when it
+/// builds the per-effect attachment. The FLOWIP "Typed identity" rule is to add
+/// a small newtype where no domain type exists rather than expose raw `String`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct EffectTypeId(pub String);
+
+impl EffectTypeId {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// A sink-delivery target declared before consume (replay-stable). Refines the
+/// sink-delivery protected unit beyond the default stage-level identity.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SinkConfiguredTargetId(pub String);
+
+// ---------------------------------------------------------------------------
+// Capability
+// ---------------------------------------------------------------------------
+
+/// Middleware capability. The binder validates `surface x capability`: a broad
+/// surface vocabulary does not imply every capability is legal everywhere.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MiddlewareCapability {
+    Control,
+    Observer,
+    Structural,
+}
+
+// ---------------------------------------------------------------------------
+// Surface vocabulary
+// ---------------------------------------------------------------------------
+
+/// The source-poll call site for one source stage.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourcePollSurface {
+    pub stage_id: StageId,
+}
+
+/// The effect call site for one declared effect on a stage.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EffectSurface {
+    pub stage_id: StageId,
+    pub effect_type: EffectTypeId,
+}
+
+/// The sink-delivery call site for one sink stage, optionally refined by a
+/// configured target declared before consume.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SinkDeliverySurface {
+    pub stage_id: StageId,
+    pub configured_target: Option<SinkConfiguredTargetId>,
+}
+
+/// The call-site shape a middleware attaches to. Broad and non-exhaustive so
+/// later slices consume the same foundation. This slice implements
+/// `SourcePoll`, `Effect`, and `SinkDelivery`; the remaining variants are
+/// reserved (FLOWIP-115d ingress, FLOWIP-115f observers).
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MiddlewareSurface {
+    SourcePoll(SourcePollSurface),
+    Effect(EffectSurface),
+    SinkDelivery(SinkDeliverySurface),
+    /// Reserved for FLOWIP-115d: listener admission is not source polling.
+    Ingress,
+    /// Reserved observer surfaces for FLOWIP-115f.
+    Handler,
+    Stateful,
+    Join,
+    OutputCommit,
+    StageLifecycle,
+}
+
+/// A lightweight discriminant of a surface, used in deterministic attachment
+/// identity and in `surface x capability` validation without dragging the
+/// surface payload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MiddlewareSurfaceKind {
+    SourcePoll,
+    Effect,
+    SinkDelivery,
+    Ingress,
+    Handler,
+    Stateful,
+    Join,
+    OutputCommit,
+    StageLifecycle,
+}
+
+impl MiddlewareSurface {
+    pub fn kind(&self) -> MiddlewareSurfaceKind {
+        match self {
+            Self::SourcePoll(_) => MiddlewareSurfaceKind::SourcePoll,
+            Self::Effect(_) => MiddlewareSurfaceKind::Effect,
+            Self::SinkDelivery(_) => MiddlewareSurfaceKind::SinkDelivery,
+            Self::Ingress => MiddlewareSurfaceKind::Ingress,
+            Self::Handler => MiddlewareSurfaceKind::Handler,
+            Self::Stateful => MiddlewareSurfaceKind::Stateful,
+            Self::Join => MiddlewareSurfaceKind::Join,
+            Self::OutputCommit => MiddlewareSurfaceKind::OutputCommit,
+            Self::StageLifecycle => MiddlewareSurfaceKind::StageLifecycle,
+        }
+    }
+
+    /// The stage this surface attaches to, where the surface names one.
+    pub fn stage_id(&self) -> Option<StageId> {
+        match self {
+            Self::SourcePoll(s) => Some(s.stage_id),
+            Self::Effect(s) => Some(s.stage_id),
+            Self::SinkDelivery(s) => Some(s.stage_id),
+            _ => None,
+        }
+    }
+}
+
+impl MiddlewareSurfaceKind {
+    /// Whether a `Control`-capability middleware may attach to this surface in
+    /// this slice. Control is legal only on the live-I/O boundary surfaces this
+    /// slice implements; `OutputCommit` is never a control surface, and the
+    /// reserved surfaces are owned by later slices.
+    pub fn allows_control(self) -> bool {
+        matches!(self, Self::SourcePoll | Self::Effect | Self::SinkDelivery)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Protected unit
+// ---------------------------------------------------------------------------
+
+/// The source-poll protected unit. There is one source-poll unit per source
+/// stage, so it carries no further discriminant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SourcePollUnitId;
+
+/// One declared-effect protected unit, keyed by effect type within the stage.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct EffectUnitId {
+    pub effect_type: EffectTypeId,
+}
+
+/// Default stage-level sink delivery, or a refined configured target.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum SinkDeliveryTarget {
+    Stage,
+    Configured(SinkConfiguredTargetId),
+}
+
+/// The sink-delivery protected unit, stage-level by default.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SinkDeliveryUnitId {
+    pub target: SinkDeliveryTarget,
+}
+
+/// The cross-attempt state and accounting key for one attached unit.
+///
+/// This must not carry per-attempt data (effect cursor, event id, request
+/// metadata, batch index, input position); those live in invocation/attempt
+/// contexts. Non-exhaustive so later slices add ingress and observer units.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ProtectedUnit {
+    SourcePoll(SourcePollUnitId),
+    Effect(EffectUnitId),
+    SinkDelivery(SinkDeliveryUnitId),
+    /// Reserved (FLOWIP-115d / FLOWIP-115f).
+    Ingress,
+    Handler,
+    Stateful,
+    Join,
+    OutputCommit,
+}
+
+/// Identity of one protected unit: the cross-attempt accounting key.
+///
+/// Keyed by `stage_id` (unique within the flow-scoped binding, the same key the
+/// control aggregator uses) plus the unit. There is no separate `flow_id`: the
+/// binding site carries only the stage id, and the stage id already identifies
+/// the unit within the flow-scoped aggregator.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ProtectedUnitId {
+    pub stage_id: StageId,
+    pub unit: ProtectedUnit,
+}
+
+// ---------------------------------------------------------------------------
+// Origin
+// ---------------------------------------------------------------------------
+
+/// Where the middleware declaration came from: flow-level configuration,
+/// stage-level configuration, or a stage override.
+///
+/// Adapter-owned audit/validation metadata. The DSL binder maps its own
+/// resolution provenance (`obzenflow_dsl::MiddlewareSource`) into this before
+/// calling adapter APIs, so adapter APIs do not depend on DSL resolution types.
+/// It is not the protected-unit key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MiddlewareOrigin {
+    Flow,
+    Stage,
+    StageOverride {
+        family_label: String,
+        flow_label: String,
+        stage_label: String,
+    },
+}
+
+// ---------------------------------------------------------------------------
+// Attachment identity
+// ---------------------------------------------------------------------------
+
+/// Deterministic, structurally-derived attachment identity (FLOWIP-115b).
+///
+/// Derived from replay-stable coordinates (the protected unit plus the override
+/// family), never a fresh materialization-time ULID, so it survives strict
+/// replay and archive-drift checks.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct MiddlewareAttachmentId {
+    pub protected_unit: ProtectedUnitId,
+    pub family_label: String,
+}
+
+// ---------------------------------------------------------------------------
+// Declaration (pre-erasure)
+// ---------------------------------------------------------------------------
+
+/// The static declaration a factory returns before any runtime middleware
+/// object is created. The binder reads this to validate `surface x capability`
+/// and to plan the attachment without constructing a `Box<dyn Middleware>`.
+#[derive(Debug, Clone)]
+pub struct MiddlewareDeclaration {
+    pub label: &'static str,
+    pub capability: MiddlewareCapability,
+    /// The surfaces this factory can attach to. A control middleware may span
+    /// several (the circuit breaker declares source poll, effect, and sink
+    /// delivery); the binder picks the concrete surface per call site and
+    /// validates membership. An empty set marks legacy shell middleware with no
+    /// hook surface, created via `create()`.
+    pub surfaces: Vec<MiddlewareSurfaceKind>,
+}
+
+impl MiddlewareDeclaration {
+    /// Declaration for legacy shell middleware: no hook surface, observer
+    /// capability (the safe default matching `MiddlewareKind::Observation`).
+    pub fn legacy_shell(label: &'static str) -> Self {
+        Self {
+            label,
+            capability: MiddlewareCapability::Observer,
+            surfaces: Vec::new(),
+        }
+    }
+
+    /// A hook-bound control declaration spanning the given surfaces.
+    pub fn control(label: &'static str, surfaces: Vec<MiddlewareSurfaceKind>) -> Self {
+        Self {
+            label,
+            capability: MiddlewareCapability::Control,
+            surfaces,
+        }
+    }
+
+    pub fn is_legacy_shell(&self) -> bool {
+        self.surfaces.is_empty()
+    }
+
+    /// Whether this factory declares it can attach to `surface`.
+    pub fn supports(&self, surface: MiddlewareSurfaceKind) -> bool {
+        self.surfaces.contains(&surface)
+    }
+
+    /// Whether this is a control-capability declaration.
+    pub fn is_control(&self) -> bool {
+        matches!(self.capability, MiddlewareCapability::Control)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Materialization request + context
+// ---------------------------------------------------------------------------
+
+/// The concrete attachment the DSL binder asks the factory to materialize: one
+/// surface, one protected unit, and the resolved origin.
+pub struct MiddlewareAttachmentRequest<'a> {
+    pub surface: &'a MiddlewareSurface,
+    pub protected_unit: &'a ProtectedUnitId,
+    pub origin: &'a MiddlewareOrigin,
+}
+
+/// Runtime construction inputs the factory needs to materialize, mirroring the
+/// inputs of `create`: the stage config and the flow-scoped control aggregator.
+pub struct MiddlewareMaterializationContext<'a> {
+    pub config: &'a StageConfig,
+    pub control_middleware: &'a Arc<ControlMiddlewareAggregator>,
+}
+
+// ---------------------------------------------------------------------------
+// Surface attachment
+// ---------------------------------------------------------------------------
+
+/// One source-poll attachment: the composable source policy plus an optional
+/// read-only completion-gate companion (the only companion this slice allows on
+/// a source-poll attachment).
+///
+/// The attachment carries the adapter-owned `SourcePolicy`, not a pre-composed
+/// boundary, because source composition happens at the policy level: the binder
+/// collects every source policy declared for a stage (in resolved order) and
+/// builds one `PerSourcePolicyBoundary` that implements the neutral runtime
+/// `SourceBoundary` seam. A pre-composed per-middleware boundary could not
+/// compose with other source policies (a still-legacy rate limiter, or a second
+/// control middleware) without breaking the single-context admit-forward /
+/// observe-reverse semantics.
+pub struct SourcePollAttachment {
+    pub policy: Arc<dyn SourcePolicy>,
+    pub completion_gate: Option<Arc<dyn CompletionGate>>,
+}
+
+/// The single typed attachment a factory materializes for one surface.
+///
+/// Adapter-owned: the DSL binder collects the per-surface policies, composes
+/// them into the neutral runtime boundary, and passes only that neutral seam to
+/// runtime/infra. Non-exhaustive; this slice implements `SourcePoll` and
+/// `Effect`, the sink-boundary phase adds `SinkDelivery` once the runtime
+/// `SinkDeliveryBoundary` seam exists, and FLOWIP-115d adds `Ingress`.
+#[non_exhaustive]
+pub enum MiddlewareSurfaceAttachment {
+    SourcePoll(SourcePollAttachment),
+    Effect(Arc<dyn EffectPolicy>),
+}

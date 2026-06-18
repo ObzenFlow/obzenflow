@@ -55,7 +55,7 @@ mod runtime;
 mod tests;
 
 pub use boundary::{
-    EffectAbortReason, EffectBoundaryMiddleware, EffectBoundaryOutcome, EffectBoundaryReport,
+    EffectAbortReason, EffectBoundary, EffectBoundaryOutcome, EffectBoundaryReport,
     EffectExecution, EffectIdentity,
 };
 pub use commit::EffectCommitHandle;

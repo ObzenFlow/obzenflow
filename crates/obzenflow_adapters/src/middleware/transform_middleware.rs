@@ -18,7 +18,7 @@ use async_trait::async_trait;
 use obzenflow_core::event::status::processing_status::ProcessingStatus;
 use obzenflow_core::ChainEvent;
 use obzenflow_core::MiddlewareExecutionScope;
-use obzenflow_runtime::effects::{EffectBoundaryMiddleware, EffectInvocationContext};
+use obzenflow_runtime::effects::{EffectBoundary, EffectInvocationContext};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::transform::traits::UnifiedTransformHandler;
 use obzenflow_runtime::stages::common::handlers::{AsyncTransformHandler, TransformHandler};
@@ -496,7 +496,7 @@ pub struct UnifiedMiddlewareTransform<H: UnifiedTransformHandler> {
     /// kinds guard individual declared effects here, while the
     /// `middleware_chain` carries observation and structural kinds around
     /// the handler shell in every execution scope.
-    effect_boundary: Option<Arc<dyn EffectBoundaryMiddleware>>,
+    effect_boundary: Option<Arc<dyn EffectBoundary>>,
 }
 
 impl<H: UnifiedTransformHandler> std::fmt::Debug for UnifiedMiddlewareTransform<H> {

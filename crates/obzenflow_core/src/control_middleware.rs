@@ -9,7 +9,6 @@
 //! live in adapters and are injected at construction time.
 
 use crate::id::StageId;
-use std::sync::atomic::AtomicU8;
 use std::sync::Arc;
 
 // ============================================================================
@@ -61,6 +60,86 @@ pub mod cb_state {
     pub const HALF_OPEN: u8 = 2;
 }
 
+/// Typed read-only circuit breaker state (FLOWIP-115b).
+///
+/// This is the projection seam that replaces direct reads of the breaker's
+/// private `Arc<AtomicU8>` state cell. Source completion, instrumentation,
+/// topology, and exporters consult this view instead of a raw mutable cell, so
+/// there is exactly one breaker state authority. FLOWIP-115i swaps the private
+/// state core behind this same view without changing any consumer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CircuitBreakerState {
+    Closed,
+    Open,
+    HalfOpen,
+}
+
+impl CircuitBreakerState {
+    pub fn is_open(self) -> bool {
+        matches!(self, Self::Open)
+    }
+
+    /// Decode the legacy `cb_state` numeric encoding. Unknown values fall back
+    /// to `Closed`, matching the historical `From<u8> for CircuitState`.
+    pub fn from_u8(value: u8) -> Self {
+        match value {
+            cb_state::OPEN => Self::Open,
+            cb_state::HALF_OPEN => Self::HalfOpen,
+            _ => Self::Closed,
+        }
+    }
+
+    /// The legacy numeric encoding (`0=closed`, `1=open`, `2=half_open`) kept
+    /// for `CircuitBreakerMetrics.state` compatibility.
+    pub fn as_u8(self) -> u8 {
+        match self {
+            Self::Closed => cb_state::CLOSED,
+            Self::Open => cb_state::OPEN,
+            Self::HalfOpen => cb_state::HALF_OPEN,
+        }
+    }
+
+    /// Stable label string used in metrics, topology, and serialised
+    /// diagnostics. Pinned to `closed` / `open` / `half_open` (never the Rust
+    /// debug names) for external compatibility.
+    pub fn stable_label(self) -> &'static str {
+        match self {
+            Self::Closed => "closed",
+            Self::Open => "open",
+            Self::HalfOpen => "half_open",
+        }
+    }
+
+    /// Stable Prometheus gauge value (`0=closed`, `0.5=half_open`, `1=open`).
+    pub fn stable_gauge(self) -> f64 {
+        match self {
+            Self::Closed => 0.0,
+            Self::Open => 1.0,
+            Self::HalfOpen => 0.5,
+        }
+    }
+}
+
+/// A read-only snapshot of one protected unit's breaker state plus a monotonic
+/// generation for staleness reasoning by topology/completion/instrumentation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CircuitBreakerStateSnapshot {
+    pub state: CircuitBreakerState,
+    pub generation: u64,
+}
+
+/// Read-only view of a breaker's authoritative state. Published by the
+/// per-protected-unit state authority; it is a projection, not a transition
+/// surface, so holders cannot mutate breaker state.
+pub trait CircuitBreakerStateView: Send + Sync + std::fmt::Debug {
+    fn snapshot(&self) -> CircuitBreakerStateSnapshot;
+
+    /// Convenience: is the breaker currently open?
+    fn is_open(&self) -> bool {
+        self.snapshot().state.is_open()
+    }
+}
+
 // ============================================================================
 // Unified Provider Trait
 // ============================================================================
@@ -89,8 +168,15 @@ pub trait ControlMiddlewareProvider: Send + Sync {
 
     // --- State (for control strategies / retry logic) ---
 
-    /// Get circuit breaker current state for a stage.
-    fn circuit_breaker_state(&self, stage_id: &StageId) -> Option<Arc<AtomicU8>>;
+    /// Get a typed read-only circuit breaker state view for a stage
+    /// (FLOWIP-115b). The aggregator overrides this; it defaults to `None` so
+    /// providers without circuit breakers need no change.
+    fn circuit_breaker_state_view(
+        &self,
+        _stage_id: &StageId,
+    ) -> Option<Arc<dyn CircuitBreakerStateView>> {
+        None
+    }
 
     // --- Per-effect instances (FLOWIP-120c) ---
 
@@ -124,10 +210,6 @@ impl ControlMiddlewareProvider for NoControlMiddleware {
     }
 
     fn rate_limiter_snapshotter(&self, _: &StageId) -> Option<Arc<RateLimiterSnapshotter>> {
-        None
-    }
-
-    fn circuit_breaker_state(&self, _: &StageId) -> Option<Arc<AtomicU8>> {
         None
     }
 }

@@ -4,7 +4,7 @@
 
 //! Adapter-owned source policy boundary (FLOWIP-115a).
 //!
-//! The runtime sees only `SourceBoundaryMiddleware`. This module owns the
+//! The runtime sees only `SourceBoundary`. This module owns the
 //! middleware policy onion hidden behind that seam.
 
 use super::MiddlewareContext;
@@ -14,7 +14,7 @@ use obzenflow_core::event::ChainEventFactory;
 use obzenflow_core::{ChainEvent, MiddlewareExecutionScope, WriterId};
 use obzenflow_runtime::prelude::SourceError;
 use obzenflow_runtime::stages::source::{
-    SourceBoundaryFuture, SourceBoundaryMiddleware, SourceBoundaryOutcome, SourceBoundaryReport,
+    SourceBoundary, SourceBoundaryFuture, SourceBoundaryOutcome, SourceBoundaryReport,
     SourcePollCompletion, SourcePollExecution, SourcePollReport,
 };
 use std::sync::Arc;
@@ -160,7 +160,7 @@ impl PerSourcePolicyBoundary {
 
 type SourceAdmitGuard = Option<Box<dyn SourceAdmissionGuard>>;
 
-impl SourceBoundaryMiddleware for PerSourcePolicyBoundary {
+impl SourceBoundary for PerSourcePolicyBoundary {
     fn around_poll<'a>(&'a self, execute: SourcePollExecution<'a>) -> SourceBoundaryFuture<'a> {
         Box::pin(async move {
             if self.policies.is_empty() {

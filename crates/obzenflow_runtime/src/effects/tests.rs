@@ -2049,7 +2049,7 @@ async fn capture_replays_recorded_value_without_using_live_value() {
 struct AbortingBoundary;
 
 #[async_trait]
-impl EffectBoundaryMiddleware for AbortingBoundary {
+impl EffectBoundary for AbortingBoundary {
     async fn around_effect(
         &self,
         _identity: &EffectIdentity,
@@ -2073,7 +2073,7 @@ impl EffectBoundaryMiddleware for AbortingBoundary {
 struct EmptySkipBoundary;
 
 #[async_trait]
-impl EffectBoundaryMiddleware for EmptySkipBoundary {
+impl EffectBoundary for EmptySkipBoundary {
     async fn around_effect(
         &self,
         _identity: &EffectIdentity,
@@ -2423,7 +2423,7 @@ struct CountingBoundary {
 }
 
 #[async_trait]
-impl EffectBoundaryMiddleware for CountingBoundary {
+impl EffectBoundary for CountingBoundary {
     async fn around_effect(
         &self,
         _identity: &EffectIdentity,
@@ -2562,7 +2562,7 @@ async fn stale_recorded_effect_fails_loud_when_key_dropped() {
 struct TransactionalOnlyAbortBoundary;
 
 #[async_trait]
-impl EffectBoundaryMiddleware for TransactionalOnlyAbortBoundary {
+impl EffectBoundary for TransactionalOnlyAbortBoundary {
     async fn around_effect(
         &self,
         identity: &EffectIdentity,
@@ -2689,7 +2689,7 @@ async fn transactional_boundary_abort_restores_output_ordinal() {
     let parent = parent_envelope(writer_id);
 
     let make_ctx = |journal: Arc<MemoryJournal<ChainEvent>>,
-                    boundary: Option<Arc<dyn EffectBoundaryMiddleware>>,
+                    boundary: Option<Arc<dyn EffectBoundary>>,
                     ports: EffectPortRegistry| EffectInvocationContext {
         flow_id,
         stage_id,

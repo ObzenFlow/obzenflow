@@ -17,7 +17,7 @@ pub(crate) mod supervision;
 pub mod typed;
 
 pub use boundary::{
-    SourceBoundaryFuture, SourceBoundaryMiddleware, SourceBoundaryOutcome, SourceBoundaryReport,
+    SourceBoundary, SourceBoundaryFuture, SourceBoundaryOutcome, SourceBoundaryReport,
     SourcePollCompletion, SourcePollExecution, SourcePollReport,
 };
 pub use typed::{

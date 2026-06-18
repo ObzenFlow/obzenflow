@@ -16,7 +16,7 @@ use crate::stages::common::supervision::backpressure_drain::{
     drain_one_pending, drain_one_pending_resolve, DrainAttempt, DrainOutcome,
 };
 use crate::stages::source::boundary::{
-    SourceBoundaryMiddleware, SourceBoundaryOutcome, SourceBoundaryReport, SourcePollExecution,
+    SourceBoundary, SourceBoundaryOutcome, SourceBoundaryReport, SourcePollExecution,
 };
 use crate::supervised_base::idle_backoff::IdleBackoff;
 use crate::supervised_base::{EventLoopDirective, EventReceiver};
@@ -33,7 +33,7 @@ use std::time::Duration;
 pub(crate) type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
 pub(crate) async fn around_source_boundary<'a>(
-    boundary: Option<Arc<dyn SourceBoundaryMiddleware>>,
+    boundary: Option<Arc<dyn SourceBoundary>>,
     execute: SourcePollExecution<'a>,
 ) -> SourceBoundaryReport {
     match boundary {

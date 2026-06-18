@@ -22,8 +22,13 @@ use crate::middleware::{
     MiddlewarePlanContribution, MiddlewareSafety, SourceMiddlewarePhase,
     TopologyMiddlewareConfigSlot,
 };
+use crate::middleware::{
+    MiddlewareAttachmentRequest, MiddlewareDeclaration, MiddlewareMaterializationContext,
+    MiddlewareSurface, MiddlewareSurfaceAttachment, MiddlewareSurfaceKind, SourcePollAttachment,
+};
 use obzenflow_core::control_middleware::{
-    cb_state, CircuitBreakerMetrics, CircuitBreakerSnapshotter,
+    cb_state, CircuitBreakerMetrics, CircuitBreakerSnapshotter, CircuitBreakerState,
+    CircuitBreakerStateSnapshot, CircuitBreakerStateView, ControlMiddlewareProvider,
 };
 use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::event::payloads::observability_payload::{
@@ -40,6 +45,9 @@ use obzenflow_core::TypedPayload;
 use obzenflow_core::{StageId, WriterId};
 use obzenflow_runtime::pipeline::config::StageConfig;
 use obzenflow_runtime::stages::common::control_strategies::BackoffStrategy;
+use obzenflow_runtime::stages::source::strategies::{
+    CompletionContext, CompletionDecision, CompletionGate,
+};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::json;
@@ -322,6 +330,27 @@ impl From<u8> for CircuitState {
             1 => CircuitState::Open,
             2 => CircuitState::HalfOpen,
             _ => CircuitState::Closed,
+        }
+    }
+}
+
+/// FLOWIP-115b: typed read-only projection of the breaker's authoritative state.
+///
+/// Wraps the private `Arc<AtomicU8>` state cell and the probe generation. This
+/// is the single state authority behind [`CircuitBreakerStateView`]; source
+/// completion, metrics, topology, and exporters read it instead of the raw
+/// atomic. FLOWIP-115i replaces the private core behind this same contract.
+#[derive(Debug)]
+pub(crate) struct CircuitBreakerStateViewImpl {
+    state: Arc<AtomicU8>,
+    generation: Arc<AtomicU64>,
+}
+
+impl CircuitBreakerStateView for CircuitBreakerStateViewImpl {
+    fn snapshot(&self) -> CircuitBreakerStateSnapshot {
+        CircuitBreakerStateSnapshot {
+            state: CircuitBreakerState::from_u8(self.state.load(Ordering::SeqCst)),
+            generation: self.generation.load(Ordering::SeqCst),
         }
     }
 }
@@ -1393,6 +1422,39 @@ impl SourcePolicy for CircuitBreakerSourcePolicy {
         }
         self.breaker
             .maybe_emit_summary(ctx.middleware_context_mut());
+    }
+}
+
+/// FLOWIP-115b: source-completion companion for the circuit breaker.
+///
+/// Replaces the old `CircuitBreakerSourceStrategy`, which re-looked-up breaker
+/// state from the control provider as a second acquisition. This gate reads the
+/// same `CircuitBreakerStateView` the source-poll boundary policy published, so
+/// completion and the boundary share one state authority (FLOWIP-115b AC26). It
+/// is read-only and never drives breaker transitions; runtime still owns EOF,
+/// drain, poison semantics, and terminal emission.
+#[derive(Debug)]
+pub(crate) struct CircuitBreakerCompletionGate {
+    view: Arc<dyn CircuitBreakerStateView>,
+}
+
+impl CircuitBreakerCompletionGate {
+    pub(crate) fn new(view: Arc<dyn CircuitBreakerStateView>) -> Self {
+        Self { view }
+    }
+}
+
+impl CompletionGate for CircuitBreakerCompletionGate {
+    fn on_natural_completion(&self, _ctx: &mut CompletionContext) -> CompletionDecision {
+        if self.view.is_open() {
+            CompletionDecision::PoisonEof
+        } else {
+            CompletionDecision::DefaultEof
+        }
+    }
+
+    fn on_begin_drain(&self, ctx: &mut CompletionContext) -> CompletionDecision {
+        self.on_natural_completion(ctx)
     }
 }
 
@@ -2760,8 +2822,12 @@ impl CircuitBreakerFactory {
         // Register circuit breaker snapshotter/state with the flow-scoped
         // aggregator so runtime_services can inject control metrics into wide
         // events and source strategies can observe breaker state.
-        let cb_state = middleware.state.clone();
-        let cb_state_for_registry = cb_state.clone();
+        let cb_state_view: Arc<dyn CircuitBreakerStateView> =
+            Arc::new(CircuitBreakerStateViewImpl {
+                state: middleware.state.clone(),
+                generation: middleware.probe_generation.clone(),
+            });
+        let cb_state_view_for_snap = cb_state_view.clone();
         let successes_total = middleware.successes_total.clone();
         let failures_total = middleware.failures_total.clone();
         let rejections_total = middleware.rejections_total.clone();
@@ -2771,7 +2837,7 @@ impl CircuitBreakerFactory {
         let time_in_half_open = middleware.time_in_half_open.clone();
         let last_state_change = middleware.last_state_change.clone();
         let snapshotter: std::sync::Arc<CircuitBreakerSnapshotter> = Arc::new(move || {
-            let state_raw = cb_state.load(Ordering::Acquire);
+            let state = cb_state_view_for_snap.snapshot().state;
 
             let successes = successes_total.load(Ordering::Relaxed);
             let failures = failures_total.load(Ordering::Relaxed);
@@ -2789,10 +2855,10 @@ impl CircuitBreakerFactory {
                 .map(|last| last.elapsed())
                 .unwrap_or_default();
 
-            match CircuitState::from(state_raw) {
-                CircuitState::Closed => closed += elapsed_current,
-                CircuitState::Open => open += elapsed_current,
-                CircuitState::HalfOpen => half_open += elapsed_current,
+            match state {
+                CircuitBreakerState::Closed => closed += elapsed_current,
+                CircuitBreakerState::Open => open += elapsed_current,
+                CircuitBreakerState::HalfOpen => half_open += elapsed_current,
             }
 
             CircuitBreakerMetrics {
@@ -2804,7 +2870,7 @@ impl CircuitBreakerFactory {
                 time_closed_seconds: closed.as_secs_f64(),
                 time_open_seconds: open.as_secs_f64(),
                 time_half_open_seconds: half_open.as_secs_f64(),
-                state: state_raw,
+                state: state.as_u8(),
             }
         });
 
@@ -2813,12 +2879,12 @@ impl CircuitBreakerFactory {
                 config.stage_id,
                 effect_type,
                 snapshotter,
-                cb_state_for_registry,
+                cb_state_view,
             ),
             None => control_middleware.register_circuit_breaker(
                 config.stage_id,
                 snapshotter,
-                cb_state_for_registry,
+                cb_state_view,
             ),
         }
 
@@ -2901,6 +2967,56 @@ impl MiddlewareFactory for CircuitBreakerFactory {
             std::sync::Arc::new(CircuitBreakerSourcePolicy { breaker }),
         );
         Ok(())
+    }
+
+    fn declaration(&self) -> MiddlewareDeclaration {
+        // The breaker is hook-bound control middleware. This slice materializes
+        // the source-poll surface; FLOWIP-115b later phases add effect and sink
+        // delivery to this surface set.
+        MiddlewareDeclaration::control(self.label(), vec![MiddlewareSurfaceKind::SourcePoll])
+    }
+
+    fn materialize(
+        &self,
+        request: MiddlewareAttachmentRequest<'_>,
+        context: &MiddlewareMaterializationContext<'_>,
+    ) -> crate::middleware::MiddlewareFactoryResult<MiddlewareSurfaceAttachment> {
+        match request.surface {
+            MiddlewareSurface::SourcePoll(_) => {
+                // Build one breaker (registering its state view and snapshotter),
+                // then return its source policy plus the completion companion
+                // that reads the same view, so completion and the boundary share
+                // one state authority (FLOWIP-115b AC26).
+                let middleware = self.build_middleware_keyed(
+                    context.config,
+                    context.control_middleware.clone(),
+                    None,
+                )?;
+                let breaker = Arc::new(middleware);
+                let view = context
+                    .control_middleware
+                    .circuit_breaker_state_view(&context.config.stage_id)
+                    .expect("breaker just registered its state view");
+                let completion_gate: Arc<dyn CompletionGate> =
+                    Arc::new(CircuitBreakerCompletionGate::new(view));
+                let policy: Arc<dyn SourcePolicy> =
+                    Arc::new(CircuitBreakerSourcePolicy { breaker });
+                Ok(MiddlewareSurfaceAttachment::SourcePoll(
+                    SourcePollAttachment {
+                        policy,
+                        completion_gate: Some(completion_gate),
+                    },
+                ))
+            }
+            other => Err(MiddlewareFactoryError::materialization_failed(
+                self.label(),
+                &context.config.name,
+                std::io::Error::other(format!(
+                    "circuit breaker materialize is not implemented for surface {:?} in this slice",
+                    other.kind()
+                )),
+            )),
+        }
     }
 
     fn safety_level(&self) -> MiddlewareSafety {
@@ -3408,8 +3524,8 @@ mod tests {
         );
 
         let _state = control_middleware
-            .circuit_breaker_state(&stage_id)
-            .expect("expected circuit breaker state registration");
+            .circuit_breaker_state_view(&stage_id)
+            .expect("expected circuit breaker state view registration");
     }
 
     #[test]

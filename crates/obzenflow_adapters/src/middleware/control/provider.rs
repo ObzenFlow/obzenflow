@@ -10,16 +10,18 @@
 
 use crate::middleware::SourcePolicy;
 use obzenflow_core::control_middleware::{
-    CircuitBreakerSnapshotter, ControlMiddlewareProvider, RateLimiterSnapshotter,
+    CircuitBreakerSnapshotter, CircuitBreakerStateView, ControlMiddlewareProvider,
+    RateLimiterSnapshotter,
 };
 use obzenflow_core::id::StageId;
 use std::collections::HashMap;
-use std::sync::atomic::AtomicU8;
 use std::sync::{Arc, RwLock};
 
 struct CircuitBreakerRegistration {
     metrics_fn: Arc<CircuitBreakerSnapshotter>,
-    state: Arc<AtomicU8>,
+    /// FLOWIP-115b: typed read-only state view published by the breaker, the
+    /// single breaker state authority.
+    state_view: Arc<dyn CircuitBreakerStateView>,
 }
 
 struct RateLimiterRegistration {
@@ -53,9 +55,9 @@ impl ControlMiddlewareAggregator {
         &self,
         stage_id: StageId,
         metrics_fn: Arc<CircuitBreakerSnapshotter>,
-        state: Arc<AtomicU8>,
+        state_view: Arc<dyn CircuitBreakerStateView>,
     ) {
-        self.register_circuit_breaker_keyed(stage_id, None, metrics_fn, state);
+        self.register_circuit_breaker_keyed(stage_id, None, metrics_fn, state_view);
     }
 
     /// Register a per-effect circuit breaker instance (FLOWIP-120c).
@@ -64,9 +66,9 @@ impl ControlMiddlewareAggregator {
         stage_id: StageId,
         effect_type: String,
         metrics_fn: Arc<CircuitBreakerSnapshotter>,
-        state: Arc<AtomicU8>,
+        state_view: Arc<dyn CircuitBreakerStateView>,
     ) {
-        self.register_circuit_breaker_keyed(stage_id, Some(effect_type), metrics_fn, state);
+        self.register_circuit_breaker_keyed(stage_id, Some(effect_type), metrics_fn, state_view);
     }
 
     fn register_circuit_breaker_keyed(
@@ -74,9 +76,12 @@ impl ControlMiddlewareAggregator {
         stage_id: StageId,
         effect_type: Option<String>,
         metrics_fn: Arc<CircuitBreakerSnapshotter>,
-        state: Arc<AtomicU8>,
+        state_view: Arc<dyn CircuitBreakerStateView>,
     ) {
-        let registration = CircuitBreakerRegistration { metrics_fn, state };
+        let registration = CircuitBreakerRegistration {
+            metrics_fn,
+            state_view,
+        };
 
         self.circuit_breakers
             .write()
@@ -157,12 +162,15 @@ impl ControlMiddlewareProvider for ControlMiddlewareAggregator {
             .map(|reg| reg.metrics_fn.clone())
     }
 
-    fn circuit_breaker_state(&self, stage_id: &StageId) -> Option<Arc<AtomicU8>> {
+    fn circuit_breaker_state_view(
+        &self,
+        stage_id: &StageId,
+    ) -> Option<Arc<dyn CircuitBreakerStateView>> {
         self.circuit_breakers
             .read()
             .expect("ControlMiddlewareAggregator: circuit_breakers poisoned read lock")
             .get(&(*stage_id, None))
-            .map(|reg| reg.state.clone())
+            .map(|reg| reg.state_view.clone())
     }
 
     fn effect_circuit_breaker_snapshotters(

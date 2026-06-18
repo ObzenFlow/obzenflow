@@ -105,6 +105,7 @@ mod stateful_middleware;
 mod transform_middleware;
 
 // Common middleware utilities
+mod carrier;
 mod context;
 mod context_keys;
 mod effect_policy;
@@ -159,6 +160,14 @@ pub use transform_middleware::{
 };
 
 // Common utilities
+pub use carrier::{
+    EffectSurface, EffectTypeId, EffectUnitId, MiddlewareAttachmentId, MiddlewareAttachmentRequest,
+    MiddlewareCapability, MiddlewareDeclaration, MiddlewareMaterializationContext,
+    MiddlewareOrigin, MiddlewareSurface, MiddlewareSurfaceAttachment, MiddlewareSurfaceKind,
+    ProtectedUnit, ProtectedUnitId, SinkConfiguredTargetId, SinkDeliverySurface,
+    SinkDeliveryTarget, SinkDeliveryUnitId, SourcePollAttachment, SourcePollSurface,
+    SourcePollUnitId,
+};
 pub use context::MiddlewareContext;
 pub use effect_policy::{
     effect_policy_from_middleware, EffectAttemptOutcome, EffectPolicy, PerEffectPolicyBoundary,

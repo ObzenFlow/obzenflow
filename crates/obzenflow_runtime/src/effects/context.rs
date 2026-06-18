@@ -128,7 +128,7 @@ pub struct EffectInvocationContext {
     pub output_contract: StageOutputContract,
     pub backpressure_writer: BackpressureWriter,
     pub emit_enabled: bool,
-    pub effect_boundary: Option<Arc<dyn EffectBoundaryMiddleware>>,
+    pub effect_boundary: Option<Arc<dyn EffectBoundary>>,
     pub boundary_control_events: Arc<Mutex<Vec<ChainEvent>>>,
 }
 

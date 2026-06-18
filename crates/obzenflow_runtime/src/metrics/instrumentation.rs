@@ -6,8 +6,8 @@
 
 use hdrhistogram::Histogram;
 use obzenflow_core::control_middleware::{
-    CircuitBreakerSnapshotter, ControlMiddlewareProvider, NoControlMiddleware,
-    RateLimiterSnapshotter,
+    CircuitBreakerSnapshotter, CircuitBreakerStateView, ControlMiddlewareProvider,
+    NoControlMiddleware, RateLimiterSnapshotter,
 };
 use obzenflow_core::event::event_envelope::EventEnvelope;
 use obzenflow_core::event::identity::journal_writer_id::JournalWriterId;
@@ -125,8 +125,9 @@ pub struct StageInstrumentation {
     /// Cached snapshotter for rate limiter metrics (set once during stage construction).
     rl_snapshotter: Option<Arc<RateLimiterSnapshotter>>,
 
-    /// Cached circuit breaker state for control strategies (set once during stage construction).
-    cb_state: Option<Arc<std::sync::atomic::AtomicU8>>,
+    /// Cached typed circuit breaker state view (FLOWIP-115b; set once during
+    /// stage construction).
+    cb_state_view: Option<Arc<dyn CircuitBreakerStateView>>,
 
     /// Per-effect circuit breaker snapshotters keyed by declared effect type
     /// (FLOWIP-120c G9; set once during stage construction).
@@ -200,7 +201,7 @@ impl StageInstrumentation {
             rl_snapshotter: None,
             effect_cb_snapshotters: Vec::new(),
             effect_rl_snapshotters: Vec::new(),
-            cb_state: None,
+            cb_state_view: None,
         }
     }
 
@@ -219,11 +220,13 @@ impl StageInstrumentation {
 
         self.cb_snapshotter = provider.circuit_breaker_snapshotter(stage_id);
         self.rl_snapshotter = provider.rate_limiter_snapshotter(stage_id);
-        self.cb_state = provider.circuit_breaker_state(stage_id);
+        self.cb_state_view = provider.circuit_breaker_state_view(stage_id);
         self.effect_cb_snapshotters = provider.effect_circuit_breaker_snapshotters(stage_id);
         self.effect_rl_snapshotters = provider.effect_rate_limiter_snapshotters(stage_id);
 
-        if expects_circuit_breaker && (self.cb_snapshotter.is_none() || self.cb_state.is_none()) {
+        if expects_circuit_breaker
+            && (self.cb_snapshotter.is_none() || self.cb_state_view.is_none())
+        {
             return Err(ControlBindError::MissingCircuitBreaker {
                 stage_id: *stage_id,
             });
@@ -422,9 +425,9 @@ impl StageInstrumentation {
         &self.control_middleware
     }
 
-    /// Access cached circuit breaker state (if bound).
-    pub fn circuit_breaker_state(&self) -> Option<&Arc<std::sync::atomic::AtomicU8>> {
-        self.cb_state.as_ref()
+    /// Access the cached typed circuit breaker state view (if bound).
+    pub fn circuit_breaker_state_view(&self) -> Option<&Arc<dyn CircuitBreakerStateView>> {
+        self.cb_state_view.as_ref()
     }
 
     /// Note a consumed envelope so downstream events capture reader position and origin.

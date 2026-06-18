@@ -11,14 +11,12 @@ use crate::dsl::typing::StageTypingMetadata;
 use crate::dsl::StageCreationResult;
 use crate::stage_handle_adapter::StageHandleAdapter;
 use async_trait::async_trait;
-use obzenflow_adapters::middleware::control::{
-    CircuitBreakerSourceStrategy, ControlMiddlewareAggregator,
-};
+use obzenflow_adapters::middleware::control::ControlMiddlewareAggregator;
 use obzenflow_adapters::middleware::{
     validate_middleware_safety, AsyncFiniteSourceHandlerExt, AsyncInfiniteSourceHandlerExt,
     AsyncTransformHandlerExt, ControlMiddlewareRole, FiniteSourceHandlerExt,
     InfiniteSourceHandlerExt, JoinHandlerMiddlewareExt, Middleware, MiddlewareFactory,
-    OutcomeEnrichmentMiddleware, PerSourcePolicyBoundary, SinkHandlerExt,
+    MiddlewareSurfaceKind, OutcomeEnrichmentMiddleware, PerSourcePolicyBoundary, SinkHandlerExt,
     StatefulHandlerMiddlewareExt, SystemEnrichmentMiddleware, TimingMiddleware,
     TransformHandlerExt, UnifiedMiddlewareTransform,
 };
@@ -58,7 +56,8 @@ use obzenflow_runtime::{
                 AsyncInfiniteSourceBuilder, InfiniteSourceBuilder, InfiniteSourceConfig,
                 InfiniteSourceEvent, InfiniteSourceState,
             },
-            SourceBoundaryMiddleware,
+            strategies::CompletionGate,
+            SourceBoundary,
         },
         stateful::{StatefulBuilder, StatefulConfig, StatefulEvent, StatefulState},
         transform::{TransformBuilder, TransformConfig, TransformEvent, TransformState},
@@ -103,8 +102,11 @@ fn create_system_middleware(
 
 struct SourceMiddlewareBinding {
     all_middleware: Vec<Box<dyn Middleware>>,
-    source_boundary: Option<Arc<dyn SourceBoundaryMiddleware>>,
-    has_circuit_breaker: bool,
+    source_boundary: Option<Arc<dyn SourceBoundary>>,
+    /// FLOWIP-115b: the source completion gate companion supplied by a
+    /// hook-bound source control middleware (the circuit breaker), sharing its
+    /// state view. Replaces the old `has_circuit_breaker` + `try_new` lookup.
+    completion_gate: Option<Arc<dyn CompletionGate>>,
     expects_circuit_breaker: bool,
     expects_rate_limiter: bool,
 }
@@ -126,16 +128,38 @@ fn build_source_middleware_and_register_policies(
         .iter()
         .any(|spec| spec.factory.control_role() == ControlMiddlewareRole::RateLimiter);
 
-    let mut has_circuit_breaker = false;
+    let mut completion_gate: Option<Arc<dyn CompletionGate>> = None;
 
     for spec in resolved.middleware {
+        // FLOWIP-115b: hook-bound control middleware that attaches to the source
+        // poll surface is placed by its declaration, not by ControlMiddlewareRole.
+        // It is materialized into a source policy registered in declared order so
+        // it composes with any still-legacy source policy (the rate limiter), and
+        // it supplies the completion-gate companion that shares its state view.
+        let declaration = spec.factory.declaration();
+        if declaration.is_control() && declaration.supports(MiddlewareSurfaceKind::SourcePoll) {
+            let origin = crate::dsl::binder::middleware_origin_from_source(&spec.source);
+            let binding = crate::dsl::binder::materialize_source_poll(
+                spec.factory.as_ref(),
+                config,
+                control_middleware,
+                &origin,
+            )?;
+            control_middleware.register_source_policy(config.stage_id, binding.policy);
+            if binding.completion_gate.is_some() {
+                completion_gate = binding.completion_gate;
+            }
+            continue;
+        }
+
         match spec.factory.control_role() {
-            ControlMiddlewareRole::CircuitBreaker => {
-                has_circuit_breaker = true;
+            ControlMiddlewareRole::RateLimiter => {
                 spec.factory
                     .register_source_policy(config, stage_type, control_middleware)?;
             }
-            ControlMiddlewareRole::RateLimiter => {
+            ControlMiddlewareRole::CircuitBreaker => {
+                // A breaker that did not declare source hooks: legacy route,
+                // retained until FLOWIP-115g (Phase 6 fail-closes it).
                 spec.factory
                     .register_source_policy(config, stage_type, control_middleware)?;
             }
@@ -151,14 +175,14 @@ fn build_source_middleware_and_register_policies(
     } else {
         Some(
             Arc::new(PerSourcePolicyBoundary::new(source_policies, writer_id))
-                as Arc<dyn SourceBoundaryMiddleware>,
+                as Arc<dyn SourceBoundary>,
         )
     };
 
     Ok(SourceMiddlewareBinding {
         all_middleware,
         source_boundary,
-        has_circuit_breaker,
+        completion_gate,
         expects_circuit_breaker,
         expects_rate_limiter,
     })
@@ -489,14 +513,7 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> S
             stage_id: config.stage_id,
             stage_name: config.name.clone(),
             flow_name: config.flow_name.clone(),
-            control_strategy: if source_binding.has_circuit_breaker {
-                Some(Arc::new(
-                    CircuitBreakerSourceStrategy::try_new(config.stage_id, &control_provider)
-                        .map_err(|e| e.to_string())?,
-                ))
-            } else {
-                None
-            },
+            control_strategy: source_binding.completion_gate,
             source_boundary: source_binding.source_boundary,
         };
 
@@ -651,14 +668,7 @@ impl<H: AsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
             stage_id: config.stage_id,
             stage_name: config.name.clone(),
             flow_name: config.flow_name.clone(),
-            control_strategy: if source_binding.has_circuit_breaker {
-                Some(Arc::new(
-                    CircuitBreakerSourceStrategy::try_new(config.stage_id, &control_provider)
-                        .map_err(|e| e.to_string())?,
-                ))
-            } else {
-                None
-            },
+            control_strategy: source_binding.completion_gate,
             source_boundary: source_binding.source_boundary,
         };
 
@@ -776,14 +786,7 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
             stage_id: config.stage_id,
             stage_name: config.name.clone(),
             flow_name: config.flow_name.clone(),
-            control_strategy: if source_binding.has_circuit_breaker {
-                Some(Arc::new(
-                    CircuitBreakerSourceStrategy::try_new(config.stage_id, &control_provider)
-                        .map_err(|e| e.to_string())?,
-                ))
-            } else {
-                None
-            },
+            control_strategy: source_binding.completion_gate,
             source_boundary: source_binding.source_boundary,
         };
 
@@ -934,14 +937,7 @@ impl<H: AsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
             stage_id: config.stage_id,
             stage_name: config.name.clone(),
             flow_name: config.flow_name.clone(),
-            control_strategy: if source_binding.has_circuit_breaker {
-                Some(Arc::new(
-                    CircuitBreakerSourceStrategy::try_new(config.stage_id, &control_provider)
-                        .map_err(|e| e.to_string())?,
-                ))
-            } else {
-                None
-            },
+            control_strategy: source_binding.completion_gate,
             source_boundary: source_binding.source_boundary,
         };
 
@@ -2926,10 +2922,10 @@ mod tests {
             .expect("handle creation should succeed");
 
         // Ensure the breaker state is registered via the flow-scoped provider.
-        let cb_state = control_middleware.circuit_breaker_state(&stage_id);
+        let cb_state = control_middleware.circuit_breaker_state_view(&stage_id);
         assert!(
             cb_state.is_some(),
-            "circuit breaker state should be registered for source with circuit_breaker middleware"
+            "circuit breaker state view should be registered for source with circuit_breaker middleware"
         );
 
         // Avoid unused variable warning
