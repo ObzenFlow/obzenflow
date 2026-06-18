@@ -290,7 +290,7 @@ pub trait MiddlewareFactory: Send + Sync {
     /// without first constructing a `Box<dyn Middleware>`. Defaults to a
     /// legacy-shell declaration, so existing shell factories need no change.
     fn declaration(&self) -> MiddlewareDeclaration {
-        MiddlewareDeclaration::legacy_shell(self.label())
+        MiddlewareDeclaration::legacy_shell(self.label(), self.override_key().family_label())
     }
 
     /// FLOWIP-115b: materialize one typed surface attachment for one concrete

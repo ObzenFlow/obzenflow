@@ -15,11 +15,11 @@ use obzenflow_adapters::middleware::control::ControlMiddlewareAggregator;
 use obzenflow_adapters::middleware::{
     validate_middleware_safety, AsyncFiniteSourceHandlerExt, AsyncInfiniteSourceHandlerExt,
     AsyncTransformHandlerExt, ControlMiddlewareRole, FiniteSourceHandlerExt,
-    InfiniteSourceHandlerExt, JoinHandlerMiddlewareExt, Middleware, MiddlewareFactory,
-    MiddlewareSurfaceKind, OutcomeEnrichmentMiddleware, PerSinkDeliveryPolicyBoundary,
-    PerSourcePolicyBoundary, SinkHandlerExt, SinkPolicy, StatefulHandlerMiddlewareExt,
-    SystemEnrichmentMiddleware, TimingMiddleware, TopologyMiddlewareConfigSlot,
-    TransformHandlerExt, UnifiedMiddlewareTransform,
+    InfiniteSourceHandlerExt, JoinHandlerMiddlewareExt, Middleware, MiddlewareDeclarationIndex,
+    MiddlewareFactory, MiddlewareSurfaceKind, OutcomeEnrichmentMiddleware,
+    PerSinkDeliveryPolicyBoundary, PerSourcePolicyBoundary, SinkHandlerExt, SinkPolicy,
+    StatefulHandlerMiddlewareExt, SystemEnrichmentMiddleware, TimingMiddleware,
+    TopologyMiddlewareConfigSlot, TransformHandlerExt, UnifiedMiddlewareTransform,
 };
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::{StageId, WriterId};
@@ -136,7 +136,7 @@ fn build_source_middleware_and_register_policies(
 
     let mut completion_gate: Option<Arc<dyn CompletionGate>> = None;
 
-    for spec in resolved.middleware {
+    for (middleware_index, spec) in resolved.middleware.into_iter().enumerate() {
         // FLOWIP-115b: hook-bound control middleware that attaches to the source
         // poll surface is placed by its declaration, not by ControlMiddlewareRole.
         // It is materialized into a source policy registered in declared order so
@@ -150,6 +150,7 @@ fn build_source_middleware_and_register_policies(
                 config,
                 control_middleware,
                 &origin,
+                MiddlewareDeclarationIndex::resolved(middleware_index),
             )?;
             control_middleware.register_source_policy(config.stage_id, binding.policy);
             if binding.completion_gate.is_some() {
@@ -1393,9 +1394,9 @@ impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
         // must name the guarded effect per entry.
         let mut shell_specs = Vec::new();
         let mut transitional_policy_specs = Vec::new();
-        for spec in resolved.middleware {
+        for (middleware_index, spec) in resolved.middleware.into_iter().enumerate() {
             if spec.factory.kind() == obzenflow_adapters::middleware::MiddlewareKind::Policy {
-                transitional_policy_specs.push(spec);
+                transitional_policy_specs.push((middleware_index, spec));
             } else {
                 shell_specs.push(spec);
             }
@@ -1417,7 +1418,7 @@ impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
                 .into());
             }
             let effect_type = effect_declarations[0].effect_type;
-            for spec in transitional_policy_specs {
+            for (middleware_index, spec) in transitional_policy_specs {
                 let origin = crate::dsl::binder::middleware_origin_from_source(&spec.source);
                 let policy = crate::dsl::binder::bind_effect_policy(
                     spec.factory.as_ref(),
@@ -1425,19 +1426,21 @@ impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
                     &control_middleware,
                     effect_type,
                     &origin,
+                    MiddlewareDeclarationIndex::resolved(middleware_index),
                 )?;
                 effect_chains.entry(effect_type).or_default().push(policy);
             }
         }
 
         for attachment in &self.effect_policies {
-            for factory in &attachment.factories {
+            for (middleware_index, factory) in attachment.factories.iter().enumerate() {
                 let policy = crate::dsl::binder::bind_effect_policy(
                     factory.as_ref(),
                     &config,
                     &control_middleware,
                     attachment.effect_type,
                     &obzenflow_adapters::middleware::MiddlewareOrigin::Stage,
+                    MiddlewareDeclarationIndex::effect_policy(middleware_index),
                 )?;
                 effect_chains
                     .entry(attachment.effect_type)
@@ -1596,7 +1599,7 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
         // sink-delivery surface is materialized into a sink policy composed at
         // the delivery boundary; everything else stays on the handler shell.
         let mut sink_policies: Vec<Arc<dyn SinkPolicy>> = Vec::new();
-        for spec in resolved.middleware {
+        for (middleware_index, spec) in resolved.middleware.into_iter().enumerate() {
             let declaration = spec.factory.declaration();
             if declaration.is_control() && declaration.supports(MiddlewareSurfaceKind::SinkDelivery)
             {
@@ -1606,6 +1609,7 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
                     &config,
                     &control_middleware,
                     &origin,
+                    MiddlewareDeclarationIndex::resolved(middleware_index),
                 )?;
                 sink_policies.push(policy);
             } else {

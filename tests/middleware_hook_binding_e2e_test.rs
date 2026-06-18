@@ -14,15 +14,15 @@ use obzenflow_adapters::middleware::control::ControlMiddlewareAggregator;
 use obzenflow_adapters::middleware::{
     validate_attachment_request, ControlMiddlewareRole, EffectPolicy, EffectSurface, EffectTypeKey,
     EffectUnitId, Middleware, MiddlewareAttachmentRequest, MiddlewareContext,
-    MiddlewareDeclaration, MiddlewareFactory, MiddlewareFactoryError, MiddlewareFactoryResult,
-    MiddlewareKind, MiddlewareMaterializationContext, MiddlewareOrigin, MiddlewareOverrideKey,
-    MiddlewarePlanContribution, MiddlewareSurface, MiddlewareSurfaceAttachment,
-    MiddlewareSurfaceKind::Effect, MiddlewareSurfaceKind::SinkDelivery,
-    MiddlewareSurfaceKind::SourcePoll, PolicyAdmission, ProtectedUnit, ProtectedUnitId,
-    SinkAdmission, SinkDeliveryPolicyOutcome, SinkDeliverySurface, SinkDeliveryTarget,
-    SinkDeliveryUnitId, SinkPolicy, SinkPolicyCtx, SourceAdmission, SourcePolicy, SourcePolicyCtx,
-    SourcePollAttachment, SourcePollOutcome, SourcePollSurface, SourcePollUnitId,
-    TopologyMiddlewareConfigSlot,
+    MiddlewareDeclaration, MiddlewareDeclarationIndex, MiddlewareFactory, MiddlewareFactoryError,
+    MiddlewareFactoryResult, MiddlewareKind, MiddlewareMaterializationContext, MiddlewareOrigin,
+    MiddlewareOverrideKey, MiddlewarePlanContribution, MiddlewareSurface,
+    MiddlewareSurfaceAttachment, MiddlewareSurfaceKind::Effect,
+    MiddlewareSurfaceKind::SinkDelivery, MiddlewareSurfaceKind::SourcePoll, PolicyAdmission,
+    ProtectedUnit, ProtectedUnitId, SinkAdmission, SinkDeliveryPolicyOutcome, SinkDeliverySurface,
+    SinkDeliveryTarget, SinkDeliveryUnitId, SinkPolicy, SinkPolicyCtx, SourceAdmission,
+    SourcePolicy, SourcePolicyCtx, SourcePollAttachment, SourcePollOutcome, SourcePollSurface,
+    SourcePollUnitId, TopologyMiddlewareConfigSlot,
 };
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
 use obzenflow_core::event::{EffectFailureCode, EffectFailureSource, RetryDisposition};
@@ -605,6 +605,7 @@ fn hook_proof_factory_validates_surface_and_protected_unit_identity() {
         surface: &surface,
         protected_unit: &mismatched_unit,
         origin: &origin,
+        declaration_index: MiddlewareDeclarationIndex::resolved(0),
     };
 
     assert!(validate_attachment_request(&factory.declaration(), &request).is_err());
@@ -623,6 +624,7 @@ fn hook_proof_factory_validates_surface_and_protected_unit_identity() {
         surface: &sink_surface,
         protected_unit: &sink_unit,
         origin: &origin,
+        declaration_index: MiddlewareDeclarationIndex::resolved(0),
     };
     assert!(validate_attachment_request(&factory.declaration(), &sink_request).is_ok());
 
@@ -637,6 +639,7 @@ fn hook_proof_factory_validates_surface_and_protected_unit_identity() {
         surface: &source_surface,
         protected_unit: &source_unit,
         origin: &origin,
+        declaration_index: MiddlewareDeclarationIndex::resolved(0),
     };
     assert!(validate_attachment_request(&factory.declaration(), &source_request).is_ok());
 }

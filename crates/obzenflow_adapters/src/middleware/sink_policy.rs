@@ -314,6 +314,7 @@ mod tests {
             surface: &surface,
             protected_unit: &unit,
             origin: &origin,
+            declaration_index: crate::middleware::MiddlewareDeclarationIndex::resolved(0),
         };
         let materialization = MiddlewareMaterializationContext {
             config: &config,

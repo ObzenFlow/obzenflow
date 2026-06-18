@@ -240,3 +240,20 @@ impl From<EffectRuntimeMode> for obzenflow_core::MiddlewareExecutionScope {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::messaging::upstream_subscription::StageInputPosition;
+
+    #[test]
+    fn resume_scope_remains_reconstruction_until_phase_predicate_lands() {
+        assert_eq!(
+            scope_for_dispatch(
+                EffectRuntimeMode::ResumeIncomplete,
+                Some(StageInputPosition(42))
+            ),
+            obzenflow_core::MiddlewareExecutionScope::ResumeHandler
+        );
+    }
+}

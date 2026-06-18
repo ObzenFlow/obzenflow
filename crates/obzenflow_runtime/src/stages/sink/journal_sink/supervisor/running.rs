@@ -549,8 +549,9 @@ async fn dispatch_data_event<
         // paths already have; the sink is the only live-I/O unit that re-consumes
         // its tape during replay, so it needs the explicit scope gate. The consume
         // executor still runs, so the delivery receipt is reconstructed normally.
-        // The live tail of a resume runs under a non-replay scope and stays
-        // breaker-protected.
+        // FLOWIP-120n owns the future resume phase predicate that will split a
+        // replayed prefix from a live tail by `StageInputPosition`. Until then,
+        // `ResumeIncomplete` is treated as deterministic reconstruction here.
         let (outcome, control_events) = if scope.is_deterministic_replay() {
             (
                 SinkDeliveryBoundaryOutcome::Attempted(executor.attempt().await),

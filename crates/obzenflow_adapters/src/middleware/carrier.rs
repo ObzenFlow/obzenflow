@@ -24,7 +24,7 @@ use super::source_policy::SourcePolicy;
 use obzenflow_core::StageId;
 use obzenflow_runtime::pipeline::config::StageConfig;
 use obzenflow_runtime::stages::source::strategies::CompletionGate;
-use ring::digest::{digest, SHA256};
+use ring::digest::{Context, SHA256};
 use std::sync::Arc;
 use thiserror::Error;
 
@@ -255,17 +255,51 @@ pub enum MiddlewareOrigin {
     },
 }
 
+/// Which ordered declaration lane produced this attachment.
+///
+/// Adapter-owned so the binder can pass ordering metadata without exposing DSL
+/// resolution types. The lane keeps explicit effect-policy declarations distinct
+/// from the resolved stage/flow middleware list when both attach the same
+/// family to the same protected unit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MiddlewareDeclarationScope {
+    ResolvedMiddleware,
+    EffectPolicy,
+}
+
+/// Replay-stable declaration position within an adapter-owned declaration lane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct MiddlewareDeclarationIndex {
+    pub scope: MiddlewareDeclarationScope,
+    pub index: u64,
+}
+
+impl MiddlewareDeclarationIndex {
+    pub fn resolved(index: usize) -> Self {
+        Self {
+            scope: MiddlewareDeclarationScope::ResolvedMiddleware,
+            index: index as u64,
+        }
+    }
+
+    pub fn effect_policy(index: usize) -> Self {
+        Self {
+            scope: MiddlewareDeclarationScope::EffectPolicy,
+            index: index as u64,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Attachment identity
 // ---------------------------------------------------------------------------
 
 /// Deterministic, structurally-derived attachment identity (FLOWIP-115b).
 ///
-/// Derived from replay-stable coordinates (the middleware origin, protected
-/// unit, and override family label), never a fresh materialization-time ULID, so
-/// it survives strict replay and archive-drift checks. Origin is folded into the
-/// material so two declarations of the same family on one protected unit at
-/// different origins (flow vs stage vs stage override) do not collide.
+/// Derived from replay-stable binding coordinates, never a fresh
+/// materialization-time ULID, so it survives strict replay and archive-drift
+/// checks. The hashed coordinate includes declaration schema, label, family,
+/// origin, declaration order, concrete surface, and protected unit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct MiddlewareAttachmentId(obzenflow_core::Ulid);
 
@@ -276,13 +310,15 @@ impl MiddlewareAttachmentId {
         declaration: &MiddlewareDeclaration,
         request: &MiddlewareAttachmentRequest<'_>,
     ) -> Self {
-        let material = format!(
-            "middleware-attachment:v2:{}:{}:{}",
-            declaration.label,
-            origin_key_material(request.origin),
-            protected_unit_key_material(request.protected_unit)
-        );
-        let hash = digest(&SHA256, material.as_bytes());
+        let mut context = Context::new(&SHA256);
+        push_field(&mut context, "schema", "middleware-attachment:v3");
+        push_field(&mut context, "middleware.label", declaration.label);
+        push_field(&mut context, "middleware.family", declaration.family_label);
+        push_origin(&mut context, request.origin);
+        push_declaration_index(&mut context, request.declaration_index);
+        push_surface(&mut context, request.surface);
+        push_protected_unit(&mut context, request.protected_unit);
+        let hash = context.finish();
         let mut id_bytes = [0u8; 16];
         id_bytes.copy_from_slice(&hash.as_ref()[..16]);
         Self(obzenflow_core::Ulid(u128::from_be_bytes(id_bytes)))
@@ -293,36 +329,108 @@ impl MiddlewareAttachmentId {
     }
 }
 
-fn origin_key_material(origin: &MiddlewareOrigin) -> String {
+fn push_field(context: &mut Context, label: &str, value: &str) {
+    context.update(label.as_bytes());
+    context.update(b"\0");
+    context.update(value.len().to_string().as_bytes());
+    context.update(b"\0");
+    context.update(value.as_bytes());
+    context.update(b"\0");
+}
+
+fn push_stage_id(context: &mut Context, label: &str, stage_id: StageId) {
+    push_field(context, label, &stage_id.as_ulid().to_string());
+}
+
+fn push_origin(context: &mut Context, origin: &MiddlewareOrigin) {
     match origin {
-        MiddlewareOrigin::Flow => "origin:flow".to_string(),
-        MiddlewareOrigin::Stage => "origin:stage".to_string(),
+        MiddlewareOrigin::Flow => push_field(context, "origin.kind", "flow"),
+        MiddlewareOrigin::Stage => push_field(context, "origin.kind", "stage"),
         MiddlewareOrigin::StageOverride {
             family_label,
             flow_label,
             stage_label,
-        } => format!("origin:override:{family_label}:{flow_label}:{stage_label}"),
+        } => {
+            push_field(context, "origin.kind", "stage_override");
+            push_field(context, "origin.family", family_label);
+            push_field(context, "origin.flow_label", flow_label);
+            push_field(context, "origin.stage_label", stage_label);
+        }
     }
 }
 
-fn protected_unit_key_material(protected_unit: &ProtectedUnitId) -> String {
-    let stage_id = protected_unit.stage_id.as_ulid();
+fn push_declaration_index(context: &mut Context, index: MiddlewareDeclarationIndex) {
+    let scope = match index.scope {
+        MiddlewareDeclarationScope::ResolvedMiddleware => "resolved_middleware",
+        MiddlewareDeclarationScope::EffectPolicy => "effect_policy",
+    };
+    push_field(context, "declaration.scope", scope);
+    push_field(context, "declaration.index", &index.index.to_string());
+}
+
+fn push_surface(context: &mut Context, surface: &MiddlewareSurface) {
+    match surface {
+        MiddlewareSurface::SourcePoll(surface) => {
+            push_field(context, "surface.kind", "source_poll");
+            push_stage_id(context, "surface.stage_id", surface.stage_id);
+        }
+        MiddlewareSurface::Effect(surface) => {
+            push_field(context, "surface.kind", "effect");
+            push_stage_id(context, "surface.stage_id", surface.stage_id);
+            push_field(context, "surface.effect_type", surface.effect_type.as_str());
+        }
+        MiddlewareSurface::SinkDelivery(surface) => {
+            push_field(context, "surface.kind", "sink_delivery");
+            push_stage_id(context, "surface.stage_id", surface.stage_id);
+            match &surface.configured_target {
+                Some(target) => {
+                    push_field(context, "surface.sink_target.kind", "configured");
+                    push_field(context, "surface.sink_target", &target.0);
+                }
+                None => push_field(context, "surface.sink_target.kind", "stage"),
+            }
+        }
+        MiddlewareSurface::Ingress => push_field(context, "surface.kind", "ingress"),
+        MiddlewareSurface::Handler => push_field(context, "surface.kind", "handler"),
+        MiddlewareSurface::Stateful => push_field(context, "surface.kind", "stateful"),
+        MiddlewareSurface::Join => push_field(context, "surface.kind", "join"),
+        MiddlewareSurface::OutputCommit => push_field(context, "surface.kind", "output_commit"),
+        MiddlewareSurface::StageLifecycle => {
+            push_field(context, "surface.kind", "stage_lifecycle");
+        }
+    }
+}
+
+fn push_protected_unit(context: &mut Context, protected_unit: &ProtectedUnitId) {
+    push_stage_id(context, "protected_unit.stage_id", protected_unit.stage_id);
     match &protected_unit.unit {
-        ProtectedUnit::SourcePoll(_) => format!("{stage_id}:source_poll"),
+        ProtectedUnit::SourcePoll(_) => push_field(context, "protected_unit.kind", "source_poll"),
         ProtectedUnit::Effect(unit) => {
-            format!("{stage_id}:effect:{}", unit.effect_type.as_str())
+            push_field(context, "protected_unit.kind", "effect");
+            push_field(
+                context,
+                "protected_unit.effect_type",
+                unit.effect_type.as_str(),
+            );
         }
         ProtectedUnit::SinkDelivery(unit) => match &unit.target {
-            SinkDeliveryTarget::Stage => format!("{stage_id}:sink_delivery:stage"),
+            SinkDeliveryTarget::Stage => {
+                push_field(context, "protected_unit.kind", "sink_delivery");
+                push_field(context, "protected_unit.sink_target.kind", "stage");
+            }
             SinkDeliveryTarget::Configured(target) => {
-                format!("{stage_id}:sink_delivery:target:{}", target.0)
+                push_field(context, "protected_unit.kind", "sink_delivery");
+                push_field(context, "protected_unit.sink_target.kind", "configured");
+                push_field(context, "protected_unit.sink_target", &target.0);
             }
         },
-        ProtectedUnit::Ingress => format!("{stage_id}:ingress"),
-        ProtectedUnit::Handler => format!("{stage_id}:handler"),
-        ProtectedUnit::Stateful => format!("{stage_id}:stateful"),
-        ProtectedUnit::Join => format!("{stage_id}:join"),
-        ProtectedUnit::OutputCommit => format!("{stage_id}:output_commit"),
+        ProtectedUnit::Ingress => push_field(context, "protected_unit.kind", "ingress"),
+        ProtectedUnit::Handler => push_field(context, "protected_unit.kind", "handler"),
+        ProtectedUnit::Stateful => push_field(context, "protected_unit.kind", "stateful"),
+        ProtectedUnit::Join => push_field(context, "protected_unit.kind", "join"),
+        ProtectedUnit::OutputCommit => {
+            push_field(context, "protected_unit.kind", "output_commit");
+        }
     }
 }
 
@@ -336,6 +444,7 @@ fn protected_unit_key_material(protected_unit: &ProtectedUnitId) -> String {
 #[derive(Debug, Clone)]
 pub struct MiddlewareDeclaration {
     pub label: &'static str,
+    pub family_label: &'static str,
     pub capability: MiddlewareCapability,
     /// The surfaces this factory can attach to. A control middleware may span
     /// several (the circuit breaker declares source poll, effect, and sink
@@ -348,9 +457,10 @@ pub struct MiddlewareDeclaration {
 impl MiddlewareDeclaration {
     /// Declaration for legacy shell middleware: no hook surface, observer
     /// capability (the safe default matching `MiddlewareKind::Observation`).
-    pub fn legacy_shell(label: &'static str) -> Self {
+    pub fn legacy_shell(label: &'static str, family_label: &'static str) -> Self {
         Self {
             label,
+            family_label,
             capability: MiddlewareCapability::Observer,
             surfaces: Vec::new(),
         }
@@ -358,8 +468,18 @@ impl MiddlewareDeclaration {
 
     /// A hook-bound control declaration spanning the given surfaces.
     pub fn control(label: &'static str, surfaces: Vec<MiddlewareSurfaceKind>) -> Self {
+        Self::control_with_family(label, label, surfaces)
+    }
+
+    /// A hook-bound control declaration with an explicit override family.
+    pub fn control_with_family(
+        label: &'static str,
+        family_label: &'static str,
+        surfaces: Vec<MiddlewareSurfaceKind>,
+    ) -> Self {
         Self {
             label,
+            family_label,
             capability: MiddlewareCapability::Control,
             surfaces,
         }
@@ -500,10 +620,12 @@ pub fn validate_attachment_request(
 
 /// The concrete attachment the DSL binder asks the factory to materialize: one
 /// surface, one protected unit, and the resolved origin.
+#[derive(Clone, Copy)]
 pub struct MiddlewareAttachmentRequest<'a> {
     pub surface: &'a MiddlewareSurface,
     pub protected_unit: &'a ProtectedUnitId,
     pub origin: &'a MiddlewareOrigin,
+    pub declaration_index: MiddlewareDeclarationIndex,
 }
 
 /// Runtime construction inputs the factory needs to materialize, mirroring the
@@ -555,9 +677,13 @@ mod tests {
     #[test]
     fn validates_source_poll_and_derives_stable_attachment_id() {
         let stage_id = StageId::new();
-        let declaration = MiddlewareDeclaration::control(
+        let declaration = MiddlewareDeclaration::control_with_family(
+            "shared_label",
             "circuit_breaker",
-            vec![MiddlewareSurfaceKind::SourcePoll],
+            vec![
+                MiddlewareSurfaceKind::SourcePoll,
+                MiddlewareSurfaceKind::Effect,
+            ],
         );
         let surface = MiddlewareSurface::SourcePoll(SourcePollSurface { stage_id });
         let protected_unit = ProtectedUnitId {
@@ -569,17 +695,67 @@ mod tests {
             surface: &surface,
             protected_unit: &protected_unit,
             origin: &origin,
+            declaration_index: MiddlewareDeclarationIndex::resolved(0),
         };
 
         let first = validate_attachment_request(&declaration, &request).unwrap();
         let second = validate_attachment_request(&declaration, &request).unwrap();
-        let other_family =
-            MiddlewareDeclaration::control("rate_limiter", vec![MiddlewareSurfaceKind::SourcePoll]);
-        let other = validate_attachment_request(&other_family, &request).unwrap();
 
         assert_eq!(first, second);
         assert_eq!(first.as_ulid(), second.as_ulid());
-        assert_ne!(first, other);
+
+        let other_origin = MiddlewareOrigin::Flow;
+        let other_origin_request = MiddlewareAttachmentRequest {
+            origin: &other_origin,
+            ..request
+        };
+        assert_ne!(
+            first,
+            validate_attachment_request(&declaration, &other_origin_request).unwrap()
+        );
+
+        let other_index_request = MiddlewareAttachmentRequest {
+            declaration_index: MiddlewareDeclarationIndex::resolved(1),
+            ..request
+        };
+        assert_ne!(
+            first,
+            validate_attachment_request(&declaration, &other_index_request).unwrap()
+        );
+
+        let other_family = MiddlewareDeclaration::control_with_family(
+            "shared_label",
+            "rate_limiter",
+            vec![
+                MiddlewareSurfaceKind::SourcePoll,
+                MiddlewareSurfaceKind::Effect,
+            ],
+        );
+        assert_ne!(
+            first,
+            validate_attachment_request(&other_family, &request).unwrap()
+        );
+
+        let effect_surface = MiddlewareSurface::Effect(EffectSurface {
+            stage_id,
+            effect_type: EffectTypeKey::from("http"),
+        });
+        let effect_unit = ProtectedUnitId {
+            stage_id,
+            unit: ProtectedUnit::Effect(EffectUnitId {
+                effect_type: EffectTypeKey::from("http"),
+            }),
+        };
+        let effect_request = MiddlewareAttachmentRequest {
+            surface: &effect_surface,
+            protected_unit: &effect_unit,
+            origin: &origin,
+            declaration_index: MiddlewareDeclarationIndex::resolved(0),
+        };
+        assert_ne!(
+            first,
+            validate_attachment_request(&declaration, &effect_request).unwrap()
+        );
     }
 
     #[test]
@@ -601,6 +777,7 @@ mod tests {
             surface: &surface,
             protected_unit: &protected_unit,
             origin: &origin,
+            declaration_index: MiddlewareDeclarationIndex::resolved(0),
         };
 
         let err = validate_attachment_request(&declaration, &request).unwrap_err();

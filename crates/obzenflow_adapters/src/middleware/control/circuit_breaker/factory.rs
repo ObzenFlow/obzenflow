@@ -995,8 +995,9 @@ impl MiddlewareFactory for CircuitBreakerFactory {
         // The breaker is hook-bound control middleware. This slice materializes
         // the source-poll and effect surfaces; the sink-delivery phase adds sink
         // delivery to this surface set.
-        MiddlewareDeclaration::control(
+        MiddlewareDeclaration::control_with_family(
             self.label(),
+            self.override_key().family_label(),
             vec![
                 MiddlewareSurfaceKind::SourcePoll,
                 MiddlewareSurfaceKind::Effect,

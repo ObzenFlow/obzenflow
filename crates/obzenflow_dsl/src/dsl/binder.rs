@@ -14,11 +14,11 @@ use crate::middleware_resolution::MiddlewareSource;
 use obzenflow_adapters::middleware::control::ControlMiddlewareAggregator;
 use obzenflow_adapters::middleware::{
     effect_policy_from_middleware, validate_attachment_request, EffectPolicy, EffectSurface,
-    EffectTypeKey, EffectUnitId, Middleware, MiddlewareAttachmentRequest, MiddlewareFactory,
-    MiddlewareMaterializationContext, MiddlewareOrigin, MiddlewareSurface,
-    MiddlewareSurfaceAttachment, MiddlewareSurfaceKind, ProtectedUnit, ProtectedUnitId,
-    SinkDeliverySurface, SinkDeliveryTarget, SinkDeliveryUnitId, SinkPolicy, SourcePolicy,
-    SourcePollSurface, SourcePollUnitId,
+    EffectTypeKey, EffectUnitId, Middleware, MiddlewareAttachmentRequest,
+    MiddlewareDeclarationIndex, MiddlewareFactory, MiddlewareMaterializationContext,
+    MiddlewareOrigin, MiddlewareSurface, MiddlewareSurfaceAttachment, MiddlewareSurfaceKind,
+    ProtectedUnit, ProtectedUnitId, SinkDeliverySurface, SinkDeliveryTarget, SinkDeliveryUnitId,
+    SinkPolicy, SourcePolicy, SourcePollSurface, SourcePollUnitId,
 };
 use obzenflow_runtime::pipeline::config::StageConfig;
 use obzenflow_runtime::stages::source::strategies::CompletionGate;
@@ -59,6 +59,7 @@ pub(crate) fn materialize_source_poll(
     config: &StageConfig,
     control_middleware: &Arc<ControlMiddlewareAggregator>,
     origin: &MiddlewareOrigin,
+    declaration_index: MiddlewareDeclarationIndex,
 ) -> Result<SourcePollBinding, String> {
     let surface = MiddlewareSurface::SourcePoll(SourcePollSurface {
         stage_id: config.stage_id,
@@ -71,6 +72,7 @@ pub(crate) fn materialize_source_poll(
         surface: &surface,
         protected_unit: &protected_unit,
         origin,
+        declaration_index,
     };
     let declaration = factory.declaration();
     validate_attachment_request(&declaration, &request).map_err(|e| e.to_string())?;
@@ -104,6 +106,7 @@ pub(crate) fn bind_effect_policy(
     control_middleware: &Arc<ControlMiddlewareAggregator>,
     effect_type: &'static str,
     origin: &MiddlewareOrigin,
+    declaration_index: MiddlewareDeclarationIndex,
 ) -> Result<Arc<dyn EffectPolicy>, String> {
     let declaration = factory.declaration();
     if declaration.is_control() && declaration.supports(MiddlewareSurfaceKind::Effect) {
@@ -121,6 +124,7 @@ pub(crate) fn bind_effect_policy(
             surface: &surface,
             protected_unit: &protected_unit,
             origin,
+            declaration_index,
         };
         validate_attachment_request(&declaration, &request).map_err(|e| e.to_string())?;
         let ctx = MiddlewareMaterializationContext {
@@ -154,6 +158,7 @@ pub(crate) fn materialize_sink_delivery(
     config: &StageConfig,
     control_middleware: &Arc<ControlMiddlewareAggregator>,
     origin: &MiddlewareOrigin,
+    declaration_index: MiddlewareDeclarationIndex,
 ) -> Result<Arc<dyn SinkPolicy>, String> {
     let surface = MiddlewareSurface::SinkDelivery(SinkDeliverySurface {
         stage_id: config.stage_id,
@@ -169,6 +174,7 @@ pub(crate) fn materialize_sink_delivery(
         surface: &surface,
         protected_unit: &protected_unit,
         origin,
+        declaration_index,
     };
     let declaration = factory.declaration();
     validate_attachment_request(&declaration, &request).map_err(|e| e.to_string())?;
