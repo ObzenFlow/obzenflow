@@ -14,7 +14,7 @@ use crate::middleware_resolution::MiddlewareSource;
 use obzenflow_adapters::middleware::control::ControlMiddlewareAggregator;
 use obzenflow_adapters::middleware::{
     effect_policy_from_middleware, validate_attachment_request, EffectPolicy, EffectSurface,
-    EffectTypeId, EffectUnitId, Middleware, MiddlewareAttachmentRequest, MiddlewareFactory,
+    EffectTypeKey, EffectUnitId, Middleware, MiddlewareAttachmentRequest, MiddlewareFactory,
     MiddlewareMaterializationContext, MiddlewareOrigin, MiddlewareSurface,
     MiddlewareSurfaceAttachment, MiddlewareSurfaceKind, ProtectedUnit, ProtectedUnitId,
     SinkDeliverySurface, SinkDeliveryTarget, SinkDeliveryUnitId, SinkPolicy, SourcePolicy,
@@ -109,12 +109,12 @@ pub(crate) fn bind_effect_policy(
     if declaration.is_control() && declaration.supports(MiddlewareSurfaceKind::Effect) {
         let surface = MiddlewareSurface::Effect(EffectSurface {
             stage_id: config.stage_id,
-            effect_type: EffectTypeId(effect_type.to_string()),
+            effect_type: EffectTypeKey::from(effect_type),
         });
         let protected_unit = ProtectedUnitId {
             stage_id: config.stage_id,
             unit: ProtectedUnit::Effect(EffectUnitId {
-                effect_type: EffectTypeId(effect_type.to_string()),
+                effect_type: EffectTypeKey::from(effect_type),
             }),
         };
         let request = MiddlewareAttachmentRequest {

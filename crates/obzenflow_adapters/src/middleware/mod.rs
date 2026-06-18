@@ -166,12 +166,13 @@ pub use transform_middleware::{
 
 // Common utilities
 pub use carrier::{
-    validate_attachment_request, EffectSurface, EffectTypeId, EffectUnitId, MiddlewareAttachmentId,
-    MiddlewareAttachmentRequest, MiddlewareAttachmentValidationError, MiddlewareCapability,
-    MiddlewareDeclaration, MiddlewareMaterializationContext, MiddlewareOrigin, MiddlewareSurface,
-    MiddlewareSurfaceAttachment, MiddlewareSurfaceKind, ProtectedUnit, ProtectedUnitId,
-    SinkConfiguredTargetId, SinkDeliverySurface, SinkDeliveryTarget, SinkDeliveryUnitId,
-    SourcePollAttachment, SourcePollSurface, SourcePollUnitId,
+    validate_attachment_request, EffectSurface, EffectTypeKey, EffectUnitId,
+    MiddlewareAttachmentId, MiddlewareAttachmentRequest, MiddlewareAttachmentValidationError,
+    MiddlewareCapability, MiddlewareDeclaration, MiddlewareMaterializationContext,
+    MiddlewareOrigin, MiddlewareSurface, MiddlewareSurfaceAttachment, MiddlewareSurfaceKind,
+    ProtectedUnit, ProtectedUnitId, SinkConfiguredTargetKey, SinkDeliverySurface,
+    SinkDeliveryTarget, SinkDeliveryUnitId, SourcePollAttachment, SourcePollSurface,
+    SourcePollUnitId,
 };
 pub use context::MiddlewareContext;
 pub use effect_policy::{

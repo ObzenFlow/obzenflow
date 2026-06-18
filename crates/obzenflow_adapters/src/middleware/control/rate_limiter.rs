@@ -49,9 +49,10 @@ use crate::middleware::{
     SourcePollOutcome,
 };
 use crate::middleware::{
-    ControlMiddlewareRole, ErrorAction, Middleware, MiddlewareAction, MiddlewareContext,
-    MiddlewareFactory, MiddlewareFactoryError, MiddlewareOverrideKey, MiddlewarePlanContribution,
-    MiddlewareSafety, SourceMiddlewarePhase, TopologyMiddlewareConfigSlot,
+    ControlMiddlewareRole, EffectTypeKey, ErrorAction, Middleware, MiddlewareAction,
+    MiddlewareContext, MiddlewareFactory, MiddlewareFactoryError, MiddlewareOverrideKey,
+    MiddlewarePlanContribution, MiddlewareSafety, SourceMiddlewarePhase,
+    TopologyMiddlewareConfigSlot,
 };
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
 use obzenflow_core::event::context::StageType;
@@ -338,7 +339,7 @@ impl RateLimiterMiddleware {
         stage_id: StageId,
         config: ValidatedRateLimiterConfig,
         control_middleware: std::sync::Arc<super::ControlMiddlewareAggregator>,
-        effect_type: Option<String>,
+        effect_type: Option<EffectTypeKey>,
     ) -> Self {
         let bucket = TokenBucket::new(config.burst_capacity, config.events_per_second);
 
@@ -1135,7 +1136,7 @@ impl MiddlewareFactory for RateLimiterFactory {
             config.stage_id,
             validated,
             control_middleware,
-            Some(effect_type.to_string()),
+            Some(EffectTypeKey::from(effect_type)),
         )))
     }
 

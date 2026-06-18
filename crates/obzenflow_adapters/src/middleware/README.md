@@ -286,8 +286,10 @@ The policies returned from `materialize` are surface-specific:
 
 The binder validates the declaration against the requested surface and protected
 unit before materialization. If a surface and protected unit both carry an
-effect type, sink target, or stage id, they must agree. `MiddlewareAttachmentId`
-is deterministic and derived from the declaration plus the attachment request.
+effect type key, sink target key, or stage id, they must agree. Effect types and
+sink targets are stable semantic keys, not GUID-style identities.
+`MiddlewareAttachmentId` is a deterministic ULID-backed identity derived from
+the declaration plus the attachment request.
 
 See `tests/middleware_hook_binding_e2e_test.rs` for a complete third-party
 control middleware that attaches to source poll, effect, and sink delivery,

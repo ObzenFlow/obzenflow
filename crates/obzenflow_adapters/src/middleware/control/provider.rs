@@ -9,7 +9,7 @@
 //! control-plane port so runtime services can consume read-only control state
 //! without depending on adapter middleware traits.
 
-use crate::middleware::SourcePolicy;
+use crate::middleware::{EffectTypeKey, SourcePolicy};
 use obzenflow_core::id::StageId;
 use obzenflow_runtime::control_plane::{
     CircuitBreakerSnapshotter, CircuitBreakerStateView, ControlPlaneProvider,
@@ -33,7 +33,7 @@ struct RateLimiterRegistration {
 /// instance under `Some(effect_type)` (FLOWIP-120c gap G3). One policy
 /// instance guards one protected dependency, so per-effect cardinality is
 /// bounded by the stage's declared `effects:` set.
-type ControlKey = (StageId, Option<String>);
+type ControlKey = (StageId, Option<EffectTypeKey>);
 
 /// Aggregates control middleware from multiple stages.
 ///
@@ -65,7 +65,7 @@ impl ControlMiddlewareAggregator {
     pub fn register_circuit_breaker_for_effect(
         &self,
         stage_id: StageId,
-        effect_type: String,
+        effect_type: EffectTypeKey,
         metrics_fn: Arc<CircuitBreakerSnapshotter>,
         state_view: Arc<dyn CircuitBreakerStateView>,
     ) {
@@ -75,7 +75,7 @@ impl ControlMiddlewareAggregator {
     fn register_circuit_breaker_keyed(
         &self,
         stage_id: StageId,
-        effect_type: Option<String>,
+        effect_type: Option<EffectTypeKey>,
         metrics_fn: Arc<CircuitBreakerSnapshotter>,
         state_view: Arc<dyn CircuitBreakerStateView>,
     ) {
@@ -102,7 +102,7 @@ impl ControlMiddlewareAggregator {
     pub fn register_rate_limiter_for_effect(
         &self,
         stage_id: StageId,
-        effect_type: String,
+        effect_type: EffectTypeKey,
         metrics_fn: Arc<RateLimiterSnapshotter>,
     ) {
         self.register_rate_limiter_keyed(stage_id, Some(effect_type), metrics_fn);
@@ -111,7 +111,7 @@ impl ControlMiddlewareAggregator {
     fn register_rate_limiter_keyed(
         &self,
         stage_id: StageId,
-        effect_type: Option<String>,
+        effect_type: Option<EffectTypeKey>,
         metrics_fn: Arc<RateLimiterSnapshotter>,
     ) {
         let registration = RateLimiterRegistration { metrics_fn };
@@ -185,7 +185,11 @@ impl ControlPlaneProvider for ControlMiddlewareAggregator {
             .iter()
             .filter_map(|((sid, effect), reg)| {
                 (sid == stage_id)
-                    .then(|| effect.clone().map(|e| (e, reg.metrics_fn.clone())))
+                    .then(|| {
+                        effect
+                            .clone()
+                            .map(|e| (e.as_str().to_string(), reg.metrics_fn.clone()))
+                    })
                     .flatten()
             })
             .collect();
@@ -204,7 +208,11 @@ impl ControlPlaneProvider for ControlMiddlewareAggregator {
             .iter()
             .filter_map(|((sid, effect), reg)| {
                 (sid == stage_id)
-                    .then(|| effect.clone().map(|e| (e, reg.metrics_fn.clone())))
+                    .then(|| {
+                        effect
+                            .clone()
+                            .map(|e| (e.as_str().to_string(), reg.metrics_fn.clone()))
+                    })
                     .flatten()
             })
             .collect();

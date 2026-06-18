@@ -24,6 +24,7 @@ use super::source_policy::SourcePolicy;
 use obzenflow_core::StageId;
 use obzenflow_runtime::pipeline::config::StageConfig;
 use obzenflow_runtime::stages::source::strategies::CompletionGate;
+use ring::digest::{digest, SHA256};
 use std::sync::Arc;
 use thiserror::Error;
 
@@ -31,25 +32,37 @@ use thiserror::Error;
 // Typed identity newtypes (FLOWIP-115b "Typed identity")
 // ---------------------------------------------------------------------------
 
-/// Effect-type identity for the carrier.
+/// Effect-type key for the carrier.
 ///
 /// Effects are keyed by `&'static str` at the runtime effect boundary, so the
 /// carrier carries an owned typed value and bridges to the static key when it
-/// builds the per-effect attachment. The FLOWIP "Typed identity" rule is to add
-/// a small newtype where no domain type exists rather than expose raw `String`.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct EffectTypeId(pub String);
+/// builds the per-effect attachment. This is a semantic key, not a GUID-style
+/// identity, so it deliberately does not use the `Id` suffix.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct EffectTypeKey(pub String);
 
-impl EffectTypeId {
+impl EffectTypeKey {
     pub fn as_str(&self) -> &str {
         &self.0
     }
 }
 
+impl From<String> for EffectTypeKey {
+    fn from(value: String) -> Self {
+        Self(value)
+    }
+}
+
+impl From<&str> for EffectTypeKey {
+    fn from(value: &str) -> Self {
+        Self(value.to_string())
+    }
+}
+
 /// A sink-delivery target declared before consume (replay-stable). Refines the
 /// sink-delivery protected unit beyond the default stage-level identity.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct SinkConfiguredTargetId(pub String);
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SinkConfiguredTargetKey(pub String);
 
 // ---------------------------------------------------------------------------
 // Capability
@@ -78,7 +91,7 @@ pub struct SourcePollSurface {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EffectSurface {
     pub stage_id: StageId,
-    pub effect_type: EffectTypeId,
+    pub effect_type: EffectTypeKey,
 }
 
 /// The sink-delivery call site for one sink stage, optionally refined by a
@@ -86,7 +99,7 @@ pub struct EffectSurface {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SinkDeliverySurface {
     pub stage_id: StageId,
-    pub configured_target: Option<SinkConfiguredTargetId>,
+    pub configured_target: Option<SinkConfiguredTargetKey>,
 }
 
 /// The call-site shape a middleware attaches to. Broad and non-exhaustive so
@@ -173,14 +186,14 @@ pub struct SourcePollUnitId;
 /// One declared-effect protected unit, keyed by effect type within the stage.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct EffectUnitId {
-    pub effect_type: EffectTypeId,
+    pub effect_type: EffectTypeKey,
 }
 
 /// Default stage-level sink delivery, or a refined configured target.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum SinkDeliveryTarget {
     Stage,
-    Configured(SinkConfiguredTargetId),
+    Configured(SinkConfiguredTargetKey),
 }
 
 /// The sink-delivery protected unit, stage-level by default.
@@ -251,11 +264,8 @@ pub enum MiddlewareOrigin {
 /// Derived from replay-stable coordinates (the protected unit plus the override
 /// family), never a fresh materialization-time ULID, so it survives strict
 /// replay and archive-drift checks.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct MiddlewareAttachmentId {
-    pub protected_unit: ProtectedUnitId,
-    pub family_label: String,
-}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct MiddlewareAttachmentId(obzenflow_core::Ulid);
 
 impl MiddlewareAttachmentId {
     /// Deterministically derive the attachment id from replay-stable binding
@@ -264,10 +274,40 @@ impl MiddlewareAttachmentId {
         declaration: &MiddlewareDeclaration,
         request: &MiddlewareAttachmentRequest<'_>,
     ) -> Self {
-        Self {
-            protected_unit: request.protected_unit.clone(),
-            family_label: declaration.label.to_string(),
+        let material = format!(
+            "middleware-attachment:v1:{}:{}",
+            declaration.label,
+            protected_unit_key_material(request.protected_unit)
+        );
+        let hash = digest(&SHA256, material.as_bytes());
+        let mut id_bytes = [0u8; 16];
+        id_bytes.copy_from_slice(&hash.as_ref()[..16]);
+        Self(obzenflow_core::Ulid(u128::from_be_bytes(id_bytes)))
+    }
+
+    pub fn as_ulid(&self) -> obzenflow_core::Ulid {
+        self.0
+    }
+}
+
+fn protected_unit_key_material(protected_unit: &ProtectedUnitId) -> String {
+    let stage_id = protected_unit.stage_id.as_ulid();
+    match &protected_unit.unit {
+        ProtectedUnit::SourcePoll(_) => format!("{stage_id}:source_poll"),
+        ProtectedUnit::Effect(unit) => {
+            format!("{stage_id}:effect:{}", unit.effect_type.as_str())
         }
+        ProtectedUnit::SinkDelivery(unit) => match &unit.target {
+            SinkDeliveryTarget::Stage => format!("{stage_id}:sink_delivery:stage"),
+            SinkDeliveryTarget::Configured(target) => {
+                format!("{stage_id}:sink_delivery:target:{}", target.0)
+            }
+        },
+        ProtectedUnit::Ingress => format!("{stage_id}:ingress"),
+        ProtectedUnit::Handler => format!("{stage_id}:handler"),
+        ProtectedUnit::Stateful => format!("{stage_id}:stateful"),
+        ProtectedUnit::Join => format!("{stage_id}:join"),
+        ProtectedUnit::OutputCommit => format!("{stage_id}:output_commit"),
     }
 }
 
@@ -518,10 +558,13 @@ mod tests {
 
         let first = validate_attachment_request(&declaration, &request).unwrap();
         let second = validate_attachment_request(&declaration, &request).unwrap();
+        let other_family =
+            MiddlewareDeclaration::control("rate_limiter", vec![MiddlewareSurfaceKind::SourcePoll]);
+        let other = validate_attachment_request(&other_family, &request).unwrap();
 
         assert_eq!(first, second);
-        assert_eq!(first.protected_unit, protected_unit);
-        assert_eq!(first.family_label, "circuit_breaker");
+        assert_eq!(first.as_ulid(), second.as_ulid());
+        assert_ne!(first, other);
     }
 
     #[test]
@@ -535,7 +578,7 @@ mod tests {
         let protected_unit = ProtectedUnitId {
             stage_id,
             unit: ProtectedUnit::Effect(EffectUnitId {
-                effect_type: EffectTypeId("http".to_string()),
+                effect_type: EffectTypeKey::from("http"),
             }),
         };
         let origin = MiddlewareOrigin::Stage;

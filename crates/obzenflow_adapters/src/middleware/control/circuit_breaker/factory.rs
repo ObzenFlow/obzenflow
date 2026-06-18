@@ -20,11 +20,12 @@ use super::{
 };
 use crate::middleware::control::ControlMiddlewareAggregator;
 use crate::middleware::{
-    validate_attachment_request, ControlMiddlewareRole, Middleware, MiddlewareAttachmentRequest,
-    MiddlewareDeclaration, MiddlewareFactory, MiddlewareFactoryError, MiddlewareHints,
-    MiddlewareMaterializationContext, MiddlewareOverrideKey, MiddlewarePlanContribution,
-    MiddlewareSafety, MiddlewareSurface, MiddlewareSurfaceAttachment, MiddlewareSurfaceKind,
-    SinkPolicy, SourcePolicy, SourcePollAttachment, TopologyMiddlewareConfigSlot,
+    validate_attachment_request, ControlMiddlewareRole, EffectTypeKey, Middleware,
+    MiddlewareAttachmentRequest, MiddlewareDeclaration, MiddlewareFactory, MiddlewareFactoryError,
+    MiddlewareHints, MiddlewareMaterializationContext, MiddlewareOverrideKey,
+    MiddlewarePlanContribution, MiddlewareSafety, MiddlewareSurface, MiddlewareSurfaceAttachment,
+    MiddlewareSurfaceKind, SinkPolicy, SourcePolicy, SourcePollAttachment,
+    TopologyMiddlewareConfigSlot,
 };
 use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::event::payloads::observability_payload::CircuitBreakerRejectionReason;
@@ -777,7 +778,7 @@ impl CircuitBreakerFactory {
         &self,
         config: &StageConfig,
         control_middleware: std::sync::Arc<ControlMiddlewareAggregator>,
-        effect_type: Option<String>,
+        effect_type: Option<EffectTypeKey>,
     ) -> crate::middleware::MiddlewareFactoryResult<CircuitBreakerMiddleware> {
         let validated_threshold = self.validated_threshold().map_err(|err| {
             MiddlewareFactoryError::invalid_configuration(self.label(), &config.name, err)
@@ -914,7 +915,7 @@ impl CircuitBreakerFactory {
         &self,
         config: &StageConfig,
         control_middleware: std::sync::Arc<ControlMiddlewareAggregator>,
-        effect_type: Option<String>,
+        effect_type: Option<EffectTypeKey>,
     ) -> crate::middleware::MiddlewareFactoryResult<Box<dyn Middleware>> {
         Ok(Box::new(self.build_middleware_keyed(
             config,
@@ -963,7 +964,11 @@ impl MiddlewareFactory for CircuitBreakerFactory {
         control_middleware: std::sync::Arc<ControlMiddlewareAggregator>,
         effect_type: &str,
     ) -> crate::middleware::MiddlewareFactoryResult<Box<dyn Middleware>> {
-        self.create_keyed(config, control_middleware, Some(effect_type.to_string()))
+        self.create_keyed(
+            config,
+            control_middleware,
+            Some(EffectTypeKey::from(effect_type)),
+        )
     }
 
     fn register_source_policy(
@@ -1048,7 +1053,7 @@ impl MiddlewareFactory for CircuitBreakerFactory {
                 let middleware = self.build_middleware_keyed(
                     context.config,
                     context.control_middleware.clone(),
-                    Some(effect_surface.effect_type.as_str().to_string()),
+                    Some(effect_surface.effect_type.clone()),
                 )?;
                 let policy: Arc<dyn crate::middleware::EffectPolicy> = Arc::new(middleware);
                 Ok(MiddlewareSurfaceAttachment::Effect(policy))

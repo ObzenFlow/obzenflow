@@ -12,7 +12,7 @@
 use async_trait::async_trait;
 use obzenflow_adapters::middleware::control::ControlMiddlewareAggregator;
 use obzenflow_adapters::middleware::{
-    validate_attachment_request, ControlMiddlewareRole, EffectPolicy, EffectSurface, EffectTypeId,
+    validate_attachment_request, ControlMiddlewareRole, EffectPolicy, EffectSurface, EffectTypeKey,
     EffectUnitId, Middleware, MiddlewareAttachmentRequest, MiddlewareContext,
     MiddlewareDeclaration, MiddlewareFactory, MiddlewareFactoryError, MiddlewareFactoryResult,
     MiddlewareKind, MiddlewareMaterializationContext, MiddlewareOrigin, MiddlewareOverrideKey,
@@ -568,12 +568,12 @@ fn hook_proof_factory_validates_surface_and_protected_unit_identity() {
     };
     let surface = MiddlewareSurface::Effect(EffectSurface {
         stage_id: config.stage_id,
-        effect_type: EffectTypeId("expected".to_string()),
+        effect_type: EffectTypeKey::from("expected"),
     });
     let mismatched_unit = ProtectedUnitId {
         stage_id: config.stage_id,
         unit: ProtectedUnit::Effect(EffectUnitId {
-            effect_type: EffectTypeId("actual".to_string()),
+            effect_type: EffectTypeKey::from("actual"),
         }),
     };
     let origin = MiddlewareOrigin::Stage;
