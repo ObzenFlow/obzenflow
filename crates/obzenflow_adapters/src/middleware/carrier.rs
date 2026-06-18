@@ -261,9 +261,11 @@ pub enum MiddlewareOrigin {
 
 /// Deterministic, structurally-derived attachment identity (FLOWIP-115b).
 ///
-/// Derived from replay-stable coordinates (the protected unit plus the override
-/// family), never a fresh materialization-time ULID, so it survives strict
-/// replay and archive-drift checks.
+/// Derived from replay-stable coordinates (the middleware origin, protected
+/// unit, and override family label), never a fresh materialization-time ULID, so
+/// it survives strict replay and archive-drift checks. Origin is folded into the
+/// material so two declarations of the same family on one protected unit at
+/// different origins (flow vs stage vs stage override) do not collide.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct MiddlewareAttachmentId(obzenflow_core::Ulid);
 
@@ -275,8 +277,9 @@ impl MiddlewareAttachmentId {
         request: &MiddlewareAttachmentRequest<'_>,
     ) -> Self {
         let material = format!(
-            "middleware-attachment:v1:{}:{}",
+            "middleware-attachment:v2:{}:{}:{}",
             declaration.label,
+            origin_key_material(request.origin),
             protected_unit_key_material(request.protected_unit)
         );
         let hash = digest(&SHA256, material.as_bytes());
@@ -287,6 +290,18 @@ impl MiddlewareAttachmentId {
 
     pub fn as_ulid(&self) -> obzenflow_core::Ulid {
         self.0
+    }
+}
+
+fn origin_key_material(origin: &MiddlewareOrigin) -> String {
+    match origin {
+        MiddlewareOrigin::Flow => "origin:flow".to_string(),
+        MiddlewareOrigin::Stage => "origin:stage".to_string(),
+        MiddlewareOrigin::StageOverride {
+            family_label,
+            flow_label,
+            stage_label,
+        } => format!("origin:override:{family_label}:{flow_label}:{stage_label}"),
     }
 }
 

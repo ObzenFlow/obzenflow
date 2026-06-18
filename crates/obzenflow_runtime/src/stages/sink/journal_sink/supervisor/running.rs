@@ -541,22 +541,36 @@ async fn dispatch_data_event<
             scope,
         };
 
-        let (outcome, control_events) = match &sink_boundary {
-            Some(boundary) => {
-                let report = boundary
-                    .around_sink_delivery(
-                        &delivery_identity,
-                        &delivery_attempt,
-                        &boundary_event,
-                        &mut executor,
-                    )
-                    .await;
-                (report.outcome, report.control_events)
-            }
-            None => (
+        // FLOWIP-115b AC48: during deterministic replay/resume reconstruction the
+        // sink-delivery boundary is bypassed entirely, so the circuit-breaker sink
+        // policy acquires no probe, transitions no state, and emits no fresh
+        // lifecycle/summary rows. This mirrors the structural replay bypass the
+        // source (ReplayDriver branch) and effect (recorded-history early return)
+        // paths already have; the sink is the only live-I/O unit that re-consumes
+        // its tape during replay, so it needs the explicit scope gate. The consume
+        // executor still runs, so the delivery receipt is reconstructed normally.
+        // The live tail of a resume runs under a non-replay scope and stays
+        // breaker-protected.
+        let (outcome, control_events) = if scope.is_deterministic_replay() {
+            (
                 SinkDeliveryBoundaryOutcome::Attempted(executor.attempt().await),
                 Vec::new(),
-            ),
+            )
+        } else if let Some(boundary) = &sink_boundary {
+            let report = boundary
+                .around_sink_delivery(
+                    &delivery_identity,
+                    &delivery_attempt,
+                    &boundary_event,
+                    &mut executor,
+                )
+                .await;
+            (report.outcome, report.control_events)
+        } else {
+            (
+                SinkDeliveryBoundaryOutcome::Attempted(executor.attempt().await),
+                Vec::new(),
+            )
         };
 
         let mapped = match outcome {

@@ -22,9 +22,13 @@ pub struct CircuitBreakerMetrics {
     pub time_closed_seconds: f64,
     pub time_open_seconds: f64,
     pub time_half_open_seconds: f64,
-    /// Current breaker state encoded by the publishing adapter
-    /// (`0=closed`, `1=open`, `2=half_open`).
-    pub state: u8,
+    /// Current breaker state as the typed projection (FLOWIP-115b AC28).
+    /// Numeric (`0=closed`, `0.5=half_open`, `1=open`) and label encodings are
+    /// produced only at compatibility edges (the Prometheus exporter and the
+    /// serialized wide-event contexts) via [`CircuitBreakerState::stable_gauge`]
+    /// / [`CircuitBreakerState::stable_label`], never carried internally as a raw
+    /// number.
+    pub state: CircuitBreakerState,
 }
 
 /// Snapshot of cumulative rate limiter metrics.
@@ -55,8 +59,9 @@ pub mod cb_state {
 /// exporters consult this view instead of a raw mutable cell, so there is one
 /// breaker state authority per protected unit. FLOWIP-115i swaps the private
 /// state core behind this same view without changing consumers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CircuitBreakerState {
+    #[default]
     Closed,
     Open,
     HalfOpen,

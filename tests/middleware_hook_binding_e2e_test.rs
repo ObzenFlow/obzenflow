@@ -551,6 +551,30 @@ async fn third_party_control_middleware_binds_all_surfaces_and_replays() {
         0,
         "the third-party rejection is replayed from the archive, not re-decided live"
     );
+    // FLOWIP-115b AC48: replay suppression must hold on every delivered surface,
+    // not only the effect surface. The source-poll boundary is structurally
+    // bypassed by the replay driver, and the sink-delivery boundary is bypassed by
+    // the dispatch-scope gate, so no source or sink hook runs during strict replay.
+    assert_eq!(
+        replay_counters.source_admits.load(Ordering::SeqCst),
+        0,
+        "strict replay must not run the source-poll hook"
+    );
+    assert_eq!(
+        replay_counters.source_observes.load(Ordering::SeqCst),
+        0,
+        "strict replay must not observe source polls live"
+    );
+    assert_eq!(
+        replay_counters.sink_admits.load(Ordering::SeqCst),
+        0,
+        "strict replay must not run the sink-delivery hook"
+    );
+    assert_eq!(
+        replay_counters.sink_observes.load(Ordering::SeqCst),
+        0,
+        "strict replay must not observe sink deliveries live"
+    );
 
     let replay_outputs = delivered_payloads(&replay_delivered, DeliveryProvenance::Replayed);
     assert_eq!(replay_outputs, live_outputs);

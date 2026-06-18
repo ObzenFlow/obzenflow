@@ -356,12 +356,9 @@ impl StageInstrumentation {
             ctx.cb_time_closed_seconds = cb.time_closed_seconds;
             ctx.cb_time_open_seconds = cb.time_open_seconds;
             ctx.cb_time_half_open_seconds = cb.time_half_open_seconds;
-            ctx.cb_state = match cb.state {
-                0 => 0.0, // closed
-                1 => 1.0, // open
-                2 => 0.5, // half_open
-                _ => 0.0,
-            };
+            // Serialized wide-event context is a compatibility edge: project the
+            // typed state to the stable 0/0.5/1 gauge here (FLOWIP-115b AC28/AC57).
+            ctx.cb_state = cb.state.stable_gauge();
         }
 
         if let Some(rl_snapshotter) = &self.rl_snapshotter {
@@ -391,12 +388,7 @@ impl StageInstrumentation {
                     cb_time_closed_seconds: cb.time_closed_seconds,
                     cb_time_open_seconds: cb.time_open_seconds,
                     cb_time_half_open_seconds: cb.time_half_open_seconds,
-                    cb_state: match cb.state {
-                        0 => 0.0,
-                        1 => 1.0,
-                        2 => 0.5,
-                        _ => 0.0,
-                    },
+                    cb_state: cb.state.stable_gauge(),
                 }
             })
             .collect();

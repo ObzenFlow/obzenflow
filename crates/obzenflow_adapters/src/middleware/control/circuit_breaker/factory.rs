@@ -887,7 +887,9 @@ impl CircuitBreakerFactory {
                 time_closed_seconds: closed.as_secs_f64(),
                 time_open_seconds: open.as_secs_f64(),
                 time_half_open_seconds: half_open.as_secs_f64(),
-                state: state.as_u8(),
+                // FLOWIP-115b AC28: publish the typed state; numeric/label
+                // projection stays at the metric edges.
+                state,
             }
         });
 
@@ -960,34 +962,33 @@ impl MiddlewareFactory for CircuitBreakerFactory {
 
     fn create_for_effect(
         &self,
-        config: &StageConfig,
-        control_middleware: std::sync::Arc<ControlMiddlewareAggregator>,
-        effect_type: &str,
+        _config: &StageConfig,
+        _control_middleware: std::sync::Arc<ControlMiddlewareAggregator>,
+        _effect_type: &str,
     ) -> crate::middleware::MiddlewareFactoryResult<Box<dyn Middleware>> {
-        self.create_keyed(
-            config,
-            control_middleware,
-            Some(EffectTypeKey::from(effect_type)),
-        )
+        // FLOWIP-115b legacy-route containment: the hook-bound breaker is placed
+        // on the Effect surface through `materialize`, and the binder routes a
+        // control middleware that declares the Effect surface there, never here.
+        // Fail closed so a direct caller cannot construct a second, off-carrier
+        // effect breaker with its own state authority. `create` (the
+        // FLOWIP-120p-deprecated handler shell for non-boundary stages) stays
+        // until FLOWIP-115g retires the scaffolding.
+        Err(MiddlewareFactoryError::not_hook_bound(self.label()))
     }
 
     fn register_source_policy(
         &self,
-        config: &StageConfig,
+        _config: &StageConfig,
         _stage_type: obzenflow_core::event::context::StageType,
-        control_middleware: &std::sync::Arc<ControlMiddlewareAggregator>,
+        _control_middleware: &std::sync::Arc<ControlMiddlewareAggregator>,
     ) -> crate::middleware::MiddlewareFactoryResult<()> {
-        // Build one breaker instance (registering its cb_state and snapshotter,
-        // which the CompletionGate and metrics path read), then register it as
-        // one source-boundary policy. The breaker guards pre-poll regardless
-        // of source kind, so stage type is irrelevant here.
-        let middleware = self.build_middleware_keyed(config, control_middleware.clone(), None)?;
-        let breaker = std::sync::Arc::new(middleware);
-        control_middleware.register_source_policy(
-            config.stage_id,
-            std::sync::Arc::new(CircuitBreakerSourcePolicy { breaker }),
-        );
-        Ok(())
+        // FLOWIP-115b legacy-route containment: the hook-bound breaker is placed
+        // on the SourcePoll surface through `materialize`, then registered with
+        // the aggregator as a ready `SourcePolicy`. The binder never routes the
+        // breaker through this legacy factory method (and AC59 already fails the
+        // source role path closed). Fail closed so a direct caller cannot build a
+        // second source breaker off the carrier; FLOWIP-115g removes the method.
+        Err(MiddlewareFactoryError::not_hook_bound(self.label()))
     }
 
     fn declaration(&self) -> MiddlewareDeclaration {
