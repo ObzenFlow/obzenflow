@@ -13,11 +13,12 @@
 use crate::middleware_resolution::MiddlewareSource;
 use obzenflow_adapters::middleware::control::ControlMiddlewareAggregator;
 use obzenflow_adapters::middleware::{
-    effect_policy_from_middleware, EffectPolicy, EffectSurface, EffectTypeId, EffectUnitId,
-    Middleware, MiddlewareAttachmentRequest, MiddlewareFactory, MiddlewareMaterializationContext,
-    MiddlewareOrigin, MiddlewareSurface, MiddlewareSurfaceAttachment, MiddlewareSurfaceKind,
-    ProtectedUnit, ProtectedUnitId, SinkDeliverySurface, SinkDeliveryTarget, SinkDeliveryUnitId,
-    SinkPolicy, SourcePolicy, SourcePollSurface, SourcePollUnitId,
+    effect_policy_from_middleware, validate_attachment_request, EffectPolicy, EffectSurface,
+    EffectTypeId, EffectUnitId, Middleware, MiddlewareAttachmentRequest, MiddlewareFactory,
+    MiddlewareMaterializationContext, MiddlewareOrigin, MiddlewareSurface,
+    MiddlewareSurfaceAttachment, MiddlewareSurfaceKind, ProtectedUnit, ProtectedUnitId,
+    SinkDeliverySurface, SinkDeliveryTarget, SinkDeliveryUnitId, SinkPolicy, SourcePolicy,
+    SourcePollSurface, SourcePollUnitId,
 };
 use obzenflow_runtime::pipeline::config::StageConfig;
 use obzenflow_runtime::stages::source::strategies::CompletionGate;
@@ -71,6 +72,8 @@ pub(crate) fn materialize_source_poll(
         protected_unit: &protected_unit,
         origin,
     };
+    let declaration = factory.declaration();
+    validate_attachment_request(&declaration, &request).map_err(|e| e.to_string())?;
     let ctx = MiddlewareMaterializationContext {
         config,
         control_middleware,
@@ -119,6 +122,7 @@ pub(crate) fn bind_effect_policy(
             protected_unit: &protected_unit,
             origin,
         };
+        validate_attachment_request(&declaration, &request).map_err(|e| e.to_string())?;
         let ctx = MiddlewareMaterializationContext {
             config,
             control_middleware,
@@ -166,6 +170,8 @@ pub(crate) fn materialize_sink_delivery(
         protected_unit: &protected_unit,
         origin,
     };
+    let declaration = factory.declaration();
+    validate_attachment_request(&declaration, &request).map_err(|e| e.to_string())?;
     let ctx = MiddlewareMaterializationContext {
         config,
         control_middleware,

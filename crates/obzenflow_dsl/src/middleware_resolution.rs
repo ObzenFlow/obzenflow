@@ -9,7 +9,7 @@
 
 use indexmap::IndexMap;
 use obzenflow_adapters::middleware::{
-    ControlMiddlewareRole, MiddlewareFactory, MiddlewareOverrideKey,
+    ControlMiddlewareRole, MiddlewareFactory, MiddlewareOverrideKey, TopologyMiddlewareConfigSlot,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -496,7 +496,7 @@ fn check_override_safety(
         });
     }
 
-    if role == ControlMiddlewareRole::CircuitBreaker {
+    if stage_mw.topology_config_slot() == Some(TopologyMiddlewareConfigSlot::CircuitBreaker) {
         return Some(ConfigWarning {
             level: WarnLevel::Medium,
             message: format!(
@@ -520,9 +520,9 @@ fn validate_middleware_combination(
     let has_retry = resolved
         .values()
         .any(|spec| spec.factory.hints().retry.is_some());
-    let has_circuit_breaker = resolved
-        .values()
-        .any(|spec| spec.factory.control_role() == ControlMiddlewareRole::CircuitBreaker);
+    let has_circuit_breaker = resolved.values().any(|spec| {
+        spec.factory.topology_config_slot() == Some(TopologyMiddlewareConfigSlot::CircuitBreaker)
+    });
 
     if has_retry && !has_circuit_breaker {
         warnings.push(ConfigWarning {

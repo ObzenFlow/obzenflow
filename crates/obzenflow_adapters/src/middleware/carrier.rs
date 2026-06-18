@@ -25,6 +25,7 @@ use obzenflow_core::StageId;
 use obzenflow_runtime::pipeline::config::StageConfig;
 use obzenflow_runtime::stages::source::strategies::CompletionGate;
 use std::sync::Arc;
+use thiserror::Error;
 
 // ---------------------------------------------------------------------------
 // Typed identity newtypes (FLOWIP-115b "Typed identity")
@@ -256,6 +257,20 @@ pub struct MiddlewareAttachmentId {
     pub family_label: String,
 }
 
+impl MiddlewareAttachmentId {
+    /// Deterministically derive the attachment id from replay-stable binding
+    /// coordinates. This is never materialization-time randomness.
+    pub fn from_declaration_and_request(
+        declaration: &MiddlewareDeclaration,
+        request: &MiddlewareAttachmentRequest<'_>,
+    ) -> Self {
+        Self {
+            protected_unit: request.protected_unit.clone(),
+            family_label: declaration.label.to_string(),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Declaration (pre-erasure)
 // ---------------------------------------------------------------------------
@@ -311,6 +326,120 @@ impl MiddlewareDeclaration {
 }
 
 // ---------------------------------------------------------------------------
+// Attachment validation
+// ---------------------------------------------------------------------------
+
+/// A carrier-level validation failure before runtime erasure.
+#[derive(Debug, Error)]
+pub enum MiddlewareAttachmentValidationError {
+    #[error(
+        "middleware '{label}' is legacy shell middleware with no hook surface; \
+         materialization requires a declared hook surface"
+    )]
+    LegacyShell { label: &'static str },
+
+    #[error("middleware '{label}' does not declare support for surface {surface:?}")]
+    UnsupportedSurface {
+        label: &'static str,
+        surface: MiddlewareSurfaceKind,
+    },
+
+    #[error("middleware '{label}' declares capability {capability:?}, but only control-capability materialization is implemented for surface {surface:?}")]
+    UnsupportedCapability {
+        label: &'static str,
+        capability: MiddlewareCapability,
+        surface: MiddlewareSurfaceKind,
+    },
+
+    #[error("surface {surface:?} is bound to stage {surface_stage}, but protected unit is bound to stage {unit_stage}")]
+    StageMismatch {
+        surface: MiddlewareSurfaceKind,
+        surface_stage: StageId,
+        unit_stage: StageId,
+    },
+
+    #[error("surface {surface:?} is reserved and cannot be materialized by this slice")]
+    ReservedSurface { surface: MiddlewareSurfaceKind },
+
+    #[error("surface {surface:?} cannot protect unit {unit:?}")]
+    ProtectedUnitMismatch {
+        surface: MiddlewareSurfaceKind,
+        unit: ProtectedUnit,
+    },
+}
+
+/// Validate the pre-erasure declaration against one concrete binding request
+/// and return its deterministic attachment id.
+pub fn validate_attachment_request(
+    declaration: &MiddlewareDeclaration,
+    request: &MiddlewareAttachmentRequest<'_>,
+) -> Result<MiddlewareAttachmentId, MiddlewareAttachmentValidationError> {
+    if declaration.is_legacy_shell() {
+        return Err(MiddlewareAttachmentValidationError::LegacyShell {
+            label: declaration.label,
+        });
+    }
+
+    let surface = request.surface.kind();
+    if !declaration.supports(surface) {
+        return Err(MiddlewareAttachmentValidationError::UnsupportedSurface {
+            label: declaration.label,
+            surface,
+        });
+    }
+
+    if !matches!(declaration.capability, MiddlewareCapability::Control) || !surface.allows_control()
+    {
+        return Err(MiddlewareAttachmentValidationError::UnsupportedCapability {
+            label: declaration.label,
+            capability: declaration.capability,
+            surface,
+        });
+    }
+
+    let Some(surface_stage) = request.surface.stage_id() else {
+        return Err(MiddlewareAttachmentValidationError::ReservedSurface { surface });
+    };
+
+    if surface_stage != request.protected_unit.stage_id {
+        return Err(MiddlewareAttachmentValidationError::StageMismatch {
+            surface,
+            surface_stage,
+            unit_stage: request.protected_unit.stage_id,
+        });
+    }
+
+    let matches_unit = match (request.surface, &request.protected_unit.unit) {
+        (MiddlewareSurface::SourcePoll(_), ProtectedUnit::SourcePoll(_)) => true,
+        (MiddlewareSurface::Effect(surface), ProtectedUnit::Effect(unit)) => {
+            surface.effect_type == unit.effect_type
+        }
+        (MiddlewareSurface::SinkDelivery(surface), ProtectedUnit::SinkDelivery(unit)) => {
+            match (&surface.configured_target, &unit.target) {
+                (None, SinkDeliveryTarget::Stage) => true,
+                (Some(surface_target), SinkDeliveryTarget::Configured(unit_target)) => {
+                    surface_target == unit_target
+                }
+                _ => false,
+            }
+        }
+        _ => false,
+    };
+
+    if !matches_unit {
+        return Err(MiddlewareAttachmentValidationError::ProtectedUnitMismatch {
+            surface,
+            unit: request.protected_unit.unit.clone(),
+        });
+    }
+
+    Ok(MiddlewareAttachmentId::from_declaration_and_request(
+        declaration,
+        request,
+    ))
+}
+
+// ---------------------------------------------------------------------------
 // Materialization request + context
 // ---------------------------------------------------------------------------
 
@@ -362,4 +491,64 @@ pub enum MiddlewareSurfaceAttachment {
     SourcePoll(SourcePollAttachment),
     Effect(Arc<dyn EffectPolicy>),
     SinkDelivery(Arc<dyn SinkPolicy>),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validates_source_poll_and_derives_stable_attachment_id() {
+        let stage_id = StageId::new();
+        let declaration = MiddlewareDeclaration::control(
+            "circuit_breaker",
+            vec![MiddlewareSurfaceKind::SourcePoll],
+        );
+        let surface = MiddlewareSurface::SourcePoll(SourcePollSurface { stage_id });
+        let protected_unit = ProtectedUnitId {
+            stage_id,
+            unit: ProtectedUnit::SourcePoll(SourcePollUnitId),
+        };
+        let origin = MiddlewareOrigin::Stage;
+        let request = MiddlewareAttachmentRequest {
+            surface: &surface,
+            protected_unit: &protected_unit,
+            origin: &origin,
+        };
+
+        let first = validate_attachment_request(&declaration, &request).unwrap();
+        let second = validate_attachment_request(&declaration, &request).unwrap();
+
+        assert_eq!(first, second);
+        assert_eq!(first.protected_unit, protected_unit);
+        assert_eq!(first.family_label, "circuit_breaker");
+    }
+
+    #[test]
+    fn rejects_surface_protected_unit_mismatch() {
+        let stage_id = StageId::new();
+        let declaration = MiddlewareDeclaration::control(
+            "circuit_breaker",
+            vec![MiddlewareSurfaceKind::SourcePoll],
+        );
+        let surface = MiddlewareSurface::SourcePoll(SourcePollSurface { stage_id });
+        let protected_unit = ProtectedUnitId {
+            stage_id,
+            unit: ProtectedUnit::Effect(EffectUnitId {
+                effect_type: EffectTypeId("http".to_string()),
+            }),
+        };
+        let origin = MiddlewareOrigin::Stage;
+        let request = MiddlewareAttachmentRequest {
+            surface: &surface,
+            protected_unit: &protected_unit,
+            origin: &origin,
+        };
+
+        let err = validate_attachment_request(&declaration, &request).unwrap_err();
+        assert!(matches!(
+            err,
+            MiddlewareAttachmentValidationError::ProtectedUnitMismatch { .. }
+        ));
+    }
 }

@@ -16,7 +16,6 @@ use crate::middleware::{
     context_keys::{
         CircuitBreakerAttempt, CircuitBreakerIsProbe, CircuitBreakerProbeGeneration,
         CircuitBreakerProbeSlot, CircuitBreakerProbeSlotGuard, CircuitBreakerRetryAfterMs,
-        CircuitBreakerRetryDelayMs, CircuitBreakerShouldRetry,
     },
     ControlMiddlewareRole, Middleware, MiddlewareAbortCause, MiddlewareAction, MiddlewareContext,
     MiddlewareFactory, MiddlewareFactoryError, MiddlewareHints, MiddlewareOverrideKey,
@@ -24,12 +23,13 @@ use crate::middleware::{
     TopologyMiddlewareConfigSlot,
 };
 use crate::middleware::{
-    MiddlewareAttachmentRequest, MiddlewareDeclaration, MiddlewareMaterializationContext,
-    MiddlewareSurface, MiddlewareSurfaceAttachment, MiddlewareSurfaceKind, SourcePollAttachment,
+    validate_attachment_request, MiddlewareAttachmentRequest, MiddlewareDeclaration,
+    MiddlewareMaterializationContext, MiddlewareSurface, MiddlewareSurfaceAttachment,
+    MiddlewareSurfaceKind, SourcePollAttachment,
 };
 use obzenflow_core::control_middleware::{
     cb_state, CircuitBreakerMetrics, CircuitBreakerSnapshotter, CircuitBreakerState,
-    CircuitBreakerStateSnapshot, CircuitBreakerStateView, ControlMiddlewareProvider,
+    CircuitBreakerStateView, ControlMiddlewareProvider,
 };
 use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::event::payloads::observability_payload::{
@@ -58,6 +58,16 @@ use std::sync::atomic::{AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
+
+mod fallback;
+mod state;
+mod window;
+
+use fallback::{
+    build_outcome_fallback_events, build_typed_fallback_event, build_typed_rejection_event,
+};
+use state::{CircuitBreakerStateViewImpl, CircuitState};
+use window::{CallSample, FailureWindow, FailureWindowState};
 
 type FailureClassifier = Arc<dyn Fn(&ChainEvent, &[ChainEvent]) -> bool + Send + Sync>;
 type FailureClassificationClassifier =
@@ -201,15 +211,6 @@ enum CircuitBreakerFailureMode {
     },
 }
 
-/// Sliding window shape for rate-based failure detection.
-#[derive(Debug, Clone)]
-pub(crate) enum FailureWindow {
-    /// Sliding window over the last `size` calls.
-    Count { size: u32 },
-    /// Time-based window over the last `duration`.
-    Time { duration: Duration },
-}
-
 /// Behaviour while the circuit breaker is in the Open state.
 #[derive(Debug, Clone, Default)]
 pub enum OpenPolicy {
@@ -256,102 +257,6 @@ impl HalfOpenPolicy {
         Self {
             permitted_probes,
             on_rejected,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-struct CallSample {
-    timestamp: Instant,
-    is_failure: bool,
-    is_slow: bool,
-}
-
-#[derive(Debug)]
-struct FailureWindowState {
-    samples: Vec<Option<CallSample>>,
-    index: usize,
-    count: usize,
-}
-
-impl FailureWindowState {
-    fn new(capacity: usize) -> Self {
-        Self {
-            samples: vec![None; capacity.max(1)],
-            index: 0,
-            count: 0,
-        }
-    }
-
-    fn capacity(&self) -> usize {
-        self.samples.len()
-    }
-
-    fn push(&mut self, sample: CallSample) {
-        let cap = self.capacity();
-        if cap == 0 {
-            return;
-        }
-        self.samples[self.index] = Some(sample);
-        self.index = (self.index + 1) % cap;
-        if self.count < cap {
-            self.count += 1;
-        }
-    }
-
-    fn iter<'a>(&'a self) -> impl Iterator<Item = CallSample> + 'a {
-        let cap = self.capacity();
-        (0..self.count).filter_map(move |i| {
-            let idx = if self.count < cap {
-                i
-            } else {
-                (self.index + i) % cap
-            };
-            self.samples[idx]
-        })
-    }
-}
-
-/// Circuit breaker states
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u8)]
-enum CircuitState {
-    /// Normal operation - requests pass through
-    Closed = 0,
-    /// Circuit is open - requests are rejected
-    Open = 1,
-    /// Testing if the circuit can be closed - limited requests allowed
-    HalfOpen = 2,
-}
-
-impl From<u8> for CircuitState {
-    fn from(value: u8) -> Self {
-        match value {
-            0 => CircuitState::Closed,
-            1 => CircuitState::Open,
-            2 => CircuitState::HalfOpen,
-            _ => CircuitState::Closed,
-        }
-    }
-}
-
-/// FLOWIP-115b: typed read-only projection of the breaker's authoritative state.
-///
-/// Wraps the private `Arc<AtomicU8>` state cell and the probe generation. This
-/// is the single state authority behind [`CircuitBreakerStateView`]; source
-/// completion, metrics, topology, and exporters read it instead of the raw
-/// atomic. FLOWIP-115i replaces the private core behind this same contract.
-#[derive(Debug)]
-pub(crate) struct CircuitBreakerStateViewImpl {
-    state: Arc<AtomicU8>,
-    generation: Arc<AtomicU64>,
-}
-
-impl CircuitBreakerStateView for CircuitBreakerStateViewImpl {
-    fn snapshot(&self) -> CircuitBreakerStateSnapshot {
-        CircuitBreakerStateSnapshot {
-            state: CircuitBreakerState::from_u8(self.state.load(Ordering::SeqCst)),
-            generation: self.generation.load(Ordering::SeqCst),
         }
     }
 }
@@ -441,7 +346,6 @@ pub struct CircuitBreakerMiddleware {
     failure_classification_policy: FailureClassificationPolicy,
     retry_state: Arc<Mutex<HashMap<obzenflow_core::event::types::EventId, RetryState>>>,
     last_retry_cleanup: Arc<Mutex<Instant>>,
-    retry_attempts_total: Arc<AtomicU64>,
     retry_successes_total: Arc<AtomicU64>,
     retry_exhaustions_total: Arc<AtomicU64>,
 }
@@ -544,7 +448,6 @@ impl CircuitBreakerMiddleware {
             failure_classification_policy: FailureClassificationPolicy::default(),
             retry_state: Arc::new(Mutex::new(HashMap::new())),
             last_retry_cleanup: Arc::new(Mutex::new(Instant::now())),
-            retry_attempts_total: Arc::new(AtomicU64::new(0)),
             retry_successes_total: Arc::new(AtomicU64::new(0)),
             retry_exhaustions_total: Arc::new(AtomicU64::new(0)),
         }
@@ -1058,7 +961,10 @@ impl CircuitBreakerMiddleware {
     /// on success and reopens on failure; a Closed-state poll error counts
     /// toward opening through the configured failure mode.
     fn source_settle(&self, outcome: SourceOutcome) -> Option<ChainEvent> {
-        if !matches!(outcome, SourceOutcome::Inconclusive) {
+        if matches!(
+            outcome,
+            SourceOutcome::Success { .. } | SourceOutcome::Failure { .. }
+        ) {
             if let Ok(mut stats) = self.stats.lock() {
                 stats.requests_processed += 1;
             }
@@ -1090,7 +996,7 @@ impl CircuitBreakerMiddleware {
                         self.failures_total.fetch_add(1, Ordering::Relaxed);
                         self.transition_to_inner(CircuitState::Open).1
                     }
-                    SourceOutcome::Inconclusive => None,
+                    SourceOutcome::Inconclusive | SourceOutcome::NotExecuted => None,
                 };
             }
             return None;
@@ -1111,8 +1017,18 @@ impl CircuitBreakerMiddleware {
                 }
                 None
             }
-            SourceOutcome::Inconclusive => None,
+            SourceOutcome::Inconclusive | SourceOutcome::NotExecuted => None,
         }
+    }
+
+    /// Settle an admitted effect probe whose protected call was skipped or
+    /// rejected by a later policy. No breaker outcome is classified.
+    fn settle_not_executed(&self, ctx: &mut MiddlewareContext) {
+        if ctx.get::<CircuitBreakerIsProbe>().copied().unwrap_or(false) {
+            let _probe_gate = self.probe_gate.lock().ok();
+            drop(ctx.remove::<CircuitBreakerProbeSlot>());
+        }
+        self.maybe_emit_summary(ctx);
     }
 
     /// Apply an Open-like policy (Open or HalfOpen non-probe behaviour).
@@ -1365,9 +1281,12 @@ enum SourceOutcome {
     Success { poll_duration: Duration },
     /// The poll returned an error.
     Failure { poll_duration: Duration },
-    /// The attempt was aborted or skipped (drain, shutdown) before an outcome;
-    /// the probe slot is released but breaker state is unchanged.
+    /// The poll produced no data (drain, shutdown) before an outcome; the
+    /// probe slot is released but breaker state is unchanged.
     Inconclusive,
+    /// The breaker admitted the protected unit, but a later policy rejected or
+    /// synthesized before the protected call executed.
+    NotExecuted,
 }
 
 /// FLOWIP-115a: source-boundary policy for the circuit breaker.
@@ -1414,9 +1333,8 @@ impl SourcePolicy for CircuitBreakerSourcePolicy {
             SourcePollOutcome::Failed { poll_duration, .. } => SourceOutcome::Failure {
                 poll_duration: *poll_duration,
             },
-            SourcePollOutcome::Empty { .. } | SourcePollOutcome::RejectedBy { .. } => {
-                SourceOutcome::Inconclusive
-            }
+            SourcePollOutcome::Empty { .. } => SourceOutcome::Inconclusive,
+            SourcePollOutcome::RejectedBy { .. } => SourceOutcome::NotExecuted,
         };
         if let Some(event) = self.breaker.source_settle(source_outcome) {
             ctx.write_control_event(event);
@@ -1499,7 +1417,7 @@ impl SinkPolicy for CircuitBreakerSinkPolicy {
             SinkDeliveryPolicyOutcome::Failed => SourceOutcome::Failure {
                 poll_duration: Duration::ZERO,
             },
-            SinkDeliveryPolicyOutcome::RejectedBy { .. } => SourceOutcome::Inconclusive,
+            SinkDeliveryPolicyOutcome::RejectedBy { .. } => SourceOutcome::NotExecuted,
         };
         if let Some(event) = self.breaker.source_settle(source_outcome) {
             ctx.write_control_event(event);
@@ -1519,12 +1437,10 @@ impl Middleware for CircuitBreakerMiddleware {
     }
 
     // FLOWIP-115b Phase 6: placement is carrier-driven (the breaker materializes
-    // onto the SourcePoll/Effect/SinkDelivery surfaces), so it no longer claims a
-    // special source-ordering phase and no longer exposes the effect-policy
-    // capability downcast. `source_phase` is a required trait method, so it
-    // returns the neutral `Ordinary`; the `as_effect_policy` override is gone
-    // (the default is `None`). The `EffectPolicy` impl stays; `materialize()`
-    // returns it directly.
+    // onto the SourcePoll/Effect/SinkDelivery surfaces), so it no longer claims
+    // a special source-ordering phase. `source_phase` is a required trait
+    // method, so it returns the neutral `Ordinary`. The `EffectPolicy` impl
+    // stays; `materialize()` returns it directly.
     fn source_phase(&self) -> SourceMiddlewarePhase {
         SourceMiddlewarePhase::Ordinary
     }
@@ -1685,7 +1601,6 @@ impl Middleware for CircuitBreakerMiddleware {
         /// progress) are always updated; only brand-new entries are refused.
         const MAX_RETRY_STATE_ENTRIES: usize = 10_000;
 
-        let mut first_attempt = now;
         if retry_enabled && !is_success {
             if let Ok(mut states) = self.retry_state.lock() {
                 // Refuse brand-new entries when at capacity to prevent
@@ -1710,7 +1625,6 @@ impl Middleware for CircuitBreakerMiddleware {
                         classification: FailureClassification::TransientFailure,
                     });
 
-                    first_attempt = entry.first_attempt;
                     entry.attempts = attempt.saturating_add(1);
                     entry.last_attempt = now;
                     if let Some(msg) = error_message.as_ref() {
@@ -1720,78 +1634,6 @@ impl Middleware for CircuitBreakerMiddleware {
                         entry.last_kind = error_kind.clone();
                     }
                     entry.classification = classification.clone();
-                }
-            }
-        }
-
-        // Integrated retry: only retry non-probe calls, and only for retryable classifications.
-        if retry_enabled && !is_success && !is_probe {
-            if let Some(policy) = &self.retry_policy {
-                let max_attempts = policy.max_attempts.max(1);
-                let eligible = matches!(
-                    classification,
-                    FailureClassification::TransientFailure | FailureClassification::RateLimited(_)
-                );
-
-                if eligible && attempt.saturating_add(1) < max_attempts {
-                    let mut delay = match &classification {
-                        FailureClassification::TransientFailure => {
-                            policy.backoff.calculate_delay(attempt as usize)
-                        }
-                        FailureClassification::RateLimited(wait) => {
-                            if wait.is_zero() {
-                                policy.backoff.calculate_delay(attempt as usize)
-                            } else {
-                                // Use the provider's hint as a floor but apply
-                                // ±10% jitter derived from the backoff strategy
-                                // to prevent thundering herd when many concurrent
-                                // requests all receive the same Retry-After.
-                                let backoff_jittered =
-                                    policy.backoff.calculate_delay(attempt as usize);
-                                let jitter_offset = if backoff_jittered > Duration::ZERO {
-                                    let ten_pct = wait.as_millis() as u64 / 10;
-                                    // Use the backoff's jitter magnitude as entropy
-                                    let raw = backoff_jittered.as_millis() as u64;
-                                    Duration::from_millis(raw % ten_pct.max(1))
-                                } else {
-                                    Duration::ZERO
-                                };
-                                *wait + jitter_offset
-                            }
-                        }
-                        _ => Duration::from_millis(0),
-                    };
-
-                    delay = delay.min(self.retry_limits.max_single_delay);
-
-                    let elapsed = now.duration_since(first_attempt);
-
-                    if elapsed.saturating_add(delay) <= self.retry_limits.max_total_wall_time {
-                        ctx.insert::<CircuitBreakerShouldRetry>(true);
-                        ctx.insert::<CircuitBreakerRetryDelayMs>(delay.as_millis() as u64);
-
-                        self.retry_attempts_total.fetch_add(1, Ordering::Relaxed);
-
-                        ctx.write_control_event(ChainEventFactory::retry_attempt_failed(
-                            self.writer_id,
-                            attempt.saturating_add(1),
-                            max_attempts,
-                            error_kind.clone(),
-                            Some(delay.as_millis() as u64),
-                            Some(event.id),
-                        ));
-
-                        // Retry attempts do not contribute to breaker opening; only final outcomes do.
-                        // TODO(D3/051c): Because the retry loop is invisible to the breaker's
-                        // failure counters, a handler that flaps (e.g. intermittent 503s) may
-                        // never trip the breaker as long as retries eventually succeed.  This
-                        // can mask genuine degradation.  Consider exposing a configurable
-                        // `count_retries_as_partial_failure` flag that increments the sliding
-                        // window for each intermediate failure (at a fractional weight) so the
-                        // breaker can open proactively when the retry rate is abnormally high.
-                        self.maybe_emit_summary(ctx);
-                        return;
-                    }
                 }
             }
         }
@@ -1959,147 +1801,12 @@ impl crate::middleware::EffectPolicy for CircuitBreakerMiddleware {
             }
             crate::middleware::EffectAttemptOutcome::SkippedBy(_)
             | crate::middleware::EffectAttemptOutcome::RejectedBy(_) => {
-                // The protected call never went out: nothing to classify.
-                // The probe-slot guard releases with the context.
+                // The protected call never went out: release any probe lease
+                // explicitly and do not classify breaker state.
+                self.settle_not_executed(ctx);
             }
         }
     }
-}
-
-fn build_typed_fallback_event<In, Out, F>(f: &F, event: &ChainEvent) -> Vec<ChainEvent>
-where
-    In: TypedPayload + DeserializeOwned,
-    Out: TypedPayload + Serialize,
-    F: Fn(&In) -> Out + Send + Sync + 'static,
-{
-    use obzenflow_core::event::status::processing_status::ProcessingStatus;
-
-    // 1. Deserialize input payload into In
-    let payload = event.payload();
-    let input: In = match serde_json::from_value(payload.clone()) {
-        Ok(v) => v,
-        Err(err) => {
-            let mut clone = event.clone();
-            clone.processing_info.status =
-                ProcessingStatus::error(format!("cb_fallback_deserialize_failed: {err}"));
-            return vec![clone];
-        }
-    };
-
-    // 2. Call user-provided closure
-    let out = f(&input);
-
-    // 3. Serialize Out
-    let out_value = match serde_json::to_value(&out) {
-        Ok(v) => v,
-        Err(err) => {
-            let mut clone = event.clone();
-            clone.processing_info.status =
-                ProcessingStatus::error(format!("cb_fallback_serialize_failed: {err}"));
-            return vec![clone];
-        }
-    };
-
-    // 4. Wrap into a ChainEvent derived from the guarded input, so causality
-    //    records the input as the fallback's parent (FLOWIP-120h lineage fix).
-    let event_type = Out::versioned_event_type();
-    let ev = ChainEventFactory::derived_data_event(event.writer_id, event, &event_type, out_value);
-
-    vec![ev]
-}
-
-/// Build the outcome-shaped fallback events (FLOWIP-120m): the closure's
-/// `E::Outcome` carrier lowers through `into_facts`, one derived data event
-/// per fact, each parented on the protected input. The runtime's boundary
-/// skip path validates the group against the effect's declared carrier and
-/// commits it with contiguous outcome ordinals and middleware-synthesized
-/// origin, so multi-fact product outcomes ride the ordinary grouped path.
-fn build_outcome_fallback_events<E, In, F>(f: &F, event: &ChainEvent) -> Vec<ChainEvent>
-where
-    E: obzenflow_runtime::effects::Effect,
-    In: TypedPayload + DeserializeOwned,
-    F: Fn(&In) -> E::Outcome + Send + Sync + 'static,
-{
-    use obzenflow_core::event::schema::TypedFactSet;
-    use obzenflow_core::event::status::processing_status::ProcessingStatus;
-
-    let payload = event.payload();
-    let input: In = match serde_json::from_value(payload.clone()) {
-        Ok(value) => value,
-        Err(err) => {
-            let mut clone = event.clone();
-            clone.processing_info.status =
-                ProcessingStatus::error(format!("cb_outcome_fallback_deserialize_failed: {err}"));
-            return vec![clone];
-        }
-    };
-
-    let outcome = f(&input);
-    let facts = match outcome.into_facts() {
-        Ok(facts) => facts,
-        Err(err) => {
-            let mut clone = event.clone();
-            clone.processing_info.status =
-                ProcessingStatus::error(format!("cb_outcome_fallback_serialize_failed: {err}"));
-            return vec![clone];
-        }
-    };
-
-    facts
-        .into_iter()
-        .map(|fact| {
-            ChainEventFactory::derived_data_event(
-                event.writer_id,
-                event,
-                fact.event_type.as_str(),
-                fact.payload,
-            )
-        })
-        .collect()
-}
-
-/// Build the typed rejection fact for typed-outcome mode (FLOWIP-120h),
-/// derived from the guarded input so causality records it as the parent.
-fn build_typed_rejection_event<In, R, F>(
-    f: &F,
-    event: &ChainEvent,
-    reason: CircuitBreakerRejectionReason,
-) -> Vec<ChainEvent>
-where
-    In: TypedPayload + DeserializeOwned,
-    R: TypedPayload + Serialize,
-    F: Fn(&In, CircuitBreakerRejectionReason) -> R + Send + Sync + 'static,
-{
-    use obzenflow_core::event::status::processing_status::ProcessingStatus;
-
-    let payload = event.payload();
-    let input: In = match serde_json::from_value(payload.clone()) {
-        Ok(v) => v,
-        Err(err) => {
-            let mut clone = event.clone();
-            clone.processing_info.status =
-                ProcessingStatus::error(format!("cb_rejection_deserialize_failed: {err}"));
-            return vec![clone];
-        }
-    };
-
-    let rejection = f(&input, reason);
-
-    let rejection_value = match serde_json::to_value(&rejection) {
-        Ok(v) => v,
-        Err(err) => {
-            let mut clone = event.clone();
-            clone.processing_info.status =
-                ProcessingStatus::error(format!("cb_rejection_serialize_failed: {err}"));
-            return vec![clone];
-        }
-    };
-
-    let event_type = R::versioned_event_type();
-    let ev =
-        ChainEventFactory::derived_data_event(event.writer_id, event, &event_type, rejection_value);
-
-    vec![ev]
 }
 
 /// Builder for circuit breaker middleware
@@ -2991,7 +2698,7 @@ impl MiddlewareFactory for CircuitBreakerFactory {
     }
 
     fn control_role(&self) -> ControlMiddlewareRole {
-        ControlMiddlewareRole::CircuitBreaker
+        ControlMiddlewareRole::None
     }
 
     fn kind(&self) -> crate::middleware::MiddlewareKind {
@@ -3061,6 +2768,16 @@ impl MiddlewareFactory for CircuitBreakerFactory {
         request: MiddlewareAttachmentRequest<'_>,
         context: &MiddlewareMaterializationContext<'_>,
     ) -> crate::middleware::MiddlewareFactoryResult<MiddlewareSurfaceAttachment> {
+        let declaration = self.declaration();
+        let _attachment_id =
+            validate_attachment_request(&declaration, &request).map_err(|err| {
+                MiddlewareFactoryError::materialization_failed(
+                    self.label(),
+                    &context.config.name,
+                    err,
+                )
+            })?;
+
         match request.surface {
             MiddlewareSurface::SourcePoll(_) => {
                 // Build one breaker (registering its state view and snapshotter),
@@ -4245,71 +3962,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // T4: RateLimited retry delay includes jitter
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn rate_limited_retry_includes_jitter() {
-        // Build a CB with exponential retry and a large enough retry_after
-        // that 10% jitter is measurable.
-        let mut cb = CircuitBreakerMiddleware::with_cooldown_and_fallback(
-            5,
-            StdDuration::from_secs(60),
-            None,
-            None,
-            None,
-            None,
-        );
-        cb.retry_policy = Some(CircuitBreakerRetryPolicy {
-            max_attempts: 3,
-            backoff: BackoffStrategy::Exponential {
-                initial: StdDuration::from_millis(100),
-                max: StdDuration::from_secs(5),
-                factor: 2.0,
-                jitter: true,
-            },
-        });
-        cb.retry_limits = RetryLimits {
-            max_single_delay: StdDuration::from_secs(30),
-            max_total_wall_time: StdDuration::from_secs(120),
-        };
-
-        let raw_wait = StdDuration::from_secs(1);
-        let event = create_test_event();
-        let mut ctx = MiddlewareContext::live_handler();
-        ctx.insert::<CircuitBreakerRetryAfterMs>(raw_wait.as_millis() as u64);
-
-        // Create a rate-limited output.
-        let mut rl_output = create_test_event();
-        rl_output.processing_info.status =
-            ProcessingStatus::error_with_kind("rate_limited", Some(ErrorKind::RateLimited));
-
-        cb.pre_handle(&event, &mut ctx);
-        cb.post_handle(&event, &[rl_output], &mut ctx);
-
-        // The CB should have signaled a retry with a delay. Extract it.
-        let should_retry = ctx
-            .get::<CircuitBreakerShouldRetry>()
-            .copied()
-            .unwrap_or(false);
-
-        assert!(should_retry, "expected CB to signal retry for RateLimited");
-
-        let delay_ms = ctx
-            .get::<CircuitBreakerRetryDelayMs>()
-            .copied()
-            .unwrap_or(0);
-
-        // The delay should be at least raw_wait (1000ms) because jitter adds,
-        // not subtracts. But it should not be exactly 0.
-        assert!(
-            delay_ms > 0,
-            "expected non-zero retry delay, got {delay_ms}"
-        );
-    }
-
-    // -----------------------------------------------------------------------
-    // T5: retry_state capacity cap is enforced
+    // T4: retry_state capacity cap is enforced
     // -----------------------------------------------------------------------
 
     #[test]
@@ -4644,6 +4297,25 @@ mod tests {
             cb.probe_in_flight.load(Ordering::SeqCst),
             0,
             "the probe slot is released on inconclusive poll"
+        );
+
+        // A policy rejection after breaker admission is explicitly settled as
+        // not-executed: the probe lease is released without classifying state.
+        let cb = open_breaker();
+        let guard = admit_probe(&cb);
+        assert_eq!(cb.current_state(), CircuitState::HalfOpen);
+        assert_eq!(cb.probe_in_flight.load(Ordering::SeqCst), 1);
+        cb.source_settle(SourceOutcome::NotExecuted);
+        drop(guard);
+        assert_eq!(
+            cb.current_state(),
+            CircuitState::HalfOpen,
+            "a not-executed probe leaves the breaker HalfOpen for the next probe"
+        );
+        assert_eq!(
+            cb.probe_in_flight.load(Ordering::SeqCst),
+            0,
+            "the probe slot is released on not-executed settlement"
         );
 
         // A cancelled boundary drops the guard without observing an outcome;

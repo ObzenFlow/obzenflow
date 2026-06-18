@@ -18,7 +18,8 @@ use obzenflow_adapters::middleware::{
     InfiniteSourceHandlerExt, JoinHandlerMiddlewareExt, Middleware, MiddlewareFactory,
     MiddlewareSurfaceKind, OutcomeEnrichmentMiddleware, PerSinkDeliveryPolicyBoundary,
     PerSourcePolicyBoundary, SinkHandlerExt, SinkPolicy, StatefulHandlerMiddlewareExt,
-    SystemEnrichmentMiddleware, TimingMiddleware, TransformHandlerExt, UnifiedMiddlewareTransform,
+    SystemEnrichmentMiddleware, TimingMiddleware, TopologyMiddlewareConfigSlot,
+    TransformHandlerExt, UnifiedMiddlewareTransform,
 };
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::{StageId, WriterId};
@@ -69,6 +70,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 const DEFAULT_ASYNC_SOURCE_POLL_TIMEOUT: Duration = Duration::from_secs(30);
+
+fn factory_declares_circuit_breaker(factory: &dyn MiddlewareFactory) -> bool {
+    factory.topology_config_slot() == Some(TopologyMiddlewareConfigSlot::CircuitBreaker)
+}
 
 /// Marker name used by stage macros when the runtime name should be derived from the enclosing
 /// `flow!` binding.
@@ -123,7 +128,7 @@ fn build_source_middleware_and_register_policies(
     let expects_circuit_breaker = resolved
         .middleware
         .iter()
-        .any(|spec| spec.factory.control_role() == ControlMiddlewareRole::CircuitBreaker);
+        .any(|spec| factory_declares_circuit_breaker(spec.factory.as_ref()));
     let expects_rate_limiter = resolved
         .middleware
         .iter()
@@ -1047,7 +1052,7 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Stag
         let expects_circuit_breaker = resolved
             .middleware
             .iter()
-            .any(|spec| spec.factory.control_role() == ControlMiddlewareRole::CircuitBreaker);
+            .any(|spec| factory_declares_circuit_breaker(spec.factory.as_ref()));
         let expects_rate_limiter = resolved
             .middleware
             .iter()
@@ -1191,7 +1196,7 @@ impl<H: AsyncTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
         let expects_circuit_breaker = resolved
             .middleware
             .iter()
-            .any(|spec| spec.factory.control_role() == ControlMiddlewareRole::CircuitBreaker);
+            .any(|spec| factory_declares_circuit_breaker(spec.factory.as_ref()));
         let expects_rate_limiter = resolved
             .middleware
             .iter()
@@ -1581,7 +1586,7 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
         let expects_circuit_breaker = resolved
             .middleware
             .iter()
-            .any(|spec| spec.factory.control_role() == ControlMiddlewareRole::CircuitBreaker);
+            .any(|spec| factory_declares_circuit_breaker(spec.factory.as_ref()));
         let expects_rate_limiter = resolved
             .middleware
             .iter()
@@ -1953,7 +1958,7 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Stage
         let expects_circuit_breaker = resolved
             .middleware
             .iter()
-            .any(|spec| spec.factory.control_role() == ControlMiddlewareRole::CircuitBreaker);
+            .any(|spec| factory_declares_circuit_breaker(spec.factory.as_ref()));
         let expects_rate_limiter = resolved
             .middleware
             .iter()
@@ -2140,7 +2145,7 @@ impl<H: EffectfulStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
         let expects_circuit_breaker = resolved
             .middleware
             .iter()
-            .any(|spec| spec.factory.control_role() == ControlMiddlewareRole::CircuitBreaker);
+            .any(|spec| factory_declares_circuit_breaker(spec.factory.as_ref()));
         let expects_rate_limiter = resolved
             .middleware
             .iter()
@@ -2322,7 +2327,7 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
         let expects_circuit_breaker = resolved
             .middleware
             .iter()
-            .any(|spec| spec.factory.control_role() == ControlMiddlewareRole::CircuitBreaker);
+            .any(|spec| factory_declares_circuit_breaker(spec.factory.as_ref()));
         let expects_rate_limiter = resolved
             .middleware
             .iter()

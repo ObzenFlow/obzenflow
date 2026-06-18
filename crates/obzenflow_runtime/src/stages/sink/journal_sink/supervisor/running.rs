@@ -38,6 +38,7 @@ use super::super::boundary::{
 use super::super::fsm::{JournalSinkContext, JournalSinkEvent, JournalSinkState};
 use super::JournalSinkSupervisor;
 use obzenflow_core::MiddlewareExecutionScope;
+use serde_json::json;
 
 pub(super) async fn dispatch_running<
     H: UnifiedSinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
@@ -623,7 +624,20 @@ async fn dispatch_data_event<
                     "sink_policy_rejected",
                     format!("{}: {}", rejection.policy, rejection.reason),
                     /* final_attempt */ false,
-                );
+                )
+                .with_middleware_context(json!({
+                    "kind": "middleware_rejection",
+                    "surface": "sink_delivery",
+                    "protected_unit": {
+                        "stage_id": ctx.stage_id.to_string(),
+                        "target": "stage"
+                    },
+                    "policy": rejection.policy,
+                    "reason": rejection.reason,
+                    "parent_event_id": event_id.to_string(),
+                    "upstream_stage_id": upstream_stage.map(|stage_id| stage_id.to_string()),
+                    "input_position": stage_input_position.map(|position| position.0)
+                }));
                 (
                     crate::stages::common::handlers::SinkConsumeReport::new(fail_payload),
                     None,
