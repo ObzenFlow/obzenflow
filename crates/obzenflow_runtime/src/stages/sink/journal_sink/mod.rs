@@ -12,6 +12,7 @@
 //! - Graceful draining to prevent data loss
 //! - Automatic completion tracking
 
+pub mod boundary;
 pub mod builder;
 pub mod config;
 pub mod fsm;
@@ -19,6 +20,11 @@ pub mod handle;
 pub mod supervisor;
 
 // Re-export public API
+pub use boundary::{
+    SinkDeliveryAttemptContext, SinkDeliveryAttemptOutcome, SinkDeliveryBoundary,
+    SinkDeliveryBoundaryOutcome, SinkDeliveryBoundaryReport, SinkDeliveryExecutor,
+    SinkDeliveryIdentity, SinkDeliveryRejection, SinkDeliveryTargetId,
+};
 pub use builder::JournalSinkBuilder;
 pub use config::JournalSinkConfig;
 pub use handle::{JournalSinkHandle, JournalSinkHandleExt};

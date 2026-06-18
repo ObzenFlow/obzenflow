@@ -99,6 +99,7 @@ pub(crate) fn strict_replay_active() -> bool {
 mod backpressure;
 mod join_middleware;
 mod sink_middleware;
+mod sink_policy;
 mod source_middleware;
 mod source_policy;
 mod stateful_middleware;
@@ -140,6 +141,10 @@ pub use middleware_trait::{
 // Handler-specific exports
 pub use join_middleware::{JoinHandlerMiddlewareExt, JoinMiddlewareBuilder, MiddlewareJoin};
 pub use sink_middleware::{MiddlewareSink, SinkHandlerExt, SinkMiddlewareBuilder};
+pub use sink_policy::{
+    PerSinkDeliveryPolicyBoundary, SinkAdmission, SinkAdmissionGuard, SinkDeliveryPolicyOutcome,
+    SinkPolicy, SinkPolicyCtx,
+};
 pub use source_middleware::{
     AsyncFiniteSourceHandlerExt, AsyncFiniteSourceMiddlewareBuilder, AsyncInfiniteSourceHandlerExt,
     AsyncInfiniteSourceMiddlewareBuilder, FiniteSourceHandlerExt, FiniteSourceMiddlewareBuilder,

@@ -31,8 +31,13 @@ use std::panic::AssertUnwindSafe;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
+use super::super::boundary::{
+    SinkDeliveryAttemptContext, SinkDeliveryAttemptOutcome, SinkDeliveryBoundaryOutcome,
+    SinkDeliveryExecutor, SinkDeliveryIdentity, SinkDeliveryTargetId,
+};
 use super::super::fsm::{JournalSinkContext, JournalSinkEvent, JournalSinkState};
 use super::JournalSinkSupervisor;
+use obzenflow_core::MiddlewareExecutionScope;
 
 pub(super) async fn dispatch_running<
     H: UnifiedSinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
@@ -423,6 +428,45 @@ async fn dispatch_control_event<
     }
 }
 
+/// FLOWIP-115b: a re-invokable executor wrapping one data-event `consume_report`
+/// attempt for the sink-delivery boundary. 115B calls `attempt` once; the
+/// re-invokable shape lets FLOWIP-115h reintroduce boundary-owned retry.
+struct ConsumeExecutor<'h, H> {
+    handler: &'h mut H,
+    event: Option<ChainEvent>,
+    effect_context: Option<EffectInvocationContext>,
+    scope: MiddlewareExecutionScope,
+}
+
+#[async_trait::async_trait]
+impl<H: UnifiedSinkHandler + Send + Sync> SinkDeliveryExecutor for ConsumeExecutor<'_, H> {
+    async fn attempt(&mut self) -> SinkDeliveryAttemptOutcome {
+        let event = self
+            .event
+            .take()
+            .expect("sink delivery executor attempted more than once");
+        let effect_context = self.effect_context.take();
+        let result = AssertUnwindSafe(self.handler.consume_report(
+            event,
+            effect_context,
+            self.scope,
+        ))
+        .catch_unwind()
+        .await;
+        match result {
+            Ok(inner) => SinkDeliveryAttemptOutcome::Delivered(inner.map(Box::new)),
+            Err(panic_payload) => {
+                let message = panic_payload
+                    .downcast_ref::<&str>()
+                    .map(|s| (*s).to_string())
+                    .or_else(|| panic_payload.downcast_ref::<String>().cloned())
+                    .unwrap_or_else(|| "unknown panic payload".to_string());
+                SinkDeliveryAttemptOutcome::Panicked { message }
+            }
+        }
+    }
+}
+
 async fn dispatch_data_event<
     H: UnifiedSinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
 >(
@@ -467,6 +511,21 @@ async fn dispatch_data_event<
     // dispatch from the delivered position.
     let scope = crate::effects::scope_for_dispatch(ctx.effect_runtime_mode, stage_input_position);
 
+    // FLOWIP-115b: the sink-delivery boundary wraps the data-event consume
+    // attempt. Pre-extract the boundary and identity so the closure borrows only
+    // `ctx.handler` mutably, disjoint from `&ctx.instrumentation`.
+    let sink_boundary = ctx.sink_delivery_boundary.clone();
+    let delivery_identity = SinkDeliveryIdentity {
+        stage_id: ctx.stage_id,
+        target: SinkDeliveryTargetId::Stage,
+    };
+    let delivery_attempt = SinkDeliveryAttemptContext {
+        parent_event_id: event_id,
+        upstream_stage,
+        input_position: stage_input_position,
+    };
+    let boundary_event = envelope.event.clone();
+
     // Use instrumentation wrapper but keep handler-level failures as per-record
     // outcomes instead of stage-fatal errors.
     let ack_result = process_with_instrumentation(&ctx.instrumentation, || async {
@@ -474,26 +533,45 @@ async fn dispatch_data_event<
             .as_ref()
             .map(|state| HeartbeatProcessingGuard::new(state.clone(), upstream_stage, event_id));
 
-        let result = AssertUnwindSafe(ctx.handler.consume_report(
-            envelope_event,
+        let mut executor = ConsumeExecutor {
+            handler: &mut ctx.handler,
+            event: Some(envelope_event),
             effect_context,
             scope,
-        ))
-        .catch_unwind()
-        .await;
+        };
 
-        match result {
-            Ok(Ok(mut report)) => {
+        let (outcome, control_events) = match &sink_boundary {
+            Some(boundary) => {
+                let report = boundary
+                    .around_sink_delivery(
+                        &delivery_identity,
+                        &delivery_attempt,
+                        &boundary_event,
+                        &mut executor,
+                    )
+                    .await;
+                (report.outcome, report.control_events)
+            }
+            None => (
+                SinkDeliveryBoundaryOutcome::Attempted(executor.attempt().await),
+                Vec::new(),
+            ),
+        };
+
+        let mapped = match outcome {
+            SinkDeliveryBoundaryOutcome::Attempted(SinkDeliveryAttemptOutcome::Delivered(Ok(
+                report,
+            ))) => {
+                let mut report = *report;
                 report.primary.destination = stage_name.clone();
                 for commit in &mut report.commit_receipts {
                     commit.payload.destination = stage_name.clone();
                 }
-                if let Some(state) = &heartbeat_state {
-                    state.record_last_consumed(event_id);
-                }
-                Ok((report, None, false))
+                (report, None, false)
             }
-            Ok(Err(err)) => {
+            SinkDeliveryBoundaryOutcome::Attempted(SinkDeliveryAttemptOutcome::Delivered(Err(
+                err,
+            ))) => {
                 let fail_payload = DeliveryPayload::failed(
                     stage_name.clone(),
                     DeliveryMethod::Noop,
@@ -501,50 +579,75 @@ async fn dispatch_data_event<
                     err.to_string(),
                     /* final_attempt */ false,
                 );
-                if let Some(state) = &heartbeat_state {
-                    state.record_last_consumed(event_id);
-                }
-                Ok((
+                (
                     crate::stages::common::handlers::SinkConsumeReport::new(fail_payload),
                     Some(err),
                     false,
-                ))
+                )
             }
-            Err(panic_payload) => {
-                let msg = panic_payload
-                    .downcast_ref::<&str>()
-                    .map(|s| (*s).to_string())
-                    .or_else(|| panic_payload.downcast_ref::<String>().cloned())
-                    .unwrap_or_else(|| "unknown panic payload".to_string());
-
+            SinkDeliveryBoundaryOutcome::Attempted(SinkDeliveryAttemptOutcome::Panicked {
+                message,
+            }) => {
                 tracing::error!(
                     stage_name = %stage_name,
-                    panic = %msg,
+                    panic = %message,
                     "SinkHandler::consume() panicked"
                 );
-
                 let fail_payload = DeliveryPayload::failed(
                     stage_name.clone(),
                     DeliveryMethod::Noop,
                     "handler_panic",
-                    msg,
+                    message,
                     /* final_attempt */ true,
                 );
-                if let Some(state) = &heartbeat_state {
-                    state.record_last_consumed(event_id);
-                }
-                Ok((
+                (
                     crate::stages::common::handlers::SinkConsumeReport::new(fail_payload),
                     None,
                     true,
-                ))
+                )
             }
+            SinkDeliveryBoundaryOutcome::Rejected(rejection) => {
+                // FLOWIP-115b AC16: a policy rejection is a failed delivery
+                // receipt with structured metadata distinct from handler errors
+                // and panics, never a successful `Noop`. It is not routed as a
+                // handler error and is not stage-fatal.
+                tracing::info!(
+                    stage_name = %stage_name,
+                    policy = %rejection.policy,
+                    reason = %rejection.reason,
+                    "Sink delivery rejected by policy (FLOWIP-115b)"
+                );
+                let fail_payload = DeliveryPayload::failed(
+                    stage_name.clone(),
+                    DeliveryMethod::Noop,
+                    "sink_policy_rejected",
+                    format!("{}: {}", rejection.policy, rejection.reason),
+                    /* final_attempt */ false,
+                );
+                (
+                    crate::stages::common::handlers::SinkConsumeReport::new(fail_payload),
+                    None,
+                    false,
+                )
+            }
+        };
+
+        if let Some(state) = &heartbeat_state {
+            state.record_last_consumed(event_id);
         }
+
+        let (report, maybe_err, panicked) = mapped;
+        Ok::<_, Box<dyn std::error::Error + Send + Sync>>((
+            report,
+            maybe_err,
+            panicked,
+            control_events,
+        ))
     })
     .await;
 
     match ack_result {
-        Ok((report, maybe_err, panicked)) => {
+        Ok((report, maybe_err, panicked, control_events)) => {
             journal_delivery_receipt(ctx, subscription, envelope, report.primary).await?;
 
             for commit in report.commit_receipts {
@@ -560,6 +663,15 @@ async fn dispatch_data_event<
                         "Skipping commit receipt with no pending parent metadata"
                     );
                 }
+            }
+
+            // FLOWIP-115b: sink-policy observability/control rows are journalled
+            // but do not advance receipt progress (AC17).
+            for control_event in control_events {
+                ctx.data_journal
+                    .append(control_event, Some(envelope))
+                    .await
+                    .map_err(|je| format!("Failed to journal sink boundary control event: {je}"))?;
             }
 
             // Per-record handler errors are not stage-fatal. Surface them as

@@ -9,7 +9,8 @@
 //! monitoring and SLI middleware.
 
 use crate::middleware::{
-    batch_has_error_marked, SourceAdmission, SourcePolicy, SourcePolicyCtx, SourcePollOutcome,
+    batch_has_error_marked, SinkAdmission, SinkAdmissionGuard, SinkDeliveryPolicyOutcome,
+    SinkPolicy, SinkPolicyCtx, SourceAdmission, SourcePolicy, SourcePolicyCtx, SourcePollOutcome,
 };
 use crate::middleware::{
     context_keys::{
@@ -1458,23 +1459,74 @@ impl CompletionGate for CircuitBreakerCompletionGate {
     }
 }
 
+/// FLOWIP-115b: sink-delivery boundary policy for the circuit breaker.
+///
+/// Reuses the breaker's admission state machine. Unlike the source policy, which
+/// idles while the breaker is open and shapes completion through the completion
+/// gate, the sink policy fails fast: an open breaker rejects the delivery, which
+/// the supervisor maps to a failed delivery receipt.
+struct CircuitBreakerSinkPolicy {
+    breaker: Arc<CircuitBreakerMiddleware>,
+}
+
+#[async_trait::async_trait]
+impl SinkPolicy for CircuitBreakerSinkPolicy {
+    fn label(&self) -> &'static str {
+        Middleware::label(self.breaker.as_ref())
+    }
+
+    async fn admit(&self, ctx: &mut SinkPolicyCtx) -> SinkAdmission {
+        match self.breaker.source_admit() {
+            SourceAdmit::Continue { guard, event } => {
+                if let Some(event) = event {
+                    ctx.write_control_event(*event);
+                }
+                SinkAdmission::Admit(
+                    guard.map(|guard| Box::new(guard) as Box<dyn SinkAdmissionGuard>),
+                )
+            }
+            SourceAdmit::Pause(_) => SinkAdmission::Reject {
+                reason: "circuit breaker open".to_string(),
+            },
+        }
+    }
+
+    fn observe(&self, outcome: &SinkDeliveryPolicyOutcome<'_>, ctx: &mut SinkPolicyCtx) {
+        let source_outcome = match outcome {
+            SinkDeliveryPolicyOutcome::Delivered { .. } => SourceOutcome::Success {
+                poll_duration: Duration::ZERO,
+            },
+            SinkDeliveryPolicyOutcome::Failed => SourceOutcome::Failure {
+                poll_duration: Duration::ZERO,
+            },
+            SinkDeliveryPolicyOutcome::RejectedBy { .. } => SourceOutcome::Inconclusive,
+        };
+        if let Some(event) = self.breaker.source_settle(source_outcome) {
+            ctx.write_control_event(event);
+        }
+        self.breaker
+            .maybe_emit_summary(ctx.middleware_context_mut());
+    }
+}
+
 impl Middleware for CircuitBreakerMiddleware {
     fn label(&self) -> &'static str {
         "circuit_breaker"
-    }
-
-    fn source_phase(&self) -> SourceMiddlewarePhase {
-        SourceMiddlewarePhase::CircuitBreakerGate
     }
 
     fn kind(&self) -> crate::middleware::MiddlewareKind {
         crate::middleware::MiddlewareKind::Policy
     }
 
-    fn as_effect_policy(
-        self: std::sync::Arc<Self>,
-    ) -> Option<std::sync::Arc<dyn crate::middleware::EffectPolicy>> {
-        Some(self)
+    // FLOWIP-115b Phase 6: placement is carrier-driven (the breaker materializes
+    // onto the SourcePoll/Effect/SinkDelivery surfaces), so it no longer claims a
+    // special source-ordering phase and no longer exposes the effect-policy
+    // capability downcast. `source_phase` is a required trait method, so it
+    // returns the neutral `Ordinary`; the `as_effect_policy` override is gone
+    // (the default is `None`). The `EffectPolicy` impl stays; `materialize()`
+    // returns it directly.
+    fn source_phase(&self) -> SourceMiddlewarePhase {
+        SourceMiddlewarePhase::Ordinary
     }
 
     fn pre_handle(&self, event: &ChainEvent, ctx: &mut MiddlewareContext) -> MiddlewareAction {
@@ -2512,6 +2564,13 @@ impl CircuitBreakerBuilder {
 
     /// Build the circuit breaker middleware factory
     pub fn build(self) -> Box<dyn MiddlewareFactory> {
+        // FLOWIP-115b: production retry is removed. A configured retry policy
+        // binds successfully but is ignored with a one-time compatibility
+        // warning; FLOWIP-115h reintroduces retry as boundary-owned recovery, so
+        // the breaker never receives a retry policy on the production path.
+        if self.retry_policy.is_some() {
+            warn_circuit_breaker_retry_ignored();
+        }
         Box::new(CircuitBreakerFactory {
             threshold: self.threshold,
             cooldown: self.cooldown,
@@ -2523,11 +2582,25 @@ impl CircuitBreakerBuilder {
             open_policy: self.open_policy,
             half_open_policy: self.half_open_policy,
             unknown_error_kind_policy: self.unknown_error_kind_policy,
-            retry_policy: self.retry_policy,
+            retry_policy: None,
             retry_limits: self.retry_limits,
             failure_classification_policy: self.failure_classification_policy,
         })
     }
+}
+
+/// FLOWIP-115b: production circuit-breaker retry is removed; FLOWIP-115h
+/// reintroduces it as boundary-owned recovery. A retry policy on a built factory
+/// is ignored with this one-time, process-wide compatibility warning.
+fn warn_circuit_breaker_retry_ignored() {
+    static WARNED: std::sync::Once = std::sync::Once::new();
+    WARNED.call_once(|| {
+        tracing::warn!(
+            "Circuit breaker retry configuration is ignored: FLOWIP-115b removed \
+             production retry and FLOWIP-115h reintroduces it as boundary-owned \
+             recovery. Remove the retry policy to silence this warning."
+        );
+    });
 }
 
 /// Factory for creating circuit breaker middleware
@@ -2971,9 +3044,16 @@ impl MiddlewareFactory for CircuitBreakerFactory {
 
     fn declaration(&self) -> MiddlewareDeclaration {
         // The breaker is hook-bound control middleware. This slice materializes
-        // the source-poll surface; FLOWIP-115b later phases add effect and sink
+        // the source-poll and effect surfaces; the sink-delivery phase adds sink
         // delivery to this surface set.
-        MiddlewareDeclaration::control(self.label(), vec![MiddlewareSurfaceKind::SourcePoll])
+        MiddlewareDeclaration::control(
+            self.label(),
+            vec![
+                MiddlewareSurfaceKind::SourcePoll,
+                MiddlewareSurfaceKind::Effect,
+                MiddlewareSurfaceKind::SinkDelivery,
+            ],
+        )
     }
 
     fn materialize(
@@ -3007,6 +3087,30 @@ impl MiddlewareFactory for CircuitBreakerFactory {
                         completion_gate: Some(completion_gate),
                     },
                 ))
+            }
+            MiddlewareSurface::Effect(effect_surface) => {
+                // One breaker instance guards one declared effect (FLOWIP-120c),
+                // registering under the per-effect key for metrics. The breaker
+                // is itself the EffectPolicy the binder composes into the chain.
+                let middleware = self.build_middleware_keyed(
+                    context.config,
+                    context.control_middleware.clone(),
+                    Some(effect_surface.effect_type.as_str().to_string()),
+                )?;
+                let policy: Arc<dyn crate::middleware::EffectPolicy> = Arc::new(middleware);
+                Ok(MiddlewareSurfaceAttachment::Effect(policy))
+            }
+            MiddlewareSurface::SinkDelivery(_) => {
+                // One breaker guards the sink stage's delivery unit, registered
+                // stage-level. It fails fast when open via `CircuitBreakerSinkPolicy`.
+                let middleware = self.build_middleware_keyed(
+                    context.config,
+                    context.control_middleware.clone(),
+                    None,
+                )?;
+                let breaker = Arc::new(middleware);
+                let policy: Arc<dyn SinkPolicy> = Arc::new(CircuitBreakerSinkPolicy { breaker });
+                Ok(MiddlewareSurfaceAttachment::SinkDelivery(policy))
             }
             other => Err(MiddlewareFactoryError::materialization_failed(
                 self.label(),

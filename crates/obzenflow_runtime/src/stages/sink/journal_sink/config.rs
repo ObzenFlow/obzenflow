@@ -4,6 +4,7 @@
 
 //! Configuration for journal sink stages
 
+use super::boundary::SinkDeliveryBoundary;
 use crate::stages::common::control_strategies::SignalGate;
 use obzenflow_core::StageId;
 use std::sync::Arc;
@@ -31,4 +32,8 @@ pub struct JournalSinkConfig {
 
     /// Control strategy for handling FlowControl events (defaults applied in builder)
     pub control_strategy: Option<Arc<dyn SignalGate>>,
+
+    /// Runtime-neutral sink-delivery boundary seam (FLOWIP-115b). Wraps the
+    /// data-event `consume_report` attempt; `None` means no sink policies.
+    pub sink_delivery_boundary: Option<Arc<dyn SinkDeliveryBoundary>>,
 }

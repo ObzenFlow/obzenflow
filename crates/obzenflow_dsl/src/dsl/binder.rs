@@ -13,9 +13,11 @@
 use crate::middleware_resolution::MiddlewareSource;
 use obzenflow_adapters::middleware::control::ControlMiddlewareAggregator;
 use obzenflow_adapters::middleware::{
-    MiddlewareAttachmentRequest, MiddlewareFactory, MiddlewareMaterializationContext,
-    MiddlewareOrigin, MiddlewareSurface, MiddlewareSurfaceAttachment, ProtectedUnit,
-    ProtectedUnitId, SourcePolicy, SourcePollSurface, SourcePollUnitId,
+    effect_policy_from_middleware, EffectPolicy, EffectSurface, EffectTypeId, EffectUnitId,
+    Middleware, MiddlewareAttachmentRequest, MiddlewareFactory, MiddlewareMaterializationContext,
+    MiddlewareOrigin, MiddlewareSurface, MiddlewareSurfaceAttachment, MiddlewareSurfaceKind,
+    ProtectedUnit, ProtectedUnitId, SinkDeliverySurface, SinkDeliveryTarget, SinkDeliveryUnitId,
+    SinkPolicy, SourcePolicy, SourcePollSurface, SourcePollUnitId,
 };
 use obzenflow_runtime::pipeline::config::StageConfig;
 use obzenflow_runtime::stages::source::strategies::CompletionGate;
@@ -83,6 +85,98 @@ pub(crate) fn materialize_source_poll(
         }),
         _ => Err(format!(
             "binder expected a SourcePoll attachment from middleware '{}'",
+            factory.label()
+        )),
+    }
+}
+
+/// Build the per-effect policy for one declared effect, in declared order.
+///
+/// A hook-bound control middleware (the circuit breaker) is materialized onto
+/// the `Effect` surface; any other middleware is adapted through the legacy
+/// chain surface so a still-legacy policy (the rate limiter) composes alongside.
+pub(crate) fn bind_effect_policy(
+    factory: &dyn MiddlewareFactory,
+    config: &StageConfig,
+    control_middleware: &Arc<ControlMiddlewareAggregator>,
+    effect_type: &'static str,
+    origin: &MiddlewareOrigin,
+) -> Result<Arc<dyn EffectPolicy>, String> {
+    let declaration = factory.declaration();
+    if declaration.is_control() && declaration.supports(MiddlewareSurfaceKind::Effect) {
+        let surface = MiddlewareSurface::Effect(EffectSurface {
+            stage_id: config.stage_id,
+            effect_type: EffectTypeId(effect_type.to_string()),
+        });
+        let protected_unit = ProtectedUnitId {
+            stage_id: config.stage_id,
+            unit: ProtectedUnit::Effect(EffectUnitId {
+                effect_type: EffectTypeId(effect_type.to_string()),
+            }),
+        };
+        let request = MiddlewareAttachmentRequest {
+            surface: &surface,
+            protected_unit: &protected_unit,
+            origin,
+        };
+        let ctx = MiddlewareMaterializationContext {
+            config,
+            control_middleware,
+        };
+        match factory
+            .materialize(request, &ctx)
+            .map_err(|e| e.to_string())?
+        {
+            MiddlewareSurfaceAttachment::Effect(policy) => Ok(policy),
+            _ => Err(format!(
+                "binder expected an Effect attachment from middleware '{}'",
+                factory.label()
+            )),
+        }
+    } else {
+        let instance: Arc<dyn Middleware> = Arc::from(
+            factory
+                .create_for_effect(config, control_middleware.clone(), effect_type)
+                .map_err(|e| e.to_string())?,
+        );
+        Ok(effect_policy_from_middleware(instance))
+    }
+}
+
+/// Materialize one hook-bound control middleware onto the sink-delivery surface,
+/// returning the composable sink policy.
+pub(crate) fn materialize_sink_delivery(
+    factory: &dyn MiddlewareFactory,
+    config: &StageConfig,
+    control_middleware: &Arc<ControlMiddlewareAggregator>,
+    origin: &MiddlewareOrigin,
+) -> Result<Arc<dyn SinkPolicy>, String> {
+    let surface = MiddlewareSurface::SinkDelivery(SinkDeliverySurface {
+        stage_id: config.stage_id,
+        configured_target: None,
+    });
+    let protected_unit = ProtectedUnitId {
+        stage_id: config.stage_id,
+        unit: ProtectedUnit::SinkDelivery(SinkDeliveryUnitId {
+            target: SinkDeliveryTarget::Stage,
+        }),
+    };
+    let request = MiddlewareAttachmentRequest {
+        surface: &surface,
+        protected_unit: &protected_unit,
+        origin,
+    };
+    let ctx = MiddlewareMaterializationContext {
+        config,
+        control_middleware,
+    };
+    match factory
+        .materialize(request, &ctx)
+        .map_err(|e| e.to_string())?
+    {
+        MiddlewareSurfaceAttachment::SinkDelivery(policy) => Ok(policy),
+        _ => Err(format!(
+            "binder expected a SinkDelivery attachment from middleware '{}'",
             factory.label()
         )),
     }

@@ -303,7 +303,6 @@ impl<M: Middleware + ?Sized> Middleware for Box<M> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceMiddlewarePhase {
-    CircuitBreakerGate,
     RateLimiterGate,
     Ordinary,
 }

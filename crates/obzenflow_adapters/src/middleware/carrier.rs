@@ -19,6 +19,7 @@
 
 use super::control::ControlMiddlewareAggregator;
 use super::effect_policy::EffectPolicy;
+use super::sink_policy::SinkPolicy;
 use super::source_policy::SourcePolicy;
 use obzenflow_core::StageId;
 use obzenflow_runtime::pipeline::config::StageConfig;
@@ -360,4 +361,5 @@ pub struct SourcePollAttachment {
 pub enum MiddlewareSurfaceAttachment {
     SourcePoll(SourcePollAttachment),
     Effect(Arc<dyn EffectPolicy>),
+    SinkDelivery(Arc<dyn SinkPolicy>),
 }

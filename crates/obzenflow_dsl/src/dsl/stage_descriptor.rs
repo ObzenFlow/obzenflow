@@ -16,9 +16,9 @@ use obzenflow_adapters::middleware::{
     validate_middleware_safety, AsyncFiniteSourceHandlerExt, AsyncInfiniteSourceHandlerExt,
     AsyncTransformHandlerExt, ControlMiddlewareRole, FiniteSourceHandlerExt,
     InfiniteSourceHandlerExt, JoinHandlerMiddlewareExt, Middleware, MiddlewareFactory,
-    MiddlewareSurfaceKind, OutcomeEnrichmentMiddleware, PerSourcePolicyBoundary, SinkHandlerExt,
-    StatefulHandlerMiddlewareExt, SystemEnrichmentMiddleware, TimingMiddleware,
-    TransformHandlerExt, UnifiedMiddlewareTransform,
+    MiddlewareSurfaceKind, OutcomeEnrichmentMiddleware, PerSinkDeliveryPolicyBoundary,
+    PerSourcePolicyBoundary, SinkHandlerExt, SinkPolicy, StatefulHandlerMiddlewareExt,
+    SystemEnrichmentMiddleware, TimingMiddleware, TransformHandlerExt, UnifiedMiddlewareTransform,
 };
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::{StageId, WriterId};
@@ -46,6 +46,7 @@ use obzenflow_runtime::{
         join::{JoinBuilder, JoinConfig, JoinEvent, JoinReferenceMode, JoinState},
         sink::journal_sink::{
             JournalSinkBuilder, JournalSinkConfig, JournalSinkEvent, JournalSinkState,
+            SinkDeliveryBoundary,
         },
         source::{
             finite::{
@@ -158,10 +159,16 @@ fn build_source_middleware_and_register_policies(
                     .register_source_policy(config, stage_type, control_middleware)?;
             }
             ControlMiddlewareRole::CircuitBreaker => {
-                // A breaker that did not declare source hooks: legacy route,
-                // retained until FLOWIP-115g (Phase 6 fail-closes it).
-                spec.factory
-                    .register_source_policy(config, stage_type, control_middleware)?;
+                // FLOWIP-115b AC59: a breaker reaching the legacy source role path
+                // did not declare source hooks. Fail closed rather than silently
+                // registering it through the retired route.
+                return Err(format!(
+                    "Stage {:?}: circuit breaker reached the legacy source role path \
+                     without declaring source hooks; hook-bound control must \
+                     materialize onto the SourcePoll surface (FLOWIP-115b)",
+                    config.stage_id
+                )
+                .into());
             }
             ControlMiddlewareRole::None => {
                 all_middleware.push(spec.factory.create(config, control_middleware.clone())?);
@@ -1406,29 +1413,31 @@ impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
             }
             let effect_type = effect_declarations[0].effect_type;
             for spec in transitional_policy_specs {
-                let instance: Arc<dyn Middleware> = Arc::from(spec.factory.create_for_effect(
+                let origin = crate::dsl::binder::middleware_origin_from_source(&spec.source);
+                let policy = crate::dsl::binder::bind_effect_policy(
+                    spec.factory.as_ref(),
                     &config,
-                    control_middleware.clone(),
+                    &control_middleware,
                     effect_type,
-                )?);
-                effect_chains
-                    .entry(effect_type)
-                    .or_default()
-                    .push(obzenflow_adapters::middleware::effect_policy_from_middleware(instance));
+                    &origin,
+                )?;
+                effect_chains.entry(effect_type).or_default().push(policy);
             }
         }
 
         for attachment in &self.effect_policies {
             for factory in &attachment.factories {
-                let instance: Arc<dyn Middleware> = Arc::from(factory.create_for_effect(
+                let policy = crate::dsl::binder::bind_effect_policy(
+                    factory.as_ref(),
                     &config,
-                    control_middleware.clone(),
+                    &control_middleware,
                     attachment.effect_type,
-                )?);
+                    &obzenflow_adapters::middleware::MiddlewareOrigin::Stage,
+                )?;
                 effect_chains
                     .entry(attachment.effect_type)
                     .or_default()
-                    .push(obzenflow_adapters::middleware::effect_policy_from_middleware(instance));
+                    .push(policy);
             }
         }
 
@@ -1578,13 +1587,33 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
             .iter()
             .any(|spec| spec.factory.control_role() == ControlMiddlewareRole::RateLimiter);
 
-        // Add resolved user middleware
-        let user_middleware: Vec<Box<dyn Middleware>> = resolved
-            .middleware
-            .into_iter()
-            .map(|spec| spec.factory.create(&config, control_middleware.clone()))
-            .collect::<Result<_, _>>()?;
-        all_middleware.extend(user_middleware);
+        // FLOWIP-115b: hook-bound control middleware that attaches to the
+        // sink-delivery surface is materialized into a sink policy composed at
+        // the delivery boundary; everything else stays on the handler shell.
+        let mut sink_policies: Vec<Arc<dyn SinkPolicy>> = Vec::new();
+        for spec in resolved.middleware {
+            let declaration = spec.factory.declaration();
+            if declaration.is_control() && declaration.supports(MiddlewareSurfaceKind::SinkDelivery)
+            {
+                let origin = crate::dsl::binder::middleware_origin_from_source(&spec.source);
+                let policy = crate::dsl::binder::materialize_sink_delivery(
+                    spec.factory.as_ref(),
+                    &config,
+                    &control_middleware,
+                    &origin,
+                )?;
+                sink_policies.push(policy);
+            } else {
+                all_middleware.push(spec.factory.create(&config, control_middleware.clone())?);
+            }
+        }
+        let sink_delivery_boundary: Option<Arc<dyn SinkDeliveryBoundary>> =
+            if sink_policies.is_empty() {
+                None
+            } else {
+                Some(Arc::new(PerSinkDeliveryPolicyBoundary::new(sink_policies))
+                    as Arc<dyn SinkDeliveryBoundary>)
+            };
 
         instrumentation
             .bind_control_middleware(
@@ -1613,6 +1642,7 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
             buffer_size: None,
             flush_interval_ms: None,
             control_strategy: Some(control_strategy),
+            sink_delivery_boundary,
         };
 
         // Use the builder to create the handle
