@@ -173,3 +173,123 @@ short-circuit the chain. A `Skip` or `Abort` returned from it is a runtime
 error naming the middleware. Filtering belongs in the handler, where
 multi-type output contracts make it natural; resilience policy belongs on
 the live I/O unit (a source, a declared effect, or sink delivery).
+
+## Hook-bound Control Middleware
+
+Control middleware that can pause, reject, synthesize, or otherwise affect live
+I/O must use the hook-bound carrier instead of the legacy handler shell. The
+factory declares its surfaces before runtime erasure, and the DSL materializes
+one attachment for one protected unit:
+
+- `SourcePoll`: source polling admission and observation.
+- `Effect`: one declared effect protected at the effect boundary.
+- `SinkDelivery`: one sink-stage delivery attempt before receipt journalling.
+
+Do not attach policy middleware at flow scope. A policy protects a concrete live
+I/O unit, so attach it to the source, to a specific effect or single-effect
+stage, or to the sink stage.
+
+Minimal factory shape:
+
+```rust
+use obzenflow_adapters::middleware::{
+    ControlMiddlewareRole, Middleware, MiddlewareDeclaration, MiddlewareFactory,
+    MiddlewareFactoryError, MiddlewareFactoryResult, MiddlewareKind,
+    MiddlewareMaterializationContext, MiddlewareOverrideKey,
+    MiddlewarePlanContribution, MiddlewareSurface, MiddlewareSurfaceAttachment,
+    MiddlewareSurfaceKind, PolicyAdmission, SourceAdmission, SinkAdmission,
+};
+use std::sync::Arc;
+
+struct MyControlFamily;
+
+struct MyControlFactory;
+
+impl MiddlewareFactory for MyControlFactory {
+    fn label(&self) -> &'static str {
+        "my_control"
+    }
+
+    fn override_key(&self) -> MiddlewareOverrideKey {
+        MiddlewareOverrideKey::of::<MyControlFamily>("my_control")
+    }
+
+    fn control_role(&self) -> ControlMiddlewareRole {
+        ControlMiddlewareRole::None
+    }
+
+    fn kind(&self) -> MiddlewareKind {
+        MiddlewareKind::Policy
+    }
+
+    fn plan_contribution(&self) -> MiddlewarePlanContribution {
+        MiddlewarePlanContribution::None
+    }
+
+    fn create(
+        &self,
+        _config: &obzenflow_runtime::pipeline::config::StageConfig,
+        _control: Arc<obzenflow_adapters::middleware::control::ControlMiddlewareAggregator>,
+    ) -> MiddlewareFactoryResult<Box<dyn Middleware>> {
+        Err(MiddlewareFactoryError::not_hook_bound(self.label()))
+    }
+
+    fn declaration(&self) -> MiddlewareDeclaration {
+        MiddlewareDeclaration::control(
+            self.label(),
+            vec![
+                MiddlewareSurfaceKind::SourcePoll,
+                MiddlewareSurfaceKind::Effect,
+                MiddlewareSurfaceKind::SinkDelivery,
+            ],
+        )
+    }
+
+    fn materialize(
+        &self,
+        request: obzenflow_adapters::middleware::MiddlewareAttachmentRequest<'_>,
+        _ctx: &MiddlewareMaterializationContext<'_>,
+    ) -> MiddlewareFactoryResult<MiddlewareSurfaceAttachment> {
+        match request.surface {
+            MiddlewareSurface::SourcePoll(_) => {
+                // Return SourcePollAttachment { policy, completion_gate: None }.
+                todo!()
+            }
+            MiddlewareSurface::Effect(_) => {
+                // Return Arc<dyn EffectPolicy>.
+                todo!()
+            }
+            MiddlewareSurface::SinkDelivery(_) => {
+                // Return Arc<dyn SinkPolicy>.
+                todo!()
+            }
+            other => Err(MiddlewareFactoryError::materialization_failed(
+                self.label(),
+                "stage",
+                std::io::Error::other(format!("unsupported surface {:?}", other.kind())),
+            )),
+        }
+    }
+}
+```
+
+The policies returned from `materialize` are surface-specific:
+
+- `SourcePolicy::admit` returns `SourceAdmission::Admit` or `Reject`; admitted
+  policies observe the raw `SourcePollOutcome`.
+- `EffectPolicy::admit` returns `PolicyAdmission::Admit`, `Synthesize`, or
+  `Reject`; rejected effects are recorded under the effect cursor and strict
+  replay returns the recorded outcome without invoking the live effect hook.
+- `SinkPolicy::admit` returns `SinkAdmission::Admit` or `Reject`; rejection is
+  recorded as a failed delivery receipt with middleware rejection metadata, not
+  a successful `Noop` delivery.
+
+The binder validates the declaration against the requested surface and protected
+unit before materialization. If a surface and protected unit both carry an
+effect type, sink target, or stage id, they must agree. `MiddlewareAttachmentId`
+is deterministic and derived from the declaration plus the attachment request.
+
+See `tests/middleware_hook_binding_e2e_test.rs` for a complete third-party
+control middleware that attaches to source poll, effect, and sink delivery,
+rejects one effect protected unit, runs live, and strict-replays the same
+archive.
