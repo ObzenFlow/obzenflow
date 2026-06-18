@@ -452,7 +452,7 @@ impl<H: JoinHandler + Send + Sync + 'static> FsmAction for JoinAction<H> {
                         config: ContractConfig::default(),
                         system_journal: Some(ctx.system_journal.clone()),
                         reader_stage: Some(ctx.stage_id),
-                        control_middleware: ctx.instrumentation.control_middleware().clone(),
+                        control_plane: ctx.instrumentation.control_plane().clone(),
                         include_delivery_contract: false,
                         cycle_guard_config: None,
                     })
@@ -485,7 +485,7 @@ impl<H: JoinHandler + Send + Sync + 'static> FsmAction for JoinAction<H> {
                         config: ContractConfig::default(),
                         system_journal: Some(ctx.system_journal.clone()),
                         reader_stage: Some(ctx.stage_id),
-                        control_middleware: ctx.instrumentation.control_middleware().clone(),
+                        control_plane: ctx.instrumentation.control_plane().clone(),
                         include_delivery_contract: false,
                         cycle_guard_config: None,
                     })

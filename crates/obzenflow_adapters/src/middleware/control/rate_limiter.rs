@@ -53,13 +53,13 @@ use crate::middleware::{
     MiddlewareFactory, MiddlewareFactoryError, MiddlewareOverrideKey, MiddlewarePlanContribution,
     MiddlewareSafety, SourceMiddlewarePhase, TopologyMiddlewareConfigSlot,
 };
-use obzenflow_core::control_middleware::{RateLimiterMetrics, RateLimiterSnapshotter};
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::payloads::observability_payload::{
     MiddlewareLifecycle, ObservabilityPayload, RateLimiterEvent,
 };
 use obzenflow_core::{StageId, WriterId};
+use obzenflow_runtime::control_plane::{RateLimiterMetrics, RateLimiterSnapshotter};
 use obzenflow_runtime::pipeline::config::StageConfig;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -1234,9 +1234,9 @@ pub fn rate_limit_with_burst(events_per_second: f64, burst: f64) -> Box<dyn Midd
 mod tests {
     use super::*;
     use crate::middleware::control::ControlMiddlewareAggregator;
-    use obzenflow_core::control_middleware::ControlMiddlewareProvider;
     use obzenflow_core::event::chain_event::ChainEventContent;
     use obzenflow_core::event::{ChainEventFactory, WriterId};
+    use obzenflow_runtime::control_plane::ControlPlaneProvider;
     use obzenflow_runtime::pipeline::config::StageConfig;
     use serde_json::json;
 

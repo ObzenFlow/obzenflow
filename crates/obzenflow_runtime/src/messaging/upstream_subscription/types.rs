@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use obzenflow_core::control_middleware::ControlMiddlewareProvider;
+use crate::control_plane::ControlPlaneProvider;
 use obzenflow_core::event::system_event::{SystemEvent, SystemFeedRole};
 use obzenflow_core::event::types::{
     Count, DurationMs, SeqNo, ViolationCause as EventViolationCause,
@@ -550,7 +550,7 @@ pub struct ContractsWiring {
     pub config: ContractConfig,
     pub system_journal: Option<Arc<dyn Journal<SystemEvent>>>,
     pub reader_stage: Option<StageId>,
-    pub control_middleware: Arc<dyn ControlMiddlewareProvider>,
+    pub control_plane: Arc<dyn ControlPlaneProvider>,
     pub include_delivery_contract: bool,
     pub cycle_guard_config: Option<CycleGuardConfig>,
 }

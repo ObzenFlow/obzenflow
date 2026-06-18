@@ -388,7 +388,7 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAct
                         config: ContractConfig::default(),
                         system_journal: Some(ctx.system_journal.clone()),
                         reader_stage: Some(ctx.stage_id),
-                        control_middleware: ctx.instrumentation.control_middleware().clone(),
+                        control_plane: ctx.instrumentation.control_plane().clone(),
                         include_delivery_contract: true,
                         cycle_guard_config: None,
                     })

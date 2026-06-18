@@ -26,14 +26,14 @@ use crate::middleware::{
     MiddlewareSafety, MiddlewareSurface, MiddlewareSurfaceAttachment, MiddlewareSurfaceKind,
     SinkPolicy, SourcePolicy, SourcePollAttachment, TopologyMiddlewareConfigSlot,
 };
-use obzenflow_core::control_middleware::{
-    CircuitBreakerMetrics, CircuitBreakerSnapshotter, CircuitBreakerState, CircuitBreakerStateView,
-    ControlMiddlewareProvider,
-};
 use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::event::payloads::observability_payload::CircuitBreakerRejectionReason;
 use obzenflow_core::event::schema::TypedFactType;
 use obzenflow_core::TypedPayload;
+use obzenflow_runtime::control_plane::{
+    CircuitBreakerMetrics, CircuitBreakerSnapshotter, CircuitBreakerState, CircuitBreakerStateView,
+    ControlPlaneProvider,
+};
 use obzenflow_runtime::pipeline::config::StageConfig;
 use obzenflow_runtime::stages::common::control_strategies::BackoffStrategy;
 use obzenflow_runtime::stages::source::strategies::CompletionGate;

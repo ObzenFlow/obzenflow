@@ -4,11 +4,11 @@
 
 //! FSM instrumentation for HandlerSupervised stages
 
-use hdrhistogram::Histogram;
-use obzenflow_core::control_middleware::{
-    CircuitBreakerSnapshotter, CircuitBreakerStateView, ControlMiddlewareProvider,
-    NoControlMiddleware, RateLimiterSnapshotter,
+use crate::control_plane::{
+    CircuitBreakerSnapshotter, CircuitBreakerStateView, ControlPlaneProvider, NoControlPlane,
+    RateLimiterSnapshotter,
 };
+use hdrhistogram::Histogram;
 use obzenflow_core::event::event_envelope::EventEnvelope;
 use obzenflow_core::event::identity::journal_writer_id::JournalWriterId;
 use obzenflow_core::event::vector_clock::VectorClock;
@@ -114,10 +114,10 @@ pub struct StageInstrumentation {
     config: InstrumentationConfig,
 
     // =========================================================================
-    // Control middleware bindings (FLOWIP-059a-3)
+    // Control-plane bindings (FLOWIP-059a-3)
     // =========================================================================
-    /// Flow-scoped provider for control middleware state/metrics.
-    control_middleware: Arc<dyn ControlMiddlewareProvider>,
+    /// Flow-scoped provider for control-plane state/metrics.
+    control_plane: Arc<dyn ControlPlaneProvider>,
 
     /// Cached snapshotter for circuit breaker metrics (set once during stage construction).
     cb_snapshotter: Option<Arc<CircuitBreakerSnapshotter>>,
@@ -196,7 +196,7 @@ impl StageInstrumentation {
 
             config,
 
-            control_middleware: Arc::new(NoControlMiddleware),
+            control_plane: Arc::new(NoControlPlane),
             cb_snapshotter: None,
             rl_snapshotter: None,
             effect_cb_snapshotters: Vec::new(),
@@ -205,18 +205,18 @@ impl StageInstrumentation {
         }
     }
 
-    /// Bind control middleware from the provider for this stage.
+    /// Bind control-plane publishers from the provider for this stage.
     ///
     /// Called once during stage construction. Caches snapshotters and state to
-    /// avoid per-event lookups. Fails if expected middleware is missing.
-    pub fn bind_control_middleware(
+    /// avoid per-event lookups. Fails if expected control publishers are missing.
+    pub fn bind_control_plane(
         &mut self,
         stage_id: &StageId,
-        provider: &Arc<dyn ControlMiddlewareProvider>,
+        provider: &Arc<dyn ControlPlaneProvider>,
         expects_circuit_breaker: bool,
         expects_rate_limiter: bool,
     ) -> Result<(), ControlBindError> {
-        self.control_middleware = provider.clone();
+        self.control_plane = provider.clone();
 
         self.cb_snapshotter = provider.circuit_breaker_snapshotter(stage_id);
         self.rl_snapshotter = provider.rate_limiter_snapshotter(stage_id);
@@ -420,9 +420,9 @@ impl StageInstrumentation {
         ctx
     }
 
-    /// Access the flow-scoped control middleware provider.
-    pub fn control_middleware(&self) -> &Arc<dyn ControlMiddlewareProvider> {
-        &self.control_middleware
+    /// Access the flow-scoped control-plane provider.
+    pub fn control_plane(&self) -> &Arc<dyn ControlPlaneProvider> {
+        &self.control_plane
     }
 
     /// Access the cached typed circuit breaker state view (if bound).

@@ -7,7 +7,6 @@
 pub mod ai;
 pub mod build_info;
 pub mod contracts;
-pub mod control_middleware;
 pub mod error;
 pub mod event;
 pub mod http_client;
@@ -54,10 +53,4 @@ pub use contracts::{
     Contract, ContractContext, ContractEvidence, ContractReadContext, ContractResult,
     ContractState, ContractViolation, ContractWriteContext, DeliveryContract, DivergenceContract,
     DivergenceThresholds, HashMismatch, SourceContract, TransportContract, ViolationCause,
-};
-
-// Re-export control middleware contracts so adapters/runtime can depend on them
-// without reaching into internal modules.
-pub use control_middleware::{
-    CircuitBreakerMetrics, ControlMiddlewareProvider, NoControlMiddleware, RateLimiterMetrics,
 };

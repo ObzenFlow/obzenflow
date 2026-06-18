@@ -31,9 +31,9 @@ pub use types::{
 };
 
 use crate::contracts::ContractChain;
+use crate::control_plane::ControlPlaneProvider;
 use crate::feed_plan::declared_event_type_matches;
 use crate::messaging::upstream_subscription_policy::ContractPolicyStack;
-use obzenflow_core::control_middleware::ControlMiddlewareProvider;
 use obzenflow_core::event::payloads::delivery_payload::DeliveryResult;
 use obzenflow_core::event::types::SeqNo;
 use obzenflow_core::event::vector_clock::VectorClock;
@@ -166,7 +166,7 @@ where
     contract_policies: Vec<Option<ContractPolicyStack>>,
 
     /// Flow-scoped control middleware provider (breaker-aware contract hints).
-    control_middleware: Arc<dyn ControlMiddlewareProvider>,
+    control_plane: Arc<dyn ControlPlaneProvider>,
 
     /// Last EOF accounting outcome (set when an EOF is observed)
     last_eof_outcome: Option<EofOutcome>,

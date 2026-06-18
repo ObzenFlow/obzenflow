@@ -478,7 +478,7 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> S
         // Create instrumentation configuration
         let instrumentation_config = InstrumentationConfig::default();
         let mut instrumentation = StageInstrumentation::new_with_config(instrumentation_config);
-        let control_provider: Arc<dyn obzenflow_core::ControlMiddlewareProvider> =
+        let control_provider: Arc<dyn obzenflow_runtime::control_plane::ControlPlaneProvider> =
             control_middleware.clone();
 
         // Resolve flow and stage middleware
@@ -500,7 +500,7 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> S
         )?;
 
         instrumentation
-            .bind_control_middleware(
+            .bind_control_plane(
                 &config.stage_id,
                 &control_provider,
                 source_binding.expects_circuit_breaker,
@@ -632,7 +632,7 @@ impl<H: AsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
         // Create instrumentation configuration
         let instrumentation_config = InstrumentationConfig::default();
         let mut instrumentation = StageInstrumentation::new_with_config(instrumentation_config);
-        let control_provider: Arc<dyn obzenflow_core::ControlMiddlewareProvider> =
+        let control_provider: Arc<dyn obzenflow_runtime::control_plane::ControlPlaneProvider> =
             control_middleware.clone();
 
         // Resolve flow and stage middleware
@@ -653,7 +653,7 @@ impl<H: AsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
         )?;
 
         instrumentation
-            .bind_control_middleware(
+            .bind_control_plane(
                 &config.stage_id,
                 &control_provider,
                 source_binding.expects_circuit_breaker,
@@ -751,7 +751,7 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
         // Create instrumentation configuration
         let instrumentation_config = InstrumentationConfig::default();
         let mut instrumentation = StageInstrumentation::new_with_config(instrumentation_config);
-        let control_provider: Arc<dyn obzenflow_core::ControlMiddlewareProvider> =
+        let control_provider: Arc<dyn obzenflow_runtime::control_plane::ControlPlaneProvider> =
             control_middleware.clone();
 
         // Resolve flow and stage middleware
@@ -773,7 +773,7 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
         )?;
 
         instrumentation
-            .bind_control_middleware(
+            .bind_control_plane(
                 &config.stage_id,
                 &control_provider,
                 source_binding.expects_circuit_breaker,
@@ -904,7 +904,7 @@ impl<H: AsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
 
         let instrumentation_config = InstrumentationConfig::default();
         let mut instrumentation = StageInstrumentation::new_with_config(instrumentation_config);
-        let control_provider: Arc<dyn obzenflow_core::ControlMiddlewareProvider> =
+        let control_provider: Arc<dyn obzenflow_runtime::control_plane::ControlPlaneProvider> =
             control_middleware.clone();
 
         let resolved = crate::middleware_resolution::resolve_middleware(
@@ -924,7 +924,7 @@ impl<H: AsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
         )?;
 
         instrumentation
-            .bind_control_middleware(
+            .bind_control_plane(
                 &config.stage_id,
                 &control_provider,
                 source_binding.expects_circuit_breaker,
@@ -1043,7 +1043,7 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Stag
         // Create instrumentation configuration
         let instrumentation_config = InstrumentationConfig::default();
         let mut instrumentation = StageInstrumentation::new_with_config(instrumentation_config);
-        let control_provider: Arc<dyn obzenflow_core::ControlMiddlewareProvider> =
+        let control_provider: Arc<dyn obzenflow_runtime::control_plane::ControlPlaneProvider> =
             control_middleware.clone();
 
         // Create system middleware with instrumentation
@@ -1067,7 +1067,7 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Stag
         all_middleware.extend(user_middleware);
 
         instrumentation
-            .bind_control_middleware(
+            .bind_control_plane(
                 &config.stage_id,
                 &control_provider,
                 expects_circuit_breaker,
@@ -1187,7 +1187,7 @@ impl<H: AsyncTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
         // Create instrumentation configuration
         let instrumentation_config = InstrumentationConfig::default();
         let mut instrumentation = StageInstrumentation::new_with_config(instrumentation_config);
-        let control_provider: Arc<dyn obzenflow_core::ControlMiddlewareProvider> =
+        let control_provider: Arc<dyn obzenflow_runtime::control_plane::ControlPlaneProvider> =
             control_middleware.clone();
 
         // Create system middleware with instrumentation
@@ -1211,7 +1211,7 @@ impl<H: AsyncTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
         all_middleware.extend(user_middleware);
 
         instrumentation
-            .bind_control_middleware(
+            .bind_control_plane(
                 &config.stage_id,
                 &control_provider,
                 expects_circuit_breaker,
@@ -1382,7 +1382,7 @@ impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
 
         let instrumentation_config = InstrumentationConfig::default();
         let mut instrumentation = StageInstrumentation::new_with_config(instrumentation_config);
-        let control_provider: Arc<dyn obzenflow_core::ControlMiddlewareProvider> =
+        let control_provider: Arc<dyn obzenflow_runtime::control_plane::ControlPlaneProvider> =
             control_middleware.clone();
 
         // FLOWIP-120c placement split: policy kinds guard individual effects
@@ -1466,7 +1466,7 @@ impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
         // instances register under their effect key and surface through the
         // per-effect snapshot extension (FLOWIP-120c phase 4).
         instrumentation
-            .bind_control_middleware(&config.stage_id, &control_provider, false, false)
+            .bind_control_plane(&config.stage_id, &control_provider, false, false)
             .map_err(|e| e.to_string())?;
         let instrumentation = Arc::new(instrumentation);
 
@@ -1577,7 +1577,7 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
         // Create instrumentation configuration
         let instrumentation_config = InstrumentationConfig::default();
         let mut instrumentation = StageInstrumentation::new_with_config(instrumentation_config);
-        let control_provider: Arc<dyn obzenflow_core::ControlMiddlewareProvider> =
+        let control_provider: Arc<dyn obzenflow_runtime::control_plane::ControlPlaneProvider> =
             control_middleware.clone();
 
         // Create system middleware with instrumentation
@@ -1621,7 +1621,7 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
             };
 
         instrumentation
-            .bind_control_middleware(
+            .bind_control_plane(
                 &config.stage_id,
                 &control_provider,
                 expects_circuit_breaker,
@@ -1949,7 +1949,7 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Stage
         // Create instrumentation configuration
         let instrumentation_config = InstrumentationConfig::default();
         let mut instrumentation = StageInstrumentation::new_with_config(instrumentation_config);
-        let control_provider: Arc<dyn obzenflow_core::ControlMiddlewareProvider> =
+        let control_provider: Arc<dyn obzenflow_runtime::control_plane::ControlPlaneProvider> =
             control_middleware.clone();
 
         // Create system middleware with instrumentation (FLOWIP-080o-part-2)
@@ -1973,7 +1973,7 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Stage
         all_middleware.extend(user_middleware);
 
         instrumentation
-            .bind_control_middleware(
+            .bind_control_plane(
                 &config.stage_id,
                 &control_provider,
                 expects_circuit_breaker,
@@ -2139,7 +2139,7 @@ impl<H: EffectfulStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
 
         let instrumentation_config = InstrumentationConfig::default();
         let mut instrumentation = StageInstrumentation::new_with_config(instrumentation_config);
-        let control_provider: Arc<dyn obzenflow_core::ControlMiddlewareProvider> =
+        let control_provider: Arc<dyn obzenflow_runtime::control_plane::ControlPlaneProvider> =
             control_middleware.clone();
 
         let expects_circuit_breaker = resolved
@@ -2158,7 +2158,7 @@ impl<H: EffectfulStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
             .collect::<Result<_, _>>()?;
 
         instrumentation
-            .bind_control_middleware(
+            .bind_control_plane(
                 &config.stage_id,
                 &control_provider,
                 expects_circuit_breaker,
@@ -2318,7 +2318,7 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
         // Create instrumentation configuration
         let instrumentation_config = InstrumentationConfig::default();
         let mut instrumentation = StageInstrumentation::new_with_config(instrumentation_config);
-        let control_provider: Arc<dyn obzenflow_core::ControlMiddlewareProvider> =
+        let control_provider: Arc<dyn obzenflow_runtime::control_plane::ControlPlaneProvider> =
             control_middleware.clone();
 
         // Create system middleware with instrumentation (FLOWIP-080o-part-2)
@@ -2342,7 +2342,7 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
         all_middleware.extend(user_middleware);
 
         instrumentation
-            .bind_control_middleware(
+            .bind_control_plane(
                 &config.stage_id,
                 &control_provider,
                 expects_circuit_breaker,
@@ -2466,8 +2466,8 @@ mod tests {
     use super::*;
     use obzenflow_adapters::middleware::control::circuit_breaker::circuit_breaker;
     use obzenflow_core::event::{JournalEvent, SystemEvent};
-    use obzenflow_core::ControlMiddlewareProvider;
     use obzenflow_core::{ChainEvent, EventEnvelope, FlowId, TypedPayload};
+    use obzenflow_runtime::control_plane::ControlPlaneProvider;
     use obzenflow_runtime::effects::{
         Effect, EffectCommitHandle, EffectContext, EffectError, TransactionalEffectPort,
     };

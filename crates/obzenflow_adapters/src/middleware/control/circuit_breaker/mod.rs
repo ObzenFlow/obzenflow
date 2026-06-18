@@ -12,7 +12,6 @@ use crate::middleware::{
     context_keys::{CircuitBreakerIsProbe, CircuitBreakerProbeSlot, CircuitBreakerRetryAfterMs},
     MiddlewareAbortCause, MiddlewareAction, MiddlewareContext,
 };
-use obzenflow_core::control_middleware::cb_state;
 use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::event::payloads::observability_payload::{
     CircuitBreakerEvent, CircuitBreakerRejectionReason, MiddlewareLifecycle, ObservabilityPayload,
@@ -24,6 +23,7 @@ use obzenflow_core::event::{
 };
 use obzenflow_core::MiddlewareExecutionScope;
 use obzenflow_core::{StageId, WriterId};
+use obzenflow_runtime::control_plane::cb_state;
 use serde_json::json;
 use std::collections::HashMap;
 use std::num::NonZeroU32;
@@ -1075,10 +1075,10 @@ mod tests {
     use crate::middleware::{
         Middleware, MiddlewareFactory, SourcePolicy, SourcePolicyCtx, SourcePollOutcome,
     };
-    use obzenflow_core::control_middleware::ControlMiddlewareProvider;
     use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
     use obzenflow_core::time::MetricsDuration;
     use obzenflow_core::TypedPayload;
+    use obzenflow_runtime::control_plane::ControlPlaneProvider;
     use obzenflow_runtime::stages::transform::BackoffStrategy;
     use std::num::NonZeroU32;
     use std::time::Duration as StdDuration;

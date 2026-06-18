@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use obzenflow_core::control_middleware::{
+use obzenflow_runtime::control_plane::{
     CircuitBreakerState, CircuitBreakerStateSnapshot, CircuitBreakerStateView,
 };
 use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};

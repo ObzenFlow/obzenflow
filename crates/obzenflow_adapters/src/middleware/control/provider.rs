@@ -2,18 +2,19 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Concrete implementation of `ControlMiddlewareProvider`.
+//! Concrete implementation of `ControlPlaneProvider`.
 //!
 //! This flow-scoped aggregator collects registrations from circuit breaker and
-//! rate limiter middleware instances and exposes them through the core trait so
-//! runtime_services can consume control middleware state without global state.
+//! rate limiter middleware instances and exposes them through the runtime
+//! control-plane port so runtime services can consume read-only control state
+//! without depending on adapter middleware traits.
 
 use crate::middleware::SourcePolicy;
-use obzenflow_core::control_middleware::{
-    CircuitBreakerSnapshotter, CircuitBreakerStateView, ControlMiddlewareProvider,
+use obzenflow_core::id::StageId;
+use obzenflow_runtime::control_plane::{
+    CircuitBreakerSnapshotter, CircuitBreakerStateView, ControlPlaneProvider,
     RateLimiterSnapshotter,
 };
-use obzenflow_core::id::StageId;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
@@ -142,7 +143,7 @@ impl ControlMiddlewareAggregator {
     }
 }
 
-impl ControlMiddlewareProvider for ControlMiddlewareAggregator {
+impl ControlPlaneProvider for ControlMiddlewareAggregator {
     fn circuit_breaker_snapshotter(
         &self,
         stage_id: &StageId,

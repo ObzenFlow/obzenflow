@@ -2,18 +2,14 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Traits and DTOs for control middleware (circuit breaker, rate limiter).
+//! Runtime-neutral control-plane ports and DTOs.
 //!
-//! This module defines the *ports* that inner layers can depend on without
-//! pulling in concrete implementations from outer layers. Implementations
-//! live in adapters and are injected at construction time.
+//! Outer-layer middleware adapters publish read-only metrics/state projections
+//! through these ports. Runtime code consumes the projections without depending
+//! on adapter middleware traits, factories, or concrete implementations.
 
-use crate::id::StageId;
+use obzenflow_core::StageId;
 use std::sync::Arc;
-
-// ============================================================================
-// Circuit Breaker Metrics (replaces control_metrics_registry CB portion)
-// ============================================================================
 
 /// Snapshot of cumulative circuit breaker metrics.
 #[derive(Debug, Clone, Default)]
@@ -26,13 +22,10 @@ pub struct CircuitBreakerMetrics {
     pub time_closed_seconds: f64,
     pub time_open_seconds: f64,
     pub time_half_open_seconds: f64,
-    /// Current breaker state encoded by middleware (0=closed,1=open,2=half_open).
+    /// Current breaker state encoded by the publishing adapter
+    /// (`0=closed`, `1=open`, `2=half_open`).
     pub state: u8,
 }
-
-// ============================================================================
-// Rate Limiter Metrics (replaces control_metrics_registry RL portion)
-// ============================================================================
 
 /// Snapshot of cumulative rate limiter metrics.
 #[derive(Debug, Clone, Default)]
@@ -42,18 +35,13 @@ pub struct RateLimiterMetrics {
     pub tokens_consumed_total: f64,
     pub delay_seconds_total: f64,
 
-    // Bucket state for gauge metrics (FLOWIP-059a-3 Issue 3)
     /// Current tokens available in the bucket.
     pub bucket_tokens: f64,
     /// Maximum capacity of the bucket.
     pub bucket_capacity: f64,
 }
 
-// ============================================================================
-// Circuit Breaker State (replaces circuit_breaker_registry)
-// ============================================================================
-
-/// Circuit breaker state values.
+/// Circuit breaker state encoding retained for legacy metric compatibility.
 pub mod cb_state {
     pub const CLOSED: u8 = 0;
     pub const OPEN: u8 = 1;
@@ -63,10 +51,10 @@ pub mod cb_state {
 /// Typed read-only circuit breaker state (FLOWIP-115b).
 ///
 /// This is the projection seam that replaces direct reads of the breaker's
-/// private `Arc<AtomicU8>` state cell. Source completion, instrumentation,
-/// topology, and exporters consult this view instead of a raw mutable cell, so
-/// there is exactly one breaker state authority. FLOWIP-115i swaps the private
-/// state core behind this same view without changing any consumer.
+/// private state cell. Source completion, instrumentation, topology, and
+/// exporters consult this view instead of a raw mutable cell, so there is one
+/// breaker state authority per protected unit. FLOWIP-115i swaps the private
+/// state core behind this same view without changing consumers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CircuitBreakerState {
     Closed,
@@ -79,8 +67,8 @@ impl CircuitBreakerState {
         matches!(self, Self::Open)
     }
 
-    /// Decode the legacy `cb_state` numeric encoding. Unknown values fall back
-    /// to `Closed`, matching the historical `From<u8> for CircuitState`.
+    /// Decode the legacy numeric encoding. Unknown values fall back to
+    /// `Closed`, matching the historical breaker behavior.
     pub fn from_u8(value: u8) -> Self {
         match value {
             cb_state::OPEN => Self::Open,
@@ -89,8 +77,8 @@ impl CircuitBreakerState {
         }
     }
 
-    /// The legacy numeric encoding (`0=closed`, `1=open`, `2=half_open`) kept
-    /// for `CircuitBreakerMetrics.state` compatibility.
+    /// The legacy numeric encoding kept for `CircuitBreakerMetrics.state`
+    /// compatibility.
     pub fn as_u8(self) -> u8 {
         match self {
             Self::Closed => cb_state::CLOSED,
@@ -99,9 +87,8 @@ impl CircuitBreakerState {
         }
     }
 
-    /// Stable label string used in metrics, topology, and serialised
-    /// diagnostics. Pinned to `closed` / `open` / `half_open` (never the Rust
-    /// debug names) for external compatibility.
+    /// Stable label string used in metrics, topology, and serialized
+    /// diagnostics.
     pub fn stable_label(self) -> &'static str {
         match self {
             Self::Closed => "closed",
@@ -140,23 +127,18 @@ pub trait CircuitBreakerStateView: Send + Sync + std::fmt::Debug {
     }
 }
 
-// ============================================================================
-// Unified Provider Trait
-// ============================================================================
-
 /// Snapshotter closure type for circuit breaker metrics.
 pub type CircuitBreakerSnapshotter = dyn Fn() -> CircuitBreakerMetrics + Send + Sync;
 
 /// Snapshotter closure type for rate limiter metrics.
 pub type RateLimiterSnapshotter = dyn Fn() -> RateLimiterMetrics + Send + Sync;
 
-/// Provider of control middleware state and metrics for stages.
+/// Runtime-facing provider of control-plane state and metrics.
 ///
-/// Implemented by a flow-scoped aggregator in the adapters crate. Consumed by
-/// runtime_services for instrumentation, control strategies, and contract policies.
-pub trait ControlMiddlewareProvider: Send + Sync {
-    // --- Snapshotters (for caching in instrumentation) ---
-
+/// Adapter-owned control middleware may implement this trait, but runtime code
+/// only sees this read-only port. It does not expose middleware factories,
+/// execution hooks, or adapter carrier concepts.
+pub trait ControlPlaneProvider: Send + Sync {
     /// Get circuit breaker snapshotter for a stage.
     fn circuit_breaker_snapshotter(
         &self,
@@ -166,11 +148,7 @@ pub trait ControlMiddlewareProvider: Send + Sync {
     /// Get rate limiter snapshotter for a stage.
     fn rate_limiter_snapshotter(&self, stage_id: &StageId) -> Option<Arc<RateLimiterSnapshotter>>;
 
-    // --- State (for control strategies / retry logic) ---
-
-    /// Get a typed read-only circuit breaker state view for a stage
-    /// (FLOWIP-115b). The aggregator overrides this; it defaults to `None` so
-    /// providers without circuit breakers need no change.
+    /// Get a typed read-only circuit breaker state view for a stage.
     fn circuit_breaker_state_view(
         &self,
         _stage_id: &StageId,
@@ -178,11 +156,8 @@ pub trait ControlMiddlewareProvider: Send + Sync {
         None
     }
 
-    // --- Per-effect instances (FLOWIP-120c) ---
-
-    /// Enumerate per-effect circuit breaker snapshotters for a stage, keyed
-    /// by the declared effect type. One policy instance guards one declared
-    /// effect, so cardinality is bounded by the stage's `effects:` set.
+    /// Enumerate per-effect circuit breaker snapshotters for a stage, keyed by
+    /// declared effect type.
     fn effect_circuit_breaker_snapshotters(
         &self,
         _stage_id: &StageId,
@@ -191,7 +166,7 @@ pub trait ControlMiddlewareProvider: Send + Sync {
     }
 
     /// Enumerate per-effect rate limiter snapshotters for a stage, keyed by
-    /// the declared effect type.
+    /// declared effect type.
     fn effect_rate_limiter_snapshotters(
         &self,
         _stage_id: &StageId,
@@ -200,11 +175,11 @@ pub trait ControlMiddlewareProvider: Send + Sync {
     }
 }
 
-/// Null implementation for flows without control middleware.
+/// Null implementation for flows without control-plane publishers.
 #[derive(Debug, Clone, Default)]
-pub struct NoControlMiddleware;
+pub struct NoControlPlane;
 
-impl ControlMiddlewareProvider for NoControlMiddleware {
+impl ControlPlaneProvider for NoControlPlane {
     fn circuit_breaker_snapshotter(&self, _: &StageId) -> Option<Arc<CircuitBreakerSnapshotter>> {
         None
     }

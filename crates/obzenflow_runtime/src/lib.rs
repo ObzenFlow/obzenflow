@@ -15,6 +15,7 @@ pub use obzenflow_core;
 pub mod backpressure;
 pub mod bootstrap;
 pub mod contracts;
+pub mod control_plane;
 pub mod effects;
 pub mod errors;
 pub mod feed_plan;
