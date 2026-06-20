@@ -180,11 +180,12 @@ mod tests {
     use obzenflow_core::id::JournalId;
     use obzenflow_core::id::SystemId;
     use obzenflow_core::ingress::{
-        FilledHostedIngress, IngressBoundaryMiddleware, IngressRefusalReason,
+        FilledHostedIngress, IngressAttemptSeq, IngressBoundaryMiddleware, IngressRefusalReason,
     };
     use obzenflow_core::journal::journal_error::JournalError;
     use obzenflow_core::journal::journal_owner::JournalOwner;
     use obzenflow_core::journal::journal_reader::JournalReader;
+    use obzenflow_core::journal::run_manifest::RUN_MANIFEST_FILENAME;
     use obzenflow_core::journal::Journal;
     use obzenflow_core::journal::JournalStorageKind;
     use obzenflow_core::web::{HttpMethod, ManagedResponse, Request, Response};
@@ -192,6 +193,10 @@ mod tests {
 
     use crate::journal::MemoryJournal;
     use obzenflow_dsl::{async_infinite_source, flow, sink};
+    use obzenflow_fsm::FsmAction;
+    use obzenflow_runtime::metrics::{
+        MetricsAggregatorAction, MetricsAggregatorContext, MetricsStore,
+    };
     use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
     use obzenflow_runtime::stages::common::handler_error::HandlerError;
     use obzenflow_runtime::stages::common::handlers::{
@@ -394,6 +399,70 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    async fn refusal_fact_details(
+        journal: &MemoryJournal<SystemEvent>,
+    ) -> Vec<(IngressRefusalReason, u64, IngressAttemptSeq)> {
+        journal
+            .read_causally_ordered()
+            .await
+            .expect("read system journal")
+            .into_iter()
+            .filter_map(|env| match env.event.event {
+                SystemEventType::IngressRefusal {
+                    reason,
+                    event_count,
+                    attempt_seq,
+                    ..
+                } => Some((reason, event_count, attempt_seq)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn run_manifest_paths(root: &Path) -> Vec<PathBuf> {
+        let flows_dir = root.join("flows");
+        let Ok(entries) = fs::read_dir(flows_dir) else {
+            return Vec::new();
+        };
+        entries
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.path().join(RUN_MANIFEST_FILENAME))
+            .filter(|path| path.exists())
+            .collect()
+    }
+
+    async fn replay_system_journal_through_refusal_aggregator(
+        system_journal: Arc<dyn Journal<SystemEvent>>,
+    ) -> HashMap<(String, String), u64> {
+        let events = system_journal
+            .read_causally_ordered()
+            .await
+            .expect("read archived system journal");
+        let mut ctx = MetricsAggregatorContext {
+            system_journal,
+            stage_data_journals: HashMap::new(),
+            stage_error_journals: HashMap::new(),
+            backpressure_registry: None,
+            include_error_journals: true,
+            exporter: None,
+            metrics_store: MetricsStore::default(),
+            export_interval_secs: 60,
+            system_id: SystemId::new(),
+            stage_metadata: HashMap::new(),
+        };
+
+        for envelope in events {
+            MetricsAggregatorAction::ProcessSystemEvent {
+                envelope: Box::new(envelope),
+            }
+            .execute(&mut ctx)
+            .await
+            .expect("replay archived system event through metrics aggregator");
+        }
+
+        ctx.metrics_store.ingestion_refusals_total
     }
 
     #[tokio::test]
@@ -846,6 +915,73 @@ mod tests {
         assert_eq!(
             refusal_facts(&journal).await,
             vec![(IngressRefusalReason::Validation, 1)]
+        );
+    }
+
+    #[tokio::test]
+    async fn batch_validation_plus_rate_limit_records_two_facts_for_one_attempt() {
+        use obzenflow_core::event::schema::TypedPayload;
+        use serde::{Deserialize, Serialize};
+
+        #[derive(Debug, Clone, Serialize, Deserialize)]
+        struct TestPayload {
+            required: String,
+        }
+
+        impl TypedPayload for TestPayload {
+            const EVENT_TYPE: &'static str = "test.event";
+        }
+
+        let config = IngestionConfig {
+            validation: Some(ValidationConfig::Single {
+                validator: Arc::new(TypedValidator::<TestPayload>::new()),
+            }),
+            ..Default::default()
+        };
+        let (state, mut rx, journal) =
+            state_with_refusal_journal(config, Some(Arc::new(AlwaysRejectIngress)));
+        state.ready.store(true, Ordering::Release);
+        let endpoint = BatchEventEndpoint::new(state);
+
+        let response = unwrap_unary(
+            endpoint
+                .handle(json_request(
+                    endpoint.path(),
+                    json!({
+                        "events": [
+                            {"event_type":"test.event","data":{"required":"ok-1"}},
+                            {"event_type":"test.event","data":{}},
+                            {"event_type":"test.event","data":{"required":"ok-2"}}
+                        ]
+                    }),
+                ))
+                .await
+                .unwrap(),
+        );
+
+        assert_eq!(response.status, 429);
+        let response_body: obzenflow_core::event::ingestion::SubmissionResponse =
+            serde_json::from_slice(&response.body).unwrap();
+        assert_eq!(response_body.accepted, 0);
+        assert_eq!(response_body.rejected, 3);
+        assert!(
+            response_body
+                .errors
+                .iter()
+                .any(|error| error.contains("rate limited")),
+            "response should include the admission refusal alongside validation errors"
+        );
+        assert!(rx.try_recv().is_err());
+
+        let facts = refusal_fact_details(&journal).await;
+        assert_eq!(facts.len(), 2);
+        assert_eq!(facts[0].0, IngressRefusalReason::Validation);
+        assert_eq!(facts[0].1, 1);
+        assert_eq!(facts[1].0, IngressRefusalReason::RateLimited);
+        assert_eq!(facts[1].1, 2);
+        assert_eq!(
+            facts[0].2, facts[1].2,
+            "mixed batch facts share the external submission attempt sequence"
         );
     }
 
@@ -1313,5 +1449,19 @@ mod tests {
         );
         // Exactly one event was admitted, so the sink delivered exactly one.
         assert_eq!(delivered.load(Ordering::Acquire), 1);
+
+        let manifests = run_manifest_paths(&journal_root);
+        assert_eq!(
+            manifests.len(),
+            1,
+            "disk-backed live run writes one replay archive manifest"
+        );
+        let replayed_refusals =
+            replay_system_journal_through_refusal_aggregator(system_journal.clone()).await;
+        assert_eq!(
+            replayed_refusals.get(&("/api/orders".to_string(), "rate_limited".to_string())),
+            Some(&1),
+            "strict replay over the archived system facts projects the same refusal total"
+        );
     }
 }
