@@ -14,9 +14,8 @@ use async_trait::async_trait;
 use obzenflow_core::{ChainEvent, MiddlewareExecutionScope};
 use obzenflow_runtime::stages::common::handlers::SinkConsumeReport;
 use obzenflow_runtime::stages::sink::journal_sink::{
-    SinkDeliveryAttemptContext, SinkDeliveryAttemptOutcome, SinkDeliveryBoundary,
-    SinkDeliveryBoundaryOutcome, SinkDeliveryBoundaryReport, SinkDeliveryExecutor,
-    SinkDeliveryIdentity, SinkDeliveryRejection,
+    SinkDeliveryAttemptOutcome, SinkDeliveryBoundary, SinkDeliveryBoundaryOutcome,
+    SinkDeliveryBoundaryReport, SinkDeliveryExecutor, SinkDeliveryRejection,
 };
 use std::sync::Arc;
 
@@ -119,8 +118,6 @@ type SinkAdmitGuard = Option<Box<dyn SinkAdmissionGuard>>;
 impl SinkDeliveryBoundary for PerSinkDeliveryPolicyBoundary {
     async fn around_sink_delivery(
         &self,
-        _: &SinkDeliveryIdentity,
-        _: &SinkDeliveryAttemptContext,
         execute: &mut dyn SinkDeliveryExecutor,
     ) -> SinkDeliveryBoundaryReport {
         if self.policies.is_empty() {
@@ -185,12 +182,8 @@ mod tests {
         MiddlewarePlanContribution, MiddlewareSurface, MiddlewareSurfaceAttachment,
         MiddlewareSurfaceKind, ProtectedUnit, ProtectedUnitId, TopologyMiddlewareConfigSlot,
     };
-    use obzenflow_core::event::chain_event::ChainEventFactory;
-    use obzenflow_core::{StageId, WriterId};
+    use obzenflow_core::StageId;
     use obzenflow_runtime::pipeline::config::StageConfig;
-    use obzenflow_runtime::stages::sink::journal_sink::{
-        SinkDeliveryAttemptContext, SinkDeliveryIdentity, SinkDeliveryTargetId,
-    };
 
     /// A third-party (non-breaker) sink policy that always rejects.
     struct AlwaysRejectPolicy;
@@ -333,24 +326,8 @@ mod tests {
         };
 
         let boundary = PerSinkDeliveryPolicyBoundary::new(vec![policy]);
-        let event = ChainEventFactory::data_event(
-            WriterId::from(StageId::new()),
-            "third_party.event",
-            serde_json::json!({}),
-        );
-        let identity = SinkDeliveryIdentity {
-            stage_id: config.stage_id,
-            target: SinkDeliveryTargetId::Stage,
-        };
-        let attempt = SinkDeliveryAttemptContext {
-            parent_event_id: event.id,
-            upstream_stage: None,
-            input_position: None,
-        };
         let mut executor = PanicExecutor;
-        let report = boundary
-            .around_sink_delivery(&identity, &attempt, &mut executor)
-            .await;
+        let report = boundary.around_sink_delivery(&mut executor).await;
 
         match report.outcome {
             SinkDeliveryBoundaryOutcome::Rejected(rejection) => {
