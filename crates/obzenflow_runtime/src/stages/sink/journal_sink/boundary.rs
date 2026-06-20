@@ -97,7 +97,6 @@ pub trait SinkDeliveryBoundary: Send + Sync {
         &self,
         identity: &SinkDeliveryIdentity,
         attempt: &SinkDeliveryAttemptContext,
-        event: &ChainEvent,
         execute: &mut dyn SinkDeliveryExecutor,
     ) -> SinkDeliveryBoundaryReport;
 }

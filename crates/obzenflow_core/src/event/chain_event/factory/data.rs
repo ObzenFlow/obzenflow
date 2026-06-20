@@ -115,7 +115,7 @@ impl ChainEventFactory {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::event::ingestion::IngressContext;
+    use crate::ingress::IngressContext;
     use crate::event::CorrelationId;
     use crate::id::StageId;
     use crate::WriterId;

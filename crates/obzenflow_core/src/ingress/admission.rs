@@ -2,24 +2,15 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! FLOWIP-115d: the core-owned neutral ingress admission port.
+//! FLOWIP-115d: the fail-fast ingress admission vocabulary.
 //!
-//! Listener ingress is the moment outside work arrives at a hosted edge, before
-//! it enters the internal source buffer. This port is the fail-fast admission
-//! contract the hosted HTTP endpoints (`obzenflow_infra`) call and the middleware
-//! adapters (`obzenflow_adapters`) implement. It lives in core so infra can call
-//! it without depending on adapter middleware concepts, and adapters can
-//! implement it without infra depending on them (the FLOWIP-115b onion-ownership
-//! rule: putting it in infra creates a dependency cycle, putting it in adapters
-//! makes hosted web endpoints depend on adapter middleware).
-//!
-//! Ingress is not source polling and not FLOWIP-115e backpressure. It admits,
-//! rejects (rate-limited), or sheds (edge overload) a submission attempt without
-//! ever waiting for a token while holding a listener request.
+//! Per-attempt facts, the admission decision, the observed outcome, and the
+//! refusal-reason labels. Ingress is not source polling and not FLOWIP-115e
+//! backpressure; it admits, rejects (rate-limited), or sheds (edge overload) a
+//! submission attempt without ever waiting for a token while holding a listener
+//! request.
 
-use crate::StageId;
 use serde::{Deserialize, Serialize};
-use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 /// Monotonic, per-hosted-ingress submission-attempt sequence (FLOWIP-115d).
@@ -153,107 +144,4 @@ pub enum IngressAdmissionOutcome {
     RejectedBy,
     /// A later policy or the hosted edge shed the attempt.
     ShedBy,
-}
-
-/// The neutral, core-owned ingress admission port.
-///
-/// Infra (hosted HTTP endpoints) calls it; adapters implement it (composing
-/// their policy onion behind it). `on_ingress` is fail-fast and never blocks the
-/// listener; `observe` records the admission outcome for the forward-fail-fast
-/// chain. Durable reject/shed evidence is owned by the hosting layer's evidence
-/// recorder, not this port.
-pub trait IngressBoundaryMiddleware: Send + Sync {
-    fn label(&self) -> &'static str;
-
-    /// Run admission before an accepted submission enters the internal source
-    /// buffer. Fail-fast: it must not wait for a token while holding the request.
-    fn on_ingress(&self, attempt: &IngressAttemptContext) -> IngressAdmissionDecision;
-
-    /// Observe the terminal admission outcome for one attempt.
-    fn observe(&self, attempt: &IngressAttemptContext, outcome: IngressAdmissionOutcome);
-}
-
-// ---------------------------------------------------------------------------
-// Hosted-ingress binding slot (FLOWIP-115d)
-// ---------------------------------------------------------------------------
-
-/// The boundary plus replay-stable identity the DSL fills into a hosted-ingress
-/// slot during source-stage materialization.
-///
-/// It carries only core-native types so the runtime source-handler trait can
-/// return the slot without depending on adapter carrier concepts. The adapter
-/// carrier ingress surface/unit are built transiently by the DSL binder from
-/// this data when it materializes the boundary.
-pub struct FilledHostedIngress {
-    /// Runtime stage id of the linked source stage.
-    pub stage_id: StageId,
-    /// Replay-stable source stage key (`StageConfig.name`, the `run_manifest.json`
-    /// key).
-    pub stage_key: String,
-    /// The composed ingress admission boundary, or `None` when a hosted source
-    /// has no ingress middleware attached (the slot is still filled so startup
-    /// can verify every hosted surface was placed in topology).
-    pub boundary: Option<Arc<dyn IngressBoundaryMiddleware>>,
-}
-
-/// A second source stage attempted to bind a hosted surface that was already
-/// bound (cloned source halves must not silently attach one listener surface to
-/// multiple source stages).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct HostedIngressAlreadyBound;
-
-impl std::fmt::Display for HostedIngressAlreadyBound {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "hosted ingress binding slot is already bound to a source stage"
-        )
-    }
-}
-
-impl std::error::Error for HostedIngressAlreadyBound {}
-
-/// Write-once binding slot shared between a hosted source's typed half (which
-/// enters flow topology) and its hosted web-surface half (which enters
-/// `FlowApplication`).
-///
-/// `http_ingress` creates it, the DSL fills it during source-stage
-/// materialization, and `FlowApplication` reads it during web-surface wiring.
-/// Cloning shares the same write-once cell, so a fill through the source half is
-/// visible to the surface half.
-#[derive(Clone)]
-pub struct HostedIngressBindingSlot {
-    base_path: String,
-    cell: Arc<OnceLock<FilledHostedIngress>>,
-}
-
-impl HostedIngressBindingSlot {
-    pub fn new(base_path: impl Into<String>) -> Self {
-        Self {
-            base_path: base_path.into(),
-            cell: Arc::new(OnceLock::new()),
-        }
-    }
-
-    /// The normalised hosted base path identifying this surface.
-    pub fn base_path(&self) -> &str {
-        &self.base_path
-    }
-
-    /// Fill the slot once. Returns `Err` if it was already filled, which the
-    /// DSL surfaces as a build error for a double-bound listener surface.
-    pub fn fill(&self, filled: FilledHostedIngress) -> Result<(), HostedIngressAlreadyBound> {
-        self.cell.set(filled).map_err(|_| HostedIngressAlreadyBound)
-    }
-
-    /// The filled binding, or `None` if the source half was never placed in
-    /// flow topology (a startup error for a registered hosted surface).
-    pub fn filled(&self) -> Option<&FilledHostedIngress> {
-        self.cell.get()
-    }
-
-    /// Whether the slot has been filled by source-stage materialization.
-    pub fn is_filled(&self) -> bool {
-        self.cell.get().is_some()
-    }
 }

@@ -6,7 +6,7 @@ use super::shared::{join_path, unix_now_nanos};
 use super::IngestionState;
 use super::{authorize_request, validate_submission};
 use async_trait::async_trait;
-use obzenflow_core::event::ingestion::{
+use obzenflow_core::ingress::{
     EventSubmission, SubmissionIngressContext, SubmissionResponse,
 };
 use obzenflow_core::ingress::{

@@ -2,7 +2,14 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use crate::ingress::IngressAttemptSeq;
+//! HTTP ingestion submission DTOs, accepted-event provenance, and the live
+//! ingestion gauge (FLOWIP-084d, reduced in FLOWIP-115d).
+//!
+//! Consolidated here from the former `event::ingestion` module so the whole
+//! ingress story (admission, boundary, binding, and these submission/provenance
+//! types) has a single home under `obzenflow_core::ingress`.
+
+use super::admission::IngressAttemptSeq;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 

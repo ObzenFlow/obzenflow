@@ -85,11 +85,10 @@ impl SinkPolicyCtx {
 /// A sink-delivery resilience policy behind the adapter-owned boundary.
 ///
 /// FLOWIP-115d AC59: `admit` and `observe` receive the typed delivery identity,
-/// per-attempt context, and parent event, so a policy can translate the
-/// protected delivery into an admission charge or a proof row. This mirrors the
-/// effect-policy shape and makes the protected-unit coordinate visible at the
-/// policy boundary. FLOWIP-115h/115i extend this contract additively with sink
-/// delivery duration for slow-call accounting.
+/// and per-attempt context, so a policy can translate the protected delivery
+/// into an admission charge or a proof row without coupling every sink policy to
+/// the parent `ChainEvent`. FLOWIP-115h/115i extend this contract additively with
+/// sink delivery duration for slow-call accounting.
 #[async_trait]
 pub trait SinkPolicy: Send + Sync {
     fn label(&self) -> &'static str;
@@ -98,7 +97,6 @@ pub trait SinkPolicy: Send + Sync {
         &self,
         identity: &SinkDeliveryIdentity,
         attempt: &SinkDeliveryAttemptContext,
-        event: &ChainEvent,
         ctx: &mut SinkPolicyCtx,
     ) -> SinkAdmission;
 
@@ -106,7 +104,6 @@ pub trait SinkPolicy: Send + Sync {
         &self,
         identity: &SinkDeliveryIdentity,
         attempt: &SinkDeliveryAttemptContext,
-        event: &ChainEvent,
         outcome: &SinkDeliveryPolicyOutcome<'_>,
         ctx: &mut SinkPolicyCtx,
     );
@@ -137,7 +134,6 @@ impl SinkDeliveryBoundary for PerSinkDeliveryPolicyBoundary {
         &self,
         identity: &SinkDeliveryIdentity,
         attempt: &SinkDeliveryAttemptContext,
-        event: &ChainEvent,
         execute: &mut dyn SinkDeliveryExecutor,
     ) -> SinkDeliveryBoundaryReport {
         if self.policies.is_empty() {
@@ -151,7 +147,7 @@ impl SinkDeliveryBoundary for PerSinkDeliveryPolicyBoundary {
         let mut admitted: Vec<(&Arc<dyn SinkPolicy>, SinkAdmitGuard)> = Vec::new();
 
         for policy in self.policies.iter() {
-            match policy.admit(identity, attempt, event, &mut ctx).await {
+            match policy.admit(identity, attempt, &mut ctx).await {
                 SinkAdmission::Admit(guard) => admitted.push((policy, guard)),
                 SinkAdmission::Reject { reason } => {
                     let outcome = SinkDeliveryPolicyOutcome::RejectedBy {
@@ -159,7 +155,7 @@ impl SinkDeliveryBoundary for PerSinkDeliveryPolicyBoundary {
                         reason: &reason,
                     };
                     for (prior, _) in admitted.iter().rev() {
-                        prior.observe(identity, attempt, event, &outcome, &mut ctx);
+                        prior.observe(identity, attempt, &outcome, &mut ctx);
                     }
                     return SinkDeliveryBoundaryReport {
                         outcome: SinkDeliveryBoundaryOutcome::Rejected(SinkDeliveryRejection {
@@ -181,7 +177,7 @@ impl SinkDeliveryBoundary for PerSinkDeliveryPolicyBoundary {
             | SinkDeliveryAttemptOutcome::Panicked { .. } => SinkDeliveryPolicyOutcome::Failed,
         };
         for (policy, _) in admitted.iter().rev() {
-            policy.observe(identity, attempt, event, &policy_outcome, &mut ctx);
+            policy.observe(identity, attempt, &policy_outcome, &mut ctx);
         }
 
         SinkDeliveryBoundaryReport {
@@ -222,7 +218,6 @@ mod tests {
             &self,
             _identity: &SinkDeliveryIdentity,
             _attempt: &SinkDeliveryAttemptContext,
-            _event: &ChainEvent,
             _ctx: &mut SinkPolicyCtx,
         ) -> SinkAdmission {
             SinkAdmission::Reject {
@@ -234,7 +229,6 @@ mod tests {
             &self,
             _identity: &SinkDeliveryIdentity,
             _attempt: &SinkDeliveryAttemptContext,
-            _event: &ChainEvent,
             _outcome: &SinkDeliveryPolicyOutcome<'_>,
             _ctx: &mut SinkPolicyCtx,
         ) {
@@ -380,7 +374,7 @@ mod tests {
         };
         let mut executor = PanicExecutor;
         let report = boundary
-            .around_sink_delivery(&identity, &attempt, &event, &mut executor)
+            .around_sink_delivery(&identity, &attempt, &mut executor)
             .await;
 
         match report.outcome {

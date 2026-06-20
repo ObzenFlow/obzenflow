@@ -262,7 +262,6 @@ impl SinkPolicy for HookProofSinkPolicy {
         &self,
         _identity: &SinkDeliveryIdentity,
         _attempt: &SinkDeliveryAttemptContext,
-        _event: &ChainEvent,
         _ctx: &mut SinkPolicyCtx,
     ) -> SinkAdmission {
         self.counters.sink_admits.fetch_add(1, Ordering::SeqCst);
@@ -273,7 +272,6 @@ impl SinkPolicy for HookProofSinkPolicy {
         &self,
         _identity: &SinkDeliveryIdentity,
         _attempt: &SinkDeliveryAttemptContext,
-        _event: &ChainEvent,
         _outcome: &SinkDeliveryPolicyOutcome<'_>,
         _ctx: &mut SinkPolicyCtx,
     ) {

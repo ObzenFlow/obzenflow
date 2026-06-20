@@ -204,7 +204,6 @@ impl SinkPolicy for CircuitBreakerSinkPolicy {
         &self,
         _identity: &SinkDeliveryIdentity,
         _attempt: &SinkDeliveryAttemptContext,
-        _event: &ChainEvent,
         ctx: &mut SinkPolicyCtx,
     ) -> SinkAdmission {
         match self.breaker.source_admit() {
@@ -226,7 +225,6 @@ impl SinkPolicy for CircuitBreakerSinkPolicy {
         &self,
         _identity: &SinkDeliveryIdentity,
         _attempt: &SinkDeliveryAttemptContext,
-        _event: &ChainEvent,
         outcome: &SinkDeliveryPolicyOutcome<'_>,
         ctx: &mut SinkPolicyCtx,
     ) {

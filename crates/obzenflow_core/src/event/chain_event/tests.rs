@@ -3,7 +3,7 @@
 // https://obzenflow.dev
 
 use super::*;
-use crate::event::ingestion::IngressContext;
+use crate::ingress::IngressContext;
 use crate::event::payloads::effect_payload::{
     EffectCursor, EffectDescriptor, EffectFactOwner, EffectProvenance, EFFECT_RECORD_EVENT_TYPE,
 };

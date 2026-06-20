@@ -2265,7 +2265,7 @@ impl PrometheusExporter {
         output: &mut String,
         ingestion_metrics: &std::collections::HashMap<
             String,
-            obzenflow_core::event::ingestion::IngestionTelemetrySnapshot,
+            obzenflow_core::ingress::IngestionTelemetrySnapshot,
         >,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
         if ingestion_metrics.is_empty() {
@@ -2536,7 +2536,7 @@ fn estimate_bucket_count(histogram: &HistogramSnapshot, bucket_value: f64) -> u6
 #[cfg(test)]
 mod tests {
     use super::*;
-    use obzenflow_core::event::ingestion::IngestionTelemetrySnapshot;
+    use obzenflow_core::ingress::IngestionTelemetrySnapshot;
     use obzenflow_core::event::observability::{
         HttpPullState, HttpPullTelemetry, HttpSurfaceRouteMetricsSnapshot, WaitReason,
     };

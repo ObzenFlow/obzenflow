@@ -306,7 +306,7 @@ pub struct InfraMetricsSnapshot {
     /// HTTP ingestion telemetry observed directly from `FlowApplication`-owned ingress handles.
     ///
     /// Keyed by `base_path` (e.g., "/api/ingest").
-    pub ingestion_metrics: HashMap<String, crate::event::ingestion::IngestionTelemetrySnapshot>,
+    pub ingestion_metrics: HashMap<String, crate::ingress::IngestionTelemetrySnapshot>,
 }
 
 /// Snapshot of continuous heartbeat-derived liveness metrics (FLOWIP-063e).

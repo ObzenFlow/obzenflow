@@ -3,7 +3,7 @@
 // https://obzenflow.dev
 
 use async_trait::async_trait;
-use obzenflow_core::event::ingestion::{EventSubmission, IngressContext};
+use obzenflow_core::ingress::{EventSubmission, IngressContext};
 use obzenflow_core::event::ChainEventFactory;
 use obzenflow_core::ingress::HostedIngressBindingSlot;
 use obzenflow_core::{ChainEvent, TypedPayload, WriterId};
@@ -200,7 +200,7 @@ impl AsyncInfiniteSourceHandler for HttpSource {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use obzenflow_core::event::ingestion::EventSubmission;
+    use obzenflow_core::ingress::EventSubmission;
     use obzenflow_core::StageId;
     use serde_json::json;
 
@@ -253,7 +253,7 @@ mod tests {
             event_type: "order.created".to_string(),
             data: json!({"value": 1}),
             metadata: None,
-            ingress_handoff: Some(obzenflow_core::event::ingestion::SubmissionIngressContext {
+            ingress_handoff: Some(obzenflow_core::ingress::SubmissionIngressContext {
                 accepted_at_ns: 42,
                 base_path: "/api/orders".to_string(),
                 batch_index: Some(0),

@@ -23,8 +23,8 @@ pub use validation::{
 };
 
 use obzenflow_adapters::sources::http::{HttpSource, HttpSourceTyped};
-use obzenflow_core::event::ingestion::EventSubmission;
-use obzenflow_core::event::ingestion::IngestionTelemetry;
+use obzenflow_core::ingress::EventSubmission;
+use obzenflow_core::ingress::IngestionTelemetry;
 use obzenflow_core::ingress::HostedIngressBindingSlot;
 use obzenflow_core::web::HttpEndpoint;
 use obzenflow_core::TypedPayload;
@@ -752,7 +752,7 @@ mod tests {
             .store(true, std::sync::atomic::Ordering::Release);
         state
             .tx
-            .try_send(obzenflow_core::event::ingestion::EventSubmission {
+            .try_send(obzenflow_core::ingress::EventSubmission {
                 event_type: "one".to_string(),
                 data: json!({"value": 1}),
                 metadata: None,
@@ -905,7 +905,7 @@ mod tests {
                 .unwrap(),
         );
         assert_eq!(resp.status, 200);
-        let response: obzenflow_core::event::ingestion::SubmissionResponse =
+        let response: obzenflow_core::ingress::SubmissionResponse =
             serde_json::from_slice(&resp.body).unwrap();
         assert_eq!(response.accepted, 1);
         assert_eq!(response.rejected, 1);
@@ -960,7 +960,7 @@ mod tests {
         );
 
         assert_eq!(response.status, 429);
-        let response_body: obzenflow_core::event::ingestion::SubmissionResponse =
+        let response_body: obzenflow_core::ingress::SubmissionResponse =
             serde_json::from_slice(&response.body).unwrap();
         assert_eq!(response_body.accepted, 0);
         assert_eq!(response_body.rejected, 3);

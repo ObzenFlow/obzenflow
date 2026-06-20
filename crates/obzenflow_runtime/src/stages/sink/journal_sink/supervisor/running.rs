@@ -525,7 +525,6 @@ async fn dispatch_data_event<
         upstream_stage,
         input_position: stage_input_position,
     };
-    let boundary_event = envelope.event.clone();
 
     // Use instrumentation wrapper but keep handler-level failures as per-record
     // outcomes instead of stage-fatal errors.
@@ -559,12 +558,7 @@ async fn dispatch_data_event<
             )
         } else if let Some(boundary) = &sink_boundary {
             let report = boundary
-                .around_sink_delivery(
-                    &delivery_identity,
-                    &delivery_attempt,
-                    &boundary_event,
-                    &mut executor,
-                )
+                .around_sink_delivery(&delivery_identity, &delivery_attempt, &mut executor)
                 .await;
             (report.outcome, report.control_events)
         } else {

@@ -8,7 +8,7 @@ use crate::event::context::observability_context::ObservabilityContext;
 use crate::event::context::{
     FlowContext, IntentContext, ProcessingContext, ReplayContext, RuntimeContext,
 };
-use crate::event::ingestion::IngressContext;
+use crate::ingress::IngressContext;
 use crate::event::payloads::correlation_payload::CorrelationPayload;
 use crate::event::payloads::delivery_payload::DeliveryPayload;
 use crate::event::payloads::effect_payload::{is_framework_effect_event_type, EffectProvenance};

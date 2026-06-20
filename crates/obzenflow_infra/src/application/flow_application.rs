@@ -20,7 +20,7 @@ use crate::application::config::{CorsModeArg, ResolvedStartupConfig, StartupMode
 use crate::web::endpoints::event_ingestion::HttpIngress;
 #[cfg(feature = "warp-server")]
 use crate::web::surface_metrics::{HttpSurfaceMetricsCollector, HttpSurfaceMetricsEmitter};
-use obzenflow_core::event::ingestion::IngestionTelemetry;
+use obzenflow_core::ingress::IngestionTelemetry;
 use obzenflow_core::metrics::{InfraMetricsSnapshot, MetricsExporter};
 use obzenflow_core::web::{CorsConfig, CorsMode, HttpEndpoint, ServerConfig};
 use obzenflow_core::TypedPayload;
