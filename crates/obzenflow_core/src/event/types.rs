@@ -42,6 +42,12 @@ impl From<&str> for EventType {
     }
 }
 
+impl From<EventType> for String {
+    fn from(value: EventType) -> Self {
+        value.0
+    }
+}
+
 impl AsRef<str> for EventType {
     fn as_ref(&self) -> &str {
         self.as_str()

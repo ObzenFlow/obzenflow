@@ -4,6 +4,7 @@
 
 use obzenflow_core::event::schema::TypedPayload;
 use obzenflow_core::ingress::EventSubmission;
+use obzenflow_core::EventType;
 use serde::de::DeserializeOwned;
 use std::collections::HashMap;
 use std::marker::PhantomData;
@@ -15,7 +16,7 @@ pub enum ValidationConfig {
     Single { validator: Arc<dyn SchemaValidator> },
     /// Multiple event types - lookup by event_type field (exact match).
     Registry {
-        validators: HashMap<String, Arc<dyn SchemaValidator>>,
+        validators: HashMap<EventType, Arc<dyn SchemaValidator>>,
         reject_unknown: bool,
     },
 }
@@ -37,7 +38,7 @@ impl ValidationError {
 }
 
 pub trait SchemaValidator: Send + Sync + std::fmt::Debug {
-    fn event_type(&self) -> &str;
+    fn event_type(&self) -> EventType;
     fn validate(&self, payload: &serde_json::Value) -> Result<(), String>;
 }
 
@@ -63,8 +64,8 @@ impl<T: TypedPayload> TypedValidator<T> {
 impl<T: TypedPayload + DeserializeOwned + Send + Sync + std::fmt::Debug> SchemaValidator
     for TypedValidator<T>
 {
-    fn event_type(&self) -> &str {
-        T::EVENT_TYPE
+    fn event_type(&self) -> EventType {
+        EventType::from(T::EVENT_TYPE)
     }
 
     fn validate(&self, payload: &serde_json::Value) -> Result<(), String> {
@@ -83,7 +84,7 @@ pub fn validate_submission(
             if submission.event_type != validator.event_type() {
                 return Err(ValidationError::EventTypeMismatch {
                     expected: validator.event_type().to_string(),
-                    actual: submission.event_type.clone(),
+                    actual: submission.event_type.to_string(),
                 });
             }
             validator
@@ -95,7 +96,7 @@ pub fn validate_submission(
             Some(v) => v,
             None if *reject_unknown => {
                 return Err(ValidationError::UnknownEventType {
-                    event_type: submission.event_type.clone(),
+                    event_type: submission.event_type.to_string(),
                 });
             }
             None => return Ok(()),
@@ -105,7 +106,7 @@ pub fn validate_submission(
     validator
         .validate(&submission.data)
         .map_err(|message| ValidationError::ValidationFailed {
-            event_type: submission.event_type.clone(),
+            event_type: submission.event_type.to_string(),
             message,
         })
 }
@@ -128,7 +129,7 @@ mod tests {
     fn typed_validator_rejects_missing_field() {
         let validator = TypedValidator::<TestPayload>::new();
         let submission = EventSubmission {
-            event_type: "test.event".to_string(),
+            event_type: "test.event".into(),
             data: serde_json::json!({}),
             metadata: None,
             ingress_handoff: None,

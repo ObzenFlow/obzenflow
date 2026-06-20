@@ -15,7 +15,7 @@
 //! - [`telemetry`]: turns the core's plain-data outputs into durable
 //!   observability `ChainEvent` lifecycle facts.
 //! - [`hook_adapters`]: the carrier-bound source/effect/sink-delivery/ingress
-//!   adapters, plus the residual generic `Middleware`/`EffectPolicy` shell.
+//!   adapters.
 //! - [`factory`]: the public `RateLimiterBuilder`/`RateLimiterFactory` and the
 //!   `rate_limit`/`rate_limit_with_burst` constructors; declaration and
 //!   materialization are the sole production placement authority.
@@ -32,8 +32,7 @@
 //! with `tokio::time::sleep`, a cancellable future, so a drain, EOF,
 //! cancellation, or shutdown abandons an in-flight wait. Hosted ingress is
 //! fail-fast and never waits while holding a listener request. Handler-shell
-//! pacing is retired: the residual generic `pre_handle` performs one
-//! non-blocking admission check and is unreachable from production placement
+//! pacing is retired; production placement is exclusively carrier-bound
 //! (AC10/AC50). All paths share one token-bucket, accounting, and
 //! lifecycle-event implementation.
 //!
@@ -100,6 +99,10 @@ pub struct RateLimiterMiddleware {
 }
 
 impl RateLimiterMiddleware {
+    pub(crate) fn label(&self) -> &'static str {
+        "rate_limiter"
+    }
+
     fn new(
         stage_id: StageId,
         config: ValidatedRateLimiterConfig,
@@ -266,91 +269,13 @@ mod tests {
     use super::config::validated_rate_limiter_config;
     use super::*;
     use crate::middleware::control::ControlMiddlewareAggregator;
-    use crate::middleware::{Middleware, MiddlewareAction};
     use std::time::Duration;
 
     use obzenflow_core::event::chain_event::ChainEventContent;
     use obzenflow_core::event::payloads::observability_payload::{
         MiddlewareLifecycle, ObservabilityPayload,
     };
-    use obzenflow_core::event::ChainEventFactory;
     use obzenflow_runtime::control_plane::ControlPlaneProvider;
-    use serde_json::json;
-
-    #[test]
-    fn test_rate_limiter_allows_bursts() {
-        // Create middleware directly (we only need a stage_id for writer attribution)
-        let middleware = test_middleware(StageId::new(), 10.0, Some(20.0), 1.0);
-
-        let mut ctx = MiddlewareContext::live_handler();
-
-        // Should allow burst of 20 events
-        for i in 0..20 {
-            let event = ChainEventFactory::data_event(
-                WriterId::from(StageId::new()),
-                "test.event",
-                json!({ "index": i }),
-            );
-
-            match middleware.pre_handle(&event, &mut ctx) {
-                MiddlewareAction::Continue => {}
-                other => panic!("Expected Continue for event {i}, got {other:?}"),
-            }
-        }
-
-        // 21st event would block, but we can't easily test blocking in unit tests
-        // The blocking behavior is tested in integration tests
-    }
-
-    #[test]
-    fn test_rate_limiter_control_events_pass_through() {
-        // Create middleware directly (we only need a stage_id for writer attribution)
-        let middleware = test_middleware(StageId::new(), 1.0, None, 1.0);
-
-        let mut ctx = MiddlewareContext::live_handler();
-
-        // Consume the one available token
-        let data_event =
-            ChainEventFactory::data_event(WriterId::from(StageId::new()), "test.event", json!({}));
-
-        middleware.pre_handle(&data_event, &mut ctx);
-
-        // Control event should still pass through without blocking
-        let eof = ChainEventFactory::eof_event(WriterId::from(StageId::new()), true);
-
-        match middleware.pre_handle(&eof, &mut ctx) {
-            MiddlewareAction::Continue => {}
-            other => panic!("Expected Continue for EOF, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn test_rate_limiter_lifecycle_events_pass_through() {
-        let middleware = test_middleware(StageId::new(), 1.0, None, 1.0);
-
-        let mut ctx = MiddlewareContext::live_handler();
-
-        // Consume the one available token
-        let data_event =
-            ChainEventFactory::data_event(WriterId::from(StageId::new()), "test.event", json!({}));
-        middleware.pre_handle(&data_event, &mut ctx);
-
-        let lifecycle_event = ChainEventFactory::observability_event(
-            WriterId::from(StageId::new()),
-            ObservabilityPayload::Middleware(MiddlewareLifecycle::RateLimiter(
-                RateLimiterEvent::WindowUtilization {
-                    utilization_percent: 0.0,
-                    events_in_window: 0,
-                    window_size_ms: 1000,
-                },
-            )),
-        );
-
-        match middleware.pre_handle(&lifecycle_event, &mut ctx) {
-            MiddlewareAction::Continue => {}
-            other => panic!("Expected Continue for lifecycle event, got {other:?}"),
-        }
-    }
 
     #[test]
     fn test_rate_limiter_default_effective_capacity_is_at_least_one_weighted_event() {
@@ -366,46 +291,6 @@ mod tests {
         let middleware = test_middleware(StageId::new(), 10.0, Some(20.0), 2.0);
 
         assert!((middleware.limit_rate() - 5.0).abs() < 1e-6);
-    }
-
-    #[test]
-    fn test_rate_limiter_pre_handle_does_not_hold_bucket_while_waiting_on_stats() {
-        let middleware = Arc::new(test_middleware(StageId::new(), 10.0, Some(10.0), 1.0));
-        let stats_guard = middleware.core.stats_for_test().lock().unwrap();
-        let middleware_for_thread = middleware.clone();
-        let (tx, rx) = std::sync::mpsc::channel();
-
-        let handle = std::thread::spawn(move || {
-            let event = ChainEventFactory::data_event(
-                WriterId::from(StageId::new()),
-                "test.event",
-                json!({}),
-            );
-            let mut ctx = MiddlewareContext::live_handler();
-            let action = middleware_for_thread.pre_handle(&event, &mut ctx);
-            tx.send(action).unwrap();
-        });
-
-        std::thread::sleep(Duration::from_millis(25));
-
-        let bucket = middleware
-            .core
-            .bucket_for_test()
-            .try_lock()
-            .expect("pre_handle should not hold bucket while blocked on stats");
-        assert!(
-            bucket.tokens < bucket.capacity,
-            "expected pre_handle to consume tokens before blocking on stats"
-        );
-        drop(bucket);
-
-        drop(stats_guard);
-
-        let action = rx
-            .recv_timeout(Duration::from_secs(1))
-            .expect("pre_handle should complete once stats lock is released");
-        assert!(matches!(action, MiddlewareAction::Continue));
-        handle.join().unwrap();
     }
 
     #[test]

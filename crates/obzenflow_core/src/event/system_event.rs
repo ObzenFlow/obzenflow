@@ -8,8 +8,8 @@ use crate::event::observability::HttpSurfaceMetricsSnapshot;
 use crate::event::payloads::observability_payload::MiddlewareLifecycle;
 use crate::event::types::{Count, DurationMs, EventId, EventType, SeqNo, WriterId};
 use crate::event::vector_clock::VectorClock;
-use crate::id::{StageId, SystemId};
-use crate::ingress::{IngressAttemptSeq, IngressRefusalReason};
+use crate::id::{StageId, StageKey, SystemId};
+use crate::ingress::{IngressAttemptSeq, IngressKey, IngressRefusalReason};
 use crate::journal::{ArchiveStatus, StatusDerivation};
 use crate::metrics::{FlowLifecycleMetricsSnapshot, StageMetricsSnapshot};
 use serde::{Deserialize, Serialize};
@@ -256,11 +256,11 @@ pub enum SystemEventType {
     #[serde(rename = "ingress_refusal")]
     IngressRefusal {
         /// Protocol-neutral hosted ingress key; the per-surface metric projection key.
-        ingress_key: String,
+        ingress_key: IngressKey,
         /// Runtime id of the linked source stage.
         stage_id: StageId,
         /// Replay-stable source stage key (`run_manifest.json` key).
-        stage_key: String,
+        stage_key: StageKey,
         reason: IngressRefusalReason,
         /// Per-attempt sequence; the merge key against accepted source rows.
         attempt_seq: IngressAttemptSeq,

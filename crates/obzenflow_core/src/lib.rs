@@ -40,7 +40,7 @@ pub use event::schema::{
 };
 
 // Re-export typed IDs
-pub use id::{CycleDepth, FlowId, JournalId, SccId, StageId, SystemId};
+pub use id::{CycleDepth, FlowId, JournalId, SccId, StageId, StageKey, SystemId};
 
 // Re-export Ulid for convenience since it's used in many IDs
 pub use ulid::Ulid;

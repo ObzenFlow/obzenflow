@@ -57,47 +57,89 @@ pub trait EffectPolicy: Send + Sync {
 
     /// Admission for one effect invocation. May await; must not block the
     /// worker thread (the FLOWIP-114o boundary slice).
-    async fn admit(
-        &self,
-        identity: &EffectIdentity,
-        event: &ChainEvent,
-        ctx: &mut MiddlewareContext,
-    ) -> PolicyAdmission;
+    async fn admit(&self, ctx: &mut MiddlewareContext) -> PolicyAdmission;
 
     /// Observation of how the attempt ended. Runs for every policy that
     /// admitted, regardless of which arm ended the attempt.
+    fn observe(&self, attempt: &EffectAttemptOutcome<'_>, ctx: &mut MiddlewareContext);
+}
+
+/// Event-aware effect policy for middleware that genuinely needs parent-event
+/// access to classify, synthesize, or derive output facts.
+#[async_trait]
+pub trait EventAwareEffectPolicy: Send + Sync {
+    fn label(&self) -> &'static str;
+
+    async fn admit(&self, event: &ChainEvent, ctx: &mut MiddlewareContext) -> PolicyAdmission;
+
     fn observe(
         &self,
-        identity: &EffectIdentity,
         event: &ChainEvent,
         attempt: &EffectAttemptOutcome<'_>,
         ctx: &mut MiddlewareContext,
     );
 }
 
+#[derive(Clone)]
+pub enum EffectPolicyAttachment {
+    Neutral(Arc<dyn EffectPolicy>),
+    EventAware(Arc<dyn EventAwareEffectPolicy>),
+}
+
+impl EffectPolicyAttachment {
+    pub fn neutral(policy: Arc<dyn EffectPolicy>) -> Self {
+        Self::Neutral(policy)
+    }
+
+    pub fn event_aware(policy: Arc<dyn EventAwareEffectPolicy>) -> Self {
+        Self::EventAware(policy)
+    }
+
+    fn label(&self) -> &'static str {
+        match self {
+            Self::Neutral(policy) => policy.label(),
+            Self::EventAware(policy) => policy.label(),
+        }
+    }
+
+    async fn admit(&self, event: &ChainEvent, ctx: &mut MiddlewareContext) -> PolicyAdmission {
+        match self {
+            Self::Neutral(policy) => policy.admit(ctx).await,
+            Self::EventAware(policy) => policy.admit(event, ctx).await,
+        }
+    }
+
+    fn observe(
+        &self,
+        event: &ChainEvent,
+        attempt: &EffectAttemptOutcome<'_>,
+        ctx: &mut MiddlewareContext,
+    ) {
+        match self {
+            Self::Neutral(policy) => policy.observe(attempt, ctx),
+            Self::EventAware(policy) => policy.observe(event, attempt, ctx),
+        }
+    }
+}
+
 /// Effect boundary backed by per-effect policy chains, keyed by the declared
 /// effect type. Effects with no declared policies execute unguarded.
 pub struct PerEffectPolicyBoundary {
-    chains: HashMap<&'static str, Arc<Vec<Arc<dyn EffectPolicy>>>>,
+    chains: HashMap<&'static str, Arc<Vec<EffectPolicyAttachment>>>,
 }
 
 impl PerEffectPolicyBoundary {
-    pub fn new(chains: HashMap<&'static str, Arc<Vec<Arc<dyn EffectPolicy>>>>) -> Self {
+    pub fn new(chains: HashMap<&'static str, Arc<Vec<EffectPolicyAttachment>>>) -> Self {
         Self { chains }
     }
 }
 
 /// Adapt a chain middleware instance into a per-effect policy.
 ///
-/// Policies with a native async surface (circuit breaker, rate limiter)
-/// return it through `Middleware::as_effect_policy`; anything else is
-/// adapted from the chain surface, mapping `pre_handle` to admission and
-/// `post_handle` to observation of executed attempts.
-pub fn effect_policy_from_middleware(instance: Arc<dyn Middleware>) -> Arc<dyn EffectPolicy> {
-    instance
-        .clone()
-        .as_effect_policy()
-        .unwrap_or_else(|| Arc::new(ChainSurfacePolicy { inner: instance }))
+/// The bridge is event-aware because the generic `Middleware` trait is
+/// event-shaped.
+pub fn effect_policy_from_middleware(instance: Arc<dyn Middleware>) -> EffectPolicyAttachment {
+    EffectPolicyAttachment::event_aware(Arc::new(ChainSurfacePolicy { inner: instance }))
 }
 
 /// Generic per-effect adapter over the chain middleware surface.
@@ -106,17 +148,12 @@ struct ChainSurfacePolicy {
 }
 
 #[async_trait]
-impl EffectPolicy for ChainSurfacePolicy {
+impl EventAwareEffectPolicy for ChainSurfacePolicy {
     fn label(&self) -> &'static str {
         self.inner.label()
     }
 
-    async fn admit(
-        &self,
-        _identity: &EffectIdentity,
-        event: &ChainEvent,
-        ctx: &mut MiddlewareContext,
-    ) -> PolicyAdmission {
+    async fn admit(&self, event: &ChainEvent, ctx: &mut MiddlewareContext) -> PolicyAdmission {
         match self.inner.pre_handle(event, ctx) {
             MiddlewareAction::Continue => PolicyAdmission::Admit,
             MiddlewareAction::Skip { results, cause } => {
@@ -139,7 +176,6 @@ impl EffectPolicy for ChainSurfacePolicy {
 
     fn observe(
         &self,
-        _identity: &EffectIdentity,
         event: &ChainEvent,
         attempt: &EffectAttemptOutcome<'_>,
         ctx: &mut MiddlewareContext,
@@ -192,15 +228,15 @@ impl EffectBoundary for PerEffectPolicyBoundary {
         // The boundary is reached only when the effect executes live, so the
         // scope is structural (FLOWIP-120c): no per-policy replay check.
         let mut ctx = MiddlewareContext::with_scope(MiddlewareExecutionScope::LiveEffectBoundary);
-        let mut admitted: Vec<&Arc<dyn EffectPolicy>> = Vec::new();
+        let mut admitted: Vec<&EffectPolicyAttachment> = Vec::new();
 
         for policy in chain.iter() {
-            match policy.admit(identity, event, &mut ctx).await {
+            match policy.admit(event, &mut ctx).await {
                 PolicyAdmission::Admit => admitted.push(policy),
                 PolicyAdmission::Synthesize { results, cause: _ } => {
                     let attempt = EffectAttemptOutcome::SkippedBy(policy.label());
                     for prior in admitted.iter().rev() {
-                        prior.observe(identity, event, &attempt, &mut ctx);
+                        prior.observe(event, &attempt, &mut ctx);
                     }
                     let control_events = ctx.take_control_events();
                     return EffectBoundaryReport {
@@ -214,7 +250,7 @@ impl EffectBoundary for PerEffectPolicyBoundary {
                 PolicyAdmission::Reject(cause) => {
                     let attempt = EffectAttemptOutcome::RejectedBy(&cause);
                     for prior in admitted.iter().rev() {
-                        prior.observe(identity, event, &attempt, &mut ctx);
+                        prior.observe(event, &attempt, &mut ctx);
                     }
                     let control_events = ctx.take_control_events();
                     return EffectBoundaryReport {
@@ -228,7 +264,7 @@ impl EffectBoundary for PerEffectPolicyBoundary {
         let result = execute.await;
         let attempt = EffectAttemptOutcome::Executed(&result);
         for policy in admitted.iter().rev() {
-            policy.observe(identity, event, &attempt, &mut ctx);
+            policy.observe(event, &attempt, &mut ctx);
         }
         let control_events = ctx.take_control_events();
         EffectBoundaryReport {
@@ -282,22 +318,11 @@ mod tests {
             self.label
         }
 
-        async fn admit(
-            &self,
-            _identity: &EffectIdentity,
-            _event: &ChainEvent,
-            _ctx: &mut MiddlewareContext,
-        ) -> PolicyAdmission {
+        async fn admit(&self, _ctx: &mut MiddlewareContext) -> PolicyAdmission {
             PolicyAdmission::Admit
         }
 
-        fn observe(
-            &self,
-            _identity: &EffectIdentity,
-            _event: &ChainEvent,
-            attempt: &EffectAttemptOutcome<'_>,
-            _ctx: &mut MiddlewareContext,
-        ) {
+        fn observe(&self, attempt: &EffectAttemptOutcome<'_>, _ctx: &mut MiddlewareContext) {
             let kind = match attempt {
                 EffectAttemptOutcome::Executed(Ok(_)) => "executed_ok".to_string(),
                 EffectAttemptOutcome::Executed(Err(_)) => "executed_err".to_string(),
@@ -318,12 +343,7 @@ mod tests {
             "test.rejecting"
         }
 
-        async fn admit(
-            &self,
-            _identity: &EffectIdentity,
-            _event: &ChainEvent,
-            _ctx: &mut MiddlewareContext,
-        ) -> PolicyAdmission {
+        async fn admit(&self, _ctx: &mut MiddlewareContext) -> PolicyAdmission {
             PolicyAdmission::Reject(MiddlewareAbortCause {
                 source: EffectFailureSource::new("test.rejecting"),
                 code: EffectFailureCode::new("rejected"),
@@ -333,14 +353,7 @@ mod tests {
             })
         }
 
-        fn observe(
-            &self,
-            _identity: &EffectIdentity,
-            _event: &ChainEvent,
-            _attempt: &EffectAttemptOutcome<'_>,
-            _ctx: &mut MiddlewareContext,
-        ) {
-        }
+        fn observe(&self, _attempt: &EffectAttemptOutcome<'_>, _ctx: &mut MiddlewareContext) {}
     }
 
     /// FLOWIP-120c gap G8: finalization is structural. A policy that
@@ -348,14 +361,14 @@ mod tests {
     #[tokio::test]
     async fn admitted_policies_observe_rejection_by_later_policy() {
         let observed = Arc::new(Mutex::new(Vec::new()));
-        let chain: Arc<Vec<Arc<dyn EffectPolicy>>> = Arc::new(vec![
-            Arc::new(RecordingPolicy {
+        let chain: Arc<Vec<EffectPolicyAttachment>> = Arc::new(vec![
+            EffectPolicyAttachment::neutral(Arc::new(RecordingPolicy {
                 label: "test.recording",
                 observed: observed.clone(),
-            }),
-            Arc::new(RejectingPolicy),
+            })),
+            EffectPolicyAttachment::neutral(Arc::new(RejectingPolicy)),
         ]);
-        let mut chains: HashMap<&'static str, Arc<Vec<Arc<dyn EffectPolicy>>>> = HashMap::new();
+        let mut chains: HashMap<&'static str, Arc<Vec<EffectPolicyAttachment>>> = HashMap::new();
         chains.insert("effect.a", chain);
         let boundary = PerEffectPolicyBoundary::new(chains);
 
@@ -381,14 +394,14 @@ mod tests {
     async fn per_effect_breakers_do_not_cross_trip() {
         let breaker_a = Arc::new(CircuitBreakerMiddleware::new(1));
         let breaker_b = Arc::new(CircuitBreakerMiddleware::new(1));
-        let mut chains: HashMap<&'static str, Arc<Vec<Arc<dyn EffectPolicy>>>> = HashMap::new();
+        let mut chains: HashMap<&'static str, Arc<Vec<EffectPolicyAttachment>>> = HashMap::new();
         chains.insert(
             "effect.a",
-            Arc::new(vec![breaker_a as Arc<dyn EffectPolicy>]),
+            Arc::new(vec![EffectPolicyAttachment::event_aware(breaker_a)]),
         );
         chains.insert(
             "effect.b",
-            Arc::new(vec![breaker_b as Arc<dyn EffectPolicy>]),
+            Arc::new(vec![EffectPolicyAttachment::event_aware(breaker_b)]),
         );
         let boundary = PerEffectPolicyBoundary::new(chains);
 

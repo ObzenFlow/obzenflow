@@ -530,7 +530,7 @@ impl<H: UnifiedTransformHandler> UnifiedMiddlewareTransform<H> {
         mut self,
         chains: std::collections::HashMap<
             &'static str,
-            Arc<Vec<Arc<dyn crate::middleware::EffectPolicy>>>,
+            Arc<Vec<crate::middleware::EffectPolicyAttachment>>,
         >,
     ) -> Self {
         self.effect_boundary = Some(Arc::new(crate::middleware::PerEffectPolicyBoundary::new(
@@ -1203,7 +1203,7 @@ mod tests {
     }
 
     fn boundary_for(middleware: Arc<dyn Middleware>) -> crate::middleware::PerEffectPolicyBoundary {
-        let chain: Arc<Vec<Arc<dyn crate::middleware::EffectPolicy>>> =
+        let chain: Arc<Vec<crate::middleware::EffectPolicyAttachment>> =
             Arc::new(vec![crate::middleware::effect_policy_from_middleware(
                 middleware,
             )]);

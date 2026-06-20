@@ -22,7 +22,7 @@ use super::hook_adapters::{
 use super::{RateLimiterFamily, RateLimiterMiddleware};
 use crate::middleware::control::ControlMiddlewareAggregator;
 use crate::middleware::{
-    validate_attachment_request, ControlMiddlewareRole, EffectPolicy, Middleware,
+    validate_attachment_request, ControlMiddlewareRole, EffectPolicyAttachment, Middleware,
     MiddlewareAttachmentRequest, MiddlewareDeclaration, MiddlewareFactory, MiddlewareFactoryError,
     MiddlewareMaterializationContext, MiddlewareOverrideKey, MiddlewarePlanContribution,
     MiddlewareSafety, MiddlewareSurface, MiddlewareSurfaceAttachment, MiddlewareSurfaceKind,
@@ -231,8 +231,9 @@ impl MiddlewareFactory for RateLimiterFactory {
                     context.control_middleware.clone(),
                     Some(effect_surface.effect_type.clone()),
                 );
-                let policy: Arc<dyn EffectPolicy> = Arc::new(middleware);
-                Ok(MiddlewareSurfaceAttachment::Effect(policy))
+                Ok(MiddlewareSurfaceAttachment::Effect(
+                    EffectPolicyAttachment::neutral(Arc::new(middleware)),
+                ))
             }
             MiddlewareSurface::SinkDelivery(_) => {
                 let middleware = Arc::new(RateLimiterMiddleware::new(
@@ -600,20 +601,21 @@ mod tests {
     #[test]
     fn rate_limiter_ingress_admits_then_rejects_fail_fast() {
         use crate::middleware::{
-            HostedIngressSurfaceKey, HostedIngressTargetKey, IngressRouteScope, IngressStageKey,
-            IngressSurface, IngressUnitId, MiddlewareAttachmentRequest, MiddlewareDeclarationIndex,
+            HostedIngressTargetKey, IngressRouteScope, IngressSurface, IngressUnitId,
+            MiddlewareAttachmentRequest, MiddlewareDeclarationIndex,
             MiddlewareMaterializationContext, MiddlewareOrigin, ProtectedUnit, ProtectedUnitId,
             SourceStageIngressOwner,
         };
         use obzenflow_core::ingress::{
-            IngressAdmissionDecision, IngressAttemptContext, IngressAttemptSeq,
+            IngressAdmissionDecision, IngressAttemptContext, IngressAttemptSeq, IngressKey,
         };
+        use obzenflow_core::StageKey;
 
         let control = Arc::new(ControlMiddlewareAggregator::new());
         let config = test_stage_config("accounts");
-        let stage_key = IngressStageKey("accounts".to_string());
+        let stage_key = StageKey("accounts".to_string());
         let target = HostedIngressTargetKey {
-            surface: HostedIngressSurfaceKey("/api/bank/accounts".to_string()),
+            surface: IngressKey("/api/bank/accounts".to_string()),
             scope: IngressRouteScope::Admission,
         };
         let surface = MiddlewareSurface::Ingress(IngressSurface {

@@ -80,7 +80,7 @@ where
         let data = serde_json::to_value(payload)
             .map_err(|e| IngressSubmitError::Serialize(e.to_string()))?;
         let submission = EventSubmission {
-            event_type: T::versioned_event_type(),
+            event_type: T::versioned_event_type().into(),
             data,
             metadata: None,
             ingress_handoff: None,
@@ -402,7 +402,7 @@ mod tests {
             .ingress_slot()
             .fill(FilledHostedIngress {
                 stage_id: StageId::new(),
-                stage_key: "test".to_string(),
+                stage_key: "test".into(),
                 boundary,
             })
             .expect("slot fill succeeds once");
@@ -494,7 +494,7 @@ mod tests {
             .ingress_slot()
             .fill(FilledHostedIngress {
                 stage_id: StageId::new(),
-                stage_key: "test".to_string(),
+                stage_key: "test".into(),
                 boundary,
             })
             .expect("slot fill succeeds once");
@@ -557,7 +557,7 @@ mod tests {
             .ingress_slot()
             .fill(FilledHostedIngress {
                 stage_id: StageId::new(),
-                stage_key: "orders".to_string(),
+                stage_key: "orders".into(),
                 boundary: Some(Arc::new(AcceptThenReject {
                     calls: AtomicUsize::new(0),
                 })),
@@ -665,7 +665,7 @@ mod tests {
 
     async fn replay_system_journal_through_refusal_aggregator(
         system_journal: Arc<dyn Journal<SystemEvent>>,
-    ) -> HashMap<(String, String), u64> {
+    ) -> HashMap<(obzenflow_core::ingress::IngressKey, String), u64> {
         let events = system_journal
             .read_causally_ordered()
             .await
@@ -885,7 +885,7 @@ mod tests {
         state
             .tx
             .try_send(EventSubmission {
-                event_type: "filled".to_string(),
+                event_type: "filled".into(),
                 data: json!({"value": 1}),
                 metadata: None,
                 ingress_handoff: None,
@@ -983,7 +983,7 @@ mod tests {
         state
             .tx
             .try_send(obzenflow_core::ingress::EventSubmission {
-                event_type: "one".to_string(),
+                event_type: "one".into(),
                 data: json!({"value": 1}),
                 metadata: None,
                 ingress_handoff: None,
@@ -1277,9 +1277,10 @@ mod tests {
             const EVENT_TYPE: &'static str = "known.event";
         }
 
-        let mut validators: HashMap<String, Arc<dyn SchemaValidator>> = HashMap::new();
+        let mut validators: HashMap<obzenflow_core::EventType, Arc<dyn SchemaValidator>> =
+            HashMap::new();
         validators.insert(
-            Known::EVENT_TYPE.to_string(),
+            Known::EVENT_TYPE.into(),
             Arc::new(TypedValidator::<Known>::new()),
         );
 
@@ -1673,7 +1674,7 @@ mod tests {
             vec![(
                 IngressRefusalReason::RateLimited,
                 1,
-                "/api/orders".to_string()
+                "/api/orders".into()
             )],
             "exactly one rate-limited refusal fact for the second POST"
         );
@@ -1689,7 +1690,7 @@ mod tests {
         let replayed_refusals =
             replay_system_journal_through_refusal_aggregator(system_journal.clone()).await;
         assert_eq!(
-            replayed_refusals.get(&("/api/orders".to_string(), "rate_limited".to_string())),
+            replayed_refusals.get(&("/api/orders".into(), "rate_limited".to_string())),
             Some(&1),
             "strict replay over the archived system facts projects the same refusal total"
         );

@@ -208,7 +208,7 @@ impl HttpEndpoint for SingleEventEndpoint {
                 }
                 submission.ingress_handoff = Some(SubmissionIngressContext {
                     accepted_at_ns: unix_now_nanos(),
-                    ingress_key: self.state.config.ingress_key.clone(),
+                    ingress_key: self.state.config.ingress_key.clone().into(),
                     batch_index: None,
                     attempt_seq: attempt.attempt_seq,
                 });

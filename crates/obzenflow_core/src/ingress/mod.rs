@@ -22,6 +22,7 @@
 mod admission;
 mod binding;
 mod boundary;
+mod key;
 mod submission;
 
 pub use admission::{
@@ -30,6 +31,7 @@ pub use admission::{
 };
 pub use binding::{FilledHostedIngress, HostedIngressAlreadyBound, HostedIngressBindingSlot};
 pub use boundary::IngressBoundaryMiddleware;
+pub use key::IngressKey;
 pub use submission::{
     BatchSubmission, EventSubmission, IngressContext, SubmissionIngressContext, SubmissionResponse,
 };

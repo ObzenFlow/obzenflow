@@ -35,7 +35,7 @@ fn test_derived_event() {
     )
     .with_ingress_context(IngressContext {
         accepted_at_ns: 42,
-        ingress_key: "test".to_string(),
+        ingress_key: "test".into(),
         batch_index: Some(1),
         attempt_seq: crate::ingress::IngressAttemptSeq(0),
     });

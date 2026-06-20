@@ -132,16 +132,6 @@ pub trait Middleware: Send + Sync {
     ) {
         // Default: no-op
     }
-
-    /// FLOWIP-120c: policies with a native async per-effect surface return it
-    /// here so per-effect chains use their own admission (a rate limiter
-    /// awaits its permit instead of blocking). Policy kinds without a native
-    /// implementation are adapted from this chain surface instead.
-    fn as_effect_policy(
-        self: std::sync::Arc<Self>,
-    ) -> Option<std::sync::Arc<dyn crate::middleware::EffectPolicy>> {
-        None
-    }
 }
 
 /// Structured cause attached to an abort so downstream seams, the effect
@@ -217,17 +207,9 @@ pub enum ErrorAction {
     Retry,
 }
 
-// Implementation for Box<dyn Middleware> to allow boxed middleware.
-//
-// FLOWIP-120c footgun: this blanket impl forwards the `&self` methods, but it
-// CANNOT forward the `self: Arc<Self>` hook (`as_effect_policy`) because there
-// is no safe way to turn `Arc<Box<M>>` into `Arc<M>`. The hook therefore falls
-// through to the trait default (`None`) for any `Box`-wrapped middleware.
-// Consequently, double-boxing a `Box<dyn Middleware>` (e.g. passing one into a
-// generic `with<M: Middleware>` that re-boxes) silently drops the native async
-// effect-policy surface. Effect-policy chains stay safe via
-// `Arc::from(create_for_effect(...))`. FLOWIP-115 retires capability downcasts in
-// favour of typed policy chains on live I/O units.
+// Implementation for Box<dyn Middleware> to allow boxed middleware. FLOWIP-115
+// retires capability downcasts in favour of typed policy chains on live I/O
+// units, so this blanket impl only forwards ordinary `&self` methods.
 impl<M: Middleware + ?Sized> Middleware for Box<M> {
     fn label(&self) -> &'static str {
         (**self).label()

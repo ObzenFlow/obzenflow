@@ -217,7 +217,7 @@ fn build_source_middleware_and_register_policies(
     if let Some(slot) = hosted_ingress_slot.as_ref() {
         slot.fill(obzenflow_core::ingress::FilledHostedIngress {
             stage_id: config.stage_id,
-            stage_key: config.name.clone(),
+            stage_key: config.name.clone().into(),
             boundary: ingress_boundary,
         })
         .map_err(|e| format!("Stage '{}': {e}", config.name))?;
@@ -1453,7 +1453,7 @@ impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
 
         let mut effect_chains: std::collections::HashMap<
             &'static str,
-            Vec<Arc<dyn obzenflow_adapters::middleware::EffectPolicy>>,
+            Vec<obzenflow_adapters::middleware::EffectPolicyAttachment>,
         > = std::collections::HashMap::new();
 
         if !transitional_policy_specs.is_empty() {
@@ -1502,7 +1502,7 @@ impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
 
         let effect_policy_chains: std::collections::HashMap<
             &'static str,
-            Arc<Vec<Arc<dyn obzenflow_adapters::middleware::EffectPolicy>>>,
+            Arc<Vec<obzenflow_adapters::middleware::EffectPolicyAttachment>>,
         > = effect_chains
             .into_iter()
             .map(|(effect_type, chain)| (effect_type, Arc::new(chain)))

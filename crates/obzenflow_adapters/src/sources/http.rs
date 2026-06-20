@@ -208,7 +208,7 @@ mod tests {
     async fn http_source_emits_chain_events_from_submissions() {
         let (tx, rx) = tokio::sync::mpsc::channel(8);
         tx.send(EventSubmission {
-            event_type: "order.created".to_string(),
+            event_type: "order.created".into(),
             data: json!({"value": 1}),
             metadata: None,
             ingress_handoff: None,
@@ -216,7 +216,7 @@ mod tests {
         .await
         .unwrap();
         tx.send(EventSubmission {
-            event_type: "order.updated".to_string(),
+            event_type: "order.updated".into(),
             data: json!({"value": 2}),
             metadata: None,
             ingress_handoff: None,
@@ -250,12 +250,12 @@ mod tests {
     async fn http_source_attaches_ingress_context_from_submission_handoff() {
         let (tx, rx) = tokio::sync::mpsc::channel(1);
         tx.send(EventSubmission {
-            event_type: "order.created".to_string(),
+            event_type: "order.created".into(),
             data: json!({"value": 1}),
             metadata: None,
             ingress_handoff: Some(obzenflow_core::ingress::SubmissionIngressContext {
                 accepted_at_ns: 42,
-                ingress_key: "orders".to_string(),
+                ingress_key: "orders".into(),
                 batch_index: Some(0),
                 attempt_seq: obzenflow_core::ingress::IngressAttemptSeq(7),
             }),
@@ -271,7 +271,7 @@ mod tests {
             out[0].ingress_context,
             Some(IngressContext {
                 accepted_at_ns: 42,
-                ingress_key: "orders".to_string(),
+                ingress_key: "orders".into(),
                 batch_index: Some(0),
                 attempt_seq: obzenflow_core::ingress::IngressAttemptSeq(7),
             })

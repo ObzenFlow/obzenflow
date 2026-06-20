@@ -21,14 +21,14 @@ pub mod sink;
 pub mod source;
 
 pub use effect::{
-    effect_policy_from_middleware, EffectAttemptOutcome, EffectPolicy, PerEffectPolicyBoundary,
-    PolicyAdmission,
+    effect_policy_from_middleware, EffectAttemptOutcome, EffectPolicy, EffectPolicyAttachment,
+    EventAwareEffectPolicy, PerEffectPolicyBoundary, PolicyAdmission,
 };
 pub use sink::{
     PerSinkDeliveryPolicyBoundary, SinkAdmission, SinkAdmissionGuard, SinkDeliveryPolicyOutcome,
     SinkPolicy, SinkPolicyCtx,
 };
 pub use source::{
-    batch_has_error_marked, PerSourcePolicyBoundary, SourceAdmission, SourceAdmissionGuard,
-    SourceAfterPoll, SourcePolicy, SourcePolicyCtx, SourcePollOutcome,
+    PerSourcePolicyBoundary, SourceAdmission, SourceAdmissionGuard, SourceAfterPoll,
+    SourceBatchFacts, SourcePolicy, SourcePolicyCtx, SourcePollOutcome,
 };

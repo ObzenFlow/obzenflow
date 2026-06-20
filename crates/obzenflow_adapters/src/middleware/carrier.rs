@@ -18,10 +18,10 @@
 //! vocabulary so later slices fill them additively.
 
 use super::control::ControlMiddlewareAggregator;
-use super::policy::{EffectPolicy, SinkPolicy, SourcePolicy};
+use super::policy::{EffectPolicyAttachment, SinkPolicy, SourcePolicy};
 use obzenflow_core::event::context::StageType;
-use obzenflow_core::ingress::IngressBoundaryMiddleware;
-use obzenflow_core::StageId;
+use obzenflow_core::ingress::{IngressBoundaryMiddleware, IngressKey};
+use obzenflow_core::{StageId, StageKey};
 use obzenflow_runtime::pipeline::config::StageConfig;
 use obzenflow_runtime::stages::source::strategies::CompletionGate;
 use ring::digest::{Context, SHA256};
@@ -106,17 +106,9 @@ pub struct SinkDeliverySurface {
 // Ingress identity (FLOWIP-115d)
 // ---------------------------------------------------------------------------
 
-/// Replay-stable source stage key for source-backed hosted ingress. Matches
-/// `StageConfig.name` (the key written to `run_manifest.json`), so durable
-/// ingress evidence and any replay-sensitive attachment coordinate survive
-/// archive drift.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct IngressStageKey(pub String);
-
-/// Normalised hosted-ingress surface key (for the HTTP surface, the normalised
-/// base path).
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct HostedIngressSurfaceKey(pub String);
+// FLOWIP-114e: the ingress stage key and the hosted-surface key are the core
+// newtypes `StageKey` and `IngressKey`. The carrier reuses them rather than
+// minting adapter-local string newtypes for the same concepts.
 
 /// Which work-admission endpoint a hosted ingress route belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -149,7 +141,7 @@ impl IngressRouteScope {
 /// owner on its own.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct HostedIngressTargetKey {
-    pub surface: HostedIngressSurfaceKey,
+    pub surface: IngressKey,
     pub scope: IngressRouteScope,
 }
 
@@ -159,7 +151,7 @@ pub struct HostedIngressTargetKey {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SourceStageIngressOwner {
     pub stage_id: StageId,
-    pub stage_key: IngressStageKey,
+    pub stage_key: StageKey,
 }
 
 /// The ingress call site for one source-backed hosted ingress target.
@@ -175,7 +167,7 @@ pub struct IngressSurface {
 /// are attempt context and never enter this key.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct IngressUnitId {
-    pub source_stage_key: IngressStageKey,
+    pub source_stage_key: StageKey,
     pub target: HostedIngressTargetKey,
 }
 
@@ -799,7 +791,7 @@ pub struct SourcePollAttachment {
 #[non_exhaustive]
 pub enum MiddlewareSurfaceAttachment {
     SourcePoll(SourcePollAttachment),
-    Effect(Arc<dyn EffectPolicy>),
+    Effect(EffectPolicyAttachment),
     SinkDelivery(Arc<dyn SinkPolicy>),
     Ingress(Arc<dyn IngressBoundaryMiddleware>),
 }
@@ -811,9 +803,9 @@ mod tests {
     /// A source-owned ingress surface plus its matching protected unit
     /// (FLOWIP-115d), for the canonical piggy-bank `accounts` shape.
     fn ingress_fixture(stage_id: StageId) -> (MiddlewareSurface, ProtectedUnitId) {
-        let stage_key = IngressStageKey("accounts".to_string());
+        let stage_key = StageKey("accounts".to_string());
         let target = HostedIngressTargetKey {
-            surface: HostedIngressSurfaceKey("/api/bank/accounts".to_string()),
+            surface: IngressKey("/api/bank/accounts".to_string()),
             scope: IngressRouteScope::Admission,
         };
         let surface = MiddlewareSurface::Ingress(IngressSurface {
@@ -865,10 +857,10 @@ mod tests {
         let other_target = MiddlewareSurface::Ingress(IngressSurface {
             owner: SourceStageIngressOwner {
                 stage_id,
-                stage_key: IngressStageKey("accounts".to_string()),
+                stage_key: StageKey("accounts".to_string()),
             },
             target: HostedIngressTargetKey {
-                surface: HostedIngressSurfaceKey("/api/bank/tx".to_string()),
+                surface: IngressKey("/api/bank/tx".to_string()),
                 scope: IngressRouteScope::Admission,
             },
         });

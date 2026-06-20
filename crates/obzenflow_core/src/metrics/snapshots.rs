@@ -12,6 +12,7 @@ use crate::event::observability::HttpSurfaceRouteMetricsSnapshot;
 use crate::event::status::processing_status::ErrorKind;
 use crate::event::system_event::{ContractName, ContractResultStatusLabel, SystemFeedRole};
 use crate::event::types::EventType;
+use crate::ingress::IngressKey;
 use crate::id::{FlowId, StageId};
 use crate::metrics::Percentile;
 use crate::time::MetricsDuration;
@@ -178,7 +179,7 @@ pub struct AppMetricsSnapshot {
     /// (FLOWIP-115d), keyed by `(ingress_key, reason)`. This replaces the former
     /// in-memory ingestion reject counters, so the metric folds journal facts and
     /// is replay-faithful.
-    pub ingestion_refusal_totals: HashMap<(String, String), u64>,
+    pub ingestion_refusal_totals: HashMap<(IngressKey, String), u64>,
 
     /// HTTP pull telemetry metrics derived from wide events (FLOWIP-084e).
     ///

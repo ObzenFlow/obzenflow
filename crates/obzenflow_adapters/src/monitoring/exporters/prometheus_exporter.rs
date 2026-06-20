@@ -1790,7 +1790,7 @@ impl PrometheusExporter {
                 writeln!(
                     output,
                     "http_ingestion_refusals_total{{ingress=\"{}\",reason=\"{}\"}} {}",
-                    escape_label(ingress_key),
+                    escape_label(ingress_key.as_str()),
                     escape_label(reason),
                     count
                 )?;
@@ -2540,9 +2540,9 @@ mod tests {
         // snapshot, keyed by (ingress_key, reason).
         let mut app = AppMetricsSnapshot::default();
         app.ingestion_refusal_totals
-            .insert(("orders".to_string(), "rate_limited".to_string()), 3);
+            .insert(("orders".into(), "rate_limited".to_string()), 3);
         app.ingestion_refusal_totals
-            .insert(("orders".to_string(), "validation".to_string()), 5);
+            .insert(("orders".into(), "validation".to_string()), 5);
         exporter.update_app_metrics(app).unwrap();
 
         let output = exporter.render_metrics().unwrap();

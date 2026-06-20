@@ -17,6 +17,7 @@ use obzenflow_core::event::payloads::observability_payload::{
 use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
 use obzenflow_core::event::{JournalEvent, WriterId};
 use obzenflow_core::id::{FlowId, StageId, SystemId};
+use obzenflow_core::ingress::IngressKey;
 use obzenflow_core::metrics::{
     ContractMetricEdgeKey, ContractMetricResultKey, ContractMetricViolationKey,
     ContractMetricsSnapshot, ContractViolationCauseLabel, Percentile, StageMetadata,
@@ -227,7 +228,7 @@ pub struct MetricsStore {
     /// (FLOWIP-115d), keyed by `(ingress_key, reason)`. This replaces the former
     /// in-memory ingestion reject counters; the metric is now a fold of journal
     /// facts and so is replay-faithful.
-    pub ingestion_refusals_total: HashMap<(String, String), u64>,
+    pub ingestion_refusals_total: HashMap<(IngressKey, String), u64>,
 
     // HTTP pull telemetry (FLOWIP-084e)
     pub http_pull_metrics: HashMap<StageId, HttpPullTelemetry>,

@@ -334,7 +334,7 @@ impl HttpEndpoint for BatchEventEndpoint {
         for (permit, (batch_index, mut event)) in permits.into_iter().zip(accepted_events) {
             event.ingress_handoff = Some(SubmissionIngressContext {
                 accepted_at_ns,
-                ingress_key: ingress_key.clone(),
+                ingress_key: ingress_key.clone().into(),
                 batch_index: Some(batch_index),
                 attempt_seq,
             });

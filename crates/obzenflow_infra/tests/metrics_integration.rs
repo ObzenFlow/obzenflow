@@ -250,9 +250,9 @@ async fn ingress_refusal_facts_project_to_per_reason_totals() {
         SystemEvent::new(
             writer,
             SystemEventType::IngressRefusal {
-                ingress_key: "orders".to_string(),
+                ingress_key: "orders".into(),
                 stage_id,
-                stage_key: "orders".to_string(),
+                stage_key: "orders".into(),
                 reason,
                 attempt_seq: IngressAttemptSeq(seq),
                 request_count: 1,
@@ -286,14 +286,14 @@ async fn ingress_refusal_facts_project_to_per_reason_totals() {
     let last = snapshots.last().expect("exported app snapshot");
     assert_eq!(
         last.ingestion_refusal_totals
-            .get(&("orders".to_string(), "rate_limited".to_string()))
+            .get(&("orders".into(), "rate_limited".to_string()))
             .copied(),
         Some(2),
         "two single rate-limited refusals sum to 2"
     );
     assert_eq!(
         last.ingestion_refusal_totals
-            .get(&("orders".to_string(), "validation".to_string()))
+            .get(&("orders".into(), "validation".to_string()))
             .copied(),
         Some(3),
         "a validation refusal of three events counts the events"

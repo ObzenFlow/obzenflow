@@ -256,7 +256,7 @@ impl MiddlewareFactory for MyControlFactory {
                 todo!()
             }
             MiddlewareSurface::Effect(_) => {
-                // Return Arc<dyn EffectPolicy>.
+                // Return EffectPolicyAttachment::neutral(...) or ::event_aware(...).
                 todo!()
             }
             MiddlewareSurface::SinkDelivery(_) => {
@@ -284,9 +284,11 @@ The policies returned from `materialize` are surface-specific:
 
 - `SourcePolicy::admit` returns `SourceAdmission::Admit` or `Reject`; admitted
   policies observe the raw `SourcePollOutcome`.
-- `EffectPolicy::admit` returns `PolicyAdmission::Admit`, `Synthesize`, or
-  `Reject`; rejected effects are recorded under the effect cursor and strict
-  replay returns the recorded outcome without invoking the live effect hook.
+- `EffectPolicy::admit` is event-neutral. Use `EventAwareEffectPolicy` only when
+  the policy has a same-slice need to inspect the parent `ChainEvent`; both
+  variants return `PolicyAdmission::Admit`, `Synthesize`, or `Reject`. Rejected
+  effects are recorded under the effect cursor and strict replay returns the
+  recorded outcome without invoking the live effect hook.
 - `SinkPolicy::admit` returns `SinkAdmission::Admit` or `Reject`; rejection is
   recorded as a failed delivery receipt with middleware rejection metadata, not
   a successful `Noop` delivery.

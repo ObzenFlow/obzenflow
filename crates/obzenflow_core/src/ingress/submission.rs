@@ -9,13 +9,15 @@
 //! types) has a single home under `obzenflow_core::ingress`.
 
 use super::admission::IngressAttemptSeq;
+use super::IngressKey;
+use crate::EventType;
 use serde::{Deserialize, Serialize};
 
 /// Event submission payload from HTTP clients (FLOWIP-084d).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EventSubmission {
     /// Event type (e.g., "order.created")
-    pub event_type: String,
+    pub event_type: EventType,
 
     /// Event payload (arbitrary JSON)
     pub data: serde_json::Value,
@@ -53,7 +55,7 @@ pub struct SubmissionResponse {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SubmissionIngressContext {
     pub accepted_at_ns: u64,
-    pub ingress_key: String,
+    pub ingress_key: IngressKey,
     pub batch_index: Option<usize>,
     /// FLOWIP-115d: the per-attempt sequence, the cross-journal merge key against
     /// `IngressRefusal` facts. A batch's accepted rows share one sequence and are
@@ -65,7 +67,7 @@ pub struct SubmissionIngressContext {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct IngressContext {
     pub accepted_at_ns: u64,
-    pub ingress_key: String,
+    pub ingress_key: IngressKey,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub batch_index: Option<usize>,
     /// FLOWIP-115d: the per-attempt sequence carried onto the accepted source row,

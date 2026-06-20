@@ -157,8 +157,8 @@ pub use transform_middleware::{
 // Common utilities
 pub use carrier::{
     validate_attachment_request, EffectSurface, EffectTypeKey, EffectUnitId,
-    HostedIngressSurfaceKey, HostedIngressTargetKey, IngressEndpointKind, IngressRouteScope,
-    IngressStageKey, IngressSurface, IngressUnitId, MiddlewareAttachmentId,
+    HostedIngressTargetKey, IngressEndpointKind, IngressRouteScope, IngressSurface, IngressUnitId,
+    MiddlewareAttachmentId,
     MiddlewareAttachmentRequest, MiddlewareAttachmentValidationError, MiddlewareCapability,
     MiddlewareDeclaration, MiddlewareDeclarationIndex, MiddlewareDeclarationScope,
     MiddlewareMaterializationContext, MiddlewareOrigin, MiddlewareSurface,
@@ -171,11 +171,11 @@ pub use function::{middleware_fn, FnMiddleware};
 pub use hints::{Attempts, BackoffKind, BatchingHint, MiddlewareHints, RetryHint};
 pub use observability::timing::TimingMiddleware;
 pub use policy::{
-    batch_has_error_marked, effect_policy_from_middleware, EffectAttemptOutcome, EffectPolicy,
-    PerEffectPolicyBoundary, PerSinkDeliveryPolicyBoundary, PerSourcePolicyBoundary,
-    PolicyAdmission, SinkAdmission, SinkAdmissionGuard, SinkDeliveryPolicyOutcome, SinkPolicy,
-    SinkPolicyCtx, SourceAdmission, SourceAdmissionGuard, SourceAfterPoll, SourcePolicy,
-    SourcePolicyCtx, SourcePollOutcome,
+    effect_policy_from_middleware, EffectAttemptOutcome, EffectPolicy, EffectPolicyAttachment,
+    EventAwareEffectPolicy, PerEffectPolicyBoundary, PerSinkDeliveryPolicyBoundary,
+    PerSourcePolicyBoundary, PolicyAdmission, SinkAdmission, SinkAdmissionGuard,
+    SinkDeliveryPolicyOutcome, SinkPolicy, SinkPolicyCtx, SourceAdmission, SourceAdmissionGuard,
+    SourceAfterPoll, SourceBatchFacts, SourcePolicy, SourcePolicyCtx, SourcePollOutcome,
 };
 pub use type_shaping::{IntoEffectPolicyParts, OutcomeShapingMiddleware, TypeShapingMiddleware};
 

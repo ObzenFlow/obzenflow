@@ -232,7 +232,7 @@ impl IngestionState {
         let event = SystemEvent::new(
             writer.writer_id,
             SystemEventType::IngressRefusal {
-                ingress_key: self.config.ingress_key.clone(),
+                ingress_key: self.config.ingress_key.clone().into(),
                 stage_id: filled.stage_id,
                 stage_key: filled.stage_key.clone(),
                 reason,
@@ -444,7 +444,7 @@ impl IngestionState {
 
         submission.ingress_handoff = Some(SubmissionIngressContext {
             accepted_at_ns: unix_now_nanos(),
-            ingress_key: self.config.ingress_key.clone(),
+            ingress_key: self.config.ingress_key.clone().into(),
             batch_index,
             attempt_seq: attempt.attempt_seq,
         });

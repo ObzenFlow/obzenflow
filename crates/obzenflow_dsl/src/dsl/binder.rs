@@ -13,15 +13,17 @@
 use crate::middleware_resolution::MiddlewareSource;
 use obzenflow_adapters::middleware::control::ControlMiddlewareAggregator;
 use obzenflow_adapters::middleware::{
-    effect_policy_from_middleware, validate_attachment_request, EffectPolicy, EffectSurface,
-    EffectTypeKey, EffectUnitId, HostedIngressSurfaceKey, HostedIngressTargetKey,
-    IngressRouteScope, IngressStageKey, IngressSurface, IngressUnitId, Middleware,
+    effect_policy_from_middleware, validate_attachment_request, EffectPolicyAttachment,
+    EffectSurface, EffectTypeKey, EffectUnitId, HostedIngressTargetKey, IngressRouteScope,
+    IngressSurface, IngressUnitId, Middleware,
     MiddlewareAttachmentRequest, MiddlewareDeclarationIndex, MiddlewareFactory,
     MiddlewareMaterializationContext, MiddlewareOrigin, MiddlewareSurface,
     MiddlewareSurfaceAttachment, MiddlewareSurfaceKind, ProtectedUnit, ProtectedUnitId,
     SinkDeliverySurface, SinkDeliveryTarget, SinkDeliveryUnitId, SinkPolicy, SourcePolicy,
     SourcePollSurface, SourcePollUnitId, SourceStageIngressOwner,
 };
+use obzenflow_core::ingress::IngressKey;
+use obzenflow_core::StageKey;
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::ingress::IngressBoundaryMiddleware;
 use obzenflow_runtime::pipeline::config::StageConfig;
@@ -114,7 +116,7 @@ pub(crate) fn bind_effect_policy(
     effect_type: &'static str,
     origin: &MiddlewareOrigin,
     declaration_index: MiddlewareDeclarationIndex,
-) -> Result<Arc<dyn EffectPolicy>, String> {
+) -> Result<EffectPolicyAttachment, String> {
     let declaration = factory.declaration();
     if declaration.is_control() && declaration.supports(MiddlewareSurfaceKind::Effect) {
         let surface = MiddlewareSurface::Effect(EffectSurface {
@@ -215,13 +217,13 @@ pub(crate) fn materialize_ingress(
     config: &StageConfig,
     stage_type: StageType,
     control_middleware: &Arc<ControlMiddlewareAggregator>,
-    ingress_key: &str,
+    ingress_key: &IngressKey,
     origin: &MiddlewareOrigin,
     declaration_index: MiddlewareDeclarationIndex,
 ) -> Result<Arc<dyn IngressBoundaryMiddleware>, String> {
-    let stage_key = IngressStageKey(config.name.clone());
+    let stage_key = StageKey(config.name.clone());
     let target = HostedIngressTargetKey {
-        surface: HostedIngressSurfaceKey(ingress_key.to_string()),
+        surface: ingress_key.clone(),
         scope: IngressRouteScope::Admission,
     };
     let surface = MiddlewareSurface::Ingress(IngressSurface {

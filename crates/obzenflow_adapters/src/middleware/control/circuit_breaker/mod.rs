@@ -1073,7 +1073,8 @@ mod tests {
     use super::fallback::{build_outcome_fallback_events, build_typed_fallback_event};
     use super::*;
     use crate::middleware::{
-        Middleware, MiddlewareFactory, SourcePolicy, SourcePolicyCtx, SourcePollOutcome,
+        Middleware, MiddlewareFactory, SourceBatchFacts, SourcePolicy, SourcePolicyCtx,
+        SourcePollOutcome,
     };
     use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
     use obzenflow_core::time::MetricsDuration;
@@ -1670,7 +1671,7 @@ mod tests {
 
         policy.observe(
             &SourcePollOutcome::Delivered {
-                events: std::slice::from_ref(&failed),
+                batch: SourceBatchFacts::from_events(std::slice::from_ref(&failed)),
                 poll_duration: StdDuration::from_millis(1),
             },
             &mut ctx,

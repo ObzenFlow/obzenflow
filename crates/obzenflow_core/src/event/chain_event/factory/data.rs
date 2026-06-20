@@ -127,7 +127,7 @@ mod tests {
         let parent = ChainEventFactory::data_event(writer_id, "parent.event", json!({"id": 1}))
             .with_ingress_context(IngressContext {
                 accepted_at_ns: 42,
-                ingress_key: "orders".to_string(),
+                ingress_key: "orders".into(),
                 batch_index: Some(3),
                 attempt_seq: crate::ingress::IngressAttemptSeq(0),
             });

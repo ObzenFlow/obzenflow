@@ -10,113 +10,31 @@
 //! [`super::admission_core::RateLimiterCore`]). The source, effect, and
 //! sink-delivery adapters await their permit through the shared cancellable
 //! acquisition helper; the ingress adapter is fail-fast at the hosted listener
-//! edge. The residual generic [`Middleware`] shell performs one non-blocking
-//! admission check and is unreachable from production placement (FLOWIP-115d
-//! AC10/AC50); production placement goes through [`super::factory`].
+//! edge. Production placement goes through [`super::factory`].
 
-use super::admission_core::AdmissionDecision;
 use super::RateLimiterMiddleware;
 use crate::middleware::{
-    batch_has_error_marked, ErrorAction, Middleware, MiddlewareAction, MiddlewareContext,
-    SinkAdmission, SinkDeliveryPolicyOutcome, SinkPolicy, SinkPolicyCtx, SourceAdmission,
-    SourceAfterPoll, SourceMiddlewarePhase, SourcePolicy, SourcePolicyCtx, SourcePollOutcome,
+    MiddlewareContext, SinkAdmission, SinkDeliveryPolicyOutcome, SinkPolicy, SinkPolicyCtx,
+    SourceAdmission, SourceAfterPoll, SourceBatchFacts, SourcePolicy, SourcePolicyCtx,
+    SourcePollOutcome,
 };
-use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::ingress::{
     IngressAdmissionDecision, IngressAdmissionOutcome, IngressAttemptContext,
     IngressBoundaryMiddleware,
 };
-use obzenflow_runtime::stages::sink::journal_sink::{
-    SinkDeliveryAttemptContext, SinkDeliveryIdentity,
-};
 use std::sync::Arc;
-use tokio::time::Instant;
-
-impl Middleware for RateLimiterMiddleware {
-    fn label(&self) -> &'static str {
-        "rate_limiter"
-    }
-
-    // FLOWIP-115d: placement is carrier-driven (the limiter materializes onto the
-    // SourcePoll/Effect/SinkDelivery/Ingress surfaces), so it no longer claims a
-    // special source-ordering phase or exposes downcast hooks. `source_phase` is a
-    // required trait method, so it returns the neutral `Ordinary`.
-    fn source_phase(&self) -> SourceMiddlewarePhase {
-        SourceMiddlewarePhase::Ordinary
-    }
-
-    fn kind(&self) -> crate::middleware::MiddlewareKind {
-        crate::middleware::MiddlewareKind::Policy
-    }
-
-    fn pre_handle(&self, event: &ChainEvent, ctx: &mut MiddlewareContext) -> MiddlewareAction {
-        // FLOWIP-120a: during deterministic replay the stage is reconstructed
-        // from recorded events and performs no live external admission, so the
-        // limiter must not consume a token, block, mark the event delayed, mutate
-        // admission state, or emit a lifecycle record. Replay reproduces identical
-        // values; pacing it would only change timing, and any delay/utilization
-        // records already exist in the archive being replayed.
-        if ctx.execution_scope().is_deterministic_replay() {
-            return MiddlewareAction::Continue;
-        }
-
-        if event.is_control() || event.is_lifecycle() {
-            return MiddlewareAction::Continue;
-        }
-
-        // FLOWIP-115d AC10/AC50: the generic handler-shell path must never block a
-        // worker thread. Hook-bound source, effect, and sink-delivery placement
-        // own paced (cancellable) admission; handler pacing is retired, and
-        // production placement on a handler shell is rejected at binding
-        // (FLOWIP-115j owns any future hook-bound handler pacing). This residual
-        // shell path performs a single non-blocking admission check and never
-        // sleeps.
-        let cost = self.core.cost_per_event();
-        if let AdmissionDecision::Admitted = self.core.try_admit_at(cost, Instant::now()) {
-            self.core.record_admitted(cost);
-        }
-        MiddlewareAction::Continue
-    }
-
-    fn post_handle(
-        &self,
-        _event: &ChainEvent,
-        _outputs: &[ChainEvent],
-        ctx: &mut MiddlewareContext,
-    ) {
-        // FLOWIP-120a: replay reconstruction performs no live admission, so the
-        // periodic activity-pulse and window-summary emissions (which also reset
-        // window counters and move limiter mode state) must be suppressed.
-        if ctx.execution_scope().is_deterministic_replay() {
-            return;
-        }
-        self.maybe_emit_activity_pulse(ctx);
-        self.maybe_emit_summary(ctx);
-    }
-
-    fn on_error(&self, _event: &ChainEvent, _ctx: &mut MiddlewareContext) -> ErrorAction {
-        // Don't consume tokens for errors
-        ErrorAction::Propagate
-    }
-}
 
 /// Per-effect policy adapter (FLOWIP-120c): one limiter instance guards one
 /// declared effect. It awaits its permit at the live effect boundary instead
 /// of blocking a worker thread, while reusing the same `RateLimiterCore`,
-/// accounting, and lifecycle-event helpers as the synchronous `Middleware`
-/// implementation.
+/// accounting, and lifecycle-event helpers.
 #[async_trait::async_trait]
 impl crate::middleware::EffectPolicy for RateLimiterMiddleware {
     fn label(&self) -> &'static str {
-        Middleware::label(self)
+        self.label()
     }
 
-    async fn admit(
-        &self,
-        _identity: &obzenflow_runtime::effects::EffectIdentity,
-        _event: &ChainEvent,
-        ctx: &mut MiddlewareContext,
-    ) -> crate::middleware::PolicyAdmission {
+    async fn admit(&self, ctx: &mut MiddlewareContext) -> crate::middleware::PolicyAdmission {
         // FLOWIP-114o: shared with the source pacing path. Replay suppression at
         // the effect boundary happens before `admit` is consulted, so this path
         // carries no scope guard of its own.
@@ -126,8 +44,6 @@ impl crate::middleware::EffectPolicy for RateLimiterMiddleware {
 
     fn observe(
         &self,
-        _identity: &obzenflow_runtime::effects::EffectIdentity,
-        _event: &ChainEvent,
         _attempt: &crate::middleware::EffectAttemptOutcome<'_>,
         ctx: &mut MiddlewareContext,
     ) {
@@ -174,7 +90,7 @@ impl RateLimiterSourcePolicy {
 #[async_trait::async_trait]
 impl SourcePolicy for RateLimiterSourcePolicy {
     fn label(&self) -> &'static str {
-        Middleware::label(self.inner.as_ref())
+        self.inner.label()
     }
 
     async fn admit(&self, ctx: &mut SourcePolicyCtx) -> SourceAdmission {
@@ -184,8 +100,12 @@ impl SourcePolicy for RateLimiterSourcePolicy {
         SourceAdmission::Admit(None)
     }
 
-    async fn after_poll(&self, batch: &[ChainEvent], ctx: &mut SourcePolicyCtx) -> SourceAfterPoll {
-        if self.charge_at == SourceRateLimitPosition::AfterPoll && !batch_has_error_marked(batch) {
+    async fn after_poll(
+        &self,
+        batch: SourceBatchFacts,
+        ctx: &mut SourcePolicyCtx,
+    ) -> SourceAfterPoll {
+        if self.charge_at == SourceRateLimitPosition::AfterPoll && !batch.has_error_marked {
             self.acquire(ctx).await;
         }
         SourceAfterPoll::Proceed
@@ -218,28 +138,17 @@ impl RateLimiterSinkPolicy {
 #[async_trait::async_trait]
 impl SinkPolicy for RateLimiterSinkPolicy {
     fn label(&self) -> &'static str {
-        Middleware::label(self.inner.as_ref())
+        self.inner.label()
     }
 
-    async fn admit(
-        &self,
-        _identity: &SinkDeliveryIdentity,
-        _attempt: &SinkDeliveryAttemptContext,
-        ctx: &mut SinkPolicyCtx,
-    ) -> SinkAdmission {
+    async fn admit(&self, ctx: &mut SinkPolicyCtx) -> SinkAdmission {
         self.inner
             .acquire_permit_async(ctx.middleware_context_mut())
             .await;
         SinkAdmission::Admit(None)
     }
 
-    fn observe(
-        &self,
-        _identity: &SinkDeliveryIdentity,
-        _attempt: &SinkDeliveryAttemptContext,
-        _outcome: &SinkDeliveryPolicyOutcome<'_>,
-        ctx: &mut SinkPolicyCtx,
-    ) {
+    fn observe(&self, _outcome: &SinkDeliveryPolicyOutcome<'_>, ctx: &mut SinkPolicyCtx) {
         let middleware_ctx = ctx.middleware_context_mut();
         self.inner.maybe_emit_activity_pulse(middleware_ctx);
         self.inner.maybe_emit_summary(middleware_ctx);
@@ -264,7 +173,7 @@ impl RateLimiterIngressPolicy {
 
 impl IngressBoundaryMiddleware for RateLimiterIngressPolicy {
     fn label(&self) -> &'static str {
-        Middleware::label(self.inner.as_ref())
+        self.inner.label()
     }
 
     fn on_ingress(&self, attempt: &IngressAttemptContext) -> IngressAdmissionDecision {
@@ -316,9 +225,10 @@ mod tests {
                     .mark_as_error("boom", ErrorKind::Remote),
             ];
 
-        // The rules read raw facts, so an error-marked batch is an error delivery.
-        assert!(batch_has_error_marked(&error_batch));
-        assert!(!batch_has_error_marked(&clean_batch));
+        let clean_facts = SourceBatchFacts::from_events(&clean_batch);
+        let error_facts = SourceBatchFacts::from_events(&error_batch);
+        assert!(!clean_facts.has_error_marked);
+        assert!(error_facts.has_error_marked);
 
         let charged = |mw: &Arc<RateLimiterMiddleware>| {
             mw.core
@@ -336,7 +246,7 @@ mod tests {
         let mut ctx = SourcePolicyCtx::new(writer);
         let _ = finite_policy.admit(&mut ctx).await;
         assert_eq!(charged(&finite), 0.0, "AfterPoll admit must not charge");
-        finite_policy.after_poll(&clean_batch, &mut ctx).await;
+        finite_policy.after_poll(clean_facts, &mut ctx).await;
         assert_eq!(
             charged(&finite),
             1.0,
@@ -349,7 +259,7 @@ mod tests {
             RateLimiterSourcePolicy::new(finite_err.clone(), SourceRateLimitPosition::AfterPoll);
         let mut ctx_err = SourcePolicyCtx::new(writer);
         finite_err_policy
-            .after_poll(&error_batch, &mut ctx_err)
+            .after_poll(error_facts, &mut ctx_err)
             .await;
         assert_eq!(
             charged(&finite_err),
@@ -364,7 +274,7 @@ mod tests {
         let mut ctx_inf = SourcePolicyCtx::new(writer);
         let _ = infinite_policy.admit(&mut ctx_inf).await;
         assert_eq!(charged(&infinite), 1.0, "PrePoll admit must charge");
-        infinite_policy.after_poll(&clean_batch, &mut ctx_inf).await;
+        infinite_policy.after_poll(clean_facts, &mut ctx_inf).await;
         assert_eq!(
             charged(&infinite),
             1.0,
@@ -379,24 +289,15 @@ mod tests {
     #[tokio::test]
     async fn effect_policy_admit_awaits_permit_without_blocking_the_runtime() {
         use crate::middleware::{EffectPolicy, PolicyAdmission};
-        use obzenflow_runtime::effects::{EffectCursor, EffectIdentity, EffectSafety};
 
         let limiter = test_middleware(StageId::new(), 10.0, Some(1.0), 1.0);
-        let identity = EffectIdentity {
-            effect_type: "test.effect",
-            safety: EffectSafety::Idempotent,
-            cursor: EffectCursor::new("test_flow", "test_stage", 1, 0),
-            idempotency_key: None,
-        };
-        let event =
-            ChainEventFactory::data_event(WriterId::from(StageId::new()), "test.input", json!({}));
         let mut ctx = MiddlewareContext::with_scope(
             obzenflow_core::MiddlewareExecutionScope::LiveEffectBoundary,
         );
 
         // The single burst token admits immediately.
         assert!(matches!(
-            limiter.admit(&identity, &event, &mut ctx).await,
+            limiter.admit(&mut ctx).await,
             PolicyAdmission::Admit
         ));
 
@@ -410,7 +311,7 @@ mod tests {
             side_order.lock().unwrap().push("side");
         });
 
-        let admission = limiter.admit(&identity, &event, &mut ctx).await;
+        let admission = limiter.admit(&mut ctx).await;
         order.lock().unwrap().push("admitted");
         side.await.expect("side task completes");
 

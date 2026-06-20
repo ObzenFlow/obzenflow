@@ -84,29 +84,16 @@ impl SinkPolicyCtx {
 
 /// A sink-delivery resilience policy behind the adapter-owned boundary.
 ///
-/// FLOWIP-115d AC59: `admit` and `observe` receive the typed delivery identity,
-/// and per-attempt context, so a policy can translate the protected delivery
-/// into an admission charge or a proof row without coupling every sink policy to
-/// the parent `ChainEvent`. FLOWIP-115h/115i extend this contract additively with
-/// sink delivery duration for slow-call accounting.
+/// The boundary owns typed delivery identity and attempt facts; policies see
+/// only the control outcome facts they actually consume. Future sink policies
+/// may extend this contract with a same-slice reader and proof.
 #[async_trait]
 pub trait SinkPolicy: Send + Sync {
     fn label(&self) -> &'static str;
 
-    async fn admit(
-        &self,
-        identity: &SinkDeliveryIdentity,
-        attempt: &SinkDeliveryAttemptContext,
-        ctx: &mut SinkPolicyCtx,
-    ) -> SinkAdmission;
+    async fn admit(&self, ctx: &mut SinkPolicyCtx) -> SinkAdmission;
 
-    fn observe(
-        &self,
-        identity: &SinkDeliveryIdentity,
-        attempt: &SinkDeliveryAttemptContext,
-        outcome: &SinkDeliveryPolicyOutcome<'_>,
-        ctx: &mut SinkPolicyCtx,
-    );
+    fn observe(&self, outcome: &SinkDeliveryPolicyOutcome<'_>, ctx: &mut SinkPolicyCtx);
 }
 
 /// Sink-delivery boundary backed by a declared-order policy chain.
@@ -132,8 +119,8 @@ type SinkAdmitGuard = Option<Box<dyn SinkAdmissionGuard>>;
 impl SinkDeliveryBoundary for PerSinkDeliveryPolicyBoundary {
     async fn around_sink_delivery(
         &self,
-        identity: &SinkDeliveryIdentity,
-        attempt: &SinkDeliveryAttemptContext,
+        _: &SinkDeliveryIdentity,
+        _: &SinkDeliveryAttemptContext,
         execute: &mut dyn SinkDeliveryExecutor,
     ) -> SinkDeliveryBoundaryReport {
         if self.policies.is_empty() {
@@ -147,7 +134,7 @@ impl SinkDeliveryBoundary for PerSinkDeliveryPolicyBoundary {
         let mut admitted: Vec<(&Arc<dyn SinkPolicy>, SinkAdmitGuard)> = Vec::new();
 
         for policy in self.policies.iter() {
-            match policy.admit(identity, attempt, &mut ctx).await {
+            match policy.admit(&mut ctx).await {
                 SinkAdmission::Admit(guard) => admitted.push((policy, guard)),
                 SinkAdmission::Reject { reason } => {
                     let outcome = SinkDeliveryPolicyOutcome::RejectedBy {
@@ -155,7 +142,7 @@ impl SinkDeliveryBoundary for PerSinkDeliveryPolicyBoundary {
                         reason: &reason,
                     };
                     for (prior, _) in admitted.iter().rev() {
-                        prior.observe(identity, attempt, &outcome, &mut ctx);
+                        prior.observe(&outcome, &mut ctx);
                     }
                     return SinkDeliveryBoundaryReport {
                         outcome: SinkDeliveryBoundaryOutcome::Rejected(SinkDeliveryRejection {
@@ -177,7 +164,7 @@ impl SinkDeliveryBoundary for PerSinkDeliveryPolicyBoundary {
             | SinkDeliveryAttemptOutcome::Panicked { .. } => SinkDeliveryPolicyOutcome::Failed,
         };
         for (policy, _) in admitted.iter().rev() {
-            policy.observe(identity, attempt, &policy_outcome, &mut ctx);
+            policy.observe(&policy_outcome, &mut ctx);
         }
 
         SinkDeliveryBoundaryReport {
@@ -214,25 +201,13 @@ mod tests {
             "third_party_reject"
         }
 
-        async fn admit(
-            &self,
-            _identity: &SinkDeliveryIdentity,
-            _attempt: &SinkDeliveryAttemptContext,
-            _ctx: &mut SinkPolicyCtx,
-        ) -> SinkAdmission {
+        async fn admit(&self, _ctx: &mut SinkPolicyCtx) -> SinkAdmission {
             SinkAdmission::Reject {
                 reason: "third party policy".to_string(),
             }
         }
 
-        fn observe(
-            &self,
-            _identity: &SinkDeliveryIdentity,
-            _attempt: &SinkDeliveryAttemptContext,
-            _outcome: &SinkDeliveryPolicyOutcome<'_>,
-            _ctx: &mut SinkPolicyCtx,
-        ) {
-        }
+        fn observe(&self, _outcome: &SinkDeliveryPolicyOutcome<'_>, _ctx: &mut SinkPolicyCtx) {}
     }
 
     /// An executor that must never run when a policy rejects before delivery.

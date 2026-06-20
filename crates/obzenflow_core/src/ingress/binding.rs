@@ -11,7 +11,8 @@
 //! handle or web-surface wiring.
 
 use super::boundary::IngressBoundaryMiddleware;
-use crate::StageId;
+use super::IngressKey;
+use crate::{StageId, StageKey};
 use std::sync::{Arc, OnceLock};
 
 /// The boundary plus replay-stable identity the DSL fills into a hosted-ingress
@@ -26,7 +27,7 @@ pub struct FilledHostedIngress {
     pub stage_id: StageId,
     /// Replay-stable source stage key (`StageConfig.name`, the `run_manifest.json`
     /// key).
-    pub stage_key: String,
+    pub stage_key: StageKey,
     /// The composed ingress admission boundary, or `None` when a hosted source
     /// has no ingress middleware attached (the slot is still filled so startup
     /// can verify every hosted surface was placed in topology).
@@ -60,12 +61,12 @@ impl std::error::Error for HostedIngressAlreadyBound {}
 /// visible to the surface half.
 #[derive(Clone)]
 pub struct HostedIngressBindingSlot {
-    ingress_key: String,
+    ingress_key: IngressKey,
     cell: Arc<OnceLock<FilledHostedIngress>>,
 }
 
 impl HostedIngressBindingSlot {
-    pub fn new(ingress_key: impl Into<String>) -> Self {
+    pub fn new(ingress_key: impl Into<IngressKey>) -> Self {
         Self {
             ingress_key: ingress_key.into(),
             cell: Arc::new(OnceLock::new()),
@@ -73,7 +74,7 @@ impl HostedIngressBindingSlot {
     }
 
     /// The protocol-neutral key identifying this hosted ingress surface.
-    pub fn ingress_key(&self) -> &str {
+    pub fn ingress_key(&self) -> &IngressKey {
         &self.ingress_key
     }
 
