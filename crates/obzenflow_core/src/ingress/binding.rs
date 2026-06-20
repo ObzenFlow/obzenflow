@@ -5,10 +5,10 @@
 //! FLOWIP-115d: the hosted-ingress binding slot.
 //!
 //! The write-once coordination primitive shared between a hosted source's typed
-//! half (which enters flow topology) and its hosted web-surface half (which
-//! enters `FlowApplication`). `http_ingress` creates it, the DSL fills it during
-//! source-stage materialization, and `FlowApplication` reads it during
-//! web-surface wiring.
+//! half (which enters flow topology) and its ingress handle or optional hosted
+//! web-surface half. The ingress source/handle constructor creates it, the DSL
+//! fills it during source-stage materialization, and the host reads it during
+//! handle or web-surface wiring.
 
 use super::boundary::IngressBoundaryMiddleware;
 use crate::StageId;
@@ -60,21 +60,21 @@ impl std::error::Error for HostedIngressAlreadyBound {}
 /// visible to the surface half.
 #[derive(Clone)]
 pub struct HostedIngressBindingSlot {
-    base_path: String,
+    ingress_key: String,
     cell: Arc<OnceLock<FilledHostedIngress>>,
 }
 
 impl HostedIngressBindingSlot {
-    pub fn new(base_path: impl Into<String>) -> Self {
+    pub fn new(ingress_key: impl Into<String>) -> Self {
         Self {
-            base_path: base_path.into(),
+            ingress_key: ingress_key.into(),
             cell: Arc::new(OnceLock::new()),
         }
     }
 
-    /// The normalised hosted base path identifying this surface.
-    pub fn base_path(&self) -> &str {
-        &self.base_path
+    /// The protocol-neutral key identifying this hosted ingress surface.
+    pub fn ingress_key(&self) -> &str {
+        &self.ingress_key
     }
 
     /// Fill the slot once. Returns `Err` if it was already filled, which the

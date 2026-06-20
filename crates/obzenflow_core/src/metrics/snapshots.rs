@@ -175,7 +175,7 @@ pub struct AppMetricsSnapshot {
     pub http_surface_metrics: Vec<HttpSurfaceRouteMetricsSnapshot>,
 
     /// Hosted-ingress refusal totals projected from `IngressRefusal` facts
-    /// (FLOWIP-115d), keyed by `(base_path, reason)`. This replaces the former
+    /// (FLOWIP-115d), keyed by `(ingress_key, reason)`. This replaces the former
     /// in-memory ingestion reject counters, so the metric folds journal facts and
     /// is replay-faithful.
     pub ingestion_refusal_totals: HashMap<(String, String), u64>,
@@ -302,11 +302,6 @@ pub struct InfraMetricsSnapshot {
 
     /// Continuous liveness metrics derived from the in-memory heartbeat snapshots store (FLOWIP-063e).
     pub liveness_metrics: LivenessMetricsSnapshot,
-
-    /// HTTP ingestion telemetry observed directly from `FlowApplication`-owned ingress handles.
-    ///
-    /// Keyed by `base_path` (e.g., "/api/ingest").
-    pub ingestion_metrics: HashMap<String, crate::ingress::IngestionTelemetrySnapshot>,
 }
 
 /// Snapshot of continuous heartbeat-derived liveness metrics (FLOWIP-063e).
@@ -562,7 +557,6 @@ impl Default for InfraMetricsSnapshot {
             journal_metrics: JournalMetricsSnapshot::default(),
             stage_metrics: HashMap::new(),
             liveness_metrics: LivenessMetricsSnapshot::default(),
-            ingestion_metrics: HashMap::new(),
         }
     }
 }

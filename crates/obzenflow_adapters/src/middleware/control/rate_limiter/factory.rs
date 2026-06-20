@@ -26,7 +26,7 @@ use crate::middleware::{
     MiddlewareAttachmentRequest, MiddlewareDeclaration, MiddlewareFactory, MiddlewareFactoryError,
     MiddlewareMaterializationContext, MiddlewareOverrideKey, MiddlewarePlanContribution,
     MiddlewareSafety, MiddlewareSurface, MiddlewareSurfaceAttachment, MiddlewareSurfaceKind,
-    SinkPolicy, SourcePollAttachment, SourcePolicy, TopologyMiddlewareConfigSlot,
+    SinkPolicy, SourcePolicy, SourcePollAttachment, TopologyMiddlewareConfigSlot,
 };
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::ingress::IngressBoundaryMiddleware;

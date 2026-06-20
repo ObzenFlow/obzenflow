@@ -208,20 +208,20 @@ pub(crate) fn materialize_sink_delivery(
 /// ingress surface (FLOWIP-115d), returning the neutral core-owned boundary the
 /// hosted endpoints call. The ingress identity is source-stage-owned: the owner
 /// is the linked source stage (its id plus the replay-stable `StageConfig.name`
-/// key), and the hosted target is the normalised base path under the default
-/// admission route scope shared by `/events` and `/batch`.
+/// key), and the hosted target is the protocol-neutral ingress key under the
+/// default admission route scope.
 pub(crate) fn materialize_ingress(
     factory: &dyn MiddlewareFactory,
     config: &StageConfig,
     stage_type: StageType,
     control_middleware: &Arc<ControlMiddlewareAggregator>,
-    base_path: &str,
+    ingress_key: &str,
     origin: &MiddlewareOrigin,
     declaration_index: MiddlewareDeclarationIndex,
 ) -> Result<Arc<dyn IngressBoundaryMiddleware>, String> {
     let stage_key = IngressStageKey(config.name.clone());
     let target = HostedIngressTargetKey {
-        surface: HostedIngressSurfaceKey(base_path.to_string()),
+        surface: HostedIngressSurfaceKey(ingress_key.to_string()),
         scope: IngressRouteScope::Admission,
     };
     let surface = MiddlewareSurface::Ingress(IngressSurface {

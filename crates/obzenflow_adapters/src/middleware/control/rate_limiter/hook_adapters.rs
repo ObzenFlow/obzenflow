@@ -154,7 +154,10 @@ pub(super) struct RateLimiterSourcePolicy {
 }
 
 impl RateLimiterSourcePolicy {
-    pub(super) fn new(inner: Arc<RateLimiterMiddleware>, charge_at: SourceRateLimitPosition) -> Self {
+    pub(super) fn new(
+        inner: Arc<RateLimiterMiddleware>,
+        charge_at: SourceRateLimitPosition,
+    ) -> Self {
         Self { inner, charge_at }
     }
 

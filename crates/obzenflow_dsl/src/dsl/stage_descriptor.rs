@@ -156,7 +156,7 @@ fn build_source_middleware_and_register_policies(
                     config,
                     stage_type,
                     control_middleware,
-                    slot.base_path(),
+                    slot.ingress_key(),
                     &origin,
                     MiddlewareDeclarationIndex::resolved(middleware_index),
                 )?;
@@ -2825,7 +2825,7 @@ mod tests {
             cycle_guard: None,
         };
         let control = Arc::new(ControlMiddlewareAggregator::new());
-        let slot = HostedIngressBindingSlot::new("/api/bank/accounts");
+        let slot = HostedIngressBindingSlot::new("bank.accounts");
 
         // A hosted ingress source with a rate limiter as its stage middleware.
         let resolved = crate::middleware_resolution::resolve_middleware(
@@ -3000,7 +3000,7 @@ mod tests {
             cycle_guard: None,
         };
         let control = Arc::new(ControlMiddlewareAggregator::new());
-        let slot = HostedIngressBindingSlot::new("/api/bank/accounts");
+        let slot = HostedIngressBindingSlot::new("bank.accounts");
 
         // The same resolve -> build -> materialize carrier path as the built-in
         // limiter, but with a user-authored factory.

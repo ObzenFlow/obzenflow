@@ -6,7 +6,6 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use obzenflow_core::event::context::StageType;
-use obzenflow_core::ingress::IngestionTelemetrySnapshot;
 use obzenflow_core::event::JournalWriterId;
 use obzenflow_core::event::{ChainEventFactory, SystemEvent, SystemEventType, WriterId};
 use obzenflow_core::id::{StageId, SystemId};
@@ -231,35 +230,8 @@ async fn running_state_process_batch_transitions() {
     );
 }
 
-#[test]
-fn infra_exporter_records_ingestion_snapshots_on_infra_path() {
-    let exporter = RecordingExporter::default();
-    let mut snapshot = InfraMetricsSnapshot::default();
-    // FLOWIP-115d: ingestion telemetry is a live gauge; counters were removed.
-    snapshot.ingestion_metrics.insert(
-        "/api/ingest".to_string(),
-        IngestionTelemetrySnapshot {
-            base_path: "/api/ingest".to_string(),
-            channel_depth: 12,
-            channel_capacity: 10_000,
-        },
-    );
-
-    exporter.update_infra_metrics(snapshot).unwrap();
-
-    let snapshots = exporter.infra_snapshots.lock().unwrap();
-    let last = snapshots.last().expect("exported infra snapshot");
-    let ing = last
-        .ingestion_metrics
-        .get("/api/ingest")
-        .expect("ingestion metrics entry");
-    assert_eq!(ing.base_path, "/api/ingest");
-    assert_eq!(ing.channel_depth, 12);
-    assert_eq!(ing.channel_capacity, 10_000);
-}
-
 /// FLOWIP-115d Phase 7: the metrics aggregator projects `IngressRefusal` facts
-/// into per-`(base_path, reason)` totals by folding them, incrementing by the
+/// into per-`(ingress_key, reason)` totals by folding them, incrementing by the
 /// refused `event_count`. Because the metric is a pure fold of journalled facts,
 /// strict replay over the same journal reproduces the identical totals, where the
 /// former in-memory counter would have read zero.
@@ -278,7 +250,7 @@ async fn ingress_refusal_facts_project_to_per_reason_totals() {
         SystemEvent::new(
             writer,
             SystemEventType::IngressRefusal {
-                base_path: "/api/orders".to_string(),
+                ingress_key: "orders".to_string(),
                 stage_id,
                 stage_key: "orders".to_string(),
                 reason,
@@ -314,14 +286,14 @@ async fn ingress_refusal_facts_project_to_per_reason_totals() {
     let last = snapshots.last().expect("exported app snapshot");
     assert_eq!(
         last.ingestion_refusal_totals
-            .get(&("/api/orders".to_string(), "rate_limited".to_string()))
+            .get(&("orders".to_string(), "rate_limited".to_string()))
             .copied(),
         Some(2),
         "two single rate-limited refusals sum to 2"
     );
     assert_eq!(
         last.ingestion_refusal_totals
-            .get(&("/api/orders".to_string(), "validation".to_string()))
+            .get(&("orders".to_string(), "validation".to_string()))
             .copied(),
         Some(3),
         "a validation refusal of three events counts the events"

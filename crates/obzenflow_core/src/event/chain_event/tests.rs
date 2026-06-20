@@ -3,12 +3,12 @@
 // https://obzenflow.dev
 
 use super::*;
-use crate::ingress::IngressContext;
 use crate::event::payloads::effect_payload::{
     EffectCursor, EffectDescriptor, EffectFactOwner, EffectProvenance, EFFECT_RECORD_EVENT_TYPE,
 };
 use crate::event::types::CorrelationId;
 use crate::id::StageId;
+use crate::ingress::IngressContext;
 use crate::WriterId;
 use serde_json::json;
 
@@ -35,7 +35,7 @@ fn test_derived_event() {
     )
     .with_ingress_context(IngressContext {
         accepted_at_ns: 42,
-        base_path: "/api/test".to_string(),
+        ingress_key: "test".to_string(),
         batch_index: Some(1),
         attempt_seq: crate::ingress::IngressAttemptSeq(0),
     });

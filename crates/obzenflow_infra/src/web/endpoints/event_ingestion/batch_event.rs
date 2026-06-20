@@ -6,9 +6,7 @@ use super::shared::{join_path, unix_now_nanos};
 use super::IngestionState;
 use super::{authorize_request, validate_submission};
 use async_trait::async_trait;
-use obzenflow_core::ingress::{
-    BatchSubmission, SubmissionIngressContext, SubmissionResponse,
-};
+use obzenflow_core::ingress::{BatchSubmission, SubmissionIngressContext, SubmissionResponse};
 use obzenflow_core::ingress::{
     IngressAdmissionDecision, IngressAdmissionOutcome, IngressAttemptContext, IngressRefusalReason,
 };
@@ -332,11 +330,11 @@ impl HttpEndpoint for BatchEventEndpoint {
         }
 
         let accepted_at_ns = unix_now_nanos();
-        let base_path = self.state.config.base_path.clone();
+        let ingress_key = self.state.config.ingress_key.clone();
         for (permit, (batch_index, mut event)) in permits.into_iter().zip(accepted_events) {
             event.ingress_handoff = Some(SubmissionIngressContext {
                 accepted_at_ns,
-                base_path: base_path.clone(),
+                ingress_key: ingress_key.clone(),
                 batch_index: Some(batch_index),
                 attempt_seq,
             });

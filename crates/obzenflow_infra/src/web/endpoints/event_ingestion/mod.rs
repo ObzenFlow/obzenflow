@@ -2,9 +2,12 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! HTTP event ingestion endpoints
+//! Handle-first ingress plus optional HTTP event ingestion endpoints
 //!
-//! Provides a small ingestion surface for push-based flows:
+//! The primary push API is `ingress_source::<T>()`, which returns a typed source
+//! plus a cloneable handle the application can mount behind its own HTTP/RPC
+//! surface. `http_ingress::<T>()` is a convenience wrapper that provides the
+//! historical hosted HTTP routes:
 //! - `POST {base_path}/events` (single event)
 //! - `POST {base_path}/batch`  (batch)
 //! - `GET  {base_path}/health` (ingestion readiness/backpressure)
@@ -17,19 +20,20 @@ mod single_event;
 mod validation;
 
 pub use auth::{authorize_request, AuthConfig, AuthError};
-pub use shared::{IngestionConfig, IngestionState};
+pub use shared::{IngestionConfig, IngestionState, IngressSubmitOutcome};
 pub use validation::{
     validate_submission, SchemaValidator, TypedValidator, ValidationConfig, ValidationError,
 };
 
 use obzenflow_adapters::sources::http::{HttpSource, HttpSourceTyped};
 use obzenflow_core::ingress::EventSubmission;
-use obzenflow_core::ingress::IngestionTelemetry;
-use obzenflow_core::ingress::HostedIngressBindingSlot;
 use obzenflow_core::web::HttpEndpoint;
 use obzenflow_core::TypedPayload;
+use obzenflow_runtime::prelude::FlowHandle;
+use std::marker::PhantomData;
 use std::sync::Arc;
 use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 
 use crate::application::{
     ApplicationError, WebSurfaceAttachment, WebSurfaceWiring, WebSurfaceWiringContext,
@@ -39,6 +43,115 @@ use batch_event::BatchEventEndpoint;
 use health::IngestionHealthEndpoint;
 use single_event::SingleEventEndpoint;
 
+/// Errors returned before a typed payload reaches ingress admission.
+#[derive(Debug, thiserror::Error)]
+pub enum IngressSubmitError {
+    #[error("failed to serialize ingress payload: {0}")]
+    Serialize(String),
+}
+
+/// Cloneable developer-owned ingress sender.
+pub struct IngressHandle<T>
+where
+    T: TypedPayload + Send + Sync + 'static,
+{
+    state: IngestionState,
+    _phantom: PhantomData<fn() -> T>,
+}
+
+impl<T> Clone for IngressHandle<T>
+where
+    T: TypedPayload + Send + Sync + 'static,
+{
+    fn clone(&self) -> Self {
+        Self {
+            state: self.state.clone(),
+            _phantom: PhantomData,
+        }
+    }
+}
+
+impl<T> IngressHandle<T>
+where
+    T: TypedPayload + Send + Sync + 'static,
+{
+    /// Submit one typed payload through fail-fast ingress admission.
+    pub async fn submit(&self, payload: T) -> Result<IngressSubmitOutcome, IngressSubmitError> {
+        let data = serde_json::to_value(payload)
+            .map_err(|e| IngressSubmitError::Serialize(e.to_string()))?;
+        let submission = EventSubmission {
+            event_type: T::versioned_event_type(),
+            data,
+            metadata: None,
+            ingress_handoff: None,
+        };
+        Ok(self.state.submit_one(submission).await)
+    }
+
+    /// Protocol-neutral ingress key used in provenance, refusal facts, and metrics.
+    pub fn ingress_key(&self) -> &str {
+        &self.state.config.ingress_key
+    }
+
+    pub(crate) fn state(&self) -> IngestionState {
+        self.state.clone()
+    }
+
+    pub(crate) fn bind_flow_handle(
+        &self,
+        flow_handle: &Arc<FlowHandle>,
+    ) -> Result<JoinHandle<()>, ApplicationError> {
+        let slot = self.state.ingress_slot();
+        if !slot.is_filled() {
+            return Err(ApplicationError::FlowBuildFailed(format!(
+                "hosted ingress handle '{}' was registered but its source half was not placed in \
+                 the flow topology; place the ingress source in flow!",
+                slot.ingress_key()
+            )));
+        }
+
+        if self.state.refusal_recording_enabled() {
+            match flow_handle.system_journal() {
+                Some(journal) => self.state.install_refusal_writer(journal),
+                None => {
+                    return Err(ApplicationError::FlowBuildFailed(format!(
+                        "hosted ingress handle '{}' has refusal recording enabled but no \
+                         system journal is available; disable record_ingress_refusals or run \
+                         with a system journal",
+                        self.state.config.ingress_key
+                    )));
+                }
+            }
+        }
+
+        Ok(self
+            .state
+            .watch_pipeline_state(flow_handle.state_receiver()))
+    }
+}
+
+/// Typed source plus ingress handle for developer-owned ingress protocols.
+pub struct Ingress<T>
+where
+    T: TypedPayload + Send + Sync + 'static,
+{
+    source: HttpSourceTyped<T>,
+    handle: IngressHandle<T>,
+}
+
+impl<T> Ingress<T>
+where
+    T: TypedPayload + Send + Sync + 'static,
+{
+    pub fn source(&self) -> HttpSourceTyped<T> {
+        self.source.clone()
+    }
+
+    pub fn handle(&self) -> IngressHandle<T> {
+        self.handle.clone()
+    }
+}
+
 /// Framework-owned HTTP ingress bundle for a single typed payload.
 pub struct HttpIngress<T>
 where
@@ -46,7 +159,7 @@ where
 {
     surface: WebSurfaceAttachment,
     source: HttpSourceTyped<T>,
-    telemetry: Arc<IngestionTelemetry>,
+    handle: IngressHandle<T>,
 }
 
 impl<T> HttpIngress<T>
@@ -58,16 +171,35 @@ where
         self.source.clone()
     }
 
+    /// Clone the underlying handle used by the hosted HTTP adaptor.
+    pub fn handle(&self) -> IngressHandle<T> {
+        self.handle.clone()
+    }
+
     /// Consume the bundle and return the hosted surface attachment.
     pub fn into_surface(self) -> WebSurfaceAttachment {
         self.surface
     }
 
-    pub(crate) fn into_surface_and_telemetry(
-        self,
-    ) -> (WebSurfaceAttachment, Arc<IngestionTelemetry>) {
-        (self.surface, self.telemetry)
+    pub(crate) fn into_surface_and_handle(self) -> (WebSurfaceAttachment, IngressHandle<T>) {
+        (self.surface, self.handle)
     }
+}
+
+/// Create a typed source plus protocol-neutral ingress handle for `T`.
+pub fn ingress_source<T>(config: IngestionConfig) -> Ingress<T>
+where
+    T: TypedPayload + Send + Sync + std::fmt::Debug + 'static,
+{
+    let (state, rx) = IngestionState::new(config);
+    let source = HttpSource::new(rx)
+        .with_ingress_slot(state.ingress_slot())
+        .typed::<T>();
+    let handle = IngressHandle {
+        state,
+        _phantom: PhantomData,
+    };
+    Ingress { source, handle }
 }
 
 /// Create a zero-wiring HTTP ingress bundle for `T`.
@@ -84,15 +216,15 @@ where
         });
     }
 
-    let (surface, rx, telemetry, ingress_slot) = create_ingestion_surface(config);
-    let source = HttpSource::new(rx)
-        .with_ingress_slot(ingress_slot)
-        .typed::<T>();
+    let ingress = ingress_source::<T>(config);
+    let source = ingress.source();
+    let handle = ingress.handle();
+    let surface = create_ingestion_surface_from_state(handle.state());
 
     HttpIngress {
         surface,
         source,
-        telemetry,
+        handle,
     }
 }
 
@@ -121,16 +253,7 @@ pub(crate) fn create_ingestion_endpoints(
     (endpoints, rx, state)
 }
 
-pub(crate) fn create_ingestion_surface(
-    config: IngestionConfig,
-) -> (
-    WebSurfaceAttachment,
-    mpsc::Receiver<EventSubmission>,
-    Arc<IngestionTelemetry>,
-    HostedIngressBindingSlot,
-) {
-    let (state, rx) = IngestionState::new(config);
-    let telemetry = state.telemetry();
+fn create_ingestion_surface_from_state(state: IngestionState) -> WebSurfaceAttachment {
     let ingress_slot = state.ingress_slot();
     let base_path = state.config.base_path.clone();
 
@@ -156,7 +279,7 @@ pub(crate) fn create_ingestion_surface(
                             "hosted ingress surface '{}' has refusal recording enabled but no \
                              system journal is available; disable record_ingress_refusals or run \
                              with a system journal",
-                            state_for_wiring.config.base_path
+                            state_for_wiring.config.ingress_key
                         )));
                     }
                 }
@@ -165,7 +288,7 @@ pub(crate) fn create_ingestion_surface(
             Ok(WebSurfaceWiring::new(vec![task]))
         });
 
-    (surface, rx, telemetry, ingress_slot)
+    surface
 }
 
 #[cfg(test)]
@@ -379,6 +502,113 @@ mod tests {
             JournalOwner::system(SystemId::new()),
         )));
         (state, rx)
+    }
+
+    #[tokio::test]
+    async fn ingress_handle_submits_without_http_envelope_and_records_refusals() {
+        use obzenflow_core::ingress::{
+            IngressAdmissionDecision, IngressAdmissionOutcome, IngressAttemptContext,
+        };
+        use obzenflow_core::{TypedPayload, WriterId};
+        use serde::{Deserialize, Serialize};
+
+        #[derive(Debug, Clone, Serialize, Deserialize)]
+        struct HandlePayload {
+            order_id: String,
+        }
+
+        impl TypedPayload for HandlePayload {
+            const EVENT_TYPE: &'static str = "order.created";
+        }
+
+        struct AcceptThenReject {
+            calls: AtomicUsize,
+        }
+
+        impl IngressBoundaryMiddleware for AcceptThenReject {
+            fn label(&self) -> &'static str {
+                "accept_then_reject"
+            }
+
+            fn on_ingress(&self, _attempt: &IngressAttemptContext) -> IngressAdmissionDecision {
+                if self.calls.fetch_add(1, Ordering::AcqRel) == 0 {
+                    IngressAdmissionDecision::Accept
+                } else {
+                    IngressAdmissionDecision::Reject {
+                        retry_after: Some(Duration::from_secs(2)),
+                    }
+                }
+            }
+
+            fn observe(&self, _attempt: &IngressAttemptContext, _outcome: IngressAdmissionOutcome) {
+            }
+        }
+
+        let ingress = ingress_source::<HandlePayload>(IngestionConfig {
+            ingress_key: "orders".to_string(),
+            record_ingress_refusals: true,
+            ..Default::default()
+        });
+        let handle = ingress.handle();
+        let mut source = ingress.source();
+        let state = handle.state();
+        state.ready.store(true, Ordering::Release);
+        state
+            .ingress_slot()
+            .fill(FilledHostedIngress {
+                stage_id: StageId::new(),
+                stage_key: "orders".to_string(),
+                boundary: Some(Arc::new(AcceptThenReject {
+                    calls: AtomicUsize::new(0),
+                })),
+            })
+            .expect("slot fill succeeds once");
+        let journal = Arc::new(MemoryJournal::with_owner(JournalOwner::system(
+            SystemId::new(),
+        )));
+        state.install_refusal_writer(journal.clone());
+
+        let accepted = handle
+            .submit(HandlePayload {
+                order_id: "1".to_string(),
+            })
+            .await
+            .expect("typed payload serializes");
+        assert!(matches!(
+            accepted,
+            IngressSubmitOutcome::Accepted {
+                attempt_seq: IngressAttemptSeq(0),
+                event_count: 1,
+            }
+        ));
+
+        source.bind_writer_id(WriterId::from(StageId::new()));
+        let events = source.next().await.expect("accepted event reaches source");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_type(), "order.created.v1");
+        let context = events[0].ingress_context.as_ref().expect("ingress context");
+        assert_eq!(context.ingress_key, "orders");
+        assert_eq!(context.attempt_seq, IngressAttemptSeq(0));
+
+        let rejected = handle
+            .submit(HandlePayload {
+                order_id: "2".to_string(),
+            })
+            .await
+            .expect("typed payload serializes");
+        assert!(matches!(
+            rejected,
+            IngressSubmitOutcome::Rejected {
+                attempt_seq: IngressAttemptSeq(1),
+                reason: IngressRefusalReason::RateLimited,
+                event_count: 1,
+                ..
+            }
+        ));
+        assert_eq!(
+            refusal_facts(&journal).await,
+            vec![(IngressRefusalReason::RateLimited, 1)]
+        );
     }
 
     /// Read the `(reason, event_count)` of every `IngressRefusal` fact, in order.
@@ -1151,7 +1381,7 @@ mod tests {
             ..IngestionConfig::default()
         });
         let mut source = ingress.source();
-        let (surface, _telemetry) = ingress.into_surface_and_telemetry();
+        let (surface, _handle) = ingress.into_surface_and_handle();
         let (_name, endpoints, wiring, _ingress_slot) = surface.into_parts();
 
         let wiring = wiring.expect("ingress surface wiring");
@@ -1193,7 +1423,7 @@ mod tests {
             other => panic!("expected data event, got {other:?}"),
         }
         let ingress_context = out[0].ingress_context.as_ref().expect("ingress context");
-        assert_eq!(ingress_context.base_path, "/api/ingest");
+        assert_eq!(ingress_context.ingress_key, "/api/ingest");
         assert_eq!(ingress_context.batch_index, None);
 
         for task in wired.tasks {
@@ -1221,7 +1451,7 @@ mod tests {
             ..Default::default()
         });
         let source = ingress.source();
-        let (surface, _telemetry) = ingress.into_surface_and_telemetry();
+        let (surface, _handle) = ingress.into_surface_and_handle();
         let (_name, endpoints, wiring, _ingress_slot) = surface.into_parts();
         let wiring = wiring.expect("ingress surface wiring");
         let events_endpoint = endpoints
@@ -1328,7 +1558,7 @@ mod tests {
             ..Default::default()
         });
         let source = ingress.source();
-        let (surface, _telemetry) = ingress.into_surface_and_telemetry();
+        let (surface, _handle) = ingress.into_surface_and_handle();
         let (_name, endpoints, wiring, _slot) = surface.into_parts();
         let wiring = wiring.expect("ingress surface wiring");
         let events_endpoint = endpoints
@@ -1431,9 +1661,9 @@ mod tests {
                 SystemEventType::IngressRefusal {
                     reason,
                     event_count,
-                    base_path,
+                    ingress_key,
                     ..
-                } => Some((reason, event_count, base_path)),
+                } => Some((reason, event_count, ingress_key)),
                 _ => None,
             })
             .collect();

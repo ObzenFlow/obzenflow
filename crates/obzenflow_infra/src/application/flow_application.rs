@@ -17,10 +17,9 @@ use super::{
     WebSurfaceWiringContext,
 };
 use crate::application::config::{CorsModeArg, ResolvedStartupConfig, StartupMode};
-use crate::web::endpoints::event_ingestion::HttpIngress;
+use crate::web::endpoints::event_ingestion::{HttpIngress, IngressHandle};
 #[cfg(feature = "warp-server")]
 use crate::web::surface_metrics::{HttpSurfaceMetricsCollector, HttpSurfaceMetricsEmitter};
-use obzenflow_core::ingress::IngestionTelemetry;
 use obzenflow_core::metrics::{InfraMetricsSnapshot, MetricsExporter};
 use obzenflow_core::web::{CorsConfig, CorsMode, HttpEndpoint, ServerConfig};
 use obzenflow_core::TypedPayload;
@@ -34,14 +33,14 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::task::JoinHandle;
 
-type FlowHandleHook = Box<dyn Fn(&Arc<FlowHandle>) -> JoinHandle<()> + Send + Sync>;
+type FlowHandleHook =
+    Box<dyn Fn(&Arc<FlowHandle>) -> Result<JoinHandle<()>, ApplicationError> + Send + Sync>;
 
 #[derive(Default)]
 struct LaunchParams {
     builder_config_file: Option<PathBuf>,
     enable_autodiscovery: bool,
     web_surfaces: Vec<WebSurfaceAttachment>,
-    ingress_telemetry: Vec<Arc<IngestionTelemetry>>,
     extra_endpoints: Vec<Box<dyn HttpEndpoint>>,
     flow_handle_hooks: Vec<FlowHandleHook>,
     presentation: Option<Presentation>,
@@ -187,7 +186,7 @@ enabled = false
                 },
                 LaunchParams {
                     enable_autodiscovery: false,
-                    flow_handle_hooks: vec![Box::new(hook)],
+                    flow_handle_hooks: vec![Box::new(move |flow_handle| Ok(hook(flow_handle)))],
                     cli_args: Some(vec![
                         OsString::from("obzenflow"),
                         OsString::from("--config"),
@@ -281,7 +280,6 @@ pub struct FlowApplicationBuilder {
     log_level: Option<LogLevel>,
     config_file: Option<PathBuf>,
     web_surfaces: Vec<WebSurfaceAttachment>,
-    ingress_telemetry: Vec<Arc<IngestionTelemetry>>,
     web_endpoints: Vec<Box<dyn HttpEndpoint>>,
     flow_handle_hooks: Vec<FlowHandleHook>,
     presentation: Option<Presentation>,
@@ -368,14 +366,25 @@ impl FlowApplicationBuilder {
         self
     }
 
-    /// Register a framework-owned HTTP ingress bundle.
+    /// Register the optional framework-owned HTTP ingress adaptor.
     pub fn with_http_ingress<T>(mut self, ingress: HttpIngress<T>) -> Self
     where
         T: TypedPayload + Send + Sync + 'static,
     {
-        let (surface, telemetry) = ingress.into_surface_and_telemetry();
+        let (surface, handle) = ingress.into_surface_and_handle();
         self.web_surfaces.push(surface);
-        self.ingress_telemetry.push(telemetry);
+        self = self.with_ingress_handle(handle);
+        self
+    }
+
+    /// Wire a developer-owned ingress handle to the built flow.
+    pub fn with_ingress_handle<T>(mut self, handle: IngressHandle<T>) -> Self
+    where
+        T: TypedPayload + Send + Sync + 'static,
+    {
+        self.flow_handle_hooks.push(Box::new(move |flow_handle| {
+            handle.bind_flow_handle(flow_handle)
+        }));
         self
     }
 
@@ -392,7 +401,8 @@ impl FlowApplicationBuilder {
     where
         F: Fn(&Arc<FlowHandle>) -> JoinHandle<()> + Send + Sync + 'static,
     {
-        self.flow_handle_hooks.push(Box::new(hook));
+        self.flow_handle_hooks
+            .push(Box::new(move |flow_handle| Ok(hook(flow_handle))));
         self
     }
 
@@ -419,7 +429,6 @@ impl FlowApplicationBuilder {
         let FlowApplicationBuilder {
             config_file,
             web_surfaces,
-            ingress_telemetry,
             web_endpoints,
             flow_handle_hooks,
             presentation,
@@ -434,7 +443,6 @@ impl FlowApplicationBuilder {
                 builder_config_file: config_file,
                 enable_autodiscovery: true,
                 web_surfaces,
-                ingress_telemetry,
                 extra_endpoints: web_endpoints,
                 flow_handle_hooks,
                 presentation,
@@ -456,7 +464,6 @@ impl FlowApplicationBuilder {
         let FlowApplicationBuilder {
             config_file,
             web_surfaces,
-            ingress_telemetry,
             web_endpoints,
             flow_handle_hooks,
             presentation,
@@ -471,7 +478,6 @@ impl FlowApplicationBuilder {
                 builder_config_file: config_file,
                 enable_autodiscovery: true,
                 web_surfaces,
-                ingress_telemetry,
                 extra_endpoints: web_endpoints,
                 flow_handle_hooks,
                 presentation,
@@ -701,7 +707,6 @@ impl FlowApplication {
             builder_config_file,
             enable_autodiscovery,
             web_surfaces,
-            ingress_telemetry,
             extra_endpoints,
             flow_handle_hooks,
             presentation,
@@ -749,8 +754,6 @@ impl FlowApplication {
         let _ = crate::journal::factory::take_last_run_dir();
 
         let grace_timeout = config.runtime.shutdown_timeout;
-        let ingestion_metrics_interval = config.runtime.ingestion_metrics_interval;
-
         #[cfg(feature = "warp-server")]
         let surface_metrics_interval = config.runtime.surface_metrics_interval;
 
@@ -826,23 +829,20 @@ impl FlowApplication {
             let flow_handle = Arc::new(flow_handle);
             let flow_name = flow_handle.flow_name().to_string();
 
-            managed_tasks = flow_handle_hooks
-                .iter()
-                .map(|hook| hook(&flow_handle))
-                .collect();
+            for hook in &flow_handle_hooks {
+                match hook(&flow_handle) {
+                    Ok(task) => managed_tasks.push(task),
+                    Err(err) => break 'run (Err(err), Some(flow_name.clone()), run_dir, false),
+                }
+            }
 
             if let Some(exporter) = flow_handle.metrics_exporter() {
                 let liveness_snapshots = flow_handle.liveness_snapshots();
-                Self::publish_infra_snapshot(
-                    &exporter,
-                    &ingress_telemetry,
-                    liveness_snapshots.as_ref(),
-                );
+                Self::publish_infra_snapshot(&exporter, liveness_snapshots.as_ref());
                 managed_tasks.push(Self::spawn_infra_metrics_collector(
                     exporter,
-                    ingress_telemetry.clone(),
                     liveness_snapshots,
-                    ingestion_metrics_interval,
+                    config.runtime.surface_metrics_interval,
                 ));
             }
 
@@ -880,10 +880,10 @@ impl FlowApplication {
                     if !slot.is_filled() {
                         break 'run (
                             Err(ApplicationError::FlowBuildFailed(format!(
-                                "hosted ingress surface '{surface_name}' (base path '{}') was \
+                                "hosted ingress surface '{surface_name}' (ingress key '{}') was \
                                  registered but its source half was not placed in the flow \
                                  topology; place the http_ingress source in flow!",
-                                slot.base_path()
+                                slot.ingress_key()
                             ))),
                             Some(flow_name.clone()),
                             run_dir,
@@ -1373,16 +1373,9 @@ impl FlowApplication {
     }
 
     fn build_infra_snapshot(
-        telemetry_handles: &[Arc<IngestionTelemetry>],
         liveness_snapshots: Option<&LivenessSnapshots>,
     ) -> InfraMetricsSnapshot {
         let mut snapshot = InfraMetricsSnapshot::default();
-        for telemetry in telemetry_handles {
-            snapshot
-                .ingestion_metrics
-                .insert(telemetry.base_path().to_string(), telemetry.snapshot());
-        }
-
         if let Some(liveness_snapshots) = liveness_snapshots {
             liveness_snapshots.with_read(|guard| {
                 for (stage_id, stage) in guard.iter() {
@@ -1428,18 +1421,16 @@ impl FlowApplication {
 
     fn publish_infra_snapshot(
         exporter: &Arc<dyn MetricsExporter>,
-        telemetry_handles: &[Arc<IngestionTelemetry>],
         liveness_snapshots: Option<&LivenessSnapshots>,
     ) {
-        let snapshot = Self::build_infra_snapshot(telemetry_handles, liveness_snapshots);
+        let snapshot = Self::build_infra_snapshot(liveness_snapshots);
         if let Err(err) = exporter.update_infra_metrics(snapshot) {
-            tracing::warn!("Failed to export ingress infrastructure metrics: {}", err);
+            tracing::warn!("Failed to export infrastructure metrics: {}", err);
         }
     }
 
     fn spawn_infra_metrics_collector(
         exporter: Arc<dyn MetricsExporter>,
-        telemetry_handles: Vec<Arc<IngestionTelemetry>>,
         liveness_snapshots: Option<LivenessSnapshots>,
         interval: Duration,
     ) -> JoinHandle<()> {
@@ -1447,10 +1438,9 @@ impl FlowApplication {
             let mut ticker = tokio::time::interval(interval);
             loop {
                 ticker.tick().await;
-                let snapshot =
-                    Self::build_infra_snapshot(&telemetry_handles, liveness_snapshots.as_ref());
+                let snapshot = Self::build_infra_snapshot(liveness_snapshots.as_ref());
                 if let Err(err) = exporter.update_infra_metrics(snapshot) {
-                    tracing::warn!("Failed to export ingress infrastructure metrics: {}", err);
+                    tracing::warn!("Failed to export infrastructure metrics: {}", err);
                 }
             }
         })

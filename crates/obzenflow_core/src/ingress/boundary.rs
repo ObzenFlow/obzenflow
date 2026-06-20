@@ -13,9 +13,7 @@
 //! rule: putting it in infra creates a dependency cycle, putting it in adapters
 //! makes hosted web endpoints depend on adapter middleware).
 
-use super::admission::{
-    IngressAdmissionDecision, IngressAdmissionOutcome, IngressAttemptContext,
-};
+use super::admission::{IngressAdmissionDecision, IngressAdmissionOutcome, IngressAttemptContext};
 
 /// The neutral, core-owned ingress admission port.
 ///

@@ -446,22 +446,37 @@ mod tests {
             cycle_guard: None,
         };
 
-        let factories: Vec<(Box<dyn MiddlewareFactory>, MiddlewareKind)> = vec![
+        let factories: Vec<(Box<dyn MiddlewareFactory>, MiddlewareKind, bool)> = vec![
             (
                 crate::middleware::control::circuit_breaker::circuit_breaker(3),
                 MiddlewareKind::Policy,
+                true,
             ),
-            (RateLimiterBuilder::new(5.0).build(), MiddlewareKind::Policy),
-            (backpressure(64), MiddlewareKind::Structural),
+            (
+                RateLimiterBuilder::new(5.0).build(),
+                MiddlewareKind::Policy,
+                false,
+            ),
+            (backpressure(64), MiddlewareKind::Structural, true),
         ];
 
-        for (factory, expected) in factories {
+        for (factory, expected, supports_generic_create) in factories {
             assert_eq!(
                 factory.kind(),
                 expected,
                 "factory '{}' kind mismatch",
                 factory.label()
             );
+            if !supports_generic_create {
+                assert!(
+                    factory
+                        .create(&config, Arc::new(ControlMiddlewareAggregator::new()))
+                        .is_err(),
+                    "factory '{}' should fail closed on generic create",
+                    factory.label()
+                );
+                continue;
+            }
             let instance = factory
                 .create(&config, Arc::new(ControlMiddlewareAggregator::new()))
                 .expect("factory should materialize");

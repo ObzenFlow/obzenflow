@@ -6,8 +6,8 @@
 //!
 //! This is the single home for the hosted-edge ingress story. It consolidates
 //! the former root-level `ingress.rs` (admission port and binding slot) and the
-//! former `event::ingestion` module (submission DTOs, accepted-event provenance,
-//! and the live ingestion gauge) so one concept has one home.
+//! former `event::ingestion` module (submission DTOs and accepted-event
+//! provenance) so one concept has one home.
 //!
 //! - [`admission`]: the fail-fast admission vocabulary (`IngressAttemptContext`,
 //!   `IngressAdmissionDecision`, `IngressAdmissionOutcome`, `IngressRefusalReason`,
@@ -16,8 +16,8 @@
 //!   (infra calls it, adapters implement it).
 //! - [`binding`]: the write-once `HostedIngressBindingSlot` the DSL fills and
 //!   `FlowApplication` reads during web-surface wiring.
-//! - [`submission`]: the HTTP submission DTOs, the accepted-event `IngressContext`
-//!   provenance, and the live `IngestionTelemetry` gauge.
+//! - [`submission`]: the HTTP submission DTOs and accepted-event
+//!   `IngressContext` provenance.
 
 mod admission;
 mod binding;
@@ -31,6 +31,5 @@ pub use admission::{
 pub use binding::{FilledHostedIngress, HostedIngressAlreadyBound, HostedIngressBindingSlot};
 pub use boundary::IngressBoundaryMiddleware;
 pub use submission::{
-    BatchSubmission, EventSubmission, IngestionTelemetry, IngestionTelemetrySnapshot,
-    IngressContext, SubmissionIngressContext, SubmissionResponse,
+    BatchSubmission, EventSubmission, IngressContext, SubmissionIngressContext, SubmissionResponse,
 };

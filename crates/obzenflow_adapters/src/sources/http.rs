@@ -3,9 +3,9 @@
 // https://obzenflow.dev
 
 use async_trait::async_trait;
-use obzenflow_core::ingress::{EventSubmission, IngressContext};
 use obzenflow_core::event::ChainEventFactory;
 use obzenflow_core::ingress::HostedIngressBindingSlot;
+use obzenflow_core::ingress::{EventSubmission, IngressContext};
 use obzenflow_core::{ChainEvent, TypedPayload, WriterId};
 use obzenflow_runtime::stages::common::handlers::AsyncInfiniteSourceHandler;
 use obzenflow_runtime::stages::SourceError;
@@ -105,7 +105,7 @@ impl HttpSource {
         if let Some(handoff) = ingress_handoff {
             event.ingress_context = Some(IngressContext {
                 accepted_at_ns: handoff.accepted_at_ns,
-                base_path: handoff.base_path,
+                ingress_key: handoff.ingress_key,
                 batch_index: handoff.batch_index,
                 attempt_seq: handoff.attempt_seq,
             });
@@ -255,7 +255,7 @@ mod tests {
             metadata: None,
             ingress_handoff: Some(obzenflow_core::ingress::SubmissionIngressContext {
                 accepted_at_ns: 42,
-                base_path: "/api/orders".to_string(),
+                ingress_key: "orders".to_string(),
                 batch_index: Some(0),
                 attempt_seq: obzenflow_core::ingress::IngressAttemptSeq(7),
             }),
@@ -271,7 +271,7 @@ mod tests {
             out[0].ingress_context,
             Some(IngressContext {
                 accepted_at_ns: 42,
-                base_path: "/api/orders".to_string(),
+                ingress_key: "orders".to_string(),
                 batch_index: Some(0),
                 attempt_seq: obzenflow_core::ingress::IngressAttemptSeq(7),
             })

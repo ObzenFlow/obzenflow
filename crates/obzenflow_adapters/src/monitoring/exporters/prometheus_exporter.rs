@@ -1776,7 +1776,7 @@ impl PrometheusExporter {
         }
 
         // FLOWIP-115d: hosted-ingress refusal totals projected from `IngressRefusal`
-        // facts, keyed by (base_path, reason). Folded from journal facts, so it is
+        // facts, keyed by (ingress_key, reason). Folded from journal facts, so it is
         // replay-faithful, unlike the former in-memory ingestion reject counters.
         if !snapshot.ingestion_refusal_totals.is_empty() {
             writeln!(
@@ -1786,11 +1786,11 @@ impl PrometheusExporter {
             writeln!(output, "# TYPE http_ingestion_refusals_total counter")?;
             let mut rows: Vec<_> = snapshot.ingestion_refusal_totals.iter().collect();
             rows.sort_by(|a, b| a.0.cmp(b.0));
-            for ((base_path, reason), count) in rows {
+            for ((ingress_key, reason), count) in rows {
                 writeln!(
                     output,
-                    "http_ingestion_refusals_total{{base_path=\"{}\",reason=\"{}\"}} {}",
-                    escape_label(base_path),
+                    "http_ingestion_refusals_total{{ingress=\"{}\",reason=\"{}\"}} {}",
+                    escape_label(ingress_key),
                     escape_label(reason),
                     count
                 )?;
@@ -2255,58 +2255,6 @@ impl PrometheusExporter {
             writeln!(output)?;
         }
 
-        self.render_ingestion_metrics(output, &snapshot.ingestion_metrics)?;
-
-        Ok(())
-    }
-
-    fn render_ingestion_metrics(
-        &self,
-        output: &mut String,
-        ingestion_metrics: &std::collections::HashMap<
-            String,
-            obzenflow_core::ingress::IngestionTelemetrySnapshot,
-        >,
-    ) -> Result<(), Box<dyn Error + Send + Sync>> {
-        if ingestion_metrics.is_empty() {
-            return Ok(());
-        }
-
-        // FLOWIP-115d: ingestion telemetry is a live gauge. Request totals are the
-        // HTTP-surface per-route metrics and accepted throughput is the source
-        // stage processed count; refusals are rendered from projected
-        // `IngressRefusal` facts (see `render_ingestion_refusals`), not from
-        // in-memory counters.
-        writeln!(
-            output,
-            "# HELP http_ingestion_channel_depth Current ingestion channel depth"
-        )?;
-        writeln!(output, "# TYPE http_ingestion_channel_depth gauge")?;
-        for metrics in ingestion_metrics.values() {
-            writeln!(
-                output,
-                "http_ingestion_channel_depth{{base_path=\"{}\"}} {}",
-                escape_label(&metrics.base_path),
-                metrics.channel_depth
-            )?;
-        }
-        writeln!(output)?;
-
-        writeln!(
-            output,
-            "# HELP http_ingestion_channel_capacity Ingestion channel capacity"
-        )?;
-        writeln!(output, "# TYPE http_ingestion_channel_capacity gauge")?;
-        for metrics in ingestion_metrics.values() {
-            writeln!(
-                output,
-                "http_ingestion_channel_capacity{{base_path=\"{}\"}} {}",
-                escape_label(&metrics.base_path),
-                metrics.channel_capacity
-            )?;
-        }
-        writeln!(output)?;
-
         Ok(())
     }
 
@@ -2536,7 +2484,6 @@ fn estimate_bucket_count(histogram: &HistogramSnapshot, bucket_value: f64) -> u6
 #[cfg(test)]
 mod tests {
     use super::*;
-    use obzenflow_core::ingress::IngestionTelemetrySnapshot;
     use obzenflow_core::event::observability::{
         HttpPullState, HttpPullTelemetry, HttpSurfaceRouteMetricsSnapshot, WaitReason,
     };
@@ -2586,51 +2533,33 @@ mod tests {
     }
 
     #[test]
-    fn test_http_ingestion_metrics_rendered() {
+    fn test_http_ingestion_refusal_metrics_rendered() {
         let exporter = PrometheusExporter::new();
 
-        // FLOWIP-115d: ingestion telemetry is a live gauge on the infra snapshot.
-        let mut infra = InfraMetricsSnapshot::default();
-        infra.ingestion_metrics.insert(
-            "/api/ingest".to_string(),
-            IngestionTelemetrySnapshot {
-                base_path: "/api/ingest".to_string(),
-                channel_depth: 12,
-                channel_capacity: 10_000,
-            },
-        );
-        exporter.update_infra_metrics(infra).unwrap();
-
         // Refusal totals are projected from `IngressRefusal` facts on the app
-        // snapshot, keyed by (base_path, reason).
+        // snapshot, keyed by (ingress_key, reason).
         let mut app = AppMetricsSnapshot::default();
         app.ingestion_refusal_totals
-            .insert(("/api/ingest".to_string(), "rate_limited".to_string()), 3);
+            .insert(("orders".to_string(), "rate_limited".to_string()), 3);
         app.ingestion_refusal_totals
-            .insert(("/api/ingest".to_string(), "validation".to_string()), 5);
+            .insert(("orders".to_string(), "validation".to_string()), 5);
         exporter.update_app_metrics(app).unwrap();
 
         let output = exporter.render_metrics().unwrap();
-        let base_path = escape_label("/api/ingest");
-
-        // The live gauge is rendered.
-        assert!(output.contains(&format!(
-            "http_ingestion_channel_depth{{base_path=\"{base_path}\"}} 12"
-        )));
-        assert!(output.contains(&format!(
-            "http_ingestion_channel_capacity{{base_path=\"{base_path}\"}} 10000"
-        )));
+        let ingress = escape_label("orders");
 
         // Refusals render by reason from the projected facts.
         assert!(output.contains("# TYPE http_ingestion_refusals_total counter"));
         assert!(output.contains(&format!(
-            "http_ingestion_refusals_total{{base_path=\"{base_path}\",reason=\"rate_limited\"}} 3"
+            "http_ingestion_refusals_total{{ingress=\"{ingress}\",reason=\"rate_limited\"}} 3"
         )));
         assert!(output.contains(&format!(
-            "http_ingestion_refusals_total{{base_path=\"{base_path}\",reason=\"validation\"}} 5"
+            "http_ingestion_refusals_total{{ingress=\"{ingress}\",reason=\"validation\"}} 5"
         )));
 
-        // The former in-memory ingestion counters are gone.
+        // The former ingestion telemetry sidecar and counters are gone.
+        assert!(!output.contains("http_ingestion_channel_depth"));
+        assert!(!output.contains("http_ingestion_channel_capacity"));
         assert!(!output.contains("http_ingestion_requests_total"));
         assert!(!output.contains("http_ingestion_events_rejected_total"));
         assert!(!output.contains("http_ingestion_events_accepted_total"));

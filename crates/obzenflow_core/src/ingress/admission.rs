@@ -49,7 +49,7 @@ pub enum EdgeShedReason {
 
 /// The reason an ingress submission attempt was refused, recorded on the durable
 /// `IngressRefusal` system-journal fact (FLOWIP-115d). Telemetry projects the
-/// per-`(base_path, reason)` refusal count from these facts, so the labels are
+/// per-`(ingress_key, reason)` refusal count from these facts, so the labels are
 /// stable and the metric is replay-faithful (`state = fold(facts)`).
 ///
 /// `RateLimited` is the limiter's token-bucket decision (429). `NotReady`,

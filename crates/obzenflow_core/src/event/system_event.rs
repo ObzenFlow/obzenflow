@@ -247,7 +247,7 @@ pub enum SystemEventType {
     ///
     /// A rejected or shed submission attempt is a domain fact, so the hosted
     /// endpoint appends one of these to `system.log` before returning the
-    /// protocol refusal, and the metrics aggregator projects the per-`(base_path,
+    /// protocol refusal, and the metrics aggregator projects the per-`(ingress_key,
     /// reason)` refusal count from it (`state = fold(facts)`). It is a dedicated
     /// variant rather than the `MiddlewareLifecycle` family because `EdgeShed`
     /// and `Validation` refusals are infra-originated admission outcomes, not
@@ -255,8 +255,8 @@ pub enum SystemEventType {
     /// accepted source rows. It carries no raw body or credential-bearing header.
     #[serde(rename = "ingress_refusal")]
     IngressRefusal {
-        /// Normalised hosted base path; the per-surface metric projection key.
-        base_path: String,
+        /// Protocol-neutral hosted ingress key; the per-surface metric projection key.
+        ingress_key: String,
         /// Runtime id of the linked source stage.
         stage_id: StageId,
         /// Replay-stable source stage key (`run_manifest.json` key).

@@ -224,7 +224,7 @@ pub struct MetricsStore {
         HashMap<(String, HttpMethod, String, String), HttpSurfaceRouteMetricsSnapshot>,
 
     /// Hosted-ingress refusal totals projected from `IngressRefusal` facts
-    /// (FLOWIP-115d), keyed by `(base_path, reason)`. This replaces the former
+    /// (FLOWIP-115d), keyed by `(ingress_key, reason)`. This replaces the former
     /// in-memory ingestion reject counters; the metric is now a fold of journal
     /// facts and so is replay-faithful.
     pub ingestion_refusals_total: HashMap<(String, String), u64>,
@@ -930,7 +930,7 @@ impl MetricsAggregatorContext {
         snapshot.http_surface_metrics = http_surface_metrics;
 
         // FLOWIP-115d: hosted-ingress refusal totals projected from `IngressRefusal`
-        // facts, keyed by (base_path, reason).
+        // facts, keyed by (ingress_key, reason).
         snapshot.ingestion_refusal_totals = store.ingestion_refusals_total.clone();
 
         // FLOWIP-084e: HTTP pull telemetry (wide events)
@@ -1419,7 +1419,7 @@ impl FsmAction for MetricsAggregatorAction {
                         }
                     }
                     obzenflow_core::event::SystemEventType::IngressRefusal {
-                        base_path,
+                        ingress_key,
                         reason,
                         event_count,
                         ..
@@ -1429,7 +1429,7 @@ impl FsmAction for MetricsAggregatorAction {
                         // store per run means strict replay reproduces the same
                         // totals). The HTTP-surface snapshot above uses max()
                         // instead because each snapshot carries cumulative totals.
-                        let key = (base_path.clone(), reason.as_str().to_string());
+                        let key = (ingress_key.clone(), reason.as_str().to_string());
                         let entry = store.ingestion_refusals_total.entry(key).or_insert(0);
                         *entry = entry.saturating_add(*event_count);
                     }
