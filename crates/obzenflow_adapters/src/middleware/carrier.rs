@@ -18,9 +18,7 @@
 //! vocabulary so later slices fill them additively.
 
 use super::control::ControlMiddlewareAggregator;
-use super::effect_policy::EffectPolicy;
-use super::sink_policy::SinkPolicy;
-use super::source_policy::SourcePolicy;
+use super::policy::{EffectPolicy, SinkPolicy, SourcePolicy};
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::ingress::IngressBoundaryMiddleware;
 use obzenflow_core::StageId;

@@ -12,7 +12,7 @@
 //! out, whichever arm ended it, so lifecycle finalization is structural
 //! rather than a hook each middleware must remember (gap G8).
 
-use super::{Middleware, MiddlewareAbortCause, MiddlewareContext};
+use crate::middleware::{Middleware, MiddlewareAbortCause, MiddlewareAction, MiddlewareContext};
 use async_trait::async_trait;
 use obzenflow_core::event::EffectFailureCause;
 use obzenflow_core::{ChainEvent, MiddlewareExecutionScope};
@@ -118,11 +118,11 @@ impl EffectPolicy for ChainSurfacePolicy {
         ctx: &mut MiddlewareContext,
     ) -> PolicyAdmission {
         match self.inner.pre_handle(event, ctx) {
-            super::MiddlewareAction::Continue => PolicyAdmission::Admit,
-            super::MiddlewareAction::Skip { results, cause } => {
+            MiddlewareAction::Continue => PolicyAdmission::Admit,
+            MiddlewareAction::Skip { results, cause } => {
                 PolicyAdmission::Synthesize { results, cause }
             }
-            super::MiddlewareAction::Abort { cause } => {
+            MiddlewareAction::Abort { cause } => {
                 PolicyAdmission::Reject(cause.unwrap_or_else(|| MiddlewareAbortCause {
                     source: obzenflow_core::event::EffectFailureSource::new(self.inner.label()),
                     code: obzenflow_core::event::EffectFailureCode::new("aborted"),

@@ -7,7 +7,7 @@
 //! The runtime sees only `SourceBoundary`. This module owns the
 //! middleware policy onion hidden behind that seam.
 
-use super::MiddlewareContext;
+use crate::middleware::MiddlewareContext;
 use async_trait::async_trait;
 use obzenflow_core::event::status::processing_status::ProcessingStatus;
 use obzenflow_core::event::ChainEventFactory;

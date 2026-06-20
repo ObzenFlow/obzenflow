@@ -51,7 +51,8 @@
 //!
 //! ## Custom Middleware
 //!
-//! You can also create custom middleware by implementing the `Middleware` trait:
+//! You can create custom observation or structural middleware by implementing
+//! the `Middleware` trait:
 //!
 //! ```rust
 //! use obzenflow_adapters::middleware::{
@@ -99,9 +100,7 @@ pub(crate) fn strict_replay_active() -> bool {
 mod backpressure;
 mod join_middleware;
 mod sink_middleware;
-mod sink_policy;
 mod source_middleware;
-mod source_policy;
 mod stateful_middleware;
 mod transform_middleware;
 
@@ -109,7 +108,6 @@ mod transform_middleware;
 mod carrier;
 mod context;
 mod context_keys;
-mod effect_policy;
 mod function;
 mod hints;
 pub mod type_shaping;
@@ -118,6 +116,7 @@ pub mod type_shaping;
 pub mod ai;
 pub mod control;
 pub mod observability;
+pub mod policy;
 mod system;
 // Dangerous middleware examples moved to examples/dangerous_examples.rs
 // Factory tests moved to tests/factory_tests.rs
@@ -140,19 +139,11 @@ pub use middleware_trait::{
 // Handler-specific exports
 pub use join_middleware::{JoinHandlerMiddlewareExt, JoinMiddlewareBuilder, MiddlewareJoin};
 pub use sink_middleware::{MiddlewareSink, SinkHandlerExt, SinkMiddlewareBuilder};
-pub use sink_policy::{
-    PerSinkDeliveryPolicyBoundary, SinkAdmission, SinkAdmissionGuard, SinkDeliveryPolicyOutcome,
-    SinkPolicy, SinkPolicyCtx,
-};
 pub use source_middleware::{
     AsyncFiniteSourceHandlerExt, AsyncFiniteSourceMiddlewareBuilder, AsyncInfiniteSourceHandlerExt,
     AsyncInfiniteSourceMiddlewareBuilder, FiniteSourceHandlerExt, FiniteSourceMiddlewareBuilder,
     InfiniteSourceHandlerExt, InfiniteSourceMiddlewareBuilder, MiddlewareAsyncFiniteSource,
     MiddlewareAsyncInfiniteSource, MiddlewareFiniteSource, MiddlewareInfiniteSource,
-};
-pub use source_policy::{
-    batch_has_error_marked, PerSourcePolicyBoundary, SourceAdmission, SourceAdmissionGuard,
-    SourceAfterPoll, SourcePolicy, SourcePolicyCtx, SourcePollOutcome,
 };
 pub use stateful_middleware::{
     MiddlewareStateful, StatefulHandlerMiddlewareExt, StatefulMiddlewareBuilder,
@@ -176,13 +167,16 @@ pub use carrier::{
     SourcePollAttachment, SourcePollSurface, SourcePollUnitId, SourceStageIngressOwner,
 };
 pub use context::MiddlewareContext;
-pub use effect_policy::{
-    effect_policy_from_middleware, EffectAttemptOutcome, EffectPolicy, PerEffectPolicyBoundary,
-    PolicyAdmission,
-};
 pub use function::{middleware_fn, FnMiddleware};
 pub use hints::{Attempts, BackoffKind, BatchingHint, MiddlewareHints, RetryHint};
 pub use observability::timing::TimingMiddleware;
+pub use policy::{
+    batch_has_error_marked, effect_policy_from_middleware, EffectAttemptOutcome, EffectPolicy,
+    PerEffectPolicyBoundary, PerSinkDeliveryPolicyBoundary, PerSourcePolicyBoundary,
+    PolicyAdmission, SinkAdmission, SinkAdmissionGuard, SinkDeliveryPolicyOutcome, SinkPolicy,
+    SinkPolicyCtx, SourceAdmission, SourceAdmissionGuard, SourceAfterPoll, SourcePolicy,
+    SourcePolicyCtx, SourcePollOutcome,
+};
 pub use type_shaping::{IntoEffectPolicyParts, OutcomeShapingMiddleware, TypeShapingMiddleware};
 
 // Control middleware

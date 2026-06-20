@@ -9,7 +9,7 @@
 //! attempt runs once, and observation runs in reverse over the raw outcome,
 //! mirroring the source (FLOWIP-115a) and effect (FLOWIP-120c) boundaries.
 
-use super::MiddlewareContext;
+use crate::middleware::MiddlewareContext;
 use async_trait::async_trait;
 use obzenflow_core::{ChainEvent, MiddlewareExecutionScope};
 use obzenflow_runtime::stages::common::handlers::SinkConsumeReport;

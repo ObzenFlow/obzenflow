@@ -273,6 +273,13 @@ impl MiddlewareFactory for MyControlFactory {
 }
 ```
 
+Control policies live under `middleware::policy`. They are the authoring
+contract for middleware that controls a live I/O boundary; observation and
+structural handler middleware still implement the generic `Middleware` trait.
+Built-in control middleware lives under `middleware::control`, while
+`middleware::policy` is the contract that built-ins and third-party control
+middleware implement.
+
 The policies returned from `materialize` are surface-specific:
 
 - `SourcePolicy::admit` returns `SourceAdmission::Admit` or `Reject`; admitted
