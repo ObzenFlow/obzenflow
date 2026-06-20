@@ -8,7 +8,8 @@ use crate::event::observability::HttpSurfaceMetricsSnapshot;
 use crate::event::payloads::observability_payload::MiddlewareLifecycle;
 use crate::event::types::{Count, DurationMs, EventId, EventType, SeqNo, WriterId};
 use crate::event::vector_clock::VectorClock;
-use crate::id::{StageId, SystemId};
+use crate::id::{StageId, StageKey, SystemId};
+use crate::ingress::{IngressAttemptSeq, IngressKey, IngressRefusalReason};
 use crate::journal::{ArchiveStatus, StatusDerivation};
 use crate::metrics::{FlowLifecycleMetricsSnapshot, StageMetricsSnapshot};
 use serde::{Deserialize, Serialize};
@@ -240,6 +241,39 @@ pub enum SystemEventType {
     HttpSurfaceSnapshot {
         #[serde(flatten)]
         snapshot: HttpSurfaceMetricsSnapshot,
+    },
+
+    /// Durable hosted-ingress refusal fact (FLOWIP-115d).
+    ///
+    /// A rejected or shed submission attempt is a domain fact, so the hosted
+    /// endpoint appends one of these to `system.log` before returning the
+    /// protocol refusal, and the metrics aggregator projects the per-`(ingress_key,
+    /// reason)` refusal count from it (`state = fold(facts)`). It is a dedicated
+    /// variant rather than the `MiddlewareLifecycle` family because `EdgeShed`
+    /// and `Validation` refusals are infra-originated admission outcomes, not
+    /// middleware decisions. The `attempt_seq` is the cross-journal merge key with
+    /// accepted source rows. It carries no raw body or credential-bearing header.
+    #[serde(rename = "ingress_refusal")]
+    IngressRefusal {
+        /// Protocol-neutral hosted ingress key; the per-surface metric projection key.
+        ingress_key: IngressKey,
+        /// Runtime id of the linked source stage.
+        stage_id: StageId,
+        /// Replay-stable source stage key (`run_manifest.json` key).
+        stage_key: StageKey,
+        reason: IngressRefusalReason,
+        /// Per-attempt sequence; the merge key against accepted source rows.
+        attempt_seq: IngressAttemptSeq,
+        /// HTTP submission requests in this attempt (always 1 in 115D).
+        request_count: u64,
+        /// Events refused by this attempt (1 for `/events`; the refused subset
+        /// size for `/batch`, so a batch refusal is one fact with a count).
+        event_count: u64,
+        /// Batches in this attempt (0 for `/events`, 1 for `/batch`).
+        batch_count: u64,
+        http_status: u16,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        retry_after_ms_bucket: Option<u64>,
     },
 }
 
@@ -879,6 +913,7 @@ impl JournalEvent for SystemEvent {
                 ContractResultStatusLabel::Healthy => "system.contract.result",
             },
             SystemEventType::HttpSurfaceSnapshot { .. } => "system.http_surface.snapshot",
+            SystemEventType::IngressRefusal { .. } => "system.ingress.refusal",
         }
     }
 }

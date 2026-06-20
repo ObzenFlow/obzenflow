@@ -7,7 +7,7 @@
 //! This module provides middleware capabilities for both FiniteSourceHandler
 //! and InfiniteSourceHandler implementations.
 
-use super::{Middleware, MiddlewareAction, MiddlewareContext, SourceMiddlewarePhase};
+use crate::middleware::{Middleware, MiddlewareAction, MiddlewareContext, SourceMiddlewarePhase};
 use async_trait::async_trait;
 use obzenflow_core::event::payloads::observability_payload::{
     MetricsLifecycle, ObservabilityPayload,
@@ -947,15 +947,11 @@ impl<H: InfiniteSourceHandler> InfiniteSourceMiddlewareBuilder<H> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::middleware::control::{
-        circuit_breaker::CircuitBreakerMiddleware, ControlMiddlewareAggregator, RateLimiterBuilder,
-    };
-    use crate::middleware::MiddlewareFactory;
+    use crate::middleware::control::circuit_breaker::CircuitBreakerMiddleware;
     use async_trait::async_trait;
     use obzenflow_core::event::status::processing_status::ErrorKind;
     use obzenflow_core::event::status::processing_status::ProcessingStatus;
     use obzenflow_core::StageId;
-    use obzenflow_runtime::pipeline::config::StageConfig;
     use serde_json::json;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
@@ -1164,7 +1160,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn async_finite_source_completion_is_not_rearmed_by_rate_limiter_control_events() {
+    async fn async_finite_source_completion_short_circuits_handler_middleware() {
         let calls = Arc::new(AtomicUsize::new(0));
         let stage_id = StageId::new();
         let writer_id = WriterId::from(stage_id);
@@ -1174,20 +1170,7 @@ mod tests {
             writer_id,
         };
 
-        let config = StageConfig {
-            stage_id,
-            name: "async_finite_rate_limited_source".to_string(),
-            flow_name: "source_middleware_tests".to_string(),
-            cycle_guard: None,
-        };
-        let rate_limiter = RateLimiterBuilder::new(20.0)
-            .with_burst(1.0)
-            .build()
-            .create(&config, Arc::new(ControlMiddlewareAggregator::new()))
-            .expect("rate limiter should materialize for async finite source test");
-
-        let mut wrapped =
-            MiddlewareAsyncFiniteSource::new(inner, writer_id).with_middleware(rate_limiter);
+        let mut wrapped = MiddlewareAsyncFiniteSource::new(inner, writer_id);
 
         let first = wrapped
             .next()
@@ -1206,7 +1189,7 @@ mod tests {
             .expect("completion poll should not propagate SourceError");
         assert!(
             second.is_none(),
-            "completion poll should return None instead of synthetic control events"
+            "completion poll should return None without running handler middleware"
         );
         assert_eq!(
             calls.load(Ordering::SeqCst),

@@ -12,17 +12,18 @@
 use async_trait::async_trait;
 use obzenflow_adapters::middleware::control::ControlMiddlewareAggregator;
 use obzenflow_adapters::middleware::{
-    validate_attachment_request, ControlMiddlewareRole, EffectPolicy, EffectSurface, EffectTypeKey,
-    EffectUnitId, Middleware, MiddlewareAttachmentRequest, MiddlewareContext,
-    MiddlewareDeclaration, MiddlewareDeclarationIndex, MiddlewareFactory, MiddlewareFactoryError,
-    MiddlewareFactoryResult, MiddlewareKind, MiddlewareMaterializationContext, MiddlewareOrigin,
-    MiddlewareOverrideKey, MiddlewarePlanContribution, MiddlewareSurface,
-    MiddlewareSurfaceAttachment, MiddlewareSurfaceKind::Effect,
-    MiddlewareSurfaceKind::SinkDelivery, MiddlewareSurfaceKind::SourcePoll, PolicyAdmission,
-    ProtectedUnit, ProtectedUnitId, SinkAdmission, SinkDeliveryPolicyOutcome, SinkDeliverySurface,
-    SinkDeliveryTarget, SinkDeliveryUnitId, SinkPolicy, SinkPolicyCtx, SourceAdmission,
-    SourcePolicy, SourcePolicyCtx, SourcePollAttachment, SourcePollOutcome, SourcePollSurface,
-    SourcePollUnitId, TopologyMiddlewareConfigSlot,
+    validate_attachment_request, ControlMiddlewareRole, EffectPolicyAttachment, EffectSurface,
+    EffectTypeKey, EffectUnitId, EventAwareEffectPolicy, Middleware, MiddlewareAttachmentRequest,
+    MiddlewareContext, MiddlewareDeclaration, MiddlewareDeclarationIndex, MiddlewareFactory,
+    MiddlewareFactoryError, MiddlewareFactoryResult, MiddlewareKind,
+    MiddlewareMaterializationContext, MiddlewareOrigin, MiddlewareOverrideKey,
+    MiddlewarePlanContribution, MiddlewareSurface, MiddlewareSurfaceAttachment,
+    MiddlewareSurfaceKind::Effect, MiddlewareSurfaceKind::SinkDelivery,
+    MiddlewareSurfaceKind::SourcePoll, PolicyAdmission, ProtectedUnit, ProtectedUnitId,
+    SinkAdmission, SinkDeliveryPolicyOutcome, SinkDeliverySurface, SinkDeliveryTarget,
+    SinkDeliveryUnitId, SinkPolicy, SinkPolicyCtx, SourceAdmission, SourcePolicy, SourcePolicyCtx,
+    SourcePollAttachment, SourcePollOutcome, SourcePollSurface, SourcePollUnitId,
+    TopologyMiddlewareConfigSlot,
 };
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
 use obzenflow_core::event::{EffectFailureCode, EffectFailureSource, RetryDisposition};
@@ -151,12 +152,12 @@ impl MiddlewareFactory for HookProofFactory {
                 self.counters
                     .effect_materialized
                     .fetch_add(1, Ordering::SeqCst);
-                Ok(MiddlewareSurfaceAttachment::Effect(Arc::new(
-                    HookProofEffectPolicy {
+                Ok(MiddlewareSurfaceAttachment::Effect(
+                    EffectPolicyAttachment::event_aware(Arc::new(HookProofEffectPolicy {
                         counters: self.counters.clone(),
                         reject_value: self.reject_effect_value,
-                    },
-                )))
+                    })),
+                ))
             }
             MiddlewareSurface::SinkDelivery(_) => {
                 self.counters
@@ -203,17 +204,12 @@ struct HookProofEffectPolicy {
 }
 
 #[async_trait]
-impl EffectPolicy for HookProofEffectPolicy {
+impl EventAwareEffectPolicy for HookProofEffectPolicy {
     fn label(&self) -> &'static str {
         "hook_proof_effect"
     }
 
-    async fn admit(
-        &self,
-        _identity: &obzenflow_runtime::effects::EffectIdentity,
-        event: &ChainEvent,
-        _ctx: &mut MiddlewareContext,
-    ) -> PolicyAdmission {
+    async fn admit(&self, event: &ChainEvent, _ctx: &mut MiddlewareContext) -> PolicyAdmission {
         self.counters.effect_attempts.fetch_add(1, Ordering::SeqCst);
         let value = HookInput::from_event(event)
             .map(|input| input.value)
@@ -236,7 +232,6 @@ impl EffectPolicy for HookProofEffectPolicy {
 
     fn observe(
         &self,
-        _identity: &obzenflow_runtime::effects::EffectIdentity,
         _event: &ChainEvent,
         _attempt: &obzenflow_adapters::middleware::EffectAttemptOutcome<'_>,
         _ctx: &mut MiddlewareContext,

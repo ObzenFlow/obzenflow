@@ -3,8 +3,9 @@
 // https://obzenflow.dev
 
 use async_trait::async_trait;
-use obzenflow_core::event::ingestion::{EventSubmission, IngressContext};
 use obzenflow_core::event::ChainEventFactory;
+use obzenflow_core::ingress::HostedIngressBindingSlot;
+use obzenflow_core::ingress::{EventSubmission, IngressContext};
 use obzenflow_core::{ChainEvent, TypedPayload, WriterId};
 use obzenflow_runtime::stages::common::handlers::AsyncInfiniteSourceHandler;
 use obzenflow_runtime::stages::SourceError;
@@ -32,6 +33,10 @@ pub struct HttpSource {
     rx: Arc<Mutex<tokio::sync::mpsc::Receiver<EventSubmission>>>,
     writer_id: Option<WriterId>,
     config: HttpSourceConfig,
+    /// FLOWIP-115d: the hosted-ingress binding slot shared with this source's
+    /// web-surface half. `http_ingress` attaches it; the DSL fills it during
+    /// source-stage materialization. `None` for HTTP pull sources.
+    ingress_slot: Option<HostedIngressBindingSlot>,
 }
 
 impl std::fmt::Debug for HttpSource {
@@ -49,6 +54,7 @@ impl HttpSource {
             rx: Arc::new(Mutex::new(rx)),
             writer_id: None,
             config: HttpSourceConfig::default(),
+            ingress_slot: None,
         }
     }
 
@@ -60,7 +66,15 @@ impl HttpSource {
             rx: Arc::new(Mutex::new(rx)),
             writer_id: None,
             config,
+            ingress_slot: None,
         }
+    }
+
+    /// FLOWIP-115d: attach the hosted-ingress binding slot shared with this
+    /// source's web-surface half (used by `http_ingress`).
+    pub fn with_ingress_slot(mut self, slot: HostedIngressBindingSlot) -> Self {
+        self.ingress_slot = Some(slot);
+        self
     }
 
     /// Mark this ingestion source as producing a single typed payload.
@@ -91,8 +105,9 @@ impl HttpSource {
         if let Some(handoff) = ingress_handoff {
             event.ingress_context = Some(IngressContext {
                 accepted_at_ns: handoff.accepted_at_ns,
-                base_path: handoff.base_path,
+                ingress_key: handoff.ingress_key,
                 batch_index: handoff.batch_index,
+                attempt_seq: handoff.attempt_seq,
             });
         }
         event
@@ -136,6 +151,10 @@ where
         self.inner.bind_writer_id(id);
     }
 
+    fn hosted_ingress_slot(&self) -> Option<HostedIngressBindingSlot> {
+        self.inner.hosted_ingress_slot()
+    }
+
     async fn next(&mut self) -> Result<Vec<ChainEvent>, SourceError> {
         self.inner.next().await
     }
@@ -149,6 +168,10 @@ where
 impl AsyncInfiniteSourceHandler for HttpSource {
     fn bind_writer_id(&mut self, id: WriterId) {
         self.writer_id = Some(id);
+    }
+
+    fn hosted_ingress_slot(&self) -> Option<HostedIngressBindingSlot> {
+        self.ingress_slot.clone()
     }
 
     async fn next(&mut self) -> Result<Vec<ChainEvent>, SourceError> {
@@ -177,7 +200,7 @@ impl AsyncInfiniteSourceHandler for HttpSource {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use obzenflow_core::event::ingestion::EventSubmission;
+    use obzenflow_core::ingress::EventSubmission;
     use obzenflow_core::StageId;
     use serde_json::json;
 
@@ -185,7 +208,7 @@ mod tests {
     async fn http_source_emits_chain_events_from_submissions() {
         let (tx, rx) = tokio::sync::mpsc::channel(8);
         tx.send(EventSubmission {
-            event_type: "order.created".to_string(),
+            event_type: "order.created".into(),
             data: json!({"value": 1}),
             metadata: None,
             ingress_handoff: None,
@@ -193,7 +216,7 @@ mod tests {
         .await
         .unwrap();
         tx.send(EventSubmission {
-            event_type: "order.updated".to_string(),
+            event_type: "order.updated".into(),
             data: json!({"value": 2}),
             metadata: None,
             ingress_handoff: None,
@@ -227,13 +250,14 @@ mod tests {
     async fn http_source_attaches_ingress_context_from_submission_handoff() {
         let (tx, rx) = tokio::sync::mpsc::channel(1);
         tx.send(EventSubmission {
-            event_type: "order.created".to_string(),
+            event_type: "order.created".into(),
             data: json!({"value": 1}),
             metadata: None,
-            ingress_handoff: Some(obzenflow_core::event::ingestion::SubmissionIngressContext {
+            ingress_handoff: Some(obzenflow_core::ingress::SubmissionIngressContext {
                 accepted_at_ns: 42,
-                base_path: "/api/orders".to_string(),
+                ingress_key: "orders".into(),
                 batch_index: Some(0),
+                attempt_seq: obzenflow_core::ingress::IngressAttemptSeq(7),
             }),
         })
         .await
@@ -247,8 +271,9 @@ mod tests {
             out[0].ingress_context,
             Some(IngressContext {
                 accepted_at_ns: 42,
-                base_path: "/api/orders".to_string(),
+                ingress_key: "orders".into(),
                 batch_index: Some(0),
+                attempt_seq: obzenflow_core::ingress::IngressAttemptSeq(7),
             })
         );
     }

@@ -11,6 +11,7 @@ pub mod flow_id;
 pub mod journal_id;
 pub mod scc_id;
 pub mod stage_id;
+pub mod stage_key;
 pub mod system_id;
 
 pub use cycle_depth::CycleDepth;
@@ -18,4 +19,5 @@ pub use flow_id::FlowId;
 pub use journal_id::JournalId;
 pub use scc_id::SccId;
 pub use stage_id::StageId;
+pub use stage_key::StageKey;
 pub use system_id::SystemId;

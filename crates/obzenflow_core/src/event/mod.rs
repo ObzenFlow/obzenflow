@@ -10,7 +10,6 @@
 pub mod chain_event;
 pub mod constants;
 pub mod event_envelope;
-pub mod ingestion;
 pub mod journal_event;
 pub mod observability;
 pub mod system_event;

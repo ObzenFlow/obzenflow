@@ -19,7 +19,7 @@
 //!
 //! This matches user expectations and avoids configuration complexity.
 
-use super::{Middleware, MiddlewareAction, MiddlewareContext};
+use crate::middleware::{Middleware, MiddlewareAction, MiddlewareContext};
 use async_trait::async_trait;
 use obzenflow_core::event::status::processing_status::ProcessingStatus;
 use obzenflow_core::MiddlewareExecutionScope;

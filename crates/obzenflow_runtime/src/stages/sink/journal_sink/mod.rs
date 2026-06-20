@@ -21,9 +21,8 @@ pub mod supervisor;
 
 // Re-export public API
 pub use boundary::{
-    SinkDeliveryAttemptContext, SinkDeliveryAttemptOutcome, SinkDeliveryBoundary,
-    SinkDeliveryBoundaryOutcome, SinkDeliveryBoundaryReport, SinkDeliveryExecutor,
-    SinkDeliveryIdentity, SinkDeliveryRejection, SinkDeliveryTargetId,
+    SinkDeliveryAttemptOutcome, SinkDeliveryBoundary, SinkDeliveryBoundaryOutcome,
+    SinkDeliveryBoundaryReport, SinkDeliveryExecutor, SinkDeliveryRejection,
 };
 pub use builder::JournalSinkBuilder;
 pub use config::JournalSinkConfig;

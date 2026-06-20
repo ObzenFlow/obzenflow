@@ -1051,14 +1051,16 @@ impl MiddlewareFactory for CircuitBreakerFactory {
             MiddlewareSurface::Effect(effect_surface) => {
                 // One breaker instance guards one declared effect (FLOWIP-120c),
                 // registering under the per-effect key for metrics. The breaker
-                // is itself the EffectPolicy the binder composes into the chain.
+                // is an event-aware effect policy because breaker fallback and
+                // classification derive facts from the parent event.
                 let middleware = self.build_middleware_keyed(
                     context.config,
                     context.control_middleware.clone(),
                     Some(effect_surface.effect_type.clone()),
                 )?;
-                let policy: Arc<dyn crate::middleware::EffectPolicy> = Arc::new(middleware);
-                Ok(MiddlewareSurfaceAttachment::Effect(policy))
+                Ok(MiddlewareSurfaceAttachment::Effect(
+                    crate::middleware::EffectPolicyAttachment::event_aware(Arc::new(middleware)),
+                ))
             }
             MiddlewareSurface::SinkDelivery(_) => {
                 // One breaker guards the sink stage's delivery unit, registered

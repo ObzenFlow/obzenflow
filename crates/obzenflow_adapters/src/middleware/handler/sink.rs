@@ -7,7 +7,7 @@
 //! This module provides middleware capabilities for SinkHandler implementations,
 //! with special focus on error handling and retry logic.
 
-use super::{
+use crate::middleware::{
     context_keys::ProcessingStartNanos, ErrorAction, Middleware, MiddlewareAction,
     MiddlewareContext,
 };

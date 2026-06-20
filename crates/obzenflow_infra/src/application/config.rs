@@ -169,7 +169,6 @@ pub(crate) struct ResolvedServerConfig {
 #[derive(Debug, Clone)]
 pub(crate) struct ResolvedRuntimeConfig {
     pub shutdown_timeout: Duration,
-    pub ingestion_metrics_interval: Duration,
     #[cfg_attr(not(feature = "warp-server"), allow(dead_code))]
     pub surface_metrics_interval: Duration,
 }
@@ -298,7 +297,6 @@ struct RawFileControlPlaneAuthConfig {
 #[serde(default, deny_unknown_fields)]
 struct RawFileRuntimeConfig {
     shutdown_timeout_secs: Option<i64>,
-    ingestion_metrics_interval_secs: Option<i64>,
     surface_metrics_interval_secs: Option<i64>,
 }
 
@@ -444,21 +442,6 @@ impl FlowConfig {
                 )?,
                 30,
             )),
-            ingestion_metrics_interval: Duration::from_secs(
-                resolve_scalar(
-                    None,
-                    parse_non_negative_u64(
-                        file.runtime.ingestion_metrics_interval_secs,
-                        "runtime.ingestion_metrics_interval_secs",
-                    )?,
-                    parse_env_u64(
-                        "OBZENFLOW_INGESTION_METRICS_INTERVAL_SECS",
-                        "runtime.ingestion_metrics_interval_secs",
-                    )?,
-                    5,
-                )
-                .max(1),
-            ),
             surface_metrics_interval: Duration::from_secs(resolve_scalar(
                 None,
                 parse_non_negative_u64(

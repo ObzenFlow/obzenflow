@@ -3102,6 +3102,9 @@ fn map_system_event_to_sse(
         // FLOWIP-093a: keep system-level hosted-surface snapshot facts out of the SSE stream
         // by default to avoid turning /api/flow/events into a high-volume metrics pipe.
         SystemEventType::HttpSurfaceSnapshot { .. } => None,
+        // FLOWIP-115d: ingress refusal facts are projected into /metrics, not the
+        // SSE lifecycle stream (same treatment as the hosted-surface snapshot).
+        SystemEventType::IngressRefusal { .. } => None,
     }
 }
 

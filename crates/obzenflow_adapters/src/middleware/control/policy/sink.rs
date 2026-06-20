@@ -9,14 +9,13 @@
 //! attempt runs once, and observation runs in reverse over the raw outcome,
 //! mirroring the source (FLOWIP-115a) and effect (FLOWIP-120c) boundaries.
 
-use super::MiddlewareContext;
+use crate::middleware::MiddlewareContext;
 use async_trait::async_trait;
 use obzenflow_core::{ChainEvent, MiddlewareExecutionScope};
 use obzenflow_runtime::stages::common::handlers::SinkConsumeReport;
 use obzenflow_runtime::stages::sink::journal_sink::{
-    SinkDeliveryAttemptContext, SinkDeliveryAttemptOutcome, SinkDeliveryBoundary,
-    SinkDeliveryBoundaryOutcome, SinkDeliveryBoundaryReport, SinkDeliveryExecutor,
-    SinkDeliveryIdentity, SinkDeliveryRejection,
+    SinkDeliveryAttemptOutcome, SinkDeliveryBoundary, SinkDeliveryBoundaryOutcome,
+    SinkDeliveryBoundaryReport, SinkDeliveryExecutor, SinkDeliveryRejection,
 };
 use std::sync::Arc;
 
@@ -83,6 +82,10 @@ impl SinkPolicyCtx {
 }
 
 /// A sink-delivery resilience policy behind the adapter-owned boundary.
+///
+/// The boundary owns typed delivery identity and attempt facts; policies see
+/// only the control outcome facts they actually consume. Future sink policies
+/// may extend this contract with a same-slice reader and proof.
 #[async_trait]
 pub trait SinkPolicy: Send + Sync {
     fn label(&self) -> &'static str;
@@ -115,9 +118,6 @@ type SinkAdmitGuard = Option<Box<dyn SinkAdmissionGuard>>;
 impl SinkDeliveryBoundary for PerSinkDeliveryPolicyBoundary {
     async fn around_sink_delivery(
         &self,
-        _identity: &SinkDeliveryIdentity,
-        _attempt: &SinkDeliveryAttemptContext,
-        _event: &ChainEvent,
         execute: &mut dyn SinkDeliveryExecutor,
     ) -> SinkDeliveryBoundaryReport {
         if self.policies.is_empty() {
@@ -182,12 +182,8 @@ mod tests {
         MiddlewarePlanContribution, MiddlewareSurface, MiddlewareSurfaceAttachment,
         MiddlewareSurfaceKind, ProtectedUnit, ProtectedUnitId, TopologyMiddlewareConfigSlot,
     };
-    use obzenflow_core::event::chain_event::ChainEventFactory;
-    use obzenflow_core::{StageId, WriterId};
+    use obzenflow_core::StageId;
     use obzenflow_runtime::pipeline::config::StageConfig;
-    use obzenflow_runtime::stages::sink::journal_sink::{
-        SinkDeliveryAttemptContext, SinkDeliveryIdentity, SinkDeliveryTargetId,
-    };
 
     /// A third-party (non-breaker) sink policy that always rejects.
     struct AlwaysRejectPolicy;
@@ -319,6 +315,7 @@ mod tests {
         let materialization = MiddlewareMaterializationContext {
             config: &config,
             control_middleware: &control,
+            stage_type: obzenflow_core::event::context::StageType::Sink,
         };
         let attachment = factory
             .materialize(request, &materialization)
@@ -329,24 +326,8 @@ mod tests {
         };
 
         let boundary = PerSinkDeliveryPolicyBoundary::new(vec![policy]);
-        let event = ChainEventFactory::data_event(
-            WriterId::from(StageId::new()),
-            "third_party.event",
-            serde_json::json!({}),
-        );
-        let identity = SinkDeliveryIdentity {
-            stage_id: config.stage_id,
-            target: SinkDeliveryTargetId::Stage,
-        };
-        let attempt = SinkDeliveryAttemptContext {
-            parent_event_id: event.id,
-            upstream_stage: None,
-            input_position: None,
-        };
         let mut executor = PanicExecutor;
-        let report = boundary
-            .around_sink_delivery(&identity, &attempt, &event, &mut executor)
-            .await;
+        let report = boundary.around_sink_delivery(&mut executor).await;
 
         match report.outcome {
             SinkDeliveryBoundaryOutcome::Rejected(rejection) => {

@@ -7,7 +7,7 @@
 //! The runtime sees only `SourceBoundary`. This module owns the
 //! middleware policy onion hidden behind that seam.
 
-use super::MiddlewareContext;
+use crate::middleware::MiddlewareContext;
 use async_trait::async_trait;
 use obzenflow_core::event::status::processing_status::ProcessingStatus;
 use obzenflow_core::event::ChainEventFactory;
@@ -40,10 +40,36 @@ pub enum SourceAfterPoll {
     Proceed,
 }
 
+/// Source-batch facts exposed to control policies after a successful poll.
+///
+/// Policies need the control-relevant shape of the batch, not raw payload or
+/// lineage access. The boundary computes these facts once from the delivered
+/// batch before invoking policy hooks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SourceBatchFacts {
+    pub event_count: usize,
+    pub has_error_marked: bool,
+}
+
+impl SourceBatchFacts {
+    pub fn from_events(events: &[ChainEvent]) -> Self {
+        Self {
+            event_count: events.len(),
+            has_error_marked: events.iter().any(|event| {
+                matches!(event.processing_info.status, ProcessingStatus::Error { .. })
+            }),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.event_count == 0
+    }
+}
+
 /// Raw source-poll outcome shown independently to each policy.
 pub enum SourcePollOutcome<'a> {
     Delivered {
-        events: &'a [ChainEvent],
+        batch: SourceBatchFacts,
         poll_duration: Duration,
     },
     Empty {
@@ -130,7 +156,7 @@ pub trait SourcePolicy: Send + Sync {
 
     async fn after_poll(
         &self,
-        _batch: &[ChainEvent],
+        _batch: SourceBatchFacts,
         _ctx: &mut SourcePolicyCtx,
     ) -> SourceAfterPoll {
         SourceAfterPoll::Proceed
@@ -195,6 +221,7 @@ impl SourceBoundary for PerSourcePolicyBoundary {
             let poll = execute.await;
             if let Ok(SourcePollCompletion::Batch(batch)) = &poll.result {
                 if !batch.is_empty() {
+                    let batch = SourceBatchFacts::from_events(batch);
                     for (policy, _) in &admitted {
                         match policy.after_poll(batch, &mut ctx).await {
                             SourceAfterPoll::Proceed => {}
@@ -222,7 +249,7 @@ fn source_poll_outcome(report: &SourcePollReport) -> SourcePollOutcome<'_> {
             poll_duration: report.poll_duration,
         },
         Ok(SourcePollCompletion::Batch(batch)) => SourcePollOutcome::Delivered {
-            events: batch,
+            batch: SourceBatchFacts::from_events(batch),
             poll_duration: report.poll_duration,
         },
         Ok(SourcePollCompletion::Eof) => SourcePollOutcome::Eof {
@@ -233,14 +260,6 @@ fn source_poll_outcome(report: &SourcePollReport) -> SourcePollOutcome<'_> {
             poll_duration: report.poll_duration,
         },
     }
-}
-
-/// Raw fact helper for policies that care whether a delivered batch contains an
-/// error-marked event. This deliberately does not classify the whole attempt.
-pub fn batch_has_error_marked(events: &[ChainEvent]) -> bool {
-    events
-        .iter()
-        .any(|event| matches!(event.processing_info.status, ProcessingStatus::Error { .. }))
 }
 
 #[cfg(test)]
@@ -274,7 +293,7 @@ mod tests {
 
         async fn after_poll(
             &self,
-            _batch: &[ChainEvent],
+            _batch: SourceBatchFacts,
             _ctx: &mut SourcePolicyCtx,
         ) -> SourceAfterPoll {
             self.log

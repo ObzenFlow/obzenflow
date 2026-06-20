@@ -6,7 +6,6 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use obzenflow_core::event::context::StageType;
-use obzenflow_core::event::ingestion::IngestionTelemetrySnapshot;
 use obzenflow_core::event::JournalWriterId;
 use obzenflow_core::event::{ChainEventFactory, SystemEvent, SystemEventType, WriterId};
 use obzenflow_core::id::{StageId, SystemId};
@@ -231,39 +230,72 @@ async fn running_state_process_batch_transitions() {
     );
 }
 
-#[test]
-fn infra_exporter_records_ingestion_snapshots_on_infra_path() {
-    let exporter = RecordingExporter::default();
-    let mut snapshot = InfraMetricsSnapshot::default();
-    snapshot.ingestion_metrics.insert(
-        "/api/ingest".to_string(),
-        IngestionTelemetrySnapshot {
-            base_path: "/api/ingest".to_string(),
-            channel_depth: 12,
-            channel_capacity: 10_000,
-            requests_total: 5,
-            events_accepted_total: 4,
-            events_rejected_auth_total: 1,
-            events_rejected_validation_total: 0,
-            events_rejected_buffer_full_total: 0,
-            events_rejected_not_ready_total: 0,
-            events_rejected_payload_too_large_total: 0,
-            events_rejected_invalid_json_total: 0,
-            events_rejected_channel_closed_total: 0,
-        },
+/// FLOWIP-115d Phase 7: the metrics aggregator projects `IngressRefusal` facts
+/// into per-`(ingress_key, reason)` totals by folding them, incrementing by the
+/// refused `event_count`. Because the metric is a pure fold of journalled facts,
+/// strict replay over the same journal reproduces the identical totals, where the
+/// former in-memory counter would have read zero.
+#[tokio::test(flavor = "multi_thread")]
+async fn ingress_refusal_facts_project_to_per_reason_totals() {
+    use obzenflow_core::ingress::{IngressAttemptSeq, IngressRefusalReason};
+
+    let stage_id = StageId::new();
+    let system_id = SystemId::new();
+    let system_journal = make_system_journal(system_id);
+    let exporter = Arc::new(RecordingExporter::default());
+    let mut ctx = make_empty_context(system_id, system_journal, exporter.clone(), stage_id);
+
+    let writer = WriterId::from(SystemId::new());
+    let refusal = |reason, event_count, seq| {
+        SystemEvent::new(
+            writer,
+            SystemEventType::IngressRefusal {
+                ingress_key: "orders".into(),
+                stage_id,
+                stage_key: "orders".into(),
+                reason,
+                attempt_seq: IngressAttemptSeq(seq),
+                request_count: 1,
+                event_count,
+                batch_count: 0,
+                http_status: 429,
+                retry_after_ms_bucket: Some(1000),
+            },
+        )
+    };
+
+    // Two single rate-limited refusals and one validation refusal of three events.
+    for event in [
+        refusal(IngressRefusalReason::RateLimited, 1, 0),
+        refusal(IngressRefusalReason::RateLimited, 1, 1),
+        refusal(IngressRefusalReason::Validation, 3, 2),
+    ] {
+        let envelope = Box::new(EventEnvelope::new(JournalWriterId::new(), event));
+        MetricsAggregatorAction::ProcessSystemEvent { envelope }
+            .execute(&mut ctx)
+            .await
+            .unwrap();
+    }
+
+    MetricsAggregatorAction::ExportMetrics
+        .execute(&mut ctx)
+        .await
+        .unwrap();
+
+    let snapshots = exporter.app_snapshots.lock().unwrap();
+    let last = snapshots.last().expect("exported app snapshot");
+    assert_eq!(
+        last.ingestion_refusal_totals
+            .get(&("orders".into(), "rate_limited".to_string()))
+            .copied(),
+        Some(2),
+        "two single rate-limited refusals sum to 2"
     );
-
-    exporter.update_infra_metrics(snapshot).unwrap();
-
-    let snapshots = exporter.infra_snapshots.lock().unwrap();
-    let last = snapshots.last().expect("exported infra snapshot");
-    let ing = last
-        .ingestion_metrics
-        .get("/api/ingest")
-        .expect("ingestion metrics entry");
-    assert_eq!(ing.requests_total, 5);
-    assert_eq!(ing.events_accepted_total, 4);
-    assert_eq!(ing.events_rejected_auth_total, 1);
-    assert_eq!(ing.channel_depth, 12);
-    assert_eq!(ing.channel_capacity, 10_000);
+    assert_eq!(
+        last.ingestion_refusal_totals
+            .get(&("orders".into(), "validation".to_string()))
+            .copied(),
+        Some(3),
+        "a validation refusal of three events counts the events"
+    );
 }

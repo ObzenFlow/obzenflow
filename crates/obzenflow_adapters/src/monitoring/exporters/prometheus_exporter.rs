@@ -1775,6 +1775,29 @@ impl PrometheusExporter {
             writeln!(output)?;
         }
 
+        // FLOWIP-115d: hosted-ingress refusal totals projected from `IngressRefusal`
+        // facts, keyed by (ingress_key, reason). Folded from journal facts, so it is
+        // replay-faithful, unlike the former in-memory ingestion reject counters.
+        if !snapshot.ingestion_refusal_totals.is_empty() {
+            writeln!(
+                output,
+                "# HELP http_ingestion_refusals_total Hosted-ingress refusals by reason (projected from journal facts)"
+            )?;
+            writeln!(output, "# TYPE http_ingestion_refusals_total counter")?;
+            let mut rows: Vec<_> = snapshot.ingestion_refusal_totals.iter().collect();
+            rows.sort_by(|a, b| a.0.cmp(b.0));
+            for ((ingress_key, reason), count) in rows {
+                writeln!(
+                    output,
+                    "http_ingestion_refusals_total{{ingress=\"{}\",reason=\"{}\"}} {}",
+                    escape_label(ingress_key.as_str()),
+                    escape_label(reason),
+                    count
+                )?;
+            }
+            writeln!(output)?;
+        }
+
         // HTTP pull telemetry (FLOWIP-084e).
         if !snapshot.http_pull_metrics.is_empty() {
             writeln!(
@@ -2232,138 +2255,6 @@ impl PrometheusExporter {
             writeln!(output)?;
         }
 
-        self.render_ingestion_metrics(output, &snapshot.ingestion_metrics)?;
-
-        Ok(())
-    }
-
-    fn render_ingestion_metrics(
-        &self,
-        output: &mut String,
-        ingestion_metrics: &std::collections::HashMap<
-            String,
-            obzenflow_core::event::ingestion::IngestionTelemetrySnapshot,
-        >,
-    ) -> Result<(), Box<dyn Error + Send + Sync>> {
-        if ingestion_metrics.is_empty() {
-            return Ok(());
-        }
-
-        writeln!(
-            output,
-            "# HELP http_ingestion_requests_total Total HTTP ingestion requests"
-        )?;
-        writeln!(output, "# TYPE http_ingestion_requests_total counter")?;
-        for metrics in ingestion_metrics.values() {
-            writeln!(
-                output,
-                "http_ingestion_requests_total{{base_path=\"{}\"}} {}",
-                escape_label(&metrics.base_path),
-                metrics.requests_total
-            )?;
-        }
-        writeln!(output)?;
-
-        writeln!(
-            output,
-            "# HELP http_ingestion_events_accepted_total Total accepted events"
-        )?;
-        writeln!(
-            output,
-            "# TYPE http_ingestion_events_accepted_total counter"
-        )?;
-        for metrics in ingestion_metrics.values() {
-            writeln!(
-                output,
-                "http_ingestion_events_accepted_total{{base_path=\"{}\"}} {}",
-                escape_label(&metrics.base_path),
-                metrics.events_accepted_total
-            )?;
-        }
-        writeln!(output)?;
-
-        writeln!(
-            output,
-            "# HELP http_ingestion_events_rejected_total Total rejected events by reason"
-        )?;
-        writeln!(
-            output,
-            "# TYPE http_ingestion_events_rejected_total counter"
-        )?;
-        for metrics in ingestion_metrics.values() {
-            let base_path = escape_label(&metrics.base_path);
-            writeln!(
-                output,
-                "http_ingestion_events_rejected_total{{base_path=\"{}\",reason=\"auth\"}} {}",
-                base_path, metrics.events_rejected_auth_total
-            )?;
-            writeln!(
-                output,
-                "http_ingestion_events_rejected_total{{base_path=\"{}\",reason=\"validation\"}} {}",
-                base_path, metrics.events_rejected_validation_total
-            )?;
-            writeln!(
-                output,
-                "http_ingestion_events_rejected_total{{base_path=\"{}\",reason=\"buffer_full\"}} {}",
-                base_path,
-                metrics.events_rejected_buffer_full_total
-            )?;
-            writeln!(
-                output,
-                "http_ingestion_events_rejected_total{{base_path=\"{}\",reason=\"not_ready\"}} {}",
-                base_path, metrics.events_rejected_not_ready_total
-            )?;
-            writeln!(
-                output,
-                "http_ingestion_events_rejected_total{{base_path=\"{}\",reason=\"payload_too_large\"}} {}",
-                base_path,
-                metrics.events_rejected_payload_too_large_total
-            )?;
-            writeln!(
-                output,
-                "http_ingestion_events_rejected_total{{base_path=\"{}\",reason=\"invalid_json\"}} {}",
-                base_path,
-                metrics.events_rejected_invalid_json_total
-            )?;
-            writeln!(
-                output,
-                "http_ingestion_events_rejected_total{{base_path=\"{}\",reason=\"channel_closed\"}} {}",
-                base_path,
-                metrics.events_rejected_channel_closed_total
-            )?;
-        }
-        writeln!(output)?;
-
-        writeln!(
-            output,
-            "# HELP http_ingestion_channel_depth Current ingestion channel depth"
-        )?;
-        writeln!(output, "# TYPE http_ingestion_channel_depth gauge")?;
-        for metrics in ingestion_metrics.values() {
-            writeln!(
-                output,
-                "http_ingestion_channel_depth{{base_path=\"{}\"}} {}",
-                escape_label(&metrics.base_path),
-                metrics.channel_depth
-            )?;
-        }
-        writeln!(output)?;
-
-        writeln!(
-            output,
-            "# HELP http_ingestion_channel_capacity Ingestion channel capacity"
-        )?;
-        writeln!(output, "# TYPE http_ingestion_channel_capacity gauge")?;
-        for metrics in ingestion_metrics.values() {
-            writeln!(
-                output,
-                "http_ingestion_channel_capacity{{base_path=\"{}\"}} {}",
-                escape_label(&metrics.base_path),
-                metrics.channel_capacity
-            )?;
-        }
-        writeln!(output)?;
-
         Ok(())
     }
 
@@ -2593,7 +2484,6 @@ fn estimate_bucket_count(histogram: &HistogramSnapshot, bucket_value: f64) -> u6
 #[cfg(test)]
 mod tests {
     use super::*;
-    use obzenflow_core::event::ingestion::IngestionTelemetrySnapshot;
     use obzenflow_core::event::observability::{
         HttpPullState, HttpPullTelemetry, HttpSurfaceRouteMetricsSnapshot, WaitReason,
     };
@@ -2643,45 +2533,36 @@ mod tests {
     }
 
     #[test]
-    fn test_http_ingestion_metrics_rendered() {
+    fn test_http_ingestion_refusal_metrics_rendered() {
         let exporter = PrometheusExporter::new();
 
-        let mut snapshot = InfraMetricsSnapshot::default();
-        snapshot.ingestion_metrics.insert(
-            "/api/ingest".to_string(),
-            IngestionTelemetrySnapshot {
-                base_path: "/api/ingest".to_string(),
-                channel_depth: 12,
-                channel_capacity: 10_000,
-                requests_total: 5,
-                events_accepted_total: 4,
-                events_rejected_auth_total: 1,
-                events_rejected_validation_total: 0,
-                events_rejected_buffer_full_total: 0,
-                events_rejected_not_ready_total: 0,
-                events_rejected_payload_too_large_total: 0,
-                events_rejected_invalid_json_total: 0,
-                events_rejected_channel_closed_total: 7,
-            },
-        );
+        // Refusal totals are projected from `IngressRefusal` facts on the app
+        // snapshot, keyed by (ingress_key, reason).
+        let mut app = AppMetricsSnapshot::default();
+        app.ingestion_refusal_totals
+            .insert(("orders".into(), "rate_limited".to_string()), 3);
+        app.ingestion_refusal_totals
+            .insert(("orders".into(), "validation".to_string()), 5);
+        exporter.update_app_metrics(app).unwrap();
 
-        exporter.update_infra_metrics(snapshot).unwrap();
         let output = exporter.render_metrics().unwrap();
+        let ingress = escape_label("orders");
 
-        let base_path = escape_label("/api/ingest");
-        assert!(output.contains("# TYPE http_ingestion_requests_total counter"));
+        // Refusals render by reason from the projected facts.
+        assert!(output.contains("# TYPE http_ingestion_refusals_total counter"));
         assert!(output.contains(&format!(
-            "http_ingestion_requests_total{{base_path=\"{base_path}\"}} 5"
+            "http_ingestion_refusals_total{{ingress=\"{ingress}\",reason=\"rate_limited\"}} 3"
         )));
         assert!(output.contains(&format!(
-            "http_ingestion_events_rejected_total{{base_path=\"{base_path}\",reason=\"auth\"}} 1"
+            "http_ingestion_refusals_total{{ingress=\"{ingress}\",reason=\"validation\"}} 5"
         )));
-        assert!(output.contains(&format!(
-            "http_ingestion_events_rejected_total{{base_path=\"{base_path}\",reason=\"channel_closed\"}} 7"
-        )));
-        assert!(output.contains(&format!(
-            "http_ingestion_channel_depth{{base_path=\"{base_path}\"}} 12"
-        )));
+
+        // The former ingestion telemetry sidecar and counters are gone.
+        assert!(!output.contains("http_ingestion_channel_depth"));
+        assert!(!output.contains("http_ingestion_channel_capacity"));
+        assert!(!output.contains("http_ingestion_requests_total"));
+        assert!(!output.contains("http_ingestion_events_rejected_total"));
+        assert!(!output.contains("http_ingestion_events_accepted_total"));
     }
 
     #[test]

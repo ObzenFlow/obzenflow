@@ -51,7 +51,8 @@
 //!
 //! ## Custom Middleware
 //!
-//! You can also create custom middleware by implementing the `Middleware` trait:
+//! You can create custom observation or structural middleware by implementing
+//! the `Middleware` trait:
 //!
 //! ```rust
 //! use obzenflow_adapters::middleware::{
@@ -82,9 +83,9 @@
 //! ```
 
 // Core types
+pub mod handler;
 mod middleware_factory;
 mod middleware_safety;
-mod middleware_trait;
 
 /// FLOWIP-120i: whether this process is performing a strict replay, read from
 /// the installed bootstrap, the same source the journal factory uses to open
@@ -95,21 +96,13 @@ pub(crate) fn strict_replay_active() -> bool {
     obzenflow_runtime::bootstrap::replay_bootstrap().is_some()
 }
 
-// Handler-specific middleware adapters
+// Handler-specific middleware adapters and legacy middleware wrappers
 mod backpressure;
-mod join_middleware;
-mod sink_middleware;
-mod sink_policy;
-mod source_middleware;
-mod source_policy;
-mod stateful_middleware;
-mod transform_middleware;
 
 // Common middleware utilities
 mod carrier;
 mod context;
 mod context_keys;
-mod effect_policy;
 mod function;
 mod hints;
 pub mod type_shaping;
@@ -126,58 +119,49 @@ mod system;
 // directly, and dashboards/query assets live outside the middleware API.
 
 // Core trait exports
+pub(crate) use handler::observation_short_circuit;
+pub use handler::{
+    ErrorAction, Middleware, MiddlewareAbortCause, MiddlewareAction, SourceMiddlewarePhase,
+};
 pub use middleware_factory::{
     ControlMiddlewareRole, MiddlewareFactory, MiddlewareFactoryError, MiddlewareFactoryResult,
     MiddlewareKind, MiddlewareOverrideKey, MiddlewarePlanContribution,
     TopologyMiddlewareConfigSlot,
 };
 pub use middleware_safety::MiddlewareSafety;
-pub(crate) use middleware_trait::observation_short_circuit;
-pub use middleware_trait::{
-    ErrorAction, Middleware, MiddlewareAbortCause, MiddlewareAction, SourceMiddlewarePhase,
-    SourcePacer,
-};
 
 // Handler-specific exports
-pub use join_middleware::{JoinHandlerMiddlewareExt, JoinMiddlewareBuilder, MiddlewareJoin};
-pub use sink_middleware::{MiddlewareSink, SinkHandlerExt, SinkMiddlewareBuilder};
-pub use sink_policy::{
-    PerSinkDeliveryPolicyBoundary, SinkAdmission, SinkAdmissionGuard, SinkDeliveryPolicyOutcome,
-    SinkPolicy, SinkPolicyCtx,
-};
-pub use source_middleware::{
+pub use handler::{
     AsyncFiniteSourceHandlerExt, AsyncFiniteSourceMiddlewareBuilder, AsyncInfiniteSourceHandlerExt,
-    AsyncInfiniteSourceMiddlewareBuilder, FiniteSourceHandlerExt, FiniteSourceMiddlewareBuilder,
-    InfiniteSourceHandlerExt, InfiniteSourceMiddlewareBuilder, MiddlewareAsyncFiniteSource,
-    MiddlewareAsyncInfiniteSource, MiddlewareFiniteSource, MiddlewareInfiniteSource,
-};
-pub use source_policy::{
-    batch_has_error_marked, PerSourcePolicyBoundary, SourceAdmission, SourceAdmissionGuard,
-    SourceAfterPoll, SourcePolicy, SourcePolicyCtx, SourcePollOutcome,
-};
-pub use stateful_middleware::{
-    MiddlewareStateful, StatefulHandlerMiddlewareExt, StatefulMiddlewareBuilder,
-};
-pub use transform_middleware::{
-    AsyncMiddlewareTransform, AsyncTransformHandlerExt, AsyncTransformMiddlewareBuilder,
-    MiddlewareTransform, TransformHandlerExt, TransformMiddlewareBuilder,
-    UnifiedMiddlewareTransform,
+    AsyncInfiniteSourceMiddlewareBuilder, AsyncMiddlewareTransform, AsyncTransformHandlerExt,
+    AsyncTransformMiddlewareBuilder, FiniteSourceHandlerExt, FiniteSourceMiddlewareBuilder,
+    InfiniteSourceHandlerExt, InfiniteSourceMiddlewareBuilder, JoinHandlerMiddlewareExt,
+    JoinMiddlewareBuilder, MiddlewareAsyncFiniteSource, MiddlewareAsyncInfiniteSource,
+    MiddlewareFiniteSource, MiddlewareInfiniteSource, MiddlewareJoin, MiddlewareSink,
+    MiddlewareStateful, MiddlewareTransform, SinkHandlerExt, SinkMiddlewareBuilder,
+    StatefulHandlerMiddlewareExt, StatefulMiddlewareBuilder, TransformHandlerExt,
+    TransformMiddlewareBuilder, UnifiedMiddlewareTransform,
 };
 
 // Common utilities
 pub use carrier::{
     validate_attachment_request, EffectSurface, EffectTypeKey, EffectUnitId,
+    HostedIngressTargetKey, IngressEndpointKind, IngressRouteScope, IngressSurface, IngressUnitId,
     MiddlewareAttachmentId, MiddlewareAttachmentRequest, MiddlewareAttachmentValidationError,
     MiddlewareCapability, MiddlewareDeclaration, MiddlewareDeclarationIndex,
     MiddlewareDeclarationScope, MiddlewareMaterializationContext, MiddlewareOrigin,
     MiddlewareSurface, MiddlewareSurfaceAttachment, MiddlewareSurfaceKind, ProtectedUnit,
     ProtectedUnitId, SinkConfiguredTargetKey, SinkDeliverySurface, SinkDeliveryTarget,
     SinkDeliveryUnitId, SourcePollAttachment, SourcePollSurface, SourcePollUnitId,
+    SourceStageIngressOwner,
 };
 pub use context::MiddlewareContext;
-pub use effect_policy::{
-    effect_policy_from_middleware, EffectAttemptOutcome, EffectPolicy, PerEffectPolicyBoundary,
-    PolicyAdmission,
+pub use control::policy::{
+    effect_policy_from_middleware, EffectAttemptOutcome, EffectPolicy, EffectPolicyAttachment,
+    EventAwareEffectPolicy, PerEffectPolicyBoundary, PerSinkDeliveryPolicyBoundary,
+    PerSourcePolicyBoundary, PolicyAdmission, SinkAdmission, SinkAdmissionGuard,
+    SinkDeliveryPolicyOutcome, SinkPolicy, SinkPolicyCtx, SourceAdmission, SourceAdmissionGuard,
+    SourceAfterPoll, SourceBatchFacts, SourcePolicy, SourcePolicyCtx, SourcePollOutcome,
 };
 pub use function::{middleware_fn, FnMiddleware};
 pub use hints::{Attempts, BackoffKind, BatchingHint, MiddlewareHints, RetryHint};

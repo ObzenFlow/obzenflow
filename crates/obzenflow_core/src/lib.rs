@@ -11,6 +11,7 @@ pub mod error;
 pub mod event;
 pub mod http_client;
 pub mod id;
+pub mod ingress;
 pub mod journal;
 pub mod metrics;
 pub mod time;
@@ -39,7 +40,7 @@ pub use event::schema::{
 };
 
 // Re-export typed IDs
-pub use id::{CycleDepth, FlowId, JournalId, SccId, StageId, SystemId};
+pub use id::{CycleDepth, FlowId, JournalId, SccId, StageId, StageKey, SystemId};
 
 // Re-export Ulid for convenience since it's used in many IDs
 pub use ulid::Ulid;

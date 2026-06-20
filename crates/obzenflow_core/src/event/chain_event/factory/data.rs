@@ -115,9 +115,9 @@ impl ChainEventFactory {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::event::ingestion::IngressContext;
     use crate::event::CorrelationId;
     use crate::id::StageId;
+    use crate::ingress::IngressContext;
     use crate::WriterId;
     use serde_json::json;
 
@@ -127,8 +127,9 @@ mod tests {
         let parent = ChainEventFactory::data_event(writer_id, "parent.event", json!({"id": 1}))
             .with_ingress_context(IngressContext {
                 accepted_at_ns: 42,
-                base_path: "/api/orders".to_string(),
+                ingress_key: "orders".into(),
                 batch_index: Some(3),
+                attempt_seq: crate::ingress::IngressAttemptSeq(0),
             });
 
         let child =

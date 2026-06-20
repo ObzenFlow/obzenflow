@@ -7,7 +7,7 @@
 //! This module provides the ability to wrap TransformHandler implementations
 //! with middleware for cross-cutting concerns like logging, monitoring, and retry logic.
 
-use super::{
+use crate::middleware::{
     context_keys::{
         CircuitBreakerAttempt, CircuitBreakerRetryAfterMs, CircuitBreakerRetryDelayMs,
         CircuitBreakerShouldRetry, CircuitBreakerTotalRetryWallMs,
@@ -530,7 +530,7 @@ impl<H: UnifiedTransformHandler> UnifiedMiddlewareTransform<H> {
         mut self,
         chains: std::collections::HashMap<
             &'static str,
-            Arc<Vec<Arc<dyn crate::middleware::EffectPolicy>>>,
+            Arc<Vec<crate::middleware::EffectPolicyAttachment>>,
         >,
     ) -> Self {
         self.effect_boundary = Some(Arc::new(crate::middleware::PerEffectPolicyBoundary::new(
@@ -1203,7 +1203,7 @@ mod tests {
     }
 
     fn boundary_for(middleware: Arc<dyn Middleware>) -> crate::middleware::PerEffectPolicyBoundary {
-        let chain: Arc<Vec<Arc<dyn crate::middleware::EffectPolicy>>> =
+        let chain: Arc<Vec<crate::middleware::EffectPolicyAttachment>> =
             Arc::new(vec![crate::middleware::effect_policy_from_middleware(
                 middleware,
             )]);

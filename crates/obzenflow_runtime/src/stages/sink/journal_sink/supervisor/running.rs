@@ -32,8 +32,7 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use super::super::boundary::{
-    SinkDeliveryAttemptContext, SinkDeliveryAttemptOutcome, SinkDeliveryBoundaryOutcome,
-    SinkDeliveryExecutor, SinkDeliveryIdentity, SinkDeliveryTargetId,
+    SinkDeliveryAttemptOutcome, SinkDeliveryBoundaryOutcome, SinkDeliveryExecutor,
 };
 use super::super::fsm::{JournalSinkContext, JournalSinkEvent, JournalSinkState};
 use super::JournalSinkSupervisor;
@@ -513,19 +512,9 @@ async fn dispatch_data_event<
     let scope = crate::effects::scope_for_dispatch(ctx.effect_runtime_mode, stage_input_position);
 
     // FLOWIP-115b: the sink-delivery boundary wraps the data-event consume
-    // attempt. Pre-extract the boundary and identity so the closure borrows only
+    // attempt. Pre-extract the boundary so the closure borrows only
     // `ctx.handler` mutably, disjoint from `&ctx.instrumentation`.
     let sink_boundary = ctx.sink_delivery_boundary.clone();
-    let delivery_identity = SinkDeliveryIdentity {
-        stage_id: ctx.stage_id,
-        target: SinkDeliveryTargetId::Stage,
-    };
-    let delivery_attempt = SinkDeliveryAttemptContext {
-        parent_event_id: event_id,
-        upstream_stage,
-        input_position: stage_input_position,
-    };
-    let boundary_event = envelope.event.clone();
 
     // Use instrumentation wrapper but keep handler-level failures as per-record
     // outcomes instead of stage-fatal errors.
@@ -558,14 +547,7 @@ async fn dispatch_data_event<
                 Vec::new(),
             )
         } else if let Some(boundary) = &sink_boundary {
-            let report = boundary
-                .around_sink_delivery(
-                    &delivery_identity,
-                    &delivery_attempt,
-                    &boundary_event,
-                    &mut executor,
-                )
-                .await;
+            let report = boundary.around_sink_delivery(&mut executor).await;
             (report.outcome, report.control_events)
         } else {
             (

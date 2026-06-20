@@ -8,7 +8,6 @@ use crate::event::context::observability_context::ObservabilityContext;
 use crate::event::context::{
     FlowContext, IntentContext, ProcessingContext, ReplayContext, RuntimeContext,
 };
-use crate::event::ingestion::IngressContext;
 use crate::event::payloads::correlation_payload::CorrelationPayload;
 use crate::event::payloads::delivery_payload::DeliveryPayload;
 use crate::event::payloads::effect_payload::{is_framework_effect_event_type, EffectProvenance};
@@ -19,6 +18,7 @@ use crate::event::payloads::observability_payload::{
 use crate::event::status::processing_status::{ErrorKind, ProcessingStatus};
 use crate::event::types::{CorrelationId, EventId, WriterId};
 use crate::id::{CycleDepth, SccId};
+use crate::ingress::IngressContext;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 

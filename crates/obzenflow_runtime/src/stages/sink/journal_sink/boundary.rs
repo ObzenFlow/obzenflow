@@ -11,35 +11,10 @@
 //! [`SinkDeliveryBoundary`]. The seam carries no `Middleware` in its name: that
 //! is adapter authoring vocabulary.
 
-use crate::messaging::upstream_subscription::StageInputPosition;
 use crate::stages::common::handler_error::HandlerError;
 use crate::stages::common::handlers::SinkConsumeReport;
 use async_trait::async_trait;
-use obzenflow_core::{ChainEvent, EventId, StageId};
-
-/// The sink-delivery target. Stage-level by default; a configured target that a
-/// sink adapter can declare before consume refines the protected unit.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SinkDeliveryTargetId {
-    Stage,
-    Configured(String),
-}
-
-/// Identity of the sink-delivery protected unit (cross-attempt accounting key).
-#[derive(Debug, Clone)]
-pub struct SinkDeliveryIdentity {
-    pub stage_id: StageId,
-    pub target: SinkDeliveryTargetId,
-}
-
-/// Per-attempt context for one sink delivery. These are invocation facts, not
-/// part of the protected-unit identity.
-#[derive(Debug, Clone)]
-pub struct SinkDeliveryAttemptContext {
-    pub parent_event_id: EventId,
-    pub upstream_stage: Option<StageId>,
-    pub input_position: Option<StageInputPosition>,
-}
+use obzenflow_core::ChainEvent;
 
 /// How one sink-delivery attempt ended once the boundary admitted it.
 pub enum SinkDeliveryAttemptOutcome {
@@ -95,9 +70,6 @@ pub trait SinkDeliveryExecutor: Send {
 pub trait SinkDeliveryBoundary: Send + Sync {
     async fn around_sink_delivery(
         &self,
-        identity: &SinkDeliveryIdentity,
-        attempt: &SinkDeliveryAttemptContext,
-        event: &ChainEvent,
         execute: &mut dyn SinkDeliveryExecutor,
     ) -> SinkDeliveryBoundaryReport;
 }

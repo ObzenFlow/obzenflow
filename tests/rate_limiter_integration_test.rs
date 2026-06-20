@@ -10,13 +10,15 @@ use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, Delivery
 use obzenflow_core::journal::Journal;
 use obzenflow_core::TypedPayload;
 use obzenflow_core::{StageId, WriterId};
-use obzenflow_dsl::{async_source, join, sink, source, test_flow, transform};
+use obzenflow_dsl::{async_source, join, sink, source, stateful, test_flow, transform};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    AsyncFiniteSourceHandler, FiniteSourceHandler, JoinHandler, SinkHandler, TransformHandler,
+    AsyncFiniteSourceHandler, FiniteSourceHandler, JoinHandler, SinkHandler, StatefulHandler,
+    TransformHandler,
 };
 use obzenflow_runtime::stages::SourceError;
+use obzenflow_runtime::typing::StatefulTyping;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -160,6 +162,30 @@ impl TransformHandler for PassthroughTransform {
 
     async fn drain(&mut self) -> std::result::Result<(), HandlerError> {
         Ok(())
+    }
+}
+
+/// Minimal stateful handler used only to prove that a rate limiter on a pure-sync
+/// stateful shell fails the build (FLOWIP-115d / FLOWIP-120c H1). The build
+/// rejects before any handler logic runs, so the body is empty.
+#[derive(Clone, Debug)]
+struct PassthroughStateful;
+
+impl StatefulTyping for PassthroughStateful {
+    type Input = RateLimiterTestEvent;
+    type Output = RateLimiterTestEvent;
+}
+
+#[async_trait]
+impl StatefulHandler for PassthroughStateful {
+    type State = ();
+    fn accumulate(&mut self, _state: &mut Self::State, _event: ChainEvent) {}
+    fn initial_state(&self) -> Self::State {}
+    fn create_events(
+        &self,
+        _state: &Self::State,
+    ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
+        Ok(vec![])
     }
 }
 
@@ -937,6 +963,88 @@ async fn rate_limiter_join_stage_rejects_rate_limit_middleware() -> Result<()> {
     assert!(
         err.contains("PolicyMiddlewareOnPureStage") || err.contains("pure sync surface"),
         "expected FLOWIP-120c H1 join rejection, got: {err}"
+    );
+
+    Ok(())
+}
+
+/// FLOWIP-115d (AC51/AC52): a built-in rate limiter on a pure-sync transform
+/// fails the build. The transform shell has no live I/O to pace, so the shared
+/// FLOWIP-120c H1 guard rejects it and names the legitimate destinations.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rate_limiter_transform_stage_rejects_rate_limit_middleware() -> Result<()> {
+    let (sink, _count) = CountingSink::new();
+    let result = test_flow! {
+        name: "rate_limiter_transform_reject",
+        journals: disk_journals(unique_journal_dir("rate_limiter_transform_reject")),
+        middleware: [],
+
+        stages: {
+            src = source!(RateLimiterTestEvent => SequenceSource::new(2));
+            throttled = transform!(RateLimiterTestEvent -> RateLimiterTestEvent => PassthroughTransform, [
+                rate_limit_with_burst(1.0, 3.0)
+            ]);
+            snk = sink!(RateLimiterTestEvent => sink);
+        },
+
+        topology: {
+            src |> throttled;
+            throttled |> snk;
+        }
+    }
+    .await;
+
+    let err = match result {
+        Ok(_) => return Err(anyhow!("rate limiter on a transform must fail the build")),
+        Err(err) => format!("{err:?}"),
+    };
+    // The shared FLOWIP-120c H1 guard is the migration hint: its `#[error(...)]`
+    // names the live-I/O surfaces a limiter may attach to (sources, the effect
+    // boundary, or sink delivery) instead of a pure-sync handler shell.
+    assert!(
+        err.contains("PolicyMiddlewareOnPureStage") || err.contains("pure sync surface"),
+        "expected FLOWIP-120c H1 transform rejection, got: {err}"
+    );
+
+    Ok(())
+}
+
+/// FLOWIP-115d (AC51/AC52): a built-in rate limiter on a pure-sync stateful stage
+/// fails the build through the same FLOWIP-120c H1 guard.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rate_limiter_stateful_stage_rejects_rate_limit_middleware() -> Result<()> {
+    let (sink, _count) = CountingSink::new();
+    let result = test_flow! {
+        name: "rate_limiter_stateful_reject",
+        journals: disk_journals(unique_journal_dir("rate_limiter_stateful_reject")),
+        middleware: [],
+
+        stages: {
+            src = source!(RateLimiterTestEvent => SequenceSource::new(2));
+            agg = stateful!(RateLimiterTestEvent -> RateLimiterTestEvent => PassthroughStateful, [
+                rate_limit_with_burst(1.0, 3.0)
+            ]);
+            snk = sink!(RateLimiterTestEvent => sink);
+        },
+
+        topology: {
+            src |> agg;
+            agg |> snk;
+        }
+    }
+    .await;
+
+    let err = match result {
+        Ok(_) => {
+            return Err(anyhow!(
+                "rate limiter on a stateful stage must fail the build"
+            ))
+        }
+        Err(err) => format!("{err:?}"),
+    };
+    assert!(
+        err.contains("PolicyMiddlewareOnPureStage") || err.contains("pure sync surface"),
+        "expected FLOWIP-120c H1 stateful rejection, got: {err}"
     );
 
     Ok(())

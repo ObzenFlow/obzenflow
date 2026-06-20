@@ -256,7 +256,7 @@ impl MiddlewareFactory for MyControlFactory {
                 todo!()
             }
             MiddlewareSurface::Effect(_) => {
-                // Return Arc<dyn EffectPolicy>.
+                // Return EffectPolicyAttachment::neutral(...) or ::event_aware(...).
                 todo!()
             }
             MiddlewareSurface::SinkDelivery(_) => {
@@ -273,13 +273,22 @@ impl MiddlewareFactory for MyControlFactory {
 }
 ```
 
+Control policies live under `middleware::control::policy`. They are the
+authoring contract for middleware that controls a live I/O boundary;
+observation and structural handler middleware still implement the generic
+`Middleware` trait under `middleware::handler`. Built-in control middleware
+lives beside the policy contract under `middleware::control`, so the namespace
+reads as one control subsystem rather than a loose set of root modules.
+
 The policies returned from `materialize` are surface-specific:
 
 - `SourcePolicy::admit` returns `SourceAdmission::Admit` or `Reject`; admitted
   policies observe the raw `SourcePollOutcome`.
-- `EffectPolicy::admit` returns `PolicyAdmission::Admit`, `Synthesize`, or
-  `Reject`; rejected effects are recorded under the effect cursor and strict
-  replay returns the recorded outcome without invoking the live effect hook.
+- `EffectPolicy::admit` is event-neutral. Use `EventAwareEffectPolicy` only when
+  the policy has a same-slice need to inspect the parent `ChainEvent`; both
+  variants return `PolicyAdmission::Admit`, `Synthesize`, or `Reject`. Rejected
+  effects are recorded under the effect cursor and strict replay returns the
+  recorded outcome without invoking the live effect hook.
 - `SinkPolicy::admit` returns `SinkAdmission::Admit` or `Reject`; rejection is
   recorded as a failed delivery receipt with middleware rejection metadata, not
   a successful `Noop` delivery.

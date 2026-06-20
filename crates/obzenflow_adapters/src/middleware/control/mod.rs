@@ -3,6 +3,7 @@
 // https://obzenflow.dev
 
 pub mod circuit_breaker;
+pub mod policy;
 pub mod provider;
 pub mod rate_limiter;
 

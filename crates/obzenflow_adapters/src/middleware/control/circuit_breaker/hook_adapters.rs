@@ -11,7 +11,7 @@ use crate::middleware::context_keys::{
     CircuitBreakerProbeSlot, CircuitBreakerProbeSlotGuard,
 };
 use crate::middleware::{
-    batch_has_error_marked, SinkAdmission, SinkAdmissionGuard, SinkDeliveryPolicyOutcome,
+    EventAwareEffectPolicy, SinkAdmission, SinkAdmissionGuard, SinkDeliveryPolicyOutcome,
     SinkPolicy, SinkPolicyCtx, SourceAdmission, SourcePolicy, SourcePolicyCtx, SourcePollOutcome,
 };
 use crate::middleware::{Middleware, MiddlewareAction, MiddlewareContext, SourceMiddlewarePhase};
@@ -125,9 +125,9 @@ impl SourcePolicy for CircuitBreakerSourcePolicy {
     fn observe(&self, outcome: &SourcePollOutcome<'_>, ctx: &mut SourcePolicyCtx) {
         let source_outcome = match outcome {
             SourcePollOutcome::Delivered {
-                events,
+                batch,
                 poll_duration,
-            } if batch_has_error_marked(events) => SourceOutcome::Failure {
+            } if batch.has_error_marked => SourceOutcome::Failure {
                 poll_duration: *poll_duration,
             },
             SourcePollOutcome::Delivered { poll_duration, .. }
@@ -562,14 +562,13 @@ impl Middleware for CircuitBreakerMiddleware {
 /// Admission never waits, so the sync `pre_handle` is reused directly under
 /// the boundary scope the policy chain establishes.
 #[async_trait::async_trait]
-impl crate::middleware::EffectPolicy for CircuitBreakerMiddleware {
+impl EventAwareEffectPolicy for CircuitBreakerMiddleware {
     fn label(&self) -> &'static str {
         Middleware::label(self)
     }
 
     async fn admit(
         &self,
-        _identity: &obzenflow_runtime::effects::EffectIdentity,
         event: &ChainEvent,
         ctx: &mut MiddlewareContext,
     ) -> crate::middleware::PolicyAdmission {
@@ -588,7 +587,6 @@ impl crate::middleware::EffectPolicy for CircuitBreakerMiddleware {
 
     fn observe(
         &self,
-        _identity: &obzenflow_runtime::effects::EffectIdentity,
         event: &ChainEvent,
         attempt: &crate::middleware::EffectAttemptOutcome<'_>,
         ctx: &mut MiddlewareContext,
