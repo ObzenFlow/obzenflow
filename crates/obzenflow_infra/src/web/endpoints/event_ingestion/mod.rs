@@ -1671,11 +1671,7 @@ mod tests {
 
         assert_eq!(
             refusals,
-            vec![(
-                IngressRefusalReason::RateLimited,
-                1,
-                "/api/orders".into()
-            )],
+            vec![(IngressRefusalReason::RateLimited, 1, "/api/orders".into())],
             "exactly one rate-limited refusal fact for the second POST"
         );
         // Exactly one event was admitted, so the sink delivered exactly one.

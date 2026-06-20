@@ -15,17 +15,16 @@ use obzenflow_adapters::middleware::control::ControlMiddlewareAggregator;
 use obzenflow_adapters::middleware::{
     effect_policy_from_middleware, validate_attachment_request, EffectPolicyAttachment,
     EffectSurface, EffectTypeKey, EffectUnitId, HostedIngressTargetKey, IngressRouteScope,
-    IngressSurface, IngressUnitId, Middleware,
-    MiddlewareAttachmentRequest, MiddlewareDeclarationIndex, MiddlewareFactory,
-    MiddlewareMaterializationContext, MiddlewareOrigin, MiddlewareSurface,
-    MiddlewareSurfaceAttachment, MiddlewareSurfaceKind, ProtectedUnit, ProtectedUnitId,
-    SinkDeliverySurface, SinkDeliveryTarget, SinkDeliveryUnitId, SinkPolicy, SourcePolicy,
-    SourcePollSurface, SourcePollUnitId, SourceStageIngressOwner,
+    IngressSurface, IngressUnitId, Middleware, MiddlewareAttachmentRequest,
+    MiddlewareDeclarationIndex, MiddlewareFactory, MiddlewareMaterializationContext,
+    MiddlewareOrigin, MiddlewareSurface, MiddlewareSurfaceAttachment, MiddlewareSurfaceKind,
+    ProtectedUnit, ProtectedUnitId, SinkDeliverySurface, SinkDeliveryTarget, SinkDeliveryUnitId,
+    SinkPolicy, SourcePolicy, SourcePollSurface, SourcePollUnitId, SourceStageIngressOwner,
 };
-use obzenflow_core::ingress::IngressKey;
-use obzenflow_core::StageKey;
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::ingress::IngressBoundaryMiddleware;
+use obzenflow_core::ingress::IngressKey;
+use obzenflow_core::StageKey;
 use obzenflow_runtime::pipeline::config::StageConfig;
 use obzenflow_runtime::stages::source::strategies::CompletionGate;
 use std::sync::Arc;
