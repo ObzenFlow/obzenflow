@@ -167,12 +167,14 @@ pub use transform_middleware::{
 // Common utilities
 pub use carrier::{
     validate_attachment_request, EffectSurface, EffectTypeKey, EffectUnitId,
-    MiddlewareAttachmentId, MiddlewareAttachmentRequest, MiddlewareAttachmentValidationError,
-    MiddlewareCapability, MiddlewareDeclaration, MiddlewareDeclarationIndex,
-    MiddlewareDeclarationScope, MiddlewareMaterializationContext, MiddlewareOrigin,
-    MiddlewareSurface, MiddlewareSurfaceAttachment, MiddlewareSurfaceKind, ProtectedUnit,
-    ProtectedUnitId, SinkConfiguredTargetKey, SinkDeliverySurface, SinkDeliveryTarget,
-    SinkDeliveryUnitId, SourcePollAttachment, SourcePollSurface, SourcePollUnitId,
+    HostedIngressSurfaceKey, HostedIngressTargetKey, IngressEndpointKind, IngressRouteScope,
+    IngressStageKey, IngressSurface, IngressUnitId, MiddlewareAttachmentId,
+    MiddlewareAttachmentRequest, MiddlewareAttachmentValidationError, MiddlewareCapability,
+    MiddlewareDeclaration, MiddlewareDeclarationIndex, MiddlewareDeclarationScope,
+    MiddlewareMaterializationContext, MiddlewareOrigin, MiddlewareSurface,
+    MiddlewareSurfaceAttachment, MiddlewareSurfaceKind, ProtectedUnit, ProtectedUnitId,
+    SinkConfiguredTargetKey, SinkDeliverySurface, SinkDeliveryTarget, SinkDeliveryUnitId,
+    SourcePollAttachment, SourcePollSurface, SourcePollUnitId, SourceStageIngressOwner,
 };
 pub use context::MiddlewareContext;
 pub use effect_policy::{

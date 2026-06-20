@@ -5,318 +5,122 @@
 //! Rate limiting middleware: a token-bucket limiter that creates natural
 //! backpressure when out of tokens, ensuring no events are lost.
 //!
+//! ## Module layout (FLOWIP-115d)
+//!
+//! The surface-neutral admission core lives in [`admission_core`] (`RateLimiterCore`,
+//! the token bucket, counters, deadline calculation, summary/pulse window
+//! state, snapshot projection, and the shared cancellable `acquire_admission`
+//! helper). Configuration validation lives in [`config`]. This root module
+//! holds the `Middleware`/`EffectPolicy`/source-pacing shells that turn core
+//! admission decisions into `ChainEvent` lifecycle facts, plus the public
+//! builder and factory. The carrier-bound source/effect/sink/ingress adapters
+//! land in FLOWIP-115d's later phases.
+//!
 //! ## Wait mechanism by placement (FLOWIP-114o)
 //!
 //! The limiter waits in one of two ways, depending on where it is attached.
 //! Async live I/O units (the effect boundary via [`crate::middleware::EffectPolicy`]
 //! and the source boundary via [`crate::middleware::SourcePolicy`]) await their permit
-//! with `tokio::time::sleep`, a cancellable future, so a drain, EOF,
-//! cancellation, or shutdown abandons an in-flight wait. Sync handler chains and
-//! sync sources keep the blocking `pre_handle` loop (it blocks via
-//! `block_in_place` off the worker), retained and documented as a known
-//! limitation; async sources are the recommended path for cancellable paced
-//! ingestion. All three paths share one token-bucket, accounting, and
-//! lifecycle-event implementation (`acquire_permit_async` for the async paths).
+//! through the shared [`admission_core::acquire_admission`] helper with `tokio::time::sleep`,
+//! a cancellable future, so a drain, EOF, cancellation, or shutdown abandons an
+//! in-flight wait. Sync handler chains and sync sources keep the blocking
+//! `pre_handle` loop (it blocks via `block_in_place` off the worker), retained
+//! and documented as a known limitation; async sources are the recommended path
+//! for cancellable paced ingestion. All paths share one token-bucket,
+//! accounting, and lifecycle-event implementation.
 //!
 //! ## No global bucket (FLOWIP-114o Q6, FLOWIP-050d)
 //!
-//! Each limiter instance owns its own `TokenBucket`. Flow-level `rate_limit(N)`
-//! materialises one instance per stage, and attaching the same builder to a
-//! source and to an effect yields independent buckets. There is deliberately no
-//! process-wide shared bucket: no established stream framework spans operators
-//! with one quota, and a flow-global bucket would be cross-cutting shared state
-//! across several live I/O units. Quotas are per protected dependency, matching
-//! the FLOWIP-120c per-effect model.
+//! Each limiter instance owns its own `RateLimiterCore`. Flow-level
+//! `rate_limit(N)` materialises one instance per stage, and attaching the same
+//! builder to a source and to an effect yields independent buckets. There is
+//! deliberately no process-wide shared bucket. Quotas are per protected
+//! dependency, matching the FLOWIP-120c per-effect model.
 //!
 //! ## Admission accounting (FLOWIP-114m, FLOWIP-114o)
 //!
 //! Counters increment at admission, not at committed output. On finite sources
-//! the limiter charges only successful non-empty batches; EOF (`Ok(None)`),
-//! empty batches (`Ok(Some(vec![]))`), and source errors (`Err(...)`) consume no
-//! token, increment no admission counter, and emit no `Delayed` event. On the
-//! legacy handler chain there is no refund: if a later middleware returns `Skip`
-//! or `Abort`, an already-charged token is not returned (the landed
-//! visited-prefix `on_rejected` hook fires on exactly that prefix, so a refund
-//! would be wired there, and is deliberately not). That handler-chain accounting
-//! is transitional and sunsets with FLOWIP-120f; the effect boundary records
-//! rejections under the effect cursor instead (FLOWIP-120c). On async sources a
-//! drain may abandon an in-flight wait after the one-shot `Delayed` event has
-//! been emitted but before a token is consumed, so the abandoned poll charges no
-//! token; `delayed_total` and `events_total` are independent counters.
+//! the limiter charges only successful non-empty batches; EOF, empty batches,
+//! and source errors consume no token, increment no admission counter, and emit
+//! no `Delayed` event. On async sources a drain may abandon an in-flight wait
+//! after the one-shot `Delayed` event has been emitted but before a token is
+//! consumed, so the abandoned poll charges no token; `delayed_total` and
+//! `events_total` are independent counters.
+
+mod admission_core;
+mod config;
 
 use crate::middleware::{
     batch_has_error_marked, SourceAdmission, SourceAfterPoll, SourcePolicy, SourcePolicyCtx,
     SourcePollOutcome,
 };
 use crate::middleware::{
-    ControlMiddlewareRole, EffectTypeKey, ErrorAction, Middleware, MiddlewareAction,
-    MiddlewareContext, MiddlewareFactory, MiddlewareFactoryError, MiddlewareOverrideKey,
-    MiddlewarePlanContribution, MiddlewareSafety, SourceMiddlewarePhase,
-    TopologyMiddlewareConfigSlot,
+    validate_attachment_request, ControlMiddlewareRole, EffectPolicy, EffectTypeKey, ErrorAction,
+    Middleware, MiddlewareAction, MiddlewareAttachmentRequest, MiddlewareContext,
+    MiddlewareDeclaration, MiddlewareFactory, MiddlewareFactoryError,
+    MiddlewareMaterializationContext, MiddlewareOverrideKey, MiddlewarePlanContribution,
+    MiddlewareSafety, MiddlewareSurface, MiddlewareSurfaceAttachment, MiddlewareSurfaceKind,
+    SinkAdmission, SinkDeliveryPolicyOutcome, SinkPolicy, SinkPolicyCtx, SourceMiddlewarePhase,
+    SourcePollAttachment, TopologyMiddlewareConfigSlot,
 };
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::payloads::observability_payload::{
     MiddlewareLifecycle, ObservabilityPayload, RateLimiterEvent,
 };
+use obzenflow_core::ingress::{
+    IngressAdmissionDecision, IngressAdmissionOutcome, IngressAttemptContext,
+    IngressBoundaryMiddleware,
+};
 use obzenflow_core::{StageId, WriterId};
 use obzenflow_runtime::control_plane::{RateLimiterMetrics, RateLimiterSnapshotter};
 use obzenflow_runtime::pipeline::config::StageConfig;
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use obzenflow_runtime::stages::sink::journal_sink::{
+    SinkDeliveryAttemptContext, SinkDeliveryIdentity,
+};
+use std::sync::Arc;
 // FLOWIP-114o: the limiter's token-bucket refill and stats windows read
 // `tokio::time::Instant` so Tokio paused time advances them in deterministic
 // tests. Under a normal runtime this tracks real time; outside a runtime
 // `Instant::now()` falls back to the std clock. `Duration` stays from std.
-use thiserror::Error;
 use tokio::time::Instant;
-use tracing::{debug, info, trace};
+use tracing::info;
 
-const ACTIVITY_PULSE_WINDOW_MS: u64 = 1000;
-const ACTIVITY_PULSE_WINDOW: Duration = Duration::from_secs(1);
-const DEFAULT_COST_PER_EVENT: f64 = 1.0;
-
-const MODE_ENTER_THRESHOLD_PCT: f64 = 100.0;
-const MODE_EXIT_THRESHOLD_PCT: f64 = 80.0;
-const MODE_EXIT_HOLD_WINDOWS: u8 = 2;
+use admission_core::{acquire_admission, AdmissionDecision, RateLimitDelayEvent, RateLimiterCore};
+use config::{
+    validated_rate_limiter_config, RateLimiterConfigError, ValidatedRateLimiterConfig,
+    DEFAULT_COST_PER_EVENT,
+};
 
 pub struct RateLimiterFamily;
 
-fn effective_capacity(
-    events_per_second: f64,
-    burst_capacity: Option<f64>,
-    cost_per_event: f64,
-) -> f64 {
-    burst_capacity.unwrap_or_else(|| events_per_second.max(cost_per_event).max(1.0))
+/// Build the durable observability `ChainEvent` for one rate-limiter lifecycle
+/// fact. Lives in the shell because the core is `ChainEvent`-free.
+fn rate_limiter_event(writer_id: WriterId, event: RateLimiterEvent) -> ChainEvent {
+    ChainEventFactory::observability_event(
+        writer_id,
+        ObservabilityPayload::Middleware(MiddlewareLifecycle::RateLimiter(event)),
+    )
 }
 
-fn effective_limit_rate(events_per_second: f64, cost_per_event: f64) -> f64 {
-    events_per_second / cost_per_event
+fn delayed_event(writer_id: WriterId, info: RateLimitDelayEvent) -> ChainEvent {
+    rate_limiter_event(
+        writer_id,
+        RateLimiterEvent::Delayed {
+            delay_ms: info.delay_ms,
+            current_rate: info.current_rate,
+            limit_rate: info.limit_rate,
+        },
+    )
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-struct ValidatedRateLimiterConfig {
-    events_per_second: f64,
-    configured_burst_capacity: Option<f64>,
-    burst_capacity: f64,
-    cost_per_event: f64,
-}
-
-impl ValidatedRateLimiterConfig {
-    fn limit_rate(self) -> f64 {
-        effective_limit_rate(self.events_per_second, self.cost_per_event)
-    }
-}
-
-#[derive(Debug, Error, Clone, Copy, PartialEq)]
-enum RateLimiterConfigError {
-    #[error("rate_limiter events_per_second must be finite and > 0, got {events_per_second}")]
-    InvalidEventsPerSecond { events_per_second: f64 },
-
-    #[error("rate_limiter cost_per_event must be finite and > 0, got {cost_per_event}")]
-    InvalidCostPerEvent { cost_per_event: f64 },
-
-    #[error("rate_limiter burst_capacity must be finite and > 0, got {burst_capacity}")]
-    InvalidBurstCapacity { burst_capacity: f64 },
-
-    #[error(
-        "rate_limiter burst_capacity ({burst_capacity}) must be >= cost_per_event ({cost_per_event})"
-    )]
-    BurstCapacityBelowCost {
-        burst_capacity: f64,
-        cost_per_event: f64,
-    },
-}
-
-fn validated_rate_limiter_config(
-    events_per_second: f64,
-    burst_capacity: Option<f64>,
-    cost_per_event: f64,
-) -> Result<ValidatedRateLimiterConfig, RateLimiterConfigError> {
-    if !events_per_second.is_finite() || events_per_second <= 0.0 {
-        return Err(RateLimiterConfigError::InvalidEventsPerSecond { events_per_second });
-    }
-
-    if !cost_per_event.is_finite() || cost_per_event <= 0.0 {
-        return Err(RateLimiterConfigError::InvalidCostPerEvent { cost_per_event });
-    }
-
-    if let Some(explicit_burst) = burst_capacity {
-        if !explicit_burst.is_finite() || explicit_burst <= 0.0 {
-            return Err(RateLimiterConfigError::InvalidBurstCapacity {
-                burst_capacity: explicit_burst,
-            });
-        }
-
-        if explicit_burst < cost_per_event {
-            return Err(RateLimiterConfigError::BurstCapacityBelowCost {
-                burst_capacity: explicit_burst,
-                cost_per_event,
-            });
-        }
-    }
-
-    Ok(ValidatedRateLimiterConfig {
-        events_per_second,
-        configured_burst_capacity: burst_capacity,
-        burst_capacity: effective_capacity(events_per_second, burst_capacity, cost_per_event),
-        cost_per_event,
-    })
-}
-
-/// Token bucket rate limiter implementation
-#[derive(Debug)]
-struct TokenBucket {
-    /// Maximum tokens (burst capacity)
-    capacity: f64,
-    /// Current tokens available
-    tokens: f64,
-    /// Tokens added per second
-    refill_rate: f64,
-    /// Last time tokens were refilled
-    last_refill: Instant,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RateLimiterMode {
-    Normal,
-    Limiting,
-}
-
-impl RateLimiterMode {
-    fn as_str(&self) -> &'static str {
-        match self {
-            RateLimiterMode::Normal => "normal",
-            RateLimiterMode::Limiting => "limiting",
-        }
-    }
-}
-
-#[derive(Debug)]
-struct RateLimiterStats {
-    // ---- Cumulative counters (never reset) ----
-    events_total: u64,
-    delayed_total: u64,
-    tokens_consumed_total: f64,
-    delay_seconds_total: f64,
-
-    // ---- Window counters (reset on summary emission) ----
-    events_window: u64,
-    delayed_window: u64,
-    tokens_consumed_window: f64,
-    last_summary: Instant,
-
-    mode: RateLimiterMode,
-    exit_hold_count: u8,
-
-    pulse_window_start: Instant,
-    pulse_delayed_events: u64,
-    pulse_delay_ms_total: u64,
-    pulse_delay_ms_max: u64,
-}
-
-impl Default for RateLimiterStats {
-    fn default() -> Self {
-        Self {
-            events_total: 0,
-            delayed_total: 0,
-            tokens_consumed_total: 0.0,
-            delay_seconds_total: 0.0,
-            events_window: 0,
-            delayed_window: 0,
-            tokens_consumed_window: 0.0,
-            last_summary: Instant::now(),
-            mode: RateLimiterMode::Normal,
-            exit_hold_count: 0,
-            pulse_window_start: Instant::now(),
-            pulse_delayed_events: 0,
-            pulse_delay_ms_total: 0,
-            pulse_delay_ms_max: 0,
-        }
-    }
-}
-
-impl TokenBucket {
-    fn new(capacity: f64, refill_rate: f64) -> Self {
-        Self {
-            capacity,
-            tokens: capacity, // Start full
-            refill_rate,
-            last_refill: Instant::now(),
-        }
-    }
-
-    /// Try to consume tokens, returns true if successful
-    fn try_consume(&mut self, tokens: f64) -> bool {
-        self.refill();
-
-        trace!(
-            "try_consume: requested={}, available={}, capacity={}",
-            tokens,
-            self.tokens,
-            self.capacity
-        );
-
-        if self.tokens >= tokens {
-            self.tokens -= tokens;
-            trace!("try_consume: SUCCESS, remaining tokens={}", self.tokens);
-            true
-        } else {
-            trace!("try_consume: FAILED, insufficient tokens");
-            false
-        }
-    }
-
-    /// Get time until enough tokens are available
-    fn time_until_available(&mut self, tokens: f64) -> Option<Duration> {
-        self.refill();
-
-        if self.tokens >= tokens {
-            return None; // Already available
-        }
-
-        let needed = tokens - self.tokens;
-        let seconds_needed = needed / self.refill_rate;
-        Some(Duration::from_secs_f64(seconds_needed))
-    }
-
-    /// Refill tokens based on elapsed time
-    fn refill(&mut self) {
-        let now = Instant::now();
-        let elapsed = now.duration_since(self.last_refill);
-
-        let tokens_to_add = elapsed.as_secs_f64() * self.refill_rate;
-        let old_tokens = self.tokens;
-        self.tokens = (self.tokens + tokens_to_add).min(self.capacity);
-        self.last_refill = now;
-
-        if tokens_to_add > 0.0 {
-            trace!(
-                "refill: elapsed={:?}, added={}, old={}, new={}",
-                elapsed,
-                tokens_to_add,
-                old_tokens,
-                self.tokens
-            );
-        }
-    }
-
-    /// Get current token count (for monitoring)
-    fn available_tokens(&mut self) -> f64 {
-        self.refill();
-        self.tokens
-    }
-}
-
-/// Rate limiting middleware using token bucket algorithm with blocking
+/// Rate limiting middleware using token bucket algorithm.
+///
+/// A thin shell over [`RateLimiterCore`]: it owns the writer identity and turns
+/// the core's plain-data admission and summary outputs into durable
+/// `ChainEvent` lifecycle facts.
 pub struct RateLimiterMiddleware {
-    bucket: Arc<Mutex<TokenBucket>>,
-    events_per_second: f64,
-    /// Cost per event (default 1.0)
-    cost_per_event: f64,
-    limit_rate: f64,
-    /// Statistics for periodic summaries
-    stats: Arc<Mutex<RateLimiterStats>>,
+    core: Arc<RateLimiterCore>,
     /// Writer identity used for durable observability/control events.
     ///
     /// This must match the stage's writer_id so vector-clock watermarks and
@@ -341,8 +145,6 @@ impl RateLimiterMiddleware {
         control_middleware: std::sync::Arc<super::ControlMiddlewareAggregator>,
         effect_type: Option<EffectTypeKey>,
     ) -> Self {
-        let bucket = TokenBucket::new(config.burst_capacity, config.events_per_second);
-
         // FLOWIP-120i: under strict replay the limiter is constructed because
         // topology and contracts must match the recorded run, but it consumes
         // no live tokens and moves no admission state. The setup log must not
@@ -363,30 +165,20 @@ impl RateLimiterMiddleware {
             }
         );
 
-        let stats = Arc::new(Mutex::new(RateLimiterStats::default()));
-        let bucket = Arc::new(Mutex::new(bucket));
-
-        let limit_rate = config.limit_rate();
+        let core = Arc::new(RateLimiterCore::new(config));
 
         let snapshotter: std::sync::Arc<RateLimiterSnapshotter> = Arc::new({
-            let stats = stats.clone();
-            let bucket = bucket.clone();
+            let core = core.clone();
             move || {
-                let mut metrics = RateLimiterMetrics::default();
-
-                if let Ok(stats) = stats.lock() {
-                    metrics.events_total = stats.events_total;
-                    metrics.delayed_total = stats.delayed_total;
-                    metrics.tokens_consumed_total = stats.tokens_consumed_total;
-                    metrics.delay_seconds_total = stats.delay_seconds_total;
+                let snap = core.snapshot();
+                RateLimiterMetrics {
+                    events_total: snap.events_total,
+                    delayed_total: snap.delayed_total,
+                    tokens_consumed_total: snap.tokens_consumed_total,
+                    delay_seconds_total: snap.delay_seconds_total,
+                    bucket_tokens: snap.bucket_tokens,
+                    bucket_capacity: snap.bucket_capacity,
                 }
-
-                if let Ok(mut bucket) = bucket.lock() {
-                    metrics.bucket_tokens = bucket.available_tokens();
-                    metrics.bucket_capacity = bucket.capacity;
-                }
-
-                metrics
             }
         });
         match effect_type {
@@ -399,243 +191,81 @@ impl RateLimiterMiddleware {
         }
 
         Self {
-            bucket,
-            events_per_second: config.events_per_second,
-            cost_per_event: config.cost_per_event,
-            limit_rate,
-            stats,
+            core,
             writer_id: WriterId::from(stage_id),
         }
     }
 
-    fn maybe_emit_activity_pulse(&self, ctx: &mut MiddlewareContext) {
-        let mut stats = self.stats.lock().unwrap();
-        let now = Instant::now();
-        let elapsed = now.duration_since(stats.pulse_window_start);
-        if elapsed < ACTIVITY_PULSE_WINDOW {
-            return;
-        }
-
-        let delayed_events = stats.pulse_delayed_events;
-        let delay_ms_total = stats.pulse_delay_ms_total;
-        let delay_ms_max = stats.pulse_delay_ms_max;
-
-        stats.pulse_delayed_events = 0;
-        stats.pulse_delay_ms_total = 0;
-        stats.pulse_delay_ms_max = 0;
-        stats.pulse_window_start = now;
-
-        if delayed_events == 0 {
-            return;
-        }
-
-        ctx.write_control_event(ChainEventFactory::observability_event(
-            self.writer_id,
-            ObservabilityPayload::Middleware(MiddlewareLifecycle::RateLimiter(
-                RateLimiterEvent::ActivityPulse {
-                    window_ms: ACTIVITY_PULSE_WINDOW_MS,
-                    delayed_events,
-                    delay_ms_total,
-                    delay_ms_max,
-                    limit_rate: self.limit_rate,
-                },
-            )),
-        ));
+    fn limit_rate(&self) -> f64 {
+        self.core.limit_rate()
     }
 
-    /// Check if we should emit a summary and do so if needed
+    fn maybe_emit_activity_pulse(&self, ctx: &mut MiddlewareContext) {
+        if let Some(pulse) = self.core.take_due_pulse(Instant::now()) {
+            ctx.write_control_event(rate_limiter_event(
+                self.writer_id,
+                RateLimiterEvent::ActivityPulse {
+                    window_ms: pulse.window_ms,
+                    delayed_events: pulse.delayed_events,
+                    delay_ms_total: pulse.delay_ms_total,
+                    delay_ms_max: pulse.delay_ms_max,
+                    limit_rate: self.limit_rate(),
+                },
+            ));
+        }
+    }
+
+    /// Check if we should emit a summary and do so if needed.
     fn maybe_emit_summary(&self, ctx: &mut MiddlewareContext) {
-        let mut stats = self.stats.lock().unwrap();
-
-        // Emit summary every 10 seconds or every 1000 processed events.
-        //
-        // Note: `requests_allowed` is incremented once per event that successfully
-        // consumes tokens (including events that were previously delayed), so it
-        // represents the true per-window event count. `requests_delayed` tracks
-        // how many events experienced backpressure and is used separately for
-        // delay-rate calculations.
-        let should_emit =
-            stats.last_summary.elapsed() >= Duration::from_secs(10) || stats.events_window >= 1000;
-
-        if should_emit {
-            let window_duration = stats.last_summary.elapsed();
-            let elapsed_s = window_duration.as_secs_f64();
-
-            let consumption_rate_tokens_per_s = if elapsed_s > 0.0 {
-                stats.tokens_consumed_window / elapsed_s
-            } else {
-                0.0
-            };
-
-            let utilization_pct = if self.events_per_second > 0.0 {
-                (consumption_rate_tokens_per_s / self.events_per_second) * 100.0
-            } else {
-                0.0
-            };
-
-            info!(
-                window_duration_s = window_duration.as_secs(),
-                requests_allowed = stats.events_window,
-                requests_delayed = stats.delayed_window,
-                tokens_consumed = stats.tokens_consumed_window,
-                consumption_rate_tokens_per_s,
-                utilization_pct = format!("{:.1}%", utilization_pct),
-                "Rate limiter summary"
-            );
-
-            let events_in_window = stats.events_window;
-
-            let mut maybe_mode_change: Option<(RateLimiterMode, RateLimiterMode)> = None;
-            match stats.mode {
-                RateLimiterMode::Normal => {
-                    if utilization_pct >= MODE_ENTER_THRESHOLD_PCT {
-                        let from = stats.mode;
-                        stats.mode = RateLimiterMode::Limiting;
-                        stats.exit_hold_count = 0;
-                        maybe_mode_change = Some((from, stats.mode));
-                    }
-                }
-                RateLimiterMode::Limiting => {
-                    if utilization_pct <= MODE_EXIT_THRESHOLD_PCT {
-                        let next = stats.exit_hold_count.saturating_add(1);
-                        stats.exit_hold_count = next;
-                        let required = MODE_EXIT_HOLD_WINDOWS.max(1);
-                        if next >= required {
-                            let from = stats.mode;
-                            stats.mode = RateLimiterMode::Normal;
-                            stats.exit_hold_count = 0;
-                            maybe_mode_change = Some((from, stats.mode));
-                        }
-                    } else {
-                        stats.exit_hold_count = 0;
-                    }
-                }
-            }
-
-            if let Some((from, to)) = maybe_mode_change {
-                ctx.write_control_event(ChainEventFactory::observability_event(
+        if let Some(summary) = self.core.take_due_summary(Instant::now()) {
+            if let Some((from, to)) = summary.mode_change {
+                ctx.write_control_event(rate_limiter_event(
                     self.writer_id,
-                    ObservabilityPayload::Middleware(MiddlewareLifecycle::RateLimiter(
-                        RateLimiterEvent::ModeChange {
-                            mode_from: from.as_str().to_string(),
-                            mode_to: to.as_str().to_string(),
-                            limit_rate: self.limit_rate,
-                        },
-                    )),
+                    RateLimiterEvent::ModeChange {
+                        mode_from: from.to_string(),
+                        mode_to: to.to_string(),
+                        limit_rate: self.limit_rate(),
+                    },
                 ));
             }
-            let event = ChainEventFactory::observability_event(
+            ctx.write_control_event(rate_limiter_event(
                 self.writer_id,
-                ObservabilityPayload::Middleware(MiddlewareLifecycle::RateLimiter(
-                    RateLimiterEvent::WindowUtilization {
-                        utilization_percent: utilization_pct,
-                        events_in_window,
-                        window_size_ms: window_duration.as_millis() as u64,
-                    },
-                )),
-            );
-            ctx.write_control_event(event);
-
-            // Reset stats
-            stats.events_window = 0;
-            stats.delayed_window = 0;
-            stats.tokens_consumed_window = 0.0;
-            stats.last_summary = Instant::now();
+                RateLimiterEvent::WindowUtilization {
+                    utilization_percent: summary.utilization_percent,
+                    events_in_window: summary.events_in_window,
+                    window_size_ms: summary.window_size_ms,
+                },
+            ));
         }
     }
 
-    /// Shared async token-bucket acquisition loop. Both the effect-boundary
+    /// Shared async token-bucket acquisition. Both the effect-boundary
     /// `EffectPolicy::admit` and the source-boundary `SourcePolicy` path
-    /// delegate here, so the two live I/O surfaces share one accounting and
-    /// lifecycle-event implementation. It awaits its permit with
-    /// `tokio::time::sleep` (a cancellable future)
-    /// instead of blocking the worker thread, and returns once a token has been
-    /// consumed. The synchronous `Middleware::pre_handle` keeps its own blocking
-    /// loop for sync handler chains and sync sources.
-    async fn acquire_permit_async(&self, event: &ChainEvent, ctx: &mut MiddlewareContext) {
-        let event_id = event.id;
-        let event_type = event.event_type();
-        let mut delayed_this_event = false;
-        loop {
-            enum AdmissionAttempt {
-                Allowed,
-                Blocked { wait_time: Duration },
+    /// delegate here through [`core::acquire_admission`], so the two live I/O
+    /// surfaces share one accounting and lifecycle-event implementation. It
+    /// awaits its permit with a cancellable future instead of blocking the
+    /// worker thread. The synchronous `Middleware::pre_handle` keeps its own
+    /// blocking loop for sync handler chains and sync sources.
+    async fn acquire_permit_async(&self, ctx: &mut MiddlewareContext) {
+        let writer_id = self.writer_id;
+        acquire_admission(&self.core, |info: RateLimitDelayEvent| {
+            ctx.write_control_event(delayed_event(writer_id, info));
+        })
+        .await;
+    }
+
+    /// FLOWIP-115d: fail-fast ingress admission. Non-blocking: it never waits for
+    /// a token while a listener request is held. Charges one token per
+    /// validation-accepted event on accept. Returns `None` when admitted (token
+    /// consumed) or `Some(retry_after)` when the token bucket would wait.
+    fn try_admit_ingress(&self, event_count: u64) -> Option<std::time::Duration> {
+        let cost = (event_count.max(1)) as f64 * self.core.cost_per_event();
+        match self.core.try_admit_at(cost, Instant::now()) {
+            AdmissionDecision::Admitted => {
+                self.core.record_admitted(cost);
+                None
             }
-
-            let attempt = {
-                let mut bucket = self.bucket.lock().unwrap();
-                if bucket.try_consume(self.cost_per_event) {
-                    AdmissionAttempt::Allowed
-                } else {
-                    AdmissionAttempt::Blocked {
-                        wait_time: bucket
-                            .time_until_available(self.cost_per_event)
-                            .unwrap_or(Duration::from_millis(10)),
-                    }
-                }
-            };
-
-            match attempt {
-                AdmissionAttempt::Allowed => {
-                    if let Ok(mut stats) = self.stats.lock() {
-                        stats.events_total += 1;
-                        stats.tokens_consumed_total += self.cost_per_event;
-                        stats.events_window += 1;
-                        stats.tokens_consumed_window += self.cost_per_event;
-                    }
-                    return;
-                }
-                AdmissionAttempt::Blocked { wait_time } => {
-                    if !delayed_this_event {
-                        delayed_this_event = true;
-                        if let Ok(mut stats) = self.stats.lock() {
-                            stats.delayed_total += 1;
-                            stats.delayed_window += 1;
-                            stats.pulse_delayed_events += 1;
-                        }
-
-                        let current_rate = if let Ok(stats) = self.stats.lock() {
-                            let elapsed_s = stats.last_summary.elapsed().as_secs_f64();
-                            if elapsed_s > 0.0 {
-                                stats.tokens_consumed_window / elapsed_s / self.cost_per_event
-                            } else {
-                                0.0
-                            }
-                        } else {
-                            0.0
-                        };
-
-                        ctx.write_control_event(ChainEventFactory::observability_event(
-                            self.writer_id,
-                            ObservabilityPayload::Middleware(MiddlewareLifecycle::RateLimiter(
-                                RateLimiterEvent::Delayed {
-                                    delay_ms: wait_time.as_millis() as u64,
-                                    current_rate,
-                                    limit_rate: self.limit_rate,
-                                },
-                            )),
-                        ));
-                    }
-
-                    debug!(
-                        event_id = %event_id,
-                        event_type = %event_type,
-                        wait_ms = wait_time.as_millis(),
-                        "Rate limited - awaiting permit"
-                    );
-
-                    let wait_start = Instant::now();
-                    tokio::time::sleep(wait_time).await;
-                    let waited = wait_start.elapsed();
-                    if let Ok(mut stats) = self.stats.lock() {
-                        stats.delay_seconds_total += waited.as_secs_f64();
-                        let waited_ms = waited.as_millis() as u64;
-                        stats.pulse_delay_ms_total =
-                            stats.pulse_delay_ms_total.saturating_add(waited_ms);
-                        stats.pulse_delay_ms_max = stats.pulse_delay_ms_max.max(waited_ms);
-                    }
-                }
-            }
+            AdmissionDecision::WouldWait { retry_after } => Some(retry_after),
         }
     }
 }
@@ -677,155 +307,21 @@ impl Middleware for RateLimiterMiddleware {
         }
 
         if event.is_control() || event.is_lifecycle() {
-            trace!(
-                event_id = %event.id,
-                event_type = %event.event_type(),
-                "Control/lifecycle event bypassing rate limiter"
-            );
             return MiddlewareAction::Continue;
         }
 
-        let event_id = event.id;
-        let event_type = event.event_type();
-        trace!(event_id = %event_id, event_type = %event_type, "Rate limiter processing event");
-
-        // Blocking loop - wait until we have tokens
-        let mut delayed_this_event = false;
-        loop {
-            enum AdmissionAttempt {
-                Allowed {
-                    available_tokens: f64,
-                },
-                Blocked {
-                    wait_time: Duration,
-                    available_tokens: f64,
-                },
-            }
-
-            let attempt = {
-                let mut bucket = self.bucket.lock().unwrap();
-                if bucket.try_consume(self.cost_per_event) {
-                    AdmissionAttempt::Allowed {
-                        available_tokens: bucket.available_tokens(),
-                    }
-                } else {
-                    AdmissionAttempt::Blocked {
-                        wait_time: bucket
-                            .time_until_available(self.cost_per_event)
-                            .unwrap_or(Duration::from_millis(10)),
-                        available_tokens: bucket.available_tokens(),
-                    }
-                }
-            };
-
-            match attempt {
-                AdmissionAttempt::Allowed { available_tokens } => {
-                    if let Ok(mut stats) = self.stats.lock() {
-                        stats.events_total += 1;
-                        stats.tokens_consumed_total += self.cost_per_event;
-                        stats.events_window += 1;
-                        stats.tokens_consumed_window += self.cost_per_event;
-                    }
-
-                    debug!(
-                        event_id = %event_id,
-                        event_type = %event_type,
-                        available_tokens,
-                        cost = self.cost_per_event,
-                        "Rate limit passed - processing event immediately"
-                    );
-
-                    return MiddlewareAction::Continue;
-                }
-                AdmissionAttempt::Blocked {
-                    wait_time,
-                    available_tokens,
-                } => {
-                    info!(
-                        event_id = %event_id,
-                        event_type = %event_type,
-                        wait_ms = wait_time.as_millis(),
-                        available_tokens,
-                        needed_tokens = self.cost_per_event,
-                        "Rate limited - blocking for {:?}",
-                        wait_time
-                    );
-
-                    if !delayed_this_event {
-                        delayed_this_event = true;
-                        if let Ok(mut stats) = self.stats.lock() {
-                            stats.delayed_total += 1;
-                            stats.delayed_window += 1;
-                            stats.pulse_delayed_events += 1;
-                        }
-
-                        let current_rate = if let Ok(stats) = self.stats.lock() {
-                            let elapsed_s = stats.last_summary.elapsed().as_secs_f64();
-                            if elapsed_s > 0.0 {
-                                stats.tokens_consumed_window / elapsed_s / self.cost_per_event
-                            } else {
-                                0.0
-                            }
-                        } else {
-                            0.0
-                        };
-
-                        ctx.write_control_event(ChainEventFactory::observability_event(
-                            self.writer_id,
-                            ObservabilityPayload::Middleware(MiddlewareLifecycle::RateLimiter(
-                                RateLimiterEvent::Delayed {
-                                    delay_ms: wait_time.as_millis() as u64,
-                                    current_rate,
-                                    limit_rate: self.limit_rate,
-                                },
-                            )),
-                        ));
-                    }
-
-                    // Block until tokens should be available. On multi-threaded runtimes,
-                    // use block_in_place to avoid blocking tokio worker threads. On
-                    // current-thread runtimes, block_in_place panics, so sleep directly.
-                    let wait_start = Instant::now();
-                    if wait_time > Duration::from_millis(1) {
-                        let use_block_in_place = tokio::runtime::Handle::try_current()
-                            .map(|handle| {
-                                handle.runtime_flavor()
-                                    == tokio::runtime::RuntimeFlavor::MultiThread
-                            })
-                            .unwrap_or(false);
-                        if use_block_in_place {
-                            trace!(event_id = %event_id, "Using block_in_place for wait > 1ms");
-                            tokio::task::block_in_place(|| {
-                                std::thread::sleep(wait_time);
-                            });
-                        } else {
-                            trace!(event_id = %event_id, "Using direct sleep for wait > 1ms");
-                            std::thread::sleep(wait_time);
-                        }
-                    } else {
-                        // For very short waits, just yield to scheduler
-                        trace!(event_id = %event_id, "Using yield_now for wait <= 1ms");
-                        std::thread::yield_now();
-                    }
-                    let waited = wait_start.elapsed();
-                    if delayed_this_event {
-                        if let Ok(mut stats) = self.stats.lock() {
-                            stats.delay_seconds_total += waited.as_secs_f64();
-                            let waited_ms = waited.as_millis() as u64;
-                            stats.pulse_delay_ms_total =
-                                stats.pulse_delay_ms_total.saturating_add(waited_ms);
-                            stats.pulse_delay_ms_max = stats.pulse_delay_ms_max.max(waited_ms);
-                        }
-                    }
-
-                    debug!(
-                        event_id = %event_id,
-                        event_type = %event_type,
-                        "Rate limit released - attempting to process event"
-                    );
-                }
-            }
+        // FLOWIP-115d AC10/AC50: the generic handler-shell path must never block a
+        // worker thread. Hook-bound source, effect, and sink-delivery placement
+        // own paced (cancellable) admission; handler pacing is retired, and
+        // production placement on a handler shell is rejected at binding
+        // (FLOWIP-115j owns any future hook-bound handler pacing). This residual
+        // shell path performs a single non-blocking admission check and never
+        // sleeps.
+        let cost = self.core.cost_per_event();
+        if let AdmissionDecision::Admitted = self.core.try_admit_at(cost, Instant::now()) {
+            self.core.record_admitted(cost);
         }
+        MiddlewareAction::Continue
     }
 
     fn post_handle(
@@ -841,7 +337,6 @@ impl Middleware for RateLimiterMiddleware {
             return;
         }
         self.maybe_emit_activity_pulse(ctx);
-        // Check if we should emit a summary
         self.maybe_emit_summary(ctx);
     }
 
@@ -853,11 +348,9 @@ impl Middleware for RateLimiterMiddleware {
 
 /// Per-effect policy adapter (FLOWIP-120c): one limiter instance guards one
 /// declared effect. It awaits its permit at the live effect boundary instead
-/// of blocking a worker thread, while reusing the same token-bucket,
+/// of blocking a worker thread, while reusing the same `RateLimiterCore`,
 /// accounting, and lifecycle-event helpers as the synchronous `Middleware`
-/// implementation. Each effect attachment is factory-created with an effect
-/// key, so its bucket and metrics are independent from source or chain
-/// instances.
+/// implementation.
 #[async_trait::async_trait]
 impl crate::middleware::EffectPolicy for RateLimiterMiddleware {
     fn label(&self) -> &'static str {
@@ -867,13 +360,13 @@ impl crate::middleware::EffectPolicy for RateLimiterMiddleware {
     async fn admit(
         &self,
         _identity: &obzenflow_runtime::effects::EffectIdentity,
-        event: &ChainEvent,
+        _event: &ChainEvent,
         ctx: &mut MiddlewareContext,
     ) -> crate::middleware::PolicyAdmission {
         // FLOWIP-114o: shared with the source pacing path. Replay suppression at
         // the effect boundary happens before `admit` is consulted, so this path
         // carries no scope guard of its own.
-        self.acquire_permit_async(event, ctx).await;
+        self.acquire_permit_async(ctx).await;
         crate::middleware::PolicyAdmission::Admit
     }
 
@@ -889,9 +382,9 @@ impl crate::middleware::EffectPolicy for RateLimiterMiddleware {
     }
 }
 
-/// Legacy source pacing adapter retained until the 115f cleanup removes the old
-/// downcast surface. The production source path uses `RateLimiterSourcePolicy`
-/// below and delegates to the same `acquire_permit_async` implementation.
+/// Legacy source pacing adapter retained until the FLOWIP-115g cleanup removes
+/// the old downcast surface. The production source path uses
+/// `RateLimiterSourcePolicy` below and delegates to the same `RateLimiterCore`.
 #[async_trait::async_trait]
 impl crate::middleware::SourcePacer for RateLimiterMiddleware {
     async fn source_admit(
@@ -908,15 +401,10 @@ impl crate::middleware::SourcePacer for RateLimiterMiddleware {
         }
 
         if event.is_control() || event.is_lifecycle() {
-            trace!(
-                event_id = %event.id,
-                event_type = %event.event_type(),
-                "Control/lifecycle event bypassing rate limiter"
-            );
             return MiddlewareAction::Continue;
         }
 
-        self.acquire_permit_async(event, ctx).await;
+        self.acquire_permit_async(ctx).await;
         MiddlewareAction::Continue
     }
 }
@@ -930,7 +418,7 @@ enum SourceRateLimitPosition {
 /// Source-boundary policy for the token-bucket rate limiter (FLOWIP-115a).
 ///
 /// It reuses [`RateLimiterMiddleware::acquire_permit_async`], so source pacing
-/// waits internally with cancellable Tokio sleep, matching FLOWIP-114o. Finite
+/// waits internally with a cancellable Tokio sleep, matching FLOWIP-114o. Finite
 /// sources charge after a clean non-empty delivery; infinite sources charge
 /// before polling.
 struct RateLimiterSourcePolicy {
@@ -944,9 +432,11 @@ impl RateLimiterSourcePolicy {
     }
 
     async fn acquire(&self, ctx: &mut SourcePolicyCtx) {
-        let event = ctx.synthetic_event_clone();
+        // FLOWIP-115d: the core admits by protected unit and typed metadata, so
+        // the source path no longer fabricates a synthetic `ChainEvent` to drive
+        // admission.
         self.inner
-            .acquire_permit_async(&event, ctx.middleware_context_mut())
+            .acquire_permit_async(ctx.middleware_context_mut())
             .await;
     }
 }
@@ -975,6 +465,96 @@ impl SourcePolicy for RateLimiterSourcePolicy {
         let middleware_ctx = ctx.middleware_context_mut();
         self.inner.maybe_emit_activity_pulse(middleware_ctx);
         self.inner.maybe_emit_summary(middleware_ctx);
+    }
+}
+
+/// Sink-delivery boundary policy for the token-bucket rate limiter (FLOWIP-115d).
+///
+/// It awaits a permit before the sink consume operation through the shared
+/// cancellable acquisition helper, protecting the delivery unit rather than the
+/// event's prior transformation. The typed delivery identity, attempt context,
+/// and parent event are available for proof rows; the v1 limiter charges one
+/// token per delivery attempt regardless of payload.
+struct RateLimiterSinkPolicy {
+    inner: Arc<RateLimiterMiddleware>,
+}
+
+impl RateLimiterSinkPolicy {
+    fn new(inner: Arc<RateLimiterMiddleware>) -> Self {
+        Self { inner }
+    }
+}
+
+#[async_trait::async_trait]
+impl SinkPolicy for RateLimiterSinkPolicy {
+    fn label(&self) -> &'static str {
+        Middleware::label(self.inner.as_ref())
+    }
+
+    async fn admit(
+        &self,
+        _identity: &SinkDeliveryIdentity,
+        _attempt: &SinkDeliveryAttemptContext,
+        _event: &ChainEvent,
+        ctx: &mut SinkPolicyCtx,
+    ) -> SinkAdmission {
+        self.inner
+            .acquire_permit_async(ctx.middleware_context_mut())
+            .await;
+        SinkAdmission::Admit(None)
+    }
+
+    fn observe(
+        &self,
+        _identity: &SinkDeliveryIdentity,
+        _attempt: &SinkDeliveryAttemptContext,
+        _event: &ChainEvent,
+        _outcome: &SinkDeliveryPolicyOutcome<'_>,
+        ctx: &mut SinkPolicyCtx,
+    ) {
+        let middleware_ctx = ctx.middleware_context_mut();
+        self.inner.maybe_emit_activity_pulse(middleware_ctx);
+        self.inner.maybe_emit_summary(middleware_ctx);
+    }
+}
+
+/// Ingress boundary policy for the token-bucket rate limiter (FLOWIP-115d).
+///
+/// Fail-fast admission at the hosted listener edge: it never waits for a token
+/// while holding a listener request. A token exhaustion maps to a `RateLimited`
+/// reject (`429`), never a wait. Edge-shed outcomes (not-ready, buffer-full,
+/// channel-closed, overloaded) are owned by infra before this policy runs.
+struct RateLimiterIngressPolicy {
+    inner: Arc<RateLimiterMiddleware>,
+}
+
+impl RateLimiterIngressPolicy {
+    fn new(inner: Arc<RateLimiterMiddleware>) -> Self {
+        Self { inner }
+    }
+}
+
+impl IngressBoundaryMiddleware for RateLimiterIngressPolicy {
+    fn label(&self) -> &'static str {
+        Middleware::label(self.inner.as_ref())
+    }
+
+    fn on_ingress(&self, attempt: &IngressAttemptContext) -> IngressAdmissionDecision {
+        // FLOWIP-115d: charge one token per validation-accepted event so `/batch`
+        // cannot bypass the shared admission scope used by `/events`.
+        match self.inner.try_admit_ingress(attempt.event_count) {
+            None => IngressAdmissionDecision::Accept,
+            Some(retry_after) => IngressAdmissionDecision::Reject {
+                retry_after: Some(retry_after),
+            },
+        }
+    }
+
+    fn observe(&self, _attempt: &IngressAttemptContext, _outcome: IngressAdmissionOutcome) {
+        // FLOWIP-115d: ingress runs at the hosted edge, outside the supervisor,
+        // so there is no boundary outbox to emit into here. Durable reject/shed
+        // evidence is owned by the hosting evidence recorder (the DSL-to-hosting
+        // wiring); live limiter telemetry is updated by the admission charge.
     }
 }
 
@@ -1106,6 +686,107 @@ impl MiddlewareFactory for RateLimiterFactory {
         Some(TopologyMiddlewareConfigSlot::RateLimiter)
     }
 
+    fn declaration(&self) -> MiddlewareDeclaration {
+        // FLOWIP-115d: the rate limiter is hook-bound control middleware that
+        // attaches to the live-I/O boundary surfaces. The binder picks the
+        // concrete surface per call site and routes it through `materialize`.
+        MiddlewareDeclaration::control_with_family(
+            self.label(),
+            self.override_key().family_label(),
+            vec![
+                MiddlewareSurfaceKind::SourcePoll,
+                MiddlewareSurfaceKind::Effect,
+                MiddlewareSurfaceKind::SinkDelivery,
+                MiddlewareSurfaceKind::Ingress,
+            ],
+        )
+    }
+
+    fn materialize(
+        &self,
+        request: MiddlewareAttachmentRequest<'_>,
+        context: &MiddlewareMaterializationContext<'_>,
+    ) -> crate::middleware::MiddlewareFactoryResult<MiddlewareSurfaceAttachment> {
+        let declaration = self.declaration();
+        let _attachment_id =
+            validate_attachment_request(&declaration, &request).map_err(|err| {
+                MiddlewareFactoryError::materialization_failed(
+                    self.label(),
+                    &context.config.name,
+                    err,
+                )
+            })?;
+
+        let validated = self.validated_config().map_err(|err| {
+            MiddlewareFactoryError::invalid_configuration(self.label(), &context.config.name, err)
+        })?;
+
+        match request.surface {
+            MiddlewareSurface::SourcePoll(_) => {
+                // FLOWIP-114m: an infinite source paces pre-poll; a finite source
+                // charges after a clean non-empty delivery.
+                let charge_at = match context.stage_type {
+                    StageType::InfiniteSource => SourceRateLimitPosition::PrePoll,
+                    _ => SourceRateLimitPosition::AfterPoll,
+                };
+                let middleware = Arc::new(RateLimiterMiddleware::new(
+                    context.config.stage_id,
+                    validated,
+                    context.control_middleware.clone(),
+                ));
+                let policy: Arc<dyn SourcePolicy> =
+                    Arc::new(RateLimiterSourcePolicy::new(middleware, charge_at));
+                Ok(MiddlewareSurfaceAttachment::SourcePoll(
+                    SourcePollAttachment {
+                        policy,
+                        completion_gate: None,
+                    },
+                ))
+            }
+            MiddlewareSurface::Effect(effect_surface) => {
+                // FLOWIP-120c: one limiter instance guards one declared effect,
+                // registered under the per-effect key for metrics.
+                let middleware = RateLimiterMiddleware::new_keyed(
+                    context.config.stage_id,
+                    validated,
+                    context.control_middleware.clone(),
+                    Some(effect_surface.effect_type.clone()),
+                );
+                let policy: Arc<dyn EffectPolicy> = Arc::new(middleware);
+                Ok(MiddlewareSurfaceAttachment::Effect(policy))
+            }
+            MiddlewareSurface::SinkDelivery(_) => {
+                let middleware = Arc::new(RateLimiterMiddleware::new(
+                    context.config.stage_id,
+                    validated,
+                    context.control_middleware.clone(),
+                ));
+                let policy: Arc<dyn SinkPolicy> = Arc::new(RateLimiterSinkPolicy::new(middleware));
+                Ok(MiddlewareSurfaceAttachment::SinkDelivery(policy))
+            }
+            MiddlewareSurface::Ingress(_) => {
+                // FLOWIP-115d: source-backed hosted ingress. One core per hosted
+                // protected unit; the adapter is fail-fast at the listener edge.
+                let middleware = Arc::new(RateLimiterMiddleware::new(
+                    context.config.stage_id,
+                    validated,
+                    context.control_middleware.clone(),
+                ));
+                let policy: Arc<dyn IngressBoundaryMiddleware> =
+                    Arc::new(RateLimiterIngressPolicy::new(middleware));
+                Ok(MiddlewareSurfaceAttachment::Ingress(policy))
+            }
+            other => Err(MiddlewareFactoryError::materialization_failed(
+                self.label(),
+                &context.config.name,
+                std::io::Error::other(format!(
+                    "rate limiter materialize is not implemented for surface {:?}",
+                    other.kind()
+                )),
+            )),
+        }
+    }
+
     fn create(
         &self,
         config: &StageConfig,
@@ -1124,50 +805,29 @@ impl MiddlewareFactory for RateLimiterFactory {
 
     fn create_for_effect(
         &self,
-        config: &StageConfig,
-        control_middleware: std::sync::Arc<super::ControlMiddlewareAggregator>,
-        effect_type: &str,
+        _config: &StageConfig,
+        _control_middleware: std::sync::Arc<super::ControlMiddlewareAggregator>,
+        _effect_type: &str,
     ) -> crate::middleware::MiddlewareFactoryResult<Box<dyn Middleware>> {
-        let validated = self.validated_config().map_err(|err| {
-            MiddlewareFactoryError::invalid_configuration(self.label(), &config.name, err)
-        })?;
-
-        Ok(Box::new(RateLimiterMiddleware::new_keyed(
-            config.stage_id,
-            validated,
-            control_middleware,
-            Some(EffectTypeKey::from(effect_type)),
-        )))
+        // FLOWIP-115d legacy-route containment (AC46): the hook-bound rate limiter
+        // is placed on the Effect surface through `materialize`; the binder routes
+        // a control middleware that declares the Effect surface there, never here.
+        // Fail closed so a direct caller cannot construct a second, off-carrier
+        // effect limiter with its own bucket.
+        Err(MiddlewareFactoryError::not_hook_bound(self.label()))
     }
 
     fn register_source_policy(
         &self,
-        config: &StageConfig,
-        stage_type: obzenflow_core::event::context::StageType,
-        control_middleware: &std::sync::Arc<super::ControlMiddlewareAggregator>,
+        _config: &StageConfig,
+        _stage_type: obzenflow_core::event::context::StageType,
+        _control_middleware: &std::sync::Arc<super::ControlMiddlewareAggregator>,
     ) -> crate::middleware::MiddlewareFactoryResult<()> {
-        use obzenflow_core::event::context::StageType as St;
-        let validated = self.validated_config().map_err(|err| {
-            MiddlewareFactoryError::invalid_configuration(self.label(), &config.name, err)
-        })?;
-        // FLOWIP-114m: finite (and any non-infinite) source charges after a
-        // clean successful delivery; an infinite source paces pre-poll.
-        let charge_at = match stage_type {
-            St::InfiniteSource => SourceRateLimitPosition::PrePoll,
-            _ => SourceRateLimitPosition::AfterPoll,
-        };
-        // Building the limiter registers its metrics snapshotter exactly as the
-        // chain path does; the source policy owns the same limiter instance.
-        let middleware = std::sync::Arc::new(RateLimiterMiddleware::new(
-            config.stage_id,
-            validated,
-            control_middleware.clone(),
-        ));
-        control_middleware.register_source_policy(
-            config.stage_id,
-            std::sync::Arc::new(RateLimiterSourcePolicy::new(middleware, charge_at)),
-        );
-        Ok(())
+        // FLOWIP-115d legacy-route containment (AC46): source-poll rate limiting
+        // is placed through `materialize` onto the SourcePoll surface and
+        // registered as a ready `SourcePolicy`. The binder never routes the
+        // hook-bound rate limiter through this legacy factory method. Fail closed.
+        Err(MiddlewareFactoryError::not_hook_bound(self.label()))
     }
 
     fn supported_stage_types(&self) -> &[StageType] {
@@ -1233,8 +893,11 @@ pub fn rate_limit_with_burst(events_per_second: f64, burst: f64) -> Box<dyn Midd
 
 #[cfg(test)]
 mod tests {
+    use super::admission_core::RateLimiterMode;
     use super::*;
     use crate::middleware::control::ControlMiddlewareAggregator;
+    use std::time::Duration;
+
     use obzenflow_core::event::chain_event::ChainEventContent;
     use obzenflow_core::event::{ChainEventFactory, WriterId};
     use obzenflow_runtime::control_plane::ControlPlaneProvider;
@@ -1276,33 +939,6 @@ mod tests {
             validated,
             Arc::new(ControlMiddlewareAggregator::new()),
         )
-    }
-
-    #[test]
-    fn test_token_bucket_basic() {
-        let mut bucket = TokenBucket::new(10.0, 5.0); // 10 capacity, 5/sec refill
-
-        // Should start full
-        assert!(bucket.try_consume(5.0));
-        assert!(bucket.try_consume(5.0));
-        assert!(!bucket.try_consume(5.0)); // Should fail
-
-        // Wait a bit and check refill
-        std::thread::sleep(Duration::from_millis(200)); // 0.2 sec = 1 token
-        assert!(bucket.try_consume(1.0)); // Should succeed
-        assert!(!bucket.try_consume(1.0)); // Should fail again
-    }
-
-    #[test]
-    fn test_token_bucket_time_until_available() {
-        let mut bucket = TokenBucket::new(10.0, 2.0); // 10 capacity, 2/sec refill
-
-        // Consume all tokens
-        assert!(bucket.try_consume(10.0));
-
-        // Should need 2.5 seconds to get 5 tokens
-        let wait = bucket.time_until_available(5.0).unwrap();
-        assert!((wait.as_secs_f64() - 2.5).abs() < 0.1);
     }
 
     #[test]
@@ -1406,7 +1042,11 @@ mod tests {
         assert!(!batch_has_error_marked(&clean_batch));
 
         let charged = |mw: &Arc<RateLimiterMiddleware>| {
-            mw.stats.lock().expect("stats lock").tokens_consumed_total
+            mw.core
+                .stats_for_test()
+                .lock()
+                .expect("stats lock")
+                .tokens_consumed_total
         };
 
         // Finite source (AfterPoll): admit is a no-op; after_poll charges a clean
@@ -1575,7 +1215,7 @@ mod tests {
     fn test_rate_limiter_default_effective_capacity_is_at_least_one_weighted_event() {
         let middleware = test_middleware(StageId::new(), 2.0, None, 5.0);
 
-        let bucket = middleware.bucket.lock().unwrap();
+        let bucket = middleware.core.bucket_for_test().lock().unwrap();
         assert!((bucket.capacity - 5.0).abs() < f64::EPSILON);
         assert!((bucket.tokens - 5.0).abs() < f64::EPSILON);
     }
@@ -1622,13 +1262,13 @@ mod tests {
     fn test_rate_limiter_limit_rate_matches_weighted_config() {
         let middleware = test_middleware(StageId::new(), 10.0, Some(20.0), 2.0);
 
-        assert!((middleware.limit_rate - 5.0).abs() < 1e-6);
+        assert!((middleware.limit_rate() - 5.0).abs() < 1e-6);
     }
 
     #[test]
     fn test_rate_limiter_pre_handle_does_not_hold_bucket_while_waiting_on_stats() {
         let middleware = Arc::new(test_middleware(StageId::new(), 10.0, Some(10.0), 1.0));
-        let stats_guard = middleware.stats.lock().unwrap();
+        let stats_guard = middleware.core.stats_for_test().lock().unwrap();
         let middleware_for_thread = middleware.clone();
         let (tx, rx) = std::sync::mpsc::channel();
 
@@ -1646,7 +1286,8 @@ mod tests {
         std::thread::sleep(Duration::from_millis(25));
 
         let bucket = middleware
-            .bucket
+            .core
+            .bucket_for_test()
             .try_lock()
             .expect("pre_handle should not hold bucket while blocked on stats");
         assert!(
@@ -1677,7 +1318,7 @@ mod tests {
         let snapshotter = control
             .rate_limiter_snapshotter(&stage_id)
             .expect("rate limiter snapshotter should be registered");
-        let bucket_guard = middleware.bucket.lock().unwrap();
+        let bucket_guard = middleware.core.bucket_for_test().lock().unwrap();
         let (tx, rx) = std::sync::mpsc::channel();
 
         let handle = std::thread::spawn(move || {
@@ -1687,7 +1328,8 @@ mod tests {
         std::thread::sleep(Duration::from_millis(25));
 
         let stats_guard = middleware
-            .stats
+            .core
+            .stats_for_test()
             .try_lock()
             .expect("snapshotter should not hold stats while waiting on bucket");
         drop(stats_guard);
@@ -1705,12 +1347,12 @@ mod tests {
     fn test_rate_limiter_summary_does_not_require_bucket_lock() {
         let middleware = Arc::new(test_middleware(StageId::new(), 10.0, Some(10.0), 1.0));
         {
-            let mut stats = middleware.stats.lock().unwrap();
+            let mut stats = middleware.core.stats_for_test().lock().unwrap();
             stats.events_window = 1;
             stats.last_summary = Instant::now() - Duration::from_secs(11);
         }
 
-        let bucket_guard = middleware.bucket.lock().unwrap();
+        let bucket_guard = middleware.core.bucket_for_test().lock().unwrap();
         let middleware_for_thread = middleware.clone();
         let (tx, rx) = std::sync::mpsc::channel();
 
@@ -1735,7 +1377,7 @@ mod tests {
 
         // ---- Window 1: utilization 120% -> Normal -> Limiting ----
         {
-            let mut stats = middleware.stats.lock().unwrap();
+            let mut stats = middleware.core.stats_for_test().lock().unwrap();
             stats.events_window = 1200;
             stats.tokens_consumed_window = 1200.0;
             stats.last_summary = Instant::now() - Duration::from_secs(10);
@@ -1777,7 +1419,7 @@ mod tests {
 
         // ---- Window 2: utilization 70% -> Limiting (hold=1) ----
         {
-            let mut stats = middleware.stats.lock().unwrap();
+            let mut stats = middleware.core.stats_for_test().lock().unwrap();
             stats.events_window = 700;
             stats.tokens_consumed_window = 700.0;
             stats.last_summary = Instant::now() - Duration::from_secs(10);
@@ -1795,7 +1437,7 @@ mod tests {
 
         // ---- Window 3: utilization 70% -> Limiting -> Normal (hold=2) ----
         {
-            let mut stats = middleware.stats.lock().unwrap();
+            let mut stats = middleware.core.stats_for_test().lock().unwrap();
             stats.events_window = 700;
             stats.tokens_consumed_window = 700.0;
             stats.last_summary = Instant::now() - Duration::from_secs(10);
@@ -1818,7 +1460,7 @@ mod tests {
             other => panic!("Expected mode change event, got {other:?}"),
         }
 
-        let stats = middleware.stats.lock().unwrap();
+        let stats = middleware.core.stats_for_test().lock().unwrap();
         assert_eq!(stats.mode, RateLimiterMode::Normal);
         assert_eq!(stats.exit_hold_count, 0);
     }
@@ -1828,7 +1470,7 @@ mod tests {
         let middleware = test_middleware(StageId::new(), 5.0, Some(10.0), 1.0);
 
         {
-            let mut stats = middleware.stats.lock().unwrap();
+            let mut stats = middleware.core.stats_for_test().lock().unwrap();
             stats.pulse_window_start = Instant::now() - Duration::from_secs(1);
             stats.pulse_delayed_events = 3;
             stats.pulse_delay_ms_total = 450;
@@ -1849,7 +1491,7 @@ mod tests {
                     limit_rate,
                 }),
             )) => {
-                assert_eq!(*window_ms, ACTIVITY_PULSE_WINDOW_MS);
+                assert_eq!(*window_ms, super::admission_core::ACTIVITY_PULSE_WINDOW_MS);
                 assert_eq!(*delayed_events, 3);
                 assert_eq!(*delay_ms_total, 450);
                 assert_eq!(*delay_ms_max, 200);
@@ -1858,7 +1500,7 @@ mod tests {
             other => panic!("Expected activity pulse event, got {other:?}"),
         }
 
-        let stats = middleware.stats.lock().unwrap();
+        let stats = middleware.core.stats_for_test().lock().unwrap();
         assert_eq!(stats.pulse_delayed_events, 0);
         assert_eq!(stats.pulse_delay_ms_total, 0);
         assert_eq!(stats.pulse_delay_ms_max, 0);
@@ -1913,7 +1555,7 @@ mod tests {
             "the side task must run while admission awaits its permit"
         );
 
-        let stats = limiter.stats.lock().unwrap();
+        let stats = limiter.core.stats_for_test().lock().unwrap();
         assert_eq!(stats.delayed_total, 1);
         assert!(stats.delay_seconds_total > 0.0);
     }

@@ -5,6 +5,7 @@
 use async_trait::async_trait;
 use obzenflow_core::event::ingestion::{EventSubmission, IngressContext};
 use obzenflow_core::event::ChainEventFactory;
+use obzenflow_core::ingress::HostedIngressBindingSlot;
 use obzenflow_core::{ChainEvent, TypedPayload, WriterId};
 use obzenflow_runtime::stages::common::handlers::AsyncInfiniteSourceHandler;
 use obzenflow_runtime::stages::SourceError;
@@ -32,6 +33,10 @@ pub struct HttpSource {
     rx: Arc<Mutex<tokio::sync::mpsc::Receiver<EventSubmission>>>,
     writer_id: Option<WriterId>,
     config: HttpSourceConfig,
+    /// FLOWIP-115d: the hosted-ingress binding slot shared with this source's
+    /// web-surface half. `http_ingress` attaches it; the DSL fills it during
+    /// source-stage materialization. `None` for HTTP pull sources.
+    ingress_slot: Option<HostedIngressBindingSlot>,
 }
 
 impl std::fmt::Debug for HttpSource {
@@ -49,6 +54,7 @@ impl HttpSource {
             rx: Arc::new(Mutex::new(rx)),
             writer_id: None,
             config: HttpSourceConfig::default(),
+            ingress_slot: None,
         }
     }
 
@@ -60,7 +66,15 @@ impl HttpSource {
             rx: Arc::new(Mutex::new(rx)),
             writer_id: None,
             config,
+            ingress_slot: None,
         }
+    }
+
+    /// FLOWIP-115d: attach the hosted-ingress binding slot shared with this
+    /// source's web-surface half (used by `http_ingress`).
+    pub fn with_ingress_slot(mut self, slot: HostedIngressBindingSlot) -> Self {
+        self.ingress_slot = Some(slot);
+        self
     }
 
     /// Mark this ingestion source as producing a single typed payload.
@@ -136,6 +150,10 @@ where
         self.inner.bind_writer_id(id);
     }
 
+    fn hosted_ingress_slot(&self) -> Option<HostedIngressBindingSlot> {
+        self.inner.hosted_ingress_slot()
+    }
+
     async fn next(&mut self) -> Result<Vec<ChainEvent>, SourceError> {
         self.inner.next().await
     }
@@ -149,6 +167,10 @@ where
 impl AsyncInfiniteSourceHandler for HttpSource {
     fn bind_writer_id(&mut self, id: WriterId) {
         self.writer_id = Some(id);
+    }
+
+    fn hosted_ingress_slot(&self) -> Option<HostedIngressBindingSlot> {
+        self.ingress_slot.clone()
     }
 
     async fn next(&mut self) -> Result<Vec<ChainEvent>, SourceError> {

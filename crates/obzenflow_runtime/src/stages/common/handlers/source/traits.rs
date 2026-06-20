@@ -157,6 +157,16 @@ pub trait AsyncInfiniteSourceHandler: Send + Sync {
         None
     }
 
+    /// FLOWIP-115d: expose this source's hosted-ingress binding slot, if it is a
+    /// source-backed hosted listener (such as `http_ingress`). The DSL fills the
+    /// slot during source-stage materialization with the stage id, replay-stable
+    /// stage key, and the materialized ingress boundary, and `FlowApplication`
+    /// installs the boundary into the hosted endpoint state. Default `None` for
+    /// sources that are not hosted listeners.
+    fn hosted_ingress_slot(&self) -> Option<obzenflow_core::ingress::HostedIngressBindingSlot> {
+        None
+    }
+
     /// Pull zero or more events from the source asynchronously.
     async fn next(&mut self) -> Result<Vec<ChainEvent>, SourceError>;
 

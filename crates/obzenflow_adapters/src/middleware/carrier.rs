@@ -21,6 +21,8 @@ use super::control::ControlMiddlewareAggregator;
 use super::effect_policy::EffectPolicy;
 use super::sink_policy::SinkPolicy;
 use super::source_policy::SourcePolicy;
+use obzenflow_core::event::context::StageType;
+use obzenflow_core::ingress::IngressBoundaryMiddleware;
 use obzenflow_core::StageId;
 use obzenflow_runtime::pipeline::config::StageConfig;
 use obzenflow_runtime::stages::source::strategies::CompletionGate;
@@ -102,6 +104,83 @@ pub struct SinkDeliverySurface {
     pub configured_target: Option<SinkConfiguredTargetKey>,
 }
 
+// ---------------------------------------------------------------------------
+// Ingress identity (FLOWIP-115d)
+// ---------------------------------------------------------------------------
+
+/// Replay-stable source stage key for source-backed hosted ingress. Matches
+/// `StageConfig.name` (the key written to `run_manifest.json`), so durable
+/// ingress evidence and any replay-sensitive attachment coordinate survive
+/// archive drift.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct IngressStageKey(pub String);
+
+/// Normalised hosted-ingress surface key (for the HTTP surface, the normalised
+/// base path).
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct HostedIngressSurfaceKey(pub String);
+
+/// Which work-admission endpoint a hosted ingress route belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum IngressEndpointKind {
+    Events,
+    Batch,
+}
+
+/// The admission route scope. The default `Admission` scope is shared by the
+/// work-admission endpoints of one hosted surface, so a client cannot bypass the
+/// limiter by switching submission endpoint.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum IngressRouteScope {
+    Admission,
+    Endpoint(IngressEndpointKind),
+}
+
+impl IngressRouteScope {
+    fn label(&self) -> &'static str {
+        match self {
+            Self::Admission => "admission",
+            Self::Endpoint(IngressEndpointKind::Events) => "endpoint:events",
+            Self::Endpoint(IngressEndpointKind::Batch) => "endpoint:batch",
+        }
+    }
+}
+
+/// The concrete hosted ingress target: a hosted surface plus its admission route
+/// scope. Target metadata under the source-stage owner, not a protected-unit
+/// owner on its own.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct HostedIngressTargetKey {
+    pub surface: HostedIngressSurfaceKey,
+    pub scope: IngressRouteScope,
+}
+
+/// The source stage that owns a source-backed hosted ingress surface. Ingress
+/// identity is source-stage-owned: the owner is the linked source stage, not the
+/// raw base path and not a fresh hosted-surface id.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SourceStageIngressOwner {
+    pub stage_id: StageId,
+    pub stage_key: IngressStageKey,
+}
+
+/// The ingress call site for one source-backed hosted ingress target.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IngressSurface {
+    pub owner: SourceStageIngressOwner,
+    pub target: HostedIngressTargetKey,
+}
+
+/// The ingress protected unit: cross-attempt, keyed by the replay-stable source
+/// stage key plus the typed hosted ingress target. Request-scoped facts (event
+/// id, batch index, counts, retry-after, transport metadata, `IngressAttemptSeq`)
+/// are attempt context and never enter this key.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct IngressUnitId {
+    pub source_stage_key: IngressStageKey,
+    pub target: HostedIngressTargetKey,
+}
+
 /// The call-site shape a middleware attaches to. Broad and non-exhaustive so
 /// later slices consume the same foundation. This slice implements
 /// `SourcePoll`, `Effect`, and `SinkDelivery`; the remaining variants are
@@ -112,8 +191,8 @@ pub enum MiddlewareSurface {
     SourcePoll(SourcePollSurface),
     Effect(EffectSurface),
     SinkDelivery(SinkDeliverySurface),
-    /// Reserved for FLOWIP-115d: listener admission is not source polling.
-    Ingress,
+    /// FLOWIP-115d: source-backed hosted listener admission (not source polling).
+    Ingress(IngressSurface),
     /// Reserved observer surfaces for FLOWIP-115f.
     Handler,
     Stateful,
@@ -144,7 +223,7 @@ impl MiddlewareSurface {
             Self::SourcePoll(_) => MiddlewareSurfaceKind::SourcePoll,
             Self::Effect(_) => MiddlewareSurfaceKind::Effect,
             Self::SinkDelivery(_) => MiddlewareSurfaceKind::SinkDelivery,
-            Self::Ingress => MiddlewareSurfaceKind::Ingress,
+            Self::Ingress(_) => MiddlewareSurfaceKind::Ingress,
             Self::Handler => MiddlewareSurfaceKind::Handler,
             Self::Stateful => MiddlewareSurfaceKind::Stateful,
             Self::Join => MiddlewareSurfaceKind::Join,
@@ -159,6 +238,10 @@ impl MiddlewareSurface {
             Self::SourcePoll(s) => Some(s.stage_id),
             Self::Effect(s) => Some(s.stage_id),
             Self::SinkDelivery(s) => Some(s.stage_id),
+            // FLOWIP-115d: source-backed hosted ingress is owned by its linked
+            // source stage, so it returns that stage id and keeps the existing
+            // stage-keyed validation flow additive.
+            Self::Ingress(s) => Some(s.owner.stage_id),
             _ => None,
         }
     }
@@ -166,11 +249,15 @@ impl MiddlewareSurface {
 
 impl MiddlewareSurfaceKind {
     /// Whether a `Control`-capability middleware may attach to this surface in
-    /// this slice. Control is legal only on the live-I/O boundary surfaces this
-    /// slice implements; `OutputCommit` is never a control surface, and the
-    /// reserved surfaces are owned by later slices.
+    /// this slice. Control is legal on the live-I/O boundary surfaces (source
+    /// poll, effect, sink delivery) and, since FLOWIP-115d, on hosted ingress;
+    /// `OutputCommit` is never a control surface, and the remaining reserved
+    /// surfaces are owned by later slices.
     pub fn allows_control(self) -> bool {
-        matches!(self, Self::SourcePoll | Self::Effect | Self::SinkDelivery)
+        matches!(
+            self,
+            Self::SourcePoll | Self::Effect | Self::SinkDelivery | Self::Ingress
+        )
     }
 }
 
@@ -213,8 +300,9 @@ pub enum ProtectedUnit {
     SourcePoll(SourcePollUnitId),
     Effect(EffectUnitId),
     SinkDelivery(SinkDeliveryUnitId),
-    /// Reserved (FLOWIP-115d / FLOWIP-115f).
-    Ingress,
+    /// FLOWIP-115d: source-backed hosted listener admission.
+    Ingress(IngressUnitId),
+    /// Reserved (FLOWIP-115f).
     Handler,
     Stateful,
     Join,
@@ -390,7 +478,25 @@ fn push_surface(context: &mut Context, surface: &MiddlewareSurface) {
                 None => push_field(context, "surface.sink_target.kind", "stage"),
             }
         }
-        MiddlewareSurface::Ingress => push_field(context, "surface.kind", "ingress"),
+        MiddlewareSurface::Ingress(surface) => {
+            push_field(context, "surface.kind", "ingress");
+            push_stage_id(context, "surface.stage_id", surface.owner.stage_id);
+            push_field(
+                context,
+                "surface.ingress_stage_key",
+                &surface.owner.stage_key.0,
+            );
+            push_field(
+                context,
+                "surface.ingress_hosted_surface",
+                &surface.target.surface.0,
+            );
+            push_field(
+                context,
+                "surface.ingress_route_scope",
+                surface.target.scope.label(),
+            );
+        }
         MiddlewareSurface::Handler => push_field(context, "surface.kind", "handler"),
         MiddlewareSurface::Stateful => push_field(context, "surface.kind", "stateful"),
         MiddlewareSurface::Join => push_field(context, "surface.kind", "join"),
@@ -424,7 +530,24 @@ fn push_protected_unit(context: &mut Context, protected_unit: &ProtectedUnitId) 
                 push_field(context, "protected_unit.sink_target", &target.0);
             }
         },
-        ProtectedUnit::Ingress => push_field(context, "protected_unit.kind", "ingress"),
+        ProtectedUnit::Ingress(unit) => {
+            push_field(context, "protected_unit.kind", "ingress");
+            push_field(
+                context,
+                "protected_unit.ingress_stage_key",
+                &unit.source_stage_key.0,
+            );
+            push_field(
+                context,
+                "protected_unit.ingress_hosted_surface",
+                &unit.target.surface.0,
+            );
+            push_field(
+                context,
+                "protected_unit.ingress_route_scope",
+                unit.target.scope.label(),
+            );
+        }
         ProtectedUnit::Handler => push_field(context, "protected_unit.kind", "handler"),
         ProtectedUnit::Stateful => push_field(context, "protected_unit.kind", "stateful"),
         ProtectedUnit::Join => push_field(context, "protected_unit.kind", "join"),
@@ -598,6 +721,13 @@ pub fn validate_attachment_request(
                 _ => false,
             }
         }
+        (MiddlewareSurface::Ingress(surface), ProtectedUnit::Ingress(unit)) => {
+            // FLOWIP-115d: the ingress surface and protected unit agree when the
+            // replay-stable source stage key and the typed hosted target match.
+            // Non-source hosted ingress has no source stage owner and is rejected
+            // here because no non-source consumer ships in this slice.
+            surface.owner.stage_key == unit.source_stage_key && surface.target == unit.target
+        }
         _ => false,
     };
 
@@ -633,6 +763,11 @@ pub struct MiddlewareAttachmentRequest<'a> {
 pub struct MiddlewareMaterializationContext<'a> {
     pub config: &'a StageConfig,
     pub control_middleware: &'a Arc<ControlMiddlewareAggregator>,
+    /// The type of the stage being attached to. Source-poll materialization uses
+    /// this to choose the FLOWIP-114m charge position (infinite sources charge
+    /// pre-poll, finite sources charge after a clean non-empty delivery); the
+    /// effect and sink-delivery surfaces ignore it.
+    pub stage_type: StageType,
 }
 
 // ---------------------------------------------------------------------------
@@ -659,20 +794,131 @@ pub struct SourcePollAttachment {
 /// The single typed attachment a factory materializes for one surface.
 ///
 /// Adapter-owned: the DSL binder collects the per-surface policies, composes
-/// them into the neutral runtime boundary, and passes only that neutral seam to
-/// runtime/infra. Non-exhaustive; this slice implements `SourcePoll` and
-/// `Effect`, the sink-boundary phase adds `SinkDelivery` once the runtime
-/// `SinkDeliveryBoundary` seam exists, and FLOWIP-115d adds `Ingress`.
+/// them into the neutral runtime/core boundary, and passes only that neutral
+/// seam to runtime/infra. Non-exhaustive; this slice implements `SourcePoll`,
+/// `Effect`, and `SinkDelivery`, and FLOWIP-115d adds `Ingress`, whose neutral
+/// port is the core-owned `IngressBoundaryMiddleware` that infra calls.
 #[non_exhaustive]
 pub enum MiddlewareSurfaceAttachment {
     SourcePoll(SourcePollAttachment),
     Effect(Arc<dyn EffectPolicy>),
     SinkDelivery(Arc<dyn SinkPolicy>),
+    Ingress(Arc<dyn IngressBoundaryMiddleware>),
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A source-owned ingress surface plus its matching protected unit
+    /// (FLOWIP-115d), for the canonical piggy-bank `accounts` shape.
+    fn ingress_fixture(stage_id: StageId) -> (MiddlewareSurface, ProtectedUnitId) {
+        let stage_key = IngressStageKey("accounts".to_string());
+        let target = HostedIngressTargetKey {
+            surface: HostedIngressSurfaceKey("/api/bank/accounts".to_string()),
+            scope: IngressRouteScope::Admission,
+        };
+        let surface = MiddlewareSurface::Ingress(IngressSurface {
+            owner: SourceStageIngressOwner {
+                stage_id,
+                stage_key: stage_key.clone(),
+            },
+            target: target.clone(),
+        });
+        let unit = ProtectedUnitId {
+            stage_id,
+            unit: ProtectedUnit::Ingress(IngressUnitId {
+                source_stage_key: stage_key,
+                target,
+            }),
+        };
+        (surface, unit)
+    }
+
+    #[test]
+    fn validates_source_owned_ingress_and_rejects_target_mismatch() {
+        let stage_id = StageId::new();
+        let declaration = MiddlewareDeclaration::control_with_family(
+            "rate_limiter",
+            "rate_limiter",
+            vec![
+                MiddlewareSurfaceKind::SourcePoll,
+                MiddlewareSurfaceKind::Ingress,
+            ],
+        );
+        let (surface, unit) = ingress_fixture(stage_id);
+        let origin = MiddlewareOrigin::Stage;
+        let request = MiddlewareAttachmentRequest {
+            surface: &surface,
+            protected_unit: &unit,
+            origin: &origin,
+            declaration_index: MiddlewareDeclarationIndex::resolved(0),
+        };
+
+        // A source-owned ingress attachment validates and derives a stable id.
+        let id = validate_attachment_request(&declaration, &request).unwrap();
+        assert_eq!(
+            id,
+            validate_attachment_request(&declaration, &request).unwrap()
+        );
+
+        // A surface naming a different hosted target than the unit fails as a
+        // protected-unit mismatch (the source stage still agrees).
+        let other_target = MiddlewareSurface::Ingress(IngressSurface {
+            owner: SourceStageIngressOwner {
+                stage_id,
+                stage_key: IngressStageKey("accounts".to_string()),
+            },
+            target: HostedIngressTargetKey {
+                surface: HostedIngressSurfaceKey("/api/bank/tx".to_string()),
+                scope: IngressRouteScope::Admission,
+            },
+        });
+        let mismatch_request = MiddlewareAttachmentRequest {
+            surface: &other_target,
+            ..request
+        };
+        assert!(matches!(
+            validate_attachment_request(&declaration, &mismatch_request),
+            Err(MiddlewareAttachmentValidationError::ProtectedUnitMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn rejects_ingress_without_declared_support_or_control_capability() {
+        let stage_id = StageId::new();
+        let (surface, unit) = ingress_fixture(stage_id);
+        let origin = MiddlewareOrigin::Stage;
+        let request = MiddlewareAttachmentRequest {
+            surface: &surface,
+            protected_unit: &unit,
+            origin: &origin,
+            declaration_index: MiddlewareDeclarationIndex::resolved(0),
+        };
+
+        // A control declaration that does not list Ingress is UnsupportedSurface.
+        let no_ingress = MiddlewareDeclaration::control_with_family(
+            "rate_limiter",
+            "rate_limiter",
+            vec![MiddlewareSurfaceKind::SourcePoll],
+        );
+        assert!(matches!(
+            validate_attachment_request(&no_ingress, &request),
+            Err(MiddlewareAttachmentValidationError::UnsupportedSurface { .. })
+        ));
+
+        // An observer-capability declaration cannot attach control to Ingress.
+        let observer = MiddlewareDeclaration {
+            label: "observer",
+            family_label: "observer",
+            capability: MiddlewareCapability::Observer,
+            surfaces: vec![MiddlewareSurfaceKind::Ingress],
+        };
+        assert!(matches!(
+            validate_attachment_request(&observer, &request),
+            Err(MiddlewareAttachmentValidationError::UnsupportedCapability { .. })
+        ));
+    }
 
     #[test]
     fn validates_source_poll_and_derives_stable_attachment_id() {

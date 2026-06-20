@@ -36,6 +36,9 @@ use obzenflow_runtime::effects::{
 use obzenflow_runtime::pipeline::config::StageConfig;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{EffectfulTransformHandler, FiniteSourceHandler};
+use obzenflow_runtime::stages::sink::journal_sink::{
+    SinkDeliveryAttemptContext, SinkDeliveryIdentity,
+};
 use obzenflow_runtime::stages::sink::{DeliveryContext, DeliveryProvenance, SinkTyped};
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
@@ -255,12 +258,25 @@ impl SinkPolicy for HookProofSinkPolicy {
         "hook_proof_sink"
     }
 
-    async fn admit(&self, _ctx: &mut SinkPolicyCtx) -> SinkAdmission {
+    async fn admit(
+        &self,
+        _identity: &SinkDeliveryIdentity,
+        _attempt: &SinkDeliveryAttemptContext,
+        _event: &ChainEvent,
+        _ctx: &mut SinkPolicyCtx,
+    ) -> SinkAdmission {
         self.counters.sink_admits.fetch_add(1, Ordering::SeqCst);
         SinkAdmission::Admit(None)
     }
 
-    fn observe(&self, _outcome: &SinkDeliveryPolicyOutcome<'_>, _ctx: &mut SinkPolicyCtx) {
+    fn observe(
+        &self,
+        _identity: &SinkDeliveryIdentity,
+        _attempt: &SinkDeliveryAttemptContext,
+        _event: &ChainEvent,
+        _outcome: &SinkDeliveryPolicyOutcome<'_>,
+        _ctx: &mut SinkPolicyCtx,
+    ) {
         self.counters.sink_observes.fetch_add(1, Ordering::SeqCst);
     }
 }

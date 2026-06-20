@@ -148,6 +148,7 @@ fn build_source_middleware_and_register_policies(
             let binding = crate::dsl::binder::materialize_source_poll(
                 spec.factory.as_ref(),
                 config,
+                stage_type,
                 control_middleware,
                 &origin,
                 MiddlewareDeclarationIndex::resolved(middleware_index),
@@ -1423,6 +1424,7 @@ impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
                 let policy = crate::dsl::binder::bind_effect_policy(
                     spec.factory.as_ref(),
                     &config,
+                    StageType::Transform,
                     &control_middleware,
                     effect_type,
                     &origin,
@@ -1437,6 +1439,7 @@ impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
                 let policy = crate::dsl::binder::bind_effect_policy(
                     factory.as_ref(),
                     &config,
+                    StageType::Transform,
                     &control_middleware,
                     attachment.effect_type,
                     &obzenflow_adapters::middleware::MiddlewareOrigin::Stage,
@@ -1607,6 +1610,7 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
                 let policy = crate::dsl::binder::materialize_sink_delivery(
                     spec.factory.as_ref(),
                     &config,
+                    StageType::Sink,
                     &control_middleware,
                     &origin,
                     MiddlewareDeclarationIndex::resolved(middleware_index),

@@ -22,6 +22,9 @@ use obzenflow_core::event::payloads::observability_payload::{
 use obzenflow_core::event::status::processing_status::ErrorKind;
 use obzenflow_core::event::ChainEventFactory;
 use obzenflow_runtime::control_plane::CircuitBreakerStateView;
+use obzenflow_runtime::stages::sink::journal_sink::{
+    SinkDeliveryAttemptContext, SinkDeliveryIdentity,
+};
 use obzenflow_runtime::stages::source::strategies::{
     CompletionContext, CompletionDecision, CompletionGate,
 };
@@ -197,7 +200,13 @@ impl SinkPolicy for CircuitBreakerSinkPolicy {
         Middleware::label(self.breaker.as_ref())
     }
 
-    async fn admit(&self, ctx: &mut SinkPolicyCtx) -> SinkAdmission {
+    async fn admit(
+        &self,
+        _identity: &SinkDeliveryIdentity,
+        _attempt: &SinkDeliveryAttemptContext,
+        _event: &ChainEvent,
+        ctx: &mut SinkPolicyCtx,
+    ) -> SinkAdmission {
         match self.breaker.source_admit() {
             SourceAdmit::Continue { guard, event } => {
                 if let Some(event) = event {
@@ -213,7 +222,14 @@ impl SinkPolicy for CircuitBreakerSinkPolicy {
         }
     }
 
-    fn observe(&self, outcome: &SinkDeliveryPolicyOutcome<'_>, ctx: &mut SinkPolicyCtx) {
+    fn observe(
+        &self,
+        _identity: &SinkDeliveryIdentity,
+        _attempt: &SinkDeliveryAttemptContext,
+        _event: &ChainEvent,
+        outcome: &SinkDeliveryPolicyOutcome<'_>,
+        ctx: &mut SinkPolicyCtx,
+    ) {
         let source_outcome = match outcome {
             SinkDeliveryPolicyOutcome::Delivered { .. } => SourceOutcome::Success {
                 poll_duration: Duration::ZERO,

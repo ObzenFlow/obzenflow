@@ -11,6 +11,7 @@ pub mod error;
 pub mod event;
 pub mod http_client;
 pub mod id;
+pub mod ingress;
 pub mod journal;
 pub mod metrics;
 pub mod time;

@@ -83,13 +83,33 @@ impl SinkPolicyCtx {
 }
 
 /// A sink-delivery resilience policy behind the adapter-owned boundary.
+///
+/// FLOWIP-115d AC59: `admit` and `observe` receive the typed delivery identity,
+/// per-attempt context, and parent event, so a policy can translate the
+/// protected delivery into an admission charge or a proof row. This mirrors the
+/// effect-policy shape and makes the protected-unit coordinate visible at the
+/// policy boundary. FLOWIP-115h/115i extend this contract additively with sink
+/// delivery duration for slow-call accounting.
 #[async_trait]
 pub trait SinkPolicy: Send + Sync {
     fn label(&self) -> &'static str;
 
-    async fn admit(&self, ctx: &mut SinkPolicyCtx) -> SinkAdmission;
+    async fn admit(
+        &self,
+        identity: &SinkDeliveryIdentity,
+        attempt: &SinkDeliveryAttemptContext,
+        event: &ChainEvent,
+        ctx: &mut SinkPolicyCtx,
+    ) -> SinkAdmission;
 
-    fn observe(&self, outcome: &SinkDeliveryPolicyOutcome<'_>, ctx: &mut SinkPolicyCtx);
+    fn observe(
+        &self,
+        identity: &SinkDeliveryIdentity,
+        attempt: &SinkDeliveryAttemptContext,
+        event: &ChainEvent,
+        outcome: &SinkDeliveryPolicyOutcome<'_>,
+        ctx: &mut SinkPolicyCtx,
+    );
 }
 
 /// Sink-delivery boundary backed by a declared-order policy chain.
@@ -115,9 +135,9 @@ type SinkAdmitGuard = Option<Box<dyn SinkAdmissionGuard>>;
 impl SinkDeliveryBoundary for PerSinkDeliveryPolicyBoundary {
     async fn around_sink_delivery(
         &self,
-        _identity: &SinkDeliveryIdentity,
-        _attempt: &SinkDeliveryAttemptContext,
-        _event: &ChainEvent,
+        identity: &SinkDeliveryIdentity,
+        attempt: &SinkDeliveryAttemptContext,
+        event: &ChainEvent,
         execute: &mut dyn SinkDeliveryExecutor,
     ) -> SinkDeliveryBoundaryReport {
         if self.policies.is_empty() {
@@ -131,7 +151,7 @@ impl SinkDeliveryBoundary for PerSinkDeliveryPolicyBoundary {
         let mut admitted: Vec<(&Arc<dyn SinkPolicy>, SinkAdmitGuard)> = Vec::new();
 
         for policy in self.policies.iter() {
-            match policy.admit(&mut ctx).await {
+            match policy.admit(identity, attempt, event, &mut ctx).await {
                 SinkAdmission::Admit(guard) => admitted.push((policy, guard)),
                 SinkAdmission::Reject { reason } => {
                     let outcome = SinkDeliveryPolicyOutcome::RejectedBy {
@@ -139,7 +159,7 @@ impl SinkDeliveryBoundary for PerSinkDeliveryPolicyBoundary {
                         reason: &reason,
                     };
                     for (prior, _) in admitted.iter().rev() {
-                        prior.observe(&outcome, &mut ctx);
+                        prior.observe(identity, attempt, event, &outcome, &mut ctx);
                     }
                     return SinkDeliveryBoundaryReport {
                         outcome: SinkDeliveryBoundaryOutcome::Rejected(SinkDeliveryRejection {
@@ -161,7 +181,7 @@ impl SinkDeliveryBoundary for PerSinkDeliveryPolicyBoundary {
             | SinkDeliveryAttemptOutcome::Panicked { .. } => SinkDeliveryPolicyOutcome::Failed,
         };
         for (policy, _) in admitted.iter().rev() {
-            policy.observe(&policy_outcome, &mut ctx);
+            policy.observe(identity, attempt, event, &policy_outcome, &mut ctx);
         }
 
         SinkDeliveryBoundaryReport {
@@ -198,13 +218,27 @@ mod tests {
             "third_party_reject"
         }
 
-        async fn admit(&self, _ctx: &mut SinkPolicyCtx) -> SinkAdmission {
+        async fn admit(
+            &self,
+            _identity: &SinkDeliveryIdentity,
+            _attempt: &SinkDeliveryAttemptContext,
+            _event: &ChainEvent,
+            _ctx: &mut SinkPolicyCtx,
+        ) -> SinkAdmission {
             SinkAdmission::Reject {
                 reason: "third party policy".to_string(),
             }
         }
 
-        fn observe(&self, _outcome: &SinkDeliveryPolicyOutcome<'_>, _ctx: &mut SinkPolicyCtx) {}
+        fn observe(
+            &self,
+            _identity: &SinkDeliveryIdentity,
+            _attempt: &SinkDeliveryAttemptContext,
+            _event: &ChainEvent,
+            _outcome: &SinkDeliveryPolicyOutcome<'_>,
+            _ctx: &mut SinkPolicyCtx,
+        ) {
+        }
     }
 
     /// An executor that must never run when a policy rejects before delivery.
@@ -319,6 +353,7 @@ mod tests {
         let materialization = MiddlewareMaterializationContext {
             config: &config,
             control_middleware: &control,
+            stage_type: obzenflow_core::event::context::StageType::Sink,
         };
         let attachment = factory
             .materialize(request, &materialization)

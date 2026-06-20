@@ -20,6 +20,7 @@ use obzenflow_adapters::middleware::{
     ProtectedUnit, ProtectedUnitId, SinkDeliverySurface, SinkDeliveryTarget, SinkDeliveryUnitId,
     SinkPolicy, SourcePolicy, SourcePollSurface, SourcePollUnitId,
 };
+use obzenflow_core::event::context::StageType;
 use obzenflow_runtime::pipeline::config::StageConfig;
 use obzenflow_runtime::stages::source::strategies::CompletionGate;
 use std::sync::Arc;
@@ -57,6 +58,7 @@ pub(crate) struct SourcePollBinding {
 pub(crate) fn materialize_source_poll(
     factory: &dyn MiddlewareFactory,
     config: &StageConfig,
+    stage_type: StageType,
     control_middleware: &Arc<ControlMiddlewareAggregator>,
     origin: &MiddlewareOrigin,
     declaration_index: MiddlewareDeclarationIndex,
@@ -79,6 +81,7 @@ pub(crate) fn materialize_source_poll(
     let ctx = MiddlewareMaterializationContext {
         config,
         control_middleware,
+        stage_type,
     };
     match factory
         .materialize(request, &ctx)
@@ -103,6 +106,7 @@ pub(crate) fn materialize_source_poll(
 pub(crate) fn bind_effect_policy(
     factory: &dyn MiddlewareFactory,
     config: &StageConfig,
+    stage_type: StageType,
     control_middleware: &Arc<ControlMiddlewareAggregator>,
     effect_type: &'static str,
     origin: &MiddlewareOrigin,
@@ -130,6 +134,7 @@ pub(crate) fn bind_effect_policy(
         let ctx = MiddlewareMaterializationContext {
             config,
             control_middleware,
+            stage_type,
         };
         match factory
             .materialize(request, &ctx)
@@ -156,6 +161,7 @@ pub(crate) fn bind_effect_policy(
 pub(crate) fn materialize_sink_delivery(
     factory: &dyn MiddlewareFactory,
     config: &StageConfig,
+    stage_type: StageType,
     control_middleware: &Arc<ControlMiddlewareAggregator>,
     origin: &MiddlewareOrigin,
     declaration_index: MiddlewareDeclarationIndex,
@@ -181,6 +187,7 @@ pub(crate) fn materialize_sink_delivery(
     let ctx = MiddlewareMaterializationContext {
         config,
         control_middleware,
+        stage_type,
     };
     match factory
         .materialize(request, &ctx)
