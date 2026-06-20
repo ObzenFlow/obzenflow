@@ -17,8 +17,8 @@
 //! observer surfaces (FLOWIP-115f) are reserved in the non-exhaustive
 //! vocabulary so later slices fill them additively.
 
+use super::control::policy::{EffectPolicyAttachment, SinkPolicy, SourcePolicy};
 use super::control::ControlMiddlewareAggregator;
-use super::policy::{EffectPolicyAttachment, SinkPolicy, SourcePolicy};
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::ingress::{IngressBoundaryMiddleware, IngressKey};
 use obzenflow_core::{StageId, StageKey};

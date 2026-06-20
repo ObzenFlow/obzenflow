@@ -7,7 +7,7 @@
 //! This module provides the ability to wrap StatefulHandler implementations
 //! with middleware for cross-cutting concerns like rate limiting, monitoring, and retries.
 
-use super::{Middleware, MiddlewareAction, MiddlewareContext};
+use crate::middleware::{Middleware, MiddlewareAction, MiddlewareContext};
 use async_trait::async_trait;
 use obzenflow_core::event::status::processing_status::ProcessingStatus;
 use obzenflow_core::ChainEvent;

@@ -83,9 +83,9 @@
 //! ```
 
 // Core types
+pub mod handler;
 mod middleware_factory;
 mod middleware_safety;
-mod middleware_trait;
 
 /// FLOWIP-120i: whether this process is performing a strict replay, read from
 /// the installed bootstrap, the same source the journal factory uses to open
@@ -96,13 +96,8 @@ pub(crate) fn strict_replay_active() -> bool {
     obzenflow_runtime::bootstrap::replay_bootstrap().is_some()
 }
 
-// Handler-specific middleware adapters
+// Handler-specific middleware adapters and legacy middleware wrappers
 mod backpressure;
-mod join_middleware;
-mod sink_middleware;
-mod source_middleware;
-mod stateful_middleware;
-mod transform_middleware;
 
 // Common middleware utilities
 mod carrier;
@@ -116,7 +111,6 @@ pub mod type_shaping;
 pub mod ai;
 pub mod control;
 pub mod observability;
-pub mod policy;
 mod system;
 // Dangerous middleware examples moved to examples/dangerous_examples.rs
 // Factory tests moved to tests/factory_tests.rs
@@ -125,33 +119,28 @@ mod system;
 // directly, and dashboards/query assets live outside the middleware API.
 
 // Core trait exports
+pub(crate) use handler::observation_short_circuit;
+pub use handler::{
+    ErrorAction, Middleware, MiddlewareAbortCause, MiddlewareAction, SourceMiddlewarePhase,
+};
 pub use middleware_factory::{
     ControlMiddlewareRole, MiddlewareFactory, MiddlewareFactoryError, MiddlewareFactoryResult,
     MiddlewareKind, MiddlewareOverrideKey, MiddlewarePlanContribution,
     TopologyMiddlewareConfigSlot,
 };
 pub use middleware_safety::MiddlewareSafety;
-pub(crate) use middleware_trait::observation_short_circuit;
-pub use middleware_trait::{
-    ErrorAction, Middleware, MiddlewareAbortCause, MiddlewareAction, SourceMiddlewarePhase,
-};
 
 // Handler-specific exports
-pub use join_middleware::{JoinHandlerMiddlewareExt, JoinMiddlewareBuilder, MiddlewareJoin};
-pub use sink_middleware::{MiddlewareSink, SinkHandlerExt, SinkMiddlewareBuilder};
-pub use source_middleware::{
+pub use handler::{
     AsyncFiniteSourceHandlerExt, AsyncFiniteSourceMiddlewareBuilder, AsyncInfiniteSourceHandlerExt,
-    AsyncInfiniteSourceMiddlewareBuilder, FiniteSourceHandlerExt, FiniteSourceMiddlewareBuilder,
-    InfiniteSourceHandlerExt, InfiniteSourceMiddlewareBuilder, MiddlewareAsyncFiniteSource,
-    MiddlewareAsyncInfiniteSource, MiddlewareFiniteSource, MiddlewareInfiniteSource,
-};
-pub use stateful_middleware::{
-    MiddlewareStateful, StatefulHandlerMiddlewareExt, StatefulMiddlewareBuilder,
-};
-pub use transform_middleware::{
-    AsyncMiddlewareTransform, AsyncTransformHandlerExt, AsyncTransformMiddlewareBuilder,
-    MiddlewareTransform, TransformHandlerExt, TransformMiddlewareBuilder,
-    UnifiedMiddlewareTransform,
+    AsyncInfiniteSourceMiddlewareBuilder, AsyncMiddlewareTransform, AsyncTransformHandlerExt,
+    AsyncTransformMiddlewareBuilder, FiniteSourceHandlerExt, FiniteSourceMiddlewareBuilder,
+    InfiniteSourceHandlerExt, InfiniteSourceMiddlewareBuilder, JoinHandlerMiddlewareExt,
+    JoinMiddlewareBuilder, MiddlewareAsyncFiniteSource, MiddlewareAsyncInfiniteSource,
+    MiddlewareFiniteSource, MiddlewareInfiniteSource, MiddlewareJoin, MiddlewareSink,
+    MiddlewareStateful, MiddlewareTransform, SinkHandlerExt, SinkMiddlewareBuilder,
+    StatefulHandlerMiddlewareExt, StatefulMiddlewareBuilder, TransformHandlerExt,
+    TransformMiddlewareBuilder, UnifiedMiddlewareTransform,
 };
 
 // Common utilities
@@ -167,16 +156,16 @@ pub use carrier::{
     SourceStageIngressOwner,
 };
 pub use context::MiddlewareContext;
-pub use function::{middleware_fn, FnMiddleware};
-pub use hints::{Attempts, BackoffKind, BatchingHint, MiddlewareHints, RetryHint};
-pub use observability::timing::TimingMiddleware;
-pub use policy::{
+pub use control::policy::{
     effect_policy_from_middleware, EffectAttemptOutcome, EffectPolicy, EffectPolicyAttachment,
     EventAwareEffectPolicy, PerEffectPolicyBoundary, PerSinkDeliveryPolicyBoundary,
     PerSourcePolicyBoundary, PolicyAdmission, SinkAdmission, SinkAdmissionGuard,
     SinkDeliveryPolicyOutcome, SinkPolicy, SinkPolicyCtx, SourceAdmission, SourceAdmissionGuard,
     SourceAfterPoll, SourceBatchFacts, SourcePolicy, SourcePolicyCtx, SourcePollOutcome,
 };
+pub use function::{middleware_fn, FnMiddleware};
+pub use hints::{Attempts, BackoffKind, BatchingHint, MiddlewareHints, RetryHint};
+pub use observability::timing::TimingMiddleware;
 pub use type_shaping::{IntoEffectPolicyParts, OutcomeShapingMiddleware, TypeShapingMiddleware};
 
 // Control middleware

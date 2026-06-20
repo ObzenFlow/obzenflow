@@ -7,7 +7,7 @@
 //! This module provides the ability to wrap TransformHandler implementations
 //! with middleware for cross-cutting concerns like logging, monitoring, and retry logic.
 
-use super::{
+use crate::middleware::{
     context_keys::{
         CircuitBreakerAttempt, CircuitBreakerRetryAfterMs, CircuitBreakerRetryDelayMs,
         CircuitBreakerShouldRetry, CircuitBreakerTotalRetryWallMs,

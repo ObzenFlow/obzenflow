@@ -7,10 +7,10 @@
 //! These traits are for middleware that can admit, wait, reject, shed, or
 //! synthesize around a protected runtime unit. They are intentionally separate
 //! from the generic [`Middleware`](crate::middleware::Middleware) trait, which
-//! remains the handler-chain observation/structural authoring surface. Built-in
-//! control middleware lives under [`control`](crate::middleware::control); this
-//! module is the public contract that built-ins and third-party control
-//! middleware implement.
+//! remains the handler-chain observation/structural authoring surface. This
+//! module lives under [`control`](crate::middleware::control) because policy is
+//! a control-only authoring contract; built-in control middleware and
+//! third-party control middleware both implement these traits.
 //!
 //! Ingress is asymmetric because infra hosts the call site. Its neutral
 //! boundary port lives in [`obzenflow_core::ingress`], while adapter factories

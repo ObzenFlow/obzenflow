@@ -7,7 +7,7 @@
 //! This module provides middleware capabilities for both FiniteSourceHandler
 //! and InfiniteSourceHandler implementations.
 
-use super::{Middleware, MiddlewareAction, MiddlewareContext, SourceMiddlewarePhase};
+use crate::middleware::{Middleware, MiddlewareAction, MiddlewareContext, SourceMiddlewarePhase};
 use async_trait::async_trait;
 use obzenflow_core::event::payloads::observability_payload::{
     MetricsLifecycle, ObservabilityPayload,

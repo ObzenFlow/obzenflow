@@ -273,12 +273,12 @@ impl MiddlewareFactory for MyControlFactory {
 }
 ```
 
-Control policies live under `middleware::policy`. They are the authoring
-contract for middleware that controls a live I/O boundary; observation and
-structural handler middleware still implement the generic `Middleware` trait.
-Built-in control middleware lives under `middleware::control`, while
-`middleware::policy` is the contract that built-ins and third-party control
-middleware implement.
+Control policies live under `middleware::control::policy`. They are the
+authoring contract for middleware that controls a live I/O boundary;
+observation and structural handler middleware still implement the generic
+`Middleware` trait under `middleware::handler`. Built-in control middleware
+lives beside the policy contract under `middleware::control`, so the namespace
+reads as one control subsystem rather than a loose set of root modules.
 
 The policies returned from `materialize` are surface-specific:
 

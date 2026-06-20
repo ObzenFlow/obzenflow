@@ -2,12 +2,13 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Core middleware trait and related types
+//! Handler-chain middleware contract and related types.
 //!
-//! This module defines the fundamental middleware abstraction and the
-//! actions that middleware can take during event processing.
+//! This module defines the generic handler middleware abstraction used by
+//! observation and structural middleware. Live-I/O control policies live under
+//! [`crate::middleware::control::policy`].
 
-use super::MiddlewareContext;
+use crate::middleware::MiddlewareContext;
 use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::event::{EffectFailureCode, EffectFailureSource, RetryDisposition};
 
