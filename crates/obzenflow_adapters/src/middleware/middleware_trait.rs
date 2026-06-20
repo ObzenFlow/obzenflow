@@ -142,15 +142,6 @@ pub trait Middleware: Send + Sync {
     ) -> Option<std::sync::Arc<dyn crate::middleware::EffectPolicy>> {
         None
     }
-
-    /// FLOWIP-114o: sources with a native async pacing surface return it here so
-    /// async source supervisors await a permit (a cancellable future) instead of
-    /// blocking the worker thread in `pre_handle`. Only the rate limiter
-    /// overrides this; every other middleware falls through to the synchronous
-    /// `pre_handle` at the source gate.
-    fn as_source_pacer(self: std::sync::Arc<Self>) -> Option<std::sync::Arc<dyn SourcePacer>> {
-        None
-    }
 }
 
 /// Structured cause attached to an abort so downstream seams, the effect
@@ -185,27 +176,6 @@ pub enum MiddlewareAction {
     /// Abort processing entirely (returns empty results). The optional cause
     /// lets the effect boundary record a structured, replayable rejection.
     Abort { cause: Option<MiddlewareAbortCause> },
-}
-
-/// FLOWIP-114o: an async pacing surface for source middleware. A policy that
-/// would otherwise block a worker thread while throttling (the rate limiter)
-/// implements this so async source supervisors can `.await` admission as a
-/// cancellable future. The supervisor's `biased` select then interrupts the
-/// wait on drain, EOF, cancellation, or shutdown. Sync source supervisors have
-/// no await point and keep the blocking `pre_handle` path (FLOWIP-114o Q4,
-/// retain-and-document).
-#[async_trait::async_trait]
-pub trait SourcePacer: Send + Sync {
-    /// Await admission for one source poll, returning the gate decision. The
-    /// rate limiter returns `Continue` once it has consumed a token, awaiting
-    /// its permit first if throttled. Accounting and lifecycle events are
-    /// identical to the synchronous `pre_handle` path; only the wait becomes a
-    /// cancellable future.
-    async fn source_admit(
-        &self,
-        event: &ChainEvent,
-        ctx: &mut MiddlewareContext,
-    ) -> MiddlewareAction;
 }
 
 /// FLOWIP-120c H2 enforcement: an observation-classified middleware may not
@@ -249,19 +219,15 @@ pub enum ErrorAction {
 
 // Implementation for Box<dyn Middleware> to allow boxed middleware.
 //
-// FLOWIP-114o footgun: this blanket impl forwards the `&self` methods, but it
-// CANNOT forward the `self: Arc<Self>` hooks (`as_effect_policy`,
-// `as_source_pacer`) because there is no safe way to turn `Arc<Box<M>>` into
-// `Arc<M>`. Those two methods therefore fall through to the trait defaults
-// (`None`) for any `Box`-wrapped middleware. Consequently, double-boxing a
-// `Box<dyn Middleware>` (e.g. passing one into a generic `with<M: Middleware>`
-// that re-boxes) silently drops the native async policy/pacer surface. Build
-// chains that need those hooks from a single box: `Arc::from(factory.create())`
-// or the `with_boxed(Box<dyn Middleware>)` builder methods, never the re-boxing
-// generic `with`. Source chains learned this the hard way; effect-policy chains
-// stay safe via `Arc::from(create_for_effect(...))`. FLOWIP-114s retires the
-// `as_*` capability-downcast entirely in favour of typed policy chains on live
-// I/O units, which removes this footgun as a class.
+// FLOWIP-120c footgun: this blanket impl forwards the `&self` methods, but it
+// CANNOT forward the `self: Arc<Self>` hook (`as_effect_policy`) because there
+// is no safe way to turn `Arc<Box<M>>` into `Arc<M>`. The hook therefore falls
+// through to the trait default (`None`) for any `Box`-wrapped middleware.
+// Consequently, double-boxing a `Box<dyn Middleware>` (e.g. passing one into a
+// generic `with<M: Middleware>` that re-boxes) silently drops the native async
+// effect-policy surface. Effect-policy chains stay safe via
+// `Arc::from(create_for_effect(...))`. FLOWIP-115 retires capability downcasts in
+// favour of typed policy chains on live I/O units.
 impl<M: Middleware + ?Sized> Middleware for Box<M> {
     fn label(&self) -> &'static str {
         (**self).label()
@@ -303,6 +269,5 @@ impl<M: Middleware + ?Sized> Middleware for Box<M> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceMiddlewarePhase {
-    RateLimiterGate,
     Ordinary,
 }

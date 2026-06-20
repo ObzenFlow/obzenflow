@@ -173,14 +173,20 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use obzenflow_core::event::chain_event::ChainEvent;
+    use obzenflow_core::event::event_envelope::EventEnvelope;
+    use obzenflow_core::event::identity::EventId;
     use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
-    use obzenflow_core::event::{SystemEvent, SystemEventType};
+    use obzenflow_core::event::{JournalEvent, SystemEvent, SystemEventType};
+    use obzenflow_core::id::JournalId;
     use obzenflow_core::id::SystemId;
     use obzenflow_core::ingress::{
         FilledHostedIngress, IngressBoundaryMiddleware, IngressRefusalReason,
     };
+    use obzenflow_core::journal::journal_error::JournalError;
     use obzenflow_core::journal::journal_owner::JournalOwner;
+    use obzenflow_core::journal::journal_reader::JournalReader;
     use obzenflow_core::journal::Journal;
+    use obzenflow_core::journal::JournalStorageKind;
     use obzenflow_core::web::{HttpMethod, ManagedResponse, Request, Response};
     use obzenflow_core::StageId;
 
@@ -279,6 +285,97 @@ mod tests {
         (state, rx, journal)
     }
 
+    #[derive(Clone)]
+    struct FailingAppendJournal<T: JournalEvent> {
+        inner: MemoryJournal<T>,
+    }
+
+    impl<T: JournalEvent> FailingAppendJournal<T> {
+        fn with_owner(owner: JournalOwner) -> Self {
+            Self {
+                inner: MemoryJournal::with_owner(owner),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl<T: JournalEvent + 'static> Journal<T> for FailingAppendJournal<T> {
+        fn storage_kind(&self) -> JournalStorageKind {
+            self.inner.storage_kind()
+        }
+
+        fn id(&self) -> &JournalId {
+            self.inner.id()
+        }
+
+        fn owner(&self) -> Option<&JournalOwner> {
+            self.inner.owner()
+        }
+
+        async fn append(
+            &self,
+            _event: T,
+            _parent: Option<&EventEnvelope<T>>,
+        ) -> Result<EventEnvelope<T>, JournalError> {
+            Err(JournalError::Implementation {
+                message: "forced append failure".to_string(),
+                source: "forced append failure".into(),
+            })
+        }
+
+        async fn read_causally_ordered(&self) -> Result<Vec<EventEnvelope<T>>, JournalError> {
+            self.inner.read_causally_ordered().await
+        }
+
+        async fn read_causally_after(
+            &self,
+            after_event_id: &EventId,
+        ) -> Result<Vec<EventEnvelope<T>>, JournalError> {
+            self.inner.read_causally_after(after_event_id).await
+        }
+
+        async fn read_event(
+            &self,
+            event_id: &EventId,
+        ) -> Result<Option<EventEnvelope<T>>, JournalError> {
+            self.inner.read_event(event_id).await
+        }
+
+        async fn reader(&self) -> Result<Box<dyn JournalReader<T>>, JournalError> {
+            self.inner.reader().await
+        }
+
+        async fn reader_from(
+            &self,
+            position: u64,
+        ) -> Result<Box<dyn JournalReader<T>>, JournalError> {
+            self.inner.reader_from(position).await
+        }
+
+        async fn read_last_n(&self, count: usize) -> Result<Vec<EventEnvelope<T>>, JournalError> {
+            self.inner.read_last_n(count).await
+        }
+    }
+
+    fn state_with_failing_refusal_journal(
+        config: IngestionConfig,
+        boundary: Option<Arc<dyn IngressBoundaryMiddleware>>,
+    ) -> (IngestionState, mpsc::Receiver<EventSubmission>) {
+        let (state, rx) = IngestionState::new(config);
+        state
+            .ingress_slot()
+            .fill(FilledHostedIngress {
+                stage_id: StageId::new(),
+                stage_key: "test".to_string(),
+                boundary,
+            })
+            .expect("slot fill succeeds once");
+        state.install_refusal_writer(Arc::new(FailingAppendJournal::with_owner(
+            JournalOwner::system(SystemId::new()),
+        )));
+        (state, rx)
+    }
+
     /// Read the `(reason, event_count)` of every `IngressRefusal` fact, in order.
     async fn refusal_facts(
         journal: &MemoryJournal<SystemEvent>,
@@ -320,6 +417,40 @@ mod tests {
             vec![(IngressRefusalReason::RateLimited, 1)],
             "a rate-limited rejection appends one RateLimited refusal fact"
         );
+    }
+
+    #[tokio::test]
+    async fn single_event_refusal_append_failure_returns_listener_unavailable() {
+        let config = IngestionConfig {
+            base_path: "/api/test".to_string(),
+            ..IngestionConfig::default()
+        };
+        let (state, mut rx) =
+            state_with_failing_refusal_journal(config, Some(Arc::new(AlwaysRejectIngress)));
+        state.ready.store(true, Ordering::Release);
+
+        let endpoint = SingleEventEndpoint::new(state);
+        let response = unwrap_unary(
+            endpoint
+                .handle(json_request(
+                    "/api/test/events",
+                    event_body("order.created"),
+                ))
+                .await
+                .unwrap(),
+        );
+
+        assert_eq!(
+            response.status, 503,
+            "evidence failure fails closed instead of returning a clean 429"
+        );
+        assert_eq!(
+            response.headers.get("Retry-After").map(String::as_str),
+            Some("1")
+        );
+        let body: serde_json::Value = serde_json::from_slice(&response.body).unwrap();
+        assert_eq!(body["error"], "listener unavailable");
+        assert!(rx.try_recv().is_err());
     }
 
     #[derive(Clone, Debug)]
@@ -510,7 +641,7 @@ mod tests {
             buffer_capacity: 1,
             ..Default::default()
         };
-        let (state, _rx) = IngestionState::new(config);
+        let (state, _rx, journal) = state_with_refusal_journal(config, None);
         state
             .ready
             .store(true, std::sync::atomic::Ordering::Release);
@@ -533,6 +664,10 @@ mod tests {
         assert_eq!(
             resp.headers.get("Retry-After").map(String::as_str),
             Some("1")
+        );
+        assert_eq!(
+            refusal_facts(&journal).await,
+            vec![(IngressRefusalReason::BufferFull, 2)]
         );
     }
 
@@ -715,6 +850,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn batch_validation_refusal_append_failure_returns_listener_unavailable() {
+        use obzenflow_core::event::schema::TypedPayload;
+        use serde::{Deserialize, Serialize};
+
+        #[derive(Debug, Clone, Serialize, Deserialize)]
+        struct TestPayload {
+            required: String,
+        }
+
+        impl TypedPayload for TestPayload {
+            const EVENT_TYPE: &'static str = "test.event";
+        }
+
+        let config = IngestionConfig {
+            validation: Some(ValidationConfig::Single {
+                validator: Arc::new(TypedValidator::<TestPayload>::new()),
+            }),
+            ..Default::default()
+        };
+        let (state, mut rx) = state_with_failing_refusal_journal(config, None);
+        state.ready.store(true, Ordering::Release);
+        let endpoint = BatchEventEndpoint::new(state);
+
+        let response = unwrap_unary(
+            endpoint
+                .handle(json_request(
+                    endpoint.path(),
+                    json!({
+                        "events": [
+                            {"event_type":"test.event","data":{"required":"ok"}},
+                            {"event_type":"test.event","data":{}}
+                        ]
+                    }),
+                ))
+                .await
+                .unwrap(),
+        );
+
+        assert_eq!(
+            response.status, 503,
+            "missing validation-refusal evidence must not be hidden behind a partial 200"
+        );
+        let body: serde_json::Value = serde_json::from_slice(&response.body).unwrap();
+        assert_eq!(body["error"], "listener unavailable");
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
     async fn registry_rejects_unknown_event_type_when_configured() {
         use obzenflow_core::event::schema::TypedPayload;
         use serde::{Deserialize, Serialize};
@@ -742,7 +925,7 @@ mod tests {
             ..Default::default()
         };
 
-        let (state, _rx) = IngestionState::new(config);
+        let (state, _rx, journal) = state_with_refusal_journal(config, None);
         state
             .ready
             .store(true, std::sync::atomic::Ordering::Release);
@@ -755,6 +938,10 @@ mod tests {
                 .unwrap(),
         );
         assert_eq!(resp.status, 400);
+        assert_eq!(
+            refusal_facts(&journal).await,
+            vec![(IngressRefusalReason::Validation, 1)]
+        );
     }
 
     #[tokio::test]

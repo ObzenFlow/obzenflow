@@ -78,14 +78,18 @@ impl HttpEndpoint for SingleEventEndpoint {
 
         // Not-ready is a hosted-edge shed: journal it as a refusal fact.
         if !self.state.is_ready() {
-            self.state
-                .record_refusal(
+            if let Some(response) = self
+                .state
+                .record_refusal_or_unavailable(
                     IngressRefusalReason::NotReady,
                     &attempt,
                     503,
                     Some(Duration::from_secs(1)),
                 )
-                .await;
+                .await?
+            {
+                return Ok(response);
+            }
             let response = Response::new(503)
                 .with_header("Retry-After".to_string(), "1".to_string())
                 .with_json(&json!({"error": "not ready"}))
@@ -114,9 +118,18 @@ impl HttpEndpoint for SingleEventEndpoint {
         // bucketed HTTP-surface 4xx metric.
         if let Some(ref validation) = self.state.config.validation {
             if let Err(e) = validate_submission(&submission, validation) {
-                self.state
-                    .record_refusal(IngressRefusalReason::Validation, &attempt, 400, None)
-                    .await;
+                if let Some(response) = self
+                    .state
+                    .record_refusal_or_unavailable(
+                        IngressRefusalReason::Validation,
+                        &attempt,
+                        400,
+                        None,
+                    )
+                    .await?
+                {
+                    return Ok(response);
+                }
                 let response = Response::new(400)
                     .with_json(&json!({"error": e.to_message()}))
                     .map_err(|err| WebError::RequestHandlingFailed {
@@ -141,14 +154,18 @@ impl HttpEndpoint for SingleEventEndpoint {
                         IngressAdmissionDecision::Reject { retry_after } => {
                             boundary.observe(&attempt, IngressAdmissionOutcome::RejectedBy);
                             drop(permit);
-                            self.state
-                                .record_refusal(
+                            if let Some(response) = self
+                                .state
+                                .record_refusal_or_unavailable(
                                     IngressRefusalReason::RateLimited,
                                     &attempt,
                                     429,
                                     retry_after,
                                 )
-                                .await;
+                                .await?
+                            {
+                                return Ok(response);
+                            }
                             let retry_secs = retry_after.map(|d| d.as_secs().max(1)).unwrap_or(1);
                             let response = Response::new(429)
                                 .with_header("Retry-After".to_string(), retry_secs.to_string())
@@ -166,9 +183,18 @@ impl HttpEndpoint for SingleEventEndpoint {
                             boundary.observe(&attempt, IngressAdmissionOutcome::ShedBy);
                             drop(permit);
                             if let Some(refusal) = IngressRefusalReason::from_edge_shed(reason) {
-                                self.state
-                                    .record_refusal(refusal, &attempt, 503, retry_after)
-                                    .await;
+                                if let Some(response) = self
+                                    .state
+                                    .record_refusal_or_unavailable(
+                                        refusal,
+                                        &attempt,
+                                        503,
+                                        retry_after,
+                                    )
+                                    .await?
+                                {
+                                    return Ok(response);
+                                }
                             }
                             let retry_secs = retry_after.map(|d| d.as_secs().max(1)).unwrap_or(1);
                             let response = Response::new(503)
@@ -202,14 +228,18 @@ impl HttpEndpoint for SingleEventEndpoint {
                 Ok(response.into())
             }
             Err(TrySendError::Full(_)) => {
-                self.state
-                    .record_refusal(
+                if let Some(response) = self
+                    .state
+                    .record_refusal_or_unavailable(
                         IngressRefusalReason::BufferFull,
                         &attempt,
                         503,
                         Some(Duration::from_secs(1)),
                     )
-                    .await;
+                    .await?
+                {
+                    return Ok(response);
+                }
                 let response = Response::new(503)
                     .with_header("Retry-After".to_string(), "1".to_string())
                     .with_json(&json!({"error": "buffer full"}))
@@ -220,9 +250,18 @@ impl HttpEndpoint for SingleEventEndpoint {
                 Ok(response.into())
             }
             Err(TrySendError::Closed(_)) => {
-                self.state
-                    .record_refusal(IngressRefusalReason::ChannelClosed, &attempt, 500, None)
-                    .await;
+                if let Some(response) = self
+                    .state
+                    .record_refusal_or_unavailable(
+                        IngressRefusalReason::ChannelClosed,
+                        &attempt,
+                        500,
+                        None,
+                    )
+                    .await?
+                {
+                    return Ok(response);
+                }
                 let response = Response::internal_error()
                     .with_json(&json!({"error": "ingestion channel closed"}))
                     .map_err(|e| WebError::RequestHandlingFailed {

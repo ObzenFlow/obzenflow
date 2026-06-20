@@ -277,9 +277,8 @@ impl Middleware for RateLimiterMiddleware {
 
     // FLOWIP-115d: placement is carrier-driven (the limiter materializes onto the
     // SourcePoll/Effect/SinkDelivery/Ingress surfaces), so it no longer claims a
-    // special source-ordering phase or exposes the `as_effect_policy` /
-    // `as_source_pacer` downcast hooks. `source_phase` is a required trait method,
-    // so it returns the neutral `Ordinary`.
+    // special source-ordering phase or exposes downcast hooks. `source_phase` is a
+    // required trait method, so it returns the neutral `Ordinary`.
     fn source_phase(&self) -> SourceMiddlewarePhase {
         SourceMiddlewarePhase::Ordinary
     }
@@ -762,15 +761,15 @@ impl MiddlewareFactory for RateLimiterFactory {
         config: &StageConfig,
         control_middleware: std::sync::Arc<super::ControlMiddlewareAggregator>,
     ) -> crate::middleware::MiddlewareFactoryResult<Box<dyn Middleware>> {
-        let validated = self.validated_config().map_err(|err| {
-            MiddlewareFactoryError::invalid_configuration(self.label(), &config.name, err)
-        })?;
-
-        Ok(Box::new(RateLimiterMiddleware::new(
-            config.stage_id,
-            validated,
-            control_middleware,
-        )))
+        let _ = control_middleware;
+        Err(MiddlewareFactoryError::materialization_failed(
+            self.label(),
+            &config.name,
+            std::io::Error::other(
+                "rate limiter is hook-bound and must be placed through materialize() on \
+                 SourcePoll, Effect, SinkDelivery, or Ingress (FLOWIP-115d)",
+            ),
+        ))
     }
 
     fn create_for_effect(
@@ -884,14 +883,55 @@ mod tests {
     }
 
     fn materialize_err(factory: RateLimiterFactory) -> MiddlewareFactoryError {
-        match factory.create(
-            &test_stage_config("test_stage"),
-            Arc::new(ControlMiddlewareAggregator::new()),
-        ) {
+        use crate::middleware::{
+            MiddlewareDeclarationIndex, MiddlewareOrigin, ProtectedUnit, ProtectedUnitId,
+            SourcePollSurface, SourcePollUnitId,
+        };
+
+        let config = test_stage_config("test_stage");
+        let control = Arc::new(ControlMiddlewareAggregator::new());
+        let surface = MiddlewareSurface::SourcePoll(SourcePollSurface {
+            stage_id: config.stage_id,
+        });
+        let unit = ProtectedUnitId {
+            stage_id: config.stage_id,
+            unit: ProtectedUnit::SourcePoll(SourcePollUnitId),
+        };
+        let origin = MiddlewareOrigin::Stage;
+        let request = MiddlewareAttachmentRequest {
+            surface: &surface,
+            protected_unit: &unit,
+            origin: &origin,
+            declaration_index: MiddlewareDeclarationIndex::resolved(0),
+        };
+        let ctx = MiddlewareMaterializationContext {
+            config: &config,
+            control_middleware: &control,
+            stage_type: StageType::InfiniteSource,
+        };
+
+        match factory.materialize(request, &ctx) {
             Ok(_) => {
                 panic!("invalid rate limiter configuration should fail during materialisation")
             }
             Err(err) => err,
+        }
+    }
+
+    #[test]
+    fn rate_limiter_direct_create_fails_closed() {
+        let factory = RateLimiterFactory::new(10.0);
+        let result = factory.create(
+            &test_stage_config("test_stage"),
+            Arc::new(ControlMiddlewareAggregator::new()),
+        );
+
+        match result {
+            Ok(_) => panic!("direct rate limiter create() should fail closed"),
+            Err(err) => assert!(
+                err.to_string().contains("hook-bound"),
+                "unexpected error: {err}"
+            ),
         }
     }
 

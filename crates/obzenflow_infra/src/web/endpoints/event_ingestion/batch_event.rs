@@ -85,14 +85,18 @@ impl HttpEndpoint for BatchEventEndpoint {
                 event_count: count,
                 batch_count: 1,
             };
-            self.state
-                .record_refusal(
+            if let Some(response) = self
+                .state
+                .record_refusal_or_unavailable(
                     IngressRefusalReason::NotReady,
                     &attempt,
                     503,
                     Some(Duration::from_secs(1)),
                 )
-                .await;
+                .await?
+            {
+                return Ok(response);
+            }
             let response = Response::new(503)
                 .with_header("Retry-After".to_string(), "1".to_string())
                 .with_json(&json!({"error": "not ready"}))
@@ -160,9 +164,18 @@ impl HttpEndpoint for BatchEventEndpoint {
                 event_count: rejected as u64,
                 batch_count: 1,
             };
-            self.state
-                .record_refusal(IngressRefusalReason::Validation, &attempt, 400, None)
-                .await;
+            if let Some(response) = self
+                .state
+                .record_refusal_or_unavailable(
+                    IngressRefusalReason::Validation,
+                    &attempt,
+                    400,
+                    None,
+                )
+                .await?
+            {
+                return Ok(response);
+            }
         }
 
         let accepted = accepted_events.len();
@@ -195,14 +208,18 @@ impl HttpEndpoint for BatchEventEndpoint {
             match self.state.tx.try_reserve() {
                 Ok(permit) => permits.push(permit),
                 Err(TrySendError::Full(_)) => {
-                    self.state
-                        .record_refusal(
+                    if let Some(response) = self
+                        .state
+                        .record_refusal_or_unavailable(
                             IngressRefusalReason::BufferFull,
                             &subset,
                             503,
                             Some(Duration::from_secs(1)),
                         )
-                        .await;
+                        .await?
+                    {
+                        return Ok(response);
+                    }
                     let response = Response::new(503)
                         .with_header("Retry-After".to_string(), "1".to_string())
                         .with_json(&json!({"error": "buffer full"}))
@@ -213,9 +230,18 @@ impl HttpEndpoint for BatchEventEndpoint {
                     return Ok(response.into());
                 }
                 Err(TrySendError::Closed(_)) => {
-                    self.state
-                        .record_refusal(IngressRefusalReason::ChannelClosed, &subset, 500, None)
-                        .await;
+                    if let Some(response) = self
+                        .state
+                        .record_refusal_or_unavailable(
+                            IngressRefusalReason::ChannelClosed,
+                            &subset,
+                            500,
+                            None,
+                        )
+                        .await?
+                    {
+                        return Ok(response);
+                    }
                     let response = Response::internal_error()
                         .with_json(&json!({"error": "ingestion channel closed"}))
                         .map_err(|e| WebError::RequestHandlingFailed {
@@ -241,14 +267,18 @@ impl HttpEndpoint for BatchEventEndpoint {
                 IngressAdmissionDecision::Reject { retry_after } => {
                     boundary.observe(&subset, IngressAdmissionOutcome::RejectedBy);
                     drop(permits);
-                    self.state
-                        .record_refusal(
+                    if let Some(response) = self
+                        .state
+                        .record_refusal_or_unavailable(
                             IngressRefusalReason::RateLimited,
                             &subset,
                             429,
                             retry_after,
                         )
-                        .await;
+                        .await?
+                    {
+                        return Ok(response);
+                    }
                     let mut errors = errors;
                     errors.push(format!(
                         "rate limited: {accepted} validation-accepted events not admitted"
@@ -274,9 +304,13 @@ impl HttpEndpoint for BatchEventEndpoint {
                     boundary.observe(&subset, IngressAdmissionOutcome::ShedBy);
                     drop(permits);
                     if let Some(refusal) = IngressRefusalReason::from_edge_shed(reason) {
-                        self.state
-                            .record_refusal(refusal, &subset, 503, retry_after)
-                            .await;
+                        if let Some(response) = self
+                            .state
+                            .record_refusal_or_unavailable(refusal, &subset, 503, retry_after)
+                            .await?
+                        {
+                            return Ok(response);
+                        }
                     }
                     let mut errors = errors;
                     errors.push(format!("overloaded: {accepted} events not admitted"));

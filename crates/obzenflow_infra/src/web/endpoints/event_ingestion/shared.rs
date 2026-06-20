@@ -11,7 +11,10 @@ use obzenflow_core::ingress::{
     IngressRefusalReason,
 };
 use obzenflow_core::journal::Journal;
+use obzenflow_core::web::{ManagedResponse, Response, WebError};
 use obzenflow_runtime::pipeline::PipelineState;
+use serde_json::json;
+use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -74,6 +77,27 @@ struct IngressRefusalWriter {
     journal: Arc<dyn Journal<SystemEvent>>,
     writer_id: WriterId,
 }
+
+#[derive(Debug)]
+pub(crate) struct IngressRefusalRecordError {
+    message: String,
+}
+
+impl IngressRefusalRecordError {
+    fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+}
+
+impl fmt::Display for IngressRefusalRecordError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for IngressRefusalRecordError {}
 
 /// Shared state between ingestion endpoints.
 #[derive(Clone)]
@@ -156,9 +180,11 @@ impl IngestionState {
     }
 
     /// Append one durable `IngressRefusal` fact for a refused attempt
-    /// (FLOWIP-115d). No-op when refusal recording is disabled (no writer
-    /// installed) or the binding slot was never filled. The projected refusal
-    /// metric is a fold of these facts, so this is the only refusal record kept.
+    /// (FLOWIP-115d). No-op only when refusal recording is explicitly disabled.
+    /// When recording is enabled, missing writer/slot wiring or append failure is
+    /// evidence unavailability and callers must fail closed before returning a
+    /// protocol refusal. The projected refusal metric is a fold of these facts, so
+    /// this is the only refusal record kept.
     ///
     /// `attempt.event_count` is the number of events this fact refuses (the whole
     /// rate-limited or shed subset, or the validation-rejected count), which is
@@ -169,12 +195,22 @@ impl IngestionState {
         attempt: &IngressAttemptContext,
         http_status: u16,
         retry_after: Option<Duration>,
-    ) {
+    ) -> Result<(), IngressRefusalRecordError> {
+        if !self.config.record_ingress_refusals {
+            return Ok(());
+        }
+
         let Some(writer) = self.refusal_writer.get() else {
-            return;
+            return Err(IngressRefusalRecordError::new(format!(
+                "ingress refusal recording is enabled for '{}' but no system-journal writer is installed",
+                self.config.base_path
+            )));
         };
         let Some(filled) = self.ingress_slot.filled() else {
-            return;
+            return Err(IngressRefusalRecordError::new(format!(
+                "ingress refusal recording is enabled for '{}' but the hosted ingress slot is not filled",
+                self.config.base_path
+            )));
         };
         let event = SystemEvent::new(
             writer.writer_id,
@@ -193,8 +229,47 @@ impl IngestionState {
                 retry_after_ms_bucket: retry_after.map(|d| d.as_secs().max(1).saturating_mul(1000)),
             },
         );
-        if let Err(e) = writer.journal.append(event, None).await {
-            tracing::warn!(error = %e, "failed to append ingress refusal fact; continuing");
+        writer
+            .journal
+            .append(event, None)
+            .await
+            .map(|_| ())
+            .map_err(|e| {
+                IngressRefusalRecordError::new(format!(
+                    "failed to append ingress refusal fact for '{}': {e}",
+                    self.config.base_path
+                ))
+            })
+    }
+
+    /// Record refusal evidence or return the fail-closed listener-unavailable
+    /// response required by FLOWIP-115d when evidence cannot be written.
+    pub(crate) async fn record_refusal_or_unavailable(
+        &self,
+        reason: IngressRefusalReason,
+        attempt: &IngressAttemptContext,
+        http_status: u16,
+        retry_after: Option<Duration>,
+    ) -> Result<Option<ManagedResponse>, WebError> {
+        match self
+            .record_refusal(reason, attempt, http_status, retry_after)
+            .await
+        {
+            Ok(()) => Ok(None),
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "failed to append ingress refusal fact; returning listener unavailable"
+                );
+                let response = Response::new(503)
+                    .with_header("Retry-After".to_string(), "1".to_string())
+                    .with_json(&json!({"error": "listener unavailable"}))
+                    .map_err(|err| WebError::RequestHandlingFailed {
+                        message: err.to_string(),
+                        source: None,
+                    })?;
+                Ok(Some(response.into()))
+            }
         }
     }
 
