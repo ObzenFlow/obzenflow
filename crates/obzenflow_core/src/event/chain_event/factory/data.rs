@@ -129,6 +129,7 @@ mod tests {
                 accepted_at_ns: 42,
                 base_path: "/api/orders".to_string(),
                 batch_index: Some(3),
+                attempt_seq: crate::ingress::IngressAttemptSeq(0),
             });
 
         let child =

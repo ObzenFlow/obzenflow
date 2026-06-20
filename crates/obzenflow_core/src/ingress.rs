@@ -56,6 +56,55 @@ pub enum EdgeShedReason {
     EvidenceUnavailable,
 }
 
+/// The reason an ingress submission attempt was refused, recorded on the durable
+/// `IngressRefusal` system-journal fact (FLOWIP-115d). Telemetry projects the
+/// per-`(base_path, reason)` refusal count from these facts, so the labels are
+/// stable and the metric is replay-faithful (`state = fold(facts)`).
+///
+/// `RateLimited` is the limiter's token-bucket decision (429). `NotReady`,
+/// `BufferFull`, `ChannelClosed`, and `ListenerOverloaded` are hosted-edge shed
+/// outcomes (503). `Validation` is a per-event input-validation rejection; it is
+/// journalled (unlike the other protocol 4xx rejects, which the bucketed
+/// HTTP-surface metrics already cover) because a partially accepted batch returns
+/// `200`, so its per-event validation rejections are otherwise invisible.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IngressRefusalReason {
+    RateLimited,
+    NotReady,
+    BufferFull,
+    ChannelClosed,
+    ListenerOverloaded,
+    Validation,
+}
+
+impl IngressRefusalReason {
+    /// Stable label used as the projected metric reason key.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::RateLimited => "rate_limited",
+            Self::NotReady => "not_ready",
+            Self::BufferFull => "buffer_full",
+            Self::ChannelClosed => "channel_closed",
+            Self::ListenerOverloaded => "listener_overloaded",
+            Self::Validation => "validation",
+        }
+    }
+
+    /// Map a hosted-edge shed reason to its durable refusal reason. Returns
+    /// `None` for `EvidenceUnavailable`: a failed refusal-fact append cannot
+    /// itself be journalled, so that path sheds `503` without recording a fact.
+    pub fn from_edge_shed(reason: EdgeShedReason) -> Option<Self> {
+        match reason {
+            EdgeShedReason::NotReady => Some(Self::NotReady),
+            EdgeShedReason::BufferFull => Some(Self::BufferFull),
+            EdgeShedReason::ChannelClosed => Some(Self::ChannelClosed),
+            EdgeShedReason::ListenerOverloaded => Some(Self::ListenerOverloaded),
+            EdgeShedReason::EvidenceUnavailable => None,
+        }
+    }
+}
+
 /// Per-attempt facts handed to the ingress boundary for one external submission.
 ///
 /// The boundary instance is already bound to one protected unit (the linked

@@ -275,24 +275,17 @@ impl Middleware for RateLimiterMiddleware {
         "rate_limiter"
     }
 
+    // FLOWIP-115d: placement is carrier-driven (the limiter materializes onto the
+    // SourcePoll/Effect/SinkDelivery/Ingress surfaces), so it no longer claims a
+    // special source-ordering phase or exposes the `as_effect_policy` /
+    // `as_source_pacer` downcast hooks. `source_phase` is a required trait method,
+    // so it returns the neutral `Ordinary`.
     fn source_phase(&self) -> SourceMiddlewarePhase {
-        SourceMiddlewarePhase::RateLimiterGate
+        SourceMiddlewarePhase::Ordinary
     }
 
     fn kind(&self) -> crate::middleware::MiddlewareKind {
         crate::middleware::MiddlewareKind::Policy
-    }
-
-    fn as_effect_policy(
-        self: std::sync::Arc<Self>,
-    ) -> Option<std::sync::Arc<dyn crate::middleware::EffectPolicy>> {
-        Some(self)
-    }
-
-    fn as_source_pacer(
-        self: std::sync::Arc<Self>,
-    ) -> Option<std::sync::Arc<dyn crate::middleware::SourcePacer>> {
-        Some(self)
     }
 
     fn pre_handle(&self, event: &ChainEvent, ctx: &mut MiddlewareContext) -> MiddlewareAction {
@@ -379,33 +372,6 @@ impl crate::middleware::EffectPolicy for RateLimiterMiddleware {
     ) {
         self.maybe_emit_activity_pulse(ctx);
         self.maybe_emit_summary(ctx);
-    }
-}
-
-/// Legacy source pacing adapter retained until the FLOWIP-115g cleanup removes
-/// the old downcast surface. The production source path uses
-/// `RateLimiterSourcePolicy` below and delegates to the same `RateLimiterCore`.
-#[async_trait::async_trait]
-impl crate::middleware::SourcePacer for RateLimiterMiddleware {
-    async fn source_admit(
-        &self,
-        event: &ChainEvent,
-        ctx: &mut MiddlewareContext,
-    ) -> MiddlewareAction {
-        // Mirror the `pre_handle` preamble. The replay guard is defence-in-depth:
-        // sources always run under `LiveHandler` scope (the replay driver bypasses
-        // the source surface entirely), so this is never deterministic replay, but
-        // keeping it matches the sync path exactly.
-        if ctx.execution_scope().is_deterministic_replay() {
-            return MiddlewareAction::Continue;
-        }
-
-        if event.is_control() || event.is_lifecycle() {
-            return MiddlewareAction::Continue;
-        }
-
-        self.acquire_permit_async(ctx).await;
-        MiddlewareAction::Continue
     }
 }
 
@@ -671,7 +637,11 @@ impl MiddlewareFactory for RateLimiterFactory {
     }
 
     fn control_role(&self) -> ControlMiddlewareRole {
-        ControlMiddlewareRole::RateLimiter
+        // FLOWIP-115d (AC45): placement is carrier-driven; the hook-bound rate
+        // limiter no longer routes through the legacy role. Topology and
+        // instrumentation metadata use the role-independent `topology_config_slot`
+        // signal instead.
+        ControlMiddlewareRole::None
     }
 
     fn kind(&self) -> crate::middleware::MiddlewareKind {
@@ -1558,5 +1528,86 @@ mod tests {
         let stats = limiter.core.stats_for_test().lock().unwrap();
         assert_eq!(stats.delayed_total, 1);
         assert!(stats.delay_seconds_total > 0.0);
+    }
+
+    /// FLOWIP-115d: the rate limiter materialized onto the `Ingress` surface
+    /// admits while the bucket has tokens and then fails fast with a
+    /// `RateLimited` reject once the bucket is exhausted, never waiting.
+    #[test]
+    fn rate_limiter_ingress_admits_then_rejects_fail_fast() {
+        use crate::middleware::{
+            HostedIngressSurfaceKey, HostedIngressTargetKey, IngressRouteScope, IngressStageKey,
+            IngressSurface, IngressUnitId, MiddlewareAttachmentRequest, MiddlewareDeclarationIndex,
+            MiddlewareMaterializationContext, MiddlewareOrigin, ProtectedUnit, ProtectedUnitId,
+            SourceStageIngressOwner,
+        };
+        use obzenflow_core::ingress::{
+            IngressAdmissionDecision, IngressAttemptContext, IngressAttemptSeq,
+        };
+
+        let control = Arc::new(ControlMiddlewareAggregator::new());
+        let config = test_stage_config("accounts");
+        let stage_key = IngressStageKey("accounts".to_string());
+        let target = HostedIngressTargetKey {
+            surface: HostedIngressSurfaceKey("/api/bank/accounts".to_string()),
+            scope: IngressRouteScope::Admission,
+        };
+        let surface = MiddlewareSurface::Ingress(IngressSurface {
+            owner: SourceStageIngressOwner {
+                stage_id: config.stage_id,
+                stage_key: stage_key.clone(),
+            },
+            target: target.clone(),
+        });
+        let unit = ProtectedUnitId {
+            stage_id: config.stage_id,
+            unit: ProtectedUnit::Ingress(IngressUnitId {
+                source_stage_key: stage_key,
+                target,
+            }),
+        };
+        let origin = MiddlewareOrigin::Stage;
+        let request = MiddlewareAttachmentRequest {
+            surface: &surface,
+            protected_unit: &unit,
+            origin: &origin,
+            declaration_index: MiddlewareDeclarationIndex::resolved(0),
+        };
+        let ctx = MiddlewareMaterializationContext {
+            config: &config,
+            control_middleware: &control,
+            stage_type: StageType::InfiniteSource,
+        };
+
+        // Burst capacity 1 (events_per_second defaults the burst), 1 event/sec.
+        let factory = RateLimiterFactory::new(1.0);
+        let boundary = match factory
+            .materialize(request, &ctx)
+            .expect("ingress materialize")
+        {
+            MiddlewareSurfaceAttachment::Ingress(boundary) => boundary,
+            _ => panic!("expected an Ingress attachment"),
+        };
+
+        let attempt = IngressAttemptContext {
+            attempt_seq: IngressAttemptSeq(0),
+            request_count: 1,
+            event_count: 1,
+            batch_count: 0,
+        };
+        assert!(
+            matches!(
+                boundary.on_ingress(&attempt),
+                IngressAdmissionDecision::Accept
+            ),
+            "the burst token admits the first attempt"
+        );
+        assert!(
+            matches!(
+                boundary.on_ingress(&attempt),
+                IngressAdmissionDecision::Reject { .. }
+            ),
+            "an exhausted bucket fails fast with a rate-limited reject, never waiting"
+        );
     }
 }

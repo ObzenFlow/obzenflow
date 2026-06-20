@@ -107,6 +107,7 @@ impl HttpSource {
                 accepted_at_ns: handoff.accepted_at_ns,
                 base_path: handoff.base_path,
                 batch_index: handoff.batch_index,
+                attempt_seq: handoff.attempt_seq,
             });
         }
         event
@@ -256,6 +257,7 @@ mod tests {
                 accepted_at_ns: 42,
                 base_path: "/api/orders".to_string(),
                 batch_index: Some(0),
+                attempt_seq: obzenflow_core::ingress::IngressAttemptSeq(7),
             }),
         })
         .await
@@ -271,6 +273,7 @@ mod tests {
                 accepted_at_ns: 42,
                 base_path: "/api/orders".to_string(),
                 batch_index: Some(0),
+                attempt_seq: obzenflow_core::ingress::IngressAttemptSeq(7),
             })
         );
     }

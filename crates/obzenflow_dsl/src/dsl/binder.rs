@@ -14,13 +14,16 @@ use crate::middleware_resolution::MiddlewareSource;
 use obzenflow_adapters::middleware::control::ControlMiddlewareAggregator;
 use obzenflow_adapters::middleware::{
     effect_policy_from_middleware, validate_attachment_request, EffectPolicy, EffectSurface,
-    EffectTypeKey, EffectUnitId, Middleware, MiddlewareAttachmentRequest,
-    MiddlewareDeclarationIndex, MiddlewareFactory, MiddlewareMaterializationContext,
-    MiddlewareOrigin, MiddlewareSurface, MiddlewareSurfaceAttachment, MiddlewareSurfaceKind,
-    ProtectedUnit, ProtectedUnitId, SinkDeliverySurface, SinkDeliveryTarget, SinkDeliveryUnitId,
-    SinkPolicy, SourcePolicy, SourcePollSurface, SourcePollUnitId,
+    EffectTypeKey, EffectUnitId, HostedIngressSurfaceKey, HostedIngressTargetKey,
+    IngressRouteScope, IngressStageKey, IngressSurface, IngressUnitId, Middleware,
+    MiddlewareAttachmentRequest, MiddlewareDeclarationIndex, MiddlewareFactory,
+    MiddlewareMaterializationContext, MiddlewareOrigin, MiddlewareSurface,
+    MiddlewareSurfaceAttachment, MiddlewareSurfaceKind, ProtectedUnit, ProtectedUnitId,
+    SinkDeliverySurface, SinkDeliveryTarget, SinkDeliveryUnitId, SinkPolicy, SourcePolicy,
+    SourcePollSurface, SourcePollUnitId, SourceStageIngressOwner,
 };
 use obzenflow_core::event::context::StageType;
+use obzenflow_core::ingress::IngressBoundaryMiddleware;
 use obzenflow_runtime::pipeline::config::StageConfig;
 use obzenflow_runtime::stages::source::strategies::CompletionGate;
 use std::sync::Arc;
@@ -196,6 +199,65 @@ pub(crate) fn materialize_sink_delivery(
         MiddlewareSurfaceAttachment::SinkDelivery(policy) => Ok(policy),
         _ => Err(format!(
             "binder expected a SinkDelivery attachment from middleware '{}'",
+            factory.label()
+        )),
+    }
+}
+
+/// Materialize one hook-bound control middleware onto the source-backed hosted
+/// ingress surface (FLOWIP-115d), returning the neutral core-owned boundary the
+/// hosted endpoints call. The ingress identity is source-stage-owned: the owner
+/// is the linked source stage (its id plus the replay-stable `StageConfig.name`
+/// key), and the hosted target is the normalised base path under the default
+/// admission route scope shared by `/events` and `/batch`.
+pub(crate) fn materialize_ingress(
+    factory: &dyn MiddlewareFactory,
+    config: &StageConfig,
+    stage_type: StageType,
+    control_middleware: &Arc<ControlMiddlewareAggregator>,
+    base_path: &str,
+    origin: &MiddlewareOrigin,
+    declaration_index: MiddlewareDeclarationIndex,
+) -> Result<Arc<dyn IngressBoundaryMiddleware>, String> {
+    let stage_key = IngressStageKey(config.name.clone());
+    let target = HostedIngressTargetKey {
+        surface: HostedIngressSurfaceKey(base_path.to_string()),
+        scope: IngressRouteScope::Admission,
+    };
+    let surface = MiddlewareSurface::Ingress(IngressSurface {
+        owner: SourceStageIngressOwner {
+            stage_id: config.stage_id,
+            stage_key: stage_key.clone(),
+        },
+        target: target.clone(),
+    });
+    let protected_unit = ProtectedUnitId {
+        stage_id: config.stage_id,
+        unit: ProtectedUnit::Ingress(IngressUnitId {
+            source_stage_key: stage_key,
+            target,
+        }),
+    };
+    let request = MiddlewareAttachmentRequest {
+        surface: &surface,
+        protected_unit: &protected_unit,
+        origin,
+        declaration_index,
+    };
+    let declaration = factory.declaration();
+    validate_attachment_request(&declaration, &request).map_err(|e| e.to_string())?;
+    let ctx = MiddlewareMaterializationContext {
+        config,
+        control_middleware,
+        stage_type,
+    };
+    match factory
+        .materialize(request, &ctx)
+        .map_err(|e| e.to_string())?
+    {
+        MiddlewareSurfaceAttachment::Ingress(boundary) => Ok(boundary),
+        _ => Err(format!(
+            "binder expected an Ingress attachment from middleware '{}'",
             factory.label()
         )),
     }

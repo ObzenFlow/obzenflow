@@ -174,6 +174,12 @@ pub struct AppMetricsSnapshot {
     /// Low-cardinality labels: (surface_name, method, path, status_class).
     pub http_surface_metrics: Vec<HttpSurfaceRouteMetricsSnapshot>,
 
+    /// Hosted-ingress refusal totals projected from `IngressRefusal` facts
+    /// (FLOWIP-115d), keyed by `(base_path, reason)`. This replaces the former
+    /// in-memory ingestion reject counters, so the metric folds journal facts and
+    /// is replay-faithful.
+    pub ingestion_refusal_totals: HashMap<(String, String), u64>,
+
     /// HTTP pull telemetry metrics derived from wide events (FLOWIP-084e).
     ///
     /// Keyed by stage ID (labels attach via `stage_metadata`).
@@ -535,6 +541,7 @@ impl Default for AppMetricsSnapshot {
             edge_liveness_state: HashMap::new(),
             contract_metrics: ContractMetricsSnapshot::default(),
             http_surface_metrics: Vec::new(),
+            ingestion_refusal_totals: HashMap::new(),
             http_pull_metrics: HashMap::new(),
             ai_chunking_metrics: HashMap::new(),
             flow_metrics: None,

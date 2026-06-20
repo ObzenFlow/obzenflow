@@ -7,10 +7,14 @@ use super::IngestionState;
 use super::{authorize_request, validate_submission};
 use async_trait::async_trait;
 use obzenflow_core::event::ingestion::{
-    EventSubmission, IngestionRejectionReason, SubmissionIngressContext, SubmissionResponse,
+    EventSubmission, SubmissionIngressContext, SubmissionResponse,
+};
+use obzenflow_core::ingress::{
+    IngressAdmissionDecision, IngressAdmissionOutcome, IngressAttemptContext, IngressRefusalReason,
 };
 use obzenflow_core::web::{HttpEndpoint, HttpMethod, ManagedResponse, Request, Response, WebError};
 use serde_json::json;
+use std::time::Duration;
 use tokio::sync::mpsc::error::TrySendError;
 
 pub struct SingleEventEndpoint {
@@ -36,8 +40,20 @@ impl HttpEndpoint for SingleEventEndpoint {
     }
 
     async fn handle(&self, request: Request) -> Result<ManagedResponse, WebError> {
-        self.state.telemetry.observe_request();
+        // FLOWIP-115d: one attempt sequence per submission, allocated up front so
+        // a refusal fact and the accepted row (if admitted) share it. Request and
+        // accepted totals are projected from journal facts (refusal facts here,
+        // accepted source rows downstream) and the bucketed HTTP-surface metrics,
+        // not from in-memory ingestion counters.
+        let attempt = IngressAttemptContext {
+            attempt_seq: self.state.next_attempt_seq(),
+            request_count: 1,
+            event_count: 1,
+            batch_count: 0,
+        };
 
+        // Protocol 4xx rejects (payload-too-large, auth, invalid-json) are not
+        // journalled; they always return a 4xx the HTTP-surface metrics record.
         if request.body.len() > self.state.config.max_body_size {
             let response = Response::new(413)
                 .with_json(&json!({"error": "payload too large"}))
@@ -45,9 +61,6 @@ impl HttpEndpoint for SingleEventEndpoint {
                     message: e.to_string(),
                     source: None,
                 })?;
-            self.state
-                .telemetry
-                .observe_rejected(IngestionRejectionReason::PayloadTooLarge, 1);
             return Ok(response.into());
         }
 
@@ -59,14 +72,20 @@ impl HttpEndpoint for SingleEventEndpoint {
                         message: err.to_string(),
                         source: None,
                     })?;
-                self.state
-                    .telemetry
-                    .observe_rejected(IngestionRejectionReason::Auth, 1);
                 return Ok(response.into());
             }
         }
 
+        // Not-ready is a hosted-edge shed: journal it as a refusal fact.
         if !self.state.is_ready() {
+            self.state
+                .record_refusal(
+                    IngressRefusalReason::NotReady,
+                    &attempt,
+                    503,
+                    Some(Duration::from_secs(1)),
+                )
+                .await;
             let response = Response::new(503)
                 .with_header("Retry-After".to_string(), "1".to_string())
                 .with_json(&json!({"error": "not ready"}))
@@ -74,9 +93,6 @@ impl HttpEndpoint for SingleEventEndpoint {
                     message: e.to_string(),
                     source: None,
                 })?;
-            self.state
-                .telemetry
-                .observe_rejected(IngestionRejectionReason::NotReady, 1);
             return Ok(response.into());
         }
 
@@ -89,34 +105,88 @@ impl HttpEndpoint for SingleEventEndpoint {
                         message: err.to_string(),
                         source: None,
                     })?;
-                self.state
-                    .telemetry
-                    .observe_rejected(IngestionRejectionReason::InvalidJson, 1);
                 return Ok(response.into());
             }
         };
 
+        // Validation rejection is journalled per event: a partially accepted batch
+        // returns 200, so validation refusals are otherwise invisible to the
+        // bucketed HTTP-surface 4xx metric.
         if let Some(ref validation) = self.state.config.validation {
             if let Err(e) = validate_submission(&submission, validation) {
+                self.state
+                    .record_refusal(IngressRefusalReason::Validation, &attempt, 400, None)
+                    .await;
                 let response = Response::new(400)
                     .with_json(&json!({"error": e.to_message()}))
                     .map_err(|err| WebError::RequestHandlingFailed {
                         message: err.to_string(),
                         source: None,
                     })?;
-                self.state
-                    .telemetry
-                    .observe_rejected(IngestionRejectionReason::Validation, 1);
                 return Ok(response.into());
             }
         }
 
         match self.state.tx.try_reserve() {
             Ok(permit) => {
+                // FLOWIP-115d: the edge reserved capacity (so buffer-full/503
+                // already had precedence); now run fail-fast ingress admission.
+                // Token exhaustion is RateLimited/429; the limiter never waits
+                // while holding the listener request.
+                if let Some(boundary) = self.state.ingress_boundary() {
+                    match boundary.on_ingress(&attempt) {
+                        IngressAdmissionDecision::Accept => {
+                            boundary.observe(&attempt, IngressAdmissionOutcome::AcceptedForEnqueue);
+                        }
+                        IngressAdmissionDecision::Reject { retry_after } => {
+                            boundary.observe(&attempt, IngressAdmissionOutcome::RejectedBy);
+                            drop(permit);
+                            self.state
+                                .record_refusal(
+                                    IngressRefusalReason::RateLimited,
+                                    &attempt,
+                                    429,
+                                    retry_after,
+                                )
+                                .await;
+                            let retry_secs = retry_after.map(|d| d.as_secs().max(1)).unwrap_or(1);
+                            let response = Response::new(429)
+                                .with_header("Retry-After".to_string(), retry_secs.to_string())
+                                .with_json(&json!({"error": "rate limited"}))
+                                .map_err(|e| WebError::RequestHandlingFailed {
+                                    message: e.to_string(),
+                                    source: None,
+                                })?;
+                            return Ok(response.into());
+                        }
+                        IngressAdmissionDecision::Shed {
+                            reason,
+                            retry_after,
+                        } => {
+                            boundary.observe(&attempt, IngressAdmissionOutcome::ShedBy);
+                            drop(permit);
+                            if let Some(refusal) = IngressRefusalReason::from_edge_shed(reason) {
+                                self.state
+                                    .record_refusal(refusal, &attempt, 503, retry_after)
+                                    .await;
+                            }
+                            let retry_secs = retry_after.map(|d| d.as_secs().max(1)).unwrap_or(1);
+                            let response = Response::new(503)
+                                .with_header("Retry-After".to_string(), retry_secs.to_string())
+                                .with_json(&json!({"error": "overloaded"}))
+                                .map_err(|e| WebError::RequestHandlingFailed {
+                                    message: e.to_string(),
+                                    source: None,
+                                })?;
+                            return Ok(response.into());
+                        }
+                    }
+                }
                 submission.ingress_handoff = Some(SubmissionIngressContext {
                     accepted_at_ns: unix_now_nanos(),
                     base_path: self.state.config.base_path.clone(),
                     batch_index: None,
+                    attempt_seq: attempt.attempt_seq,
                 });
                 permit.send(submission);
                 let response = Response::ok()
@@ -129,10 +199,17 @@ impl HttpEndpoint for SingleEventEndpoint {
                         message: e.to_string(),
                         source: None,
                     })?;
-                self.state.telemetry.observe_accepted(1);
                 Ok(response.into())
             }
             Err(TrySendError::Full(_)) => {
+                self.state
+                    .record_refusal(
+                        IngressRefusalReason::BufferFull,
+                        &attempt,
+                        503,
+                        Some(Duration::from_secs(1)),
+                    )
+                    .await;
                 let response = Response::new(503)
                     .with_header("Retry-After".to_string(), "1".to_string())
                     .with_json(&json!({"error": "buffer full"}))
@@ -140,21 +217,18 @@ impl HttpEndpoint for SingleEventEndpoint {
                         message: e.to_string(),
                         source: None,
                     })?;
-                self.state
-                    .telemetry
-                    .observe_rejected(IngestionRejectionReason::BufferFull, 1);
                 Ok(response.into())
             }
             Err(TrySendError::Closed(_)) => {
+                self.state
+                    .record_refusal(IngressRefusalReason::ChannelClosed, &attempt, 500, None)
+                    .await;
                 let response = Response::internal_error()
                     .with_json(&json!({"error": "ingestion channel closed"}))
                     .map_err(|e| WebError::RequestHandlingFailed {
                         message: e.to_string(),
                         source: None,
                     })?;
-                self.state
-                    .telemetry
-                    .observe_rejected(IngestionRejectionReason::ChannelClosed, 1);
                 Ok(response.into())
             }
         }

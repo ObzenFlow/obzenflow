@@ -25,12 +25,15 @@ pub use validation::{
 use obzenflow_adapters::sources::http::{HttpSource, HttpSourceTyped};
 use obzenflow_core::event::ingestion::EventSubmission;
 use obzenflow_core::event::ingestion::IngestionTelemetry;
+use obzenflow_core::ingress::HostedIngressBindingSlot;
 use obzenflow_core::web::HttpEndpoint;
 use obzenflow_core::TypedPayload;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
-use crate::application::{WebSurfaceAttachment, WebSurfaceWiring, WebSurfaceWiringContext};
+use crate::application::{
+    ApplicationError, WebSurfaceAttachment, WebSurfaceWiring, WebSurfaceWiringContext,
+};
 
 use batch_event::BatchEventEndpoint;
 use health::IngestionHealthEndpoint;
@@ -81,8 +84,10 @@ where
         });
     }
 
-    let (surface, rx, telemetry) = create_ingestion_surface(config);
-    let source = HttpSource::new(rx).typed::<T>();
+    let (surface, rx, telemetry, ingress_slot) = create_ingestion_surface(config);
+    let source = HttpSource::new(rx)
+        .with_ingress_slot(ingress_slot)
+        .typed::<T>();
 
     HttpIngress {
         surface,
@@ -122,9 +127,11 @@ pub(crate) fn create_ingestion_surface(
     WebSurfaceAttachment,
     mpsc::Receiver<EventSubmission>,
     Arc<IngestionTelemetry>,
+    HostedIngressBindingSlot,
 ) {
     let (state, rx) = IngestionState::new(config);
     let telemetry = state.telemetry();
+    let ingress_slot = state.ingress_slot();
     let base_path = state.config.base_path.clone();
 
     let state_for_wiring = state.clone();
@@ -135,12 +142,30 @@ pub(crate) fn create_ingestion_surface(
     ];
 
     let surface = WebSurfaceAttachment::new(format!("ingestion:{base_path}"), endpoints)
+        .with_ingress_slot(ingress_slot.clone())
         .with_wiring(move |ctx: WebSurfaceWiringContext| {
+            // FLOWIP-115d: install the refusal-fact writer from the host system
+            // journal. Recording is on by default; a surface that wants it but
+            // has no system journal fails startup rather than silently dropping
+            // replayable refusal evidence.
+            if state_for_wiring.refusal_recording_enabled() {
+                match ctx.system_journal {
+                    Some(journal) => state_for_wiring.install_refusal_writer(journal),
+                    None => {
+                        return Err(ApplicationError::FlowBuildFailed(format!(
+                            "hosted ingress surface '{}' has refusal recording enabled but no \
+                             system journal is available; disable record_ingress_refusals or run \
+                             with a system journal",
+                            state_for_wiring.config.base_path
+                        )));
+                    }
+                }
+            }
             let task = state_for_wiring.watch_pipeline_state(ctx.pipeline_state);
             Ok(WebSurfaceWiring::new(vec![task]))
         });
 
-    (surface, rx, telemetry)
+    (surface, rx, telemetry, ingress_slot)
 }
 
 #[cfg(test)]
@@ -149,7 +174,17 @@ mod tests {
     use async_trait::async_trait;
     use obzenflow_core::event::chain_event::ChainEvent;
     use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
+    use obzenflow_core::event::{SystemEvent, SystemEventType};
+    use obzenflow_core::id::SystemId;
+    use obzenflow_core::ingress::{
+        FilledHostedIngress, IngressBoundaryMiddleware, IngressRefusalReason,
+    };
+    use obzenflow_core::journal::journal_owner::JournalOwner;
+    use obzenflow_core::journal::Journal;
     use obzenflow_core::web::{HttpMethod, ManagedResponse, Request, Response};
+    use obzenflow_core::StageId;
+
+    use crate::journal::MemoryJournal;
     use obzenflow_dsl::{async_infinite_source, flow, sink};
     use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
     use obzenflow_runtime::stages::common::handler_error::HandlerError;
@@ -185,6 +220,106 @@ mod tests {
             "event_type": event_type,
             "data": { "value": 1 }
         })
+    }
+
+    /// FLOWIP-115d: a hosted-ingress boundary that always rejects (as a rate
+    /// limiter whose bucket is exhausted would), for endpoint-admission tests.
+    struct AlwaysRejectIngress;
+
+    impl obzenflow_core::ingress::IngressBoundaryMiddleware for AlwaysRejectIngress {
+        fn label(&self) -> &'static str {
+            "always_reject"
+        }
+
+        fn on_ingress(
+            &self,
+            _attempt: &obzenflow_core::ingress::IngressAttemptContext,
+        ) -> obzenflow_core::ingress::IngressAdmissionDecision {
+            obzenflow_core::ingress::IngressAdmissionDecision::Reject {
+                retry_after: Some(Duration::from_secs(2)),
+            }
+        }
+
+        fn observe(
+            &self,
+            _attempt: &obzenflow_core::ingress::IngressAttemptContext,
+            _outcome: obzenflow_core::ingress::IngressAdmissionOutcome,
+        ) {
+        }
+    }
+
+    /// FLOWIP-115d: the single-event endpoint runs ingress admission after
+    /// reserving capacity, and maps a rate-limited rejection to `429` plus
+    /// `Retry-After`, recording it as a rate-limited refusal.
+    /// FLOWIP-115d: build an ingestion state with an in-memory refusal-fact
+    /// journal installed and the binding slot filled, so endpoint refusals append
+    /// `IngressRefusal` facts the test can read back. `boundary` is the ingress
+    /// admission boundary (None skips boundary admission).
+    fn state_with_refusal_journal(
+        config: IngestionConfig,
+        boundary: Option<Arc<dyn IngressBoundaryMiddleware>>,
+    ) -> (
+        IngestionState,
+        mpsc::Receiver<EventSubmission>,
+        Arc<MemoryJournal<SystemEvent>>,
+    ) {
+        let (state, rx) = IngestionState::new(config);
+        state
+            .ingress_slot()
+            .fill(FilledHostedIngress {
+                stage_id: StageId::new(),
+                stage_key: "test".to_string(),
+                boundary,
+            })
+            .expect("slot fill succeeds once");
+        let journal = Arc::new(MemoryJournal::with_owner(JournalOwner::system(
+            SystemId::new(),
+        )));
+        state.install_refusal_writer(journal.clone());
+        (state, rx, journal)
+    }
+
+    /// Read the `(reason, event_count)` of every `IngressRefusal` fact, in order.
+    async fn refusal_facts(
+        journal: &MemoryJournal<SystemEvent>,
+    ) -> Vec<(IngressRefusalReason, u64)> {
+        journal
+            .read_causally_ordered()
+            .await
+            .expect("read system journal")
+            .into_iter()
+            .filter_map(|env| match env.event.event {
+                SystemEventType::IngressRefusal {
+                    reason,
+                    event_count,
+                    ..
+                } => Some((reason, event_count)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn single_event_ingress_admission_maps_reject_to_429() {
+        let config = IngestionConfig {
+            base_path: "/api/test".to_string(),
+            ..IngestionConfig::default()
+        };
+        let (state, _rx, journal) =
+            state_with_refusal_journal(config, Some(Arc::new(AlwaysRejectIngress)));
+        state.ready.store(true, Ordering::Release);
+
+        let endpoint = SingleEventEndpoint::new(state.clone());
+        let request = json_request("/api/test/events", event_body("order.created"));
+        let response = unwrap_unary(endpoint.handle(request).await.unwrap());
+
+        assert_eq!(response.status, 429, "ingress rejection maps to 429");
+        // The refusal is a durable fact, not an in-memory counter.
+        assert_eq!(
+            refusal_facts(&journal).await,
+            vec![(IngressRefusalReason::RateLimited, 1)],
+            "a rate-limited rejection appends one RateLimited refusal fact"
+        );
     }
 
     #[derive(Clone, Debug)]
@@ -258,8 +393,7 @@ mod tests {
 
     #[tokio::test]
     async fn single_event_rejects_when_not_ready() {
-        let (state, mut rx) = IngestionState::new(IngestionConfig::default());
-        let telemetry = state.telemetry();
+        let (state, mut rx, journal) = state_with_refusal_journal(IngestionConfig::default(), None);
         let endpoint = SingleEventEndpoint::new(state.clone());
 
         let resp = unwrap_unary(
@@ -275,17 +409,15 @@ mod tests {
             Some("1")
         );
         assert!(rx.try_recv().is_err());
-
-        let snapshot = telemetry.snapshot();
-        assert_eq!(snapshot.requests_total, 1);
-        assert_eq!(snapshot.events_accepted_total, 0);
-        assert_eq!(snapshot.events_rejected_not_ready_total, 1);
+        assert_eq!(
+            refusal_facts(&journal).await,
+            vec![(IngressRefusalReason::NotReady, 1)]
+        );
     }
 
     #[tokio::test]
     async fn single_event_accepts_when_ready_and_enqueues() {
         let (state, mut rx) = IngestionState::new(IngestionConfig::default());
-        let telemetry = state.telemetry();
         state
             .ready
             .store(true, std::sync::atomic::Ordering::Release);
@@ -302,10 +434,9 @@ mod tests {
         let queued = rx.recv().await.expect("queued event");
         assert_eq!(queued.event_type, "order.created");
         assert_eq!(queued.data, json!({ "value": 1 }));
-
-        let snapshot = telemetry.snapshot();
-        assert_eq!(snapshot.requests_total, 1);
-        assert_eq!(snapshot.events_accepted_total, 1);
+        // FLOWIP-115d: the accepted submission carries its attempt sequence, the
+        // cross-journal merge key with refusal facts.
+        assert!(queued.ingress_handoff.is_some());
     }
 
     #[tokio::test]
@@ -314,16 +445,16 @@ mod tests {
             buffer_capacity: 1,
             ..Default::default()
         };
-        let (state, _rx) = IngestionState::new(config);
-        let telemetry = state.telemetry();
+        let (state, _rx, journal) = state_with_refusal_journal(config, None);
         state
             .ready
             .store(true, std::sync::atomic::Ordering::Release);
         let endpoint = SingleEventEndpoint::new(state.clone());
 
+        // Fill the single channel slot so the endpoint's reserve fails.
         state
             .tx
-            .try_send(obzenflow_core::event::ingestion::EventSubmission {
+            .try_send(EventSubmission {
                 event_type: "filled".to_string(),
                 data: json!({"value": 1}),
                 metadata: None,
@@ -343,23 +474,21 @@ mod tests {
             resp.headers.get("Retry-After").map(String::as_str),
             Some("1")
         );
-
-        let snapshot = telemetry.snapshot();
-        assert_eq!(snapshot.requests_total, 1);
-        assert_eq!(snapshot.events_accepted_total, 0);
-        assert_eq!(snapshot.events_rejected_buffer_full_total, 1);
+        assert_eq!(
+            refusal_facts(&journal).await,
+            vec![(IngressRefusalReason::BufferFull, 1)]
+        );
     }
 
     #[tokio::test]
     async fn single_event_returns_500_when_channel_closed() {
-        let (state, rx) = IngestionState::new(IngestionConfig::default());
-        let telemetry = state.telemetry();
+        let (state, rx, journal) = state_with_refusal_journal(IngestionConfig::default(), None);
         drop(rx);
 
         state
             .ready
             .store(true, std::sync::atomic::Ordering::Release);
-        let endpoint = SingleEventEndpoint::new(state);
+        let endpoint = SingleEventEndpoint::new(state.clone());
 
         let resp = unwrap_unary(
             endpoint
@@ -369,9 +498,10 @@ mod tests {
         );
 
         assert_eq!(resp.status, 500);
-        let snapshot = telemetry.snapshot();
-        assert_eq!(snapshot.requests_total, 1);
-        assert_eq!(snapshot.events_rejected_channel_closed_total, 1);
+        assert_eq!(
+            refusal_facts(&journal).await,
+            vec![(IngressRefusalReason::ChannelClosed, 1)]
+        );
     }
 
     #[tokio::test]
@@ -465,7 +595,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn batch_auth_rejection_counts_events_from_request_body() {
+    async fn batch_auth_rejection_returns_401() {
+        // FLOWIP-115d: auth is a protocol 4xx reject (Class B), not journalled; it
+        // always returns a 401 the HTTP-surface metrics record.
         let mut keys = HashSet::new();
         keys.insert("secret".to_string());
         let config = IngestionConfig {
@@ -475,8 +607,7 @@ mod tests {
             }),
             ..Default::default()
         };
-        let (state, _rx) = IngestionState::new(config);
-        let telemetry = state.telemetry();
+        let (state, _rx, journal) = state_with_refusal_journal(config, None);
         let endpoint = BatchEventEndpoint::new(state);
 
         let resp = unwrap_unary(
@@ -495,16 +626,16 @@ mod tests {
         );
 
         assert_eq!(resp.status, 401);
-        let snapshot = telemetry.snapshot();
-        assert_eq!(snapshot.requests_total, 1);
-        assert_eq!(snapshot.events_rejected_auth_total, 2);
+        assert!(
+            refusal_facts(&journal).await.is_empty(),
+            "auth rejections are not journalled refusal facts"
+        );
     }
 
     #[tokio::test]
-    async fn batch_not_ready_rejection_counts_events_from_request_body() {
-        let (state, _rx) = IngestionState::new(IngestionConfig::default());
-        let telemetry = state.telemetry();
-        let endpoint = BatchEventEndpoint::new(state);
+    async fn batch_not_ready_rejection_records_event_count() {
+        let (state, _rx, journal) = state_with_refusal_journal(IngestionConfig::default(), None);
+        let endpoint = BatchEventEndpoint::new(state.clone());
 
         let resp = unwrap_unary(
             endpoint
@@ -523,9 +654,11 @@ mod tests {
         );
 
         assert_eq!(resp.status, 503);
-        let snapshot = telemetry.snapshot();
-        assert_eq!(snapshot.requests_total, 1);
-        assert_eq!(snapshot.events_rejected_not_ready_total, 3);
+        // Not-ready sheds the whole batch; the single fact carries the event count.
+        assert_eq!(
+            refusal_facts(&journal).await,
+            vec![(IngressRefusalReason::NotReady, 3)]
+        );
     }
 
     #[tokio::test]
@@ -548,11 +681,11 @@ mod tests {
             }),
             ..Default::default()
         };
-        let (state, mut rx) = IngestionState::new(config);
+        let (state, mut rx, journal) = state_with_refusal_journal(config, None);
         state
             .ready
             .store(true, std::sync::atomic::Ordering::Release);
-        let endpoint = BatchEventEndpoint::new(state);
+        let endpoint = BatchEventEndpoint::new(state.clone());
 
         let body = json!({
             "events": [
@@ -573,6 +706,12 @@ mod tests {
         assert_eq!(response.accepted, 1);
         assert_eq!(response.rejected, 1);
         assert_eq!(rx.recv().await.unwrap().event_type, "test.event");
+        // FLOWIP-115d: per-event validation rejection is journalled even though the
+        // partial batch returns 200 (so it is invisible to the 4xx surface metric).
+        assert_eq!(
+            refusal_facts(&journal).await,
+            vec![(IngressRefusalReason::Validation, 1)]
+        );
     }
 
     #[tokio::test]
@@ -682,14 +821,23 @@ mod tests {
             const EVENT_TYPE: &'static str = "order.created";
         }
 
-        let ingress = http_ingress::<TestPayload>(IngestionConfig::default());
+        // This test wires the surface/source, not refusal recording, so it runs
+        // without a system journal; disable recording to avoid the startup check.
+        let ingress = http_ingress::<TestPayload>(IngestionConfig {
+            record_ingress_refusals: false,
+            ..IngestionConfig::default()
+        });
         let mut source = ingress.source();
         let (surface, _telemetry) = ingress.into_surface_and_telemetry();
-        let (_name, endpoints, wiring) = surface.into_parts();
+        let (_name, endpoints, wiring, _ingress_slot) = surface.into_parts();
 
         let wiring = wiring.expect("ingress surface wiring");
         let (_tx, pipeline_state) = tokio::sync::watch::channel(PipelineState::Running);
-        let wired = wiring(WebSurfaceWiringContext { pipeline_state }).unwrap();
+        let wired = wiring(WebSurfaceWiringContext {
+            pipeline_state,
+            system_journal: None,
+        })
+        .unwrap();
         tokio::task::yield_now().await;
 
         let events_endpoint = endpoints
@@ -746,11 +894,12 @@ mod tests {
 
         let ingress = http_ingress::<TestPayload>(IngestionConfig {
             base_path: "/api/journal-check".to_string(),
+            record_ingress_refusals: false,
             ..Default::default()
         });
         let source = ingress.source();
         let (surface, _telemetry) = ingress.into_surface_and_telemetry();
-        let (_name, endpoints, wiring) = surface.into_parts();
+        let (_name, endpoints, wiring, _ingress_slot) = surface.into_parts();
         let wiring = wiring.expect("ingress surface wiring");
         let events_endpoint = endpoints
             .into_iter()
@@ -785,6 +934,7 @@ mod tests {
 
         let wired = wiring(WebSurfaceWiringContext {
             pipeline_state: handle.state_receiver(),
+            system_journal: None,
         })
         .expect("wire ingress surface");
 
@@ -828,5 +978,153 @@ mod tests {
             !journal_contains_token(&journal_root, b"http_ingestion.snapshot"),
             "ingestion journals must not contain http_ingestion.snapshot after 084h cutover"
         );
+    }
+
+    /// FLOWIP-115d Phase 7: end-to-end composition proof. A rate limiter attached
+    /// to a hosted-ingress source binds to the `Ingress` surface (AC42), the
+    /// `FlowApplication` wiring installs it from the real system journal, and a
+    /// rate-limited POST appends a durable `IngressRefusal` fact that the metrics
+    /// aggregator would project. This exercises the whole vertical in a running
+    /// flow, not just the unit seams.
+    #[tokio::test]
+    async fn http_ingress_rate_limiter_writes_refusal_fact_through_running_flow() {
+        use obzenflow_adapters::middleware::rate_limit_with_burst;
+        use obzenflow_core::TypedPayload;
+        use serde::{Deserialize, Serialize};
+
+        #[derive(Debug, Clone, Serialize, Deserialize)]
+        struct OrderPayload {
+            order_id: String,
+        }
+        impl TypedPayload for OrderPayload {
+            const EVENT_TYPE: &'static str = "order.created";
+        }
+
+        let ingress = http_ingress::<OrderPayload>(IngestionConfig {
+            base_path: "/api/orders".to_string(),
+            ..Default::default()
+        });
+        let source = ingress.source();
+        let (surface, _telemetry) = ingress.into_surface_and_telemetry();
+        let (_name, endpoints, wiring, _slot) = surface.into_parts();
+        let wiring = wiring.expect("ingress surface wiring");
+        let events_endpoint = endpoints
+            .into_iter()
+            .find(|endpoint| endpoint.path().ends_with("/events"))
+            .expect("events endpoint");
+
+        let delivered = Arc::new(AtomicUsize::new(0));
+        let notify = Arc::new(Notify::new());
+        let sink = NotifyingSink {
+            delivered: delivered.clone(),
+            notify: notify.clone(),
+        };
+
+        let journal_root = unique_journal_dir("flowip_115d_ingress_refusal_fact");
+        let journal_root_for_flow = journal_root.clone();
+        let handle = flow! {
+            name: "flowip_115d_ingress_refusal_fact",
+            journals: disk_journals(journal_root_for_flow),
+            middleware: [],
+
+            stages: {
+                // Capacity 1 with a negligible refill: the first POST consumes the
+                // single burst token, the second is fail-fast rate-limited. The
+                // limiter routes to Ingress (AC42), not the internal source poll.
+                source = async_infinite_source!(OrderPayload => source, [
+                    rate_limit_with_burst(0.001, 1.0)
+                ]);
+                sink = sink!(OrderPayload => sink);
+            },
+
+            topology: {
+                source |> sink;
+            }
+        }
+        .await
+        .expect("build flow");
+
+        let system_journal = handle.system_journal().expect("flow has a system journal");
+        let wired = wiring(WebSurfaceWiringContext {
+            pipeline_state: handle.state_receiver(),
+            system_journal: Some(system_journal.clone()),
+        })
+        .expect("wire ingress surface");
+
+        handle.start().await.expect("start flow");
+        wait_for_running(&handle).await;
+        tokio::task::yield_now().await;
+
+        let order_body = |id: &str| {
+            json!({
+                "event_type": "order.created",
+                "data": { "order_id": id }
+            })
+        };
+
+        // First POST consumes the burst token and is admitted.
+        let first = unwrap_unary(
+            events_endpoint
+                .handle(json_request(events_endpoint.path(), order_body("1")))
+                .await
+                .expect("first response"),
+        );
+        assert_eq!(first.status, 200, "first POST is admitted");
+
+        // Wait for the accepted event to drain to the sink.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while delivered.load(Ordering::Acquire) == 0 {
+                notify.notified().await;
+            }
+        })
+        .await
+        .expect("timed out waiting for delivered event");
+
+        // Second POST finds the bucket empty and is rate-limited fail-fast.
+        let second = unwrap_unary(
+            events_endpoint
+                .handle(json_request(events_endpoint.path(), order_body("2")))
+                .await
+                .expect("second response"),
+        );
+        assert_eq!(second.status, 429, "second POST is rate-limited");
+
+        handle.stop_cancel().await.expect("stop flow");
+        tokio::time::timeout(Duration::from_secs(5), handle.wait_for_completion())
+            .await
+            .expect("timed out waiting for flow completion")
+            .expect("flow completion");
+        for task in wired.tasks {
+            task.abort();
+        }
+
+        // The rate-limited refusal is a durable fact on the real system journal.
+        let refusals: Vec<_> = system_journal
+            .read_causally_ordered()
+            .await
+            .expect("read system journal")
+            .into_iter()
+            .filter_map(|env| match env.event.event {
+                SystemEventType::IngressRefusal {
+                    reason,
+                    event_count,
+                    base_path,
+                    ..
+                } => Some((reason, event_count, base_path)),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(
+            refusals,
+            vec![(
+                IngressRefusalReason::RateLimited,
+                1,
+                "/api/orders".to_string()
+            )],
+            "exactly one rate-limited refusal fact for the second POST"
+        );
+        // Exactly one event was admitted, so the sink delivered exactly one.
+        assert_eq!(delivered.load(Ordering::Acquire), 1);
     }
 }

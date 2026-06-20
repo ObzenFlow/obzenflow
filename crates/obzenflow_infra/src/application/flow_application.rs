@@ -871,13 +871,36 @@ impl FlowApplication {
 
             let mut all_extra_endpoints = extra_endpoints;
             for surface in web_surfaces {
-                let (surface_name, endpoints, wiring) = surface.into_parts();
+                let (surface_name, endpoints, wiring, ingress_slot) = surface.into_parts();
+                // FLOWIP-115d (AC41): a registered hosted ingress surface whose
+                // source half was never placed in flow topology has an unfilled
+                // binding slot. Fail startup before serving endpoints rather than
+                // silently running without its configured ingress identity.
+                if let Some(slot) = ingress_slot {
+                    if !slot.is_filled() {
+                        break 'run (
+                            Err(ApplicationError::FlowBuildFailed(format!(
+                                "hosted ingress surface '{surface_name}' (base path '{}') was \
+                                 registered but its source half was not placed in the flow \
+                                 topology; place the http_ingress source in flow!",
+                                slot.base_path()
+                            ))),
+                            Some(flow_name.clone()),
+                            run_dir,
+                            false,
+                        );
+                    }
+                }
                 for endpoint in endpoints {
                     all_extra_endpoints.push(label_endpoint(&surface_name, endpoint));
                 }
                 if let Some(wiring) = wiring {
                     match wiring(WebSurfaceWiringContext {
                         pipeline_state: flow_handle.state_receiver(),
+                        // FLOWIP-115d: hand hosted ingress surfaces the host system
+                        // journal so they can append refusal facts. A surface with
+                        // refusal recording enabled fails startup here if it is None.
+                        system_journal: flow_handle.system_journal(),
                     }) {
                         Ok(wired) => managed_tasks.extend(wired.tasks),
                         Err(err) => break 'run (Err(err), Some(flow_name.clone()), run_dir, false),

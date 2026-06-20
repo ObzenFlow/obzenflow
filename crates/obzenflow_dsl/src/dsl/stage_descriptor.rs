@@ -122,6 +122,7 @@ fn build_source_middleware_and_register_policies(
     stage_type: StageType,
     writer_id: WriterId,
     resolved: crate::middleware_resolution::ResolvedMiddleware,
+    hosted_ingress_slot: Option<obzenflow_core::ingress::HostedIngressBindingSlot>,
     control_middleware: &Arc<ControlMiddlewareAggregator>,
 ) -> StageCreationResult<SourceMiddlewareBinding> {
     let mut all_middleware = create_system_middleware(config, stage_type);
@@ -129,20 +130,46 @@ fn build_source_middleware_and_register_policies(
         .middleware
         .iter()
         .any(|spec| factory_declares_circuit_breaker(spec.factory.as_ref()));
-    let expects_rate_limiter = resolved
-        .middleware
-        .iter()
-        .any(|spec| spec.factory.control_role() == ControlMiddlewareRole::RateLimiter);
+    let expects_rate_limiter = resolved.middleware.iter().any(|spec| {
+        spec.factory.topology_config_slot() == Some(TopologyMiddlewareConfigSlot::RateLimiter)
+    });
 
     let mut completion_gate: Option<Arc<dyn CompletionGate>> = None;
+    // FLOWIP-115d: the ingress boundary materialized for a source-backed hosted
+    // ingress source, filled into the shared binding slot below.
+    let mut ingress_boundary: Option<Arc<dyn obzenflow_core::ingress::IngressBoundaryMiddleware>> =
+        None;
 
     for (middleware_index, spec) in resolved.middleware.into_iter().enumerate() {
+        let declaration = spec.factory.declaration();
+
+        // FLOWIP-115d AC42: a source-backed hosted ingress source binds a control
+        // middleware that declares Ingress to the ingress boundary, not source
+        // poll, and does not also pace the internal mpsc-drain source poll. This
+        // branch precedes the source-poll branch so a limiter declaring both
+        // surfaces routes to Ingress for hosted sources.
+        if let Some(slot) = hosted_ingress_slot.as_ref() {
+            if declaration.is_control() && declaration.supports(MiddlewareSurfaceKind::Ingress) {
+                let origin = crate::dsl::binder::middleware_origin_from_source(&spec.source);
+                let boundary = crate::dsl::binder::materialize_ingress(
+                    spec.factory.as_ref(),
+                    config,
+                    stage_type,
+                    control_middleware,
+                    slot.base_path(),
+                    &origin,
+                    MiddlewareDeclarationIndex::resolved(middleware_index),
+                )?;
+                ingress_boundary = Some(boundary);
+                continue;
+            }
+        }
+
         // FLOWIP-115b: hook-bound control middleware that attaches to the source
         // poll surface is placed by its declaration, not by ControlMiddlewareRole.
         // It is materialized into a source policy registered in declared order so
         // it composes with any still-legacy source policy (the rate limiter), and
         // it supplies the completion-gate companion that shares its state view.
-        let declaration = spec.factory.declaration();
         if declaration.is_control() && declaration.supports(MiddlewareSurfaceKind::SourcePoll) {
             let origin = crate::dsl::binder::middleware_origin_from_source(&spec.source);
             let binding = crate::dsl::binder::materialize_source_poll(
@@ -181,6 +208,19 @@ fn build_source_middleware_and_register_policies(
                 all_middleware.push(spec.factory.create(config, control_middleware.clone())?);
             }
         }
+    }
+
+    // FLOWIP-115d: fill the hosted-ingress binding slot during source-stage
+    // materialization, even when no ingress middleware is attached (boundary
+    // None), so startup can verify every registered hosted surface was placed in
+    // flow topology. A second source stage binding the same slot fails the build.
+    if let Some(slot) = hosted_ingress_slot.as_ref() {
+        slot.fill(obzenflow_core::ingress::FilledHostedIngress {
+            stage_id: config.stage_id,
+            stage_key: config.name.clone(),
+            boundary: ingress_boundary,
+        })
+        .map_err(|e| format!("Stage '{}': {e}", config.name))?;
     }
 
     let source_policies = control_middleware.source_policies(&config.stage_id);
@@ -498,6 +538,7 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> S
             StageType::FiniteSource,
             writer_id,
             resolved,
+            None,
             &control_middleware,
         )?;
 
@@ -651,6 +692,7 @@ impl<H: AsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
             StageType::FiniteSource,
             writer_id,
             resolved,
+            None,
             &control_middleware,
         )?;
 
@@ -771,6 +813,7 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
             StageType::InfiniteSource,
             writer_id,
             resolved,
+            None,
             &control_middleware,
         )?;
 
@@ -917,11 +960,18 @@ impl<H: AsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
 
         crate::middleware_resolution::log_resolved_middleware(&config.name, &resolved);
 
+        // FLOWIP-115d: a source-backed hosted ingress source (e.g. http_ingress)
+        // exposes its binding slot here; the DSL fills it during this source
+        // stage's materialization with the stage id, replay-stable key, and the
+        // materialized ingress boundary.
+        let hosted_ingress_slot = self.handler.hosted_ingress_slot();
+
         let source_binding = build_source_middleware_and_register_policies(
             &config,
             StageType::InfiniteSource,
             writer_id,
             resolved,
+            hosted_ingress_slot,
             &control_middleware,
         )?;
 
@@ -1055,10 +1105,9 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Stag
             .middleware
             .iter()
             .any(|spec| factory_declares_circuit_breaker(spec.factory.as_ref()));
-        let expects_rate_limiter = resolved
-            .middleware
-            .iter()
-            .any(|spec| spec.factory.control_role() == ControlMiddlewareRole::RateLimiter);
+        let expects_rate_limiter = resolved.middleware.iter().any(|spec| {
+            spec.factory.topology_config_slot() == Some(TopologyMiddlewareConfigSlot::RateLimiter)
+        });
 
         // Add resolved user middleware
         let user_middleware: Vec<Box<dyn Middleware>> = resolved
@@ -1199,10 +1248,9 @@ impl<H: AsyncTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
             .middleware
             .iter()
             .any(|spec| factory_declares_circuit_breaker(spec.factory.as_ref()));
-        let expects_rate_limiter = resolved
-            .middleware
-            .iter()
-            .any(|spec| spec.factory.control_role() == ControlMiddlewareRole::RateLimiter);
+        let expects_rate_limiter = resolved.middleware.iter().any(|spec| {
+            spec.factory.topology_config_slot() == Some(TopologyMiddlewareConfigSlot::RateLimiter)
+        });
 
         // Add resolved user middleware
         let user_middleware: Vec<Box<dyn Middleware>> = resolved
@@ -1593,10 +1641,9 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
             .middleware
             .iter()
             .any(|spec| factory_declares_circuit_breaker(spec.factory.as_ref()));
-        let expects_rate_limiter = resolved
-            .middleware
-            .iter()
-            .any(|spec| spec.factory.control_role() == ControlMiddlewareRole::RateLimiter);
+        let expects_rate_limiter = resolved.middleware.iter().any(|spec| {
+            spec.factory.topology_config_slot() == Some(TopologyMiddlewareConfigSlot::RateLimiter)
+        });
 
         // FLOWIP-115b: hook-bound control middleware that attaches to the
         // sink-delivery surface is materialized into a sink policy composed at
@@ -1967,10 +2014,9 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Stage
             .middleware
             .iter()
             .any(|spec| factory_declares_circuit_breaker(spec.factory.as_ref()));
-        let expects_rate_limiter = resolved
-            .middleware
-            .iter()
-            .any(|spec| spec.factory.control_role() == ControlMiddlewareRole::RateLimiter);
+        let expects_rate_limiter = resolved.middleware.iter().any(|spec| {
+            spec.factory.topology_config_slot() == Some(TopologyMiddlewareConfigSlot::RateLimiter)
+        });
 
         // Add resolved user middleware
         let user_middleware: Vec<Box<dyn Middleware>> = resolved
@@ -2154,10 +2200,9 @@ impl<H: EffectfulStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
             .middleware
             .iter()
             .any(|spec| factory_declares_circuit_breaker(spec.factory.as_ref()));
-        let expects_rate_limiter = resolved
-            .middleware
-            .iter()
-            .any(|spec| spec.factory.control_role() == ControlMiddlewareRole::RateLimiter);
+        let expects_rate_limiter = resolved.middleware.iter().any(|spec| {
+            spec.factory.topology_config_slot() == Some(TopologyMiddlewareConfigSlot::RateLimiter)
+        });
 
         let _registered_middleware: Vec<Box<dyn Middleware>> = resolved
             .middleware
@@ -2336,10 +2381,9 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
             .middleware
             .iter()
             .any(|spec| factory_declares_circuit_breaker(spec.factory.as_ref()));
-        let expects_rate_limiter = resolved
-            .middleware
-            .iter()
-            .any(|spec| spec.factory.control_role() == ControlMiddlewareRole::RateLimiter);
+        let expects_rate_limiter = resolved.middleware.iter().any(|spec| {
+            spec.factory.topology_config_slot() == Some(TopologyMiddlewareConfigSlot::RateLimiter)
+        });
 
         // Add resolved user middleware
         let user_middleware: Vec<Box<dyn Middleware>> = resolved
@@ -2764,6 +2808,244 @@ mod tests {
         let descriptor =
             AsyncInfiniteSourceDescriptor::new("defaulted", DummyAsyncInfiniteSourceNoHint);
         assert_eq!(descriptor.poll_timeout, None);
+    }
+
+    #[test]
+    fn hosted_ingress_source_fills_slot_and_binds_limiter_to_ingress() {
+        use obzenflow_core::ingress::{
+            HostedIngressBindingSlot, IngressAdmissionDecision, IngressAttemptContext,
+            IngressAttemptSeq,
+        };
+
+        let stage_id = StageId::new();
+        let config = StageConfig {
+            stage_id,
+            name: "accounts".to_string(),
+            flow_name: "test_flow".to_string(),
+            cycle_guard: None,
+        };
+        let control = Arc::new(ControlMiddlewareAggregator::new());
+        let slot = HostedIngressBindingSlot::new("/api/bank/accounts");
+
+        // A hosted ingress source with a rate limiter as its stage middleware.
+        let resolved = crate::middleware_resolution::resolve_middleware(
+            vec![],
+            vec![obzenflow_adapters::middleware::control::rate_limiter::rate_limit(1.0)],
+            &config.name,
+        )
+        .expect("middleware resolves");
+
+        build_source_middleware_and_register_policies(
+            &config,
+            StageType::InfiniteSource,
+            WriterId::from(stage_id),
+            resolved,
+            Some(slot.clone()),
+            &control,
+        )
+        .expect("source middleware build");
+
+        // The DSL fills the slot with the materialized ingress boundary.
+        assert!(slot.is_filled(), "the DSL fills the hosted-ingress slot");
+        let filled = slot.filled().expect("slot filled");
+        assert_eq!(filled.stage_key, "accounts");
+        let boundary = filled
+            .boundary
+            .as_ref()
+            .expect("the ingress boundary is materialized");
+
+        // FLOWIP-115d AC42: the limiter binds to Ingress, not source poll, so it
+        // does not also pace the internal mpsc-drain source poll.
+        assert!(
+            control.source_policies(&stage_id).is_empty(),
+            "a hosted ingress limiter is not also registered as a source-poll policy"
+        );
+
+        // The materialized boundary rate-limits: the burst token admits, then a
+        // fail-fast reject (never waiting).
+        let attempt = IngressAttemptContext {
+            attempt_seq: IngressAttemptSeq(0),
+            request_count: 1,
+            event_count: 1,
+            batch_count: 0,
+        };
+        assert!(matches!(
+            boundary.on_ingress(&attempt),
+            IngressAdmissionDecision::Accept
+        ));
+        assert!(matches!(
+            boundary.on_ingress(&attempt),
+            IngressAdmissionDecision::Reject { .. }
+        ));
+    }
+
+    /// FLOWIP-115d AC55: a third-party (non-framework) control middleware that
+    /// admits the first attempt then refuses, declaring only the `Ingress`
+    /// surface. It implements the core boundary trait and materializes through the
+    /// same public carrier as the built-in limiter, with no framework enum branch,
+    /// downcast, or legacy shell route.
+    struct AllowOnceIngressFactory;
+    struct AllowOnceIngressFamily;
+    struct AllowOnceBoundary {
+        admitted: std::sync::atomic::AtomicBool,
+    }
+
+    impl obzenflow_core::ingress::IngressBoundaryMiddleware for AllowOnceBoundary {
+        fn label(&self) -> &'static str {
+            "allow_once"
+        }
+        fn on_ingress(
+            &self,
+            _attempt: &obzenflow_core::ingress::IngressAttemptContext,
+        ) -> obzenflow_core::ingress::IngressAdmissionDecision {
+            if self
+                .admitted
+                .swap(true, std::sync::atomic::Ordering::Relaxed)
+            {
+                obzenflow_core::ingress::IngressAdmissionDecision::Reject { retry_after: None }
+            } else {
+                obzenflow_core::ingress::IngressAdmissionDecision::Accept
+            }
+        }
+        fn observe(
+            &self,
+            _attempt: &obzenflow_core::ingress::IngressAttemptContext,
+            _outcome: obzenflow_core::ingress::IngressAdmissionOutcome,
+        ) {
+        }
+    }
+
+    impl MiddlewareFactory for AllowOnceIngressFactory {
+        fn label(&self) -> &'static str {
+            "allow_once_ingress"
+        }
+        fn override_key(&self) -> obzenflow_adapters::middleware::MiddlewareOverrideKey {
+            obzenflow_adapters::middleware::MiddlewareOverrideKey::of::<AllowOnceIngressFamily>(
+                "allow_once_ingress",
+            )
+        }
+        fn control_role(&self) -> ControlMiddlewareRole {
+            ControlMiddlewareRole::None
+        }
+        fn kind(&self) -> obzenflow_adapters::middleware::MiddlewareKind {
+            obzenflow_adapters::middleware::MiddlewareKind::Policy
+        }
+        fn plan_contribution(&self) -> obzenflow_adapters::middleware::MiddlewarePlanContribution {
+            obzenflow_adapters::middleware::MiddlewarePlanContribution::None
+        }
+        fn topology_config_slot(&self) -> Option<TopologyMiddlewareConfigSlot> {
+            None
+        }
+        fn declaration(&self) -> obzenflow_adapters::middleware::MiddlewareDeclaration {
+            obzenflow_adapters::middleware::MiddlewareDeclaration::control_with_family(
+                self.label(),
+                "allow_once_ingress",
+                vec![MiddlewareSurfaceKind::Ingress],
+            )
+        }
+        fn create(
+            &self,
+            _config: &StageConfig,
+            _control_middleware: Arc<ControlMiddlewareAggregator>,
+        ) -> obzenflow_adapters::middleware::MiddlewareFactoryResult<Box<dyn Middleware>> {
+            // Hook-bound: this control middleware is placed through `materialize`,
+            // never the legacy handler shell.
+            Err(
+                obzenflow_adapters::middleware::MiddlewareFactoryError::not_hook_bound(
+                    self.label(),
+                ),
+            )
+        }
+        fn materialize(
+            &self,
+            request: obzenflow_adapters::middleware::MiddlewareAttachmentRequest<'_>,
+            context: &obzenflow_adapters::middleware::MiddlewareMaterializationContext<'_>,
+        ) -> obzenflow_adapters::middleware::MiddlewareFactoryResult<
+            obzenflow_adapters::middleware::MiddlewareSurfaceAttachment,
+        > {
+            use obzenflow_adapters::middleware::{
+                validate_attachment_request, MiddlewareFactoryError, MiddlewareSurface,
+                MiddlewareSurfaceAttachment,
+            };
+            validate_attachment_request(&self.declaration(), &request).map_err(|e| {
+                MiddlewareFactoryError::materialization_failed(
+                    self.label(),
+                    &context.config.name,
+                    e,
+                )
+            })?;
+            match request.surface {
+                MiddlewareSurface::Ingress(_) => Ok(MiddlewareSurfaceAttachment::Ingress(
+                    std::sync::Arc::new(AllowOnceBoundary {
+                        admitted: std::sync::atomic::AtomicBool::new(false),
+                    }),
+                )),
+                _ => Err(MiddlewareFactoryError::not_hook_bound(self.label())),
+            }
+        }
+    }
+
+    #[test]
+    fn hosted_ingress_routes_third_party_control_middleware_through_carrier() {
+        use obzenflow_core::ingress::{
+            HostedIngressBindingSlot, IngressAdmissionDecision, IngressAttemptContext,
+            IngressAttemptSeq,
+        };
+
+        let stage_id = StageId::new();
+        let config = StageConfig {
+            stage_id,
+            name: "accounts".to_string(),
+            flow_name: "test_flow".to_string(),
+            cycle_guard: None,
+        };
+        let control = Arc::new(ControlMiddlewareAggregator::new());
+        let slot = HostedIngressBindingSlot::new("/api/bank/accounts");
+
+        // The same resolve -> build -> materialize carrier path as the built-in
+        // limiter, but with a user-authored factory.
+        let resolved = crate::middleware_resolution::resolve_middleware(
+            vec![],
+            vec![Box::new(AllowOnceIngressFactory)],
+            &config.name,
+        )
+        .expect("middleware resolves");
+
+        build_source_middleware_and_register_policies(
+            &config,
+            StageType::InfiniteSource,
+            WriterId::from(stage_id),
+            resolved,
+            Some(slot.clone()),
+            &control,
+        )
+        .expect("source middleware build");
+
+        // The carrier routed the third-party Ingress-declaring factory to Ingress
+        // and filled the slot with its own boundary; no source-poll policy and no
+        // framework-specific branch was needed.
+        let filled = slot.filled().expect("slot filled");
+        let boundary = filled.boundary.as_ref().expect("third-party boundary");
+        assert_eq!(boundary.label(), "allow_once");
+        assert!(
+            control.source_policies(&stage_id).is_empty(),
+            "an ingress-only third party is not registered as a source-poll policy"
+        );
+
+        let attempt = IngressAttemptContext {
+            attempt_seq: IngressAttemptSeq(0),
+            request_count: 1,
+            event_count: 1,
+            batch_count: 0,
+        };
+        assert!(matches!(
+            boundary.on_ingress(&attempt),
+            IngressAdmissionDecision::Accept
+        ));
+        assert!(matches!(
+            boundary.on_ingress(&attempt),
+            IngressAdmissionDecision::Reject { .. }
+        ));
     }
 
     #[tokio::test]

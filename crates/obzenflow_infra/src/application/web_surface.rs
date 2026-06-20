@@ -6,11 +6,15 @@
 //! `FlowApplication` but do not participate in pipeline topology.
 
 use async_trait::async_trait;
+use obzenflow_core::event::SystemEvent;
+use obzenflow_core::ingress::HostedIngressBindingSlot;
+use obzenflow_core::journal::Journal;
 use obzenflow_core::web::{
     EndpointMetadata, HttpEndpoint, ManagedResponse, ManagedRouteInfo, Request, WebError,
     WebSurface,
 };
 use obzenflow_runtime::pipeline::PipelineState;
+use std::sync::Arc;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
@@ -24,14 +28,20 @@ pub(crate) type WebSurfaceAttachmentParts = (
     String,
     Vec<Box<dyn HttpEndpoint>>,
     Option<WebSurfaceWiringFn>,
+    Option<HostedIngressBindingSlot>,
 );
 
 /// Narrow, framework-owned wiring context for hosted web surfaces.
 ///
-/// This is intentionally minimal in the first pass; more capabilities can be added when
-/// a concrete surface requires it (e.g. additional pipeline or runtime signals).
+/// Host-owned capabilities only; this never exposes adapter carrier objects. More
+/// capabilities can be added when a concrete surface requires it.
 pub struct WebSurfaceWiringContext {
     pub pipeline_state: watch::Receiver<PipelineState>,
+    /// FLOWIP-115d: the host system journal, so a hosted ingress surface can
+    /// install its refusal-fact writer. `None` when the flow has no system
+    /// journal, in which case a surface with refusal recording enabled fails
+    /// startup.
+    pub system_journal: Option<Arc<dyn Journal<SystemEvent>>>,
 }
 
 #[derive(Default)]
@@ -78,6 +88,7 @@ pub struct WebSurfaceAttachment {
     name: String,
     endpoints: Vec<Box<dyn HttpEndpoint>>,
     wiring: Option<WebSurfaceWiringFn>,
+    ingress_slot: Option<HostedIngressBindingSlot>,
 }
 
 impl WebSurfaceAttachment {
@@ -87,6 +98,7 @@ impl WebSurfaceAttachment {
             name: name.into(),
             endpoints,
             wiring: None,
+            ingress_slot: None,
         }
     }
 
@@ -100,12 +112,20 @@ impl WebSurfaceAttachment {
         self
     }
 
+    /// FLOWIP-115d: attach the hosted-ingress binding slot so `FlowApplication`
+    /// can verify it was filled (its source half was placed in flow topology)
+    /// before serving endpoints.
+    pub fn with_ingress_slot(mut self, slot: HostedIngressBindingSlot) -> Self {
+        self.ingress_slot = Some(slot);
+        self
+    }
+
     pub fn name(&self) -> &str {
         &self.name
     }
 
     pub(crate) fn into_parts(self) -> WebSurfaceAttachmentParts {
-        (self.name, self.endpoints, self.wiring)
+        (self.name, self.endpoints, self.wiring, self.ingress_slot)
     }
 }
 
@@ -186,11 +206,15 @@ mod tests {
             },
         );
 
-        let (_name, endpoints, wiring) = surface.into_parts();
+        let (_name, endpoints, wiring, _ingress_slot) = surface.into_parts();
         assert!(endpoints.is_empty());
         let wiring = wiring.expect("wiring should exist");
 
-        let wired = wiring(WebSurfaceWiringContext { pipeline_state: rx }).unwrap();
+        let wired = wiring(WebSurfaceWiringContext {
+            pipeline_state: rx,
+            system_journal: None,
+        })
+        .unwrap();
         assert_eq!(wired.tasks.len(), 1);
 
         let _ = tx.send(PipelineState::Running);

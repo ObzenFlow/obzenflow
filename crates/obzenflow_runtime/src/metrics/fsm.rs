@@ -223,6 +223,12 @@ pub struct MetricsStore {
     pub http_surface_metrics:
         HashMap<(String, HttpMethod, String, String), HttpSurfaceRouteMetricsSnapshot>,
 
+    /// Hosted-ingress refusal totals projected from `IngressRefusal` facts
+    /// (FLOWIP-115d), keyed by `(base_path, reason)`. This replaces the former
+    /// in-memory ingestion reject counters; the metric is now a fold of journal
+    /// facts and so is replay-faithful.
+    pub ingestion_refusals_total: HashMap<(String, String), u64>,
+
     // HTTP pull telemetry (FLOWIP-084e)
     pub http_pull_metrics: HashMap<StageId, HttpPullTelemetry>,
 
@@ -923,6 +929,10 @@ impl MetricsAggregatorContext {
         });
         snapshot.http_surface_metrics = http_surface_metrics;
 
+        // FLOWIP-115d: hosted-ingress refusal totals projected from `IngressRefusal`
+        // facts, keyed by (base_path, reason).
+        snapshot.ingestion_refusal_totals = store.ingestion_refusals_total.clone();
+
         // FLOWIP-084e: HTTP pull telemetry (wide events)
         snapshot.http_pull_metrics = store.http_pull_metrics.clone();
 
@@ -1407,6 +1417,21 @@ impl FsmAction for MetricsAggregatorAction {
                             entry.response_bytes_total =
                                 entry.response_bytes_total.max(route.response_bytes_total);
                         }
+                    }
+                    obzenflow_core::event::SystemEventType::IngressRefusal {
+                        base_path,
+                        reason,
+                        event_count,
+                        ..
+                    } => {
+                        // FLOWIP-115d: each fact is one refusal occurrence carrying
+                        // its refused event_count, so totals increment (a fresh
+                        // store per run means strict replay reproduces the same
+                        // totals). The HTTP-surface snapshot above uses max()
+                        // instead because each snapshot carries cumulative totals.
+                        let key = (base_path.clone(), reason.as_str().to_string());
+                        let entry = store.ingestion_refusals_total.entry(key).or_insert(0);
+                        *entry = entry.saturating_add(*event_count);
                     }
                     _ => {} // Skip MetricsCoordination and other event types
                 }
