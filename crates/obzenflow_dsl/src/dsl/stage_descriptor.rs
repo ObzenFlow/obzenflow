@@ -191,25 +191,29 @@ fn declaration_has_stage_observer_surface(
         .any(|surface| declaration.supports(*surface))
 }
 
+struct EffectObserverMaterialization<'a> {
+    config: &'a StageConfig,
+    stage_type: StageType,
+    control_middleware: &'a Arc<ControlMiddlewareAggregator>,
+    origin: &'a obzenflow_adapters::middleware::MiddlewareOrigin,
+    declaration_index: MiddlewareDeclarationIndex,
+    effect_declarations: &'a [EffectDeclaration],
+}
+
 fn materialize_effect_observers_for_declarations(
     observers: &mut StageObserverBundle,
     factory: &dyn MiddlewareFactory,
-    config: &StageConfig,
-    stage_type: StageType,
-    control_middleware: &Arc<ControlMiddlewareAggregator>,
-    origin: &obzenflow_adapters::middleware::MiddlewareOrigin,
-    declaration_index: MiddlewareDeclarationIndex,
-    effect_declarations: &[EffectDeclaration],
+    materialization: EffectObserverMaterialization<'_>,
 ) -> StageCreationResult<()> {
-    for effect in effect_declarations {
+    for effect in materialization.effect_declarations {
         let attachment = crate::dsl::binder::materialize_effect_observer(
             factory,
-            config,
-            stage_type,
-            control_middleware,
+            materialization.config,
+            materialization.stage_type,
+            materialization.control_middleware,
             effect.effect_type,
-            origin,
-            declaration_index,
+            materialization.origin,
+            materialization.declaration_index,
         )?;
         push_observer_attachment(observers, attachment)?;
     }
@@ -1658,12 +1662,14 @@ impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
                 materialize_effect_observers_for_declarations(
                     &mut effect_observers,
                     spec.factory.as_ref(),
-                    &config,
-                    StageType::Transform,
-                    &control_middleware,
-                    &origin,
-                    MiddlewareDeclarationIndex::resolved(middleware_index),
-                    &effect_declarations,
+                    EffectObserverMaterialization {
+                        config: &config,
+                        stage_type: StageType::Transform,
+                        control_middleware: &control_middleware,
+                        origin: &origin,
+                        declaration_index: MiddlewareDeclarationIndex::resolved(middleware_index),
+                        effect_declarations: &effect_declarations,
+                    },
                 )?;
                 if declaration_has_stage_observer_surface(&declaration, StageType::Transform) {
                     shell_specs.push(spec);
@@ -2463,12 +2469,14 @@ impl<H: EffectfulStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
                 materialize_effect_observers_for_declarations(
                     &mut effect_observers,
                     spec.factory.as_ref(),
-                    &config,
-                    StageType::Stateful,
-                    &control_middleware,
-                    &origin,
-                    MiddlewareDeclarationIndex::resolved(middleware_index),
-                    &effect_declarations,
+                    EffectObserverMaterialization {
+                        config: &config,
+                        stage_type: StageType::Stateful,
+                        control_middleware: &control_middleware,
+                        origin: &origin,
+                        declaration_index: MiddlewareDeclarationIndex::resolved(middleware_index),
+                        effect_declarations: &effect_declarations,
+                    },
                 )?;
                 if declaration_has_stage_observer_surface(&declaration, StageType::Stateful) {
                     shell_specs.push(spec);

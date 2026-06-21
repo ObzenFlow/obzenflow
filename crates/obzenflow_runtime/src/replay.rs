@@ -180,7 +180,7 @@ impl ReplayDriver {
             let mut new_event = original_event;
             new_event.flow_context = flow_context;
             new_event.replay_context = Some(obzenflow_core::event::context::ReplayContext {
-                original_event_id: original_event_id,
+                original_event_id,
                 original_flow_id: self.replay_context.original_flow_id.clone(),
                 original_stage_id: self.replay_context.original_stage_id,
                 archive_path: self.replay_context.archive_path.clone(),
