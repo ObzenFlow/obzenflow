@@ -110,26 +110,6 @@ impl MiddlewareContextKey for CircuitBreakerTotalRetryWallMs {
     const LABEL: &'static str = "circuit_breaker.total_retry_wall_ms";
 }
 
-// ---- Outcome enrichment ---------------------------------------------------
-
-pub(crate) struct OutcomeProcessingFailed;
-impl MiddlewareContextKey for OutcomeProcessingFailed {
-    type Value = bool;
-    const LABEL: &'static str = "processing_failed";
-}
-
-pub(crate) struct OutcomeFailedEventType;
-impl MiddlewareContextKey for OutcomeFailedEventType {
-    type Value = String;
-    const LABEL: &'static str = "failed_event_type";
-}
-
-pub(crate) struct OutcomeRetryAttempt;
-impl MiddlewareContextKey for OutcomeRetryAttempt {
-    type Value = u32;
-    const LABEL: &'static str = "retry_attempt";
-}
-
 // ---- AI map-reduce --------------------------------------------------------
 
 #[derive(Debug, Clone, Copy)]

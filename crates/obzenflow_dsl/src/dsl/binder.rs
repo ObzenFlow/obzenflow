@@ -117,6 +117,12 @@ pub(crate) fn bind_effect_policy(
     declaration_index: MiddlewareDeclarationIndex,
 ) -> Result<EffectPolicyAttachment, String> {
     let declaration = factory.declaration();
+    if declaration.is_observer() {
+        return Err(format!(
+            "observer middleware '{}' cannot be materialized as an effect policy",
+            factory.label()
+        ));
+    }
     if declaration.is_control() && declaration.supports(MiddlewareSurfaceKind::Effect) {
         let surface = MiddlewareSurface::Effect(EffectSurface {
             stage_id: config.stage_id,
@@ -158,6 +164,127 @@ pub(crate) fn bind_effect_policy(
         );
         Ok(effect_policy_from_middleware(instance))
     }
+}
+
+pub(crate) fn materialize_effect_observer(
+    factory: &dyn MiddlewareFactory,
+    config: &StageConfig,
+    stage_type: StageType,
+    control_middleware: &Arc<ControlMiddlewareAggregator>,
+    effect_type: &'static str,
+    origin: &MiddlewareOrigin,
+    declaration_index: MiddlewareDeclarationIndex,
+) -> Result<MiddlewareSurfaceAttachment, String> {
+    let surface = MiddlewareSurface::Effect(EffectSurface {
+        stage_id: config.stage_id,
+        effect_type: EffectTypeKey::from(effect_type),
+    });
+    let protected_unit = ProtectedUnitId {
+        stage_id: config.stage_id,
+        unit: ProtectedUnit::Effect(EffectUnitId {
+            effect_type: EffectTypeKey::from(effect_type),
+        }),
+    };
+    let request = MiddlewareAttachmentRequest {
+        surface: &surface,
+        protected_unit: &protected_unit,
+        origin,
+        declaration_index,
+    };
+    let declaration = factory.declaration();
+    validate_attachment_request(&declaration, &request).map_err(|e| e.to_string())?;
+    let ctx = MiddlewareMaterializationContext {
+        config,
+        control_middleware,
+        stage_type,
+    };
+    match factory
+        .materialize(request, &ctx)
+        .map_err(|e| e.to_string())?
+    {
+        attachment @ MiddlewareSurfaceAttachment::EffectObserver(_) => Ok(attachment),
+        _ => Err(format!(
+            "binder expected an EffectObserver attachment from middleware '{}'",
+            factory.label()
+        )),
+    }
+}
+
+pub(crate) fn materialize_observer(
+    factory: &dyn MiddlewareFactory,
+    config: &StageConfig,
+    stage_type: StageType,
+    control_middleware: &Arc<ControlMiddlewareAggregator>,
+    surface_kind: MiddlewareSurfaceKind,
+    origin: &MiddlewareOrigin,
+    declaration_index: MiddlewareDeclarationIndex,
+) -> Result<MiddlewareSurfaceAttachment, String> {
+    let surface = match surface_kind {
+        MiddlewareSurfaceKind::SourcePoll => MiddlewareSurface::SourcePoll(SourcePollSurface {
+            stage_id: config.stage_id,
+        }),
+        MiddlewareSurfaceKind::SinkDelivery => {
+            MiddlewareSurface::SinkDelivery(SinkDeliverySurface {
+                stage_id: config.stage_id,
+                configured_target: None,
+            })
+        }
+        MiddlewareSurfaceKind::Handler => MiddlewareSurface::Handler {
+            stage_id: config.stage_id,
+        },
+        MiddlewareSurfaceKind::Stateful => MiddlewareSurface::Stateful {
+            stage_id: config.stage_id,
+        },
+        MiddlewareSurfaceKind::Join => MiddlewareSurface::Join {
+            stage_id: config.stage_id,
+        },
+        MiddlewareSurfaceKind::OutputCommit => MiddlewareSurface::OutputCommit {
+            stage_id: config.stage_id,
+        },
+        MiddlewareSurfaceKind::StageLifecycle => MiddlewareSurface::StageLifecycle {
+            stage_id: config.stage_id,
+        },
+        MiddlewareSurfaceKind::Effect | MiddlewareSurfaceKind::Ingress => {
+            return Err(format!(
+                "observer middleware '{}' requires a specialized {:?} binding",
+                factory.label(),
+                surface_kind
+            ));
+        }
+    };
+    let protected_unit = ProtectedUnitId {
+        stage_id: config.stage_id,
+        unit: match surface_kind {
+            MiddlewareSurfaceKind::SourcePoll => ProtectedUnit::SourcePoll(SourcePollUnitId),
+            MiddlewareSurfaceKind::SinkDelivery => {
+                ProtectedUnit::SinkDelivery(SinkDeliveryUnitId {
+                    target: SinkDeliveryTarget::Stage,
+                })
+            }
+            MiddlewareSurfaceKind::Handler => ProtectedUnit::Handler,
+            MiddlewareSurfaceKind::Stateful => ProtectedUnit::Stateful,
+            MiddlewareSurfaceKind::Join => ProtectedUnit::Join,
+            MiddlewareSurfaceKind::OutputCommit => ProtectedUnit::OutputCommit,
+            MiddlewareSurfaceKind::StageLifecycle => ProtectedUnit::StageLifecycle,
+            MiddlewareSurfaceKind::Effect | MiddlewareSurfaceKind::Ingress => unreachable!(),
+        },
+    };
+    let request = MiddlewareAttachmentRequest {
+        surface: &surface,
+        protected_unit: &protected_unit,
+        origin,
+        declaration_index,
+    };
+    let declaration = factory.declaration();
+    validate_attachment_request(&declaration, &request).map_err(|e| e.to_string())?;
+    let ctx = MiddlewareMaterializationContext {
+        config,
+        control_middleware,
+        stage_type,
+    };
+    factory
+        .materialize(request, &ctx)
+        .map_err(|e| e.to_string())
 }
 
 /// Materialize one hook-bound control middleware onto the sink-delivery surface,

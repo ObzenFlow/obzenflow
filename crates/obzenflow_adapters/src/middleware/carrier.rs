@@ -21,6 +21,11 @@ use super::control::policy::{EffectPolicyAttachment, SinkPolicy, SourcePolicy};
 use super::control::ControlMiddlewareAggregator;
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::ingress::{IngressBoundaryMiddleware, IngressKey};
+use obzenflow_core::{
+    EffectObserver, HandlerMiddlewareObserver, IngressObserver, JoinMiddlewareObserver,
+    OutputCommitObserver, SinkDeliveryObserver, SourcePollObserver, StageLifecycleObserver,
+    StatefulMiddlewareObserver,
+};
 use obzenflow_core::{StageId, StageKey};
 use obzenflow_runtime::pipeline::config::StageConfig;
 use obzenflow_runtime::stages::source::strategies::CompletionGate;
@@ -183,12 +188,21 @@ pub enum MiddlewareSurface {
     SinkDelivery(SinkDeliverySurface),
     /// FLOWIP-115d: source-backed hosted listener admission (not source polling).
     Ingress(IngressSurface),
-    /// Reserved observer surfaces for FLOWIP-115f.
-    Handler,
-    Stateful,
-    Join,
-    OutputCommit,
-    StageLifecycle,
+    Handler {
+        stage_id: StageId,
+    },
+    Stateful {
+        stage_id: StageId,
+    },
+    Join {
+        stage_id: StageId,
+    },
+    OutputCommit {
+        stage_id: StageId,
+    },
+    StageLifecycle {
+        stage_id: StageId,
+    },
 }
 
 /// A lightweight discriminant of a surface, used in deterministic attachment
@@ -214,11 +228,11 @@ impl MiddlewareSurface {
             Self::Effect(_) => MiddlewareSurfaceKind::Effect,
             Self::SinkDelivery(_) => MiddlewareSurfaceKind::SinkDelivery,
             Self::Ingress(_) => MiddlewareSurfaceKind::Ingress,
-            Self::Handler => MiddlewareSurfaceKind::Handler,
-            Self::Stateful => MiddlewareSurfaceKind::Stateful,
-            Self::Join => MiddlewareSurfaceKind::Join,
-            Self::OutputCommit => MiddlewareSurfaceKind::OutputCommit,
-            Self::StageLifecycle => MiddlewareSurfaceKind::StageLifecycle,
+            Self::Handler { .. } => MiddlewareSurfaceKind::Handler,
+            Self::Stateful { .. } => MiddlewareSurfaceKind::Stateful,
+            Self::Join { .. } => MiddlewareSurfaceKind::Join,
+            Self::OutputCommit { .. } => MiddlewareSurfaceKind::OutputCommit,
+            Self::StageLifecycle { .. } => MiddlewareSurfaceKind::StageLifecycle,
         }
     }
 
@@ -232,7 +246,11 @@ impl MiddlewareSurface {
             // source stage, so it returns that stage id and keeps the existing
             // stage-keyed validation flow additive.
             Self::Ingress(s) => Some(s.owner.stage_id),
-            _ => None,
+            Self::Handler { stage_id }
+            | Self::Stateful { stage_id }
+            | Self::Join { stage_id }
+            | Self::OutputCommit { stage_id }
+            | Self::StageLifecycle { stage_id } => Some(*stage_id),
         }
     }
 }
@@ -247,6 +265,22 @@ impl MiddlewareSurfaceKind {
         matches!(
             self,
             Self::SourcePoll | Self::Effect | Self::SinkDelivery | Self::Ingress
+        )
+    }
+
+    /// Whether an `Observer`-capability middleware may attach to this surface.
+    pub fn allows_observer(self) -> bool {
+        matches!(
+            self,
+            Self::SourcePoll
+                | Self::Effect
+                | Self::SinkDelivery
+                | Self::Ingress
+                | Self::Handler
+                | Self::Stateful
+                | Self::Join
+                | Self::OutputCommit
+                | Self::StageLifecycle
         )
     }
 }
@@ -297,6 +331,7 @@ pub enum ProtectedUnit {
     Stateful,
     Join,
     OutputCommit,
+    StageLifecycle,
 }
 
 /// Identity of one protected unit: the cross-attempt accounting key.
@@ -487,12 +522,25 @@ fn push_surface(context: &mut Context, surface: &MiddlewareSurface) {
                 surface.target.scope.label(),
             );
         }
-        MiddlewareSurface::Handler => push_field(context, "surface.kind", "handler"),
-        MiddlewareSurface::Stateful => push_field(context, "surface.kind", "stateful"),
-        MiddlewareSurface::Join => push_field(context, "surface.kind", "join"),
-        MiddlewareSurface::OutputCommit => push_field(context, "surface.kind", "output_commit"),
-        MiddlewareSurface::StageLifecycle => {
+        MiddlewareSurface::Handler { stage_id } => {
+            push_field(context, "surface.kind", "handler");
+            push_stage_id(context, "surface.stage_id", *stage_id);
+        }
+        MiddlewareSurface::Stateful { stage_id } => {
+            push_field(context, "surface.kind", "stateful");
+            push_stage_id(context, "surface.stage_id", *stage_id);
+        }
+        MiddlewareSurface::Join { stage_id } => {
+            push_field(context, "surface.kind", "join");
+            push_stage_id(context, "surface.stage_id", *stage_id);
+        }
+        MiddlewareSurface::OutputCommit { stage_id } => {
+            push_field(context, "surface.kind", "output_commit");
+            push_stage_id(context, "surface.stage_id", *stage_id);
+        }
+        MiddlewareSurface::StageLifecycle { stage_id } => {
             push_field(context, "surface.kind", "stage_lifecycle");
+            push_stage_id(context, "surface.stage_id", *stage_id);
         }
     }
 }
@@ -543,6 +591,9 @@ fn push_protected_unit(context: &mut Context, protected_unit: &ProtectedUnitId) 
         ProtectedUnit::Join => push_field(context, "protected_unit.kind", "join"),
         ProtectedUnit::OutputCommit => {
             push_field(context, "protected_unit.kind", "output_commit");
+        }
+        ProtectedUnit::StageLifecycle => {
+            push_field(context, "protected_unit.kind", "stage_lifecycle");
         }
     }
 }
@@ -598,6 +649,25 @@ impl MiddlewareDeclaration {
         }
     }
 
+    /// A hook-bound observer declaration spanning the given surfaces.
+    pub fn observer(label: &'static str, surfaces: Vec<MiddlewareSurfaceKind>) -> Self {
+        Self::observer_with_family(label, label, surfaces)
+    }
+
+    /// A hook-bound observer declaration with an explicit override family.
+    pub fn observer_with_family(
+        label: &'static str,
+        family_label: &'static str,
+        surfaces: Vec<MiddlewareSurfaceKind>,
+    ) -> Self {
+        Self {
+            label,
+            family_label,
+            capability: MiddlewareCapability::Observer,
+            surfaces,
+        }
+    }
+
     pub fn is_legacy_shell(&self) -> bool {
         self.surfaces.is_empty()
     }
@@ -610,6 +680,10 @@ impl MiddlewareDeclaration {
     /// Whether this is a control-capability declaration.
     pub fn is_control(&self) -> bool {
         matches!(self.capability, MiddlewareCapability::Control)
+    }
+
+    pub fn is_observer(&self) -> bool {
+        matches!(self.capability, MiddlewareCapability::Observer) && !self.is_legacy_shell()
     }
 }
 
@@ -632,7 +706,7 @@ pub enum MiddlewareAttachmentValidationError {
         surface: MiddlewareSurfaceKind,
     },
 
-    #[error("middleware '{label}' declares capability {capability:?}, but only control-capability materialization is implemented for surface {surface:?}")]
+    #[error("middleware '{label}' declares capability {capability:?}, which cannot attach to surface {surface:?}")]
     UnsupportedCapability {
         label: &'static str,
         capability: MiddlewareCapability,
@@ -645,9 +719,6 @@ pub enum MiddlewareAttachmentValidationError {
         surface_stage: StageId,
         unit_stage: StageId,
     },
-
-    #[error("surface {surface:?} is reserved and cannot be materialized by this slice")]
-    ReservedSurface { surface: MiddlewareSurfaceKind },
 
     #[error("surface {surface:?} cannot protect unit {unit:?}")]
     ProtectedUnitMismatch {
@@ -676,8 +747,12 @@ pub fn validate_attachment_request(
         });
     }
 
-    if !matches!(declaration.capability, MiddlewareCapability::Control) || !surface.allows_control()
-    {
+    let allowed = match declaration.capability {
+        MiddlewareCapability::Control => surface.allows_control(),
+        MiddlewareCapability::Observer => surface.allows_observer(),
+        MiddlewareCapability::Structural => false,
+    };
+    if !allowed {
         return Err(MiddlewareAttachmentValidationError::UnsupportedCapability {
             label: declaration.label,
             capability: declaration.capability,
@@ -685,9 +760,10 @@ pub fn validate_attachment_request(
         });
     }
 
-    let Some(surface_stage) = request.surface.stage_id() else {
-        return Err(MiddlewareAttachmentValidationError::ReservedSurface { surface });
-    };
+    let surface_stage = request
+        .surface
+        .stage_id()
+        .expect("every materializable middleware surface carries a stage id");
 
     if surface_stage != request.protected_unit.stage_id {
         return Err(MiddlewareAttachmentValidationError::StageMismatch {
@@ -718,6 +794,11 @@ pub fn validate_attachment_request(
             // here because no non-source consumer ships in this slice.
             surface.owner.stage_key == unit.source_stage_key && surface.target == unit.target
         }
+        (MiddlewareSurface::Handler { .. }, ProtectedUnit::Handler) => true,
+        (MiddlewareSurface::Stateful { .. }, ProtectedUnit::Stateful) => true,
+        (MiddlewareSurface::Join { .. }, ProtectedUnit::Join) => true,
+        (MiddlewareSurface::OutputCommit { .. }, ProtectedUnit::OutputCommit) => true,
+        (MiddlewareSurface::StageLifecycle { .. }, ProtectedUnit::StageLifecycle) => true,
         _ => false,
     };
 
@@ -794,6 +875,15 @@ pub enum MiddlewareSurfaceAttachment {
     Effect(EffectPolicyAttachment),
     SinkDelivery(Arc<dyn SinkPolicy>),
     Ingress(Arc<dyn IngressBoundaryMiddleware>),
+    SourcePollObserver(Arc<dyn SourcePollObserver>),
+    EffectObserver(Arc<dyn EffectObserver>),
+    SinkDeliveryObserver(Arc<dyn SinkDeliveryObserver>),
+    IngressObserver(Arc<dyn IngressObserver>),
+    HandlerObserver(Arc<dyn HandlerMiddlewareObserver>),
+    StatefulObserver(Arc<dyn StatefulMiddlewareObserver>),
+    JoinObserver(Arc<dyn JoinMiddlewareObserver>),
+    OutputCommitObserver(Arc<dyn OutputCommitObserver>),
+    StageLifecycleObserver(Arc<dyn StageLifecycleObserver>),
 }
 
 #[cfg(test)]
@@ -897,15 +987,41 @@ mod tests {
             Err(MiddlewareAttachmentValidationError::UnsupportedSurface { .. })
         ));
 
-        // An observer-capability declaration cannot attach control to Ingress.
-        let observer = MiddlewareDeclaration {
-            label: "observer",
-            family_label: "observer",
-            capability: MiddlewareCapability::Observer,
-            surfaces: vec![MiddlewareSurfaceKind::Ingress],
+        // Observer-capability declarations can attach to observer-compatible
+        // ingress observation without becoming control policies.
+        let observer =
+            MiddlewareDeclaration::observer("observer", vec![MiddlewareSurfaceKind::Ingress]);
+        validate_attachment_request(&observer, &request)
+            .expect("observer ingress attachment should validate");
+    }
+
+    #[test]
+    fn output_commit_allows_observer_but_rejects_control() {
+        let stage_id = StageId::new();
+        let surface = MiddlewareSurface::OutputCommit { stage_id };
+        let protected_unit = ProtectedUnitId {
+            stage_id,
+            unit: ProtectedUnit::OutputCommit,
         };
+        let origin = MiddlewareOrigin::Stage;
+        let request = MiddlewareAttachmentRequest {
+            surface: &surface,
+            protected_unit: &protected_unit,
+            origin: &origin,
+            declaration_index: MiddlewareDeclarationIndex::resolved(0),
+        };
+
+        let observer =
+            MiddlewareDeclaration::observer("timing", vec![MiddlewareSurfaceKind::OutputCommit]);
+        validate_attachment_request(&observer, &request)
+            .expect("output commit observer should validate");
+
+        let control = MiddlewareDeclaration::control(
+            "bad_control",
+            vec![MiddlewareSurfaceKind::OutputCommit],
+        );
         assert!(matches!(
-            validate_attachment_request(&observer, &request),
+            validate_attachment_request(&control, &request),
             Err(MiddlewareAttachmentValidationError::UnsupportedCapability { .. })
         ));
     }

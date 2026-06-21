@@ -79,12 +79,6 @@ fn has_typed_output<T: TypedPayload>(outputs: &[ChainEvent]) -> bool {
     })
 }
 
-fn should_retry(ctx: &MiddlewareContext) -> bool {
-    ctx.get::<CircuitBreakerShouldRetry>()
-        .copied()
-        .unwrap_or(false)
-}
-
 fn update_chunk_failed_reason(
     event: &mut ChainEvent,
     ctx: &MiddlewareContext,
@@ -486,7 +480,11 @@ where
         ctx: &mut MiddlewareContext,
     ) {
         // Integrated retry: do not surface chunk_failed markers until the terminal attempt.
-        if should_retry(ctx) {
+        if ctx
+            .get::<CircuitBreakerShouldRetry>()
+            .copied()
+            .unwrap_or(false)
+        {
             remove_control_events_by_type(ctx, CHUNK_FAILED_EVENT_TYPE);
             remove_control_events_by_type(ctx, MAP_FAILURE_EVENT_TYPE);
             return;

@@ -139,9 +139,12 @@ signals bypass the middleware chain.
 
 See `ChainEventFactory` methods in `obzenflow_core` for the current control event API.
 
-## Function-based Middleware
+## Legacy Function-based Middleware
 
-The middleware system provides utilities for creating middleware from functions/closures instead of implementing the full Middleware trait. This is useful for simple, one-off behaviors.
+The middleware system still provides utilities for creating legacy handler-shell
+middleware from functions/closures instead of implementing the full `Middleware`
+trait. This is a compatibility path for simple handler-shell behaviors while
+hook-bound observer and control surfaces are split out.
 
 ### FnMiddleware
 
@@ -165,14 +168,43 @@ let logger = middleware_fn(|event, ctx| {
 });
 ```
 
-This approach eliminates boilerplate for simple middleware behaviors that only need pre-processing logic.
+This approach eliminates boilerplate for compatibility middleware that only
+needs pre-processing logic. New observe-only behavior should use observer hooks
+instead of the legacy `Middleware` shell.
 
-Function middleware is observation-classified (FLOWIP-120c H2): it runs in
-every execution scope, including replay reconstruction, and may not
-short-circuit the chain. A `Skip` or `Abort` returned from it is a runtime
-error naming the middleware. Filtering belongs in the handler, where
-multi-type output contracts make it natural; resilience policy belongs on
-the live I/O unit (a source, a declared effect, or sink delivery).
+Function middleware is handler-shell compatibility code (FLOWIP-120c H2). It may
+not be used for live I/O policy. Filtering belongs in the handler, where
+multi-type output contracts make it natural; resilience policy belongs on the
+live I/O unit (a source, a declared effect, or sink delivery).
+
+## Hook-bound Observer Middleware
+
+Observer middleware is separate from legacy `Middleware` and from hook-bound
+control policy. Implement the neutral observer traits exported by
+`obzenflow_core` and declare `MiddlewareDeclaration::observer(...)` from the
+factory. Observer hooks can inspect inputs, outputs, delivery outcomes, effect
+outcomes, lifecycle phases, and output commits, and may return diagnostics, but
+they cannot skip, reject, retry, recover, synthesize, pause, or abort.
+
+Supported observer surfaces are:
+
+- `SourcePoll`
+- `Handler`
+- `Stateful`
+- `Join`
+- `Effect`
+- `SinkDelivery`
+- `OutputCommit`
+- `StageLifecycle`
+- `Ingress`
+
+`OutputCommit` is observer-only. It may fail only as an output commit invariant
+failure, not as control flow.
+
+Observer implementations choose replay behavior with
+`ObserverDeterminism::Deterministic` or `ObserverDeterminism::LiveOnly`.
+Runtime dispatch applies that gate, so observer authors do not need to inspect
+`MiddlewareExecutionScope`.
 
 ## Hook-bound Control Middleware
 
@@ -275,10 +307,11 @@ impl MiddlewareFactory for MyControlFactory {
 
 Control policies live under `middleware::control::policy`. They are the
 authoring contract for middleware that controls a live I/O boundary;
-observation and structural handler middleware still implement the generic
-`Middleware` trait under `middleware::handler`. Built-in control middleware
-lives beside the policy contract under `middleware::control`, so the namespace
-reads as one control subsystem rather than a loose set of root modules.
+legacy handler-shell compatibility middleware still implements the generic
+`Middleware` trait under `middleware::handler`. Observe-only middleware uses the
+neutral observer traits described above. Built-in control middleware lives
+beside the policy contract under `middleware::control`, so the namespace reads
+as one control subsystem rather than a loose set of root modules.
 
 The policies returned from `materialize` are surface-specific:
 

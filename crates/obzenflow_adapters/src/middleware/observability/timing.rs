@@ -8,14 +8,24 @@
 //! with processing duration before they're written to the journal.
 
 use crate::middleware::{
-    context_keys::ProcessingStartNanos, ControlMiddlewareRole, ErrorAction, Middleware,
-    MiddlewareAction, MiddlewareContext, MiddlewareFactory, MiddlewareOverrideKey,
-    MiddlewarePlanContribution, SourceMiddlewarePhase, TopologyMiddlewareConfigSlot,
+    validate_attachment_request, ControlMiddlewareRole, ErrorAction, Middleware, MiddlewareAction,
+    MiddlewareAttachmentRequest, MiddlewareContext, MiddlewareDeclaration, MiddlewareFactory,
+    MiddlewareOverrideKey, MiddlewarePlanContribution, MiddlewareSurfaceAttachment,
+    MiddlewareSurfaceKind, SourceMiddlewarePhase, TopologyMiddlewareConfigSlot,
 };
 use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::time::MetricsDuration;
+use obzenflow_core::{
+    HandlerMiddlewareObserver, HandlerObserverContext, JoinMiddlewareObserver, JoinObserverContext,
+    ObserverCommitError, ObserverCommitResult, ObserverDeterminism, ObserverReport,
+    OutputCommitObserver, OutputCommitObserverContext, SourcePollObserver,
+    SourcePollObserverContext, StageId, StageObserverBundle, StatefulMiddlewareObserver,
+    StatefulObserverContext,
+};
 use obzenflow_runtime::pipeline::config::StageConfig;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 /// Middleware that measures processing time and adds it to events
 ///
@@ -23,14 +33,81 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// to provide automatic timing instrumentation.
 #[derive(Debug, Clone)]
 pub struct TimingMiddleware {
-    stage_name: String,
+    starts: Arc<Mutex<HashMap<obzenflow_core::EventId, Instant>>>,
+    output_durations: Arc<Mutex<HashMap<obzenflow_core::EventId, MetricsDuration>>>,
 }
 
 impl TimingMiddleware {
     /// Create a new timing middleware for a specific stage
-    pub fn new(stage_name: impl Into<String>) -> Self {
+    pub fn new(_stage_name: impl Into<String>) -> Self {
         Self {
-            stage_name: stage_name.into(),
+            starts: Arc::new(Mutex::new(HashMap::new())),
+            output_durations: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    pub fn bundle(stage_name: impl Into<String>, stage_id: StageId) -> StageObserverBundle {
+        let observer = Arc::new(Self::new(stage_name));
+        let mut bundle = StageObserverBundle::default();
+        bundle.handler.push(observer.clone());
+        bundle.stateful.push(observer.clone());
+        bundle.join.push(observer.clone());
+        bundle.source_poll.push(observer.clone());
+        bundle.output_commit.push(observer);
+        tracing::trace!(?stage_id, "created timing observer bundle");
+        bundle
+    }
+
+    fn remember_start(&self, event: &ChainEvent) {
+        let mut starts = self
+            .starts
+            .lock()
+            .expect("TimingMiddleware starts lock poisoned");
+        starts.insert(event.id, Instant::now());
+    }
+
+    fn duration_for_input(&self, event: &ChainEvent) -> MetricsDuration {
+        let elapsed = self
+            .starts
+            .lock()
+            .expect("TimingMiddleware starts lock poisoned")
+            .remove(&event.id)
+            .map(|start| start.elapsed())
+            .unwrap_or(Duration::ZERO);
+        MetricsDuration::from_nanos(elapsed.as_nanos().min(u64::MAX as u128) as u64)
+    }
+
+    fn stamp_outputs(&self, input: Option<&ChainEvent>, outputs: &mut [ChainEvent]) {
+        let duration = input
+            .map(|event| self.duration_for_input(event))
+            .unwrap_or(MetricsDuration::ZERO);
+        let mut output_durations = self
+            .output_durations
+            .lock()
+            .expect("TimingMiddleware output durations lock poisoned");
+        for output in outputs {
+            output.processing_info.processing_time = duration;
+            output_durations.insert(output.id, duration);
+        }
+    }
+
+    fn stamp_source_outputs(&self, poll_duration: Duration, outputs: &mut [ChainEvent]) {
+        let data_count = outputs
+            .iter()
+            .filter(|event| event.is_data())
+            .count()
+            .max(1);
+        let nanos = (poll_duration.as_nanos() / data_count as u128).min(u64::MAX as u128) as u64;
+        let duration = MetricsDuration::from_nanos(nanos);
+        let mut output_durations = self
+            .output_durations
+            .lock()
+            .expect("TimingMiddleware output durations lock poisoned");
+        for output in outputs {
+            if output.is_data() {
+                output.processing_info.processing_time = duration;
+                output_durations.insert(output.id, duration);
+            }
         }
     }
 }
@@ -45,19 +122,9 @@ impl Middleware for TimingMiddleware {
     }
 
     fn pre_handle(&self, event: &ChainEvent, ctx: &mut MiddlewareContext) -> MiddlewareAction {
-        // Record the start time in the context as nanoseconds since epoch
-        let start_nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos() as u64;
-        ctx.insert::<ProcessingStartNanos>(start_nanos);
+        let _ = ctx;
 
-        tracing::trace!(
-            "TimingMiddleware[{}]: pre_handle for event {} at {}ns",
-            self.stage_name,
-            event.id,
-            start_nanos
-        );
+        self.remember_start(event);
 
         MiddlewareAction::Continue
     }
@@ -77,39 +144,128 @@ impl Middleware for TimingMiddleware {
     }
 
     fn pre_write(&self, event: &mut ChainEvent, ctx: &MiddlewareContext) {
-        // Calculate processing time and add to event
-        if let Some(start_nanos) = ctx.get::<ProcessingStartNanos>().copied() {
-            let now_nanos = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos() as u64;
-            let duration_nanos = now_nanos - start_nanos;
-            let duration = MetricsDuration::from_nanos(duration_nanos);
+        let _ = (event, ctx);
+    }
+}
 
-            // Store duration
-            event.processing_info.processing_time = duration;
+impl HandlerMiddlewareObserver for TimingMiddleware {
+    fn label(&self) -> &'static str {
+        "timing"
+    }
 
-            tracing::debug!(
-                "TimingMiddleware[{}]: Set processing_time={} for event {}",
-                self.stage_name,
-                duration,
-                event.id,
-            );
+    fn determinism(&self) -> ObserverDeterminism {
+        ObserverDeterminism::LiveOnly
+    }
 
-            // Log warning if timing seems too low for processor stage
-            if self.stage_name.contains("processor") && duration.as_nanos() < 5_000_000 {
-                tracing::debug!(
-                    "TimingMiddleware: Processor timing seems too low: {} for event {}",
-                    duration,
-                    event.id
-                );
-            }
-        } else {
-            tracing::debug!(
-                "TimingMiddleware: No processing start time found for event {}",
-                event.id
-            );
+    fn before_handle(&self, ctx: &HandlerObserverContext<'_>) -> ObserverReport {
+        self.remember_start(ctx.input);
+        ObserverReport::empty()
+    }
+
+    fn after_handle(
+        &self,
+        ctx: &HandlerObserverContext<'_>,
+        outputs: &mut [ChainEvent],
+    ) -> ObserverReport {
+        self.stamp_outputs(Some(ctx.input), outputs);
+        ObserverReport::empty()
+    }
+}
+
+impl StatefulMiddlewareObserver for TimingMiddleware {
+    fn label(&self) -> &'static str {
+        "timing"
+    }
+
+    fn determinism(&self) -> ObserverDeterminism {
+        ObserverDeterminism::LiveOnly
+    }
+
+    fn before_state_accumulate(&self, ctx: &StatefulObserverContext<'_>) -> ObserverReport {
+        if let Some(input) = ctx.input {
+            self.remember_start(input);
         }
+        ObserverReport::empty()
+    }
+
+    fn after_state_emit(
+        &self,
+        ctx: &StatefulObserverContext<'_>,
+        outputs: &mut [ChainEvent],
+    ) -> ObserverReport {
+        self.stamp_outputs(ctx.input, outputs);
+        ObserverReport::empty()
+    }
+}
+
+impl JoinMiddlewareObserver for TimingMiddleware {
+    fn label(&self) -> &'static str {
+        "timing"
+    }
+
+    fn determinism(&self) -> ObserverDeterminism {
+        ObserverDeterminism::LiveOnly
+    }
+
+    fn before_join_input(&self, ctx: &JoinObserverContext<'_>) -> ObserverReport {
+        if let Some(input) = ctx.input {
+            self.remember_start(input);
+        }
+        ObserverReport::empty()
+    }
+
+    fn after_join_output(
+        &self,
+        ctx: &JoinObserverContext<'_>,
+        outputs: &mut [ChainEvent],
+    ) -> ObserverReport {
+        self.stamp_outputs(ctx.input, outputs);
+        ObserverReport::empty()
+    }
+}
+
+impl SourcePollObserver for TimingMiddleware {
+    fn label(&self) -> &'static str {
+        "timing"
+    }
+
+    fn determinism(&self) -> ObserverDeterminism {
+        ObserverDeterminism::LiveOnly
+    }
+
+    fn after_source_poll(
+        &self,
+        ctx: &SourcePollObserverContext<'_>,
+        outputs: &mut [ChainEvent],
+    ) -> ObserverReport {
+        self.stamp_source_outputs(ctx.poll_duration, outputs);
+        ObserverReport::empty()
+    }
+}
+
+impl OutputCommitObserver for TimingMiddleware {
+    fn label(&self) -> &'static str {
+        "timing"
+    }
+
+    fn determinism(&self) -> ObserverDeterminism {
+        ObserverDeterminism::LiveOnly
+    }
+
+    fn before_output_commit(
+        &self,
+        _ctx: &OutputCommitObserverContext<'_>,
+        event: &mut ChainEvent,
+    ) -> ObserverCommitResult {
+        if let Some(duration) = self
+            .output_durations
+            .lock()
+            .expect("TimingMiddleware output durations lock poisoned")
+            .remove(&event.id)
+        {
+            event.processing_info.processing_time = duration;
+        }
+        Ok(ObserverReport::empty())
     }
 }
 
@@ -160,6 +316,60 @@ impl MiddlewareFactory for TimingMiddlewareFactory {
     ) -> crate::middleware::MiddlewareFactoryResult<Box<dyn Middleware>> {
         Ok(Box::new(TimingMiddleware::new(&config.name)))
     }
+
+    fn declaration(&self) -> MiddlewareDeclaration {
+        MiddlewareDeclaration::observer_with_family(
+            self.label(),
+            self.override_key().family_label(),
+            vec![
+                MiddlewareSurfaceKind::SourcePoll,
+                MiddlewareSurfaceKind::Handler,
+                MiddlewareSurfaceKind::Stateful,
+                MiddlewareSurfaceKind::Join,
+                MiddlewareSurfaceKind::OutputCommit,
+            ],
+        )
+    }
+
+    fn materialize(
+        &self,
+        request: MiddlewareAttachmentRequest<'_>,
+        context: &crate::middleware::MiddlewareMaterializationContext<'_>,
+    ) -> crate::middleware::MiddlewareFactoryResult<MiddlewareSurfaceAttachment> {
+        let declaration = self.declaration();
+        validate_attachment_request(&declaration, &request).map_err(|err| {
+            crate::middleware::MiddlewareFactoryError::materialization_failed(
+                self.label(),
+                &context.config.name,
+                err,
+            )
+        })?;
+        let observer = Arc::new(TimingMiddleware::new(&context.config.name));
+        match request.surface.kind() {
+            MiddlewareSurfaceKind::SourcePoll => {
+                Ok(MiddlewareSurfaceAttachment::SourcePollObserver(observer))
+            }
+            MiddlewareSurfaceKind::Handler => {
+                Ok(MiddlewareSurfaceAttachment::HandlerObserver(observer))
+            }
+            MiddlewareSurfaceKind::Stateful => {
+                Ok(MiddlewareSurfaceAttachment::StatefulObserver(observer))
+            }
+            MiddlewareSurfaceKind::Join => Ok(MiddlewareSurfaceAttachment::JoinObserver(observer)),
+            MiddlewareSurfaceKind::OutputCommit => {
+                Ok(MiddlewareSurfaceAttachment::OutputCommitObserver(observer))
+            }
+            surface => Err(
+                crate::middleware::MiddlewareFactoryError::materialization_failed(
+                    self.label(),
+                    &context.config.name,
+                    ObserverCommitError::new(format!(
+                        "unsupported timing observer surface {surface:?}"
+                    )),
+                ),
+            ),
+        }
+    }
 }
 
 /// Convenience function to create a timing middleware factory
@@ -178,7 +388,6 @@ mod tests {
     #[test]
     fn test_timing_middleware_adds_processing_time() {
         let middleware = TimingMiddleware::new("test_stage");
-        let mut ctx = MiddlewareContext::live_handler();
 
         let event = ChainEventFactory::data_event(
             WriterId::from(StageId::new()),
@@ -186,23 +395,13 @@ mod tests {
             json!({"data": "test"}),
         );
 
-        // Pre-handle starts the timer
-        let action = middleware.pre_handle(&event, &mut ctx);
-        assert!(matches!(action, MiddlewareAction::Continue));
-
-        // Verify start time was recorded
-        assert!(ctx.get::<ProcessingStartNanos>().is_some());
-
-        // Simulate some processing time
+        middleware.remember_start(&event);
         thread::sleep(MetricsDuration::from_millis(10).to_std());
 
-        // Pre-write should add the timing
         let mut result_event = event.clone();
-        middleware.pre_write(&mut result_event, &ctx);
+        middleware.stamp_outputs(Some(&event), std::slice::from_mut(&mut result_event));
 
-        // Check that processing time was added (in nanoseconds)
         assert!(result_event.processing_info.processing_time.as_nanos() >= 9_000_000);
-        // Allow for timing variance
     }
 
     #[test]

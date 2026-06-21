@@ -78,6 +78,7 @@ impl<H: AsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
         let context = FiniteSourceContext::<H>::new(FiniteSourceContextInit {
             stage_id: self.config.stage_id,
             stage_name: self.config.stage_name.clone(),
+            observers: self.config.observers.clone(),
             flow_name: self.config.flow_name.clone(),
             flow_id: self.resources.flow_id,
             data_journal: self.resources.data_journal.clone(),

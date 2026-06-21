@@ -5,7 +5,7 @@
 //! Join stage configuration
 
 use crate::stages::common::control_strategies::SignalGate;
-use obzenflow_core::StageId;
+use obzenflow_core::{StageId, StageObserverBundle};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -34,6 +34,10 @@ pub struct JoinConfig {
 
     /// Unique name for this join stage
     pub stage_name: String,
+
+    /// Runtime observer bundle attached to this stage.
+    #[serde(skip, default)]
+    pub observers: StageObserverBundle,
 
     /// Flow name
     pub flow_name: String,
@@ -72,6 +76,7 @@ impl JoinConfig {
         Self {
             stage_id,
             stage_name: stage_name.into(),
+            observers: StageObserverBundle::default(),
             flow_name: flow_name.into(),
             reference_source_id,
             stream_source_id,

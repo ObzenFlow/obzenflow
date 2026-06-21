@@ -17,14 +17,17 @@ use crate::replay::ReplayArchive;
 use crate::stages::common::control_strategies::SignalGate;
 use crate::stages::common::handlers::UnifiedSinkHandler;
 use crate::stages::common::heartbeat::HeartbeatHandle;
+use crate::stages::common::observers::run_stage_lifecycle_observers;
 use crate::stages::common::supervision::lifecycle_actions;
 use crate::stages::resources_builder::BoundSubscriptionFactory;
 use obzenflow_core::event::context::causality_context::CausalityContext;
-use obzenflow_core::event::context::{FlowContext, StageType};
+use obzenflow_core::event::context::{FlowContext, MiddlewareExecutionScope, StageType};
 use obzenflow_core::event::payloads::delivery_payload::DeliveryPayload;
 use obzenflow_core::event::{ChainEventFactory, EventEnvelope, SystemEvent};
 use obzenflow_core::journal::Journal;
-use obzenflow_core::{ChainEvent, FlowId, StageId, WriterId};
+use obzenflow_core::{
+    ChainEvent, FlowId, StageId, StageLifecyclePhase, StageObserverBundle, WriterId,
+};
 use obzenflow_fsm::{EventVariant, FsmAction, FsmContext, StateVariant};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -345,6 +348,9 @@ pub struct JournalSinkContext<H: UnifiedSinkHandler> {
     /// data-event `consume_report` attempt only.
     pub sink_delivery_boundary: Option<Arc<dyn super::boundary::SinkDeliveryBoundary>>,
 
+    /// Observe-only middleware hooks for sink delivery.
+    pub observers: StageObserverBundle,
+
     /// Durable per-stage signal-strategy scratch (FLOWIP-115c).
     pub processing_context: crate::stages::common::control_strategies::ProcessingContext,
 
@@ -429,6 +435,34 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAct
                     &ctx.system_journal,
                 )
                 .await;
+                let flow_context = FlowContext {
+                    flow_name: ctx.flow_name.clone(),
+                    flow_id: ctx.flow_id.to_string(),
+                    stage_name: ctx.stage_name.clone(),
+                    stage_id: ctx.stage_id,
+                    stage_type: StageType::Sink,
+                };
+                let scope = if ctx.replay_archive.is_some() {
+                    MiddlewareExecutionScope::StrictReplayHandler
+                } else {
+                    MiddlewareExecutionScope::LiveHandler
+                };
+                run_stage_lifecycle_observers(
+                    &ctx.observers,
+                    ctx.stage_id,
+                    &ctx.stage_name,
+                    &flow_context,
+                    scope,
+                    StageLifecyclePhase::Running,
+                    &ctx.data_journal,
+                    &ctx.instrumentation,
+                )
+                .await
+                .map_err(|e| {
+                    obzenflow_fsm::FsmError::HandlerError(format!(
+                        "Sink lifecycle observer failed: {e}"
+                    ))
+                })?;
                 Ok(())
             }
 
@@ -447,6 +481,34 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAct
                     ctx.instrumentation.as_ref(),
                 )
                 .await;
+                let flow_context = FlowContext {
+                    flow_name: ctx.flow_name.clone(),
+                    flow_id: ctx.flow_id.to_string(),
+                    stage_name: ctx.stage_name.clone(),
+                    stage_id: ctx.stage_id,
+                    stage_type: StageType::Sink,
+                };
+                let scope = if ctx.replay_archive.is_some() {
+                    MiddlewareExecutionScope::StrictReplayHandler
+                } else {
+                    MiddlewareExecutionScope::LiveHandler
+                };
+                run_stage_lifecycle_observers(
+                    &ctx.observers,
+                    ctx.stage_id,
+                    &ctx.stage_name,
+                    &flow_context,
+                    scope,
+                    StageLifecyclePhase::Completed,
+                    &ctx.data_journal,
+                    &ctx.instrumentation,
+                )
+                .await
+                .map_err(|e| {
+                    obzenflow_fsm::FsmError::HandlerError(format!(
+                        "Sink lifecycle observer failed: {e}"
+                    ))
+                })?;
                 Ok(())
             }
 
@@ -462,6 +524,34 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAct
                     ctx.instrumentation.as_ref(),
                 )
                 .await;
+                let flow_context = FlowContext {
+                    flow_name: ctx.flow_name.clone(),
+                    flow_id: ctx.flow_id.to_string(),
+                    stage_name: ctx.stage_name.clone(),
+                    stage_id: ctx.stage_id,
+                    stage_type: StageType::Sink,
+                };
+                let scope = if ctx.replay_archive.is_some() {
+                    MiddlewareExecutionScope::StrictReplayHandler
+                } else {
+                    MiddlewareExecutionScope::LiveHandler
+                };
+                run_stage_lifecycle_observers(
+                    &ctx.observers,
+                    ctx.stage_id,
+                    &ctx.stage_name,
+                    &flow_context,
+                    scope,
+                    StageLifecyclePhase::Failed,
+                    &ctx.data_journal,
+                    &ctx.instrumentation,
+                )
+                .await
+                .map_err(|e| {
+                    obzenflow_fsm::FsmError::HandlerError(format!(
+                        "Sink lifecycle observer failed: {e}"
+                    ))
+                })?;
                 Ok(())
             }
 

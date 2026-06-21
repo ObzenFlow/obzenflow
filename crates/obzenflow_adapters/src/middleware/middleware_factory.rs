@@ -255,6 +255,7 @@ pub trait MiddlewareFactory: Send + Sync {
             StageType::Transform,
             StageType::Sink,
             StageType::Stateful,
+            StageType::Join,
         ]
     }
 

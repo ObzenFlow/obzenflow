@@ -15,14 +15,14 @@ use obzenflow_adapters::middleware::control::ControlMiddlewareAggregator;
 use obzenflow_adapters::middleware::{
     validate_middleware_safety, AsyncFiniteSourceHandlerExt, AsyncInfiniteSourceHandlerExt,
     AsyncTransformHandlerExt, ControlMiddlewareRole, FiniteSourceHandlerExt,
-    InfiniteSourceHandlerExt, JoinHandlerMiddlewareExt, Middleware, MiddlewareDeclarationIndex,
-    MiddlewareFactory, MiddlewareSurfaceKind, OutcomeEnrichmentMiddleware,
-    PerSinkDeliveryPolicyBoundary, PerSourcePolicyBoundary, SinkHandlerExt, SinkPolicy,
-    StatefulHandlerMiddlewareExt, SystemEnrichmentMiddleware, TimingMiddleware,
-    TopologyMiddlewareConfigSlot, TransformHandlerExt, UnifiedMiddlewareTransform,
+    InfiniteSourceHandlerExt, JoinHandlerMiddlewareExt, Middleware, MiddlewareDeclaration,
+    MiddlewareDeclarationIndex, MiddlewareFactory, MiddlewareSurfaceAttachment,
+    MiddlewareSurfaceKind, PerSinkDeliveryPolicyBoundary, PerSourcePolicyBoundary, SinkHandlerExt,
+    SinkPolicy, StatefulHandlerMiddlewareExt, TimingMiddleware, TopologyMiddlewareConfigSlot,
+    TransformHandlerExt, UnifiedMiddlewareTransform,
 };
 use obzenflow_core::event::context::StageType;
-use obzenflow_core::{StageId, WriterId};
+use obzenflow_core::{StageId, StageObserverBundle, WriterId};
 use obzenflow_runtime::{
     effects::{
         EffectDeclaration, EffectPortRegistry, EffectSafety, IdempotencyKeyPolicy,
@@ -83,31 +83,142 @@ fn factory_declares_circuit_breaker(factory: &dyn MiddlewareFactory) -> bool {
 #[doc(hidden)]
 pub const BINDING_DERIVED_NAME_SENTINEL: &str = "__obzenflow_binding_derived_name__";
 
-/// Create system middleware for a stage
 fn create_system_middleware(
+    _config: &StageConfig,
+    _stage_type: StageType,
+) -> Vec<Box<dyn Middleware>> {
+    Vec::new()
+}
+
+fn create_system_observers(config: &StageConfig) -> StageObserverBundle {
+    TimingMiddleware::bundle(config.name.clone(), config.stage_id)
+}
+
+fn create_legacy_shell(
+    factory: &dyn MiddlewareFactory,
+    config: &StageConfig,
+    control_middleware: Arc<ControlMiddlewareAggregator>,
+) -> StageCreationResult<Box<dyn Middleware>> {
+    let declaration = factory.declaration();
+    if !declaration.is_legacy_shell() {
+        return Err(format!(
+            "middleware '{}' declares hook surfaces {:?} and cannot fall back to legacy create() on stage '{}'",
+            factory.label(),
+            declaration.surfaces,
+            config.name
+        )
+        .into());
+    }
+    Ok(factory.create(config, control_middleware)?)
+}
+
+fn observer_surfaces_for_stage(stage_type: StageType) -> &'static [MiddlewareSurfaceKind] {
+    match stage_type {
+        StageType::FiniteSource | StageType::InfiniteSource => &[
+            MiddlewareSurfaceKind::SourcePoll,
+            MiddlewareSurfaceKind::OutputCommit,
+            MiddlewareSurfaceKind::StageLifecycle,
+        ],
+        StageType::Transform => &[
+            MiddlewareSurfaceKind::Handler,
+            MiddlewareSurfaceKind::OutputCommit,
+            MiddlewareSurfaceKind::StageLifecycle,
+        ],
+        StageType::Stateful => &[
+            MiddlewareSurfaceKind::Stateful,
+            MiddlewareSurfaceKind::OutputCommit,
+            MiddlewareSurfaceKind::StageLifecycle,
+        ],
+        StageType::Join => &[
+            MiddlewareSurfaceKind::Join,
+            MiddlewareSurfaceKind::OutputCommit,
+            MiddlewareSurfaceKind::StageLifecycle,
+        ],
+        StageType::Sink => &[
+            MiddlewareSurfaceKind::SinkDelivery,
+            MiddlewareSurfaceKind::StageLifecycle,
+        ],
+    }
+}
+
+fn push_observer_attachment(
+    observers: &mut StageObserverBundle,
+    attachment: MiddlewareSurfaceAttachment,
+) -> StageCreationResult<()> {
+    match attachment {
+        MiddlewareSurfaceAttachment::SourcePollObserver(observer) => {
+            observers.source_poll.push(observer);
+        }
+        MiddlewareSurfaceAttachment::HandlerObserver(observer) => {
+            observers.handler.push(observer);
+        }
+        MiddlewareSurfaceAttachment::StatefulObserver(observer) => {
+            observers.stateful.push(observer);
+        }
+        MiddlewareSurfaceAttachment::JoinObserver(observer) => {
+            observers.join.push(observer);
+        }
+        MiddlewareSurfaceAttachment::OutputCommitObserver(observer) => {
+            observers.output_commit.push(observer);
+        }
+        MiddlewareSurfaceAttachment::StageLifecycleObserver(observer) => {
+            observers.stage_lifecycle.push(observer);
+        }
+        MiddlewareSurfaceAttachment::SinkDeliveryObserver(observer) => {
+            observers.sink_delivery.push(observer);
+        }
+        MiddlewareSurfaceAttachment::EffectObserver(observer) => {
+            observers.effect.push(observer);
+        }
+        MiddlewareSurfaceAttachment::IngressObserver(observer) => {
+            observers.ingress.push(observer);
+        }
+        _ => {
+            return Err(
+                "middleware materialized a control attachment while planning observers".into(),
+            )
+        }
+    }
+    Ok(())
+}
+
+fn declaration_has_stage_observer_surface(
+    declaration: &MiddlewareDeclaration,
+    stage_type: StageType,
+) -> bool {
+    observer_surfaces_for_stage(stage_type)
+        .iter()
+        .any(|surface| declaration.supports(*surface))
+}
+
+fn materialize_effect_observers_for_declarations(
+    observers: &mut StageObserverBundle,
+    factory: &dyn MiddlewareFactory,
     config: &StageConfig,
     stage_type: StageType,
-) -> Vec<Box<dyn Middleware>> {
-    tracing::info!(
-        "Creating system middleware for stage '{}' of type {:?}",
-        config.name,
-        stage_type
-    );
-    vec![
-        Box::new(TimingMiddleware::new(&config.name)),
-        Box::new(SystemEnrichmentMiddleware::new(
-            config.flow_name.clone(),
-            config.flow_name.clone(), // flow_id same as flow_name for now
-            config.name.clone(),
-            config.stage_id,
+    control_middleware: &Arc<ControlMiddlewareAggregator>,
+    origin: &obzenflow_adapters::middleware::MiddlewareOrigin,
+    declaration_index: MiddlewareDeclarationIndex,
+    effect_declarations: &[EffectDeclaration],
+) -> StageCreationResult<()> {
+    for effect in effect_declarations {
+        let attachment = crate::dsl::binder::materialize_effect_observer(
+            factory,
+            config,
             stage_type,
-        )),
-        Box::new(OutcomeEnrichmentMiddleware::new(&config.name)),
-    ]
+            control_middleware,
+            effect.effect_type,
+            origin,
+            declaration_index,
+        )?;
+        push_observer_attachment(observers, attachment)?;
+    }
+    Ok(())
 }
 
 struct SourceMiddlewareBinding {
     all_middleware: Vec<Box<dyn Middleware>>,
+    observers: StageObserverBundle,
     source_boundary: Option<Arc<dyn SourceBoundary>>,
     /// FLOWIP-115b: the source completion gate companion supplied by a
     /// hook-bound source control middleware (the circuit breaker), sharing its
@@ -115,6 +226,90 @@ struct SourceMiddlewareBinding {
     completion_gate: Option<Arc<dyn CompletionGate>>,
     expects_circuit_breaker: bool,
     expects_rate_limiter: bool,
+}
+
+struct MiddlewarePlacement {
+    legacy_shell: Vec<Box<dyn Middleware>>,
+    observers: StageObserverBundle,
+    expects_circuit_breaker: bool,
+    expects_rate_limiter: bool,
+}
+
+fn plan_stage_middleware(
+    config: &StageConfig,
+    stage_type: StageType,
+    resolved: crate::middleware_resolution::ResolvedMiddleware,
+    control_middleware: &Arc<ControlMiddlewareAggregator>,
+) -> StageCreationResult<MiddlewarePlacement> {
+    let expects_circuit_breaker = resolved
+        .middleware
+        .iter()
+        .any(|spec| factory_declares_circuit_breaker(spec.factory.as_ref()));
+    let expects_rate_limiter = resolved.middleware.iter().any(|spec| {
+        spec.factory.topology_config_slot() == Some(TopologyMiddlewareConfigSlot::RateLimiter)
+    });
+
+    let mut legacy_shell = create_system_middleware(config, stage_type);
+    let mut observers = create_system_observers(config);
+    let observer_surfaces = observer_surfaces_for_stage(stage_type);
+
+    for (middleware_index, spec) in resolved.middleware.into_iter().enumerate() {
+        let declaration = spec.factory.declaration();
+        if declaration.is_observer() {
+            let mut placed = false;
+            let origin = crate::dsl::binder::middleware_origin_from_source(&spec.source);
+            for surface in observer_surfaces {
+                if !declaration.supports(*surface) {
+                    continue;
+                }
+                let attachment = crate::dsl::binder::materialize_observer(
+                    spec.factory.as_ref(),
+                    config,
+                    stage_type,
+                    control_middleware,
+                    *surface,
+                    &origin,
+                    MiddlewareDeclarationIndex::resolved(middleware_index),
+                )?;
+                push_observer_attachment(&mut observers, attachment)?;
+                placed = true;
+            }
+            if !placed {
+                return Err(format!(
+                    "observer middleware '{}' declares surfaces {:?}, but stage '{}' ({stage_type:?}) has no compatible observer surface",
+                    declaration.label,
+                    declaration.surfaces,
+                    config.name
+                )
+                .into());
+            }
+            continue;
+        }
+
+        if declaration.is_legacy_shell() {
+            legacy_shell.push(create_legacy_shell(
+                spec.factory.as_ref(),
+                config,
+                control_middleware.clone(),
+            )?);
+            continue;
+        }
+
+        return Err(format!(
+            "middleware '{}' declares hook surfaces {:?}, but stage '{}' ({stage_type:?}) has no compatible placement",
+            declaration.label,
+            declaration.surfaces,
+            config.name
+        )
+        .into());
+    }
+
+    Ok(MiddlewarePlacement {
+        legacy_shell,
+        observers,
+        expects_circuit_breaker,
+        expects_rate_limiter,
+    })
 }
 
 fn build_source_middleware_and_register_policies(
@@ -126,6 +321,7 @@ fn build_source_middleware_and_register_policies(
     control_middleware: &Arc<ControlMiddlewareAggregator>,
 ) -> StageCreationResult<SourceMiddlewareBinding> {
     let mut all_middleware = create_system_middleware(config, stage_type);
+    let mut observers = create_system_observers(config);
     let expects_circuit_breaker = resolved
         .middleware
         .iter()
@@ -142,6 +338,36 @@ fn build_source_middleware_and_register_policies(
 
     for (middleware_index, spec) in resolved.middleware.into_iter().enumerate() {
         let declaration = spec.factory.declaration();
+        if declaration.is_observer() {
+            let mut placed = false;
+            let origin = crate::dsl::binder::middleware_origin_from_source(&spec.source);
+            for surface in observer_surfaces_for_stage(stage_type) {
+                if !declaration.supports(*surface) {
+                    continue;
+                }
+                let attachment = crate::dsl::binder::materialize_observer(
+                    spec.factory.as_ref(),
+                    config,
+                    stage_type,
+                    control_middleware,
+                    *surface,
+                    &origin,
+                    MiddlewareDeclarationIndex::resolved(middleware_index),
+                )?;
+                push_observer_attachment(&mut observers, attachment)?;
+                placed = true;
+            }
+            if !placed {
+                return Err(format!(
+                    "observer middleware '{}' declares surfaces {:?}, but source stage '{}' has no compatible observer surface",
+                    declaration.label,
+                    declaration.surfaces,
+                    config.name
+                )
+                .into());
+            }
+            continue;
+        }
 
         // FLOWIP-115d AC42: a source-backed hosted ingress source binds a control
         // middleware that declares Ingress to the ingress boundary, not source
@@ -205,7 +431,11 @@ fn build_source_middleware_and_register_policies(
                 .into());
             }
             ControlMiddlewareRole::None => {
-                all_middleware.push(spec.factory.create(config, control_middleware.clone())?);
+                all_middleware.push(create_legacy_shell(
+                    spec.factory.as_ref(),
+                    config,
+                    control_middleware.clone(),
+                )?);
             }
         }
     }
@@ -235,6 +465,7 @@ fn build_source_middleware_and_register_policies(
 
     Ok(SourceMiddlewareBinding {
         all_middleware,
+        observers,
         source_boundary,
         completion_gate,
         expects_circuit_breaker,
@@ -570,6 +801,7 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> S
             flow_name: config.flow_name.clone(),
             control_strategy: source_binding.completion_gate,
             source_boundary: source_binding.source_boundary,
+            observers: source_binding.observers,
         };
 
         // Use the builder to create the handle
@@ -726,6 +958,7 @@ impl<H: AsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
             flow_name: config.flow_name.clone(),
             control_strategy: source_binding.completion_gate,
             source_boundary: source_binding.source_boundary,
+            observers: source_binding.observers,
         };
 
         // Use the builder to create the handle
@@ -845,6 +1078,7 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
             flow_name: config.flow_name.clone(),
             control_strategy: source_binding.completion_gate,
             source_boundary: source_binding.source_boundary,
+            observers: source_binding.observers,
         };
 
         // Use the builder to create the handle
@@ -1003,6 +1237,7 @@ impl<H: AsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
             flow_name: config.flow_name.clone(),
             control_strategy: source_binding.completion_gate,
             source_boundary: source_binding.source_boundary,
+            observers: source_binding.observers,
         };
 
         let handle =
@@ -1098,31 +1333,16 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Stag
         let control_provider: Arc<dyn obzenflow_runtime::control_plane::ControlPlaneProvider> =
             control_middleware.clone();
 
-        // Create system middleware with instrumentation
-        let mut all_middleware = create_system_middleware(&config, StageType::Transform);
-
-        let expects_circuit_breaker = resolved
-            .middleware
-            .iter()
-            .any(|spec| factory_declares_circuit_breaker(spec.factory.as_ref()));
-        let expects_rate_limiter = resolved.middleware.iter().any(|spec| {
-            spec.factory.topology_config_slot() == Some(TopologyMiddlewareConfigSlot::RateLimiter)
-        });
-
-        // Add resolved user middleware
-        let user_middleware: Vec<Box<dyn Middleware>> = resolved
-            .middleware
-            .into_iter()
-            .map(|spec| spec.factory.create(&config, control_middleware.clone()))
-            .collect::<Result<_, _>>()?;
-        all_middleware.extend(user_middleware);
+        let placement =
+            plan_stage_middleware(&config, StageType::Transform, resolved, &control_middleware)?;
+        let all_middleware = placement.legacy_shell;
 
         instrumentation
             .bind_control_plane(
                 &config.stage_id,
                 &control_provider,
-                expects_circuit_breaker,
-                expects_rate_limiter,
+                placement.expects_circuit_breaker,
+                placement.expects_rate_limiter,
             )
             .map_err(|e| e.to_string())?;
         let instrumentation = Arc::new(instrumentation);
@@ -1140,6 +1360,7 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Stag
             stage_id: config.stage_id,
             stage_name: config.name.clone(),
             flow_name: config.flow_name.clone(),
+            observers: placement.observers,
             control_strategy: Some(control_strategy),
             upstream_stages: resources.upstream_stages.clone(),
             cycle_guard: config.cycle_guard,
@@ -1241,31 +1462,16 @@ impl<H: AsyncTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
         let control_provider: Arc<dyn obzenflow_runtime::control_plane::ControlPlaneProvider> =
             control_middleware.clone();
 
-        // Create system middleware with instrumentation
-        let mut all_middleware = create_system_middleware(&config, StageType::Transform);
-
-        let expects_circuit_breaker = resolved
-            .middleware
-            .iter()
-            .any(|spec| factory_declares_circuit_breaker(spec.factory.as_ref()));
-        let expects_rate_limiter = resolved.middleware.iter().any(|spec| {
-            spec.factory.topology_config_slot() == Some(TopologyMiddlewareConfigSlot::RateLimiter)
-        });
-
-        // Add resolved user middleware
-        let user_middleware: Vec<Box<dyn Middleware>> = resolved
-            .middleware
-            .into_iter()
-            .map(|spec| spec.factory.create(&config, control_middleware.clone()))
-            .collect::<Result<_, _>>()?;
-        all_middleware.extend(user_middleware);
+        let placement =
+            plan_stage_middleware(&config, StageType::Transform, resolved, &control_middleware)?;
+        let all_middleware = placement.legacy_shell;
 
         instrumentation
             .bind_control_plane(
                 &config.stage_id,
                 &control_provider,
-                expects_circuit_breaker,
-                expects_rate_limiter,
+                placement.expects_circuit_breaker,
+                placement.expects_rate_limiter,
             )
             .map_err(|e| e.to_string())?;
         let instrumentation = Arc::new(instrumentation);
@@ -1283,6 +1489,7 @@ impl<H: AsyncTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
             stage_id: config.stage_id,
             stage_name: config.name.clone(),
             flow_name: config.flow_name.clone(),
+            observers: placement.observers,
             control_strategy: Some(control_strategy),
             upstream_stages: resources.upstream_stages.clone(),
             cycle_guard: config.cycle_guard,
@@ -1443,8 +1650,26 @@ impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
         // must name the guarded effect per entry.
         let mut shell_specs = Vec::new();
         let mut transitional_policy_specs = Vec::new();
+        let mut effect_observers = StageObserverBundle::default();
         for (middleware_index, spec) in resolved.middleware.into_iter().enumerate() {
-            if spec.factory.kind() == obzenflow_adapters::middleware::MiddlewareKind::Policy {
+            let declaration = spec.factory.declaration();
+            if declaration.is_observer() && declaration.supports(MiddlewareSurfaceKind::Effect) {
+                let origin = crate::dsl::binder::middleware_origin_from_source(&spec.source);
+                materialize_effect_observers_for_declarations(
+                    &mut effect_observers,
+                    spec.factory.as_ref(),
+                    &config,
+                    StageType::Transform,
+                    &control_middleware,
+                    &origin,
+                    MiddlewareDeclarationIndex::resolved(middleware_index),
+                    &effect_declarations,
+                )?;
+                if declaration_has_stage_observer_surface(&declaration, StageType::Transform) {
+                    shell_specs.push(spec);
+                }
+            } else if spec.factory.kind() == obzenflow_adapters::middleware::MiddlewareKind::Policy
+            {
                 transitional_policy_specs.push((middleware_index, spec));
             } else {
                 shell_specs.push(spec);
@@ -1508,19 +1733,30 @@ impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
             .map(|(effect_type, chain)| (effect_type, Arc::new(chain)))
             .collect();
 
-        let mut all_middleware = create_system_middleware(&config, StageType::Transform);
-
-        let user_middleware: Vec<Box<dyn Middleware>> = shell_specs
-            .into_iter()
-            .map(|spec| spec.factory.create(&config, control_middleware.clone()))
-            .collect::<Result<_, _>>()?;
-        all_middleware.extend(user_middleware);
+        let placement = plan_stage_middleware(
+            &config,
+            StageType::Transform,
+            crate::middleware_resolution::ResolvedMiddleware {
+                middleware: shell_specs,
+                overrides: Vec::new(),
+                warnings: Vec::new(),
+            },
+            &control_middleware,
+        )?;
+        let mut observers = placement.observers;
+        observers.extend(effect_observers);
+        let all_middleware = placement.legacy_shell;
 
         // Stage-level control binding covers shell instances only; per-effect
         // instances register under their effect key and surface through the
         // per-effect snapshot extension (FLOWIP-120c phase 4).
         instrumentation
-            .bind_control_plane(&config.stage_id, &control_provider, false, false)
+            .bind_control_plane(
+                &config.stage_id,
+                &control_provider,
+                placement.expects_circuit_breaker,
+                placement.expects_rate_limiter,
+            )
             .map_err(|e| e.to_string())?;
         let instrumentation = Arc::new(instrumentation);
 
@@ -1528,6 +1764,7 @@ impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
             stage_id: config.stage_id,
             stage_name: config.name.clone(),
             flow_name: config.flow_name.clone(),
+            observers,
             control_strategy: Some(control_strategy),
             upstream_stages: resources.upstream_stages.clone(),
             cycle_guard: config.cycle_guard,
@@ -1649,9 +1886,39 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
         // sink-delivery surface is materialized into a sink policy composed at
         // the delivery boundary; everything else stays on the handler shell.
         let mut sink_policies: Vec<Arc<dyn SinkPolicy>> = Vec::new();
+        let mut observers = StageObserverBundle::default();
         for (middleware_index, spec) in resolved.middleware.into_iter().enumerate() {
             let declaration = spec.factory.declaration();
-            if declaration.is_control() && declaration.supports(MiddlewareSurfaceKind::SinkDelivery)
+            if declaration.is_observer() {
+                let mut placed = false;
+                let origin = crate::dsl::binder::middleware_origin_from_source(&spec.source);
+                for surface in observer_surfaces_for_stage(StageType::Sink) {
+                    if !declaration.supports(*surface) {
+                        continue;
+                    }
+                    let attachment = crate::dsl::binder::materialize_observer(
+                        spec.factory.as_ref(),
+                        &config,
+                        StageType::Sink,
+                        &control_middleware,
+                        *surface,
+                        &origin,
+                        MiddlewareDeclarationIndex::resolved(middleware_index),
+                    )?;
+                    push_observer_attachment(&mut observers, attachment)?;
+                    placed = true;
+                }
+                if !placed {
+                    return Err(format!(
+                        "observer middleware '{}' declares surfaces {:?}, but sink stage '{}' has no compatible observer surface",
+                        declaration.label,
+                        declaration.surfaces,
+                        config.name
+                    )
+                    .into());
+                }
+            } else if declaration.is_control()
+                && declaration.supports(MiddlewareSurfaceKind::SinkDelivery)
             {
                 let origin = crate::dsl::binder::middleware_origin_from_source(&spec.source);
                 let policy = crate::dsl::binder::materialize_sink_delivery(
@@ -1664,7 +1931,11 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
                 )?;
                 sink_policies.push(policy);
             } else {
-                all_middleware.push(spec.factory.create(&config, control_middleware.clone())?);
+                all_middleware.push(create_legacy_shell(
+                    spec.factory.as_ref(),
+                    &config,
+                    control_middleware.clone(),
+                )?);
             }
         }
         let sink_delivery_boundary: Option<Arc<dyn SinkDeliveryBoundary>> =
@@ -1703,6 +1974,7 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
             flush_interval_ms: None,
             control_strategy: Some(control_strategy),
             sink_delivery_boundary,
+            observers,
         };
 
         // Use the builder to create the handle
@@ -2007,31 +2279,16 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Stage
         let control_provider: Arc<dyn obzenflow_runtime::control_plane::ControlPlaneProvider> =
             control_middleware.clone();
 
-        // Create system middleware with instrumentation (FLOWIP-080o-part-2)
-        let mut all_middleware = create_system_middleware(&config, StageType::Stateful);
-
-        let expects_circuit_breaker = resolved
-            .middleware
-            .iter()
-            .any(|spec| factory_declares_circuit_breaker(spec.factory.as_ref()));
-        let expects_rate_limiter = resolved.middleware.iter().any(|spec| {
-            spec.factory.topology_config_slot() == Some(TopologyMiddlewareConfigSlot::RateLimiter)
-        });
-
-        // Add resolved user middleware
-        let user_middleware: Vec<Box<dyn Middleware>> = resolved
-            .middleware
-            .into_iter()
-            .map(|spec| spec.factory.create(&config, control_middleware.clone()))
-            .collect::<Result<_, _>>()?;
-        all_middleware.extend(user_middleware);
+        let placement =
+            plan_stage_middleware(&config, StageType::Stateful, resolved, &control_middleware)?;
+        let all_middleware = placement.legacy_shell;
 
         instrumentation
             .bind_control_plane(
                 &config.stage_id,
                 &control_provider,
-                expects_circuit_breaker,
-                expects_rate_limiter,
+                placement.expects_circuit_breaker,
+                placement.expects_rate_limiter,
             )
             .map_err(|e| e.to_string())?;
         let instrumentation = Arc::new(instrumentation);
@@ -2050,6 +2307,7 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Stage
             stage_id: config.stage_id,
             stage_name: config.name.clone(),
             flow_name: config.flow_name.clone(),
+            observers: placement.observers,
             emit_interval: self.emit_interval,
             control_strategy: Some(control_strategy),
             upstream_stages: resources.upstream_stages.clone(),
@@ -2170,7 +2428,7 @@ impl<H: EffectfulStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
     ) -> StageCreationResult<BoxedStageHandle> {
         let effect_declarations = self.effects.clone();
         validate_effect_declarations(&self.name, &effect_declarations, &resources.effect_ports)?;
-        resources.effect_declarations = effect_declarations;
+        resources.effect_declarations = effect_declarations.clone();
 
         for factory in &self.middleware {
             let validation_result =
@@ -2196,26 +2454,49 @@ impl<H: EffectfulStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
         let control_provider: Arc<dyn obzenflow_runtime::control_plane::ControlPlaneProvider> =
             control_middleware.clone();
 
-        let expects_circuit_breaker = resolved
-            .middleware
-            .iter()
-            .any(|spec| factory_declares_circuit_breaker(spec.factory.as_ref()));
-        let expects_rate_limiter = resolved.middleware.iter().any(|spec| {
-            spec.factory.topology_config_slot() == Some(TopologyMiddlewareConfigSlot::RateLimiter)
-        });
+        let mut shell_specs = Vec::new();
+        let mut effect_observers = StageObserverBundle::default();
+        for (middleware_index, spec) in resolved.middleware.into_iter().enumerate() {
+            let declaration = spec.factory.declaration();
+            if declaration.is_observer() && declaration.supports(MiddlewareSurfaceKind::Effect) {
+                let origin = crate::dsl::binder::middleware_origin_from_source(&spec.source);
+                materialize_effect_observers_for_declarations(
+                    &mut effect_observers,
+                    spec.factory.as_ref(),
+                    &config,
+                    StageType::Stateful,
+                    &control_middleware,
+                    &origin,
+                    MiddlewareDeclarationIndex::resolved(middleware_index),
+                    &effect_declarations,
+                )?;
+                if declaration_has_stage_observer_surface(&declaration, StageType::Stateful) {
+                    shell_specs.push(spec);
+                }
+            } else {
+                shell_specs.push(spec);
+            }
+        }
 
-        let _registered_middleware: Vec<Box<dyn Middleware>> = resolved
-            .middleware
-            .into_iter()
-            .map(|spec| spec.factory.create(&config, control_middleware.clone()))
-            .collect::<Result<_, _>>()?;
+        let placement = plan_stage_middleware(
+            &config,
+            StageType::Stateful,
+            crate::middleware_resolution::ResolvedMiddleware {
+                middleware: shell_specs,
+                overrides: Vec::new(),
+                warnings: Vec::new(),
+            },
+            &control_middleware,
+        )?;
+        let mut observers = placement.observers;
+        observers.extend(effect_observers);
 
         instrumentation
             .bind_control_plane(
                 &config.stage_id,
                 &control_provider,
-                expects_circuit_breaker,
-                expects_rate_limiter,
+                placement.expects_circuit_breaker,
+                placement.expects_rate_limiter,
             )
             .map_err(|e| e.to_string())?;
         let instrumentation = Arc::new(instrumentation);
@@ -2224,6 +2505,7 @@ impl<H: EffectfulStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
             stage_id: config.stage_id,
             stage_name: config.name.clone(),
             flow_name: config.flow_name.clone(),
+            observers,
             emit_interval: self.emit_interval,
             control_strategy: Some(control_strategy),
             upstream_stages: resources.upstream_stages.clone(),
@@ -2374,31 +2656,16 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
         let control_provider: Arc<dyn obzenflow_runtime::control_plane::ControlPlaneProvider> =
             control_middleware.clone();
 
-        // Create system middleware with instrumentation (FLOWIP-080o-part-2)
-        let mut all_middleware = create_system_middleware(&config, StageType::Join);
-
-        let expects_circuit_breaker = resolved
-            .middleware
-            .iter()
-            .any(|spec| factory_declares_circuit_breaker(spec.factory.as_ref()));
-        let expects_rate_limiter = resolved.middleware.iter().any(|spec| {
-            spec.factory.topology_config_slot() == Some(TopologyMiddlewareConfigSlot::RateLimiter)
-        });
-
-        // Add resolved user middleware
-        let user_middleware: Vec<Box<dyn Middleware>> = resolved
-            .middleware
-            .into_iter()
-            .map(|spec| spec.factory.create(&config, control_middleware.clone()))
-            .collect::<Result<_, _>>()?;
-        all_middleware.extend(user_middleware);
+        let placement =
+            plan_stage_middleware(&config, StageType::Join, resolved, &control_middleware)?;
+        let all_middleware = placement.legacy_shell;
 
         instrumentation
             .bind_control_plane(
                 &config.stage_id,
                 &control_provider,
-                expects_circuit_breaker,
-                expects_rate_limiter,
+                placement.expects_circuit_breaker,
+                placement.expects_rate_limiter,
             )
             .map_err(|e| e.to_string())?;
         let instrumentation = Arc::new(instrumentation);
@@ -2441,6 +2708,7 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
         let join_config = JoinConfig {
             stage_id: config.stage_id,
             stage_name: config.name.clone(),
+            observers: placement.observers,
             flow_name: config.flow_name.clone(),
             reference_source_id,
             stream_source_id,

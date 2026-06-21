@@ -8,14 +8,14 @@
 //! They have a unique "WaitingForGun" state that ensures they don't
 //! start emitting events until the pipeline is ready.
 
-use obzenflow_core::event::context::{FlowContext, StageType};
+use obzenflow_core::event::context::{FlowContext, MiddlewareExecutionScope, StageType};
 use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
 use obzenflow_core::event::types::{Count, SeqNo};
 use obzenflow_core::event::{
     ChainEventContent, ChainEventFactory, ConsumptionFinalEventParams, SystemEvent,
 };
 use obzenflow_core::journal::Journal;
-use obzenflow_core::{ChainEvent, FlowId, WriterId};
+use obzenflow_core::{ChainEvent, FlowId, StageLifecyclePhase, WriterId};
 use obzenflow_fsm::{EventVariant, FsmAction, FsmContext, StateMachine, StateVariant};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
@@ -29,6 +29,7 @@ use crate::metrics::instrumentation::{snapshot_stage_metrics, StageInstrumentati
 use crate::metrics::tail_read;
 use crate::replay::ReplayArchive;
 use crate::stages::common::backpressure_activity_pulse::BackpressureActivityPulse;
+use crate::stages::common::observers::run_stage_lifecycle_observers;
 use crate::stages::common::stage_handle::{
     FORCE_SHUTDOWN_MESSAGE, STOP_REASON_TIMEOUT, STOP_REASON_USER_STOP,
 };
@@ -250,6 +251,9 @@ pub struct InfiniteSourceContext<H> {
     /// Human-readable stage name for logging
     pub stage_name: String,
 
+    /// Runtime observer bundle attached to this source boundary.
+    pub observers: obzenflow_core::StageObserverBundle,
+
     /// Flow name for flow context
     pub flow_name: String,
 
@@ -308,6 +312,7 @@ pub struct InfiniteSourceContext<H> {
 pub struct InfiniteSourceContextInit {
     pub stage_id: obzenflow_core::StageId,
     pub stage_name: String,
+    pub observers: obzenflow_core::StageObserverBundle,
     pub flow_name: String,
     pub flow_id: FlowId,
     pub data_journal: Arc<dyn Journal<ChainEvent>>,
@@ -326,6 +331,7 @@ impl<H> InfiniteSourceContext<H> {
         Self {
             stage_id: init.stage_id,
             stage_name: init.stage_name,
+            observers: init.observers,
             flow_name: init.flow_name,
             flow_id: init.flow_id,
             data_journal: init.data_journal,
@@ -578,6 +584,34 @@ impl<H: Send + Sync + 'static> FsmAction for InfiniteSourceAction<H> {
                         );
                     }
                 }
+                let flow_context = FlowContext {
+                    flow_name: ctx.flow_name.clone(),
+                    flow_id: ctx.flow_id.to_string(),
+                    stage_name: ctx.stage_name.clone(),
+                    stage_id: ctx.stage_id,
+                    stage_type: StageType::InfiniteSource,
+                };
+                let scope = if ctx.replay_archive.is_some() {
+                    MiddlewareExecutionScope::StrictReplayHandler
+                } else {
+                    MiddlewareExecutionScope::LiveHandler
+                };
+                run_stage_lifecycle_observers(
+                    &ctx.observers,
+                    ctx.stage_id,
+                    &ctx.stage_name,
+                    &flow_context,
+                    scope,
+                    StageLifecyclePhase::Failed,
+                    &ctx.data_journal,
+                    &ctx.instrumentation,
+                )
+                .await
+                .map_err(|e| {
+                    obzenflow_fsm::FsmError::HandlerError(format!(
+                        "Infinite source lifecycle observer failed: {e}"
+                    ))
+                })?;
                 Ok(())
             }
 
@@ -597,6 +631,34 @@ impl<H: Send + Sync + 'static> FsmAction for InfiniteSourceAction<H> {
                     stage_name = %ctx.stage_name,
                     "Infinite source published running event"
                 );
+                let flow_context = FlowContext {
+                    flow_name: ctx.flow_name.clone(),
+                    flow_id: ctx.flow_id.to_string(),
+                    stage_name: ctx.stage_name.clone(),
+                    stage_id: ctx.stage_id,
+                    stage_type: StageType::InfiniteSource,
+                };
+                let scope = if ctx.replay_archive.is_some() {
+                    MiddlewareExecutionScope::StrictReplayHandler
+                } else {
+                    MiddlewareExecutionScope::LiveHandler
+                };
+                run_stage_lifecycle_observers(
+                    &ctx.observers,
+                    ctx.stage_id,
+                    &ctx.stage_name,
+                    &flow_context,
+                    scope,
+                    StageLifecyclePhase::Running,
+                    &ctx.data_journal,
+                    &ctx.instrumentation,
+                )
+                .await
+                .map_err(|e| {
+                    obzenflow_fsm::FsmError::HandlerError(format!(
+                        "Infinite source lifecycle observer failed: {e}"
+                    ))
+                })?;
                 Ok(())
             }
 
@@ -631,6 +693,34 @@ impl<H: Send + Sync + 'static> FsmAction for InfiniteSourceAction<H> {
                     stage_name = %ctx.stage_name,
                     "Infinite source sent completion event"
                 );
+                let flow_context = FlowContext {
+                    flow_name: ctx.flow_name.clone(),
+                    flow_id: ctx.flow_id.to_string(),
+                    stage_name: ctx.stage_name.clone(),
+                    stage_id: ctx.stage_id,
+                    stage_type: StageType::InfiniteSource,
+                };
+                let scope = if ctx.replay_archive.is_some() {
+                    MiddlewareExecutionScope::StrictReplayHandler
+                } else {
+                    MiddlewareExecutionScope::LiveHandler
+                };
+                run_stage_lifecycle_observers(
+                    &ctx.observers,
+                    ctx.stage_id,
+                    &ctx.stage_name,
+                    &flow_context,
+                    scope,
+                    StageLifecyclePhase::Completed,
+                    &ctx.data_journal,
+                    &ctx.instrumentation,
+                )
+                .await
+                .map_err(|e| {
+                    obzenflow_fsm::FsmError::HandlerError(format!(
+                        "Infinite source lifecycle observer failed: {e}"
+                    ))
+                })?;
                 Ok(())
             }
 

@@ -39,15 +39,18 @@
 
 use std::sync::Arc;
 
-use obzenflow_core::event::context::FlowContext;
+use obzenflow_core::event::context::{FlowContext, MiddlewareExecutionScope, StageType};
+use obzenflow_core::event::payloads::correlation_payload::CorrelationPayload;
+use obzenflow_core::event::CorrelationId;
 use obzenflow_core::event::{EventEnvelope, SystemEvent};
 use obzenflow_core::journal::Journal;
-use obzenflow_core::ChainEvent;
+use obzenflow_core::{ChainEvent, StageObserverBundle};
 
 use crate::feed_plan::StageOutputContract;
 use crate::metrics::instrumentation::StageInstrumentation;
 use crate::stages::common::heartbeat::HeartbeatState;
 use crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal;
+use crate::stages::common::observers::{append_observer_diagnostics, run_output_commit_observers};
 
 fn output_contract_summary(output_contract: &StageOutputContract) -> String {
     output_contract
@@ -87,6 +90,56 @@ pub(crate) struct CommitOptions {
     pub validate_output_contract: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MirrorPolicy {
+    None,
+    FrameworkMiddlewareAllowlist,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StageAppendIntent {
+    NormalStageData,
+    ObserverDiagnostic,
+    FrameworkObservability,
+    BackpressurePulse,
+    ForwardedControl,
+    NonDataStageFact,
+    ErrorJournal,
+    ErrorRoutedData,
+    ImmediateDerivedFact,
+    DomainEffectOutcomeFact,
+    FrameworkEffectRecord,
+    SinkReceipt,
+    IngressRefusal,
+    Lifecycle,
+}
+
+impl StageAppendIntent {
+    pub(crate) fn mirror_policy(self) -> MirrorPolicy {
+        match self {
+            Self::FrameworkObservability | Self::BackpressurePulse | Self::ForwardedControl => {
+                MirrorPolicy::FrameworkMiddlewareAllowlist
+            }
+            Self::NormalStageData
+            | Self::ObserverDiagnostic
+            | Self::NonDataStageFact
+            | Self::ErrorJournal
+            | Self::ErrorRoutedData
+            | Self::ImmediateDerivedFact
+            | Self::DomainEffectOutcomeFact
+            | Self::FrameworkEffectRecord
+            | Self::SinkReceipt
+            | Self::IngressRefusal
+            | Self::Lifecycle => MirrorPolicy::None,
+        }
+    }
+
+    pub(crate) fn runs_output_commit_hooks(self) -> bool {
+        matches!(self, Self::NormalStageData)
+    }
+}
+
 /// Shared commit path for migrated stage-authored outputs (FLOWIP-120b).
 ///
 /// Holds borrowed handles for the duration of one commit. An absent handle
@@ -110,6 +163,10 @@ pub(crate) struct OutputCommitter<'a> {
     /// Runtime output contract for stage-authored domain `Data` facts. Absent
     /// on reserved framework append paths and legacy callers.
     pub output_contract: Option<&'a StageOutputContract>,
+    /// Observer bundle for stage output commit hooks.
+    pub observers: Option<&'a StageObserverBundle>,
+    /// Per-event observer execution scope for replay suppression.
+    pub observer_scope: MiddlewareExecutionScope,
 }
 
 impl OutputCommitter<'_> {
@@ -129,19 +186,61 @@ impl OutputCommitter<'_> {
         parent: Option<&EventEnvelope<ChainEvent>>,
         options: CommitOptions,
     ) -> Result<EventEnvelope<ChainEvent>, CommitError> {
+        let intent = if event.is_data() {
+            StageAppendIntent::NormalStageData
+        } else {
+            StageAppendIntent::NonDataStageFact
+        };
+        self.commit_prebuilt_with_intent(event, parent, options, intent)
+            .await
+    }
+
+    pub(crate) async fn commit_prebuilt_with_intent(
+        &self,
+        event: ChainEvent,
+        parent: Option<&EventEnvelope<ChainEvent>>,
+        options: CommitOptions,
+        intent: StageAppendIntent,
+    ) -> Result<EventEnvelope<ChainEvent>, CommitError> {
         self.validate_prebuilt(&event, options)?;
 
         let mut event = event;
 
         if let Some(flow_context) = self.flow_context {
             event = event.with_flow_context(flow_context.clone());
+            if intent.runs_output_commit_hooks() && !self.observer_scope.is_deterministic_replay() {
+                apply_runtime_journey_identity(&mut event, flow_context);
+            }
         }
 
         if let Some(instrumentation) = self.instrumentation {
-            if options.count_output && event.is_data() {
-                instrumentation.record_output_event(&event);
-            }
             event = event.with_runtime_context(instrumentation.snapshot_with_control());
+        }
+
+        if intent.runs_output_commit_hooks() {
+            if let (Some(observers), Some(flow_context)) = (self.observers, self.flow_context) {
+                let before = value_preserving_projection(&event)?;
+                let parent_event = parent.map(|envelope| &envelope.event);
+                let report = run_output_commit_observers(
+                    observers,
+                    flow_context.stage_id,
+                    &flow_context.stage_name,
+                    flow_context,
+                    self.observer_scope,
+                    parent_event,
+                    &mut event,
+                )
+                .map_err(|e| -> CommitError { e.to_string().into() })?;
+                ensure_value_preserving(before, &event)?;
+                append_observer_diagnostics(
+                    report,
+                    flow_context,
+                    self.instrumentation,
+                    self.data_journal,
+                    parent,
+                )
+                .await?;
+            }
         }
 
         let written = self
@@ -150,12 +249,23 @@ impl OutputCommitter<'_> {
             .await
             .map_err(|e| -> CommitError { e.to_string().into() })?;
 
+        if let Some(instrumentation) = self.instrumentation {
+            if options.count_output && written.event.is_data() {
+                instrumentation.record_output_event(&written.event);
+            }
+        }
+
         if let Some(heartbeat) = self.heartbeat_state {
             heartbeat.record_last_output(written.event.id);
         }
 
-        if let Some(system_journal) = self.system_journal {
-            mirror_middleware_event_to_system_journal(&written, system_journal).await;
+        if matches!(
+            intent.mirror_policy(),
+            MirrorPolicy::FrameworkMiddlewareAllowlist
+        ) {
+            if let Some(system_journal) = self.system_journal {
+                mirror_middleware_event_to_system_journal(&written, system_journal).await;
+            }
         }
 
         Ok(written)
@@ -203,5 +313,79 @@ impl OutputCommitter<'_> {
             "Data output event type `{event_type}` is not declared in the stage output contract (declared: [{declared}])"
         )
         .into())
+    }
+}
+
+#[allow(dead_code)]
+pub(crate) struct StageAppendWriter<'a> {
+    pub committer: OutputCommitter<'a>,
+}
+
+#[allow(dead_code)]
+impl StageAppendWriter<'_> {
+    pub(crate) async fn append(
+        &self,
+        event: ChainEvent,
+        parent: Option<&EventEnvelope<ChainEvent>>,
+        options: CommitOptions,
+        intent: StageAppendIntent,
+    ) -> Result<EventEnvelope<ChainEvent>, CommitError> {
+        self.committer
+            .commit_prebuilt_with_intent(event, parent, options, intent)
+            .await
+    }
+}
+
+fn value_preserving_projection(event: &ChainEvent) -> Result<serde_json::Value, CommitError> {
+    let mut value = serde_json::to_value(event).map_err(|e| -> CommitError { e.into() })?;
+    if let Some(processing) = value
+        .as_object_mut()
+        .and_then(|object| object.get_mut("processing_info"))
+        .and_then(|value| value.as_object_mut())
+    {
+        processing.remove("processing_time");
+    }
+    if let Some(object) = value.as_object_mut() {
+        object.remove("observability");
+    }
+    Ok(value)
+}
+
+fn ensure_value_preserving(
+    before: serde_json::Value,
+    event: &ChainEvent,
+) -> Result<(), CommitError> {
+    let after = value_preserving_projection(event)?;
+    if before == after {
+        return Ok(());
+    }
+    Err("output-commit observer changed non-observability event fields".into())
+}
+
+fn apply_runtime_journey_identity(event: &mut ChainEvent, flow: &FlowContext) {
+    if !event.is_data() || event.correlation.is_some() {
+        return;
+    }
+
+    let should_mint = matches!(
+        flow.stage_type,
+        StageType::FiniteSource | StageType::InfiniteSource
+    ) || event.causality.is_root();
+
+    if should_mint {
+        let correlation_id = CorrelationId::new();
+        let mut payload = CorrelationPayload::new(&flow.stage_name, event.id);
+        payload.metadata = Some(serde_json::json!({
+            "flow_name": flow.flow_name,
+            "flow_id": flow.flow_id,
+            "source_event_id": event.id.to_string(),
+        }));
+        event.set_single_correlation(correlation_id, Some(payload));
+    } else {
+        tracing::warn!(
+            event_id = %event.id,
+            stage_name = %flow.stage_name,
+            "Non-source derived data event missing correlation_id"
+        );
     }
 }

@@ -9,6 +9,7 @@ use crate::messaging::PollResult;
 use crate::metrics::instrumentation::process_with_instrumentation;
 use crate::stages::common::handlers::transform::traits::UnifiedTransformHandler;
 use crate::stages::common::heartbeat::HeartbeatProcessingGuard;
+use crate::stages::common::observers::{run_after_handler_observers, run_before_handler_observers};
 use crate::stages::common::supervision::backpressure_drain::{drain_one_pending, DrainOutcome};
 use crate::stages::common::supervision::control_resolution::{
     is_terminal_eof, resolve_control_event_awaiting_pauses, ControlAction,
@@ -90,6 +91,8 @@ async fn dispatch_running_inner<
                 &mut ctx.backpressure_pulse,
                 &mut ctx.backpressure_backoff,
                 Some(&ctx.output_contract),
+                Some(&ctx.observers),
+                obzenflow_core::MiddlewareExecutionScope::LiveHandler,
                 &mut ctx.pending_outputs,
             )
             .await?
@@ -378,6 +381,7 @@ async fn dispatch_running_inner<
                             stage_logic_version: handler.stage_logic_version().to_string(),
                             data_journal: ctx.data_journal.clone(),
                             flow_context: Some(flow_context.clone()),
+                            observers: Some(ctx.observers.clone()),
                             system_journal: Some(ctx.system_journal.clone()),
                             instrumentation: Some(ctx.instrumentation.clone()),
                             heartbeat_state: ctx.heartbeat.as_ref().map(|h| h.state.clone()),
@@ -404,6 +408,19 @@ async fn dispatch_running_inner<
                         ctx.effect_runtime_mode,
                         stage_input_position,
                     );
+                    run_before_handler_observers(
+                        &ctx.observers,
+                        ctx.stage_id,
+                        &ctx.stage_name,
+                        flow_context,
+                        scope,
+                        &envelope.event,
+                        stage_input_position.map(|position| position.0),
+                        &ctx.data_journal,
+                        &ctx.instrumentation,
+                        &envelope,
+                    )
+                    .await?;
                     let result =
                         process_with_instrumentation(&ctx.instrumentation, || async move {
                             let event = envelope_clone.event.clone();
@@ -455,7 +472,21 @@ async fn dispatch_running_inner<
                         .await;
 
                     match result {
-                        Ok(transformed_events) => {
+                        Ok(mut transformed_events) => {
+                            run_after_handler_observers(
+                                &ctx.observers,
+                                ctx.stage_id,
+                                &ctx.stage_name,
+                                flow_context,
+                                scope,
+                                &envelope.event,
+                                stage_input_position.map(|position| position.0),
+                                transformed_events.as_mut_slice(),
+                                &ctx.data_journal,
+                                &ctx.instrumentation,
+                                &envelope,
+                            )
+                            .await?;
                             // Error-journal events are written immediately; stage-journal
                             // outputs are gated by backpressure.
                             let mut stage_outputs = std::collections::VecDeque::<ChainEvent>::new();
@@ -497,6 +528,8 @@ async fn dispatch_running_inner<
                                     &mut ctx.backpressure_pulse,
                                     &mut ctx.backpressure_backoff,
                                     Some(&ctx.output_contract),
+                                    Some(&ctx.observers),
+                                    scope,
                                     &mut stage_outputs,
                                 )
                                 .await?

@@ -116,6 +116,7 @@ pub struct EffectInvocationContext {
     pub stage_logic_version: String,
     pub data_journal: Arc<dyn Journal<ChainEvent>>,
     pub flow_context: Option<FlowContext>,
+    pub observers: Option<obzenflow_core::StageObserverBundle>,
     pub system_journal: Option<Arc<dyn Journal<SystemEvent>>>,
     pub instrumentation: Option<Arc<StageInstrumentation>>,
     pub heartbeat_state: Option<Arc<HeartbeatState>>,

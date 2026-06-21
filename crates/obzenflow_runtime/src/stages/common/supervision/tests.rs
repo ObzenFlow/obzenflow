@@ -771,6 +771,8 @@ async fn drain_one_pending_reserves_before_journal_append_and_records_output_for
         &mut pulse,
         &mut backoff,
         Some(&output_contract),
+        None,
+        obzenflow_core::MiddlewareExecutionScope::LiveHandler,
         &mut pending_outputs,
     )
     .await
@@ -827,6 +829,8 @@ async fn drain_one_pending_accepts_semantic_event_for_versioned_output_contract(
         &mut pulse,
         &mut backoff,
         Some(&output_contract),
+        None,
+        obzenflow_core::MiddlewareExecutionScope::LiveHandler,
         &mut pending_outputs,
     )
     .await
@@ -880,6 +884,8 @@ async fn drain_one_pending_rejects_undeclared_data_output() {
         &mut pulse,
         &mut backoff,
         Some(&output_contract),
+        None,
+        obzenflow_core::MiddlewareExecutionScope::LiveHandler,
         &mut pending_outputs,
     )
     .await
@@ -938,6 +944,8 @@ async fn drain_one_pending_does_not_reserve_for_non_data() {
         &mut pulse,
         &mut backoff,
         None,
+        None,
+        obzenflow_core::MiddlewareExecutionScope::LiveHandler,
         &mut pending_outputs,
     )
     .await
@@ -996,6 +1004,8 @@ async fn drain_one_pending_requeues_and_returns_backed_off_when_reserve_fails() 
         &mut pulse,
         &mut backoff,
         None,
+        None,
+        obzenflow_core::MiddlewareExecutionScope::LiveHandler,
         &mut pending_outputs,
     )
     .await

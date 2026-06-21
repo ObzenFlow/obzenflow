@@ -14,6 +14,7 @@ pub mod id;
 pub mod ingress;
 pub mod journal;
 pub mod metrics;
+pub mod observer_middleware;
 pub mod time;
 pub mod web;
 
@@ -28,6 +29,17 @@ pub use event::{EventType, JournalWriterId, WriterId};
 pub use journal::journal_error::JournalError;
 pub use journal::journal_owner::JournalOwner;
 pub use journal::Journal;
+pub use observer_middleware::{
+    EffectObserver, EffectObserverContext, EffectObserverOutcome, HandlerMiddlewareObserver,
+    HandlerObserverContext, IngressObserver, IngressObserverContext, IngressObserverOutcome,
+    JoinCanonicalMergeMetadata, JoinDeliverySnapshot, JoinMiddlewareObserver, JoinObserverContext,
+    JoinSide, JoinSignalKind, JoinSignalSnapshot, ObserverCommitError, ObserverCommitResult,
+    ObserverDeterminism, ObserverReport, OutputCommitObserver, OutputCommitObserverContext,
+    SinkDeliveryObserver, SinkDeliveryObserverContext, SinkDeliveryObserverOutcome,
+    SourcePollObserver, SourcePollObserverContext, SourcePollObserverOutcome,
+    StageLifecycleObserver, StageLifecycleObserverContext, StageLifecyclePhase,
+    StageObserverBundle, StatefulMiddlewareObserver, StatefulObserverContext,
+};
 
 // The derive generates paths through `::obzenflow_core`, so make that name
 // resolve inside this crate too (the serde-style self-alias trick).

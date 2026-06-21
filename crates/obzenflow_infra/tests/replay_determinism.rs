@@ -486,6 +486,7 @@ async fn run_stateful_supervisor_once() -> Vec<serde_json::Value> {
         stage_name: "stateful_supervisor_replay".to_string(),
         flow_name: "replay_flow".to_string(),
         upstream_stages: vec![src],
+        observers: obzenflow_core::StageObserverBundle::default(),
         emit_interval: None,
         control_strategy: None,
     };

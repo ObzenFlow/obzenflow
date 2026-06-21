@@ -60,7 +60,8 @@ pub struct PositionalRow {
     /// Parsed domain payload for `Data` rows; `{"timestamp": ..}` for
     /// watermarks.
     pub payload: Value,
-    pub status: SemanticStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<SemanticStatus>,
     /// Present when the row carries `effect_provenance`. Compared only under
     /// `IdentityMode::Lineage`.
     pub identity: Option<EffectIdentity>,
@@ -111,14 +112,14 @@ pub fn project(event: &ChainEvent) -> Option<ProjectedRow> {
                 event_type: event_type.clone(),
             },
             payload: payload.clone(),
-            status: semantic_status(event),
+            status: Some(semantic_status(event)),
             identity: effect_identity(event),
         })),
         ChainEventContent::FlowControl(FlowControlPayload::Watermark { timestamp, .. }) => {
             Some(ProjectedRow::Positional(PositionalRow {
                 kind: RowKind::Watermark,
                 payload: json!({ "timestamp": timestamp }),
-                status: semantic_status(event),
+                status: None,
                 identity: None,
             }))
         }
@@ -147,22 +148,12 @@ fn semantic_status(event: &ChainEvent) -> SemanticStatus {
             error_message: None,
             error_kind: None,
         },
-        ProcessingStatus::Filtered => SemanticStatus {
-            status: "filtered".to_string(),
-            error_message: None,
-            error_kind: None,
-        },
         ProcessingStatus::Error { message, kind } => SemanticStatus {
             status: "error".to_string(),
             error_message: Some(message.clone()),
             error_kind: kind
                 .as_ref()
                 .map(|k| serde_json::to_string(k).unwrap_or_default()),
-        },
-        ProcessingStatus::Retry { attempt } => SemanticStatus {
-            status: format!("retry:{attempt}"),
-            error_message: None,
-            error_kind: None,
         },
     }
 }
@@ -204,7 +195,7 @@ mod tests {
             }
         );
         assert_eq!(row.payload, json!({"id": 7}));
-        assert_eq!(row.status.status, "success");
+        assert_eq!(row.status.as_ref().expect("data status").status, "success");
         assert!(row.identity.is_none());
     }
 
@@ -215,8 +206,9 @@ mod tests {
         let Some(ProjectedRow::Positional(row)) = project(&event) else {
             panic!("error data row must project positionally");
         };
-        assert_eq!(row.status.status, "error");
-        assert_eq!(row.status.error_message.as_deref(), Some("bad order"));
+        let status = row.status.as_ref().expect("data status");
+        assert_eq!(status.status, "error");
+        assert_eq!(status.error_message.as_deref(), Some("bad order"));
     }
 
     #[test]

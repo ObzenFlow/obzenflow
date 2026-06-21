@@ -5,7 +5,7 @@
 //! Configuration for stateful stages
 
 use crate::stages::common::control_strategies::SignalGate;
-use obzenflow_core::StageId;
+use obzenflow_core::{StageId, StageObserverBundle};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -23,6 +23,9 @@ pub struct StatefulConfig {
 
     /// IDs of upstream stages this stateful stage reads from
     pub upstream_stages: Vec<StageId>,
+
+    /// Runtime observer bundle attached to this stage.
+    pub observers: StageObserverBundle,
 
     /// Optional supervisor-driven emit interval for timer-driven emission while idle.
     pub emit_interval: Option<Duration>,

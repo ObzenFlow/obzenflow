@@ -7,14 +7,14 @@
 //! Stateful stages maintain state across events, enabling aggregations,
 //! windowing operations, and session tracking.
 
-use obzenflow_core::event::context::{FlowContext, StageType};
+use obzenflow_core::event::context::{FlowContext, MiddlewareExecutionScope, StageType};
 use obzenflow_core::event::event_envelope::EventEnvelope;
 use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
 use obzenflow_core::event::types::SeqNo;
 use obzenflow_core::event::{ChainEventFactory, SystemEvent};
 use obzenflow_core::journal::Journal;
-use obzenflow_core::StageId;
 use obzenflow_core::{ChainEvent, FlowId, WriterId};
+use obzenflow_core::{StageId, StageLifecyclePhase};
 use obzenflow_fsm::{EventVariant, FsmAction, FsmContext, StateVariant};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
@@ -35,6 +35,7 @@ use crate::stages::common::backpressure_activity_pulse::BackpressureActivityPuls
 use crate::stages::common::control_strategies::SignalGate;
 use crate::stages::common::handlers::UnifiedStatefulHandler;
 use crate::stages::common::heartbeat::HeartbeatHandle;
+use crate::stages::common::observers::run_stage_lifecycle_observers;
 use crate::stages::common::supervision::lifecycle_actions;
 use crate::stages::resources_builder::BoundSubscriptionFactory;
 use crate::supervised_base::idle_backoff::IdleBackoff;
@@ -316,6 +317,9 @@ pub struct StatefulContext<H: UnifiedStatefulHandler> {
     /// Human-readable stage name for logging
     pub stage_name: String,
 
+    /// Runtime observer bundle attached to this stage.
+    pub observers: obzenflow_core::StageObserverBundle,
+
     /// Flow name for flow context
     pub flow_name: String,
 
@@ -528,6 +532,34 @@ impl<H: UnifiedStatefulHandler + Send + Sync + 'static> FsmAction for StatefulAc
                     &ctx.system_journal,
                 )
                 .await;
+                let flow_context = FlowContext {
+                    flow_name: ctx.flow_name.clone(),
+                    flow_id: ctx.flow_id.to_string(),
+                    stage_name: ctx.stage_name.clone(),
+                    stage_id: ctx.stage_id,
+                    stage_type: StageType::Stateful,
+                };
+                let scope = if ctx.replay_archive.is_some() {
+                    MiddlewareExecutionScope::StrictReplayHandler
+                } else {
+                    MiddlewareExecutionScope::LiveHandler
+                };
+                run_stage_lifecycle_observers(
+                    &ctx.observers,
+                    ctx.stage_id,
+                    &ctx.stage_name,
+                    &flow_context,
+                    scope,
+                    StageLifecyclePhase::Running,
+                    &ctx.data_journal,
+                    &ctx.instrumentation,
+                )
+                .await
+                .map_err(|e| {
+                    obzenflow_fsm::FsmError::HandlerError(format!(
+                        "Stateful lifecycle observer failed: {e}"
+                    ))
+                })?;
                 Ok(())
             }
 
@@ -650,6 +682,34 @@ impl<H: UnifiedStatefulHandler + Send + Sync + 'static> FsmAction for StatefulAc
                     ctx.instrumentation.as_ref(),
                 )
                 .await;
+                let flow_context = FlowContext {
+                    flow_name: ctx.flow_name.clone(),
+                    flow_id: ctx.flow_id.to_string(),
+                    stage_name: ctx.stage_name.clone(),
+                    stage_id: ctx.stage_id,
+                    stage_type: StageType::Stateful,
+                };
+                let scope = if ctx.replay_archive.is_some() {
+                    MiddlewareExecutionScope::StrictReplayHandler
+                } else {
+                    MiddlewareExecutionScope::LiveHandler
+                };
+                run_stage_lifecycle_observers(
+                    &ctx.observers,
+                    ctx.stage_id,
+                    &ctx.stage_name,
+                    &flow_context,
+                    scope,
+                    StageLifecyclePhase::Completed,
+                    &ctx.data_journal,
+                    &ctx.instrumentation,
+                )
+                .await
+                .map_err(|e| {
+                    obzenflow_fsm::FsmError::HandlerError(format!(
+                        "Stateful lifecycle observer failed: {e}"
+                    ))
+                })?;
                 Ok(())
             }
 
@@ -665,6 +725,34 @@ impl<H: UnifiedStatefulHandler + Send + Sync + 'static> FsmAction for StatefulAc
                     ctx.instrumentation.as_ref(),
                 )
                 .await;
+                let flow_context = FlowContext {
+                    flow_name: ctx.flow_name.clone(),
+                    flow_id: ctx.flow_id.to_string(),
+                    stage_name: ctx.stage_name.clone(),
+                    stage_id: ctx.stage_id,
+                    stage_type: StageType::Stateful,
+                };
+                let scope = if ctx.replay_archive.is_some() {
+                    MiddlewareExecutionScope::StrictReplayHandler
+                } else {
+                    MiddlewareExecutionScope::LiveHandler
+                };
+                run_stage_lifecycle_observers(
+                    &ctx.observers,
+                    ctx.stage_id,
+                    &ctx.stage_name,
+                    &flow_context,
+                    scope,
+                    StageLifecyclePhase::Failed,
+                    &ctx.data_journal,
+                    &ctx.instrumentation,
+                )
+                .await
+                .map_err(|e| {
+                    obzenflow_fsm::FsmError::HandlerError(format!(
+                        "Stateful lifecycle observer failed: {e}"
+                    ))
+                })?;
                 Ok(())
             }
 

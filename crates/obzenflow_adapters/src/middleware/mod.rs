@@ -177,13 +177,7 @@ pub use control::{
 // Backpressure (config + topology observability; FLOWIP-086k)
 pub use backpressure::{backpressure, BackpressureMiddlewareFactory};
 
-// Re-export observability middleware for backward compatibility
-pub use observability::{
-    BoundaryConfig, BoundaryTrackingMiddleware, FlowBoundaryTracker, FlowMetrics,
-    LoggingMiddleware, SystemEnrichmentMiddleware,
-};
+pub use observability::LoggingMiddleware;
 
 // System middleware exports
-pub use system::{
-    outcome_enrichment, validate_middleware_safety, OutcomeEnrichmentMiddleware, ValidationResult,
-};
+pub use system::{validate_middleware_safety, ValidationResult};

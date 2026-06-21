@@ -11,6 +11,7 @@ use crate::messaging::PollResult;
 use crate::metrics::instrumentation::process_with_instrumentation;
 use crate::stages::common::handlers::UnifiedSinkHandler;
 use crate::stages::common::heartbeat::HeartbeatProcessingGuard;
+use crate::stages::common::observers::run_sink_delivery_observers;
 use crate::stages::common::supervision::control_resolution::{
     resolve_control_event_awaiting_pauses, ControlAction,
 };
@@ -25,6 +26,7 @@ use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, Delivery
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::{ChainEventFactory, EventEnvelope, JournalEvent};
 use obzenflow_core::ChainEvent;
+use obzenflow_core::SinkDeliveryObserverOutcome;
 use obzenflow_core::WriterId;
 use obzenflow_fsm::StateVariant;
 use std::panic::AssertUnwindSafe;
@@ -490,6 +492,7 @@ async fn dispatch_data_event<
             stage_logic_version: ctx.handler.stage_logic_version().to_string(),
             data_journal: ctx.data_journal.clone(),
             flow_context: None,
+            observers: Some(ctx.observers.clone()),
             system_journal: None,
             instrumentation: None,
             heartbeat_state: None,
@@ -555,6 +558,48 @@ async fn dispatch_data_event<
                 Vec::new(),
             )
         };
+
+        let observer_outcome = match &outcome {
+            SinkDeliveryBoundaryOutcome::Attempted(SinkDeliveryAttemptOutcome::Delivered(Ok(
+                _,
+            ))) => SinkDeliveryObserverOutcome::Delivered,
+            SinkDeliveryBoundaryOutcome::Attempted(SinkDeliveryAttemptOutcome::Delivered(Err(
+                err,
+            ))) => SinkDeliveryObserverOutcome::Failed {
+                message: err.to_string(),
+            },
+            SinkDeliveryBoundaryOutcome::Attempted(SinkDeliveryAttemptOutcome::Panicked {
+                message,
+            }) => SinkDeliveryObserverOutcome::Failed {
+                message: message.clone(),
+            },
+            SinkDeliveryBoundaryOutcome::Rejected(rejection) => {
+                SinkDeliveryObserverOutcome::Rejected {
+                    reason: format!("{}: {}", rejection.policy, rejection.reason),
+                }
+            }
+        };
+        let flow_context = make_flow_context(
+            &ctx.flow_name,
+            &ctx.flow_id.to_string(),
+            &ctx.stage_name,
+            ctx.stage_id,
+            StageType::Sink,
+        );
+        run_sink_delivery_observers(
+            &ctx.observers,
+            ctx.stage_id,
+            &ctx.stage_name,
+            &flow_context,
+            scope,
+            &envelope.event,
+            stage_input_position.map(|position| position.0),
+            observer_outcome,
+            &ctx.data_journal,
+            &ctx.instrumentation,
+            envelope,
+        )
+        .await?;
 
         let mapped = match outcome {
             SinkDeliveryBoundaryOutcome::Attempted(SinkDeliveryAttemptOutcome::Delivered(Ok(

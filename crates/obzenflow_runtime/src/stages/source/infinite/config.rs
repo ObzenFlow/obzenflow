@@ -6,7 +6,7 @@
 
 use crate::stages::source::boundary::SourceBoundary;
 use crate::stages::source::strategies::CompletionGate;
-use obzenflow_core::StageId;
+use obzenflow_core::{StageId, StageObserverBundle};
 use std::sync::Arc;
 
 /// Configuration for an infinite source stage
@@ -27,6 +27,9 @@ pub struct InfiniteSourceConfig {
 
     /// Runtime-neutral source boundary seam (FLOWIP-115a).
     pub source_boundary: Option<Arc<dyn SourceBoundary>>,
+
+    /// Runtime observer bundle attached to this source boundary.
+    pub observers: StageObserverBundle,
 }
 
 impl std::fmt::Debug for InfiniteSourceConfig {
@@ -37,6 +40,7 @@ impl std::fmt::Debug for InfiniteSourceConfig {
             .field("flow_name", &self.flow_name)
             .field("control_strategy", &self.control_strategy)
             .field("has_source_boundary", &self.source_boundary.is_some())
+            .field("has_observers", &!self.observers.is_empty())
             .finish()
     }
 }

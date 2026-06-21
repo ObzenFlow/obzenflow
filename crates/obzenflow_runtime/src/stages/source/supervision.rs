@@ -12,6 +12,7 @@ use crate::feed_plan::StageOutputContract;
 use crate::metrics::instrumentation::StageInstrumentation;
 use crate::stages::common::backpressure_activity_pulse::BackpressureActivityPulse;
 use crate::stages::common::heartbeat::HeartbeatState;
+use crate::stages::common::observers::run_source_poll_observers;
 use crate::stages::common::supervision::backpressure_drain::{
     drain_one_pending, drain_one_pending_resolve, DrainAttempt, DrainOutcome,
 };
@@ -24,7 +25,9 @@ use obzenflow_core::event::context::FlowContext;
 use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
 use obzenflow_core::event::SystemEvent;
 use obzenflow_core::journal::Journal;
-use obzenflow_core::{ChainEvent, StageId};
+use obzenflow_core::{
+    ChainEvent, SourcePollObserverContext, SourcePollObserverOutcome, StageId, StageObserverBundle,
+};
 use std::collections::VecDeque;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -84,6 +87,48 @@ pub(crate) fn emit_batch_to_pending_outputs(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn observe_and_emit_batch_to_pending_outputs(
+    mut events: Vec<ChainEvent>,
+    stage_flow_context: &FlowContext,
+    instrumentation: &Arc<StageInstrumentation>,
+    poll_duration: Duration,
+    outcome: SourcePollObserverOutcome,
+    observers: &StageObserverBundle,
+    observer_scope: obzenflow_core::MiddlewareExecutionScope,
+    data_journal: &Arc<dyn Journal<ChainEvent>>,
+    pending_outputs: &mut VecDeque<ChainEvent>,
+) -> Result<(), BoxError> {
+    let observer_ctx = SourcePollObserverContext {
+        stage_id: stage_flow_context.stage_id,
+        stage_name: &stage_flow_context.stage_name,
+        flow_context: stage_flow_context,
+        scope: observer_scope,
+        poll_duration,
+        outcome,
+    };
+    run_source_poll_observers(
+        observers,
+        &observer_ctx,
+        events.as_mut_slice(),
+        data_journal,
+        instrumentation,
+    )
+    .await?;
+
+    let data_events_in_tick = events.iter().filter(|event| event.is_data()).count();
+    let per_data_event_duration =
+        per_data_event_duration_for_batch(poll_duration, data_events_in_tick);
+    emit_batch_to_pending_outputs(
+        events,
+        stage_flow_context,
+        instrumentation,
+        per_data_event_duration,
+        pending_outputs,
+    );
+    Ok(())
+}
+
 pub(crate) fn stage_boundary_control_events(
     control_events: Vec<ChainEvent>,
     stage_flow_context: &FlowContext,
@@ -118,6 +163,8 @@ pub(crate) async fn drain_pending_outputs_sync(
     backpressure_pulse: &mut BackpressureActivityPulse,
     backpressure_backoff: &mut IdleBackoff,
     output_contract: Option<&StageOutputContract>,
+    observers: Option<&obzenflow_core::StageObserverBundle>,
+    observer_scope: obzenflow_core::MiddlewareExecutionScope,
 ) -> Result<bool, BoxError> {
     while let Some(pending) = pending_outputs.pop_front() {
         if matches!(
@@ -145,6 +192,8 @@ pub(crate) async fn drain_pending_outputs_sync(
             backpressure_pulse,
             backpressure_backoff,
             output_contract,
+            observers,
+            observer_scope,
             pending_outputs,
         )
         .await?
@@ -171,6 +220,8 @@ pub(crate) async fn drain_pending_outputs_async<E>(
     backpressure_pulse: &mut BackpressureActivityPulse,
     backpressure_backoff: &mut IdleBackoff,
     output_contract: Option<&StageOutputContract>,
+    observers: Option<&obzenflow_core::StageObserverBundle>,
+    observer_scope: obzenflow_core::MiddlewareExecutionScope,
     external_events: &mut EventReceiver<E>,
     on_channel_closed: impl FnOnce() -> E,
 ) -> Result<Option<EventLoopDirective<E>>, BoxError>
@@ -205,6 +256,8 @@ where
             backpressure_pulse,
             backpressure_backoff,
             output_contract,
+            observers,
+            observer_scope,
             pending_outputs,
         )
         .await?
@@ -459,6 +512,8 @@ mod tests {
                 &mut backpressure_pulse,
                 &mut backpressure_backoff,
                 None,
+                None,
+                obzenflow_core::MiddlewareExecutionScope::LiveHandler,
                 &mut receiver,
                 || TestEvent::ChannelClosed,
             )

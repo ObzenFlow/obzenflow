@@ -9,6 +9,10 @@ use crate::messaging::PollResult;
 use crate::metrics::instrumentation::process_with_instrumentation_no_count;
 use crate::stages::common::handlers::{StatefulOutputContext, UnifiedStatefulHandler};
 use crate::stages::common::heartbeat::HeartbeatProcessingGuard;
+use crate::stages::common::observers::{
+    run_stateful_after_accumulate_observers, run_stateful_after_emit_observers,
+    run_stateful_before_accumulate_observers,
+};
 use crate::stages::common::supervision::backpressure_drain::{drain_one_pending, DrainOutcome};
 use crate::stages::common::supervision::control_resolution::{
     resolve_control_event_awaiting_pauses, ControlAction,
@@ -18,6 +22,7 @@ use crate::stages::common::supervision::flow_context_factory::make_flow_context;
 use crate::supervised_base::EventLoopDirective;
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::vector_clock::CausalOrderingService;
+use obzenflow_core::StatefulObserverContext;
 use obzenflow_fsm::StateVariant;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
@@ -52,6 +57,8 @@ pub(super) async fn dispatch_accumulating<
         sup.stage_id,
         StageType::Stateful,
     );
+    let pending_observer_scope =
+        crate::effects::scope_for_dispatch(ctx.effect_runtime_mode, ctx.last_input_position);
 
     if sup.subscription.is_none() {
         sup.subscription = ctx.subscription.take();
@@ -73,6 +80,8 @@ pub(super) async fn dispatch_accumulating<
             &mut ctx.backpressure_pulse,
             &mut ctx.backpressure_backoff,
             Some(&ctx.output_contract),
+            Some(&ctx.observers),
+            pending_observer_scope,
             &mut ctx.pending_outputs,
         )
         .await?
@@ -248,6 +257,7 @@ pub(super) async fn dispatch_accumulating<
                             stage_logic_version: handler.stage_logic_version().to_string(),
                             data_journal: ctx.data_journal.clone(),
                             flow_context: None,
+                            observers: Some(ctx.observers.clone()),
                             system_journal: Some(ctx.system_journal.clone()),
                             instrumentation: Some(ctx.instrumentation.clone()),
                             heartbeat_state: heartbeat_state.clone(),
@@ -286,9 +296,33 @@ pub(super) async fn dispatch_accumulating<
                         ctx.effect_runtime_mode,
                         stage_input_position,
                     );
+                    let observer_ctx = StatefulObserverContext {
+                        stage_id: ctx.stage_id,
+                        stage_name: &ctx.stage_name,
+                        flow_context: &flow_context,
+                        scope,
+                        input: Some(&event),
+                        stage_input_position: stage_input_position.map(|position| position.0),
+                    };
+                    run_stateful_before_accumulate_observers(
+                        &ctx.observers,
+                        &observer_ctx,
+                        &ctx.data_journal,
+                        &ctx.instrumentation,
+                        Some(&envelope),
+                    )
+                    .await?;
                     let accumulate_result = handler
                         .accumulate(&mut ctx.current_state, event.clone(), effect_context, scope)
                         .await;
+                    run_stateful_after_accumulate_observers(
+                        &ctx.observers,
+                        &observer_ctx,
+                        &ctx.data_journal,
+                        &ctx.instrumentation,
+                        Some(&envelope),
+                    )
+                    .await?;
 
                     if let Some(state) = &heartbeat_state {
                         state.record_last_consumed(event_id);
@@ -524,6 +558,8 @@ pub(super) async fn dispatch_emitting<
         sup.stage_id,
         StageType::Stateful,
     );
+    let observer_scope =
+        crate::effects::scope_for_dispatch(ctx.effect_runtime_mode, ctx.last_input_position);
 
     if sup.subscription.is_none() {
         sup.subscription = ctx.subscription.take();
@@ -551,6 +587,8 @@ pub(super) async fn dispatch_emitting<
                 &mut ctx.backpressure_pulse,
                 &mut ctx.backpressure_backoff,
                 Some(&ctx.output_contract),
+                Some(&ctx.observers),
+                observer_scope,
                 &mut ctx.pending_outputs,
             )
             .await?
@@ -623,8 +661,28 @@ pub(super) async fn dispatch_emitting<
     .await;
 
     match emit_result {
-        Ok(events) if !events.is_empty() => {
+        Ok(mut events) if !events.is_empty() => {
             let stage_writer_id = ctx.writer_id.ok_or("No writer ID available")?;
+            let observer_ctx = StatefulObserverContext {
+                stage_id: ctx.stage_id,
+                stage_name: &ctx.stage_name,
+                flow_context: &flow_context,
+                scope: observer_scope,
+                input: ctx
+                    .last_consumed_envelope
+                    .as_ref()
+                    .map(|envelope| &envelope.event),
+                stage_input_position: ctx.last_input_position.map(|position| position.0),
+            };
+            run_stateful_after_emit_observers(
+                &ctx.observers,
+                &observer_ctx,
+                events.as_mut_slice(),
+                &ctx.data_journal,
+                &ctx.instrumentation,
+                ctx.last_consumed_envelope.as_ref(),
+            )
+            .await?;
 
             for mut event in events {
                 event.writer_id = stage_writer_id;

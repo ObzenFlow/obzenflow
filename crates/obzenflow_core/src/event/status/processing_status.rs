@@ -38,9 +38,6 @@ pub enum ProcessingStatus {
     #[default]
     Success,
 
-    /// Event was filtered out (intentionally not processed)
-    Filtered,
-
     /// Processing failed with an error
     Error {
         /// Human-readable error message
@@ -49,9 +46,6 @@ pub enum ProcessingStatus {
         #[serde(skip_serializing_if = "Option::is_none")]
         kind: Option<ErrorKind>,
     },
-
-    /// Event should be retried
-    Retry { attempt: u32 },
 }
 
 impl ProcessingStatus {
@@ -86,12 +80,7 @@ impl ProcessingStatus {
 
     /// Check if this outcome is terminal (no more processing needed)
     pub fn is_terminal(&self) -> bool {
-        matches!(self, Self::Success | Self::Filtered | Self::Error { .. })
-    }
-
-    /// Check if the event should be retried
-    pub fn should_retry(&self) -> bool {
-        matches!(self, Self::Retry { .. })
+        matches!(self, Self::Success | Self::Error { .. })
     }
 
     /// Check if processing was successful
