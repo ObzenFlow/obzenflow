@@ -41,8 +41,11 @@ use std::sync::Arc;
 
 use obzenflow_core::event::context::{FlowContext, MiddlewareExecutionScope, StageType};
 use obzenflow_core::event::payloads::correlation_payload::CorrelationPayload;
+use obzenflow_core::event::payloads::observability_payload::{
+    MiddlewareLifecycle, ObservabilityPayload,
+};
 use obzenflow_core::event::CorrelationId;
-use obzenflow_core::event::{EventEnvelope, SystemEvent};
+use obzenflow_core::event::{ChainEventContent, EventEnvelope, SystemEvent};
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{ChainEvent, StageObserverBundle};
 
@@ -314,6 +317,60 @@ impl OutputCommitter<'_> {
         )
         .into())
     }
+}
+
+pub(crate) struct FrameworkObservabilityCommit<'a> {
+    pub flow_context: &'a FlowContext,
+    pub data_journal: &'a Arc<dyn Journal<ChainEvent>>,
+    pub system_journal: Option<&'a Arc<dyn Journal<SystemEvent>>>,
+    pub instrumentation: Option<&'a Arc<StageInstrumentation>>,
+    pub heartbeat_state: Option<&'a Arc<HeartbeatState>>,
+    pub parent: Option<&'a EventEnvelope<ChainEvent>>,
+    pub observer_scope: MiddlewareExecutionScope,
+}
+
+pub(crate) async fn commit_framework_observability_events(
+    events: Vec<ChainEvent>,
+    context: FrameworkObservabilityCommit<'_>,
+) -> Result<(), CommitError> {
+    if events.is_empty() {
+        return Ok(());
+    }
+
+    let committer = OutputCommitter {
+        data_journal: context.data_journal,
+        flow_context: Some(context.flow_context),
+        system_journal: context.system_journal,
+        instrumentation: context.instrumentation,
+        heartbeat_state: context.heartbeat_state,
+        output_contract: None,
+        observers: None,
+        observer_scope: context.observer_scope,
+    };
+
+    for event in events {
+        committer
+            .commit_prebuilt_with_intent(
+                event,
+                context.parent,
+                CommitOptions::default(),
+                StageAppendIntent::FrameworkObservability,
+            )
+            .await?;
+    }
+
+    Ok(())
+}
+
+pub(crate) fn is_framework_middleware_observability_event(event: &ChainEvent) -> bool {
+    matches!(
+        &event.content,
+        ChainEventContent::Observability(ObservabilityPayload::Middleware(
+            MiddlewareLifecycle::CircuitBreaker(_)
+                | MiddlewareLifecycle::RateLimiter(_)
+                | MiddlewareLifecycle::Backpressure(_)
+        ))
+    )
 }
 
 #[allow(dead_code)]

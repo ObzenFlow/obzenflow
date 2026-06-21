@@ -112,6 +112,26 @@ fn create_legacy_shell(
     Ok(factory.create(config, control_middleware)?)
 }
 
+fn create_deprecated_async_policy_shell(
+    factory: &dyn MiddlewareFactory,
+    config: &StageConfig,
+    control_middleware: Arc<ControlMiddlewareAggregator>,
+) -> StageCreationResult<Box<dyn Middleware>> {
+    let declaration = factory.declaration();
+    if factory.kind() != obzenflow_adapters::middleware::MiddlewareKind::Policy
+        || declaration.is_observer()
+    {
+        return Err(format!(
+            "middleware '{}' declares hook surfaces {:?} and cannot use the deprecated async policy shell on stage '{}'",
+            factory.label(),
+            declaration.surfaces,
+            config.name
+        )
+        .into());
+    }
+    Ok(factory.create(config, control_middleware)?)
+}
+
 fn observer_surfaces_for_stage(stage_type: StageType) -> &'static [MiddlewareSurfaceKind] {
     match stage_type {
         StageType::FiniteSource | StageType::InfiniteSource => &[
@@ -244,6 +264,7 @@ fn plan_stage_middleware(
     stage_type: StageType,
     resolved: crate::middleware_resolution::ResolvedMiddleware,
     control_middleware: &Arc<ControlMiddlewareAggregator>,
+    allow_deprecated_async_policy_shell: bool,
 ) -> StageCreationResult<MiddlewarePlacement> {
     let expects_circuit_breaker = resolved
         .middleware
@@ -292,6 +313,18 @@ fn plan_stage_middleware(
 
         if declaration.is_legacy_shell() {
             legacy_shell.push(create_legacy_shell(
+                spec.factory.as_ref(),
+                config,
+                control_middleware.clone(),
+            )?);
+            continue;
+        }
+
+        if allow_deprecated_async_policy_shell
+            && declaration.is_control()
+            && spec.factory.kind() == obzenflow_adapters::middleware::MiddlewareKind::Policy
+        {
+            legacy_shell.push(create_deprecated_async_policy_shell(
                 spec.factory.as_ref(),
                 config,
                 control_middleware.clone(),
@@ -1337,8 +1370,13 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Stag
         let control_provider: Arc<dyn obzenflow_runtime::control_plane::ControlPlaneProvider> =
             control_middleware.clone();
 
-        let placement =
-            plan_stage_middleware(&config, StageType::Transform, resolved, &control_middleware)?;
+        let placement = plan_stage_middleware(
+            &config,
+            StageType::Transform,
+            resolved,
+            &control_middleware,
+            false,
+        )?;
         let all_middleware = placement.legacy_shell;
 
         instrumentation
@@ -1466,8 +1504,13 @@ impl<H: AsyncTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
         let control_provider: Arc<dyn obzenflow_runtime::control_plane::ControlPlaneProvider> =
             control_middleware.clone();
 
-        let placement =
-            plan_stage_middleware(&config, StageType::Transform, resolved, &control_middleware)?;
+        let placement = plan_stage_middleware(
+            &config,
+            StageType::Transform,
+            resolved,
+            &control_middleware,
+            true,
+        )?;
         let all_middleware = placement.legacy_shell;
 
         instrumentation
@@ -1748,6 +1791,7 @@ impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
                 warnings: Vec::new(),
             },
             &control_middleware,
+            false,
         )?;
         let mut observers = placement.observers;
         observers.extend(effect_observers);
@@ -2285,8 +2329,13 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Stage
         let control_provider: Arc<dyn obzenflow_runtime::control_plane::ControlPlaneProvider> =
             control_middleware.clone();
 
-        let placement =
-            plan_stage_middleware(&config, StageType::Stateful, resolved, &control_middleware)?;
+        let placement = plan_stage_middleware(
+            &config,
+            StageType::Stateful,
+            resolved,
+            &control_middleware,
+            false,
+        )?;
         let all_middleware = placement.legacy_shell;
 
         instrumentation
@@ -2495,6 +2544,7 @@ impl<H: EffectfulStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
                 warnings: Vec::new(),
             },
             &control_middleware,
+            false,
         )?;
         let mut observers = placement.observers;
         observers.extend(effect_observers);
@@ -2664,8 +2714,13 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
         let control_provider: Arc<dyn obzenflow_runtime::control_plane::ControlPlaneProvider> =
             control_middleware.clone();
 
-        let placement =
-            plan_stage_middleware(&config, StageType::Join, resolved, &control_middleware)?;
+        let placement = plan_stage_middleware(
+            &config,
+            StageType::Join,
+            resolved,
+            &control_middleware,
+            false,
+        )?;
         let all_middleware = placement.legacy_shell;
 
         instrumentation

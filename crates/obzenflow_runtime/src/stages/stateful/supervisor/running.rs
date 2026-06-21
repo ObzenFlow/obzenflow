@@ -19,6 +19,10 @@ use crate::stages::common::supervision::control_resolution::{
 };
 use crate::stages::common::supervision::error_routing::route_to_error_journal;
 use crate::stages::common::supervision::flow_context_factory::make_flow_context;
+use crate::stages::common::supervision::output_committer::{
+    commit_framework_observability_events, is_framework_middleware_observability_event,
+    FrameworkObservabilityCommit,
+};
 use crate::supervised_base::EventLoopDirective;
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::vector_clock::CausalOrderingService;
@@ -256,7 +260,7 @@ pub(super) async fn dispatch_accumulating<
                             input_seq,
                             stage_logic_version: handler.stage_logic_version().to_string(),
                             data_journal: ctx.data_journal.clone(),
-                            flow_context: None,
+                            flow_context: Some(flow_context.clone()),
                             observers: Some(ctx.observers.clone()),
                             system_journal: Some(ctx.system_journal.clone()),
                             instrumentation: Some(ctx.instrumentation.clone()),
@@ -276,6 +280,9 @@ pub(super) async fn dispatch_accumulating<
                             )),
                         })
                     });
+                    let boundary_control_events = effect_context
+                        .as_ref()
+                        .map(|context| context.boundary_control_events.clone());
 
                     ctx.instrumentation
                         .in_flight_count
@@ -323,6 +330,27 @@ pub(super) async fn dispatch_accumulating<
                         Some(&envelope),
                     )
                     .await?;
+                    if let Some(buffer) = boundary_control_events {
+                        commit_framework_observability_events(
+                            EffectInvocationContext::drain_boundary_control_event_buffer(&buffer),
+                            FrameworkObservabilityCommit {
+                                flow_context: &flow_context,
+                                data_journal: &ctx.data_journal,
+                                system_journal: Some(&ctx.system_journal),
+                                instrumentation: Some(&ctx.instrumentation),
+                                heartbeat_state: ctx
+                                    .heartbeat
+                                    .as_ref()
+                                    .map(|heartbeat| &heartbeat.state),
+                                parent: Some(&envelope),
+                                observer_scope: scope,
+                            },
+                        )
+                        .await
+                        .map_err(|e| {
+                            format!("Failed to commit effect boundary observability events: {e}")
+                        })?;
+                    }
 
                     if let Some(state) = &heartbeat_state {
                         state.record_last_consumed(event_id);
@@ -686,6 +714,27 @@ pub(super) async fn dispatch_emitting<
 
             for mut event in events {
                 event.writer_id = stage_writer_id;
+                if is_framework_middleware_observability_event(&event) {
+                    commit_framework_observability_events(
+                        vec![event],
+                        FrameworkObservabilityCommit {
+                            flow_context: &flow_context,
+                            data_journal: &ctx.data_journal,
+                            system_journal: Some(&ctx.system_journal),
+                            instrumentation: Some(&ctx.instrumentation),
+                            heartbeat_state: ctx
+                                .heartbeat
+                                .as_ref()
+                                .map(|heartbeat| &heartbeat.state),
+                            parent: ctx.last_consumed_envelope.as_ref(),
+                            observer_scope,
+                        },
+                    )
+                    .await
+                    .map_err(|e| format!("Failed to commit framework observability event: {e}"))?;
+                    continue;
+                }
+
                 if route_to_error_journal(&event) {
                     tracing::info!(
                         stage_name = %ctx.stage_name,

@@ -16,6 +16,10 @@ use crate::stages::common::supervision::control_resolution::{
 };
 use crate::stages::common::supervision::error_routing::route_to_error_journal;
 use crate::stages::common::supervision::flow_context_factory::make_flow_context;
+use crate::stages::common::supervision::output_committer::{
+    commit_framework_observability_events, is_framework_middleware_observability_event,
+    FrameworkObservabilityCommit,
+};
 use crate::supervised_base::EventLoopDirective;
 use obzenflow_core::event::context::{FlowContext, StageType};
 use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
@@ -400,6 +404,9 @@ async fn dispatch_running_inner<
                             )),
                         })
                     });
+                    let boundary_control_events = effect_context
+                        .as_ref()
+                        .map(|context| context.boundary_control_events.clone());
 
                     // FLOWIP-120c H3: the middleware execution scope is
                     // computed per dispatched event from the delivered
@@ -487,11 +494,61 @@ async fn dispatch_running_inner<
                                 &envelope,
                             )
                             .await?;
+                            if let Some(buffer) = boundary_control_events {
+                                commit_framework_observability_events(
+                                    EffectInvocationContext::drain_boundary_control_event_buffer(
+                                        &buffer,
+                                    ),
+                                    FrameworkObservabilityCommit {
+                                        flow_context,
+                                        data_journal: &ctx.data_journal,
+                                        system_journal: Some(&ctx.system_journal),
+                                        instrumentation: Some(&ctx.instrumentation),
+                                        heartbeat_state: ctx
+                                            .heartbeat
+                                            .as_ref()
+                                            .map(|heartbeat| &heartbeat.state),
+                                        parent: Some(&envelope),
+                                        observer_scope: scope,
+                                    },
+                                )
+                                .await
+                                .map_err(|e| {
+                                    format!(
+                                        "Failed to commit effect boundary observability events: {e}"
+                                    )
+                                })?;
+                            }
                             // Error-journal events are written immediately; stage-journal
                             // outputs are gated by backpressure.
                             let mut stage_outputs = std::collections::VecDeque::<ChainEvent>::new();
 
                             for event in transformed_events {
+                                if is_framework_middleware_observability_event(&event) {
+                                    commit_framework_observability_events(
+                                        vec![event],
+                                        FrameworkObservabilityCommit {
+                                            flow_context,
+                                            data_journal: &ctx.data_journal,
+                                            system_journal: Some(&ctx.system_journal),
+                                            instrumentation: Some(&ctx.instrumentation),
+                                            heartbeat_state: ctx
+                                                .heartbeat
+                                                .as_ref()
+                                                .map(|heartbeat| &heartbeat.state),
+                                            parent: Some(&envelope),
+                                            observer_scope: scope,
+                                        },
+                                    )
+                                    .await
+                                    .map_err(|e| {
+                                        format!(
+                                            "Failed to commit framework observability event: {e}"
+                                        )
+                                    })?;
+                                    continue;
+                                }
+
                                 if let ProcessingStatus::Error { kind, .. } =
                                     &event.processing_info.status
                                 {
