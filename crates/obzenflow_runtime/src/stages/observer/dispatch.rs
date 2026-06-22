@@ -17,7 +17,7 @@ use obzenflow_core::event::{EventEnvelope, SystemEvent};
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{ChainEvent, StageId};
 
-use crate::{
+use super::{
     EffectObserverContext, EffectObserverOutcome, HandlerObserverContext, JoinObserverContext,
     ObserverCommitResult, ObserverReport, OutputCommitObserverContext, SinkDeliveryObserverContext,
     SinkDeliveryObserverOutcome, SourcePollObserverContext, StageLifecycleObserverContext,
@@ -25,26 +25,7 @@ use crate::{
 };
 
 use crate::metrics::instrumentation::StageInstrumentation;
-
-pub(crate) async fn append_observer_diagnostics(
-    report: ObserverReport,
-    flow_context: &FlowContext,
-    instrumentation: Option<&Arc<StageInstrumentation>>,
-    data_journal: &Arc<dyn Journal<ChainEvent>>,
-    parent: Option<&EventEnvelope<ChainEvent>>,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    for diagnostic in report.diagnostics {
-        let mut diagnostic = diagnostic.with_flow_context(flow_context.clone());
-        if let Some(instrumentation) = instrumentation {
-            diagnostic = diagnostic.with_runtime_context(instrumentation.snapshot_with_control());
-        }
-        data_journal
-            .append(diagnostic, parent)
-            .await
-            .map_err(|e| format!("Failed to append observer diagnostic: {e}"))?;
-    }
-    Ok(())
-}
+use crate::stages::common::supervision::output_committer::append_observer_diagnostics;
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_before_handler_observers(

@@ -11,7 +11,6 @@ pub mod handler_error;
 pub mod handlers;
 pub(crate) mod heartbeat;
 pub mod middleware_mirror;
-pub(crate) mod observers;
 pub mod source_handle;
 pub mod stage_handle;
 pub(crate) mod supervision;

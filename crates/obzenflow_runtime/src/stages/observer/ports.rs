@@ -8,10 +8,10 @@
 //! diagnostics, but they cannot return control decisions. The output-commit hook
 //! may fail only as a commit/invariant failure.
 //!
-//! The ports live here instead of `obzenflow_core` because they describe
-//! runtime stage and boundary observation surfaces. Core provides the domain
-//! primitives used by those surfaces, but it must not own runtime middleware
-//! contracts.
+//! The ports live under `stages::observer` instead of `obzenflow_core` or the
+//! runtime crate root because they describe runtime stage and boundary
+//! observation surfaces. Core provides the domain primitives used by those
+//! surfaces, but it must not own runtime middleware contracts.
 
 use obzenflow_core::event::context::{FlowContext, MiddlewareExecutionScope};
 use obzenflow_core::event::vector_clock::VectorClock;
@@ -187,18 +187,6 @@ pub struct SinkDeliveryObserverContext<'a> {
     pub outcome: SinkDeliveryObserverOutcome,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum IngressObserverOutcome {
-    Accepted,
-    Refused { reason: String },
-}
-
-pub struct IngressObserverContext<'a> {
-    pub stage_id: StageId,
-    pub stage_name: &'a str,
-    pub outcome: IngressObserverOutcome,
-}
-
 pub struct OutputCommitObserverContext<'a> {
     pub stage_id: StageId,
     pub stage_name: &'a str,
@@ -326,22 +314,6 @@ pub trait SinkDeliveryObserver: Send + Sync {
     }
 }
 
-/// Reserved cross-cutting surface. Ingress (listener) observation is owned by
-/// the infra hosted-web ingress path (FLOWIP-115d), not the stage runtime, so
-/// there is no stage-runtime dispatcher for this port yet. It is kept defined so
-/// the carrier and infra path can adopt it without re-reserving the surface.
-pub trait IngressObserver: Send + Sync {
-    fn label(&self) -> &'static str;
-
-    fn determinism(&self) -> ObserverDeterminism {
-        ObserverDeterminism::Deterministic
-    }
-
-    fn after_ingress(&self, _ctx: &IngressObserverContext<'_>) -> ObserverReport {
-        ObserverReport::empty()
-    }
-}
-
 pub trait OutputCommitObserver: Send + Sync {
     fn label(&self) -> &'static str;
 
@@ -386,7 +358,6 @@ pub struct StageObserverBundle {
     pub source_poll: Option<Arc<dyn SourcePollObserver>>,
     pub effect: Option<Arc<dyn EffectObserver>>,
     pub sink_delivery: Option<Arc<dyn SinkDeliveryObserver>>,
-    pub ingress: Option<Arc<dyn IngressObserver>>,
     pub output_commit: Option<Arc<dyn OutputCommitObserver>>,
     pub stage_lifecycle: Option<Arc<dyn StageLifecycleObserver>>,
 }
@@ -399,7 +370,6 @@ impl StageObserverBundle {
             && self.source_poll.is_none()
             && self.effect.is_none()
             && self.sink_delivery.is_none()
-            && self.ingress.is_none()
             && self.output_commit.is_none()
             && self.stage_lifecycle.is_none()
     }

@@ -78,9 +78,10 @@ pub(super) async fn dispatch_enriching<
                     let contract_reader_count = ctx.stream_contract_state.len();
                     let upstream_stage = subscription.last_delivered_upstream_stage();
                     let last_eof_outcome = subscription.last_eof_outcome().cloned();
-                    if let Some(signal_snapshot) =
-                        common::signal_snapshot(Some(crate::JoinSide::Stream), &envelope.event)
-                    {
+                    if let Some(signal_snapshot) = common::signal_snapshot(
+                        Some(crate::stages::observer::JoinSide::Stream),
+                        &envelope.event,
+                    ) {
                         common::observe_join_input(
                             ctx,
                             &envelope.event,
@@ -164,7 +165,7 @@ pub(super) async fn dispatch_enriching<
                     let event = envelope.event.clone();
                     let event_id = event.id;
                     let delivery_snapshot = common::delivery_snapshot(
-                        crate::JoinSide::Stream,
+                        crate::stages::observer::JoinSide::Stream,
                         source_id,
                         subscription.last_delivered_stage_input_position(),
                         &envelope,

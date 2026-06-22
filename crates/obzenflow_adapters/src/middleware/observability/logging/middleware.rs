@@ -3,8 +3,16 @@
 // https://obzenflow.dev
 
 use obzenflow_core::event::chain_event::ChainEvent;
+use obzenflow_core::event::payloads::observability_payload::{
+    MiddlewareLifecycle, ObservabilityPayload, UserMiddlewareEvent,
+};
+use obzenflow_core::event::ChainEventFactory;
+use obzenflow_core::{StageId, WriterId};
+use serde_json::json;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+
+const LOGGING_EVENT_TYPE: &str = "obzenflow.logging";
 
 /// Logs event processing from observe-only middleware hooks.
 pub struct LoggingMiddleware {
@@ -47,7 +55,7 @@ impl LoggingMiddleware {
         self.events_processed.fetch_add(count, Ordering::Relaxed);
     }
 
-    pub(super) fn log_processing(&self, event: &ChainEvent) {
+    pub(super) fn log_processing(&self, event: &ChainEvent) -> String {
         let count = self.events_processed.fetch_add(1, Ordering::Relaxed) + 1;
 
         let message = if let Some(prefix) = &self.prefix {
@@ -67,10 +75,11 @@ impl LoggingMiddleware {
             )
         };
 
-        self.emit(message);
+        self.emit(message.clone());
+        message
     }
 
-    pub(super) fn log_completed(&self, event: &ChainEvent, result_count: usize) {
+    pub(super) fn log_completed(&self, event: &ChainEvent, result_count: usize) -> String {
         let message = if let Some(prefix) = &self.prefix {
             format!(
                 "{} - Completed processing {}, produced {} results",
@@ -83,7 +92,38 @@ impl LoggingMiddleware {
             )
         };
 
-        self.emit(message);
+        self.emit(message.clone());
+        message
+    }
+
+    pub(super) fn diagnostic_event(
+        &self,
+        stage_id: StageId,
+        action: &'static str,
+        message: String,
+        input: Option<&ChainEvent>,
+        details: serde_json::Value,
+    ) -> ChainEvent {
+        let input_event = input.map(|event| {
+            json!({
+                "id": event.id.to_string(),
+                "event_type": event.event_type(),
+            })
+        });
+        ChainEventFactory::observability_event(
+            WriterId::from(stage_id),
+            ObservabilityPayload::Middleware(MiddlewareLifecycle::User(UserMiddlewareEvent {
+                event_type: LOGGING_EVENT_TYPE.to_string(),
+                payload: json!({
+                    "action": action,
+                    "level": self.level.to_string(),
+                    "message": message,
+                    "prefix": self.prefix.as_deref(),
+                    "input": input_event,
+                    "details": details,
+                }),
+            })),
+        )
     }
 
     pub(super) fn emit(&self, message: String) {

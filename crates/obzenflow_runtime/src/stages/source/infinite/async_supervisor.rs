@@ -10,7 +10,8 @@ use crate::stages::common::supervision::flow_context_factory::make_flow_context;
 use crate::stages::source::replay_lifecycle::ReplayCompletionGuard;
 use crate::stages::source::supervision::{
     around_source_boundary, drain_pending_outputs_async, emit_batch_to_pending_outputs,
-    stage_boundary_control_events, stage_source_poll_outputs, SourcePollObservation,
+    observe_source_boundary_rejection, stage_boundary_control_events, stage_source_poll_outputs,
+    SourcePollObservation,
 };
 use crate::stages::source::{
     SourceBoundary, SourceBoundaryOutcome, SourcePollCompletion, SourcePollReport,
@@ -572,8 +573,15 @@ impl<H: AsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
                             );
                             ctx.completion_reason =
                                 InfiniteSourceCompletionReason::ArchiveExhausted;
+                            let mut control_events = report.control_events;
+                            observe_source_boundary_rejection(
+                                &source_poll_observation,
+                                &mut control_events,
+                                &reason,
+                            )
+                            .await?;
                             if stage_boundary_control_events(
-                                report.control_events,
+                                control_events,
                                 &stage_flow_context,
                                 &ctx.instrumentation,
                                 &mut ctx.pending_outputs,
@@ -598,7 +606,7 @@ impl<H: AsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
                                     .observe(
                                         events.as_mut_slice(),
                                         poll.poll_duration,
-                                        crate::SourcePollObserverOutcome::Batch {
+                                        crate::stages::observer::SourcePollObserverOutcome::Batch {
                                             events: source_event_count,
                                         },
                                     )
@@ -621,7 +629,7 @@ impl<H: AsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
                                         .observe(
                                             events.as_mut_slice(),
                                             Duration::from_nanos(0),
-                                            crate::SourcePollObserverOutcome::Batch {
+                                            crate::stages::observer::SourcePollObserverOutcome::Batch {
                                                 events: source_event_count,
                                             },
                                         )
@@ -643,7 +651,7 @@ impl<H: AsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
                                     source_poll_observation
                                         .observe_empty(
                                             poll.poll_duration,
-                                            crate::SourcePollObserverOutcome::Eof,
+                                            crate::stages::observer::SourcePollObserverOutcome::Eof,
                                         )
                                         .await?;
                                     Ok(EventLoopDirective::Transition(
@@ -655,7 +663,7 @@ impl<H: AsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
                                         .observe(
                                             control_events.as_mut_slice(),
                                             Duration::from_nanos(0),
-                                            crate::SourcePollObserverOutcome::Eof,
+                                            crate::stages::observer::SourcePollObserverOutcome::Eof,
                                         )
                                         .await?;
                                     stage_source_poll_outputs(
@@ -680,7 +688,7 @@ impl<H: AsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
                                     source_poll_observation
                                         .observe_empty(
                                             poll.poll_duration,
-                                            crate::SourcePollObserverOutcome::Error {
+                                            crate::stages::observer::SourcePollObserverOutcome::Error {
                                                 message: error.clone(),
                                             },
                                         )
@@ -694,7 +702,7 @@ impl<H: AsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
                                         .observe(
                                             control_events.as_mut_slice(),
                                             Duration::from_nanos(0),
-                                            crate::SourcePollObserverOutcome::Error {
+                                            crate::stages::observer::SourcePollObserverOutcome::Error {
                                                 message: error.clone(),
                                             },
                                         )

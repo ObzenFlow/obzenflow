@@ -11,15 +11,15 @@ use crate::messaging::PollResult;
 use crate::metrics::instrumentation::process_with_instrumentation;
 use crate::stages::common::handlers::UnifiedSinkHandler;
 use crate::stages::common::heartbeat::HeartbeatProcessingGuard;
-use crate::stages::common::observers::run_sink_delivery_observers;
 use crate::stages::common::supervision::control_resolution::{
     resolve_control_event_awaiting_pauses, ControlAction,
 };
 use crate::stages::common::supervision::error_routing::route_to_error_journal;
 use crate::stages::common::supervision::flow_context_factory::make_flow_context;
 use crate::stages::common::supervision::forward_control_event::forward_control_event as forward_control_event_helper;
+use crate::stages::observer::dispatch::run_sink_delivery_observers;
+use crate::stages::observer::SinkDeliveryObserverOutcome;
 use crate::supervised_base::EventLoopDirective;
-use crate::SinkDeliveryObserverOutcome;
 use futures::FutureExt;
 use obzenflow_core::event::context::causality_context::CausalityContext;
 use obzenflow_core::event::context::StageType;

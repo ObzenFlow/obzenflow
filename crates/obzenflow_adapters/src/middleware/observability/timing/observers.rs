@@ -4,7 +4,7 @@
 
 use super::TimingMiddleware;
 use obzenflow_core::event::chain_event::ChainEvent;
-use obzenflow_runtime::{
+use obzenflow_runtime::stages::observer::{
     HandlerObserver, HandlerObserverContext, JoinObserver, JoinObserverContext,
     ObserverCommitResult, ObserverDeterminism, ObserverReport, OutputCommitObserver,
     OutputCommitObserverContext, SourcePollObserver, SourcePollObserverContext, StatefulObserver,

@@ -9,7 +9,7 @@ use crate::middleware::{
     MiddlewareSurfaceAttachment, MiddlewareSurfaceKind, TopologyMiddlewareConfigSlot,
 };
 use obzenflow_runtime::pipeline::config::StageConfig;
-use obzenflow_runtime::ObserverCommitError;
+use obzenflow_runtime::stages::observer::ObserverCommitError;
 use std::sync::Arc;
 
 /// Override-key family for timing observer middleware.

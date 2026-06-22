@@ -22,7 +22,6 @@ pub mod feed_plan;
 pub mod id_conversions;
 pub mod journal;
 pub mod message_bus;
-pub mod observer_ports;
 pub mod replay;
 pub(crate) mod runtime_resource_limits;
 pub mod supervised_base;
@@ -36,18 +35,6 @@ pub mod stages;
 
 #[cfg(any(test, feature = "test-support"))]
 pub mod testing;
-
-pub use observer_ports::{
-    EffectObserver, EffectObserverContext, EffectObserverOutcome, HandlerObserver,
-    HandlerObserverContext, IngressObserver, IngressObserverContext, IngressObserverOutcome,
-    JoinCanonicalMergeMetadata, JoinDeliverySnapshot, JoinObserver, JoinObserverContext, JoinSide,
-    JoinSignalKind, JoinSignalSnapshot, ObserverCommitError, ObserverCommitResult,
-    ObserverDeterminism, ObserverReport, OutputCommitObserver, OutputCommitObserverContext,
-    SinkDeliveryObserver, SinkDeliveryObserverContext, SinkDeliveryObserverOutcome,
-    SourcePollObserver, SourcePollObserverContext, SourcePollObserverOutcome,
-    StageLifecycleObserver, StageLifecycleObserverContext, StageLifecyclePhase,
-    StageObserverBundle, StatefulObserver, StatefulObserverContext,
-};
 
 /// Convenience re-exports of the most commonly used runtime types.
 ///

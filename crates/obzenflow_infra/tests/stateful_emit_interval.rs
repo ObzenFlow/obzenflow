@@ -171,7 +171,7 @@ async fn stateful_emit_interval_emits_while_idle() {
         stage_name: "timer_stateful".to_string(),
         flow_name: "timer_flow".to_string(),
         upstream_stages: vec![src],
-        observers: obzenflow_runtime::StageObserverBundle::default(),
+        observers: obzenflow_runtime::stages::observer::StageObserverBundle::default(),
         emit_interval: Some(emit_interval),
         control_strategy: None,
     };
@@ -355,7 +355,7 @@ async fn stateful_emit_interval_advances_under_paused_time() {
         stage_name: "paused_timer_stateful".to_string(),
         flow_name: "paused_timer_flow".to_string(),
         upstream_stages: vec![src],
-        observers: obzenflow_runtime::StageObserverBundle::default(),
+        observers: obzenflow_runtime::stages::observer::StageObserverBundle::default(),
         emit_interval: Some(emit_interval),
         control_strategy: None,
     };

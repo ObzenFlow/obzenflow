@@ -9,10 +9,6 @@ use crate::messaging::PollResult;
 use crate::metrics::instrumentation::process_with_instrumentation_no_count;
 use crate::stages::common::handlers::{StatefulOutputContext, UnifiedStatefulHandler};
 use crate::stages::common::heartbeat::HeartbeatProcessingGuard;
-use crate::stages::common::observers::{
-    run_stateful_after_accumulate_observers, run_stateful_after_emit_observers,
-    run_stateful_before_accumulate_observers,
-};
 use crate::stages::common::supervision::backpressure_drain::{drain_one_pending, DrainOutcome};
 use crate::stages::common::supervision::control_resolution::{
     resolve_control_event_awaiting_pauses, ControlAction,
@@ -23,8 +19,12 @@ use crate::stages::common::supervision::output_committer::{
     commit_framework_observability_events, is_framework_middleware_observability_event,
     FrameworkObservabilityCommit,
 };
+use crate::stages::observer::dispatch::{
+    run_stateful_after_accumulate_observers, run_stateful_after_emit_observers,
+    run_stateful_before_accumulate_observers,
+};
+use crate::stages::observer::StatefulObserverContext;
 use crate::supervised_base::EventLoopDirective;
-use crate::StatefulObserverContext;
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::vector_clock::CausalOrderingService;
 use obzenflow_fsm::StateVariant;

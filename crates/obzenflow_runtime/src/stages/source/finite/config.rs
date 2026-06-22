@@ -4,9 +4,9 @@
 
 //! Configuration for finite source stages
 
+use crate::stages::observer::StageObserverBundle;
 use crate::stages::source::boundary::SourceBoundary;
 use crate::stages::source::strategies::CompletionGate;
-use crate::StageObserverBundle;
 use obzenflow_core::StageId;
 use std::sync::Arc;
 

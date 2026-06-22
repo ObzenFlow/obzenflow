@@ -22,11 +22,11 @@ use obzenflow_core::event::context::StageType;
 use obzenflow_core::ingress::{IngressBoundaryMiddleware, IngressKey};
 use obzenflow_core::{StageId, StageKey};
 use obzenflow_runtime::pipeline::config::StageConfig;
-use obzenflow_runtime::stages::source::strategies::CompletionGate;
-use obzenflow_runtime::{
-    EffectObserver, HandlerObserver, IngressObserver, JoinObserver, OutputCommitObserver,
-    SinkDeliveryObserver, SourcePollObserver, StageLifecycleObserver, StatefulObserver,
+use obzenflow_runtime::stages::observer::{
+    EffectObserver, HandlerObserver, JoinObserver, OutputCommitObserver, SinkDeliveryObserver,
+    SourcePollObserver, StageLifecycleObserver, StatefulObserver,
 };
+use obzenflow_runtime::stages::source::strategies::CompletionGate;
 use ring::digest::{Context, SHA256};
 use std::sync::Arc;
 use thiserror::Error;
@@ -866,7 +866,6 @@ pub enum MiddlewareSurfaceAttachment {
     SourcePollObserver(Arc<dyn SourcePollObserver>),
     EffectObserver(Arc<dyn EffectObserver>),
     SinkDeliveryObserver(Arc<dyn SinkDeliveryObserver>),
-    IngressObserver(Arc<dyn IngressObserver>),
     HandlerObserver(Arc<dyn HandlerObserver>),
     StatefulObserver(Arc<dyn StatefulObserver>),
     JoinObserver(Arc<dyn JoinObserver>),
@@ -975,12 +974,14 @@ mod tests {
             Err(MiddlewareAttachmentValidationError::UnsupportedSurface { .. })
         ));
 
-        // Observer-capability declarations can attach to observer-compatible
-        // ingress observation without becoming control policies.
+        // Ingress observation is carrier-reserved but not a public 115f
+        // observer port until infra ships the matching dispatcher.
         let observer =
             MiddlewareDeclaration::observer("observer", vec![MiddlewareSurfaceKind::Ingress]);
-        validate_attachment_request(&observer, &request)
-            .expect("observer ingress attachment should validate");
+        assert!(matches!(
+            validate_attachment_request(&observer, &request),
+            Err(MiddlewareAttachmentValidationError::UnsupportedCapability { .. })
+        ));
     }
 
     #[test]

@@ -6,6 +6,7 @@
 
 pub mod common;
 pub mod join;
+pub mod observer;
 pub mod resources_builder;
 pub mod sink;
 pub mod source;

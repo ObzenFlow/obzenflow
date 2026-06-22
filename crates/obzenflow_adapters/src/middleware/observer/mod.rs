@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Adapter-owned observer composition (FLOWIP-115f onion conformance).
+//! Adapter-owned observer composition and authoring surface (FLOWIP-115f).
 //!
 //! This module folds the resolved per-surface observer list for a stage into a
 //! single composed port, exactly as `Per*PolicyBoundary` folds a control-policy
@@ -14,13 +14,14 @@
 use std::sync::Arc;
 
 use obzenflow_core::ChainEvent;
-use obzenflow_runtime::{
-    EffectObserver, EffectObserverContext, HandlerObserver, HandlerObserverContext,
-    IngressObserver, IngressObserverContext, JoinObserver, JoinObserverContext,
-    ObserverCommitResult, ObserverReport, OutputCommitObserver, OutputCommitObserverContext,
-    SinkDeliveryObserver, SinkDeliveryObserverContext, SourcePollObserver,
-    SourcePollObserverContext, StageLifecycleObserver, StageLifecycleObserverContext,
-    StageObserverBundle, StatefulObserver, StatefulObserverContext,
+use obzenflow_runtime::stages::observer::StageObserverBundle;
+pub use obzenflow_runtime::stages::observer::{
+    EffectObserver, EffectObserverContext, HandlerObserver, HandlerObserverContext, JoinObserver,
+    JoinObserverContext, ObserverCommitError, ObserverCommitResult, ObserverDeterminism,
+    ObserverReport, OutputCommitObserver, OutputCommitObserverContext, SinkDeliveryObserver,
+    SinkDeliveryObserverContext, SinkDeliveryObserverOutcome, SourcePollObserver,
+    SourcePollObserverContext, SourcePollObserverOutcome, StageLifecycleObserver,
+    StageLifecycleObserverContext, StageLifecyclePhase, StatefulObserver, StatefulObserverContext,
 };
 
 use crate::middleware::{MiddlewareSurfaceAttachment, MiddlewareSurfaceKind};
@@ -164,10 +165,6 @@ observer_surfaces! {
         SinkDeliveryObserverSurface {
             kind: SinkDelivery, port: SinkDeliveryObserver, attach: SinkDeliveryObserver,
             field: sink_delivery, chain: SinkDeliveryObserverChain,
-        },
-        IngressObserverSurface {
-            kind: Ingress, port: IngressObserver, attach: IngressObserver,
-            field: ingress, chain: IngressObserverChain,
         },
         OutputCommitObserverSurface {
             kind: OutputCommit, port: OutputCommitObserver, attach: OutputCommitObserver,
@@ -366,26 +363,6 @@ impl SinkDeliveryObserver for SinkDeliveryObserverChain {
     }
 }
 
-struct IngressObserverChain(Vec<Arc<dyn IngressObserver>>);
-
-impl IngressObserver for IngressObserverChain {
-    fn label(&self) -> &'static str {
-        CHAIN_LABEL
-    }
-
-    fn after_ingress(&self, ctx: &IngressObserverContext<'_>) -> ObserverReport {
-        // Ingress observation runs at the listener boundary, which replay never
-        // enters, so there is no handler-shell determinism gate here.
-        let mut merged = ObserverReport::empty();
-        for observer in &self.0 {
-            merged
-                .diagnostics
-                .extend(observer.after_ingress(ctx).diagnostics);
-        }
-        merged
-    }
-}
-
 struct OutputCommitObserverChain(Vec<Arc<dyn OutputCommitObserver>>);
 
 impl OutputCommitObserver for OutputCommitObserverChain {
@@ -435,7 +412,7 @@ mod tests {
     use obzenflow_core::event::context::{FlowContext, MiddlewareExecutionScope, StageType};
     use obzenflow_core::event::ChainEventFactory;
     use obzenflow_core::{StageId, WriterId};
-    use obzenflow_runtime::ObserverDeterminism;
+    use obzenflow_runtime::stages::observer::ObserverDeterminism;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// A handler observer that counts its invocations, so a test can prove the
@@ -553,16 +530,15 @@ mod tests {
     }
 
     #[test]
-    fn observer_surface_kinds_cover_every_surface() {
-        // Every surface kind has an observer port, so the carrier gate derived
-        // from this set is correct: observer-capable iff a port exists. A surface
-        // kind added without a wiring row is absent here and the gate rejects
-        // observer attachment, which is the fail-closed behaviour we want.
+    fn observer_surface_kinds_cover_every_shipped_surface() {
+        // Every shipped observer surface kind has an observer port, so the
+        // carrier gate derived from this set is correct: observer-capable iff a
+        // port exists. Ingress remains carrier-reserved but is intentionally
+        // absent until infra ships a same-slice observer dispatcher.
         let all = [
             MiddlewareSurfaceKind::SourcePoll,
             MiddlewareSurfaceKind::Effect,
             MiddlewareSurfaceKind::SinkDelivery,
-            MiddlewareSurfaceKind::Ingress,
             MiddlewareSurfaceKind::Handler,
             MiddlewareSurfaceKind::Stateful,
             MiddlewareSurfaceKind::Join,

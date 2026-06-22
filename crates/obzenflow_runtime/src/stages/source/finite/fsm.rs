@@ -8,7 +8,7 @@
 //! They have a unique "WaitingForGun" state that ensures they don't
 //! start emitting events until the pipeline is ready.
 
-use crate::StageLifecyclePhase;
+use crate::stages::observer::StageLifecyclePhase;
 use obzenflow_core::event::context::{FlowContext, MiddlewareExecutionScope, StageType};
 use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
 use obzenflow_core::event::types::{Count, JournalIndex, JournalPath, SeqNo};
@@ -31,10 +31,10 @@ use crate::metrics::instrumentation::{snapshot_stage_metrics, StageInstrumentati
 use crate::metrics::tail_read;
 use crate::replay::ReplayArchive;
 use crate::stages::common::backpressure_activity_pulse::BackpressureActivityPulse;
-use crate::stages::common::observers::run_stage_lifecycle_observers;
 use crate::stages::common::stage_handle::{
     FORCE_SHUTDOWN_MESSAGE, STOP_REASON_TIMEOUT, STOP_REASON_USER_STOP,
 };
+use crate::stages::observer::dispatch::run_stage_lifecycle_observers;
 use crate::stages::source::strategies::{CompletionContext, CompletionGate};
 use crate::supervised_base::idle_backoff::IdleBackoff;
 
@@ -249,7 +249,7 @@ pub struct FiniteSourceContext<H> {
     pub stage_name: String,
 
     /// Runtime observer bundle attached to this source boundary.
-    pub observers: crate::StageObserverBundle,
+    pub observers: crate::stages::observer::StageObserverBundle,
 
     /// Flow name for flow context
     pub flow_name: String,
@@ -306,7 +306,7 @@ pub struct FiniteSourceContext<H> {
 pub struct FiniteSourceContextInit {
     pub stage_id: obzenflow_core::StageId,
     pub stage_name: String,
-    pub observers: crate::StageObserverBundle,
+    pub observers: crate::stages::observer::StageObserverBundle,
     pub flow_name: String,
     pub flow_id: FlowId,
     pub data_journal: Arc<dyn Journal<ChainEvent>>,
@@ -958,7 +958,7 @@ mod tests {
             FiniteSourceContext::<DummySource>::new(FiniteSourceContextInit {
                 stage_id,
                 stage_name: stage_name.clone(),
-                observers: crate::StageObserverBundle::default(),
+                observers: crate::stages::observer::StageObserverBundle::default(),
                 flow_name: flow_name.clone(),
                 flow_id,
                 data_journal: data_journal.clone(),

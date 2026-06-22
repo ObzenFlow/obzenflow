@@ -180,11 +180,14 @@ live I/O unit (a source, a declared effect, or sink delivery).
 ## Hook-bound Observer Middleware
 
 Observer middleware is separate from legacy `Middleware` and from hook-bound
-control policy. Implement the runtime-owned observer traits exported by
-`obzenflow_runtime` and declare `MiddlewareDeclaration::observer(...)` from
-the factory. Observer hooks can inspect inputs, outputs, delivery outcomes, effect
-outcomes, lifecycle phases, and output commits, and may return diagnostics, but
-they cannot skip, reject, retry, recover, synthesize, pause, or abort.
+control policy. Public authoring goes through
+`obzenflow_adapters::middleware::observer`, which re-exports the observer traits
+and contexts from the bounded runtime port module. Declare
+`MiddlewareDeclaration::observer(...)` from the factory and materialize one
+observer attachment for each supported surface. Observer hooks can inspect
+inputs, outputs, delivery outcomes, effect outcomes, lifecycle phases, and
+output commits, and may return diagnostics, but they cannot skip, reject,
+retry, recover, synthesize, pause, or abort.
 
 Supported observer surfaces are:
 
@@ -196,10 +199,16 @@ Supported observer surfaces are:
 - `SinkDelivery`
 - `OutputCommit`
 - `StageLifecycle`
-- `Ingress`
 
 `OutputCommit` is observer-only. It may fail only as an output commit invariant
 failure, not as control flow.
+
+Observer diagnostics are wide events. Observer output must be either
+value-preserving enrichment on the journal-bound event or explicit diagnostic
+facts appended to the stage data journal. User diagnostics are not mirrored to
+the system journal and should not be routed through a side-channel telemetry
+bus. Logging observers may mirror a journalled diagnostic to `tracing`, but the
+journal fact remains the source of truth.
 
 Observer implementations choose replay behavior with
 `ObserverDeterminism::Deterministic` or `ObserverDeterminism::LiveOnly`.
@@ -309,7 +318,8 @@ Control policies live under `middleware::control::policy`. They are the
 authoring contract for middleware that controls a live I/O boundary;
 legacy handler-shell compatibility middleware still implements the generic
 `Middleware` trait under `middleware::handler`. Observe-only middleware uses the
-neutral observer traits described above. Built-in control middleware lives
+adapter observer authoring surface and the bounded neutral ports described
+above. Built-in control middleware lives
 beside the policy contract under `middleware::control`, so the namespace reads
 as one control subsystem rather than a loose set of root modules.
 

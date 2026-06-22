@@ -39,7 +39,7 @@
 
 use std::sync::Arc;
 
-use crate::StageObserverBundle;
+use crate::stages::observer::{ObserverReport, StageObserverBundle};
 use obzenflow_core::event::context::{FlowContext, MiddlewareExecutionScope, StageType};
 use obzenflow_core::event::payloads::correlation_payload::CorrelationPayload;
 use obzenflow_core::event::payloads::observability_payload::{
@@ -54,7 +54,7 @@ use crate::feed_plan::StageOutputContract;
 use crate::metrics::instrumentation::StageInstrumentation;
 use crate::stages::common::heartbeat::HeartbeatState;
 use crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal;
-use crate::stages::common::observers::{append_observer_diagnostics, run_output_commit_observers};
+use crate::stages::observer::dispatch::run_output_commit_observers;
 
 fn output_contract_summary(output_contract: &StageOutputContract) -> String {
     output_contract
@@ -275,6 +275,44 @@ impl OutputCommitter<'_> {
         Ok(written)
     }
 
+    async fn append_no_hook_prebuilt(
+        &self,
+        mut event: ChainEvent,
+        parent: Option<&EventEnvelope<ChainEvent>>,
+        intent: StageAppendIntent,
+    ) -> Result<EventEnvelope<ChainEvent>, CommitError> {
+        debug_assert!(!intent.runs_output_commit_hooks());
+
+        if let Some(flow_context) = self.flow_context {
+            event = event.with_flow_context(flow_context.clone());
+        }
+
+        if let Some(instrumentation) = self.instrumentation {
+            event = event.with_runtime_context(instrumentation.snapshot_with_control());
+        }
+
+        let written = self
+            .data_journal
+            .append(event, parent)
+            .await
+            .map_err(|e| -> CommitError { e.to_string().into() })?;
+
+        if let Some(heartbeat) = self.heartbeat_state {
+            heartbeat.record_last_output(written.event.id);
+        }
+
+        if matches!(
+            intent.mirror_policy(),
+            MirrorPolicy::FrameworkMiddlewareAllowlist
+        ) {
+            if let Some(system_journal) = self.system_journal {
+                mirror_middleware_event_to_system_journal(&written, system_journal).await;
+            }
+        }
+
+        Ok(written)
+    }
+
     /// Validate a prebuilt event before a caller performs any external gating
     /// such as backpressure reservation.
     pub(crate) fn validate_prebuilt(
@@ -372,6 +410,38 @@ pub(crate) fn is_framework_middleware_observability_event(event: &ChainEvent) ->
                 | MiddlewareLifecycle::Backpressure(_)
         ))
     )
+}
+
+pub(crate) async fn append_observer_diagnostics(
+    report: ObserverReport,
+    flow_context: &FlowContext,
+    instrumentation: Option<&Arc<StageInstrumentation>>,
+    data_journal: &Arc<dyn Journal<ChainEvent>>,
+    parent: Option<&EventEnvelope<ChainEvent>>,
+) -> Result<(), CommitError> {
+    if report.is_empty() {
+        return Ok(());
+    }
+
+    let committer = OutputCommitter {
+        data_journal,
+        flow_context: Some(flow_context),
+        system_journal: None,
+        instrumentation,
+        heartbeat_state: None,
+        output_contract: None,
+        observers: None,
+        observer_scope: MiddlewareExecutionScope::LiveHandler,
+    };
+
+    for diagnostic in report.diagnostics {
+        committer
+            .append_no_hook_prebuilt(diagnostic, parent, StageAppendIntent::ObserverDiagnostic)
+            .await
+            .map_err(|e| format!("Failed to append observer diagnostic: {e}"))?;
+    }
+
+    Ok(())
 }
 
 #[allow(dead_code)]

@@ -12,16 +12,18 @@ use crate::feed_plan::StageOutputContract;
 use crate::metrics::instrumentation::StageInstrumentation;
 use crate::stages::common::backpressure_activity_pulse::BackpressureActivityPulse;
 use crate::stages::common::heartbeat::HeartbeatState;
-use crate::stages::common::observers::run_source_poll_observers;
 use crate::stages::common::supervision::backpressure_drain::{
     drain_one_pending, drain_one_pending_resolve, DrainAttempt, DrainOutcome,
+};
+use crate::stages::observer::dispatch::run_source_poll_observers;
+use crate::stages::observer::{
+    SourcePollObserverContext, SourcePollObserverOutcome, StageObserverBundle,
 };
 use crate::stages::source::boundary::{
     SourceBoundary, SourceBoundaryOutcome, SourceBoundaryReport, SourcePollExecution,
 };
 use crate::supervised_base::idle_backoff::IdleBackoff;
 use crate::supervised_base::{EventLoopDirective, EventReceiver};
-use crate::{SourcePollObserverContext, SourcePollObserverOutcome, StageObserverBundle};
 use obzenflow_core::event::context::{FlowContext, MiddlewareExecutionScope};
 use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
 use obzenflow_core::event::SystemEvent;
@@ -146,6 +148,29 @@ impl<'a> SourcePollObservation<'a> {
     }
 }
 
+pub(crate) async fn observe_source_boundary_rejection(
+    observation: &SourcePollObservation<'_>,
+    control_events: &mut Vec<ChainEvent>,
+    reason: &str,
+) -> Result<(), BoxError> {
+    let outcome = SourcePollObserverOutcome::Rejected {
+        reason: reason.to_string(),
+    };
+    if control_events.is_empty() {
+        observation
+            .observe_empty(Duration::from_nanos(0), outcome)
+            .await
+    } else {
+        observation
+            .observe(
+                control_events.as_mut_slice(),
+                Duration::from_nanos(0),
+                outcome,
+            )
+            .await
+    }
+}
+
 pub(crate) fn stage_source_poll_outputs(
     events: Vec<ChainEvent>,
     stage_flow_context: &FlowContext,
@@ -199,7 +224,7 @@ pub(crate) async fn drain_pending_outputs_sync(
     backpressure_pulse: &mut BackpressureActivityPulse,
     backpressure_backoff: &mut IdleBackoff,
     output_contract: Option<&StageOutputContract>,
-    observers: Option<&crate::StageObserverBundle>,
+    observers: Option<&crate::stages::observer::StageObserverBundle>,
     observer_scope: obzenflow_core::MiddlewareExecutionScope,
 ) -> Result<bool, BoxError> {
     while let Some(pending) = pending_outputs.pop_front() {
@@ -256,7 +281,7 @@ pub(crate) async fn drain_pending_outputs_async<E>(
     backpressure_pulse: &mut BackpressureActivityPulse,
     backpressure_backoff: &mut IdleBackoff,
     output_contract: Option<&StageOutputContract>,
-    observers: Option<&crate::StageObserverBundle>,
+    observers: Option<&crate::stages::observer::StageObserverBundle>,
     observer_scope: obzenflow_core::MiddlewareExecutionScope,
     external_events: &mut EventReceiver<E>,
     on_channel_closed: impl FnOnce() -> E,

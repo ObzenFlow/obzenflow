@@ -4,14 +4,14 @@
 
 use crate::messaging::upstream_subscription::StageInputPosition;
 use crate::stages::common::handlers::JoinHandler;
-use crate::stages::common::observers::{
-    run_join_after_output_observers, run_join_before_input_observers,
-};
 use crate::stages::common::supervision::backpressure_drain::{drain_one_pending, DrainOutcome};
 use crate::stages::common::supervision::flow_context_factory::make_flow_context;
 use crate::stages::common::supervision::forward_control_event::forward_control_event;
 use crate::stages::join::fsm::{JoinContext, PendingTransition};
-use crate::{
+use crate::stages::observer::dispatch::{
+    run_join_after_output_observers, run_join_before_input_observers,
+};
+use crate::stages::observer::{
     JoinCanonicalMergeMetadata, JoinDeliverySnapshot, JoinObserverContext, JoinSide,
     JoinSignalKind, JoinSignalSnapshot,
 };

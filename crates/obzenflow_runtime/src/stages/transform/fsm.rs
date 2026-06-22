@@ -7,7 +7,7 @@
 //! Transforms process events from upstream stages and emit transformed events.
 //! They start processing immediately without waiting for a start signal.
 
-use crate::StageLifecyclePhase;
+use crate::stages::observer::StageLifecyclePhase;
 use obzenflow_core::event::context::{FlowContext, MiddlewareExecutionScope, StageType};
 use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
 use obzenflow_core::event::types::SeqNo;
@@ -33,8 +33,8 @@ use crate::stages::common::backpressure_activity_pulse::BackpressureActivityPuls
 use crate::stages::common::control_strategies::SignalGate;
 use crate::stages::common::handlers::transform::traits::UnifiedTransformHandler;
 use crate::stages::common::heartbeat::HeartbeatHandle;
-use crate::stages::common::observers::run_stage_lifecycle_observers;
 use crate::stages::common::supervision::lifecycle_actions;
+use crate::stages::observer::dispatch::run_stage_lifecycle_observers;
 use crate::stages::resources_builder::BoundSubscriptionFactory;
 use crate::supervised_base::idle_backoff::IdleBackoff;
 
@@ -275,7 +275,7 @@ pub(crate) struct TransformContext<H: UnifiedTransformHandler> {
     pub stage_name: String,
 
     /// Runtime observer bundle attached to this stage.
-    pub observers: crate::StageObserverBundle,
+    pub observers: crate::stages::observer::StageObserverBundle,
 
     /// Flow name for flow context
     pub flow_name: String,

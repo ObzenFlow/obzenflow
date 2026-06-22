@@ -9,7 +9,7 @@
 //! (reference and stream) with different behaviors.
 
 use crate::effects::{scope_for_dispatch, EffectRuntimeMode};
-use crate::StageLifecyclePhase;
+use crate::stages::observer::StageLifecyclePhase;
 use obzenflow_core::event::context::{FlowContext, StageType};
 use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
 use obzenflow_core::event::types::SeqNo;
@@ -33,8 +33,8 @@ use crate::metrics::instrumentation::StageInstrumentation;
 use crate::stages::common::backpressure_activity_pulse::BackpressureActivityPulse;
 use crate::stages::common::handlers::JoinHandler;
 use crate::stages::common::heartbeat::HeartbeatHandle;
-use crate::stages::common::observers::run_stage_lifecycle_observers;
 use crate::stages::common::supervision::lifecycle_actions;
+use crate::stages::observer::dispatch::run_stage_lifecycle_observers;
 use crate::stages::resources_builder::BoundSubscriptionFactory;
 use crate::supervised_base::idle_backoff::IdleBackoff;
 
@@ -293,7 +293,7 @@ pub struct JoinContext<H: JoinHandler> {
     pub stage_name: String,
 
     /// Runtime observer bundle attached to this stage.
-    pub observers: crate::StageObserverBundle,
+    pub observers: crate::stages::observer::StageObserverBundle,
 
     /// Effect runtime mode (live vs replay) for this stage. Used to derive the
     /// observer execution scope so live-only observers are suppressed under

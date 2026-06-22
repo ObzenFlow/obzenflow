@@ -43,7 +43,7 @@ impl Effects {
     async fn observe_effect_outcome(
         &self,
         effect_type: &str,
-        outcome: crate::EffectObserverOutcome,
+        outcome: crate::stages::observer::EffectObserverOutcome,
     ) -> Result<(), EffectError> {
         let Some(observers) = self.ctx.observers.as_ref() else {
             return Ok(());
@@ -51,12 +51,15 @@ impl Effects {
         if observers.effect.is_none() {
             return Ok(());
         }
-        let scope = if matches!(outcome, crate::EffectObserverOutcome::SuppressedByReplay) {
+        let scope = if matches!(
+            outcome,
+            crate::stages::observer::EffectObserverOutcome::SuppressedByReplay
+        ) {
             self.ctx.effect_runtime_mode.into()
         } else {
             obzenflow_core::MiddlewareExecutionScope::LiveEffectBoundary
         };
-        crate::stages::common::observers::run_effect_observers(
+        crate::stages::observer::dispatch::run_effect_observers(
             observers,
             self.ctx.stage_id,
             &self.ctx.stage_key,
@@ -78,8 +81,8 @@ impl Effects {
         result: &Result<T, EffectError>,
     ) -> Result<(), EffectError> {
         let outcome = match result {
-            Ok(_) => crate::EffectObserverOutcome::Succeeded,
-            Err(err) => crate::EffectObserverOutcome::Failed {
+            Ok(_) => crate::stages::observer::EffectObserverOutcome::Succeeded,
+            Err(err) => crate::stages::observer::EffectObserverOutcome::Failed {
                 message: err.error_message(),
             },
         };
@@ -302,7 +305,7 @@ impl Effects {
                         .await?;
                         self.observe_effect_outcome(
                             E::EFFECT_TYPE,
-                            crate::EffectObserverOutcome::SuppressedByReplay,
+                            crate::stages::observer::EffectObserverOutcome::SuppressedByReplay,
                         )
                         .await?;
                         return Err(err);
@@ -314,7 +317,7 @@ impl Effects {
                     .await?;
                 self.observe_effect_outcome(
                     E::EFFECT_TYPE,
-                    crate::EffectObserverOutcome::SuppressedByReplay,
+                    crate::stages::observer::EffectObserverOutcome::SuppressedByReplay,
                 )
                 .await?;
                 return Ok(output);
@@ -363,7 +366,7 @@ impl Effects {
                     .await?;
                     self.observe_effect_outcome(
                         E::EFFECT_TYPE,
-                        crate::EffectObserverOutcome::Succeeded,
+                        crate::stages::observer::EffectObserverOutcome::Succeeded,
                     )
                     .await?;
                     Ok(output)
@@ -373,7 +376,7 @@ impl Effects {
                         .await?;
                     self.observe_effect_outcome(
                         E::EFFECT_TYPE,
-                        crate::EffectObserverOutcome::Failed {
+                        crate::stages::observer::EffectObserverOutcome::Failed {
                             message: err.error_message(),
                         },
                     )
@@ -440,7 +443,7 @@ impl Effects {
                 .await?;
                 self.observe_effect_outcome(
                     E::EFFECT_TYPE,
-                    crate::EffectObserverOutcome::Succeeded,
+                    crate::stages::observer::EffectObserverOutcome::Succeeded,
                 )
                 .await?;
                 Ok(output)
@@ -450,7 +453,7 @@ impl Effects {
                     .await?;
                 self.observe_effect_outcome(
                     E::EFFECT_TYPE,
-                    crate::EffectObserverOutcome::Failed {
+                    crate::stages::observer::EffectObserverOutcome::Failed {
                         message: err.error_message(),
                     },
                 )
@@ -465,14 +468,14 @@ impl Effects {
                     Ok(_) => {
                         self.observe_effect_outcome(
                             E::EFFECT_TYPE,
-                            crate::EffectObserverOutcome::Succeeded,
+                            crate::stages::observer::EffectObserverOutcome::Succeeded,
                         )
                         .await?;
                     }
                     Err(err) => {
                         self.observe_effect_outcome(
                             E::EFFECT_TYPE,
-                            crate::EffectObserverOutcome::Failed {
+                            crate::stages::observer::EffectObserverOutcome::Failed {
                                 message: err.error_message(),
                             },
                         )
@@ -488,7 +491,7 @@ impl Effects {
                 if let Err(err) = &result {
                     self.observe_effect_outcome(
                         E::EFFECT_TYPE,
-                        crate::EffectObserverOutcome::Failed {
+                        crate::stages::observer::EffectObserverOutcome::Failed {
                             message: err.error_message(),
                         },
                     )
@@ -754,7 +757,7 @@ impl Effects {
                         .await?;
                         self.observe_effect_outcome(
                             "obzenflow.capture",
-                            crate::EffectObserverOutcome::SuppressedByReplay,
+                            crate::stages::observer::EffectObserverOutcome::SuppressedByReplay,
                         )
                         .await?;
                         return Err(err);
@@ -766,7 +769,7 @@ impl Effects {
                     .await?;
                 self.observe_effect_outcome(
                     "obzenflow.capture",
-                    crate::EffectObserverOutcome::SuppressedByReplay,
+                    crate::stages::observer::EffectObserverOutcome::SuppressedByReplay,
                 )
                 .await?;
                 return Ok(output);
@@ -790,8 +793,11 @@ impl Effects {
             origin: None,
         })
         .await?;
-        self.observe_effect_outcome("obzenflow.capture", crate::EffectObserverOutcome::Succeeded)
-            .await?;
+        self.observe_effect_outcome(
+            "obzenflow.capture",
+            crate::stages::observer::EffectObserverOutcome::Succeeded,
+        )
+        .await?;
         Ok(value)
     }
 
@@ -936,7 +942,7 @@ impl Effects {
                     .await?;
                 self.observe_effect_outcome(
                     E::EFFECT_TYPE,
-                    crate::EffectObserverOutcome::Failed {
+                    crate::stages::observer::EffectObserverOutcome::Failed {
                         message: err.error_message(),
                     },
                 )

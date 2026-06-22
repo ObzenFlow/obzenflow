@@ -129,7 +129,7 @@ async fn handle_reference_envelope<
     sup: &mut JoinSupervisor<H>,
     ctx: &mut JoinContext<H>,
     envelope: EventEnvelope<ChainEvent>,
-    canonical_merge: Option<crate::JoinCanonicalMergeMetadata>,
+    canonical_merge: Option<crate::stages::observer::JoinCanonicalMergeMetadata>,
 ) -> Result<Option<EventLoopDirective<JoinEvent<H>>>, Box<dyn std::error::Error + Send + Sync>> {
     let Some(subscription) = sup.reference_subscription.as_mut() else {
         return Ok(None);
@@ -152,9 +152,10 @@ async fn handle_reference_envelope<
             let contract_reader_count = ctx.reference_contract_state.len();
             let upstream_stage = subscription.last_delivered_upstream_stage();
             let last_eof_outcome = subscription.last_eof_outcome().cloned();
-            if let Some(signal_snapshot) =
-                common::signal_snapshot(Some(crate::JoinSide::Reference), &envelope.event)
-            {
+            if let Some(signal_snapshot) = common::signal_snapshot(
+                Some(crate::stages::observer::JoinSide::Reference),
+                &envelope.event,
+            ) {
                 common::observe_join_input(
                     ctx,
                     &envelope.event,
@@ -211,7 +212,7 @@ async fn handle_reference_envelope<
             let source_id = ctx.reference_stage_id;
             let writer_id = ctx.writer_id.ok_or("No writer ID available")?;
             let delivery_snapshot = common::delivery_snapshot(
-                crate::JoinSide::Reference,
+                crate::stages::observer::JoinSide::Reference,
                 source_id,
                 subscription.last_delivered_stage_input_position(),
                 &envelope,
@@ -400,7 +401,7 @@ async fn handle_stream_envelope<
     sup: &mut JoinSupervisor<H>,
     ctx: &mut JoinContext<H>,
     envelope: EventEnvelope<ChainEvent>,
-    canonical_merge: Option<crate::JoinCanonicalMergeMetadata>,
+    canonical_merge: Option<crate::stages::observer::JoinCanonicalMergeMetadata>,
 ) -> Result<Option<EventLoopDirective<JoinEvent<H>>>, Box<dyn std::error::Error + Send + Sync>> {
     let Some(subscription) = sup.stream_subscription.as_mut() else {
         return Ok(None);
@@ -425,9 +426,10 @@ async fn handle_stream_envelope<
             let contract_reader_count = ctx.stream_contract_state.len();
             let upstream_stage = subscription.last_delivered_upstream_stage();
             let last_eof_outcome = subscription.last_eof_outcome().cloned();
-            if let Some(signal_snapshot) =
-                common::signal_snapshot(Some(crate::JoinSide::Stream), &envelope.event)
-            {
+            if let Some(signal_snapshot) = common::signal_snapshot(
+                Some(crate::stages::observer::JoinSide::Stream),
+                &envelope.event,
+            ) {
                 common::observe_join_input(
                     ctx,
                     &envelope.event,
@@ -499,7 +501,7 @@ async fn handle_stream_envelope<
             let event = envelope.event.clone();
             let event_id = event.id;
             let delivery_snapshot = common::delivery_snapshot(
-                crate::JoinSide::Stream,
+                crate::stages::observer::JoinSide::Stream,
                 source_id,
                 subscription.last_delivered_stage_input_position(),
                 &envelope,
@@ -845,7 +847,7 @@ async fn dispatch_live_canonical<
                         sup,
                         ctx,
                         envelope,
-                        Some(crate::JoinCanonicalMergeMetadata {
+                        Some(crate::stages::observer::JoinCanonicalMergeMetadata {
                             selected_feed: Some("reference".to_string()),
                             reader_index: None,
                         }),
@@ -871,7 +873,7 @@ async fn dispatch_live_canonical<
                         sup,
                         ctx,
                         envelope,
-                        Some(crate::JoinCanonicalMergeMetadata {
+                        Some(crate::stages::observer::JoinCanonicalMergeMetadata {
                             selected_feed: Some("stream".to_string()),
                             reader_index: None,
                         }),

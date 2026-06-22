@@ -3,13 +3,26 @@
 // https://obzenflow.dev
 
 use super::LoggingMiddleware;
+use obzenflow_core::event::chain_event::ChainEventContent;
 use obzenflow_core::event::context::{FlowContext, MiddlewareExecutionScope, StageType};
+use obzenflow_core::event::payloads::observability_payload::{
+    MiddlewareLifecycle, ObservabilityPayload,
+};
 use obzenflow_core::event::ChainEventFactory;
-use obzenflow_runtime::{
+use obzenflow_runtime::stages::observer::{
     HandlerObserver, HandlerObserverContext, ObserverDeterminism, SinkDeliveryObserver,
     SinkDeliveryObserverContext, SinkDeliveryObserverOutcome,
 };
 use serde_json::json;
+
+fn is_logging_diagnostic(event: &obzenflow_core::ChainEvent) -> bool {
+    matches!(
+        &event.content,
+        ChainEventContent::Observability(ObservabilityPayload::Middleware(
+            MiddlewareLifecycle::User(user)
+        )) if user.event_type == "obzenflow.logging"
+    )
+}
 
 #[test]
 fn test_logging_middleware_counts_events() {
@@ -38,10 +51,14 @@ fn test_logging_middleware_counts_events() {
         input: &event,
         stage_input_position: Some(1),
     };
-    HandlerObserver::before_handle(&middleware, &ctx);
+    let report = HandlerObserver::before_handle(&middleware, &ctx);
+    assert_eq!(report.diagnostics.len(), 1);
+    assert!(is_logging_diagnostic(&report.diagnostics[0]));
     assert_eq!(middleware.events_processed(), 1);
 
-    HandlerObserver::before_handle(&middleware, &ctx);
+    let report = HandlerObserver::before_handle(&middleware, &ctx);
+    assert_eq!(report.diagnostics.len(), 1);
+    assert!(is_logging_diagnostic(&report.diagnostics[0]));
     assert_eq!(middleware.events_processed(), 2);
 }
 
@@ -72,6 +89,8 @@ fn test_logging_middleware_observes_sink_delivery() {
         outcome: SinkDeliveryObserverOutcome::Delivered,
     };
 
-    SinkDeliveryObserver::after_sink_delivery(&middleware, &ctx);
+    let report = SinkDeliveryObserver::after_sink_delivery(&middleware, &ctx);
+    assert_eq!(report.diagnostics.len(), 2);
+    assert!(report.diagnostics.iter().all(is_logging_diagnostic));
     assert_eq!(middleware.events_processed(), 1);
 }
