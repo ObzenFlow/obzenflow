@@ -265,22 +265,6 @@ impl MiddlewareSurfaceKind {
             Self::SourcePoll | Self::Effect | Self::SinkDelivery | Self::Ingress
         )
     }
-
-    /// Whether an `Observer`-capability middleware may attach to this surface.
-    pub fn allows_observer(self) -> bool {
-        matches!(
-            self,
-            Self::SourcePoll
-                | Self::Effect
-                | Self::SinkDelivery
-                | Self::Ingress
-                | Self::Handler
-                | Self::Stateful
-                | Self::Join
-                | Self::OutputCommit
-                | Self::StageLifecycle
-        )
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -747,7 +731,13 @@ pub fn validate_attachment_request(
 
     let allowed = match declaration.capability {
         MiddlewareCapability::Control => surface.allows_control(),
-        MiddlewareCapability::Observer => surface.allows_observer(),
+        // Observer capability is universal across surfaces: a surface is
+        // observer-capable iff it has an observer port (an `ObserverSurface`
+        // impl). The set is derived from the observer wiring table, so the gate
+        // cannot drift from the ports that actually exist.
+        MiddlewareCapability::Observer => {
+            crate::middleware::observer::OBSERVER_SURFACE_KINDS.contains(&surface)
+        }
         MiddlewareCapability::Structural => false,
     };
     if !allowed {

@@ -10,7 +10,7 @@ use crate::stages::common::supervision::flow_context_factory::make_flow_context;
 use crate::stages::source::replay_lifecycle::ReplayCompletionGuard;
 use crate::stages::source::supervision::{
     around_source_boundary, drain_pending_outputs_sync, emit_batch_to_pending_outputs,
-    observe_and_emit_batch_to_pending_outputs, stage_boundary_control_events,
+    stage_boundary_control_events, stage_source_poll_outputs, SourcePollObservation,
 };
 use crate::stages::source::{
     SourceBoundary, SourceBoundaryOutcome, SourcePollCompletion, SourcePollReport,
@@ -544,6 +544,14 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> H
                     )
                     .await;
 
+                    let source_poll_observation = SourcePollObservation::new(
+                        &stage_flow_context,
+                        &ctx.instrumentation,
+                        &ctx.observers,
+                        obzenflow_core::MiddlewareExecutionScope::LiveHandler,
+                        &ctx.data_journal,
+                    );
+
                     match report.outcome {
                         SourceBoundaryOutcome::Rejected { reason } => {
                             tracing::warn!(
@@ -572,20 +580,22 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> H
 
                                 let source_event_count = events.len();
                                 events.extend(report.control_events);
-                                observe_and_emit_batch_to_pending_outputs(
+                                source_poll_observation
+                                    .observe(
+                                        events.as_mut_slice(),
+                                        poll.poll_duration,
+                                        crate::SourcePollObserverOutcome::Batch {
+                                            events: source_event_count,
+                                        },
+                                    )
+                                    .await?;
+                                stage_source_poll_outputs(
                                     events,
                                     &stage_flow_context,
                                     &ctx.instrumentation,
                                     poll.poll_duration,
-                                    crate::SourcePollObserverOutcome::Batch {
-                                        events: source_event_count,
-                                    },
-                                    &ctx.observers,
-                                    obzenflow_core::MiddlewareExecutionScope::LiveHandler,
-                                    &ctx.data_journal,
                                     &mut ctx.pending_outputs,
-                                )
-                                .await?;
+                                );
 
                                 tracing::trace!(
                                     stage_name = %ctx.stage_name,
@@ -598,20 +608,22 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> H
                                 let source_event_count = events.len();
                                 events.extend(report.control_events);
                                 if !events.is_empty() {
-                                    observe_and_emit_batch_to_pending_outputs(
+                                    source_poll_observation
+                                        .observe(
+                                            events.as_mut_slice(),
+                                            Duration::from_nanos(0),
+                                            crate::SourcePollObserverOutcome::Batch {
+                                                events: source_event_count,
+                                            },
+                                        )
+                                        .await?;
+                                    stage_source_poll_outputs(
                                         events,
                                         &stage_flow_context,
                                         &ctx.instrumentation,
                                         Duration::from_nanos(0),
-                                        crate::SourcePollObserverOutcome::Batch {
-                                            events: source_event_count,
-                                        },
-                                        &ctx.observers,
-                                        obzenflow_core::MiddlewareExecutionScope::LiveHandler,
-                                        &ctx.data_journal,
                                         &mut ctx.pending_outputs,
-                                    )
-                                    .await?;
+                                    );
                                 }
                                 let delay = self.idle_backoff.next_delay();
                                 tokio::time::sleep(delay).await;
@@ -619,32 +631,29 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> H
                             }
                             Ok(SourcePollCompletion::Eof) => {
                                 if report.control_events.is_empty() {
-                                    observe_and_emit_batch_to_pending_outputs(
-                                        Vec::new(),
-                                        &stage_flow_context,
-                                        &ctx.instrumentation,
-                                        poll.poll_duration,
-                                        crate::SourcePollObserverOutcome::Eof,
-                                        &ctx.observers,
-                                        obzenflow_core::MiddlewareExecutionScope::LiveHandler,
-                                        &ctx.data_journal,
-                                        &mut ctx.pending_outputs,
-                                    )
-                                    .await?;
+                                    source_poll_observation
+                                        .observe_empty(
+                                            poll.poll_duration,
+                                            crate::SourcePollObserverOutcome::Eof,
+                                        )
+                                        .await?;
                                     Ok(EventLoopDirective::Transition(FiniteSourceEvent::Completed))
                                 } else {
-                                    observe_and_emit_batch_to_pending_outputs(
-                                        report.control_events,
+                                    let mut control_events = report.control_events;
+                                    source_poll_observation
+                                        .observe(
+                                            control_events.as_mut_slice(),
+                                            Duration::from_nanos(0),
+                                            crate::SourcePollObserverOutcome::Eof,
+                                        )
+                                        .await?;
+                                    stage_source_poll_outputs(
+                                        control_events,
                                         &stage_flow_context,
                                         &ctx.instrumentation,
                                         Duration::from_nanos(0),
-                                        crate::SourcePollObserverOutcome::Eof,
-                                        &ctx.observers,
-                                        obzenflow_core::MiddlewareExecutionScope::LiveHandler,
-                                        &ctx.data_journal,
                                         &mut ctx.pending_outputs,
-                                    )
-                                    .await?;
+                                    );
                                     self.pending_boundary_eof = true;
                                     Ok(EventLoopDirective::Continue)
                                 }
@@ -657,38 +666,35 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> H
                                 );
                                 let error = e.to_string();
                                 if report.control_events.is_empty() {
-                                    observe_and_emit_batch_to_pending_outputs(
-                                        Vec::new(),
-                                        &stage_flow_context,
-                                        &ctx.instrumentation,
-                                        poll.poll_duration,
-                                        crate::SourcePollObserverOutcome::Error {
-                                            message: error.clone(),
-                                        },
-                                        &ctx.observers,
-                                        obzenflow_core::MiddlewareExecutionScope::LiveHandler,
-                                        &ctx.data_journal,
-                                        &mut ctx.pending_outputs,
-                                    )
-                                    .await?;
+                                    source_poll_observation
+                                        .observe_empty(
+                                            poll.poll_duration,
+                                            crate::SourcePollObserverOutcome::Error {
+                                                message: error.clone(),
+                                            },
+                                        )
+                                        .await?;
                                     Ok(EventLoopDirective::Transition(FiniteSourceEvent::Error(
                                         error,
                                     )))
                                 } else {
-                                    observe_and_emit_batch_to_pending_outputs(
-                                        report.control_events,
+                                    let mut control_events = report.control_events;
+                                    source_poll_observation
+                                        .observe(
+                                            control_events.as_mut_slice(),
+                                            Duration::from_nanos(0),
+                                            crate::SourcePollObserverOutcome::Error {
+                                                message: error.clone(),
+                                            },
+                                        )
+                                        .await?;
+                                    stage_source_poll_outputs(
+                                        control_events,
                                         &stage_flow_context,
                                         &ctx.instrumentation,
                                         Duration::from_nanos(0),
-                                        crate::SourcePollObserverOutcome::Error {
-                                            message: error.clone(),
-                                        },
-                                        &ctx.observers,
-                                        obzenflow_core::MiddlewareExecutionScope::LiveHandler,
-                                        &ctx.data_journal,
                                         &mut ctx.pending_outputs,
-                                    )
-                                    .await?;
+                                    );
                                     self.pending_boundary_error = Some(error);
                                     Ok(EventLoopDirective::Continue)
                                 }

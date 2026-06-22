@@ -22,7 +22,7 @@ use crate::stages::source::boundary::{
 use crate::supervised_base::idle_backoff::IdleBackoff;
 use crate::supervised_base::{EventLoopDirective, EventReceiver};
 use crate::{SourcePollObserverContext, SourcePollObserverOutcome, StageObserverBundle};
-use obzenflow_core::event::context::FlowContext;
+use obzenflow_core::event::context::{FlowContext, MiddlewareExecutionScope};
 use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
 use obzenflow_core::event::SystemEvent;
 use obzenflow_core::journal::Journal;
@@ -86,35 +86,73 @@ pub(crate) fn emit_batch_to_pending_outputs(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn observe_and_emit_batch_to_pending_outputs(
-    mut events: Vec<ChainEvent>,
+pub(crate) struct SourcePollObservation<'a> {
+    stage_flow_context: &'a FlowContext,
+    instrumentation: &'a Arc<StageInstrumentation>,
+    observers: &'a StageObserverBundle,
+    scope: MiddlewareExecutionScope,
+    data_journal: &'a Arc<dyn Journal<ChainEvent>>,
+}
+
+impl<'a> SourcePollObservation<'a> {
+    pub(crate) fn new(
+        stage_flow_context: &'a FlowContext,
+        instrumentation: &'a Arc<StageInstrumentation>,
+        observers: &'a StageObserverBundle,
+        scope: MiddlewareExecutionScope,
+        data_journal: &'a Arc<dyn Journal<ChainEvent>>,
+    ) -> Self {
+        Self {
+            stage_flow_context,
+            instrumentation,
+            observers,
+            scope,
+            data_journal,
+        }
+    }
+
+    pub(crate) async fn observe(
+        &self,
+        outputs: &mut [ChainEvent],
+        poll_duration: Duration,
+        outcome: SourcePollObserverOutcome,
+    ) -> Result<(), BoxError> {
+        let observer_ctx = SourcePollObserverContext {
+            stage_id: self.stage_flow_context.stage_id,
+            stage_name: &self.stage_flow_context.stage_name,
+            flow_context: self.stage_flow_context,
+            scope: self.scope,
+            poll_duration,
+            outcome,
+        };
+        run_source_poll_observers(
+            self.observers,
+            &observer_ctx,
+            outputs,
+            self.data_journal,
+            self.instrumentation,
+        )
+        .await
+    }
+
+    pub(crate) async fn observe_empty(
+        &self,
+        poll_duration: Duration,
+        outcome: SourcePollObserverOutcome,
+    ) -> Result<(), BoxError> {
+        let mut outputs = Vec::new();
+        self.observe(outputs.as_mut_slice(), poll_duration, outcome)
+            .await
+    }
+}
+
+pub(crate) fn stage_source_poll_outputs(
+    events: Vec<ChainEvent>,
     stage_flow_context: &FlowContext,
     instrumentation: &Arc<StageInstrumentation>,
     poll_duration: Duration,
-    outcome: SourcePollObserverOutcome,
-    observers: &StageObserverBundle,
-    observer_scope: obzenflow_core::MiddlewareExecutionScope,
-    data_journal: &Arc<dyn Journal<ChainEvent>>,
     pending_outputs: &mut VecDeque<ChainEvent>,
-) -> Result<(), BoxError> {
-    let observer_ctx = SourcePollObserverContext {
-        stage_id: stage_flow_context.stage_id,
-        stage_name: &stage_flow_context.stage_name,
-        flow_context: stage_flow_context,
-        scope: observer_scope,
-        poll_duration,
-        outcome,
-    };
-    run_source_poll_observers(
-        observers,
-        &observer_ctx,
-        events.as_mut_slice(),
-        data_journal,
-        instrumentation,
-    )
-    .await?;
-
+) {
     let data_events_in_tick = events.iter().filter(|event| event.is_data()).count();
     let per_data_event_duration =
         per_data_event_duration_for_batch(poll_duration, data_events_in_tick);
@@ -125,7 +163,6 @@ pub(crate) async fn observe_and_emit_batch_to_pending_outputs(
         per_data_event_duration,
         pending_outputs,
     );
-    Ok(())
 }
 
 pub(crate) fn stage_boundary_control_events(
