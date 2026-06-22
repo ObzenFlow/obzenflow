@@ -111,7 +111,7 @@ pub mod type_shaping;
 pub mod ai;
 pub mod control;
 pub mod observability;
-mod system;
+mod validation;
 // Dangerous middleware examples moved to examples/dangerous_examples.rs
 // Factory tests moved to tests/factory_tests.rs
 // Note: Monitoring is no longer implemented as middleware.
@@ -179,5 +179,5 @@ pub use backpressure::{backpressure, BackpressureMiddlewareFactory};
 
 pub use observability::LoggingMiddleware;
 
-// System middleware exports
-pub use system::{validate_middleware_safety, ValidationResult};
+// Middleware validation helpers
+pub use validation::{validate_middleware_safety, ValidationResult};

@@ -2,13 +2,13 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Observability middleware for monitoring and metrics
+//! Observe-only middleware for timing and logging.
 //!
-//! This module contains middleware implementations that enhance the observability
-//! of ObzenFlow pipelines by adding timing, logging, and other instrumentation.
+//! This module contains observer implementations that enhance pipeline
+//! observability without making control-flow decisions.
 
-pub mod logging_middleware;
+pub mod logging;
 pub mod timing;
 
-pub use logging_middleware::LoggingMiddleware;
-pub use timing::TimingMiddleware;
+pub use logging::LoggingMiddleware;
+pub use timing::{timing, TimingMiddleware, TimingMiddlewareFactory};

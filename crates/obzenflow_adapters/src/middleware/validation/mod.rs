@@ -2,6 +2,8 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-pub mod validate_safety;
+//! Middleware validation helpers.
 
-pub use validate_safety::{validate_middleware_safety, ValidationResult};
+pub mod safety;
+
+pub use safety::{validate_middleware_safety, ValidationResult};
