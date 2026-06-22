@@ -149,6 +149,7 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Superviso
             stage_name: self.config.stage_name.clone(),
             observers: self.config.observers.clone(),
             flow_name: self.config.flow_name.clone(),
+            effect_runtime_mode: self.resources.effect_runtime_mode,
             flow_id: self.resources.flow_id,
             reference_stage_id: self.config.reference_source_id,
             data_journal: self.resources.data_journal.clone(),

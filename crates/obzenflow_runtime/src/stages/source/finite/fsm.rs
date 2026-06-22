@@ -8,6 +8,7 @@
 //! They have a unique "WaitingForGun" state that ensures they don't
 //! start emitting events until the pipeline is ready.
 
+use crate::StageLifecyclePhase;
 use obzenflow_core::event::context::{FlowContext, MiddlewareExecutionScope, StageType};
 use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
 use obzenflow_core::event::types::{Count, JournalIndex, JournalPath, SeqNo};
@@ -16,7 +17,7 @@ use obzenflow_core::event::{
     SystemEvent,
 };
 use obzenflow_core::journal::Journal;
-use obzenflow_core::{ChainEvent, FlowId, StageLifecyclePhase, WriterId};
+use obzenflow_core::{ChainEvent, FlowId, WriterId};
 use obzenflow_fsm::{EventVariant, FsmAction, FsmContext, StateVariant};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
@@ -248,7 +249,7 @@ pub struct FiniteSourceContext<H> {
     pub stage_name: String,
 
     /// Runtime observer bundle attached to this source boundary.
-    pub observers: obzenflow_core::StageObserverBundle,
+    pub observers: crate::StageObserverBundle,
 
     /// Flow name for flow context
     pub flow_name: String,
@@ -305,7 +306,7 @@ pub struct FiniteSourceContext<H> {
 pub struct FiniteSourceContextInit {
     pub stage_id: obzenflow_core::StageId,
     pub stage_name: String,
-    pub observers: obzenflow_core::StageObserverBundle,
+    pub observers: crate::StageObserverBundle,
     pub flow_name: String,
     pub flow_id: FlowId,
     pub data_journal: Arc<dyn Journal<ChainEvent>>,
@@ -957,7 +958,7 @@ mod tests {
             FiniteSourceContext::<DummySource>::new(FiniteSourceContextInit {
                 stage_id,
                 stage_name: stage_name.clone(),
-                observers: obzenflow_core::StageObserverBundle::default(),
+                observers: crate::StageObserverBundle::default(),
                 flow_name: flow_name.clone(),
                 flow_id,
                 data_journal: data_journal.clone(),

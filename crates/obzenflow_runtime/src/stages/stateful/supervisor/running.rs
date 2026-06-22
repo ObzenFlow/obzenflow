@@ -24,9 +24,9 @@ use crate::stages::common::supervision::output_committer::{
     FrameworkObservabilityCommit,
 };
 use crate::supervised_base::EventLoopDirective;
+use crate::StatefulObserverContext;
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::vector_clock::CausalOrderingService;
-use obzenflow_core::StatefulObserverContext;
 use obzenflow_fsm::StateVariant;
 use std::sync::atomic::Ordering;
 use std::time::Instant;

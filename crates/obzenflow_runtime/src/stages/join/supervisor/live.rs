@@ -129,7 +129,7 @@ async fn handle_reference_envelope<
     sup: &mut JoinSupervisor<H>,
     ctx: &mut JoinContext<H>,
     envelope: EventEnvelope<ChainEvent>,
-    canonical_merge: Option<obzenflow_core::JoinCanonicalMergeMetadata>,
+    canonical_merge: Option<crate::JoinCanonicalMergeMetadata>,
 ) -> Result<Option<EventLoopDirective<JoinEvent<H>>>, Box<dyn std::error::Error + Send + Sync>> {
     let Some(subscription) = sup.reference_subscription.as_mut() else {
         return Ok(None);
@@ -153,7 +153,7 @@ async fn handle_reference_envelope<
             let upstream_stage = subscription.last_delivered_upstream_stage();
             let last_eof_outcome = subscription.last_eof_outcome().cloned();
             if let Some(signal_snapshot) =
-                common::signal_snapshot(Some(obzenflow_core::JoinSide::Reference), &envelope.event)
+                common::signal_snapshot(Some(crate::JoinSide::Reference), &envelope.event)
             {
                 common::observe_join_input(
                     ctx,
@@ -211,7 +211,7 @@ async fn handle_reference_envelope<
             let source_id = ctx.reference_stage_id;
             let writer_id = ctx.writer_id.ok_or("No writer ID available")?;
             let delivery_snapshot = common::delivery_snapshot(
-                obzenflow_core::JoinSide::Reference,
+                crate::JoinSide::Reference,
                 source_id,
                 subscription.last_delivered_stage_input_position(),
                 &envelope,
@@ -400,7 +400,7 @@ async fn handle_stream_envelope<
     sup: &mut JoinSupervisor<H>,
     ctx: &mut JoinContext<H>,
     envelope: EventEnvelope<ChainEvent>,
-    canonical_merge: Option<obzenflow_core::JoinCanonicalMergeMetadata>,
+    canonical_merge: Option<crate::JoinCanonicalMergeMetadata>,
 ) -> Result<Option<EventLoopDirective<JoinEvent<H>>>, Box<dyn std::error::Error + Send + Sync>> {
     let Some(subscription) = sup.stream_subscription.as_mut() else {
         return Ok(None);
@@ -426,7 +426,7 @@ async fn handle_stream_envelope<
             let upstream_stage = subscription.last_delivered_upstream_stage();
             let last_eof_outcome = subscription.last_eof_outcome().cloned();
             if let Some(signal_snapshot) =
-                common::signal_snapshot(Some(obzenflow_core::JoinSide::Stream), &envelope.event)
+                common::signal_snapshot(Some(crate::JoinSide::Stream), &envelope.event)
             {
                 common::observe_join_input(
                     ctx,
@@ -499,7 +499,7 @@ async fn handle_stream_envelope<
             let event = envelope.event.clone();
             let event_id = event.id;
             let delivery_snapshot = common::delivery_snapshot(
-                obzenflow_core::JoinSide::Stream,
+                crate::JoinSide::Stream,
                 source_id,
                 subscription.last_delivered_stage_input_position(),
                 &envelope,
@@ -845,7 +845,7 @@ async fn dispatch_live_canonical<
                         sup,
                         ctx,
                         envelope,
-                        Some(obzenflow_core::JoinCanonicalMergeMetadata {
+                        Some(crate::JoinCanonicalMergeMetadata {
                             selected_feed: Some("reference".to_string()),
                             reader_index: None,
                         }),
@@ -871,7 +871,7 @@ async fn dispatch_live_canonical<
                         sup,
                         ctx,
                         envelope,
-                        Some(obzenflow_core::JoinCanonicalMergeMetadata {
+                        Some(crate::JoinCanonicalMergeMetadata {
                             selected_feed: Some("stream".to_string()),
                             reader_index: None,
                         }),
@@ -927,7 +927,7 @@ async fn write_stage_outputs_and_ack<H: JoinHandler>(
             &mut ctx.backpressure_backoff,
             Some(&ctx.output_contract),
             Some(&ctx.observers),
-            obzenflow_core::MiddlewareExecutionScope::LiveHandler,
+            crate::effects::scope_for_dispatch(ctx.effect_runtime_mode, None),
             &mut outputs,
         )
         .await?

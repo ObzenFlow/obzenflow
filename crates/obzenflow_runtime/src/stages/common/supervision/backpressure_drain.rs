@@ -77,7 +77,7 @@ pub(crate) async fn drain_one_pending(
     backpressure_pulse: &mut BackpressureActivityPulse,
     backpressure_backoff: &mut IdleBackoff,
     output_contract: Option<&StageOutputContract>,
-    observers: Option<&obzenflow_core::StageObserverBundle>,
+    observers: Option<&crate::StageObserverBundle>,
     observer_scope: obzenflow_core::MiddlewareExecutionScope,
     pending_outputs: &mut std::collections::VecDeque<ChainEvent>,
 ) -> Result<DrainOutcome, Box<dyn std::error::Error + Send + Sync>> {
@@ -129,7 +129,7 @@ pub(crate) async fn drain_one_pending_resolve(
     backpressure_pulse: &mut BackpressureActivityPulse,
     backpressure_backoff: &mut IdleBackoff,
     output_contract: Option<&StageOutputContract>,
-    observers: Option<&obzenflow_core::StageObserverBundle>,
+    observers: Option<&crate::StageObserverBundle>,
     observer_scope: obzenflow_core::MiddlewareExecutionScope,
     pending_outputs: &mut std::collections::VecDeque<ChainEvent>,
 ) -> Result<DrainAttempt, Box<dyn std::error::Error + Send + Sync>> {

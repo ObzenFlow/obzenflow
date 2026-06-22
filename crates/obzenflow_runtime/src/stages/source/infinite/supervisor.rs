@@ -574,7 +574,7 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
                                     &stage_flow_context,
                                     &ctx.instrumentation,
                                     poll.poll_duration,
-                                    obzenflow_core::SourcePollObserverOutcome::Batch {
+                                    crate::SourcePollObserverOutcome::Batch {
                                         events: source_event_count,
                                     },
                                     &ctx.observers,
@@ -600,7 +600,7 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
                                         &stage_flow_context,
                                         &ctx.instrumentation,
                                         Duration::from_nanos(0),
-                                        obzenflow_core::SourcePollObserverOutcome::Batch {
+                                        crate::SourcePollObserverOutcome::Batch {
                                             events: source_event_count,
                                         },
                                         &ctx.observers,
@@ -623,7 +623,7 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
                                         &stage_flow_context,
                                         &ctx.instrumentation,
                                         poll.poll_duration,
-                                        obzenflow_core::SourcePollObserverOutcome::Eof,
+                                        crate::SourcePollObserverOutcome::Eof,
                                         &ctx.observers,
                                         obzenflow_core::MiddlewareExecutionScope::LiveHandler,
                                         &ctx.data_journal,
@@ -639,7 +639,7 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
                                         &stage_flow_context,
                                         &ctx.instrumentation,
                                         Duration::from_nanos(0),
-                                        obzenflow_core::SourcePollObserverOutcome::Eof,
+                                        crate::SourcePollObserverOutcome::Eof,
                                         &ctx.observers,
                                         obzenflow_core::MiddlewareExecutionScope::LiveHandler,
                                         &ctx.data_journal,
@@ -664,7 +664,7 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
                                         &stage_flow_context,
                                         &ctx.instrumentation,
                                         poll.poll_duration,
-                                        obzenflow_core::SourcePollObserverOutcome::Error {
+                                        crate::SourcePollObserverOutcome::Error {
                                             message: error.clone(),
                                         },
                                         &ctx.observers,
@@ -682,7 +682,7 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
                                         &stage_flow_context,
                                         &ctx.instrumentation,
                                         Duration::from_nanos(0),
-                                        obzenflow_core::SourcePollObserverOutcome::Error {
+                                        crate::SourcePollObserverOutcome::Error {
                                             message: error.clone(),
                                         },
                                         &ctx.observers,

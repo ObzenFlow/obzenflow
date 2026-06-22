@@ -11,24 +11,22 @@
 //! runtime/infra neutral boundary seams; runtime and infra receive only neutral
 //! seams.
 //!
-//! This slice implements the `SourcePoll` and `Effect` surfaces consumed by the
-//! circuit breaker. `SinkDelivery` is added by the sink-boundary phase once the
-//! runtime `SinkDeliveryBoundary` seam exists; `Ingress` (FLOWIP-115d) and the
-//! observer surfaces (FLOWIP-115f) are reserved in the non-exhaustive
-//! vocabulary so later slices fill them additively.
+//! The carrier covers hook-bound control policy and observe-only runtime
+//! observer ports. Adapter factories declare intent here; the DSL validates
+//! surface/capability compatibility and passes only typed runtime/infra ports
+//! across the architectural boundary.
 
 use super::control::policy::{EffectPolicyAttachment, SinkPolicy, SourcePolicy};
 use super::control::ControlMiddlewareAggregator;
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::ingress::{IngressBoundaryMiddleware, IngressKey};
-use obzenflow_core::{
-    EffectObserver, HandlerMiddlewareObserver, IngressObserver, JoinMiddlewareObserver,
-    OutputCommitObserver, SinkDeliveryObserver, SourcePollObserver, StageLifecycleObserver,
-    StatefulMiddlewareObserver,
-};
 use obzenflow_core::{StageId, StageKey};
 use obzenflow_runtime::pipeline::config::StageConfig;
 use obzenflow_runtime::stages::source::strategies::CompletionGate;
+use obzenflow_runtime::{
+    EffectObserver, HandlerObserver, IngressObserver, JoinObserver, OutputCommitObserver,
+    SinkDeliveryObserver, SourcePollObserver, StageLifecycleObserver, StatefulObserver,
+};
 use ring::digest::{Context, SHA256};
 use std::sync::Arc;
 use thiserror::Error;
@@ -879,9 +877,9 @@ pub enum MiddlewareSurfaceAttachment {
     EffectObserver(Arc<dyn EffectObserver>),
     SinkDeliveryObserver(Arc<dyn SinkDeliveryObserver>),
     IngressObserver(Arc<dyn IngressObserver>),
-    HandlerObserver(Arc<dyn HandlerMiddlewareObserver>),
-    StatefulObserver(Arc<dyn StatefulMiddlewareObserver>),
-    JoinObserver(Arc<dyn JoinMiddlewareObserver>),
+    HandlerObserver(Arc<dyn HandlerObserver>),
+    StatefulObserver(Arc<dyn StatefulObserver>),
+    JoinObserver(Arc<dyn JoinObserver>),
     OutputCommitObserver(Arc<dyn OutputCommitObserver>),
     StageLifecycleObserver(Arc<dyn StageLifecycleObserver>),
 }

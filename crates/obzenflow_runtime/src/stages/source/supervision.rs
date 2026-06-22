@@ -21,13 +21,12 @@ use crate::stages::source::boundary::{
 };
 use crate::supervised_base::idle_backoff::IdleBackoff;
 use crate::supervised_base::{EventLoopDirective, EventReceiver};
+use crate::{SourcePollObserverContext, SourcePollObserverOutcome, StageObserverBundle};
 use obzenflow_core::event::context::FlowContext;
 use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
 use obzenflow_core::event::SystemEvent;
 use obzenflow_core::journal::Journal;
-use obzenflow_core::{
-    ChainEvent, SourcePollObserverContext, SourcePollObserverOutcome, StageId, StageObserverBundle,
-};
+use obzenflow_core::{ChainEvent, StageId};
 use std::collections::VecDeque;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -163,7 +162,7 @@ pub(crate) async fn drain_pending_outputs_sync(
     backpressure_pulse: &mut BackpressureActivityPulse,
     backpressure_backoff: &mut IdleBackoff,
     output_contract: Option<&StageOutputContract>,
-    observers: Option<&obzenflow_core::StageObserverBundle>,
+    observers: Option<&crate::StageObserverBundle>,
     observer_scope: obzenflow_core::MiddlewareExecutionScope,
 ) -> Result<bool, BoxError> {
     while let Some(pending) = pending_outputs.pop_front() {
@@ -220,7 +219,7 @@ pub(crate) async fn drain_pending_outputs_async<E>(
     backpressure_pulse: &mut BackpressureActivityPulse,
     backpressure_backoff: &mut IdleBackoff,
     output_contract: Option<&StageOutputContract>,
-    observers: Option<&obzenflow_core::StageObserverBundle>,
+    observers: Option<&crate::StageObserverBundle>,
     observer_scope: obzenflow_core::MiddlewareExecutionScope,
     external_events: &mut EventReceiver<E>,
     on_channel_closed: impl FnOnce() -> E,

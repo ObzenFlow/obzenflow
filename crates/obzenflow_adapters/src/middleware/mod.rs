@@ -111,6 +111,7 @@ pub mod type_shaping;
 pub mod ai;
 pub mod control;
 pub mod observability;
+pub mod observer;
 mod validation;
 // Dangerous middleware examples moved to examples/dangerous_examples.rs
 // Factory tests moved to tests/factory_tests.rs
@@ -166,6 +167,7 @@ pub use control::policy::{
 pub use function::{middleware_fn, FnMiddleware};
 pub use hints::{Attempts, BackoffKind, BatchingHint, MiddlewareHints, RetryHint};
 pub use observability::timing::TimingMiddleware;
+pub use observer::StageObserverSet;
 pub use type_shaping::{IntoEffectPolicyParts, OutcomeShapingMiddleware, TypeShapingMiddleware};
 
 // Control middleware

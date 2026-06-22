@@ -78,10 +78,9 @@ pub(super) async fn dispatch_enriching<
                     let contract_reader_count = ctx.stream_contract_state.len();
                     let upstream_stage = subscription.last_delivered_upstream_stage();
                     let last_eof_outcome = subscription.last_eof_outcome().cloned();
-                    if let Some(signal_snapshot) = common::signal_snapshot(
-                        Some(obzenflow_core::JoinSide::Stream),
-                        &envelope.event,
-                    ) {
+                    if let Some(signal_snapshot) =
+                        common::signal_snapshot(Some(crate::JoinSide::Stream), &envelope.event)
+                    {
                         common::observe_join_input(
                             ctx,
                             &envelope.event,
@@ -165,7 +164,7 @@ pub(super) async fn dispatch_enriching<
                     let event = envelope.event.clone();
                     let event_id = event.id;
                     let delivery_snapshot = common::delivery_snapshot(
-                        obzenflow_core::JoinSide::Stream,
+                        crate::JoinSide::Stream,
                         source_id,
                         subscription.last_delivered_stage_input_position(),
                         &envelope,
@@ -424,7 +423,7 @@ async fn write_stage_outputs_and_ack<H: JoinHandler>(
             &mut ctx.backpressure_backoff,
             Some(&ctx.output_contract),
             Some(&ctx.observers),
-            obzenflow_core::MiddlewareExecutionScope::LiveHandler,
+            crate::effects::scope_for_dispatch(ctx.effect_runtime_mode, None),
             &mut outputs,
         )
         .await?

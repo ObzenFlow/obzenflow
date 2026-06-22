@@ -7,14 +7,15 @@
 //! Stateful stages maintain state across events, enabling aggregations,
 //! windowing operations, and session tracking.
 
+use crate::StageLifecyclePhase;
 use obzenflow_core::event::context::{FlowContext, MiddlewareExecutionScope, StageType};
 use obzenflow_core::event::event_envelope::EventEnvelope;
 use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
 use obzenflow_core::event::types::SeqNo;
 use obzenflow_core::event::{ChainEventFactory, SystemEvent};
 use obzenflow_core::journal::Journal;
+use obzenflow_core::StageId;
 use obzenflow_core::{ChainEvent, FlowId, WriterId};
-use obzenflow_core::{StageId, StageLifecyclePhase};
 use obzenflow_fsm::{EventVariant, FsmAction, FsmContext, StateVariant};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
@@ -318,7 +319,7 @@ pub struct StatefulContext<H: UnifiedStatefulHandler> {
     pub stage_name: String,
 
     /// Runtime observer bundle attached to this stage.
-    pub observers: obzenflow_core::StageObserverBundle,
+    pub observers: crate::StageObserverBundle,
 
     /// Flow name for flow context
     pub flow_name: String,

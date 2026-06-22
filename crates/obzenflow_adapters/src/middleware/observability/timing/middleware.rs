@@ -2,9 +2,10 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
+use crate::middleware::observer::StageObserverSet;
 use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::time::MetricsDuration;
-use obzenflow_core::{StageId, StageObserverBundle};
+use obzenflow_core::StageId;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -25,16 +26,16 @@ impl TimingMiddleware {
         }
     }
 
-    pub fn bundle(stage_name: impl Into<String>, stage_id: StageId) -> StageObserverBundle {
+    pub fn observer_set(stage_name: impl Into<String>, stage_id: StageId) -> StageObserverSet {
         let observer = Arc::new(Self::new(stage_name));
-        let mut bundle = StageObserverBundle::default();
-        bundle.handler.push(observer.clone());
-        bundle.stateful.push(observer.clone());
-        bundle.join.push(observer.clone());
-        bundle.source_poll.push(observer.clone());
-        bundle.output_commit.push(observer);
-        tracing::trace!(?stage_id, "created timing observer bundle");
-        bundle
+        let mut set = StageObserverSet::default();
+        set.handler.push(observer.clone());
+        set.stateful.push(observer.clone());
+        set.join.push(observer.clone());
+        set.source_poll.push(observer.clone());
+        set.output_commit.push(observer);
+        tracing::trace!(?stage_id, "created timing observer set");
+        set
     }
 
     pub(super) fn remember_start(&self, event: &ChainEvent) {

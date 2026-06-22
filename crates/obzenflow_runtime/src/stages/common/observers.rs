@@ -3,18 +3,25 @@
 // https://obzenflow.dev
 
 //! Runtime observer dispatch helpers.
+//!
+//! Each helper invokes the one composed observer port for its surface (the
+//! adapter folds the resolved observer list and the determinism gate into that
+//! port) and appends any returned diagnostics. The runtime never iterates an
+//! observer list or evaluates observer determinism here; it owns only the
+//! journal append.
 
 use std::sync::Arc;
 
 use obzenflow_core::event::context::{FlowContext, MiddlewareExecutionScope};
 use obzenflow_core::event::{EventEnvelope, SystemEvent};
 use obzenflow_core::journal::Journal;
-use obzenflow_core::{
-    ChainEvent, EffectObserverContext, EffectObserverOutcome, HandlerObserverContext,
-    JoinObserverContext, ObserverCommitResult, ObserverReport, OutputCommitObserverContext,
-    SinkDeliveryObserverContext, SinkDeliveryObserverOutcome, SourcePollObserverContext, StageId,
-    StageLifecycleObserverContext, StageLifecyclePhase, StageObserverBundle,
-    StatefulObserverContext,
+use obzenflow_core::{ChainEvent, StageId};
+
+use crate::{
+    EffectObserverContext, EffectObserverOutcome, HandlerObserverContext, JoinObserverContext,
+    ObserverCommitResult, ObserverReport, OutputCommitObserverContext, SinkDeliveryObserverContext,
+    SinkDeliveryObserverOutcome, SourcePollObserverContext, StageLifecycleObserverContext,
+    StageLifecyclePhase, StageObserverBundle, StatefulObserverContext,
 };
 
 use crate::metrics::instrumentation::StageInstrumentation;
@@ -52,9 +59,9 @@ pub(crate) async fn run_before_handler_observers(
     instrumentation: &Arc<StageInstrumentation>,
     parent: &EventEnvelope<ChainEvent>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    if observers.handler.is_empty() {
+    let Some(observer) = observers.handler.as_ref() else {
         return Ok(());
-    }
+    };
     let ctx = HandlerObserverContext {
         stage_id,
         stage_name,
@@ -63,19 +70,15 @@ pub(crate) async fn run_before_handler_observers(
         input,
         stage_input_position,
     };
-    for observer in &observers.handler {
-        if observer.determinism().should_run(scope) {
-            append_observer_diagnostics(
-                observer.before_handle(&ctx),
-                flow_context,
-                Some(instrumentation),
-                data_journal,
-                Some(parent),
-            )
-            .await?;
-        }
-    }
-    Ok(())
+    let report = observer.before_handle(&ctx);
+    append_observer_diagnostics(
+        report,
+        flow_context,
+        Some(instrumentation),
+        data_journal,
+        Some(parent),
+    )
+    .await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -92,9 +95,9 @@ pub(crate) async fn run_after_handler_observers(
     instrumentation: &Arc<StageInstrumentation>,
     parent: &EventEnvelope<ChainEvent>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    if observers.handler.is_empty() {
+    let Some(observer) = observers.handler.as_ref() else {
         return Ok(());
-    }
+    };
     let ctx = HandlerObserverContext {
         stage_id,
         stage_name,
@@ -103,22 +106,17 @@ pub(crate) async fn run_after_handler_observers(
         input,
         stage_input_position,
     };
-    for observer in &observers.handler {
-        if observer.determinism().should_run(scope) {
-            append_observer_diagnostics(
-                observer.after_handle(&ctx, outputs),
-                flow_context,
-                Some(instrumentation),
-                data_journal,
-                Some(parent),
-            )
-            .await?;
-        }
-    }
-    Ok(())
+    let report = observer.after_handle(&ctx, outputs);
+    append_observer_diagnostics(
+        report,
+        flow_context,
+        Some(instrumentation),
+        data_journal,
+        Some(parent),
+    )
+    .await
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_stateful_after_emit_observers(
     observers: &StageObserverBundle,
     ctx: &StatefulObserverContext<'_>,
@@ -127,19 +125,18 @@ pub(crate) async fn run_stateful_after_emit_observers(
     instrumentation: &Arc<StageInstrumentation>,
     parent: Option<&EventEnvelope<ChainEvent>>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    for observer in &observers.stateful {
-        if observer.determinism().should_run(ctx.scope) {
-            append_observer_diagnostics(
-                observer.after_state_emit(ctx, outputs),
-                ctx.flow_context,
-                Some(instrumentation),
-                data_journal,
-                parent,
-            )
-            .await?;
-        }
-    }
-    Ok(())
+    let Some(observer) = observers.stateful.as_ref() else {
+        return Ok(());
+    };
+    let report = observer.after_state_emit(ctx, outputs);
+    append_observer_diagnostics(
+        report,
+        ctx.flow_context,
+        Some(instrumentation),
+        data_journal,
+        parent,
+    )
+    .await
 }
 
 pub(crate) async fn run_stateful_before_accumulate_observers(
@@ -149,19 +146,18 @@ pub(crate) async fn run_stateful_before_accumulate_observers(
     instrumentation: &Arc<StageInstrumentation>,
     parent: Option<&EventEnvelope<ChainEvent>>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    for observer in &observers.stateful {
-        if observer.determinism().should_run(ctx.scope) {
-            append_observer_diagnostics(
-                observer.before_state_accumulate(ctx),
-                ctx.flow_context,
-                Some(instrumentation),
-                data_journal,
-                parent,
-            )
-            .await?;
-        }
-    }
-    Ok(())
+    let Some(observer) = observers.stateful.as_ref() else {
+        return Ok(());
+    };
+    let report = observer.before_state_accumulate(ctx);
+    append_observer_diagnostics(
+        report,
+        ctx.flow_context,
+        Some(instrumentation),
+        data_journal,
+        parent,
+    )
+    .await
 }
 
 pub(crate) async fn run_stateful_after_accumulate_observers(
@@ -171,19 +167,18 @@ pub(crate) async fn run_stateful_after_accumulate_observers(
     instrumentation: &Arc<StageInstrumentation>,
     parent: Option<&EventEnvelope<ChainEvent>>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    for observer in &observers.stateful {
-        if observer.determinism().should_run(ctx.scope) {
-            append_observer_diagnostics(
-                observer.after_state_accumulate(ctx),
-                ctx.flow_context,
-                Some(instrumentation),
-                data_journal,
-                parent,
-            )
-            .await?;
-        }
-    }
-    Ok(())
+    let Some(observer) = observers.stateful.as_ref() else {
+        return Ok(());
+    };
+    let report = observer.after_state_accumulate(ctx);
+    append_observer_diagnostics(
+        report,
+        ctx.flow_context,
+        Some(instrumentation),
+        data_journal,
+        parent,
+    )
+    .await
 }
 
 pub(crate) async fn run_source_poll_observers(
@@ -193,19 +188,18 @@ pub(crate) async fn run_source_poll_observers(
     data_journal: &Arc<dyn Journal<ChainEvent>>,
     instrumentation: &Arc<StageInstrumentation>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    for observer in &observers.source_poll {
-        if observer.determinism().should_run(ctx.scope) {
-            append_observer_diagnostics(
-                observer.after_source_poll(ctx, outputs),
-                ctx.flow_context,
-                Some(instrumentation),
-                data_journal,
-                None,
-            )
-            .await?;
-        }
-    }
-    Ok(())
+    let Some(observer) = observers.source_poll.as_ref() else {
+        return Ok(());
+    };
+    let report = observer.after_source_poll(ctx, outputs);
+    append_observer_diagnostics(
+        report,
+        ctx.flow_context,
+        Some(instrumentation),
+        data_journal,
+        None,
+    )
+    .await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -222,9 +216,9 @@ pub(crate) async fn run_sink_delivery_observers(
     instrumentation: &Arc<StageInstrumentation>,
     parent: &EventEnvelope<ChainEvent>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    if observers.sink_delivery.is_empty() {
+    let Some(observer) = observers.sink_delivery.as_ref() else {
         return Ok(());
-    }
+    };
     let ctx = SinkDeliveryObserverContext {
         stage_id,
         stage_name,
@@ -233,19 +227,15 @@ pub(crate) async fn run_sink_delivery_observers(
         stage_input_position,
         outcome,
     };
-    for observer in &observers.sink_delivery {
-        if observer.determinism().should_run(scope) {
-            append_observer_diagnostics(
-                observer.after_sink_delivery(&ctx),
-                flow_context,
-                Some(instrumentation),
-                data_journal,
-                Some(parent),
-            )
-            .await?;
-        }
-    }
-    Ok(())
+    let report = observer.after_sink_delivery(&ctx);
+    append_observer_diagnostics(
+        report,
+        flow_context,
+        Some(instrumentation),
+        data_journal,
+        Some(parent),
+    )
+    .await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -261,9 +251,9 @@ pub(crate) async fn run_effect_observers(
     instrumentation: Option<&Arc<StageInstrumentation>>,
     parent: Option<&EventEnvelope<ChainEvent>>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    if observers.effect.is_empty() {
+    let Some(observer) = observers.effect.as_ref() else {
         return Ok(());
-    }
+    };
     let ctx = EffectObserverContext {
         stage_id,
         stage_name,
@@ -272,28 +262,20 @@ pub(crate) async fn run_effect_observers(
         effect_type,
         outcome,
     };
-    for observer in &observers.effect {
-        if observer.determinism().should_run(scope) {
-            let report = observer.after_effect(&ctx);
-            if let Some(flow_context) = flow_context {
-                append_observer_diagnostics(
-                    report,
-                    flow_context,
-                    instrumentation,
-                    data_journal,
-                    parent,
-                )
-                .await?;
-            } else if !report.is_empty() {
-                tracing::warn!(
-                    stage_name,
-                    effect_type,
-                    "dropping effect observer diagnostics because no flow context is available"
-                );
-            }
-        }
+    let report = observer.after_effect(&ctx);
+    if let Some(flow_context) = flow_context {
+        append_observer_diagnostics(report, flow_context, instrumentation, data_journal, parent)
+            .await
+    } else if !report.is_empty() {
+        tracing::warn!(
+            stage_name,
+            effect_type,
+            "dropping effect observer diagnostics because no flow context is available"
+        );
+        Ok(())
+    } else {
+        Ok(())
     }
-    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -307,27 +289,24 @@ pub(crate) async fn run_stage_lifecycle_observers(
     data_journal: &Arc<dyn Journal<ChainEvent>>,
     instrumentation: &Arc<StageInstrumentation>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    if observers.stage_lifecycle.is_empty() {
+    let Some(observer) = observers.stage_lifecycle.as_ref() else {
         return Ok(());
-    }
+    };
     let ctx = StageLifecycleObserverContext {
         stage_id,
         stage_name,
+        scope,
         phase,
     };
-    for observer in &observers.stage_lifecycle {
-        if observer.determinism().should_run(scope) {
-            append_observer_diagnostics(
-                observer.on_stage_lifecycle(&ctx),
-                flow_context,
-                Some(instrumentation),
-                data_journal,
-                None,
-            )
-            .await?;
-        }
-    }
-    Ok(())
+    let report = observer.on_stage_lifecycle(&ctx);
+    append_observer_diagnostics(
+        report,
+        flow_context,
+        Some(instrumentation),
+        data_journal,
+        None,
+    )
+    .await
 }
 
 pub(crate) async fn run_join_after_output_observers(
@@ -338,19 +317,18 @@ pub(crate) async fn run_join_after_output_observers(
     instrumentation: &Arc<StageInstrumentation>,
     parent: Option<&EventEnvelope<ChainEvent>>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    for observer in &observers.join {
-        if observer.determinism().should_run(ctx.scope) {
-            append_observer_diagnostics(
-                observer.after_join_output(ctx, outputs),
-                ctx.flow_context,
-                Some(instrumentation),
-                data_journal,
-                parent,
-            )
-            .await?;
-        }
-    }
-    Ok(())
+    let Some(observer) = observers.join.as_ref() else {
+        return Ok(());
+    };
+    let report = observer.after_join_output(ctx, outputs);
+    append_observer_diagnostics(
+        report,
+        ctx.flow_context,
+        Some(instrumentation),
+        data_journal,
+        parent,
+    )
+    .await
 }
 
 pub(crate) async fn run_join_before_input_observers(
@@ -360,19 +338,18 @@ pub(crate) async fn run_join_before_input_observers(
     instrumentation: &Arc<StageInstrumentation>,
     parent: Option<&EventEnvelope<ChainEvent>>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    for observer in &observers.join {
-        if observer.determinism().should_run(ctx.scope) {
-            append_observer_diagnostics(
-                observer.before_join_input(ctx),
-                ctx.flow_context,
-                Some(instrumentation),
-                data_journal,
-                parent,
-            )
-            .await?;
-        }
-    }
-    Ok(())
+    let Some(observer) = observers.join.as_ref() else {
+        return Ok(());
+    };
+    let report = observer.before_join_input(ctx);
+    append_observer_diagnostics(
+        report,
+        ctx.flow_context,
+        Some(instrumentation),
+        data_journal,
+        parent,
+    )
+    .await
 }
 
 pub(crate) fn run_output_commit_observers(
@@ -384,6 +361,9 @@ pub(crate) fn run_output_commit_observers(
     parent: Option<&ChainEvent>,
     event: &mut ChainEvent,
 ) -> ObserverCommitResult {
+    let Some(observer) = observers.output_commit.as_ref() else {
+        return Ok(ObserverReport::empty());
+    };
     let ctx = OutputCommitObserverContext {
         stage_id,
         stage_name,
@@ -391,14 +371,7 @@ pub(crate) fn run_output_commit_observers(
         scope,
         parent,
     };
-    let mut merged = ObserverReport::empty();
-    for observer in &observers.output_commit {
-        if observer.determinism().should_run(scope) {
-            let report = observer.before_output_commit(&ctx, event)?;
-            merged.diagnostics.extend(report.diagnostics);
-        }
-    }
-    Ok(merged)
+    observer.before_output_commit(&ctx, event)
 }
 
 #[allow(dead_code)]

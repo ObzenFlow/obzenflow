@@ -4,14 +4,14 @@
 
 use super::TimingMiddleware;
 use obzenflow_core::event::chain_event::ChainEvent;
-use obzenflow_core::{
-    HandlerMiddlewareObserver, HandlerObserverContext, JoinMiddlewareObserver, JoinObserverContext,
+use obzenflow_runtime::{
+    HandlerObserver, HandlerObserverContext, JoinObserver, JoinObserverContext,
     ObserverCommitResult, ObserverDeterminism, ObserverReport, OutputCommitObserver,
-    OutputCommitObserverContext, SourcePollObserver, SourcePollObserverContext,
-    StatefulMiddlewareObserver, StatefulObserverContext,
+    OutputCommitObserverContext, SourcePollObserver, SourcePollObserverContext, StatefulObserver,
+    StatefulObserverContext,
 };
 
-impl HandlerMiddlewareObserver for TimingMiddleware {
+impl HandlerObserver for TimingMiddleware {
     fn label(&self) -> &'static str {
         "timing"
     }
@@ -35,7 +35,7 @@ impl HandlerMiddlewareObserver for TimingMiddleware {
     }
 }
 
-impl StatefulMiddlewareObserver for TimingMiddleware {
+impl StatefulObserver for TimingMiddleware {
     fn label(&self) -> &'static str {
         "timing"
     }
@@ -61,7 +61,7 @@ impl StatefulMiddlewareObserver for TimingMiddleware {
     }
 }
 
-impl JoinMiddlewareObserver for TimingMiddleware {
+impl JoinObserver for TimingMiddleware {
     fn label(&self) -> &'static str {
         "timing"
     }

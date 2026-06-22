@@ -7,13 +7,14 @@
 //! Transforms process events from upstream stages and emit transformed events.
 //! They start processing immediately without waiting for a start signal.
 
+use crate::StageLifecyclePhase;
 use obzenflow_core::event::context::{FlowContext, MiddlewareExecutionScope, StageType};
 use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
 use obzenflow_core::event::types::SeqNo;
 use obzenflow_core::event::{ChainEventFactory, SystemEvent};
 use obzenflow_core::journal::Journal;
+use obzenflow_core::StageId;
 use obzenflow_core::{ChainEvent, EventEnvelope, FlowId, WriterId};
-use obzenflow_core::{StageId, StageLifecyclePhase};
 use obzenflow_fsm::{EventVariant, FsmAction, FsmContext, StateVariant};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -274,7 +275,7 @@ pub(crate) struct TransformContext<H: UnifiedTransformHandler> {
     pub stage_name: String,
 
     /// Runtime observer bundle attached to this stage.
-    pub observers: obzenflow_core::StageObserverBundle,
+    pub observers: crate::StageObserverBundle,
 
     /// Flow name for flow context
     pub flow_name: String,

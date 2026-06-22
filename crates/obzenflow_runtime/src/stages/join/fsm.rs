@@ -8,14 +8,16 @@
 //! Unlike transforms which have single upstream, joins track two distinct upstreams
 //! (reference and stream) with different behaviors.
 
-use obzenflow_core::event::context::{FlowContext, MiddlewareExecutionScope, StageType};
+use crate::effects::{scope_for_dispatch, EffectRuntimeMode};
+use crate::StageLifecyclePhase;
+use obzenflow_core::event::context::{FlowContext, StageType};
 use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
 use obzenflow_core::event::types::SeqNo;
 use obzenflow_core::event::vector_clock::VectorClock;
 use obzenflow_core::event::{ChainEventFactory, EventEnvelope, SystemEvent};
 use obzenflow_core::journal::Journal;
+use obzenflow_core::StageId;
 use obzenflow_core::{ChainEvent, FlowId, WriterId};
-use obzenflow_core::{StageId, StageLifecyclePhase};
 use obzenflow_fsm::{EventVariant, FsmAction, FsmContext, StateVariant};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
@@ -291,7 +293,12 @@ pub struct JoinContext<H: JoinHandler> {
     pub stage_name: String,
 
     /// Runtime observer bundle attached to this stage.
-    pub observers: obzenflow_core::StageObserverBundle,
+    pub observers: crate::StageObserverBundle,
+
+    /// Effect runtime mode (live vs replay) for this stage. Used to derive the
+    /// observer execution scope so live-only observers are suppressed under
+    /// strict replay and resume, instead of hard-coding a live scope.
+    pub effect_runtime_mode: EffectRuntimeMode,
 
     /// Flow name for flow context
     pub flow_name: String,
@@ -543,7 +550,7 @@ impl<H: JoinHandler + Send + Sync + 'static> FsmAction for JoinAction<H> {
                     ctx.stage_id,
                     &ctx.stage_name,
                     &flow_context,
-                    MiddlewareExecutionScope::LiveHandler,
+                    scope_for_dispatch(ctx.effect_runtime_mode, None),
                     StageLifecyclePhase::Running,
                     &ctx.data_journal,
                     &ctx.instrumentation,
@@ -689,7 +696,7 @@ impl<H: JoinHandler + Send + Sync + 'static> FsmAction for JoinAction<H> {
                     ctx.stage_id,
                     &ctx.stage_name,
                     &flow_context,
-                    MiddlewareExecutionScope::LiveHandler,
+                    scope_for_dispatch(ctx.effect_runtime_mode, None),
                     StageLifecyclePhase::Completed,
                     &ctx.data_journal,
                     &ctx.instrumentation,
@@ -727,7 +734,7 @@ impl<H: JoinHandler + Send + Sync + 'static> FsmAction for JoinAction<H> {
                     ctx.stage_id,
                     &ctx.stage_name,
                     &flow_context,
-                    MiddlewareExecutionScope::LiveHandler,
+                    scope_for_dispatch(ctx.effect_runtime_mode, None),
                     StageLifecyclePhase::Failed,
                     &ctx.data_journal,
                     &ctx.instrumentation,

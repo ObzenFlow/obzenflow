@@ -5,8 +5,8 @@
 use super::LoggingMiddleware;
 use obzenflow_core::event::context::{FlowContext, MiddlewareExecutionScope, StageType};
 use obzenflow_core::event::ChainEventFactory;
-use obzenflow_core::{
-    HandlerMiddlewareObserver, HandlerObserverContext, ObserverDeterminism, SinkDeliveryObserver,
+use obzenflow_runtime::{
+    HandlerObserver, HandlerObserverContext, ObserverDeterminism, SinkDeliveryObserver,
     SinkDeliveryObserverContext, SinkDeliveryObserverOutcome,
 };
 use serde_json::json;
@@ -38,10 +38,10 @@ fn test_logging_middleware_counts_events() {
         input: &event,
         stage_input_position: Some(1),
     };
-    HandlerMiddlewareObserver::before_handle(&middleware, &ctx);
+    HandlerObserver::before_handle(&middleware, &ctx);
     assert_eq!(middleware.events_processed(), 1);
 
-    HandlerMiddlewareObserver::before_handle(&middleware, &ctx);
+    HandlerObserver::before_handle(&middleware, &ctx);
     assert_eq!(middleware.events_processed(), 2);
 }
 
@@ -49,7 +49,7 @@ fn test_logging_middleware_counts_events() {
 fn test_logging_middleware_is_live_only() {
     let middleware = LoggingMiddleware::default();
     assert_eq!(
-        HandlerMiddlewareObserver::determinism(&middleware),
+        HandlerObserver::determinism(&middleware),
         ObserverDeterminism::LiveOnly
     );
 }

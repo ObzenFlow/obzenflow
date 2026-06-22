@@ -5,7 +5,8 @@
 //! Configuration for stateful stages
 
 use crate::stages::common::control_strategies::SignalGate;
-use obzenflow_core::{StageId, StageObserverBundle};
+use crate::StageObserverBundle;
+use obzenflow_core::StageId;
 use std::sync::Arc;
 use std::time::Duration;
 

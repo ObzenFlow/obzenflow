@@ -43,18 +43,15 @@ impl Effects {
     async fn observe_effect_outcome(
         &self,
         effect_type: &str,
-        outcome: obzenflow_core::EffectObserverOutcome,
+        outcome: crate::EffectObserverOutcome,
     ) -> Result<(), EffectError> {
         let Some(observers) = self.ctx.observers.as_ref() else {
             return Ok(());
         };
-        if observers.effect.is_empty() {
+        if observers.effect.is_none() {
             return Ok(());
         }
-        let scope = if matches!(
-            outcome,
-            obzenflow_core::EffectObserverOutcome::SuppressedByReplay
-        ) {
+        let scope = if matches!(outcome, crate::EffectObserverOutcome::SuppressedByReplay) {
             self.ctx.effect_runtime_mode.into()
         } else {
             obzenflow_core::MiddlewareExecutionScope::LiveEffectBoundary
@@ -81,8 +78,8 @@ impl Effects {
         result: &Result<T, EffectError>,
     ) -> Result<(), EffectError> {
         let outcome = match result {
-            Ok(_) => obzenflow_core::EffectObserverOutcome::Succeeded,
-            Err(err) => obzenflow_core::EffectObserverOutcome::Failed {
+            Ok(_) => crate::EffectObserverOutcome::Succeeded,
+            Err(err) => crate::EffectObserverOutcome::Failed {
                 message: err.error_message(),
             },
         };
@@ -305,7 +302,7 @@ impl Effects {
                         .await?;
                         self.observe_effect_outcome(
                             E::EFFECT_TYPE,
-                            obzenflow_core::EffectObserverOutcome::SuppressedByReplay,
+                            crate::EffectObserverOutcome::SuppressedByReplay,
                         )
                         .await?;
                         return Err(err);
@@ -317,7 +314,7 @@ impl Effects {
                     .await?;
                 self.observe_effect_outcome(
                     E::EFFECT_TYPE,
-                    obzenflow_core::EffectObserverOutcome::SuppressedByReplay,
+                    crate::EffectObserverOutcome::SuppressedByReplay,
                 )
                 .await?;
                 return Ok(output);
@@ -366,7 +363,7 @@ impl Effects {
                     .await?;
                     self.observe_effect_outcome(
                         E::EFFECT_TYPE,
-                        obzenflow_core::EffectObserverOutcome::Succeeded,
+                        crate::EffectObserverOutcome::Succeeded,
                     )
                     .await?;
                     Ok(output)
@@ -376,7 +373,7 @@ impl Effects {
                         .await?;
                     self.observe_effect_outcome(
                         E::EFFECT_TYPE,
-                        obzenflow_core::EffectObserverOutcome::Failed {
+                        crate::EffectObserverOutcome::Failed {
                             message: err.error_message(),
                         },
                     )
@@ -443,7 +440,7 @@ impl Effects {
                 .await?;
                 self.observe_effect_outcome(
                     E::EFFECT_TYPE,
-                    obzenflow_core::EffectObserverOutcome::Succeeded,
+                    crate::EffectObserverOutcome::Succeeded,
                 )
                 .await?;
                 Ok(output)
@@ -453,7 +450,7 @@ impl Effects {
                     .await?;
                 self.observe_effect_outcome(
                     E::EFFECT_TYPE,
-                    obzenflow_core::EffectObserverOutcome::Failed {
+                    crate::EffectObserverOutcome::Failed {
                         message: err.error_message(),
                     },
                 )
@@ -468,14 +465,14 @@ impl Effects {
                     Ok(_) => {
                         self.observe_effect_outcome(
                             E::EFFECT_TYPE,
-                            obzenflow_core::EffectObserverOutcome::Succeeded,
+                            crate::EffectObserverOutcome::Succeeded,
                         )
                         .await?;
                     }
                     Err(err) => {
                         self.observe_effect_outcome(
                             E::EFFECT_TYPE,
-                            obzenflow_core::EffectObserverOutcome::Failed {
+                            crate::EffectObserverOutcome::Failed {
                                 message: err.error_message(),
                             },
                         )
@@ -491,7 +488,7 @@ impl Effects {
                 if let Err(err) = &result {
                     self.observe_effect_outcome(
                         E::EFFECT_TYPE,
-                        obzenflow_core::EffectObserverOutcome::Failed {
+                        crate::EffectObserverOutcome::Failed {
                             message: err.error_message(),
                         },
                     )
@@ -757,7 +754,7 @@ impl Effects {
                         .await?;
                         self.observe_effect_outcome(
                             "obzenflow.capture",
-                            obzenflow_core::EffectObserverOutcome::SuppressedByReplay,
+                            crate::EffectObserverOutcome::SuppressedByReplay,
                         )
                         .await?;
                         return Err(err);
@@ -769,7 +766,7 @@ impl Effects {
                     .await?;
                 self.observe_effect_outcome(
                     "obzenflow.capture",
-                    obzenflow_core::EffectObserverOutcome::SuppressedByReplay,
+                    crate::EffectObserverOutcome::SuppressedByReplay,
                 )
                 .await?;
                 return Ok(output);
@@ -793,11 +790,8 @@ impl Effects {
             origin: None,
         })
         .await?;
-        self.observe_effect_outcome(
-            "obzenflow.capture",
-            obzenflow_core::EffectObserverOutcome::Succeeded,
-        )
-        .await?;
+        self.observe_effect_outcome("obzenflow.capture", crate::EffectObserverOutcome::Succeeded)
+            .await?;
         Ok(value)
     }
 
@@ -942,7 +936,7 @@ impl Effects {
                     .await?;
                 self.observe_effect_outcome(
                     E::EFFECT_TYPE,
-                    obzenflow_core::EffectObserverOutcome::Failed {
+                    crate::EffectObserverOutcome::Failed {
                         message: err.error_message(),
                     },
                 )

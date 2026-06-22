@@ -12,6 +12,7 @@ use crate::dsl::StageCreationResult;
 use crate::stage_handle_adapter::StageHandleAdapter;
 use async_trait::async_trait;
 use obzenflow_adapters::middleware::control::ControlMiddlewareAggregator;
+use obzenflow_adapters::middleware::StageObserverSet;
 use obzenflow_adapters::middleware::{
     validate_middleware_safety, AsyncFiniteSourceHandlerExt, AsyncInfiniteSourceHandlerExt,
     AsyncTransformHandlerExt, ControlMiddlewareRole, FiniteSourceHandlerExt,
@@ -22,7 +23,7 @@ use obzenflow_adapters::middleware::{
     TransformHandlerExt, UnifiedMiddlewareTransform,
 };
 use obzenflow_core::event::context::StageType;
-use obzenflow_core::{StageId, StageObserverBundle, WriterId};
+use obzenflow_core::{StageId, WriterId};
 use obzenflow_runtime::{
     effects::{
         EffectDeclaration, EffectPortRegistry, EffectSafety, IdempotencyKeyPolicy,
@@ -90,8 +91,8 @@ fn create_system_middleware(
     Vec::new()
 }
 
-fn create_system_observers(config: &StageConfig) -> StageObserverBundle {
-    TimingMiddleware::bundle(config.name.clone(), config.stage_id)
+fn create_system_observers(config: &StageConfig) -> StageObserverSet {
+    TimingMiddleware::observer_set(config.name.clone(), config.stage_id)
 }
 
 fn create_legacy_shell(
@@ -162,44 +163,10 @@ fn observer_surfaces_for_stage(stage_type: StageType) -> &'static [MiddlewareSur
 }
 
 fn push_observer_attachment(
-    observers: &mut StageObserverBundle,
+    observers: &mut StageObserverSet,
     attachment: MiddlewareSurfaceAttachment,
 ) -> StageCreationResult<()> {
-    match attachment {
-        MiddlewareSurfaceAttachment::SourcePollObserver(observer) => {
-            observers.source_poll.push(observer);
-        }
-        MiddlewareSurfaceAttachment::HandlerObserver(observer) => {
-            observers.handler.push(observer);
-        }
-        MiddlewareSurfaceAttachment::StatefulObserver(observer) => {
-            observers.stateful.push(observer);
-        }
-        MiddlewareSurfaceAttachment::JoinObserver(observer) => {
-            observers.join.push(observer);
-        }
-        MiddlewareSurfaceAttachment::OutputCommitObserver(observer) => {
-            observers.output_commit.push(observer);
-        }
-        MiddlewareSurfaceAttachment::StageLifecycleObserver(observer) => {
-            observers.stage_lifecycle.push(observer);
-        }
-        MiddlewareSurfaceAttachment::SinkDeliveryObserver(observer) => {
-            observers.sink_delivery.push(observer);
-        }
-        MiddlewareSurfaceAttachment::EffectObserver(observer) => {
-            observers.effect.push(observer);
-        }
-        MiddlewareSurfaceAttachment::IngressObserver(observer) => {
-            observers.ingress.push(observer);
-        }
-        _ => {
-            return Err(
-                "middleware materialized a control attachment while planning observers".into(),
-            )
-        }
-    }
-    Ok(())
+    observers.push_attachment(attachment).map_err(|e| e.into())
 }
 
 fn declaration_has_stage_observer_surface(
@@ -221,7 +188,7 @@ struct EffectObserverMaterialization<'a> {
 }
 
 fn materialize_effect_observers_for_declarations(
-    observers: &mut StageObserverBundle,
+    observers: &mut StageObserverSet,
     factory: &dyn MiddlewareFactory,
     materialization: EffectObserverMaterialization<'_>,
 ) -> StageCreationResult<()> {
@@ -242,7 +209,7 @@ fn materialize_effect_observers_for_declarations(
 
 struct SourceMiddlewareBinding {
     all_middleware: Vec<Box<dyn Middleware>>,
-    observers: StageObserverBundle,
+    observers: StageObserverSet,
     source_boundary: Option<Arc<dyn SourceBoundary>>,
     /// FLOWIP-115b: the source completion gate companion supplied by a
     /// hook-bound source control middleware (the circuit breaker), sharing its
@@ -254,7 +221,7 @@ struct SourceMiddlewareBinding {
 
 struct MiddlewarePlacement {
     legacy_shell: Vec<Box<dyn Middleware>>,
-    observers: StageObserverBundle,
+    observers: StageObserverSet,
     expects_circuit_breaker: bool,
     expects_rate_limiter: bool,
 }
@@ -838,7 +805,7 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> S
             flow_name: config.flow_name.clone(),
             control_strategy: source_binding.completion_gate,
             source_boundary: source_binding.source_boundary,
-            observers: source_binding.observers,
+            observers: source_binding.observers.build(),
         };
 
         // Use the builder to create the handle
@@ -995,7 +962,7 @@ impl<H: AsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
             flow_name: config.flow_name.clone(),
             control_strategy: source_binding.completion_gate,
             source_boundary: source_binding.source_boundary,
-            observers: source_binding.observers,
+            observers: source_binding.observers.build(),
         };
 
         // Use the builder to create the handle
@@ -1115,7 +1082,7 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
             flow_name: config.flow_name.clone(),
             control_strategy: source_binding.completion_gate,
             source_boundary: source_binding.source_boundary,
-            observers: source_binding.observers,
+            observers: source_binding.observers.build(),
         };
 
         // Use the builder to create the handle
@@ -1274,7 +1241,7 @@ impl<H: AsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
             flow_name: config.flow_name.clone(),
             control_strategy: source_binding.completion_gate,
             source_boundary: source_binding.source_boundary,
-            observers: source_binding.observers,
+            observers: source_binding.observers.build(),
         };
 
         let handle =
@@ -1402,7 +1369,7 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Stag
             stage_id: config.stage_id,
             stage_name: config.name.clone(),
             flow_name: config.flow_name.clone(),
-            observers: placement.observers,
+            observers: placement.observers.build(),
             control_strategy: Some(control_strategy),
             upstream_stages: resources.upstream_stages.clone(),
             cycle_guard: config.cycle_guard,
@@ -1536,7 +1503,7 @@ impl<H: AsyncTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
             stage_id: config.stage_id,
             stage_name: config.name.clone(),
             flow_name: config.flow_name.clone(),
-            observers: placement.observers,
+            observers: placement.observers.build(),
             control_strategy: Some(control_strategy),
             upstream_stages: resources.upstream_stages.clone(),
             cycle_guard: config.cycle_guard,
@@ -1697,7 +1664,7 @@ impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
         // must name the guarded effect per entry.
         let mut shell_specs = Vec::new();
         let mut transitional_policy_specs = Vec::new();
-        let mut effect_observers = StageObserverBundle::default();
+        let mut effect_observers = StageObserverSet::default();
         for (middleware_index, spec) in resolved.middleware.into_iter().enumerate() {
             let declaration = spec.factory.declaration();
             if declaration.is_observer() && declaration.supports(MiddlewareSurfaceKind::Effect) {
@@ -1814,7 +1781,7 @@ impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
             stage_id: config.stage_id,
             stage_name: config.name.clone(),
             flow_name: config.flow_name.clone(),
-            observers,
+            observers: observers.build(),
             control_strategy: Some(control_strategy),
             upstream_stages: resources.upstream_stages.clone(),
             cycle_guard: config.cycle_guard,
@@ -1936,7 +1903,7 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
         // sink-delivery surface is materialized into a sink policy composed at
         // the delivery boundary; everything else stays on the handler shell.
         let mut sink_policies: Vec<Arc<dyn SinkPolicy>> = Vec::new();
-        let mut observers = StageObserverBundle::default();
+        let mut observers = StageObserverSet::default();
         for (middleware_index, spec) in resolved.middleware.into_iter().enumerate() {
             let declaration = spec.factory.declaration();
             if declaration.is_observer() {
@@ -2024,7 +1991,7 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
             flush_interval_ms: None,
             control_strategy: Some(control_strategy),
             sink_delivery_boundary,
-            observers,
+            observers: observers.build(),
         };
 
         // Use the builder to create the handle
@@ -2362,7 +2329,7 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Stage
             stage_id: config.stage_id,
             stage_name: config.name.clone(),
             flow_name: config.flow_name.clone(),
-            observers: placement.observers,
+            observers: placement.observers.build(),
             emit_interval: self.emit_interval,
             control_strategy: Some(control_strategy),
             upstream_stages: resources.upstream_stages.clone(),
@@ -2510,7 +2477,7 @@ impl<H: EffectfulStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
             control_middleware.clone();
 
         let mut shell_specs = Vec::new();
-        let mut effect_observers = StageObserverBundle::default();
+        let mut effect_observers = StageObserverSet::default();
         for (middleware_index, spec) in resolved.middleware.into_iter().enumerate() {
             let declaration = spec.factory.declaration();
             if declaration.is_observer() && declaration.supports(MiddlewareSurfaceKind::Effect) {
@@ -2563,7 +2530,7 @@ impl<H: EffectfulStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
             stage_id: config.stage_id,
             stage_name: config.name.clone(),
             flow_name: config.flow_name.clone(),
-            observers,
+            observers: observers.build(),
             emit_interval: self.emit_interval,
             control_strategy: Some(control_strategy),
             upstream_stages: resources.upstream_stages.clone(),
@@ -2771,7 +2738,7 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
         let join_config = JoinConfig {
             stage_id: config.stage_id,
             stage_name: config.name.clone(),
-            observers: placement.observers,
+            observers: placement.observers.build(),
             flow_name: config.flow_name.clone(),
             reference_source_id,
             stream_source_id,

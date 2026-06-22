@@ -39,6 +39,7 @@
 
 use std::sync::Arc;
 
+use crate::StageObserverBundle;
 use obzenflow_core::event::context::{FlowContext, MiddlewareExecutionScope, StageType};
 use obzenflow_core::event::payloads::correlation_payload::CorrelationPayload;
 use obzenflow_core::event::payloads::observability_payload::{
@@ -47,7 +48,7 @@ use obzenflow_core::event::payloads::observability_payload::{
 use obzenflow_core::event::CorrelationId;
 use obzenflow_core::event::{ChainEventContent, EventEnvelope, SystemEvent};
 use obzenflow_core::journal::Journal;
-use obzenflow_core::{ChainEvent, StageObserverBundle};
+use obzenflow_core::ChainEvent;
 
 use crate::feed_plan::StageOutputContract;
 use crate::metrics::instrumentation::StageInstrumentation;

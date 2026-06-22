@@ -8,6 +8,7 @@
 //! They have a unique "WaitingForGun" state that ensures they don't
 //! start emitting events until the pipeline is ready.
 
+use crate::StageLifecyclePhase;
 use obzenflow_core::event::context::{FlowContext, MiddlewareExecutionScope, StageType};
 use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
 use obzenflow_core::event::types::{Count, SeqNo};
@@ -15,7 +16,7 @@ use obzenflow_core::event::{
     ChainEventContent, ChainEventFactory, ConsumptionFinalEventParams, SystemEvent,
 };
 use obzenflow_core::journal::Journal;
-use obzenflow_core::{ChainEvent, FlowId, StageLifecyclePhase, WriterId};
+use obzenflow_core::{ChainEvent, FlowId, WriterId};
 use obzenflow_fsm::{EventVariant, FsmAction, FsmContext, StateMachine, StateVariant};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
@@ -252,7 +253,7 @@ pub struct InfiniteSourceContext<H> {
     pub stage_name: String,
 
     /// Runtime observer bundle attached to this source boundary.
-    pub observers: obzenflow_core::StageObserverBundle,
+    pub observers: crate::StageObserverBundle,
 
     /// Flow name for flow context
     pub flow_name: String,
@@ -312,7 +313,7 @@ pub struct InfiniteSourceContext<H> {
 pub struct InfiniteSourceContextInit {
     pub stage_id: obzenflow_core::StageId,
     pub stage_name: String,
-    pub observers: obzenflow_core::StageObserverBundle,
+    pub observers: crate::StageObserverBundle,
     pub flow_name: String,
     pub flow_id: FlowId,
     pub data_journal: Arc<dyn Journal<ChainEvent>>,

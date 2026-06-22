@@ -4,14 +4,14 @@
 
 use super::LoggingMiddleware;
 use obzenflow_core::event::chain_event::ChainEvent;
-use obzenflow_core::{
-    HandlerMiddlewareObserver, HandlerObserverContext, JoinMiddlewareObserver, JoinObserverContext,
+use obzenflow_runtime::{
+    HandlerObserver, HandlerObserverContext, JoinObserver, JoinObserverContext,
     ObserverDeterminism, ObserverReport, SinkDeliveryObserver, SinkDeliveryObserverContext,
-    SinkDeliveryObserverOutcome, SourcePollObserver, SourcePollObserverContext,
-    StatefulMiddlewareObserver, StatefulObserverContext,
+    SinkDeliveryObserverOutcome, SourcePollObserver, SourcePollObserverContext, StatefulObserver,
+    StatefulObserverContext,
 };
 
-impl HandlerMiddlewareObserver for LoggingMiddleware {
+impl HandlerObserver for LoggingMiddleware {
     fn label(&self) -> &'static str {
         "logging"
     }
@@ -35,7 +35,7 @@ impl HandlerMiddlewareObserver for LoggingMiddleware {
     }
 }
 
-impl StatefulMiddlewareObserver for LoggingMiddleware {
+impl StatefulObserver for LoggingMiddleware {
     fn label(&self) -> &'static str {
         "logging"
     }
@@ -63,7 +63,7 @@ impl StatefulMiddlewareObserver for LoggingMiddleware {
     }
 }
 
-impl JoinMiddlewareObserver for LoggingMiddleware {
+impl JoinObserver for LoggingMiddleware {
     fn label(&self) -> &'static str {
         "logging"
     }

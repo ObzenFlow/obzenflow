@@ -11,6 +11,10 @@ use crate::stages::common::supervision::backpressure_drain::{drain_one_pending, 
 use crate::stages::common::supervision::flow_context_factory::make_flow_context;
 use crate::stages::common::supervision::forward_control_event::forward_control_event;
 use crate::stages::join::fsm::{JoinContext, PendingTransition};
+use crate::{
+    JoinCanonicalMergeMetadata, JoinDeliverySnapshot, JoinObserverContext, JoinSide,
+    JoinSignalKind, JoinSignalSnapshot,
+};
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::payloads::observability_payload::{
@@ -18,10 +22,7 @@ use obzenflow_core::event::payloads::observability_payload::{
 };
 use obzenflow_core::event::vector_clock::CausalOrderingService;
 use obzenflow_core::event::{ChainEventFactory, EventEnvelope};
-use obzenflow_core::{
-    ChainEvent, JoinCanonicalMergeMetadata, JoinDeliverySnapshot, JoinObserverContext, JoinSide,
-    JoinSignalKind, JoinSignalSnapshot, StageId,
-};
+use obzenflow_core::{ChainEvent, StageId};
 use serde_json::json;
 
 use super::JoinSupervisor;
@@ -90,7 +91,7 @@ pub(super) async fn flush_pending_outputs<
             &mut ctx.backpressure_backoff,
             Some(&ctx.output_contract),
             Some(&ctx.observers),
-            obzenflow_core::MiddlewareExecutionScope::LiveHandler,
+            crate::effects::scope_for_dispatch(ctx.effect_runtime_mode, None),
             &mut ctx.pending_outputs,
         )
         .await?
@@ -142,7 +143,7 @@ pub(super) async fn observe_join_input<H: JoinHandler>(
         stage_id: ctx.stage_id,
         stage_name: &ctx.stage_name,
         flow_context: &flow_context,
-        scope: obzenflow_core::MiddlewareExecutionScope::LiveHandler,
+        scope: crate::effects::scope_for_dispatch(ctx.effect_runtime_mode, None),
         input: Some(input),
         delivery,
         signal,
@@ -177,7 +178,7 @@ pub(super) async fn observe_join_outputs<H: JoinHandler>(
         stage_id: ctx.stage_id,
         stage_name: &ctx.stage_name,
         flow_context: &flow_context,
-        scope: obzenflow_core::MiddlewareExecutionScope::LiveHandler,
+        scope: crate::effects::scope_for_dispatch(ctx.effect_runtime_mode, None),
         input,
         delivery,
         signal,

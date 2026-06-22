@@ -5,7 +5,8 @@
 //! Join stage configuration
 
 use crate::stages::common::control_strategies::SignalGate;
-use obzenflow_core::{StageId, StageObserverBundle};
+use crate::StageObserverBundle;
+use obzenflow_core::StageId;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 

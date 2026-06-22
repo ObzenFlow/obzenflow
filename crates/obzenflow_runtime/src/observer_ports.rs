@@ -2,15 +2,20 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Runtime-neutral observer middleware contracts.
+//! Runtime-owned observer middleware ports.
 //!
 //! These traits are intentionally observe-only. Ordinary hooks can return
 //! diagnostics, but they cannot return control decisions. The output-commit hook
 //! may fail only as a commit/invariant failure.
+//!
+//! The ports live here instead of `obzenflow_core` because they describe
+//! runtime stage and boundary observation surfaces. Core provides the domain
+//! primitives used by those surfaces, but it must not own runtime middleware
+//! contracts.
 
-use crate::event::context::{FlowContext, MiddlewareExecutionScope};
-use crate::event::vector_clock::VectorClock;
-use crate::{ChainEvent, EventEnvelope, StageId};
+use obzenflow_core::event::context::{FlowContext, MiddlewareExecutionScope};
+use obzenflow_core::event::vector_clock::VectorClock;
+use obzenflow_core::{ChainEvent, EventEnvelope, StageId};
 use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
@@ -213,10 +218,11 @@ pub enum StageLifecyclePhase {
 pub struct StageLifecycleObserverContext<'a> {
     pub stage_id: StageId,
     pub stage_name: &'a str,
+    pub scope: MiddlewareExecutionScope,
     pub phase: StageLifecyclePhase,
 }
 
-pub trait HandlerMiddlewareObserver: Send + Sync {
+pub trait HandlerObserver: Send + Sync {
     fn label(&self) -> &'static str;
 
     fn determinism(&self) -> ObserverDeterminism {
@@ -236,7 +242,7 @@ pub trait HandlerMiddlewareObserver: Send + Sync {
     }
 }
 
-pub trait StatefulMiddlewareObserver: Send + Sync {
+pub trait StatefulObserver: Send + Sync {
     fn label(&self) -> &'static str;
 
     fn determinism(&self) -> ObserverDeterminism {
@@ -251,10 +257,6 @@ pub trait StatefulMiddlewareObserver: Send + Sync {
         ObserverReport::empty()
     }
 
-    fn before_state_emit(&self, _ctx: &StatefulObserverContext<'_>) -> ObserverReport {
-        ObserverReport::empty()
-    }
-
     fn after_state_emit(
         &self,
         _ctx: &StatefulObserverContext<'_>,
@@ -264,7 +266,7 @@ pub trait StatefulMiddlewareObserver: Send + Sync {
     }
 }
 
-pub trait JoinMiddlewareObserver: Send + Sync {
+pub trait JoinObserver: Send + Sync {
     fn label(&self) -> &'static str;
 
     fn determinism(&self) -> ObserverDeterminism {
@@ -272,10 +274,6 @@ pub trait JoinMiddlewareObserver: Send + Sync {
     }
 
     fn before_join_input(&self, _ctx: &JoinObserverContext<'_>) -> ObserverReport {
-        ObserverReport::empty()
-    }
-
-    fn after_join_input(&self, _ctx: &JoinObserverContext<'_>) -> ObserverReport {
         ObserverReport::empty()
     }
 
@@ -328,6 +326,10 @@ pub trait SinkDeliveryObserver: Send + Sync {
     }
 }
 
+/// Reserved cross-cutting surface. Ingress (listener) observation is owned by
+/// the infra hosted-web ingress path (FLOWIP-115d), not the stage runtime, so
+/// there is no stage-runtime dispatcher for this port yet. It is kept defined so
+/// the carrier and infra path can adopt it without re-reserving the surface.
 pub trait IngressObserver: Send + Sync {
     fn label(&self) -> &'static str;
 
@@ -368,41 +370,45 @@ pub trait StageLifecycleObserver: Send + Sync {
     }
 }
 
+/// Composed, per-surface observer ports for one stage.
+///
+/// Each field is a single neutral port. The adapter folds the resolved observer
+/// list for a surface into one composed port (mirroring how control policies
+/// fold into one `Per*PolicyBoundary`), so the runtime calls one port per
+/// surface and never iterates an observer list or evaluates observer
+/// determinism itself. The composed port owns iteration, the determinism gate,
+/// and report merging.
 #[derive(Clone, Default)]
 pub struct StageObserverBundle {
-    pub handler: Vec<Arc<dyn HandlerMiddlewareObserver>>,
-    pub stateful: Vec<Arc<dyn StatefulMiddlewareObserver>>,
-    pub join: Vec<Arc<dyn JoinMiddlewareObserver>>,
-    pub source_poll: Vec<Arc<dyn SourcePollObserver>>,
-    pub effect: Vec<Arc<dyn EffectObserver>>,
-    pub sink_delivery: Vec<Arc<dyn SinkDeliveryObserver>>,
-    pub ingress: Vec<Arc<dyn IngressObserver>>,
-    pub output_commit: Vec<Arc<dyn OutputCommitObserver>>,
-    pub stage_lifecycle: Vec<Arc<dyn StageLifecycleObserver>>,
+    pub handler: Option<Arc<dyn HandlerObserver>>,
+    pub stateful: Option<Arc<dyn StatefulObserver>>,
+    pub join: Option<Arc<dyn JoinObserver>>,
+    pub source_poll: Option<Arc<dyn SourcePollObserver>>,
+    pub effect: Option<Arc<dyn EffectObserver>>,
+    pub sink_delivery: Option<Arc<dyn SinkDeliveryObserver>>,
+    pub ingress: Option<Arc<dyn IngressObserver>>,
+    pub output_commit: Option<Arc<dyn OutputCommitObserver>>,
+    pub stage_lifecycle: Option<Arc<dyn StageLifecycleObserver>>,
 }
 
 impl StageObserverBundle {
     pub fn is_empty(&self) -> bool {
-        self.handler.is_empty()
-            && self.stateful.is_empty()
-            && self.join.is_empty()
-            && self.source_poll.is_empty()
-            && self.effect.is_empty()
-            && self.sink_delivery.is_empty()
-            && self.ingress.is_empty()
-            && self.output_commit.is_empty()
-            && self.stage_lifecycle.is_empty()
+        self.handler.is_none()
+            && self.stateful.is_none()
+            && self.join.is_none()
+            && self.source_poll.is_none()
+            && self.effect.is_none()
+            && self.sink_delivery.is_none()
+            && self.ingress.is_none()
+            && self.output_commit.is_none()
+            && self.stage_lifecycle.is_none()
     }
+}
 
-    pub fn extend(&mut self, other: Self) {
-        self.handler.extend(other.handler);
-        self.stateful.extend(other.stateful);
-        self.join.extend(other.join);
-        self.source_poll.extend(other.source_poll);
-        self.effect.extend(other.effect);
-        self.sink_delivery.extend(other.sink_delivery);
-        self.ingress.extend(other.ingress);
-        self.output_commit.extend(other.output_commit);
-        self.stage_lifecycle.extend(other.stage_lifecycle);
+impl fmt::Debug for StageObserverBundle {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("StageObserverBundle")
+            .field("has_observers", &!self.is_empty())
+            .finish()
     }
 }

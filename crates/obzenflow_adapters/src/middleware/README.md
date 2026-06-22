@@ -180,9 +180,9 @@ live I/O unit (a source, a declared effect, or sink delivery).
 ## Hook-bound Observer Middleware
 
 Observer middleware is separate from legacy `Middleware` and from hook-bound
-control policy. Implement the neutral observer traits exported by
-`obzenflow_core` and declare `MiddlewareDeclaration::observer(...)` from the
-factory. Observer hooks can inspect inputs, outputs, delivery outcomes, effect
+control policy. Implement the runtime-owned observer traits exported by
+`obzenflow_runtime` and declare `MiddlewareDeclaration::observer(...)` from
+the factory. Observer hooks can inspect inputs, outputs, delivery outcomes, effect
 outcomes, lifecycle phases, and output commits, and may return diagnostics, but
 they cannot skip, reject, retry, recover, synthesize, pause, or abort.
 
