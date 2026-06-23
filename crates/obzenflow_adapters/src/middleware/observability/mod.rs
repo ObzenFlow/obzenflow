@@ -2,21 +2,13 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Observability middleware for monitoring and metrics
+//! Observe-only middleware for service-level indicators and logging.
 //!
-//! This module contains middleware implementations that enhance the observability
-//! of ObzenFlow pipelines by adding timing, logging, and other instrumentation.
+//! This module contains observer implementations that enhance pipeline
+//! observability without making control-flow decisions.
 
-pub mod flow_boundary;
-pub mod logging_middleware;
-pub mod system_enrichment;
-pub mod timing;
+pub mod indicator;
+pub mod logging;
 
-pub use flow_boundary::{
-    BoundaryConfig, BoundaryTrackingMiddleware, FlowBoundaryTracker, FlowMetrics,
-};
-pub use logging_middleware::LoggingMiddleware;
-pub use system_enrichment::{
-    system_enrichment, SystemEnrichmentMiddleware, SystemEnrichmentMiddlewareFactory,
-};
-pub use timing::TimingMiddleware;
+pub use indicator::{indicator, latency, IndicatorKind, IndicatorMiddlewareFactory};
+pub use logging::{log, LoggingMiddleware, LoggingMiddlewareFactory};

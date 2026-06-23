@@ -7,7 +7,6 @@
 //! A `SinkHandler::consume()` must return one of these to let the runtime
 //! journal whether delivery fully succeeded, partially succeeded, or failed.
 
-use crate::time::MetricsDuration;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -27,7 +26,6 @@ pub struct DeliveryPayload {
     pub delivery_method: DeliveryMethod,
 
     /// Performance
-    pub processing_duration: MetricsDuration,
     pub bytes_processed: Option<u64>,
 
     /// When + any middleware extensions
@@ -99,7 +97,6 @@ impl DeliveryPayload {
             },
             destination: destination.into(),
             delivery_method: method,
-            processing_duration: MetricsDuration::ZERO, // Will be set by middleware
             bytes_processed,
             processed_at: Utc::now(),
             middleware_context: None,
@@ -117,7 +114,6 @@ impl DeliveryPayload {
             result: DeliveryResult::Buffered {},
             destination: destination.into(),
             delivery_method: method,
-            processing_duration: MetricsDuration::ZERO,
             bytes_processed,
             processed_at: Utc::now(),
             middleware_context: None,
@@ -141,7 +137,6 @@ impl DeliveryPayload {
             },
             destination: destination.into(),
             delivery_method: method,
-            processing_duration: MetricsDuration::ZERO, // Will be set by middleware
             bytes_processed: None,
             processed_at: Utc::now(),
             middleware_context: None,
@@ -166,7 +161,6 @@ impl DeliveryPayload {
             },
             destination: destination.into(),
             delivery_method: method,
-            processing_duration: MetricsDuration::ZERO, // Will be set by middleware
             bytes_processed: None,
             processed_at: Utc::now(),
             middleware_context: None,
@@ -184,7 +178,6 @@ impl DeliveryPayload {
         Self {
             destination: url.clone(),
             delivery_method: DeliveryMethod::HttpPost { url },
-            processing_duration: MetricsDuration::ZERO, // Will be set by middleware
             bytes_processed: bytes,
             result: DeliveryResult::Success {
                 confirmation,
@@ -198,12 +191,6 @@ impl DeliveryPayload {
 
 // Builder-style methods for enhancing payloads
 impl DeliveryPayload {
-    /// Update the processing duration (builder style)
-    pub fn with_processing_duration(mut self, duration: MetricsDuration) -> Self {
-        self.processing_duration = duration;
-        self
-    }
-
     /// Update the middleware context (builder style)
     pub fn with_middleware_context(mut self, context: Value) -> Self {
         self.middleware_context = Some(context);

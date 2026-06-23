@@ -8,7 +8,8 @@
 //! They have a unique "WaitingForGun" state that ensures they don't
 //! start emitting events until the pipeline is ready.
 
-use obzenflow_core::event::context::{FlowContext, StageType};
+use crate::stages::observer::StageLifecyclePhase;
+use obzenflow_core::event::context::{FlowContext, MiddlewareExecutionScope, StageType};
 use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
 use obzenflow_core::event::types::{Count, JournalIndex, JournalPath, SeqNo};
 use obzenflow_core::event::{
@@ -33,6 +34,7 @@ use crate::stages::common::backpressure_activity_pulse::BackpressureActivityPuls
 use crate::stages::common::stage_handle::{
     FORCE_SHUTDOWN_MESSAGE, STOP_REASON_TIMEOUT, STOP_REASON_USER_STOP,
 };
+use crate::stages::observer::dispatch::run_stage_lifecycle_observers;
 use crate::stages::source::strategies::{CompletionContext, CompletionGate};
 use crate::supervised_base::idle_backoff::IdleBackoff;
 
@@ -246,6 +248,9 @@ pub struct FiniteSourceContext<H> {
     /// Human-readable stage name for logging
     pub stage_name: String,
 
+    /// Runtime observer bundle attached to this source boundary.
+    pub observers: crate::stages::observer::StageObserverBundle,
+
     /// Flow name for flow context
     pub flow_name: String,
 
@@ -301,6 +306,7 @@ pub struct FiniteSourceContext<H> {
 pub struct FiniteSourceContextInit {
     pub stage_id: obzenflow_core::StageId,
     pub stage_name: String,
+    pub observers: crate::stages::observer::StageObserverBundle,
     pub flow_name: String,
     pub flow_id: FlowId,
     pub data_journal: Arc<dyn Journal<ChainEvent>>,
@@ -319,6 +325,7 @@ impl<H> FiniteSourceContext<H> {
         Self {
             stage_id: init.stage_id,
             stage_name: init.stage_name,
+            observers: init.observers,
             flow_name: init.flow_name,
             flow_id: init.flow_id,
             data_journal: init.data_journal,
@@ -565,6 +572,34 @@ impl<H: Send + Sync + 'static> FsmAction for FiniteSourceAction<H> {
                         );
                     }
                 }
+                let flow_context = FlowContext {
+                    flow_name: ctx.flow_name.clone(),
+                    flow_id: ctx.flow_id.to_string(),
+                    stage_name: ctx.stage_name.clone(),
+                    stage_id: ctx.stage_id,
+                    stage_type: StageType::FiniteSource,
+                };
+                let scope = if ctx.replay_archive.is_some() {
+                    MiddlewareExecutionScope::StrictReplayHandler
+                } else {
+                    MiddlewareExecutionScope::LiveHandler
+                };
+                run_stage_lifecycle_observers(
+                    &ctx.observers,
+                    ctx.stage_id,
+                    &ctx.stage_name,
+                    &flow_context,
+                    scope,
+                    StageLifecyclePhase::Failed,
+                    &ctx.data_journal,
+                    &ctx.instrumentation,
+                )
+                .await
+                .map_err(|e| {
+                    obzenflow_fsm::FsmError::HandlerError(format!(
+                        "Finite source lifecycle observer failed: {e}"
+                    ))
+                })?;
                 Ok(())
             }
 
@@ -612,6 +647,34 @@ impl<H: Send + Sync + 'static> FsmAction for FiniteSourceAction<H> {
                     stage_name = %ctx.stage_name,
                     "Finite source published running event and source_contract"
                 );
+                let flow_context = FlowContext {
+                    flow_name: ctx.flow_name.clone(),
+                    flow_id: ctx.flow_id.to_string(),
+                    stage_name: ctx.stage_name.clone(),
+                    stage_id: ctx.stage_id,
+                    stage_type: StageType::FiniteSource,
+                };
+                let scope = if ctx.replay_archive.is_some() {
+                    MiddlewareExecutionScope::StrictReplayHandler
+                } else {
+                    MiddlewareExecutionScope::LiveHandler
+                };
+                run_stage_lifecycle_observers(
+                    &ctx.observers,
+                    ctx.stage_id,
+                    &ctx.stage_name,
+                    &flow_context,
+                    scope,
+                    StageLifecyclePhase::Running,
+                    &ctx.data_journal,
+                    &ctx.instrumentation,
+                )
+                .await
+                .map_err(|e| {
+                    obzenflow_fsm::FsmError::HandlerError(format!(
+                        "Finite source lifecycle observer failed: {e}"
+                    ))
+                })?;
                 Ok(())
             }
 
@@ -646,6 +709,34 @@ impl<H: Send + Sync + 'static> FsmAction for FiniteSourceAction<H> {
                     stage_name = %ctx.stage_name,
                     "Finite source sent completion event"
                 );
+                let flow_context = FlowContext {
+                    flow_name: ctx.flow_name.clone(),
+                    flow_id: ctx.flow_id.to_string(),
+                    stage_name: ctx.stage_name.clone(),
+                    stage_id: ctx.stage_id,
+                    stage_type: StageType::FiniteSource,
+                };
+                let scope = if ctx.replay_archive.is_some() {
+                    MiddlewareExecutionScope::StrictReplayHandler
+                } else {
+                    MiddlewareExecutionScope::LiveHandler
+                };
+                run_stage_lifecycle_observers(
+                    &ctx.observers,
+                    ctx.stage_id,
+                    &ctx.stage_name,
+                    &flow_context,
+                    scope,
+                    StageLifecyclePhase::Completed,
+                    &ctx.data_journal,
+                    &ctx.instrumentation,
+                )
+                .await
+                .map_err(|e| {
+                    obzenflow_fsm::FsmError::HandlerError(format!(
+                        "Finite source lifecycle observer failed: {e}"
+                    ))
+                })?;
                 Ok(())
             }
 
@@ -867,6 +958,7 @@ mod tests {
             FiniteSourceContext::<DummySource>::new(FiniteSourceContextInit {
                 stage_id,
                 stage_name: stage_name.clone(),
+                observers: crate::stages::observer::StageObserverBundle::default(),
                 flow_name: flow_name.clone(),
                 flow_id,
                 data_journal: data_journal.clone(),

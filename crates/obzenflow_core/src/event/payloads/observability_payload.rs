@@ -113,7 +113,12 @@ pub enum MiddlewareLifecycle {
     RateLimiter(RateLimiterEvent),
     Backpressure(BackpressureEvent),
     Retry(RetryEvent),
-    Sli(SliEvent),
+    /// One per-execution service-level-indicator sample (FLOWIP-115f).
+    ///
+    /// An `Indicator` row is a single observe-only sample of one operation
+    /// execution. Aggregation (percentiles, error budgets, windowed rates) and
+    /// any objective evaluation are FLOWIP-115l's job, reading these rows.
+    Indicator(IndicatorSample),
     User(UserMiddlewareEvent),
 }
 
@@ -267,32 +272,53 @@ pub enum RetryEvent {
     },
 }
 
-// ---- SLI / SLO -----------------------------------------------------------
+// ---- Service-level indicator sample (FLOWIP-115f) ------------------------
+//
+// A per-execution SLI *sample*: the observe-only raw input an SLI is computed
+// from. `value_ms` is the raw observation a distribution is built from. The
+// sample records the measurement only; the objective (threshold) and the
+// good/bad classification are deliberately not embedded in the durable event,
+// because the objective can change while the measurement cannot. Applying a
+// threshold and computing ratios/percentiles/windows/error budgets belong to
+// FLOWIP-115l, which reads these rows. Samples never steer control.
+
+/// The family of service-level indicator a sample measures.
+///
+/// Only `Latency` ships today. Additional kinds (availability, consistency,
+/// throughput) require their own FLOWIP with a producer, example, and tests
+/// before they become callable public API (no dead indicator surface). This
+/// enum is intentionally not `#[non_exhaustive]` so adding a kind later forces
+/// every match to be revisited.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IndicatorKind {
+    /// Wall-clock duration of one operation execution.
+    Latency,
+}
+
+/// One per-execution service-level-indicator sample: the raw measurement
+/// (`value_ms`) plus its identity and context. The objective (threshold) and the
+/// good/bad evaluation are read-side (FLOWIP-115l), not baked into the event.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "indicator", rename_all = "snake_case")]
-pub enum SliEvent {
-    LatencyPercentiles {
-        p50_ms: f64,
-        p90_ms: f64,
-        p95_ms: f64,
-        p99_ms: f64,
-        p999_ms: f64,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        sample_count: Option<u64>,
-    },
-    Availability {
-        success_rate: f64,
-        error_rate: f64,
-        total_requests: u64,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        window_duration_ms: Option<u64>,
-    },
-    ErrorBudget {
-        remaining_percent: f64,
-        consumed_percent: f64,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        time_window_hours: Option<u32>,
-    },
+pub struct IndicatorSample {
+    /// The kind of indicator this sample measures.
+    pub kind: IndicatorKind,
+    /// The named operation being measured, e.g. `"payment.authorization"`.
+    pub operation: String,
+    /// The indicator name within the operation, e.g. `"authorization.latency"`.
+    pub indicator: String,
+    /// The measured sample value in milliseconds.
+    pub value_ms: u64,
+    /// Static authoring-time tags (dependency, region, ...).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<IndicatorTag>,
+}
+
+/// A static key/value tag attached to an indicator sample at authoring time.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IndicatorTag {
+    pub key: String,
+    pub value: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

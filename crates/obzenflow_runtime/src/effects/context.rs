@@ -116,6 +116,7 @@ pub struct EffectInvocationContext {
     pub stage_logic_version: String,
     pub data_journal: Arc<dyn Journal<ChainEvent>>,
     pub flow_context: Option<FlowContext>,
+    pub observers: Option<crate::stages::observer::StageObserverBundle>,
     pub system_journal: Option<Arc<dyn Journal<SystemEvent>>>,
     pub instrumentation: Option<Arc<StageInstrumentation>>,
     pub heartbeat_state: Option<Arc<HeartbeatState>>,
@@ -146,8 +147,13 @@ impl EffectInvocationContext {
     }
 
     pub fn drain_boundary_control_events(&self) -> Vec<ChainEvent> {
-        let mut buffer = self
-            .boundary_control_events
+        Self::drain_boundary_control_event_buffer(&self.boundary_control_events)
+    }
+
+    pub fn drain_boundary_control_event_buffer(
+        buffer: &Arc<Mutex<Vec<ChainEvent>>>,
+    ) -> Vec<ChainEvent> {
+        let mut buffer = buffer
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         std::mem::take(&mut *buffer)

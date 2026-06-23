@@ -8,6 +8,8 @@
 //! Unlike transforms which have single upstream, joins track two distinct upstreams
 //! (reference and stream) with different behaviors.
 
+use crate::effects::{scope_for_dispatch, EffectRuntimeMode};
+use crate::stages::observer::StageLifecyclePhase;
 use obzenflow_core::event::context::{FlowContext, StageType};
 use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
 use obzenflow_core::event::types::SeqNo;
@@ -32,6 +34,7 @@ use crate::stages::common::backpressure_activity_pulse::BackpressureActivityPuls
 use crate::stages::common::handlers::JoinHandler;
 use crate::stages::common::heartbeat::HeartbeatHandle;
 use crate::stages::common::supervision::lifecycle_actions;
+use crate::stages::observer::dispatch::run_stage_lifecycle_observers;
 use crate::stages::resources_builder::BoundSubscriptionFactory;
 use crate::supervised_base::idle_backoff::IdleBackoff;
 
@@ -289,6 +292,14 @@ pub struct JoinContext<H: JoinHandler> {
     /// Human-readable stage name for logging
     pub stage_name: String,
 
+    /// Runtime observer bundle attached to this stage.
+    pub observers: crate::stages::observer::StageObserverBundle,
+
+    /// Effect runtime mode (live vs replay) for this stage. Used to derive the
+    /// observer execution scope so live-only observers are suppressed under
+    /// strict replay and resume, instead of hard-coding a live scope.
+    pub effect_runtime_mode: EffectRuntimeMode,
+
     /// Flow name for flow context
     pub flow_name: String,
 
@@ -527,6 +538,29 @@ impl<H: JoinHandler + Send + Sync + 'static> FsmAction for JoinAction<H> {
                     &ctx.system_journal,
                 )
                 .await;
+                let flow_context = FlowContext {
+                    flow_name: ctx.flow_name.clone(),
+                    flow_id: ctx.flow_id.to_string(),
+                    stage_name: ctx.stage_name.clone(),
+                    stage_id: ctx.stage_id,
+                    stage_type: StageType::Join,
+                };
+                run_stage_lifecycle_observers(
+                    &ctx.observers,
+                    ctx.stage_id,
+                    &ctx.stage_name,
+                    &flow_context,
+                    scope_for_dispatch(ctx.effect_runtime_mode, None),
+                    StageLifecyclePhase::Running,
+                    &ctx.data_journal,
+                    &ctx.instrumentation,
+                )
+                .await
+                .map_err(|e| {
+                    obzenflow_fsm::FsmError::HandlerError(format!(
+                        "Join lifecycle observer failed: {e}"
+                    ))
+                })?;
                 Ok(())
             }
 
@@ -650,6 +684,29 @@ impl<H: JoinHandler + Send + Sync + 'static> FsmAction for JoinAction<H> {
                     ctx.instrumentation.as_ref(),
                 )
                 .await;
+                let flow_context = FlowContext {
+                    flow_name: ctx.flow_name.clone(),
+                    flow_id: ctx.flow_id.to_string(),
+                    stage_name: ctx.stage_name.clone(),
+                    stage_id: ctx.stage_id,
+                    stage_type: StageType::Join,
+                };
+                run_stage_lifecycle_observers(
+                    &ctx.observers,
+                    ctx.stage_id,
+                    &ctx.stage_name,
+                    &flow_context,
+                    scope_for_dispatch(ctx.effect_runtime_mode, None),
+                    StageLifecyclePhase::Completed,
+                    &ctx.data_journal,
+                    &ctx.instrumentation,
+                )
+                .await
+                .map_err(|e| {
+                    obzenflow_fsm::FsmError::HandlerError(format!(
+                        "Join lifecycle observer failed: {e}"
+                    ))
+                })?;
                 Ok(())
             }
 
@@ -665,6 +722,29 @@ impl<H: JoinHandler + Send + Sync + 'static> FsmAction for JoinAction<H> {
                     ctx.instrumentation.as_ref(),
                 )
                 .await;
+                let flow_context = FlowContext {
+                    flow_name: ctx.flow_name.clone(),
+                    flow_id: ctx.flow_id.to_string(),
+                    stage_name: ctx.stage_name.clone(),
+                    stage_id: ctx.stage_id,
+                    stage_type: StageType::Join,
+                };
+                run_stage_lifecycle_observers(
+                    &ctx.observers,
+                    ctx.stage_id,
+                    &ctx.stage_name,
+                    &flow_context,
+                    scope_for_dispatch(ctx.effect_runtime_mode, None),
+                    StageLifecyclePhase::Failed,
+                    &ctx.data_journal,
+                    &ctx.instrumentation,
+                )
+                .await
+                .map_err(|e| {
+                    obzenflow_fsm::FsmError::HandlerError(format!(
+                        "Join lifecycle observer failed: {e}"
+                    ))
+                })?;
                 Ok(())
             }
 

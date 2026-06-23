@@ -81,6 +81,7 @@ impl<H: UnifiedSinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Su
             .unwrap_or_else(|| Arc::new(JonestownSignalStrategy));
 
         let sink_delivery_boundary = self.config.sink_delivery_boundary;
+        let observers = self.config.observers;
 
         let heartbeat_config = self.heartbeat_config.clone();
         let heartbeat = if self.resources.replay_archive.is_some() || !heartbeat_config.enabled {
@@ -121,6 +122,7 @@ impl<H: UnifiedSinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Su
             upstream_subscription_factory: self.resources.upstream_subscription_factory,
             control_strategy,
             sink_delivery_boundary,
+            observers,
             processing_context:
                 crate::stages::common::control_strategies::ProcessingContext::default(),
             backpressure_writer: self.resources.backpressure_writer.clone(),

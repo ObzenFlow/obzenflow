@@ -116,6 +116,7 @@ impl EffectInvocationContextBuilder {
             backpressure_writer: BackpressureWriter::disabled(),
             emit_enabled: self.emit_enabled,
             effect_boundary: None,
+            observers: None,
             boundary_control_events: Arc::new(Mutex::new(Vec::new())),
         }
     }

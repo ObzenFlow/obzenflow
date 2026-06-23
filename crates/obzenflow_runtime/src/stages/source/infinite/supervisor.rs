@@ -10,7 +10,8 @@ use crate::stages::common::supervision::flow_context_factory::make_flow_context;
 use crate::stages::source::replay_lifecycle::ReplayCompletionGuard;
 use crate::stages::source::supervision::{
     around_source_boundary, drain_pending_outputs_sync, emit_batch_to_pending_outputs,
-    per_data_event_duration_for_batch, stage_boundary_control_events,
+    observe_source_boundary_rejection, stage_boundary_control_events, stage_source_poll_outputs,
+    SourcePollObservation,
 };
 use crate::stages::source::{
     SourceBoundary, SourceBoundaryOutcome, SourcePollCompletion, SourcePollReport,
@@ -368,6 +369,11 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
                     self.stage_id,
                     StageType::InfiniteSource,
                 );
+                let observer_scope = if ctx.replay_archive.is_some() {
+                    obzenflow_core::MiddlewareExecutionScope::StrictReplayHandler
+                } else {
+                    obzenflow_core::MiddlewareExecutionScope::LiveHandler
+                };
 
                 if drain_pending_outputs_sync(
                     &mut ctx.pending_outputs,
@@ -382,6 +388,8 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
                     &mut ctx.backpressure_pulse,
                     &mut ctx.backpressure_backoff,
                     Some(&ctx.output_contract),
+                    Some(&ctx.observers),
+                    observer_scope,
                 )
                 .await?
                 {
@@ -530,6 +538,14 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
                     )
                     .await;
 
+                    let source_poll_observation = SourcePollObservation::new(
+                        &stage_flow_context,
+                        &ctx.instrumentation,
+                        &ctx.observers,
+                        obzenflow_core::MiddlewareExecutionScope::LiveHandler,
+                        &ctx.data_journal,
+                    );
+
                     match report.outcome {
                         SourceBoundaryOutcome::Rejected { reason } => {
                             tracing::warn!(
@@ -539,8 +555,15 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
                             );
                             ctx.completion_reason =
                                 InfiniteSourceCompletionReason::ArchiveExhausted;
+                            let mut control_events = report.control_events;
+                            observe_source_boundary_rejection(
+                                &source_poll_observation,
+                                &mut control_events,
+                                &reason,
+                            )
+                            .await?;
                             if stage_boundary_control_events(
-                                report.control_events,
+                                control_events,
                                 &stage_flow_context,
                                 &ctx.instrumentation,
                                 &mut ctx.pending_outputs,
@@ -560,18 +583,22 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
                                     .event_loops_with_work_total
                                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
+                                let source_event_count = events.len();
                                 events.extend(report.control_events);
-                                let data_events_in_tick =
-                                    events.iter().filter(|event| event.is_data()).count();
-                                let per_data_event_duration = per_data_event_duration_for_batch(
-                                    poll.poll_duration,
-                                    data_events_in_tick,
-                                );
-                                emit_batch_to_pending_outputs(
+                                source_poll_observation
+                                    .observe(
+                                        events.as_mut_slice(),
+                                        poll.poll_duration,
+                                        crate::stages::observer::SourcePollObserverOutcome::Batch {
+                                            events: source_event_count,
+                                        },
+                                    )
+                                    .await?;
+                                stage_source_poll_outputs(
                                     events,
                                     &stage_flow_context,
                                     &ctx.instrumentation,
-                                    per_data_event_duration,
+                                    poll.poll_duration,
                                     &mut ctx.pending_outputs,
                                 );
 
@@ -583,9 +610,19 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
                                 Ok(EventLoopDirective::Continue)
                             }
                             Ok(SourcePollCompletion::Batch(mut events)) => {
+                                let source_event_count = events.len();
                                 events.extend(report.control_events);
                                 if !events.is_empty() {
-                                    emit_batch_to_pending_outputs(
+                                    source_poll_observation
+                                        .observe(
+                                            events.as_mut_slice(),
+                                            Duration::from_nanos(0),
+                                            crate::stages::observer::SourcePollObserverOutcome::Batch {
+                                                events: source_event_count,
+                                            },
+                                        )
+                                        .await?;
+                                    stage_source_poll_outputs(
                                         events,
                                         &stage_flow_context,
                                         &ctx.instrumentation,
@@ -601,12 +638,26 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
                                 ctx.completion_reason =
                                     InfiniteSourceCompletionReason::ArchiveExhausted;
                                 if report.control_events.is_empty() {
+                                    source_poll_observation
+                                        .observe_empty(
+                                            poll.poll_duration,
+                                            crate::stages::observer::SourcePollObserverOutcome::Eof,
+                                        )
+                                        .await?;
                                     Ok(EventLoopDirective::Transition(
                                         InfiniteSourceEvent::BeginDrain,
                                     ))
                                 } else {
-                                    emit_batch_to_pending_outputs(
-                                        report.control_events,
+                                    let mut control_events = report.control_events;
+                                    source_poll_observation
+                                        .observe(
+                                            control_events.as_mut_slice(),
+                                            Duration::from_nanos(0),
+                                            crate::stages::observer::SourcePollObserverOutcome::Eof,
+                                        )
+                                        .await?;
+                                    stage_source_poll_outputs(
+                                        control_events,
                                         &stage_flow_context,
                                         &ctx.instrumentation,
                                         Duration::from_nanos(0),
@@ -625,12 +676,30 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
                                 );
                                 let error = e.to_string();
                                 if report.control_events.is_empty() {
+                                    source_poll_observation
+                                        .observe_empty(
+                                            poll.poll_duration,
+                                            crate::stages::observer::SourcePollObserverOutcome::Error {
+                                                message: error.clone(),
+                                            },
+                                        )
+                                        .await?;
                                     Ok(EventLoopDirective::Transition(InfiniteSourceEvent::Error(
                                         error,
                                     )))
                                 } else {
-                                    emit_batch_to_pending_outputs(
-                                        report.control_events,
+                                    let mut control_events = report.control_events;
+                                    source_poll_observation
+                                        .observe(
+                                            control_events.as_mut_slice(),
+                                            Duration::from_nanos(0),
+                                            crate::stages::observer::SourcePollObserverOutcome::Error {
+                                                message: error.clone(),
+                                            },
+                                        )
+                                        .await?;
+                                    stage_source_poll_outputs(
+                                        control_events,
                                         &stage_flow_context,
                                         &ctx.instrumentation,
                                         Duration::from_nanos(0),

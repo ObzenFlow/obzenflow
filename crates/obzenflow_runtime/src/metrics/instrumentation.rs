@@ -85,6 +85,13 @@ pub struct StageInstrumentation {
     // Actual sum of processing times (nanoseconds) - never reconstructed from percentiles
     pub processing_time_sum_nanos: AtomicU64,
 
+    /// Most-recent per-invocation processing duration (nanoseconds). Set by
+    /// `record_processing_time`; read by the output committer to stamp each stage
+    /// output's `processing_info.processing_time` (FLOWIP-115f, replacing the
+    /// deleted `TimingMiddleware`). Stages process one input at a time, so at
+    /// commit this is the current invocation's duration.
+    pub last_processing_time_nanos: AtomicU64,
+
     // FSM state tracking
     pub current_state: RwLock<String>,
     pub state_entered_at: RwLock<Instant>,
@@ -174,6 +181,9 @@ impl StageInstrumentation {
 
             // Actual sum - always tracked, never reconstructed
             processing_time_sum_nanos: AtomicU64::new(0),
+
+            // Most-recent per-invocation duration (FLOWIP-115f processing_time stamp)
+            last_processing_time_nanos: AtomicU64::new(0),
 
             // State
             current_state: RwLock::new("Created".to_string()),
@@ -487,6 +497,8 @@ impl StageInstrumentation {
         let duration_nanos = duration.as_nanos() as u64;
         self.processing_time_sum_nanos
             .fetch_add(duration_nanos, Ordering::Relaxed);
+        self.last_processing_time_nanos
+            .store(duration_nanos, Ordering::Relaxed);
 
         // Histogram recording is optional (for percentiles)
         if !self.config.enable_histograms {
@@ -501,6 +513,15 @@ impl StageInstrumentation {
                 .record(clamped)
                 .unwrap_or_else(|e| tracing::warn!("Failed to record duration: {:?}", e));
         }
+    }
+
+    /// The most-recent per-invocation processing duration. The output committer
+    /// reads this to stamp `processing_info.processing_time` on stage outputs
+    /// (FLOWIP-115f), replacing the deleted `TimingMiddleware` observer.
+    pub fn last_processing_time(&self) -> obzenflow_core::time::MetricsDuration {
+        obzenflow_core::time::MetricsDuration::from_nanos(
+            self.last_processing_time_nanos.load(Ordering::Relaxed),
+        )
     }
 
     /// Track FSM state transition

@@ -248,6 +248,8 @@ pub(super) async fn append_domain_effect_success_facts(
         instrumentation,
         heartbeat_state,
         output_contract,
+        observers: None,
+        observer_scope: obzenflow_core::MiddlewareExecutionScope::LiveEffectBoundary,
     };
 
     let mut committed_events = Vec::new();
@@ -357,6 +359,8 @@ pub(super) async fn append_effect_record(
         instrumentation: None,
         heartbeat_state: None,
         output_contract: None,
+        observers: None,
+        observer_scope: obzenflow_core::MiddlewareExecutionScope::LiveEffectBoundary,
     };
     committer
         .commit_prebuilt(event, Some(parent), CommitOptions::default())

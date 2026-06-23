@@ -4,6 +4,7 @@
 
 //! Configuration for finite source stages
 
+use crate::stages::observer::StageObserverBundle;
 use crate::stages::source::boundary::SourceBoundary;
 use crate::stages::source::strategies::CompletionGate;
 use obzenflow_core::StageId;
@@ -27,6 +28,9 @@ pub struct FiniteSourceConfig {
 
     /// Runtime-neutral source boundary seam (FLOWIP-115a).
     pub source_boundary: Option<Arc<dyn SourceBoundary>>,
+
+    /// Runtime observer bundle attached to this source boundary.
+    pub observers: StageObserverBundle,
 }
 
 impl std::fmt::Debug for FiniteSourceConfig {
@@ -37,6 +41,7 @@ impl std::fmt::Debug for FiniteSourceConfig {
             .field("flow_name", &self.flow_name)
             .field("control_strategy", &self.control_strategy)
             .field("has_source_boundary", &self.source_boundary.is_some())
+            .field("has_observers", &!self.observers.is_empty())
             .finish()
     }
 }

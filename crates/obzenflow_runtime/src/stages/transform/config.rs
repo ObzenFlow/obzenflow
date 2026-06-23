@@ -6,6 +6,7 @@
 
 use crate::pipeline::config::CycleGuardConfig;
 use crate::stages::common::control_strategies::SignalGate;
+use crate::stages::observer::StageObserverBundle;
 use obzenflow_core::StageId;
 use std::sync::Arc;
 
@@ -23,6 +24,9 @@ pub struct TransformConfig {
 
     /// IDs of upstream stages this transform reads from
     pub upstream_stages: Vec<StageId>,
+
+    /// Runtime observer bundle attached to this stage.
+    pub observers: StageObserverBundle,
 
     /// Control event handling strategy (defaults to JonestownSignalStrategy if not specified)
     pub control_strategy: Option<Arc<dyn SignalGate>>,

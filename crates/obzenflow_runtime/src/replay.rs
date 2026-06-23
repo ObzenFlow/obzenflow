@@ -10,7 +10,6 @@
 use async_trait::async_trait;
 use obzenflow_core::event::context::FlowContext;
 use obzenflow_core::event::context::StageType;
-use obzenflow_core::event::ChainEventFactory;
 use obzenflow_core::journal::journal_reader::JournalReader;
 use obzenflow_core::journal::{ArchiveStatus, StatusDerivation};
 use obzenflow_core::WriterId;
@@ -145,8 +144,8 @@ impl ReplayDriver {
 
     pub async fn next_replayed_event(
         &mut self,
-        writer_id: WriterId,
-        stage_name: &str,
+        _writer_id: WriterId,
+        _stage_name: &str,
         flow_context: FlowContext,
     ) -> Result<Option<ChainEvent>, ReplayError> {
         loop {
@@ -177,15 +176,11 @@ impl ReplayDriver {
                 continue;
             }
 
-            let mut new_event = ChainEventFactory::source_event(
-                writer_id,
-                stage_name.to_string(),
-                original_event.content.clone(),
-            );
+            let original_event_id = original_event.id;
+            let mut new_event = original_event;
             new_event.flow_context = flow_context;
-            new_event.intent = original_event.intent.clone();
             new_event.replay_context = Some(obzenflow_core::event::context::ReplayContext {
-                original_event_id: original_event.id,
+                original_event_id,
                 original_flow_id: self.replay_context.original_flow_id.clone(),
                 original_stage_id: self.replay_context.original_stage_id,
                 archive_path: self.replay_context.archive_path.clone(),

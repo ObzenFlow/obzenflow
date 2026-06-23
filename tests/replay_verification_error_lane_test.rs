@@ -35,7 +35,7 @@ struct Input {
     id: u64,
 }
 
-// Deliberately keyword-free event types: `OutcomeEnrichmentMiddleware`
+// Deliberately keyword-free event types for the error-lane assertions.
 // marks any event whose type contains "error"/"failed"/"failure" as an
 // error in live runs, and that live-only accounting is suppressed under
 // strict replay, which is a real journal asymmetry outside this fixture's

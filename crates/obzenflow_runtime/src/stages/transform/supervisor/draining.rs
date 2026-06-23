@@ -12,6 +12,13 @@ use crate::stages::common::heartbeat::HeartbeatProcessingGuard;
 use crate::stages::common::supervision::backpressure_drain::{drain_one_pending, DrainOutcome};
 use crate::stages::common::supervision::error_routing::route_to_error_journal;
 use crate::stages::common::supervision::flow_context_factory::make_flow_context;
+use crate::stages::common::supervision::output_committer::{
+    commit_framework_observability_events, is_framework_middleware_observability_event,
+    FrameworkObservabilityCommit,
+};
+use crate::stages::observer::dispatch::{
+    run_after_handler_observers, run_before_handler_observers,
+};
 use crate::supervised_base::EventLoopDirective;
 use obzenflow_core::event::context::{FlowContext, StageType};
 use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
@@ -72,6 +79,8 @@ async fn dispatch_draining_inner<
                 &mut ctx.backpressure_pulse,
                 &mut ctx.backpressure_backoff,
                 Some(&ctx.output_contract),
+                Some(&ctx.observers),
+                obzenflow_core::MiddlewareExecutionScope::LiveHandler,
                 &mut ctx.pending_outputs,
             )
             .await?
@@ -182,6 +191,7 @@ async fn dispatch_draining_inner<
                     stage_logic_version: handler.stage_logic_version().to_string(),
                     data_journal: ctx.data_journal.clone(),
                     flow_context: Some(flow_context.clone()),
+                    observers: Some(ctx.observers.clone()),
                     system_journal: Some(ctx.system_journal.clone()),
                     instrumentation: Some(ctx.instrumentation.clone()),
                     heartbeat_state: ctx.heartbeat.as_ref().map(|h| h.state.clone()),
@@ -198,11 +208,27 @@ async fn dispatch_draining_inner<
                     boundary_control_events: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
                 })
             });
+            let boundary_control_events = effect_context
+                .as_ref()
+                .map(|context| context.boundary_control_events.clone());
 
             // FLOWIP-120c H3: per-event scope, same as the running path.
             let scope =
                 crate::effects::scope_for_dispatch(ctx.effect_runtime_mode, stage_input_position);
-            let transformed_events =
+            run_before_handler_observers(
+                &ctx.observers,
+                ctx.stage_id,
+                &ctx.stage_name,
+                flow_context,
+                scope,
+                &envelope.event,
+                stage_input_position.map(|position| position.0),
+                &ctx.data_journal,
+                &ctx.instrumentation,
+                &envelope,
+            )
+            .await?;
+            let mut transformed_events =
                 process_with_instrumentation(&ctx.instrumentation, || async move {
                     let event = envelope_clone.event.clone();
                     let event_id = event.id;
@@ -239,10 +265,63 @@ async fn dispatch_draining_inner<
                     }
                 })
                 .await?;
+            run_after_handler_observers(
+                &ctx.observers,
+                ctx.stage_id,
+                &ctx.stage_name,
+                flow_context,
+                scope,
+                &envelope.event,
+                stage_input_position.map(|position| position.0),
+                transformed_events.as_mut_slice(),
+                &ctx.data_journal,
+                &ctx.instrumentation,
+                &envelope,
+            )
+            .await?;
+            if let Some(buffer) = boundary_control_events {
+                commit_framework_observability_events(
+                    EffectInvocationContext::drain_boundary_control_event_buffer(&buffer),
+                    FrameworkObservabilityCommit {
+                        flow_context,
+                        data_journal: &ctx.data_journal,
+                        system_journal: Some(&ctx.system_journal),
+                        instrumentation: Some(&ctx.instrumentation),
+                        heartbeat_state: ctx.heartbeat.as_ref().map(|heartbeat| &heartbeat.state),
+                        parent: Some(&envelope),
+                        observer_scope: scope,
+                    },
+                )
+                .await
+                .map_err(|e| {
+                    format!("Failed to commit effect boundary observability events: {e}")
+                })?;
+            }
 
             // Error-journal events are written immediately; stage-journal outputs are gated by backpressure.
             let mut stage_outputs = std::collections::VecDeque::<ChainEvent>::new();
             for event in transformed_events {
+                if is_framework_middleware_observability_event(&event) {
+                    commit_framework_observability_events(
+                        vec![event],
+                        FrameworkObservabilityCommit {
+                            flow_context,
+                            data_journal: &ctx.data_journal,
+                            system_journal: Some(&ctx.system_journal),
+                            instrumentation: Some(&ctx.instrumentation),
+                            heartbeat_state: ctx
+                                .heartbeat
+                                .as_ref()
+                                .map(|heartbeat| &heartbeat.state),
+                            parent: Some(&envelope),
+                            observer_scope: scope,
+                        },
+                    )
+                    .await
+                    .map_err(|e| format!("Failed to commit framework observability event: {e}"))?;
+                    continue;
+                }
+
                 if let ProcessingStatus::Error { kind, .. } = &event.processing_info.status {
                     let k = kind.clone().unwrap_or(ErrorKind::Unknown);
                     ctx.instrumentation.record_error(k);
@@ -277,6 +356,8 @@ async fn dispatch_draining_inner<
                     &mut ctx.backpressure_pulse,
                     &mut ctx.backpressure_backoff,
                     Some(&ctx.output_contract),
+                    Some(&ctx.observers),
+                    scope,
                     &mut stage_outputs,
                 )
                 .await?

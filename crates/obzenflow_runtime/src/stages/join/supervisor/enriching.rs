@@ -78,6 +78,19 @@ pub(super) async fn dispatch_enriching<
                     let contract_reader_count = ctx.stream_contract_state.len();
                     let upstream_stage = subscription.last_delivered_upstream_stage();
                     let last_eof_outcome = subscription.last_eof_outcome().cloned();
+                    if let Some(signal_snapshot) = common::signal_snapshot(
+                        Some(crate::stages::observer::JoinSide::Stream),
+                        &envelope.event,
+                    ) {
+                        common::observe_join_input(
+                            ctx,
+                            &envelope.event,
+                            None,
+                            Some(&signal_snapshot),
+                            Some(&envelope),
+                        )
+                        .await?;
+                    }
 
                     let resolution = resolve_control_event_awaiting_pauses(
                         signal,
@@ -151,11 +164,27 @@ pub(super) async fn dispatch_enriching<
                     let writer_id = ctx.writer_id.ok_or("No writer ID available")?;
                     let event = envelope.event.clone();
                     let event_id = event.id;
+                    let delivery_snapshot = common::delivery_snapshot(
+                        crate::stages::observer::JoinSide::Stream,
+                        source_id,
+                        subscription.last_delivered_stage_input_position(),
+                        &envelope,
+                        &ctx.reference_high_water_clock,
+                        None,
+                    )?;
 
                     if let Some(heartbeat) = &ctx.heartbeat {
                         heartbeat.state.record_data_read(source_id, event_id);
                     }
                     let heartbeat_state = ctx.heartbeat.as_ref().map(|h| h.state.clone());
+                    common::observe_join_input(
+                        ctx,
+                        &event,
+                        Some(&delivery_snapshot),
+                        None,
+                        Some(&envelope),
+                    )
+                    .await?;
 
                     if matches!(event.processing_info.status, ProcessingStatus::Error { .. }) {
                         tracing::info!(
@@ -167,11 +196,21 @@ pub(super) async fn dispatch_enriching<
                         if let Some(state) = &heartbeat_state {
                             state.record_last_consumed(event_id);
                         }
+                        let mut outputs = vec![event.clone()];
+                        common::observe_join_outputs(
+                            ctx,
+                            Some(&event),
+                            Some(&delivery_snapshot),
+                            None,
+                            outputs.as_mut_slice(),
+                            Some(&envelope),
+                        )
+                        .await?;
                         write_stage_outputs_and_ack(
                             subscription,
                             ctx,
                             source_id,
-                            VecDeque::from([event]),
+                            outputs.into(),
                             Some(&envelope),
                         )
                         .await?;
@@ -224,10 +263,19 @@ pub(super) async fn dispatch_enriching<
                         .fetch_add(1, Ordering::Relaxed);
 
                     match result {
-                        Ok(events) => {
+                        Ok(mut events) => {
                             ctx.instrumentation
                                 .events_accumulated_total
                                 .fetch_add(1, Ordering::Relaxed);
+                            common::observe_join_outputs(
+                                ctx,
+                                Some(&event),
+                                Some(&delivery_snapshot),
+                                None,
+                                events.as_mut_slice(),
+                                Some(&merged_parent),
+                            )
+                            .await?;
                             write_stage_outputs_and_ack(
                                 subscription,
                                 ctx,
@@ -239,9 +287,18 @@ pub(super) async fn dispatch_enriching<
                         }
                         Err(err) => {
                             let reason = format!("Join handler error during enrichment: {err:?}");
-                            let error_event =
+                            let mut error_event =
                                 envelope.event.clone().mark_as_error(reason, err.kind());
                             ctx.instrumentation.record_error(err.kind());
+                            common::observe_join_outputs(
+                                ctx,
+                                Some(&event),
+                                Some(&delivery_snapshot),
+                                None,
+                                std::slice::from_mut(&mut error_event),
+                                Some(&merged_parent),
+                            )
+                            .await?;
 
                             if route_to_error_journal(&error_event) {
                                 ctx.error_journal
@@ -366,6 +423,8 @@ async fn write_stage_outputs_and_ack<H: JoinHandler>(
             &mut ctx.backpressure_pulse,
             &mut ctx.backpressure_backoff,
             Some(&ctx.output_contract),
+            Some(&ctx.observers),
+            crate::effects::scope_for_dispatch(ctx.effect_runtime_mode, None),
             &mut outputs,
         )
         .await?

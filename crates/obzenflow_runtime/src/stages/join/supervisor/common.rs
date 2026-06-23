@@ -2,12 +2,21 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
+use crate::messaging::upstream_subscription::StageInputPosition;
 use crate::stages::common::handlers::JoinHandler;
 use crate::stages::common::supervision::backpressure_drain::{drain_one_pending, DrainOutcome};
 use crate::stages::common::supervision::flow_context_factory::make_flow_context;
 use crate::stages::common::supervision::forward_control_event::forward_control_event;
 use crate::stages::join::fsm::{JoinContext, PendingTransition};
+use crate::stages::observer::dispatch::{
+    run_join_after_output_observers, run_join_before_input_observers,
+};
+use crate::stages::observer::{
+    JoinCanonicalMergeMetadata, JoinDeliverySnapshot, JoinObserverContext, JoinSide,
+    JoinSignalKind, JoinSignalSnapshot,
+};
 use obzenflow_core::event::context::StageType;
+use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::payloads::observability_payload::{
     MetricsLifecycle, ObservabilityPayload,
 };
@@ -81,6 +90,8 @@ pub(super) async fn flush_pending_outputs<
             &mut ctx.backpressure_pulse,
             &mut ctx.backpressure_backoff,
             Some(&ctx.output_contract),
+            Some(&ctx.observers),
+            crate::effects::scope_for_dispatch(ctx.effect_runtime_mode, None),
             &mut ctx.pending_outputs,
         )
         .await?
@@ -111,6 +122,113 @@ pub(super) async fn flush_pending_outputs<
     }
 
     Ok(FlushOutcome::Drained)
+}
+
+pub(super) async fn observe_join_input<H: JoinHandler>(
+    ctx: &JoinContext<H>,
+    input: &ChainEvent,
+    delivery: Option<&JoinDeliverySnapshot>,
+    signal: Option<&JoinSignalSnapshot>,
+    parent: Option<&EventEnvelope<ChainEvent>>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let flow_id = ctx.flow_id.to_string();
+    let flow_context = make_flow_context(
+        &ctx.flow_name,
+        &flow_id,
+        &ctx.stage_name,
+        ctx.stage_id,
+        StageType::Join,
+    );
+    let observer_ctx = JoinObserverContext {
+        stage_id: ctx.stage_id,
+        stage_name: &ctx.stage_name,
+        flow_context: &flow_context,
+        scope: crate::effects::scope_for_dispatch(ctx.effect_runtime_mode, None),
+        input: Some(input),
+        delivery,
+        signal,
+    };
+    run_join_before_input_observers(
+        &ctx.observers,
+        &observer_ctx,
+        &ctx.data_journal,
+        &ctx.instrumentation,
+        parent,
+    )
+    .await
+}
+
+pub(super) async fn observe_join_outputs<H: JoinHandler>(
+    ctx: &JoinContext<H>,
+    input: Option<&ChainEvent>,
+    delivery: Option<&JoinDeliverySnapshot>,
+    signal: Option<&JoinSignalSnapshot>,
+    outputs: &mut [ChainEvent],
+    parent: Option<&EventEnvelope<ChainEvent>>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let flow_id = ctx.flow_id.to_string();
+    let flow_context = make_flow_context(
+        &ctx.flow_name,
+        &flow_id,
+        &ctx.stage_name,
+        ctx.stage_id,
+        StageType::Join,
+    );
+    let observer_ctx = JoinObserverContext {
+        stage_id: ctx.stage_id,
+        stage_name: &ctx.stage_name,
+        flow_context: &flow_context,
+        scope: crate::effects::scope_for_dispatch(ctx.effect_runtime_mode, None),
+        input,
+        delivery,
+        signal,
+    };
+    run_join_after_output_observers(
+        &ctx.observers,
+        &observer_ctx,
+        outputs,
+        &ctx.data_journal,
+        &ctx.instrumentation,
+        parent,
+    )
+    .await
+}
+
+pub(super) fn delivery_snapshot(
+    side: JoinSide,
+    source_stage_id: StageId,
+    stage_input_position: Option<StageInputPosition>,
+    envelope: &EventEnvelope<ChainEvent>,
+    reference_high_water: &obzenflow_core::event::vector_clock::VectorClock,
+    canonical_merge: Option<JoinCanonicalMergeMetadata>,
+) -> Result<JoinDeliverySnapshot, Box<dyn std::error::Error + Send + Sync>> {
+    let position =
+        stage_input_position.ok_or("join delivered data input without StageInputPosition")?;
+    Ok(JoinDeliverySnapshot {
+        side,
+        delivered_source_stage_id: source_stage_id,
+        delivered_stage_input_position: position.0,
+        input_envelope: envelope.clone(),
+        reference_high_water: reference_high_water.clone(),
+        canonical_merge,
+    })
+}
+
+pub(super) fn signal_snapshot(
+    side: Option<JoinSide>,
+    input: &ChainEvent,
+) -> Option<JoinSignalSnapshot> {
+    let signal = match &input.content {
+        obzenflow_core::event::ChainEventContent::FlowControl(FlowControlPayload::Eof {
+            ..
+        }) => JoinSignalKind::Eof,
+        obzenflow_core::event::ChainEventContent::FlowControl(FlowControlPayload::Drain) => {
+            JoinSignalKind::Drain
+        }
+        obzenflow_core::event::ChainEventContent::FlowControl(_) => JoinSignalKind::OtherControl,
+        _ => return None,
+    };
+    Some(JoinSignalSnapshot { side, signal })
 }
 
 pub(super) fn observe_reference_envelope<H: JoinHandler>(

@@ -46,7 +46,7 @@ impl JournalReader<ChainEvent> for TestReader {
 }
 
 #[tokio::test]
-async fn replay_driver_rewrites_ids_and_sets_replay_context() {
+async fn replay_driver_preserves_recorded_ids_and_sets_replay_context() {
     let archived_writer = WriterId::from(StageId::new());
     let mut eof = ChainEventFactory::eof_event(archived_writer, true);
     eof.intent = Some(IntentContext::Event {
@@ -95,8 +95,8 @@ async fn replay_driver_rewrites_ids_and_sets_replay_context() {
         .unwrap()
         .expect("should replay data after skipping eof");
 
-    assert_ne!(replayed.id, data.id);
-    assert_eq!(replayed.writer_id, new_writer);
+    assert_eq!(replayed.id, data.id);
+    assert_eq!(replayed.writer_id, data.writer_id);
     assert_eq!(replayed.flow_context.flow_name, flow_context.flow_name);
     assert_eq!(replayed.flow_context.stage_name, flow_context.stage_name);
 

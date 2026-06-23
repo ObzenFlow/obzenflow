@@ -14,10 +14,15 @@ use std::sync::Arc;
 
 // ---- Timing / processing --------------------------------------------------
 
-pub(crate) struct ProcessingStartNanos;
-impl MiddlewareContextKey for ProcessingStartNanos {
+/// Wall-clock duration (nanoseconds) of the protected effect call
+/// (`execute.await`), measured by the effect boundary and read by the circuit
+/// breaker for slow-call detection (FLOWIP-115f). Replaces the breaker's old
+/// heuristic of reading `processing_info.processing_time` off the handler
+/// outputs, which is now stamped at commit time after the breaker observes.
+pub(crate) struct EffectCallDurationNanos;
+impl MiddlewareContextKey for EffectCallDurationNanos {
     type Value = u64;
-    const LABEL: &'static str = "processing_start_nanos";
+    const LABEL: &'static str = "effect.call_duration_nanos";
 }
 
 // ---- Circuit breaker integrated retry ------------------------------------
@@ -108,26 +113,6 @@ pub(crate) struct CircuitBreakerTotalRetryWallMs;
 impl MiddlewareContextKey for CircuitBreakerTotalRetryWallMs {
     type Value = u64;
     const LABEL: &'static str = "circuit_breaker.total_retry_wall_ms";
-}
-
-// ---- Outcome enrichment ---------------------------------------------------
-
-pub(crate) struct OutcomeProcessingFailed;
-impl MiddlewareContextKey for OutcomeProcessingFailed {
-    type Value = bool;
-    const LABEL: &'static str = "processing_failed";
-}
-
-pub(crate) struct OutcomeFailedEventType;
-impl MiddlewareContextKey for OutcomeFailedEventType {
-    type Value = String;
-    const LABEL: &'static str = "failed_event_type";
-}
-
-pub(crate) struct OutcomeRetryAttempt;
-impl MiddlewareContextKey for OutcomeRetryAttempt {
-    type Value = u32;
-    const LABEL: &'static str = "retry_attempt";
 }
 
 // ---- AI map-reduce --------------------------------------------------------

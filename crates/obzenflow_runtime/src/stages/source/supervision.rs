@@ -15,12 +15,16 @@ use crate::stages::common::heartbeat::HeartbeatState;
 use crate::stages::common::supervision::backpressure_drain::{
     drain_one_pending, drain_one_pending_resolve, DrainAttempt, DrainOutcome,
 };
+use crate::stages::observer::dispatch::run_source_poll_observers;
+use crate::stages::observer::{
+    SourcePollObserverContext, SourcePollObserverOutcome, StageObserverBundle,
+};
 use crate::stages::source::boundary::{
     SourceBoundary, SourceBoundaryOutcome, SourceBoundaryReport, SourcePollExecution,
 };
 use crate::supervised_base::idle_backoff::IdleBackoff;
 use crate::supervised_base::{EventLoopDirective, EventReceiver};
-use obzenflow_core::event::context::FlowContext;
+use obzenflow_core::event::context::{FlowContext, MiddlewareExecutionScope};
 use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
 use obzenflow_core::event::SystemEvent;
 use obzenflow_core::journal::Journal;
@@ -84,6 +88,108 @@ pub(crate) fn emit_batch_to_pending_outputs(
     }
 }
 
+pub(crate) struct SourcePollObservation<'a> {
+    stage_flow_context: &'a FlowContext,
+    instrumentation: &'a Arc<StageInstrumentation>,
+    observers: &'a StageObserverBundle,
+    scope: MiddlewareExecutionScope,
+    data_journal: &'a Arc<dyn Journal<ChainEvent>>,
+}
+
+impl<'a> SourcePollObservation<'a> {
+    pub(crate) fn new(
+        stage_flow_context: &'a FlowContext,
+        instrumentation: &'a Arc<StageInstrumentation>,
+        observers: &'a StageObserverBundle,
+        scope: MiddlewareExecutionScope,
+        data_journal: &'a Arc<dyn Journal<ChainEvent>>,
+    ) -> Self {
+        Self {
+            stage_flow_context,
+            instrumentation,
+            observers,
+            scope,
+            data_journal,
+        }
+    }
+
+    pub(crate) async fn observe(
+        &self,
+        outputs: &mut [ChainEvent],
+        poll_duration: Duration,
+        outcome: SourcePollObserverOutcome,
+    ) -> Result<(), BoxError> {
+        let observer_ctx = SourcePollObserverContext {
+            stage_id: self.stage_flow_context.stage_id,
+            stage_name: &self.stage_flow_context.stage_name,
+            flow_context: self.stage_flow_context,
+            scope: self.scope,
+            poll_duration,
+            outcome,
+        };
+        run_source_poll_observers(
+            self.observers,
+            &observer_ctx,
+            outputs,
+            self.data_journal,
+            self.instrumentation,
+        )
+        .await
+    }
+
+    pub(crate) async fn observe_empty(
+        &self,
+        poll_duration: Duration,
+        outcome: SourcePollObserverOutcome,
+    ) -> Result<(), BoxError> {
+        let mut outputs = Vec::new();
+        self.observe(outputs.as_mut_slice(), poll_duration, outcome)
+            .await
+    }
+}
+
+pub(crate) async fn observe_source_boundary_rejection(
+    observation: &SourcePollObservation<'_>,
+    control_events: &mut Vec<ChainEvent>,
+    reason: &str,
+) -> Result<(), BoxError> {
+    let outcome = SourcePollObserverOutcome::Rejected {
+        reason: reason.to_string(),
+    };
+    if control_events.is_empty() {
+        observation
+            .observe_empty(Duration::from_nanos(0), outcome)
+            .await
+    } else {
+        observation
+            .observe(
+                control_events.as_mut_slice(),
+                Duration::from_nanos(0),
+                outcome,
+            )
+            .await
+    }
+}
+
+pub(crate) fn stage_source_poll_outputs(
+    events: Vec<ChainEvent>,
+    stage_flow_context: &FlowContext,
+    instrumentation: &Arc<StageInstrumentation>,
+    poll_duration: Duration,
+    pending_outputs: &mut VecDeque<ChainEvent>,
+) {
+    let data_events_in_tick = events.iter().filter(|event| event.is_data()).count();
+    let per_data_event_duration =
+        per_data_event_duration_for_batch(poll_duration, data_events_in_tick);
+    emit_batch_to_pending_outputs(
+        events,
+        stage_flow_context,
+        instrumentation,
+        per_data_event_duration,
+        pending_outputs,
+    );
+}
+
 pub(crate) fn stage_boundary_control_events(
     control_events: Vec<ChainEvent>,
     stage_flow_context: &FlowContext,
@@ -118,6 +224,8 @@ pub(crate) async fn drain_pending_outputs_sync(
     backpressure_pulse: &mut BackpressureActivityPulse,
     backpressure_backoff: &mut IdleBackoff,
     output_contract: Option<&StageOutputContract>,
+    observers: Option<&crate::stages::observer::StageObserverBundle>,
+    observer_scope: obzenflow_core::MiddlewareExecutionScope,
 ) -> Result<bool, BoxError> {
     while let Some(pending) = pending_outputs.pop_front() {
         if matches!(
@@ -145,6 +253,8 @@ pub(crate) async fn drain_pending_outputs_sync(
             backpressure_pulse,
             backpressure_backoff,
             output_contract,
+            observers,
+            observer_scope,
             pending_outputs,
         )
         .await?
@@ -171,6 +281,8 @@ pub(crate) async fn drain_pending_outputs_async<E>(
     backpressure_pulse: &mut BackpressureActivityPulse,
     backpressure_backoff: &mut IdleBackoff,
     output_contract: Option<&StageOutputContract>,
+    observers: Option<&crate::stages::observer::StageObserverBundle>,
+    observer_scope: obzenflow_core::MiddlewareExecutionScope,
     external_events: &mut EventReceiver<E>,
     on_channel_closed: impl FnOnce() -> E,
 ) -> Result<Option<EventLoopDirective<E>>, BoxError>
@@ -205,6 +317,8 @@ where
             backpressure_pulse,
             backpressure_backoff,
             output_contract,
+            observers,
+            observer_scope,
             pending_outputs,
         )
         .await?
@@ -459,6 +573,8 @@ mod tests {
                 &mut backpressure_pulse,
                 &mut backpressure_backoff,
                 None,
+                None,
+                obzenflow_core::MiddlewareExecutionScope::LiveHandler,
                 &mut receiver,
                 || TestEvent::ChannelClosed,
             )

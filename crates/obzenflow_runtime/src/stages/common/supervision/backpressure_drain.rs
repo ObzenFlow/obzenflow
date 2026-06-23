@@ -77,6 +77,8 @@ pub(crate) async fn drain_one_pending(
     backpressure_pulse: &mut BackpressureActivityPulse,
     backpressure_backoff: &mut IdleBackoff,
     output_contract: Option<&StageOutputContract>,
+    observers: Option<&crate::stages::observer::StageObserverBundle>,
+    observer_scope: obzenflow_core::MiddlewareExecutionScope,
     pending_outputs: &mut std::collections::VecDeque<ChainEvent>,
 ) -> Result<DrainOutcome, Box<dyn std::error::Error + Send + Sync>> {
     match drain_one_pending_resolve(
@@ -92,6 +94,8 @@ pub(crate) async fn drain_one_pending(
         backpressure_pulse,
         backpressure_backoff,
         output_contract,
+        observers,
+        observer_scope,
         pending_outputs,
     )
     .await?
@@ -125,6 +129,8 @@ pub(crate) async fn drain_one_pending_resolve(
     backpressure_pulse: &mut BackpressureActivityPulse,
     backpressure_backoff: &mut IdleBackoff,
     output_contract: Option<&StageOutputContract>,
+    observers: Option<&crate::stages::observer::StageObserverBundle>,
+    observer_scope: obzenflow_core::MiddlewareExecutionScope,
     pending_outputs: &mut std::collections::VecDeque<ChainEvent>,
 ) -> Result<DrainAttempt, Box<dyn std::error::Error + Send + Sync>> {
     let is_data = pending.is_data();
@@ -141,6 +147,8 @@ pub(crate) async fn drain_one_pending_resolve(
         instrumentation: Some(instrumentation),
         heartbeat_state: heartbeat_state.as_ref(),
         output_contract,
+        observers,
+        observer_scope,
     };
 
     if is_data {
