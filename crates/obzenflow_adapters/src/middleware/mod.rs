@@ -13,8 +13,8 @@
 //! Middleware weaves a cross-cutting concern at a named stage join point without
 //! touching handler code, and splits by capability:
 //!
-//! - **Observers** publish journalled evidence (timing, logging, and
-//!   service-level indicator samples) and structurally cannot steer control
+//! - **Observers** publish journalled evidence (logging and service-level
+//!   indicator samples) and structurally cannot steer control
 //!   flow: their return type only carries evidence. This is the tool for custom
 //!   observability and auditability aspects.
 //! - **Control** middleware (circuit breaker, rate limiter) admits, paces,

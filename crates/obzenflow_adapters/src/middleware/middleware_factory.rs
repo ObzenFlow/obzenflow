@@ -480,8 +480,8 @@ pub enum MiddlewareKind {
     /// Reacts to an unreliable dependency by delaying, rejecting, or
     /// tripping (circuit breaker, rate limiter).
     Policy,
-    /// Deterministic, value-preserving observation (timing, logging,
-    /// enrichment). May not short-circuit processing.
+    /// Deterministic, value-preserving observation (indicator/logging evidence
+    /// or enrichment). May not short-circuit processing.
     Observation,
     /// Framework machinery: build-time plan contributors and transitional
     /// structural middleware (backpressure, AI map-reduce, type shaping).
