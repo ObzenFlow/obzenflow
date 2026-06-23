@@ -20,6 +20,17 @@ impl MiddlewareContextKey for ProcessingStartNanos {
     const LABEL: &'static str = "processing_start_nanos";
 }
 
+/// Wall-clock duration (nanoseconds) of the protected effect call
+/// (`execute.await`), measured by the effect boundary and read by the circuit
+/// breaker for slow-call detection (FLOWIP-115f). Replaces the breaker's old
+/// heuristic of reading `processing_info.processing_time` off the handler
+/// outputs, which is now stamped at commit time after the breaker observes.
+pub(crate) struct EffectCallDurationNanos;
+impl MiddlewareContextKey for EffectCallDurationNanos {
+    type Value = u64;
+    const LABEL: &'static str = "effect.call_duration_nanos";
+}
+
 // ---- Circuit breaker integrated retry ------------------------------------
 
 pub(crate) struct CircuitBreakerAttempt;

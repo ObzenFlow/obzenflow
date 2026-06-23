@@ -1077,7 +1077,6 @@ mod tests {
         SourcePollOutcome,
     };
     use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
-    use obzenflow_core::time::MetricsDuration;
     use obzenflow_core::TypedPayload;
     use obzenflow_runtime::control_plane::ControlPlaneProvider;
     use obzenflow_runtime::stages::transform::BackoffStrategy;
@@ -1567,13 +1566,16 @@ mod tests {
                 "expected Continue in Closed state"
             );
 
-            let mut out = create_test_event();
-            out.processing_info.processing_time = if *is_slow {
-                MetricsDuration::from_millis(100)
+            // FLOWIP-115f: the breaker reads the protected call's wall-clock
+            // duration from the effect-boundary context, not from the output's
+            // `processing_time` (which is now stamped at commit, after observe).
+            ctx.insert::<crate::middleware::context_keys::EffectCallDurationNanos>(if *is_slow {
+                StdDuration::from_millis(100).as_nanos() as u64
             } else {
-                MetricsDuration::from_millis(10)
-            };
+                StdDuration::from_millis(10).as_nanos() as u64
+            });
 
+            let out = create_test_event();
             cb.post_handle(&event, &[out], &mut ctx);
         }
 

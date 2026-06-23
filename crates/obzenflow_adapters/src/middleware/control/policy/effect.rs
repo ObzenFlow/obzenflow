@@ -261,7 +261,15 @@ impl EffectBoundary for PerEffectPolicyBoundary {
             }
         }
 
+        let call_started = std::time::Instant::now();
         let result = execute.await;
+        // FLOWIP-115f: record the protected call's wall-clock duration on the
+        // boundary context so a slow-call policy (circuit breaker) reads it here,
+        // rather than from a per-event `processing_time` field that is now stamped
+        // at commit time, after this observe pass.
+        ctx.insert::<crate::middleware::context_keys::EffectCallDurationNanos>(
+            call_started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
+        );
         let attempt = EffectAttemptOutcome::Executed(&result);
         for policy in admitted.iter().rev() {
             policy.observe(event, &attempt, &mut ctx);

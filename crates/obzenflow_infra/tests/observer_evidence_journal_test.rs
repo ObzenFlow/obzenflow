@@ -261,5 +261,17 @@ async fn observer_evidence_lands_in_journals_without_system_mirror() {
         "every order produces exactly one processed domain output"
     );
 
+    // 5. FLOWIP-115f regression: with TimingMiddleware deleted, the runtime output
+    //    committer still stamps processing_time on stage outputs, from the
+    //    instrumentation timer that already measures every stage.
+    let all_stamped = process_events
+        .iter()
+        .filter(|event| event.is_data() && event.event_type() == Processed::versioned_event_type())
+        .all(|event| event.processing_info.processing_time.as_nanos() > 0);
+    assert!(
+        all_stamped,
+        "every processed output carries a stamped processing_time"
+    );
+
     std::fs::remove_dir_all(&base).ok();
 }

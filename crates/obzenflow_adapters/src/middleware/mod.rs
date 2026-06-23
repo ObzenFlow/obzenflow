@@ -178,7 +178,6 @@ pub use control::policy::{
 pub use function::{middleware_fn, FnMiddleware};
 pub use hints::{Attempts, BackoffKind, BatchingHint, MiddlewareHints, RetryHint};
 pub use observability::indicator::{indicator, latency, IndicatorKind, IndicatorMiddlewareFactory};
-pub use observability::timing::TimingMiddleware;
 pub use observer::StageObserverSet;
 pub use type_shaping::{IntoEffectPolicyParts, OutcomeShapingMiddleware, TypeShapingMiddleware};
 

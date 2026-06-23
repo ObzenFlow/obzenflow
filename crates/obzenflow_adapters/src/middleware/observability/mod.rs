@@ -9,8 +9,6 @@
 
 pub mod indicator;
 pub mod logging;
-pub mod timing;
 
 pub use indicator::{indicator, latency, IndicatorKind, IndicatorMiddlewareFactory};
 pub use logging::{log, LoggingMiddleware, LoggingMiddlewareFactory};
-pub use timing::TimingMiddleware;

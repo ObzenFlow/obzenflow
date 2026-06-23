@@ -210,6 +210,14 @@ impl OutputCommitter<'_> {
         }
 
         if let Some(instrumentation) = self.instrumentation {
+            // Stamp the per-event processing-time wide-event field from the
+            // runtime's own per-invocation measurement (FLOWIP-115f, replacing the
+            // deleted TimingMiddleware). Live-only by the same replay gate as
+            // journey identity: under strict replay the recorded value replays
+            // from the journal rather than being re-stamped.
+            if intent.runs_output_commit_hooks() && !self.observer_scope.is_deterministic_replay() {
+                event.processing_info.processing_time = instrumentation.last_processing_time();
+            }
             event = event.with_runtime_context(instrumentation.snapshot_with_control());
         }
 

@@ -19,8 +19,8 @@ use obzenflow_adapters::middleware::{
     InfiniteSourceHandlerExt, JoinHandlerMiddlewareExt, Middleware, MiddlewareDeclaration,
     MiddlewareDeclarationIndex, MiddlewareFactory, MiddlewareSurfaceAttachment,
     MiddlewareSurfaceKind, PerSinkDeliveryPolicyBoundary, PerSourcePolicyBoundary, SinkHandlerExt,
-    SinkPolicy, StatefulHandlerMiddlewareExt, TimingMiddleware, TopologyMiddlewareConfigSlot,
-    TransformHandlerExt, UnifiedMiddlewareTransform,
+    SinkPolicy, StatefulHandlerMiddlewareExt, TopologyMiddlewareConfigSlot, TransformHandlerExt,
+    UnifiedMiddlewareTransform,
 };
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::{StageId, WriterId};
@@ -91,8 +91,12 @@ fn create_system_middleware(
     Vec::new()
 }
 
-fn create_system_observers(config: &StageConfig) -> StageObserverSet {
-    TimingMiddleware::observer_set(config.name.clone(), config.stage_id)
+fn create_system_observers(_config: &StageConfig) -> StageObserverSet {
+    // No built-in observers (FLOWIP-115f): `processing_time` is stamped by the
+    // runtime output committer from the instrumentation timer, not by an
+    // observer, and the user-facing observation middleware are `indicator()` and
+    // `log()`. User-attached observers are merged onto this empty default.
+    StageObserverSet::default()
 }
 
 fn create_legacy_shell(

@@ -493,13 +493,14 @@ impl Middleware for CircuitBreakerMiddleware {
             self.successes_total.fetch_add(1, Ordering::Relaxed);
         }
 
-        // Best-effort measurement of call duration based on handler results.
-        // When multiple outputs are produced, we use the maximum processing
-        // time as a conservative estimate.
-        let call_duration: Option<Duration> = outputs
-            .iter()
-            .map(|e| e.processing_info.processing_time.into())
-            .max();
+        // FLOWIP-115f: the protected call's wall-clock duration is measured at the
+        // effect boundary and threaded through the context, rather than read back
+        // from a per-event `processing_time` field (which is now stamped at commit
+        // time, after this observe pass).
+        let call_duration: Option<Duration> = ctx
+            .get::<crate::middleware::context_keys::EffectCallDurationNanos>()
+            .copied()
+            .map(Duration::from_nanos);
 
         if is_probe {
             let probe_generation = ctx.get::<CircuitBreakerProbeGeneration>().copied();
