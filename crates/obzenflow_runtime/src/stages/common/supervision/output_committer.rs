@@ -444,26 +444,6 @@ pub(crate) async fn append_observer_diagnostics(
     Ok(())
 }
 
-#[allow(dead_code)]
-pub(crate) struct StageAppendWriter<'a> {
-    pub committer: OutputCommitter<'a>,
-}
-
-#[allow(dead_code)]
-impl StageAppendWriter<'_> {
-    pub(crate) async fn append(
-        &self,
-        event: ChainEvent,
-        parent: Option<&EventEnvelope<ChainEvent>>,
-        options: CommitOptions,
-        intent: StageAppendIntent,
-    ) -> Result<EventEnvelope<ChainEvent>, CommitError> {
-        self.committer
-            .commit_prebuilt_with_intent(event, parent, options, intent)
-            .await
-    }
-}
-
 fn value_preserving_projection(event: &ChainEvent) -> Result<serde_json::Value, CommitError> {
     let mut value = serde_json::to_value(event).map_err(|e| -> CommitError { e.into() })?;
     if let Some(processing) = value

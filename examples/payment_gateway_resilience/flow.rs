@@ -51,11 +51,13 @@ use super::sinks;
 use super::validation;
 use obzenflow::typed::sources as typed_sources;
 use obzenflow_adapters::middleware::circuit_breaker::{HalfOpenPolicy, OpenPolicy};
+use obzenflow_adapters::middleware::observability::{indicator, log, IndicatorKind};
 use obzenflow_adapters::middleware::{backpressure, CircuitBreakerBuilder, RateLimiterBuilder};
 use obzenflow_dsl::{effectful_transform, flow, sink, source};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::sink::SinkTyped;
 use std::num::NonZeroU32;
+use std::time::Duration;
 
 const BACKPRESSURE_WINDOW: u64 = 1_000;
 const SOURCE_RATE_LIMIT_EVENTS_PER_SECOND: f64 = 20.0;
@@ -227,7 +229,20 @@ pub fn build_flow() -> obzenflow_dsl::FlowDefinition {
                     PaymentAuthorizationUnavailable
                 } => GatewayTransform,
                 effects: [AuthorizePayment with [gateway_breaker, gateway_limiter]],
-                middleware: []
+                // Record a per-execution service-level-indicator sample for the
+                // authorization operation: how long the live gateway call took,
+                // and whether it stayed under five seconds. This is observe-only
+                // evidence; it never changes whether the payment succeeds,
+                // retries, or routes. Aggregation into percentiles and SLOs is
+                // FLOWIP-115l's job, reading these journalled samples.
+                middleware: [
+                    indicator()
+                        .operation("payment.authorization")
+                        .kind(IndicatorKind::Latency)
+                        .indicator("authorization.latency")
+                        .under(Duration::from_secs(5))
+                        .tag("dependency", "payment_gateway")
+                ]
             );
 
             // Paid-order sink: in production this is the boundary a shipping
@@ -258,7 +273,13 @@ pub fn build_flow() -> obzenflow_dsl::FlowDefinition {
                 |unavailable: PaymentAuthorizationUnavailable, delivery| async move {
                     sinks::record_authorization_unavailable(unavailable, delivery.provenance());
                 }
-            ));
+            ), [
+                // Publish journalled operator-handoff evidence for each
+                // unavailable-authorization delivery. Observe-only: it does not
+                // change routing or delivery. The stage data journal is the
+                // source of truth, with a tracing mirror for local visibility.
+                log().prefix("manual_review")
+            ]);
         },
 
         topology: {

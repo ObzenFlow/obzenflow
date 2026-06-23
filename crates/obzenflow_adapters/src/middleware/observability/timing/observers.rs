@@ -30,7 +30,8 @@ impl HandlerObserver for TimingMiddleware {
         ctx: &HandlerObserverContext<'_>,
         outputs: &mut [ChainEvent],
     ) -> ObserverReport {
-        self.stamp_outputs(Some(ctx.input), outputs);
+        let duration = self.duration_for_input(ctx.input);
+        self.stamp_outputs_with_duration(duration, outputs);
         ObserverReport::empty()
     }
 }

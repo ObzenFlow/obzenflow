@@ -3559,3 +3559,192 @@ mod tests {
 // ============================================================================
 // ErrorSink Descriptor (FLOWIP-082e)
 // ============================================================================
+
+/// FLOWIP-115f AC 12 / AC 25: observer middleware binds through the placement
+/// planner's observer path on every stage type and never falls back to legacy
+/// `create()` / `create_for_effect()`.
+#[cfg(test)]
+mod observer_placement_negative_tests {
+    use super::*;
+    use obzenflow_adapters::middleware::{
+        validate_attachment_request, ControlMiddlewareRole, Middleware,
+        MiddlewareAttachmentRequest, MiddlewareDeclaration, MiddlewareFactory,
+        MiddlewareFactoryError, MiddlewareFactoryResult, MiddlewareMaterializationContext,
+        MiddlewareOverrideKey, MiddlewarePlanContribution, MiddlewareSurfaceAttachment,
+        MiddlewareSurfaceKind, TopologyMiddlewareConfigSlot,
+    };
+    use obzenflow_runtime::stages::observer::{
+        HandlerObserver, JoinObserver, SinkDeliveryObserver, SourcePollObserver, StatefulObserver,
+    };
+
+    /// A no-op observer that supports every observer surface this factory may be
+    /// placed on. All hooks use the trait defaults (record nothing).
+    struct NoopObserver;
+    impl HandlerObserver for NoopObserver {
+        fn label(&self) -> &'static str {
+            "loud-observer"
+        }
+    }
+    impl StatefulObserver for NoopObserver {
+        fn label(&self) -> &'static str {
+            "loud-observer"
+        }
+    }
+    impl JoinObserver for NoopObserver {
+        fn label(&self) -> &'static str {
+            "loud-observer"
+        }
+    }
+    impl SourcePollObserver for NoopObserver {
+        fn label(&self) -> &'static str {
+            "loud-observer"
+        }
+    }
+    impl SinkDeliveryObserver for NoopObserver {
+        fn label(&self) -> &'static str {
+            "loud-observer"
+        }
+    }
+
+    /// An observer factory whose legacy-shell constructors panic. If the planner
+    /// ever routed it through `create()` instead of observer placement, the test
+    /// would abort, so reaching a successful placement proves the planner used
+    /// `materialize()`.
+    struct LoudObserverFactory;
+    struct LoudObserverFamily;
+
+    impl MiddlewareFactory for LoudObserverFactory {
+        fn label(&self) -> &'static str {
+            "loud-observer"
+        }
+
+        fn override_key(&self) -> MiddlewareOverrideKey {
+            MiddlewareOverrideKey::of::<LoudObserverFamily>(self.label())
+        }
+
+        fn control_role(&self) -> ControlMiddlewareRole {
+            ControlMiddlewareRole::None
+        }
+
+        fn plan_contribution(&self) -> MiddlewarePlanContribution {
+            MiddlewarePlanContribution::None
+        }
+
+        fn topology_config_slot(&self) -> Option<TopologyMiddlewareConfigSlot> {
+            None
+        }
+
+        fn create(
+            &self,
+            _config: &StageConfig,
+            _control_middleware: Arc<ControlMiddlewareAggregator>,
+        ) -> MiddlewareFactoryResult<Box<dyn Middleware>> {
+            panic!("legacy create() must never be called for an observer middleware");
+        }
+
+        fn create_for_effect(
+            &self,
+            _config: &StageConfig,
+            _control_middleware: Arc<ControlMiddlewareAggregator>,
+            _effect_type: &str,
+        ) -> MiddlewareFactoryResult<Box<dyn Middleware>> {
+            panic!("legacy create_for_effect() must never be called for an observer middleware");
+        }
+
+        fn declaration(&self) -> MiddlewareDeclaration {
+            MiddlewareDeclaration::observer_with_family(
+                self.label(),
+                self.override_key().family_label(),
+                vec![
+                    MiddlewareSurfaceKind::Handler,
+                    MiddlewareSurfaceKind::Stateful,
+                    MiddlewareSurfaceKind::Join,
+                    MiddlewareSurfaceKind::SourcePoll,
+                    MiddlewareSurfaceKind::SinkDelivery,
+                ],
+            )
+        }
+
+        fn materialize(
+            &self,
+            request: MiddlewareAttachmentRequest<'_>,
+            context: &MiddlewareMaterializationContext<'_>,
+        ) -> MiddlewareFactoryResult<MiddlewareSurfaceAttachment> {
+            let declaration = self.declaration();
+            validate_attachment_request(&declaration, &request).map_err(|err| {
+                MiddlewareFactoryError::materialization_failed(
+                    self.label(),
+                    &context.config.name,
+                    err,
+                )
+            })?;
+            let observer = Arc::new(NoopObserver);
+            match request.surface.kind() {
+                MiddlewareSurfaceKind::Handler => {
+                    Ok(MiddlewareSurfaceAttachment::HandlerObserver(observer))
+                }
+                MiddlewareSurfaceKind::Stateful => {
+                    Ok(MiddlewareSurfaceAttachment::StatefulObserver(observer))
+                }
+                MiddlewareSurfaceKind::Join => {
+                    Ok(MiddlewareSurfaceAttachment::JoinObserver(observer))
+                }
+                MiddlewareSurfaceKind::SourcePoll => {
+                    Ok(MiddlewareSurfaceAttachment::SourcePollObserver(observer))
+                }
+                MiddlewareSurfaceKind::SinkDelivery => {
+                    Ok(MiddlewareSurfaceAttachment::SinkDeliveryObserver(observer))
+                }
+                other => Err(MiddlewareFactoryError::materialization_failed(
+                    self.label(),
+                    &context.config.name,
+                    obzenflow_runtime::stages::observer::ObserverCommitError::new(format!(
+                        "unsupported loud observer surface {other:?}"
+                    )),
+                )),
+            }
+        }
+    }
+
+    #[test]
+    fn observer_binds_through_placement_on_every_stage_type_without_legacy_create() {
+        // StageType collapses transform / async transform / effectful transform
+        // to `Transform`, so the six variants cover all seven descriptor paths
+        // the planner serves.
+        for stage_type in [
+            StageType::FiniteSource,
+            StageType::InfiniteSource,
+            StageType::Transform,
+            StageType::Sink,
+            StageType::Stateful,
+            StageType::Join,
+        ] {
+            let stage_id = StageId::new();
+            let config = StageConfig {
+                stage_id,
+                name: format!("loud_{stage_type:?}"),
+                flow_name: "observer_placement_negative".to_string(),
+                cycle_guard: None,
+            };
+            let control = Arc::new(ControlMiddlewareAggregator::new());
+            let resolved = crate::middleware_resolution::resolve_middleware(
+                vec![],
+                vec![Box::new(LoudObserverFactory)],
+                &config.name,
+            )
+            .expect("loud observer middleware resolves");
+
+            let placement = plan_stage_middleware(&config, stage_type, resolved, &control, false)
+                .unwrap_or_else(|err| {
+                    panic!("observer placement must succeed for {stage_type:?}: {err}")
+                });
+
+            // The observer never lands in the legacy shell: that bucket holds only
+            // the (now empty) system middleware, never a hook-bound observer.
+            assert!(
+                placement.legacy_shell.is_empty(),
+                "observer middleware must not be placed in the legacy shell for {stage_type:?}"
+            );
+        }
+    }
+}

@@ -4,10 +4,11 @@
 
 //! Logging observer middleware.
 
-mod legacy;
+mod factory;
 mod middleware;
 mod observers;
 
+pub use factory::{log, LoggingFamily, LoggingMiddlewareFactory};
 pub use middleware::LoggingMiddleware;
 
 #[cfg(test)]

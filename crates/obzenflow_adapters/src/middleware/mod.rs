@@ -8,18 +8,21 @@
 //! concerns like monitoring, logging, rate limiting, and retries to your ObzenFlow
 //! pipeline stages without modifying their core logic.
 //!
-//! ## Middleware Overview
+//! ## Middleware model
 //!
-//! Middleware is composable - you can stack multiple middleware on a handler.
-//! When used in flows (via the DSL layer), middleware is specified as an array
-//! of middleware instances for each stage.
+//! Middleware weaves a cross-cutting concern at a named stage join point without
+//! touching handler code, and splits by capability:
 //!
-//! The middleware execution order is:
-//! 1. First middleware's `pre_handle`
-//! 2. Second middleware's `pre_handle`
-//! 3. Handler processes the event
-//! 4. Second middleware's `post_handle`
-//! 5. First middleware's `post_handle`
+//! - **Observers** publish journalled evidence (timing, logging, and
+//!   service-level indicator samples) and structurally cannot steer control
+//!   flow: their return type only carries evidence. This is the tool for custom
+//!   observability and auditability aspects.
+//! - **Control** middleware (circuit breaker, rate limiter) admits, paces,
+//!   rejects, or synthesizes at a live-I/O boundary.
+//!
+//! Built-in observers are constructed with `indicator()` / `latency()` and
+//! `log()`; built-in control middleware with `circuit_breaker()` and
+//! `rate_limit()`. In the DSL, middleware is attached per stage as an array.
 //!
 //! ## Monitoring
 //!
@@ -49,38 +52,46 @@
 //! The `common` module provides pre-built middleware for rate limiting, circuit breaking,
 //! and logging; refer to the current control/observability modules for up-to-date builders.
 //!
-//! ## Custom Middleware
+//! ## Custom observers
 //!
-//! You can create custom observation or structural middleware by implementing
-//! the `Middleware` trait:
+//! Author a custom observability or auditability aspect by implementing the
+//! observer hook for the surface you care about and exposing it through a small
+//! factory. The observer hook (`HandlerObserver`, `StatefulObserver`,
+//! `JoinObserver`, `SourcePollObserver`, `SinkDeliveryObserver`,
+//! `OutputCommitObserver`, ...) returns an `ObserverReport` carrying journalled
+//! evidence and nothing else, so it cannot pause, reject, retry, or otherwise
+//! steer control. It needs no downcasts and no execution-scope handling: the
+//! runtime suppresses a `LiveOnly` observer under strict replay by placement.
 //!
-//! ```rust
-//! use obzenflow_adapters::middleware::{
-//!     Middleware, MiddlewareAction, MiddlewareContext, SourceMiddlewarePhase,
+//! ```ignore
+//! use obzenflow_runtime::stages::observer::{
+//!     HandlerObserver, HandlerObserverContext, ObserverReport,
 //! };
-//! use obzenflow_core::event::chain_event::ChainEvent;
 //!
-//! struct MyCustomMiddleware;
+//! struct CountInputs;
 //!
-//! impl Middleware for MyCustomMiddleware {
-//!     fn label(&self) -> &'static str {
-//!         "my_custom_middleware"
-//!     }
+//! impl HandlerObserver for CountInputs {
+//!     fn label(&self) -> &'static str { "count_inputs" }
 //!
-//!     fn source_phase(&self) -> SourceMiddlewarePhase {
-//!         SourceMiddlewarePhase::Ordinary
-//!     }
-//!
-//!     fn pre_handle(&self, event: &ChainEvent, _ctx: &mut MiddlewareContext) -> MiddlewareAction {
-//!         println!("Processing event: {:?}", event.id);
-//!         MiddlewareAction::Continue
-//!     }
-//!     
-//!     fn post_handle(&self, event: &ChainEvent, results: &[ChainEvent], _ctx: &mut MiddlewareContext) {
-//!         println!("Produced {} results", results.len());
+//!     fn after_handle(
+//!         &self,
+//!         _ctx: &HandlerObserverContext<'_>,
+//!         _outputs: &mut [obzenflow_core::ChainEvent],
+//!     ) -> ObserverReport {
+//!         // Build and attach an evidence row, or return `ObserverReport::empty()`.
+//!         ObserverReport::empty()
 //!     }
 //! }
+//!
+//! // Expose it through a `MiddlewareFactory` whose `declaration()` names the
+//! // observer surface(s) and whose `materialize()` returns the observer
+//! // attachment, then attach `count_inputs()` to a stage in the DSL.
 //! ```
+//!
+//! The built-in `observability::indicator` and `observability::logging` modules
+//! are complete worked examples of this factory + observer-hook shape, and
+//! FLOWIP-115f documents the authoring contract. To affect control flow instead,
+//! implement a control hook rather than an observer.
 
 // Core types
 pub mod handler;
@@ -166,6 +177,7 @@ pub use control::policy::{
 };
 pub use function::{middleware_fn, FnMiddleware};
 pub use hints::{Attempts, BackoffKind, BatchingHint, MiddlewareHints, RetryHint};
+pub use observability::indicator::{indicator, latency, IndicatorKind, IndicatorMiddlewareFactory};
 pub use observability::timing::TimingMiddleware;
 pub use observer::StageObserverSet;
 pub use type_shaping::{IntoEffectPolicyParts, OutcomeShapingMiddleware, TypeShapingMiddleware};
@@ -179,7 +191,7 @@ pub use control::{
 // Backpressure (config + topology observability; FLOWIP-086k)
 pub use backpressure::{backpressure, BackpressureMiddlewareFactory};
 
-pub use observability::LoggingMiddleware;
+pub use observability::{log, LoggingMiddleware, LoggingMiddlewareFactory};
 
 // Middleware validation helpers
 pub use validation::{validate_middleware_safety, ValidationResult};

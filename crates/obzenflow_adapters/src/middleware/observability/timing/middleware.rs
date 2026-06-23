@@ -2,6 +2,16 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
+//! The built-in timing observer: the framework's value-preserving
+//! processing-time stamp (FLOWIP-115f, AC 15).
+//!
+//! `TimingMiddleware` is attached to every stage by default through
+//! [`TimingMiddleware::observer_set`]. It brackets stage work with a wall-clock
+//! measurement and stamps each output's `processing_info.processing_time`. It is
+//! observe-only and emits no diagnostics: user-facing latency *evidence* is the
+//! separate `indicator()` observer. User-authored service-level samples live in
+//! the sibling `indicator` module.
+
 use crate::middleware::observer::StageObserverSet;
 use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::time::MetricsDuration;
@@ -11,21 +21,21 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// Measures stage processing time and stamps output metadata.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct TimingMiddleware {
     starts: Arc<Mutex<HashMap<obzenflow_core::EventId, Instant>>>,
     output_durations: Arc<Mutex<HashMap<obzenflow_core::EventId, MetricsDuration>>>,
 }
 
 impl TimingMiddleware {
-    /// Create a new timing middleware for a specific stage.
+    /// Create a new timing middleware. The stage name is accepted for call-site
+    /// symmetry and is not stored; the stamp is stage-agnostic.
     pub fn new(_stage_name: impl Into<String>) -> Self {
-        Self {
-            starts: Arc::new(Mutex::new(HashMap::new())),
-            output_durations: Arc::new(Mutex::new(HashMap::new())),
-        }
+        Self::default()
     }
 
+    /// Build the default per-stage observer set: the processing-time stamp on
+    /// every observe-capable surface.
     pub fn observer_set(stage_name: impl Into<String>, stage_id: StageId) -> StageObserverSet {
         let observer = Arc::new(Self::new(stage_name));
         let mut set = StageObserverSet::default();
@@ -61,6 +71,14 @@ impl TimingMiddleware {
         let duration = input
             .map(|event| self.duration_for_input(event))
             .unwrap_or(MetricsDuration::ZERO);
+        self.stamp_outputs_with_duration(duration, outputs);
+    }
+
+    pub(super) fn stamp_outputs_with_duration(
+        &self,
+        duration: MetricsDuration,
+        outputs: &mut [ChainEvent],
+    ) {
         let mut output_durations = self
             .output_durations
             .lock()

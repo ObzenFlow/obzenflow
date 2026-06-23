@@ -7,8 +7,10 @@
 //! This module contains observer implementations that enhance pipeline
 //! observability without making control-flow decisions.
 
+pub mod indicator;
 pub mod logging;
 pub mod timing;
 
-pub use logging::LoggingMiddleware;
-pub use timing::{timing, TimingMiddleware, TimingMiddlewareFactory};
+pub use indicator::{indicator, latency, IndicatorKind, IndicatorMiddlewareFactory};
+pub use logging::{log, LoggingMiddleware, LoggingMiddlewareFactory};
+pub use timing::TimingMiddleware;

@@ -114,6 +114,12 @@ pub enum MiddlewareLifecycle {
     Backpressure(BackpressureEvent),
     Retry(RetryEvent),
     Sli(SliEvent),
+    /// One per-execution service-level-indicator sample (FLOWIP-115f).
+    ///
+    /// Distinct from the aggregate [`SliEvent`]: an `Indicator` row is a single
+    /// observe-only sample of one operation execution. Aggregation (percentiles,
+    /// error budgets, windowed rates) is FLOWIP-115l's job and reads these rows.
+    Indicator(IndicatorSample),
     User(UserMiddlewareEvent),
 }
 
@@ -267,7 +273,12 @@ pub enum RetryEvent {
     },
 }
 
-// ---- SLI / SLO -----------------------------------------------------------
+// ---- SLI / SLO (aggregate) ----------------------------------------------
+//
+// Aggregate, windowed SLI/SLO statistics. Reserved for FLOWIP-115l (evidence
+// projection and export); there is no producer in 115f, which emits per-sample
+// `IndicatorSample` rows instead. Kept deliberately distinct from the per-sample
+// `IndicatorSample` type below.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "indicator", rename_all = "snake_case")]
 pub enum SliEvent {
@@ -293,6 +304,74 @@ pub enum SliEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         time_window_hours: Option<u32>,
     },
+}
+
+// ---- Service-level indicator sample (FLOWIP-115f) ------------------------
+//
+// A per-execution SLI *sample*: the observe-only raw input an SLI is computed
+// from. `met` is the per-sample "good event" classifier of the good-events /
+// total-events model, and `value_ms` is the raw observation a distribution is
+// built from. Aggregation into ratios, percentiles, windows, and error budgets
+// belongs to FLOWIP-115l, which reads these rows. Samples never steer control.
+
+/// The family of service-level indicator a sample measures.
+///
+/// Only `Latency` ships today. Additional kinds (availability, consistency,
+/// throughput) require their own FLOWIP with a producer, example, and tests
+/// before they become callable public API (no dead indicator surface). This
+/// enum is intentionally not `#[non_exhaustive]` so adding a kind later forces
+/// every match to be revisited.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IndicatorKind {
+    /// Wall-clock duration of one operation execution.
+    Latency,
+}
+
+/// One per-execution service-level-indicator sample.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IndicatorSample {
+    /// The kind of indicator this sample measures.
+    pub kind: IndicatorKind,
+    /// The named operation being measured, e.g. `"payment.authorization"`.
+    pub operation: String,
+    /// The indicator name within the operation, e.g. `"authorization.latency"`.
+    pub indicator: String,
+    /// The measured sample value in milliseconds.
+    pub value_ms: u64,
+    /// The per-sample boundary result, when a boundary was declared.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub boundary: Option<IndicatorBoundary>,
+    /// Static authoring-time tags (dependency, region, ...).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<IndicatorTag>,
+}
+
+/// A per-sample boundary *result*. Observe-only: it records what happened on
+/// this execution and never steers control flow, and it is not an SLO objective.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IndicatorBoundary {
+    /// Which comparison `met` reflects.
+    pub boundary: IndicatorBoundaryKind,
+    /// The boundary threshold in milliseconds.
+    pub boundary_ms: u64,
+    /// Whether this sample satisfied the boundary.
+    pub met: bool,
+}
+
+/// The comparison a boundary applies to a sample value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IndicatorBoundaryKind {
+    /// `met` is true when the sample value is under the threshold.
+    Under,
+}
+
+/// A static key/value tag attached to an indicator sample at authoring time.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IndicatorTag {
+    pub key: String,
+    pub value: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

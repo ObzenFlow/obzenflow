@@ -111,7 +111,16 @@ impl MiddlewareFactoryError {
 /// This trait solves the stage context injection problem by deferring middleware
 /// creation until the supervisor is built with full context available.
 ///
-/// ## Example Implementation
+/// Modern middleware is hook-bound: a factory's [`declaration`](MiddlewareFactory::declaration)
+/// names its observer or control surfaces and [`materialize`](MiddlewareFactory::materialize)
+/// returns a typed surface attachment. The built-in `indicator`, `logging`,
+/// circuit-breaker, and rate-limiter factories follow that shape, and observers
+/// authored this way structurally cannot steer control flow. The `create()`
+/// example below is the legacy shell path, retained only for migration; new
+/// custom middleware should implement an observer or control hook rather than the
+/// `Middleware` trait.
+///
+/// ## Example Implementation (legacy shell, migration only)
 ///
 /// ```rust
 /// use obzenflow_adapters::middleware::{

@@ -2,15 +2,11 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Timing observer middleware.
+//! The built-in timing observer: the framework's value-preserving
+//! processing-time stamp, attached to every stage by default. User-facing
+//! latency *evidence* is the sibling `indicator` module.
 
-mod factory;
-mod legacy;
 mod middleware;
 mod observers;
 
-pub use factory::{timing, TimingFamily, TimingMiddlewareFactory};
 pub use middleware::TimingMiddleware;
-
-#[cfg(test)]
-mod tests;
