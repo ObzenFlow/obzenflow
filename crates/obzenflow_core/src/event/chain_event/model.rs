@@ -345,7 +345,6 @@ impl ChainEvent {
                         "lifecycle.middleware.backpressure".into()
                     }
                     MiddlewareLifecycle::Retry(_) => "lifecycle.middleware.retry".into(),
-                    MiddlewareLifecycle::Sli(_) => "lifecycle.middleware.sli".into(),
                     MiddlewareLifecycle::Indicator(_) => "lifecycle.middleware.indicator".into(),
                     MiddlewareLifecycle::User(_) => "lifecycle.middleware.user".into(),
                 },

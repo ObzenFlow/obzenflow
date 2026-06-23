@@ -57,7 +57,6 @@ use obzenflow_dsl::{effectful_transform, flow, sink, source};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::sink::SinkTyped;
 use std::num::NonZeroU32;
-use std::time::Duration;
 
 const BACKPRESSURE_WINDOW: u64 = 1_000;
 const SOURCE_RATE_LIMIT_EVENTS_PER_SECOND: f64 = 20.0;

@@ -22,9 +22,26 @@ use obzenflow_runtime::pipeline::config::StageConfig;
 use obzenflow_runtime::stages::observer::ObserverCommitError;
 use serde_json::json;
 use std::sync::Arc;
+use thiserror::Error;
 
 /// Override-key family for indicator observer middleware.
 pub struct IndicatorFamily;
+
+/// Why an indicator's identity is invalid. The `indicator()` factory is
+/// fail-closed: a sample with a missing or blank operation/indicator name is
+/// unusable evidence (a read-side consumer cannot join it), so the attachment is
+/// rejected at flow-build time rather than silently journalling empty strings.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum IndicatorConfigError {
+    #[error("indicator middleware requires an operation name; call .operation(..)")]
+    MissingOperation,
+    #[error("indicator middleware operation name must not be blank")]
+    BlankOperation,
+    #[error("indicator middleware requires an indicator name; call .indicator(..)")]
+    MissingIndicator,
+    #[error("indicator middleware indicator name must not be blank")]
+    BlankIndicator,
+}
 
 /// Fluent authoring factory for the service-level indicator observer.
 pub struct IndicatorMiddlewareFactory {
@@ -80,6 +97,27 @@ impl IndicatorMiddlewareFactory {
     pub fn tag(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.config.tags.push((key.into(), value.into()));
         self
+    }
+
+    /// Reject a missing or blank operation/indicator name. Called by
+    /// `materialize` so a nameless indicator fails the flow build (fail-closed)
+    /// rather than journalling empty-string identity.
+    pub(super) fn validated_identity(&self) -> Result<(), IndicatorConfigError> {
+        match self.config.operation.as_deref() {
+            None => return Err(IndicatorConfigError::MissingOperation),
+            Some(operation) if operation.trim().is_empty() => {
+                return Err(IndicatorConfigError::BlankOperation)
+            }
+            Some(_) => {}
+        }
+        match self.config.indicator.as_deref() {
+            None => return Err(IndicatorConfigError::MissingIndicator),
+            Some(indicator) if indicator.trim().is_empty() => {
+                return Err(IndicatorConfigError::BlankIndicator)
+            }
+            Some(_) => {}
+        }
+        Ok(())
     }
 }
 
@@ -146,6 +184,9 @@ impl MiddlewareFactory for IndicatorMiddlewareFactory {
         let declaration = self.declaration();
         validate_attachment_request(&declaration, &request).map_err(|err| {
             MiddlewareFactoryError::materialization_failed(self.label(), &context.config.name, err)
+        })?;
+        self.validated_identity().map_err(|err| {
+            MiddlewareFactoryError::invalid_configuration(self.label(), &context.config.name, err)
         })?;
         let observer = Arc::new(IndicatorMiddleware::with_config(self.config.clone()));
         match request.surface.kind() {

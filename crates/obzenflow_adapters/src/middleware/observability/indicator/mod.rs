@@ -19,7 +19,9 @@ mod factory;
 mod middleware;
 mod observers;
 
-pub use factory::{indicator, latency, IndicatorFamily, IndicatorMiddlewareFactory};
+pub use factory::{
+    indicator, latency, IndicatorConfigError, IndicatorFamily, IndicatorMiddlewareFactory,
+};
 pub use middleware::{IndicatorConfig, IndicatorMiddleware};
 
 // Re-export the journalled evidence types for authoring ergonomics, so a user

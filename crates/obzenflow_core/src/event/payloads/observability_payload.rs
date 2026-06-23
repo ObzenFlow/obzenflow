@@ -113,12 +113,11 @@ pub enum MiddlewareLifecycle {
     RateLimiter(RateLimiterEvent),
     Backpressure(BackpressureEvent),
     Retry(RetryEvent),
-    Sli(SliEvent),
     /// One per-execution service-level-indicator sample (FLOWIP-115f).
     ///
-    /// Distinct from the aggregate [`SliEvent`]: an `Indicator` row is a single
-    /// observe-only sample of one operation execution. Aggregation (percentiles,
-    /// error budgets, windowed rates) is FLOWIP-115l's job and reads these rows.
+    /// An `Indicator` row is a single observe-only sample of one operation
+    /// execution. Aggregation (percentiles, error budgets, windowed rates) and
+    /// any objective evaluation are FLOWIP-115l's job, reading these rows.
     Indicator(IndicatorSample),
     User(UserMiddlewareEvent),
 }
@@ -270,39 +269,6 @@ pub enum RetryEvent {
         total_attempts: u32,
         last_error: String,
         total_duration_ms: u64,
-    },
-}
-
-// ---- SLI / SLO (aggregate) ----------------------------------------------
-//
-// Aggregate, windowed SLI/SLO statistics. Reserved for FLOWIP-115l (evidence
-// projection and export); there is no producer in 115f, which emits per-sample
-// `IndicatorSample` rows instead. Kept deliberately distinct from the per-sample
-// `IndicatorSample` type below.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "indicator", rename_all = "snake_case")]
-pub enum SliEvent {
-    LatencyPercentiles {
-        p50_ms: f64,
-        p90_ms: f64,
-        p95_ms: f64,
-        p99_ms: f64,
-        p999_ms: f64,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        sample_count: Option<u64>,
-    },
-    Availability {
-        success_rate: f64,
-        error_rate: f64,
-        total_requests: u64,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        window_duration_ms: Option<u64>,
-    },
-    ErrorBudget {
-        remaining_percent: f64,
-        consumed_percent: f64,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        time_window_hours: Option<u32>,
     },
 }
 

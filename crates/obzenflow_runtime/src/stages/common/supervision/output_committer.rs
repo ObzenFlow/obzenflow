@@ -100,42 +100,34 @@ pub(crate) enum MirrorPolicy {
     FrameworkMiddlewareAllowlist,
 }
 
-#[allow(dead_code)]
+/// The kind of stage-runtime journal append, used to gate the
+/// `before_output_commit` observer hook and the framework system-journal mirror.
+///
+/// Only the four wired variants exist. Other stage-runtime appends are
+/// out-of-surface raw appends today: error-journal and error-routed-data writes,
+/// backpressure activity pulses, sink delivery receipts, forwarded sink-boundary
+/// control rows, source/stage lifecycle events, ingress refusal facts, and the
+/// `fx.emit` / domain-effect-outcome / framework-effect-record facts (which flow
+/// through `NonDataStageFact`) each append directly to their journal (and mirror
+/// directly where applicable) rather than through this seam. Routing them through
+/// named intents is deferred to a committer-consolidation slice (FLOWIP-120b);
+/// it is not required for the `before_output_commit` boundary, which only the
+/// `NormalStageData` path reaches.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StageAppendIntent {
     NormalStageData,
-    ObserverDiagnostic,
-    FrameworkObservability,
-    BackpressurePulse,
-    ForwardedControl,
     NonDataStageFact,
-    ErrorJournal,
-    ErrorRoutedData,
-    ImmediateDerivedFact,
-    DomainEffectOutcomeFact,
-    FrameworkEffectRecord,
-    SinkReceipt,
-    IngressRefusal,
-    Lifecycle,
+    FrameworkObservability,
+    ObserverDiagnostic,
 }
 
 impl StageAppendIntent {
     pub(crate) fn mirror_policy(self) -> MirrorPolicy {
         match self {
-            Self::FrameworkObservability | Self::BackpressurePulse | Self::ForwardedControl => {
-                MirrorPolicy::FrameworkMiddlewareAllowlist
+            Self::FrameworkObservability => MirrorPolicy::FrameworkMiddlewareAllowlist,
+            Self::NormalStageData | Self::NonDataStageFact | Self::ObserverDiagnostic => {
+                MirrorPolicy::None
             }
-            Self::NormalStageData
-            | Self::ObserverDiagnostic
-            | Self::NonDataStageFact
-            | Self::ErrorJournal
-            | Self::ErrorRoutedData
-            | Self::ImmediateDerivedFact
-            | Self::DomainEffectOutcomeFact
-            | Self::FrameworkEffectRecord
-            | Self::SinkReceipt
-            | Self::IngressRefusal
-            | Self::Lifecycle => MirrorPolicy::None,
         }
     }
 

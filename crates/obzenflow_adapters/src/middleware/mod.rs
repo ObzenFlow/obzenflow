@@ -64,7 +64,7 @@
 //! runtime suppresses a `LiveOnly` observer under strict replay by placement.
 //!
 //! ```ignore
-//! use obzenflow_runtime::stages::observer::{
+//! use obzenflow_adapters::middleware::observer::{
 //!     HandlerObserver, HandlerObserverContext, ObserverReport,
 //! };
 //!

@@ -123,3 +123,44 @@ fn indicator_factory_is_hook_bound_not_legacy_shell() {
         "indicator must never fall back to the legacy create() shell"
     );
 }
+
+#[test]
+fn indicator_requires_operation_and_indicator_names() {
+    use super::IndicatorConfigError;
+    assert_eq!(
+        indicator()
+            .indicator("authorization.latency")
+            .validated_identity(),
+        Err(IndicatorConfigError::MissingOperation)
+    );
+    assert_eq!(
+        indicator()
+            .operation("payment.authorization")
+            .validated_identity(),
+        Err(IndicatorConfigError::MissingIndicator)
+    );
+    assert!(indicator()
+        .operation("payment.authorization")
+        .indicator("authorization.latency")
+        .validated_identity()
+        .is_ok());
+}
+
+#[test]
+fn indicator_rejects_blank_identity() {
+    use super::IndicatorConfigError;
+    assert_eq!(
+        indicator()
+            .operation("   ")
+            .indicator("authorization.latency")
+            .validated_identity(),
+        Err(IndicatorConfigError::BlankOperation)
+    );
+    assert_eq!(
+        indicator()
+            .operation("payment.authorization")
+            .indicator("\t")
+            .validated_identity(),
+        Err(IndicatorConfigError::BlankIndicator)
+    );
+}
