@@ -49,8 +49,8 @@ impl Default for IndicatorConfig {
 /// For the latency kind it brackets the handler with a wall-clock measurement
 /// (`before_handle` remembers the start, `after_handle` reads the elapsed time)
 /// and emits exactly one [`IndicatorSample`] per input. It is `LiveOnly`, so
-/// strict replay suppresses the live measurement and the already-journalled
-/// sample replays from the journal.
+/// strict replay suppresses the live measurement; the sample recorded during the
+/// live run is not re-emitted on replay (it remains in the original journal).
 #[derive(Debug, Clone)]
 pub struct IndicatorMiddleware {
     config: IndicatorConfig,

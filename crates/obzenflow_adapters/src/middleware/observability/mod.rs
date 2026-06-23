@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Observe-only middleware for timing and logging.
+//! Observe-only middleware for service-level indicators and logging.
 //!
 //! This module contains observer implementations that enhance pipeline
 //! observability without making control-flow decisions.

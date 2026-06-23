@@ -168,7 +168,8 @@ impl MiddlewareFactory for IndicatorMiddlewareFactory {
 
     fn declaration(&self) -> MiddlewareDeclaration {
         // Latency is a handler-bracket measurement; the value-preserving
-        // processing-time stamp is the framework's built-in timing observer.
+        // processing-time stamp is applied by the runtime output committer, not
+        // an observer.
         MiddlewareDeclaration::observer_with_family(
             self.label(),
             self.override_key().family_label(),

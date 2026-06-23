@@ -7,13 +7,9 @@
 //! This module provides middleware capabilities for SinkHandler implementations,
 //! with special focus on error handling and retry logic.
 
-use crate::middleware::{
-    context_keys::ProcessingStartNanos, ErrorAction, Middleware, MiddlewareAction,
-    MiddlewareContext,
-};
+use crate::middleware::{ErrorAction, Middleware, MiddlewareAction, MiddlewareContext};
 use async_trait::async_trait;
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
-use obzenflow_core::time::MetricsDuration;
 use obzenflow_core::ChainEvent;
 use obzenflow_core::MiddlewareExecutionScope;
 use obzenflow_runtime::effects::EffectInvocationContext;
@@ -98,32 +94,12 @@ impl<H: SinkHandler> MiddlewareSink<H> {
 
         // Consume with inner handler
         match self.inner.consume_report(event.clone()).await {
-            Ok(mut report) => {
+            Ok(report) => {
                 // Post-processing phase - sinks don't produce output events
                 let empty = vec![];
                 for middleware in self.middleware_chain.iter() {
                     middleware.post_handle(&event, &empty, &mut ctx);
                 }
-
-                // Extract timing from context if available (set by TimingMiddleware)
-                report.primary = match ctx.get::<ProcessingStartNanos>().copied() {
-                    Some(start_nanos) => {
-                        let now_nanos = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap()
-                            .as_nanos() as u64;
-                        let duration_nanos = now_nanos - start_nanos;
-                        let duration = MetricsDuration::from_nanos(duration_nanos);
-
-                        tracing::debug!(
-                            "SinkMiddleware: Enriching delivery payload with processing_duration={}",
-                            duration
-                        );
-
-                        report.primary.with_processing_duration(duration)
-                    }
-                    None => report.primary,
-                };
 
                 Ok(report)
             }

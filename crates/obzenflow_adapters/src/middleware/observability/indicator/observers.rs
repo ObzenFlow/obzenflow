@@ -9,7 +9,7 @@
 //! the full output slice), so emitting one sample there is inherently one
 //! durable sample per operation execution, independent of handler fan-out. The
 //! observer never mutates outputs: the value-preserving `processing_time` stamp
-//! is the framework's built-in timing observer, not this one.
+//! is applied by the runtime output committer, not this observer.
 
 use super::IndicatorMiddleware;
 use obzenflow_core::event::chain_event::ChainEvent;
@@ -24,7 +24,8 @@ impl HandlerObserver for IndicatorMiddleware {
 
     fn determinism(&self) -> ObserverDeterminism {
         // Wall-clock measurement is live-only; strict replay suppresses the
-        // measurement and the recorded sample replays from the journal.
+        // measurement, and the sample recorded during the live run is not
+        // re-emitted (it remains in the original journal).
         ObserverDeterminism::LiveOnly
     }
 

@@ -14,12 +14,6 @@ use std::sync::Arc;
 
 // ---- Timing / processing --------------------------------------------------
 
-pub(crate) struct ProcessingStartNanos;
-impl MiddlewareContextKey for ProcessingStartNanos {
-    type Value = u64;
-    const LABEL: &'static str = "processing_start_nanos";
-}
-
 /// Wall-clock duration (nanoseconds) of the protected effect call
 /// (`execute.await`), measured by the effect boundary and read by the circuit
 /// breaker for slow-call detection (FLOWIP-115f). Replaces the breaker's old

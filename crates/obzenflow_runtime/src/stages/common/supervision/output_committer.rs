@@ -212,9 +212,12 @@ impl OutputCommitter<'_> {
         if let Some(instrumentation) = self.instrumentation {
             // Stamp the per-event processing-time wide-event field from the
             // runtime's own per-invocation measurement (FLOWIP-115f, replacing the
-            // deleted TimingMiddleware). Live-only by the same replay gate as
-            // journey identity: under strict replay the recorded value replays
-            // from the journal rather than being re-stamped.
+            // deleted TimingMiddleware). This is live-run wall-clock evidence: the
+            // same replay gate as journey identity skips it under strict replay, so
+            // it is excluded from replay equivalence by the value-preserving
+            // projection (like the runtime_context telemetry). The replay candidate
+            // therefore carries a replay-time value that nothing compares or reads;
+            // the authoritative original journal holds the true measurement.
             if intent.runs_output_commit_hooks() && !self.observer_scope.is_deterministic_replay() {
                 event.processing_info.processing_time = instrumentation.last_processing_time();
             }
