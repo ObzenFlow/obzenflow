@@ -38,8 +38,8 @@ impl HandlerObserver for IndicatorMiddleware {
         ctx: &HandlerObserverContext<'_>,
         _outputs: &mut [ChainEvent],
     ) -> ObserverReport {
-        // One unconditional sample per execution: `under(..)` records `met`, it
-        // does not gate emission.
+        // One sample per execution, recording the raw measured duration. The
+        // objective/threshold is applied read-side (FLOWIP-115l), not here.
         let value = self.duration_for_input(ctx.input);
         ObserverReport::empty().with_diagnostic(self.diagnostic(ctx.stage_id, value))
     }

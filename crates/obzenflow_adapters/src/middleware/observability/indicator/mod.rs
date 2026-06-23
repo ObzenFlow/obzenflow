@@ -7,8 +7,9 @@
 //! `indicator()` records one per-execution service-level-indicator *sample* as a
 //! durable, journalled wide event (one `MiddlewareLifecycle::Indicator` row per
 //! operation execution). A sample is the raw, observe-only input an SLI is
-//! computed from: it carries the measured value and an optional per-sample
-//! boundary result (`met`), and it never steers control flow.
+//! computed from: it carries the raw measured value and its identity only. The
+//! objective (threshold) and good/bad evaluation are read-side, never embedded,
+//! and it never steers control flow.
 //!
 //! Aggregation into ratios, percentiles, windows, and error budgets is the job
 //! of FLOWIP-115l, which reads these rows; this module only publishes them.
@@ -19,12 +20,12 @@ mod middleware;
 mod observers;
 
 pub use factory::{indicator, latency, IndicatorFamily, IndicatorMiddlewareFactory};
-pub use middleware::{IndicatorBoundarySpec, IndicatorConfig, IndicatorMiddleware};
+pub use middleware::{IndicatorConfig, IndicatorMiddleware};
 
 // Re-export the journalled evidence types for authoring ergonomics, so a user
 // can write `indicator().kind(IndicatorKind::Latency)` from the adapters crate.
 pub use obzenflow_core::event::payloads::observability_payload::{
-    IndicatorBoundary, IndicatorBoundaryKind, IndicatorKind, IndicatorSample, IndicatorTag,
+    IndicatorKind, IndicatorSample, IndicatorTag,
 };
 
 #[cfg(test)]

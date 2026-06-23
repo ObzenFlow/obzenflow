@@ -9,16 +9,15 @@
 //! and a `log()` observer on a sink, then inspects the stage data journals to
 //! prove that
 //!
-//! * a typed `IndicatorSample` is published once per handler execution, with the
-//!   boundary result (`met`) recorded correctly and durably;
+//! * a typed `IndicatorSample` is published once per handler execution, carrying
+//!   the raw `value_ms` measurement and its identity, with no objective embedded;
 //! * a logging `User` evidence row is published per sink delivery;
 //! * neither indicator nor logging evidence is mirrored into `system.log`;
 //! * enabling the observers does not change the domain output count.
 //!
-//! The explicit `met == false` branch is covered by the indicator unit tests
-//! (`boundary_met_false_when_value_reaches_threshold`); here the boundary is
-//! generous, so the invariant `met == (value_ms < boundary_ms)` holds with
-//! `met == true`, proving the boundary result is computed and journalled.
+//! The objective (threshold) and the good/bad evaluation are deliberately not in
+//! the wide event: applying a threshold and computing SLOs is a read-side concern
+//! (FLOWIP-115l) over these raw samples.
 
 use async_trait::async_trait;
 use obzenflow_adapters::middleware::observability::{indicator, log, IndicatorKind};
@@ -42,11 +41,9 @@ use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 use uuid::Uuid;
 
 const INPUT_COUNT: usize = 4;
-const BOUNDARY_MS: u64 = 10_000;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Order {
@@ -198,7 +195,6 @@ async fn observer_evidence_lands_in_journals_without_system_mirror() {
                         .operation("checkout.process")
                         .kind(IndicatorKind::Latency)
                         .indicator("process.latency")
-                        .under(Duration::from_millis(BOUNDARY_MS))
                         .tag("dependency", "ledger")
                 ]);
                 handoff = sink!(Processed => Handoff, [
@@ -234,15 +230,9 @@ async fn observer_evidence_lands_in_journals_without_system_mirror() {
         assert_eq!(sample.kind, IndicatorKind::Latency);
         assert_eq!(sample.tags.len(), 1);
         assert_eq!(sample.tags[0].key, "dependency");
-        let boundary = sample.boundary.as_ref().expect("boundary result recorded");
-        assert_eq!(boundary.boundary_ms, BOUNDARY_MS);
-        // The boundary result is computed and journalled correctly: `met` is the
-        // per-sample "good event" classifier.
-        assert_eq!(
-            boundary.met,
-            sample.value_ms < BOUNDARY_MS,
-            "met must equal value_ms < boundary_ms"
-        );
+        // The sample records the raw measurement only: `value_ms` is the SLI
+        // input. No objective, threshold, or `met` flag is embedded; the type has
+        // no such field, and applying a threshold is read-side (FLOWIP-115l).
     }
 
     // 2. Logging evidence is published per sink delivery. The logging observer

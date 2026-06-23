@@ -10,22 +10,18 @@
 //! and its legacy `create()` path fails loudly because an observer has no
 //! legacy shell.
 
-use super::{IndicatorBoundarySpec, IndicatorConfig, IndicatorMiddleware};
+use super::{IndicatorConfig, IndicatorMiddleware};
 use crate::middleware::{
     validate_attachment_request, ControlMiddlewareRole, Middleware, MiddlewareAttachmentRequest,
     MiddlewareDeclaration, MiddlewareFactory, MiddlewareFactoryError,
     MiddlewareMaterializationContext, MiddlewareOverrideKey, MiddlewarePlanContribution,
     MiddlewareSurfaceAttachment, MiddlewareSurfaceKind, TopologyMiddlewareConfigSlot,
 };
-use obzenflow_core::event::payloads::observability_payload::{
-    IndicatorBoundaryKind, IndicatorKind,
-};
-use obzenflow_core::time::MetricsDuration;
+use obzenflow_core::event::payloads::observability_payload::IndicatorKind;
 use obzenflow_runtime::pipeline::config::StageConfig;
 use obzenflow_runtime::stages::observer::ObserverCommitError;
 use serde_json::json;
 use std::sync::Arc;
-use std::time::Duration;
 
 /// Override-key family for indicator observer middleware.
 pub struct IndicatorFamily;
@@ -80,18 +76,6 @@ impl IndicatorMiddlewareFactory {
         self
     }
 
-    /// Record a per-sample boundary result of "value under `threshold`".
-    ///
-    /// This is observe-only: it sets the sample's `met` field and never steers
-    /// control flow, and it is not an SLO objective.
-    pub fn under(mut self, threshold: Duration) -> Self {
-        self.config.boundary = Some(IndicatorBoundarySpec {
-            kind: IndicatorBoundaryKind::Under,
-            threshold: MetricsDuration::from_std(threshold),
-        });
-        self
-    }
-
     /// Add a static tag carried on every sample.
     pub fn tag(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.config.tags.push((key.into(), value.into()));
@@ -138,10 +122,6 @@ impl MiddlewareFactory for IndicatorMiddlewareFactory {
             "kind": serde_json::to_value(self.config.kind).ok(),
             "operation": self.config.operation,
             "indicator": self.config.indicator,
-            "boundary": self.config.boundary.map(|boundary| json!({
-                "kind": serde_json::to_value(boundary.kind).ok(),
-                "threshold_ms": boundary.threshold.as_millis(),
-            })),
             "tags": self.config.tags.iter().map(|(key, value)| {
                 json!({ "key": key, "value": value })
             }).collect::<Vec<_>>(),
@@ -190,7 +170,6 @@ impl MiddlewareFactory for IndicatorMiddlewareFactory {
 ///     .operation("payment.authorization")
 ///     .kind(IndicatorKind::Latency)
 ///     .indicator("authorization.latency")
-///     .under(Duration::from_secs(5))
 ///     .tag("dependency", "payment_gateway")
 /// ```
 pub fn indicator() -> IndicatorMiddlewareFactory {

@@ -13,61 +13,28 @@ use obzenflow_core::time::MetricsDuration;
 use obzenflow_core::{StageId, WriterId};
 use obzenflow_runtime::stages::observer::{HandlerObserver, HandlerObserverContext};
 use serde_json::json;
-use std::time::Duration;
 
 fn configured() -> IndicatorMiddleware {
     IndicatorMiddleware::with_config(IndicatorConfig {
         kind: IndicatorKind::Latency,
         operation: Some("payment.authorization".to_string()),
         indicator: Some("authorization.latency".to_string()),
-        boundary: Some(super::IndicatorBoundarySpec {
-            kind: super::IndicatorBoundaryKind::Under,
-            threshold: MetricsDuration::from_millis(5_000),
-        }),
         tags: vec![("dependency".to_string(), "payment_gateway".to_string())],
     })
 }
 
 #[test]
-fn sample_carries_operation_indicator_kind_and_tags() {
-    let sample = configured().sample(MetricsDuration::from_millis(120));
+fn sample_records_raw_value_with_operation_indicator_kind_and_tags() {
+    // The sample carries the raw measurement and identity only: no objective,
+    // threshold, or met flag is embedded (those are read-side, FLOWIP-115l).
+    let sample = configured().sample(MetricsDuration::from_millis(6_120));
     assert_eq!(sample.kind, IndicatorKind::Latency);
     assert_eq!(sample.operation, "payment.authorization");
     assert_eq!(sample.indicator, "authorization.latency");
-    assert_eq!(sample.value_ms, 120);
+    assert_eq!(sample.value_ms, 6_120);
     assert_eq!(sample.tags.len(), 1);
     assert_eq!(sample.tags[0].key, "dependency");
     assert_eq!(sample.tags[0].value, "payment_gateway");
-}
-
-#[test]
-fn boundary_met_true_when_value_under_threshold() {
-    let sample = configured().sample(MetricsDuration::from_millis(120));
-    let boundary = sample.boundary.expect("boundary was declared");
-    assert_eq!(boundary.boundary_ms, 5_000);
-    assert!(boundary.met, "120ms is under the 5000ms boundary");
-}
-
-#[test]
-fn boundary_met_false_when_value_reaches_threshold() {
-    // 6.12s against an under-5s boundary: the canonical missed-boundary sample.
-    let sample = configured().sample(MetricsDuration::from_millis(6_120));
-    let boundary = sample.boundary.expect("boundary was declared");
-    assert_eq!(sample.value_ms, 6_120);
-    assert!(!boundary.met, "6120ms is not under the 5000ms boundary");
-}
-
-#[test]
-fn no_boundary_yields_no_boundary_result() {
-    let middleware = IndicatorMiddleware::with_config(IndicatorConfig {
-        operation: Some("op".to_string()),
-        indicator: Some("ind".to_string()),
-        ..IndicatorConfig::default()
-    });
-    assert!(middleware
-        .sample(MetricsDuration::from_millis(10))
-        .boundary
-        .is_none());
 }
 
 #[test]
@@ -128,7 +95,6 @@ fn latency_is_a_convenience_constructor_for_the_indicator_factory() {
     let factory = latency()
         .operation("payment.authorization")
         .indicator("authorization.latency")
-        .under(Duration::from_secs(5))
         .tag("dependency", "payment_gateway");
 
     assert_eq!(factory.label(), "latency");
@@ -137,8 +103,9 @@ fn latency_is_a_convenience_constructor_for_the_indicator_factory() {
         .expect("indicator exposes a snapshot");
     assert_eq!(snapshot["operation"], "payment.authorization");
     assert_eq!(snapshot["indicator"], "authorization.latency");
-    assert_eq!(snapshot["boundary"]["threshold_ms"], 5_000);
     assert_eq!(snapshot["tags"][0]["key"], "dependency");
+    // The objective is read-side: no boundary/threshold is embedded in the sample.
+    assert!(snapshot.get("boundary").is_none());
 }
 
 #[test]

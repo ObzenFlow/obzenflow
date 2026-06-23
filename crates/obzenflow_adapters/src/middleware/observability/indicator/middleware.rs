@@ -10,8 +10,7 @@
 
 use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::event::payloads::observability_payload::{
-    IndicatorBoundary, IndicatorBoundaryKind, IndicatorKind, IndicatorSample, IndicatorTag,
-    MiddlewareLifecycle, ObservabilityPayload,
+    IndicatorKind, IndicatorSample, IndicatorTag, MiddlewareLifecycle, ObservabilityPayload,
 };
 use obzenflow_core::event::ChainEventFactory;
 use obzenflow_core::time::MetricsDuration;
@@ -19,15 +18,6 @@ use obzenflow_core::{EventId, StageId, WriterId};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
-
-/// A declared per-sample boundary: the result of `.under(..)` on the builder.
-#[derive(Debug, Clone, Copy)]
-pub struct IndicatorBoundarySpec {
-    /// Which comparison the boundary applies.
-    pub kind: IndicatorBoundaryKind,
-    /// The threshold the measured value is compared against.
-    pub threshold: MetricsDuration,
-}
 
 /// Resolved authoring configuration for one indicator attachment.
 #[derive(Debug, Clone)]
@@ -38,8 +28,6 @@ pub struct IndicatorConfig {
     pub operation: Option<String>,
     /// The indicator name within the operation, e.g. `"authorization.latency"`.
     pub indicator: Option<String>,
-    /// An optional per-sample boundary, recorded as a `met` result.
-    pub boundary: Option<IndicatorBoundarySpec>,
     /// Static authoring-time tags carried on every sample.
     pub tags: Vec<(String, String)>,
 }
@@ -50,7 +38,6 @@ impl Default for IndicatorConfig {
             kind: IndicatorKind::Latency,
             operation: None,
             indicator: None,
-            boundary: None,
             tags: Vec::new(),
         }
     }
@@ -97,24 +84,15 @@ impl IndicatorMiddleware {
         MetricsDuration::from_nanos(elapsed.as_nanos().min(u64::MAX as u128) as u64)
     }
 
-    /// Build the per-execution sample for a measured value.
+    /// Build the per-execution sample for a measured value. Records the raw
+    /// measurement only: the objective and good/bad classification are read-side
+    /// (FLOWIP-115l), never baked into the sample.
     pub(super) fn sample(&self, value: MetricsDuration) -> IndicatorSample {
-        let boundary = self.config.boundary.map(|spec| {
-            let met = match spec.kind {
-                IndicatorBoundaryKind::Under => value < spec.threshold,
-            };
-            IndicatorBoundary {
-                boundary: spec.kind,
-                boundary_ms: spec.threshold.as_millis(),
-                met,
-            }
-        });
         IndicatorSample {
             kind: self.config.kind,
             operation: self.config.operation.clone().unwrap_or_default(),
             indicator: self.config.indicator.clone().unwrap_or_default(),
             value_ms: value.as_millis(),
-            boundary,
             tags: self
                 .config
                 .tags

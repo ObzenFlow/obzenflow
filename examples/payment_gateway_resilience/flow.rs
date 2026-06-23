@@ -230,17 +230,17 @@ pub fn build_flow() -> obzenflow_dsl::FlowDefinition {
                 } => GatewayTransform,
                 effects: [AuthorizePayment with [gateway_breaker, gateway_limiter]],
                 // Record a per-execution service-level-indicator sample for the
-                // authorization operation: how long the live gateway call took,
-                // and whether it stayed under five seconds. This is observe-only
-                // evidence; it never changes whether the payment succeeds,
-                // retries, or routes. Aggregation into percentiles and SLOs is
-                // FLOWIP-115l's job, reading these journalled samples.
+                // authorization operation: the raw wall-clock latency of the live
+                // gateway call. This is observe-only evidence; it never changes
+                // whether the payment succeeds, retries, or routes. The objective
+                // (e.g. "under five seconds"), and aggregation into percentiles and
+                // SLOs, are FLOWIP-115l's job, applied at read time over these
+                // journalled samples rather than baked into the wide event.
                 middleware: [
                     indicator()
                         .operation("payment.authorization")
                         .kind(IndicatorKind::Latency)
                         .indicator("authorization.latency")
-                        .under(Duration::from_secs(5))
                         .tag("dependency", "payment_gateway")
                 ]
             );

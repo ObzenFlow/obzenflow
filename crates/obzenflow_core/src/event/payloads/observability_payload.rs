@@ -309,10 +309,12 @@ pub enum SliEvent {
 // ---- Service-level indicator sample (FLOWIP-115f) ------------------------
 //
 // A per-execution SLI *sample*: the observe-only raw input an SLI is computed
-// from. `met` is the per-sample "good event" classifier of the good-events /
-// total-events model, and `value_ms` is the raw observation a distribution is
-// built from. Aggregation into ratios, percentiles, windows, and error budgets
-// belongs to FLOWIP-115l, which reads these rows. Samples never steer control.
+// from. `value_ms` is the raw observation a distribution is built from. The
+// sample records the measurement only; the objective (threshold) and the
+// good/bad classification are deliberately not embedded in the durable event,
+// because the objective can change while the measurement cannot. Applying a
+// threshold and computing ratios/percentiles/windows/error budgets belong to
+// FLOWIP-115l, which reads these rows. Samples never steer control.
 
 /// The family of service-level indicator a sample measures.
 ///
@@ -328,7 +330,9 @@ pub enum IndicatorKind {
     Latency,
 }
 
-/// One per-execution service-level-indicator sample.
+/// One per-execution service-level-indicator sample: the raw measurement
+/// (`value_ms`) plus its identity and context. The objective (threshold) and the
+/// good/bad evaluation are read-side (FLOWIP-115l), not baked into the event.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IndicatorSample {
     /// The kind of indicator this sample measures.
@@ -339,32 +343,9 @@ pub struct IndicatorSample {
     pub indicator: String,
     /// The measured sample value in milliseconds.
     pub value_ms: u64,
-    /// The per-sample boundary result, when a boundary was declared.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub boundary: Option<IndicatorBoundary>,
     /// Static authoring-time tags (dependency, region, ...).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<IndicatorTag>,
-}
-
-/// A per-sample boundary *result*. Observe-only: it records what happened on
-/// this execution and never steers control flow, and it is not an SLO objective.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct IndicatorBoundary {
-    /// Which comparison `met` reflects.
-    pub boundary: IndicatorBoundaryKind,
-    /// The boundary threshold in milliseconds.
-    pub boundary_ms: u64,
-    /// Whether this sample satisfied the boundary.
-    pub met: bool,
-}
-
-/// The comparison a boundary applies to a sample value.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum IndicatorBoundaryKind {
-    /// `met` is true when the sample value is under the threshold.
-    Under,
 }
 
 /// A static key/value tag attached to an indicator sample at authoring time.
