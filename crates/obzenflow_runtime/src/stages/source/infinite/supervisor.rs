@@ -407,7 +407,9 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
                     .event_loops_total
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-                if let Some(replay_archive) = ctx.runtime_execution.archive_for_io().map(|a| a.as_ref()) {
+                if let Some(replay_archive) =
+                    ctx.runtime_execution.archive_for_io().map(|a| a.as_ref())
+                {
                     if self.replay_driver.is_none() {
                         let stage_key = ctx.stage_name.as_str();
                         let journal_path = replay_archive

@@ -333,14 +333,12 @@ impl Effects {
                 return Ok(output);
             }
 
-            if self
-                .ctx
-                .runtime_execution
-                .missing_outcome_is_corruption(crate::execution::ExecutionPosition {
+            if self.ctx.runtime_execution.missing_outcome_is_corruption(
+                crate::execution::ExecutionPosition {
                     stage_id: self.ctx.stage_id,
                     position: self.ctx.input_seq,
-                })
-            {
+                },
+            ) {
                 return Err(EffectError::MissingRecordedEffect { cursor });
             }
         }
@@ -789,14 +787,12 @@ impl Effects {
                 return Ok(output);
             }
 
-            if self
-                .ctx
-                .runtime_execution
-                .missing_outcome_is_corruption(crate::execution::ExecutionPosition {
+            if self.ctx.runtime_execution.missing_outcome_is_corruption(
+                crate::execution::ExecutionPosition {
                     stage_id: self.ctx.stage_id,
                     position: self.ctx.input_seq,
-                })
-            {
+                },
+            ) {
                 return Err(EffectError::MissingRecordedEffect { cursor });
             }
         }

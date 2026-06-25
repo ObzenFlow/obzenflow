@@ -68,7 +68,9 @@ pub(crate) fn emit_batch_to_pending_outputs(
     instrumentation: &Arc<StageInstrumentation>,
     per_data_event_duration: Duration,
     scope: obzenflow_core::MiddlewareExecutionScope,
-    pending_outputs: &mut VecDeque<crate::stages::common::supervision::backpressure_drain::PendingOutput>,
+    pending_outputs: &mut VecDeque<
+        crate::stages::common::supervision::backpressure_drain::PendingOutput,
+    >,
 ) {
     for event in events {
         let staged_event = event.with_flow_context(stage_flow_context.clone());
@@ -183,7 +185,9 @@ pub(crate) fn stage_source_poll_outputs(
     instrumentation: &Arc<StageInstrumentation>,
     poll_duration: Duration,
     scope: obzenflow_core::MiddlewareExecutionScope,
-    pending_outputs: &mut VecDeque<crate::stages::common::supervision::backpressure_drain::PendingOutput>,
+    pending_outputs: &mut VecDeque<
+        crate::stages::common::supervision::backpressure_drain::PendingOutput,
+    >,
 ) {
     let data_events_in_tick = events.iter().filter(|event| event.is_data()).count();
     let per_data_event_duration =
@@ -203,7 +207,9 @@ pub(crate) fn stage_boundary_control_events(
     stage_flow_context: &FlowContext,
     instrumentation: &Arc<StageInstrumentation>,
     scope: obzenflow_core::MiddlewareExecutionScope,
-    pending_outputs: &mut VecDeque<crate::stages::common::supervision::backpressure_drain::PendingOutput>,
+    pending_outputs: &mut VecDeque<
+        crate::stages::common::supervision::backpressure_drain::PendingOutput,
+    >,
 ) -> bool {
     if control_events.is_empty() {
         return false;
@@ -222,7 +228,9 @@ pub(crate) fn stage_boundary_control_events(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn drain_pending_outputs_sync(
-    pending_outputs: &mut VecDeque<crate::stages::common::supervision::backpressure_drain::PendingOutput>,
+    pending_outputs: &mut VecDeque<
+        crate::stages::common::supervision::backpressure_drain::PendingOutput,
+    >,
     stage_flow_context: &FlowContext,
     stage_id: StageId,
     heartbeat_state: Option<Arc<HeartbeatState>>,
@@ -279,7 +287,9 @@ pub(crate) async fn drain_pending_outputs_sync(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn drain_pending_outputs_async<E>(
-    pending_outputs: &mut VecDeque<crate::stages::common::supervision::backpressure_drain::PendingOutput>,
+    pending_outputs: &mut VecDeque<
+        crate::stages::common::supervision::backpressure_drain::PendingOutput,
+    >,
     stage_flow_context: &FlowContext,
     stage_id: StageId,
     heartbeat_state: Option<Arc<HeartbeatState>>,

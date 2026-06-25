@@ -295,10 +295,9 @@ pub(super) async fn dispatch_accumulating<
                     });
 
                     // FLOWIP-120c H3: per-event middleware execution scope.
-                    let scope = ctx.runtime_execution.dispatch_scope(
-                        ctx.stage_id,
-                        stage_input_position,
-                    );
+                    let scope = ctx
+                        .runtime_execution
+                        .dispatch_scope(ctx.stage_id, stage_input_position);
                     let observer_ctx = StatefulObserverContext {
                         stage_id: ctx.stage_id,
                         stage_name: &ctx.stage_name,
@@ -582,8 +581,9 @@ pub(super) async fn dispatch_emitting<
         sup.stage_id,
         StageType::Stateful,
     );
-    let observer_scope =
-        ctx.runtime_execution.dispatch_scope(ctx.stage_id, ctx.last_input_position);
+    let observer_scope = ctx
+        .runtime_execution
+        .dispatch_scope(ctx.stage_id, ctx.last_input_position);
 
     if sup.subscription.is_none() {
         sup.subscription = ctx.subscription.take();

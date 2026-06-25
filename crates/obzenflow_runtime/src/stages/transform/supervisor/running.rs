@@ -411,10 +411,9 @@ async fn dispatch_running_inner<
                     // FLOWIP-120c H3: the middleware execution scope is
                     // computed per dispatched event from the delivered
                     // position, not baked into the wrapper at build time.
-                    let scope = ctx.runtime_execution.dispatch_scope(
-                        ctx.stage_id,
-                        stage_input_position,
-                    );
+                    let scope = ctx
+                        .runtime_execution
+                        .dispatch_scope(ctx.stage_id, stage_input_position);
                     run_before_handler_observers(
                         &ctx.observers,
                         ctx.stage_id,

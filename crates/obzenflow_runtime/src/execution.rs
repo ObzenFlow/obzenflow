@@ -270,9 +270,9 @@ impl RuntimeExecution {
     /// dispatch to the strategy's positioned or position-less answer.
     pub fn handler_scope_for(&self, source: ExecutionPositionSource) -> MiddlewareExecutionScope {
         match source {
-            ExecutionPositionSource::Data { stage_id, position } => {
-                self.strategy.scope_at(ExecutionPosition { stage_id, position })
-            }
+            ExecutionPositionSource::Data { stage_id, position } => self
+                .strategy
+                .scope_at(ExecutionPosition { stage_id, position }),
             ExecutionPositionSource::FlowControl { stage_id, cause } => match cause {
                 Some(at) => self.strategy.scope_at(at),
                 None => self.strategy.stage_scope(stage_id),
@@ -356,7 +356,10 @@ mod tests {
         assert_eq!(s.scope_at(at()), Scope::LiveHandler);
         assert_eq!(s.stage_scope(StageId::new()), Scope::LiveHandler);
         assert!(!s.missing_outcome_is_corruption(at()));
-        assert_eq!(s.source_phase_for(StageId::new()), SourceExecutionPhase::Live);
+        assert_eq!(
+            s.source_phase_for(StageId::new()),
+            SourceExecutionPhase::Live
+        );
         assert_eq!(
             s.heartbeat_policy_for(StageId::new()),
             HeartbeatExecutionPolicy::Active

@@ -88,7 +88,13 @@ impl<H: UnifiedStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static
             .unwrap_or_else(|| Arc::new(StageInstrumentation::new()));
 
         let heartbeat_config = self.heartbeat_config.clone();
-        let heartbeat = if self.resources.runtime_execution.heartbeat_policy_for(self.config.stage_id) == crate::execution::HeartbeatExecutionPolicy::Suppressed || !heartbeat_config.enabled {
+        let heartbeat = if self
+            .resources
+            .runtime_execution
+            .heartbeat_policy_for(self.config.stage_id)
+            == crate::execution::HeartbeatExecutionPolicy::Suppressed
+            || !heartbeat_config.enabled
+        {
             None
         } else {
             let heartbeat_state = HeartbeatState::new(self.resources.upstream_stages.clone());

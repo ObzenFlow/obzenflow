@@ -398,9 +398,13 @@ async fn dispatch_draining_live<
                 .on_source_eof(&mut final_state, stream_source_id, writer_id)
                 .map_err(|err| obzenflow_fsm::FsmError::HandlerError(err.to_string()))?;
             let scope = ctx.runtime_execution.stage_scope(ctx.stage_id);
-            ctx.pending_outputs.extend(eof_events.into_iter().map(|event| {
-                crate::stages::common::supervision::backpressure_drain::PendingOutput { event, scope }
-            }));
+            ctx.pending_outputs
+                .extend(eof_events.into_iter().map(|event| {
+                    crate::stages::common::supervision::backpressure_drain::PendingOutput {
+                        event,
+                        scope,
+                    }
+                }));
         }
 
         let events = handler

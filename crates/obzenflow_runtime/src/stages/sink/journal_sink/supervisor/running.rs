@@ -512,7 +512,9 @@ async fn dispatch_data_event<
 
     // FLOWIP-120c H3: per-event middleware execution scope, computed at
     // dispatch from the delivered position.
-    let scope = ctx.runtime_execution.dispatch_scope(ctx.stage_id, stage_input_position);
+    let scope = ctx
+        .runtime_execution
+        .dispatch_scope(ctx.stage_id, stage_input_position);
 
     // FLOWIP-115b: the sink-delivery boundary wraps the data-event consume
     // attempt. Pre-extract the boundary so the closure borrows only

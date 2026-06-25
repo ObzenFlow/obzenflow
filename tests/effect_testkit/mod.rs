@@ -15,8 +15,7 @@ use obzenflow_core::{FlowId, JournalOwner, JournalWriterId, StageId, WriterId};
 use obzenflow_infra::journal::MemoryJournal;
 use obzenflow_runtime::backpressure::BackpressureWriter;
 use obzenflow_runtime::effects::{
-    EffectDeclaration, EffectInvocationContext, EffectPortRegistry,
-    SynthesizedOutcomeRegistration,
+    EffectDeclaration, EffectInvocationContext, EffectPortRegistry, SynthesizedOutcomeRegistration,
 };
 use obzenflow_runtime::execution::{RuntimeExecution, RuntimeMode};
 use obzenflow_runtime::feed_plan::StageOutputContract;

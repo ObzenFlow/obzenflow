@@ -920,9 +920,12 @@ async fn write_stage_outputs_and_ack<H: JoinHandler>(
         crate::stages::common::supervision::backpressure_drain::PendingOutput,
     > = outputs
         .into_iter()
-        .map(|event| {
-            crate::stages::common::supervision::backpressure_drain::PendingOutput { event, scope }
-        })
+        .map(
+            |event| crate::stages::common::supervision::backpressure_drain::PendingOutput {
+                event,
+                scope,
+            },
+        )
         .collect();
 
     while let Some(event) = outputs.pop_front() {
