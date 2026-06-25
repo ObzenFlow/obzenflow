@@ -22,7 +22,6 @@ use crate::stages::observer::dispatch::{
 use crate::supervised_base::EventLoopDirective;
 use obzenflow_core::event::context::{FlowContext, StageType};
 use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
-use obzenflow_core::ChainEvent;
 use obzenflow_fsm::StateVariant;
 
 use super::TransformSupervisor;
@@ -80,7 +79,6 @@ async fn dispatch_draining_inner<
                 &mut ctx.backpressure_backoff,
                 Some(&ctx.output_contract),
                 Some(&ctx.observers),
-                obzenflow_core::MiddlewareExecutionScope::LiveHandler,
                 &mut ctx.pending_outputs,
             )
             .await?
@@ -197,7 +195,7 @@ async fn dispatch_draining_inner<
                     heartbeat_state: ctx.heartbeat.as_ref().map(|h| h.state.clone()),
                     parent: envelope_clone.clone(),
                     effect_history: ctx.effect_history.clone(),
-                    effect_runtime_mode: ctx.effect_runtime_mode,
+                    runtime_execution: ctx.runtime_execution.clone(),
                     effect_ports: ctx.effect_ports.clone(),
                     effect_declarations: ctx.effect_declarations.clone(),
                     synthesized_outcomes: ctx.synthesized_outcomes.clone(),
@@ -214,7 +212,7 @@ async fn dispatch_draining_inner<
 
             // FLOWIP-120c H3: per-event scope, same as the running path.
             let scope =
-                crate::effects::scope_for_dispatch(ctx.effect_runtime_mode, stage_input_position);
+                ctx.runtime_execution.dispatch_scope(ctx.stage_id, stage_input_position);
             run_before_handler_observers(
                 &ctx.observers,
                 ctx.stage_id,
@@ -299,7 +297,9 @@ async fn dispatch_draining_inner<
             }
 
             // Error-journal events are written immediately; stage-journal outputs are gated by backpressure.
-            let mut stage_outputs = std::collections::VecDeque::<ChainEvent>::new();
+            let mut stage_outputs = std::collections::VecDeque::<
+                crate::stages::common::supervision::backpressure_drain::PendingOutput,
+            >::new();
             for event in transformed_events {
                 if is_framework_middleware_observability_event(&event) {
                     commit_framework_observability_events(
@@ -338,7 +338,12 @@ async fn dispatch_draining_inner<
                         .await
                         .map_err(|e| format!("Failed to write error event during drain: {e}"))?;
                 } else {
-                    stage_outputs.push_back(event);
+                    stage_outputs.push_back(
+                        crate::stages::common::supervision::backpressure_drain::PendingOutput {
+                            event,
+                            scope,
+                        },
+                    );
                 }
             }
 
@@ -357,7 +362,6 @@ async fn dispatch_draining_inner<
                     &mut ctx.backpressure_backoff,
                     Some(&ctx.output_contract),
                     Some(&ctx.observers),
-                    scope,
                     &mut stage_outputs,
                 )
                 .await?

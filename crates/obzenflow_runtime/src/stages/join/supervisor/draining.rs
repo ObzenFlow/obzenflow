@@ -127,7 +127,10 @@ pub(super) async fn dispatch_draining<
                                     }
                                 }
                             } else {
-                                ctx.pending_outputs.extend(results);
+                                let scope = ctx.runtime_execution.stage_scope(ctx.stage_id);
+                                ctx.pending_outputs.extend(results.into_iter().map(|event| {
+                                    crate::stages::common::supervision::backpressure_drain::PendingOutput { event, scope }
+                                }));
                                 ctx.pending_ack_upstream = upstream_stage;
                                 ctx.pending_parent = Some(envelope.clone());
                             }
@@ -262,7 +265,10 @@ pub(super) async fn dispatch_draining<
                                     }
                                 }
                             } else {
-                                ctx.pending_outputs.extend(events);
+                                let scope = ctx.runtime_execution.stage_scope(ctx.stage_id);
+                                ctx.pending_outputs.extend(events.into_iter().map(|event| {
+                                    crate::stages::common::supervision::backpressure_drain::PendingOutput { event, scope }
+                                }));
                                 ctx.pending_ack_upstream = upstream_stage;
                                 ctx.pending_parent = Some(merged_parent);
                             }
@@ -287,7 +293,13 @@ pub(super) async fn dispatch_draining<
                                     }
                                 }
                             } else {
-                                ctx.pending_outputs.push_back(error_event);
+                                let scope = ctx.runtime_execution.stage_scope(ctx.stage_id);
+                                ctx.pending_outputs.push_back(
+                                    crate::stages::common::supervision::backpressure_drain::PendingOutput {
+                                        event: error_event,
+                                        scope,
+                                    },
+                                );
                                 ctx.pending_ack_upstream = upstream_stage;
                                 ctx.pending_parent = Some(merged_parent);
                             }
@@ -329,7 +341,10 @@ pub(super) async fn dispatch_draining<
         .map_err(|err| obzenflow_fsm::FsmError::HandlerError(err.to_string()))?;
     ctx.handler_state = final_state;
 
-    ctx.pending_outputs.extend(events);
+    let scope = ctx.runtime_execution.stage_scope(ctx.stage_id);
+    ctx.pending_outputs.extend(events.into_iter().map(|event| {
+        crate::stages::common::supervision::backpressure_drain::PendingOutput { event, scope }
+    }));
     if !ctx.pending_outputs.is_empty() {
         if let Some(mut frontier) = ctx.drain_parent.clone() {
             CausalOrderingService::update_with_parent(
@@ -382,7 +397,10 @@ async fn dispatch_draining_live<
             let eof_events = handler
                 .on_source_eof(&mut final_state, stream_source_id, writer_id)
                 .map_err(|err| obzenflow_fsm::FsmError::HandlerError(err.to_string()))?;
-            ctx.pending_outputs.extend(eof_events);
+            let scope = ctx.runtime_execution.stage_scope(ctx.stage_id);
+            ctx.pending_outputs.extend(eof_events.into_iter().map(|event| {
+                crate::stages::common::supervision::backpressure_drain::PendingOutput { event, scope }
+            }));
         }
 
         let events = handler
@@ -391,7 +409,10 @@ async fn dispatch_draining_live<
             .map_err(|err| obzenflow_fsm::FsmError::HandlerError(err.to_string()))?;
         ctx.handler_state = final_state;
 
-        ctx.pending_outputs.extend(events);
+        let scope = ctx.runtime_execution.stage_scope(ctx.stage_id);
+        ctx.pending_outputs.extend(events.into_iter().map(|event| {
+            crate::stages::common::supervision::backpressure_drain::PendingOutput { event, scope }
+        }));
         if !ctx.pending_outputs.is_empty() {
             if let Some(mut frontier) = ctx.drain_parent.clone() {
                 CausalOrderingService::update_with_parent(

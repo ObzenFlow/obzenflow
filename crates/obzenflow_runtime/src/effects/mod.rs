@@ -20,7 +20,7 @@ pub use obzenflow_core::event::schema::{
     EffectOutcomeFacts, TypedFact, TypedFactSet, TypedFactSetError, TypedFactType, TypedPayload,
 };
 use obzenflow_core::event::{ChainEventContent, ChainEventFactory, SystemEvent};
-use obzenflow_core::journal::{ArchiveStatus, Journal};
+use obzenflow_core::journal::Journal;
 use obzenflow_core::{ChainEvent, EventEnvelope, EventId, FlowId, StageId, WriterId};
 use ring::digest::{digest, SHA256};
 use serde::{de::DeserializeOwned, Serialize};
@@ -60,9 +60,12 @@ pub use boundary::{
 };
 pub use commit::EffectCommitHandle;
 pub use context::{
-    scope_for_dispatch, EffectContext, EffectInvocationContext, EffectRuntimeMode,
-    SynthesizedOutcomeKind, SynthesizedOutcomeRegistration,
+    EffectContext, EffectInvocationContext, SynthesizedOutcomeKind,
+    SynthesizedOutcomeRegistration,
 };
+// FLOWIP-120r: `EffectRuntimeMode` survives only as a test parameterization aid.
+#[cfg(test)]
+pub(crate) use context::EffectRuntimeMode;
 pub use declaration::{
     Effect, EffectDeclaration, EffectSafety, IdempotencyKey, IdempotencyKeyPolicy,
     TransactionalEffectPort,

@@ -84,7 +84,7 @@ impl<H: AsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
             data_journal: self.resources.data_journal.clone(),
             error_journal: self.resources.error_journal.clone(),
             system_journal: self.resources.system_journal.clone(),
-            replay_archive: self.resources.replay_archive.clone(),
+            runtime_execution: self.resources.runtime_execution.clone(),
             bus: self.resources.message_bus.clone(),
             instrumentation,
             control_strategy,

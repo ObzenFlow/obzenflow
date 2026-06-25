@@ -8,7 +8,7 @@
 //! They start processing immediately without waiting for a start signal.
 
 use crate::stages::observer::StageLifecyclePhase;
-use obzenflow_core::event::context::{FlowContext, MiddlewareExecutionScope, StageType};
+use obzenflow_core::event::context::{FlowContext, StageType};
 use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
 use obzenflow_core::event::types::SeqNo;
 use obzenflow_core::event::{ChainEventFactory, SystemEvent};
@@ -22,13 +22,12 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 
 use crate::backpressure::{BackpressureReader, BackpressureRegistry, BackpressureWriter};
-use crate::effects::{EffectDeclaration, EffectHistory, EffectPortRegistry, EffectRuntimeMode};
+use crate::effects::{EffectDeclaration, EffectHistory, EffectPortRegistry};
 use crate::feed_plan::StageOutputContract;
 use crate::messaging::upstream_subscription::{ContractConfig, ContractsWiring, ReaderProgress};
 use crate::messaging::UpstreamSubscription;
 use crate::metrics::instrumentation::StageInstrumentation;
 use crate::pipeline::config::CycleGuardConfig;
-use crate::replay::ReplayArchive;
 use crate::stages::common::backpressure_activity_pulse::BackpressureActivityPulse;
 use crate::stages::common::control_strategies::SignalGate;
 use crate::stages::common::handlers::transform::traits::UnifiedTransformHandler;
@@ -286,14 +285,11 @@ pub(crate) struct TransformContext<H: UnifiedTransformHandler> {
     /// Data journal for writing chain events
     pub data_journal: Arc<dyn Journal<ChainEvent>>,
 
-    /// Optional replay archive for effect-history loading.
-    pub replay_archive: Option<Arc<dyn ReplayArchive>>,
-
     /// Stage-local effect history loaded from replay archive.
     pub effect_history: Option<Arc<EffectHistory>>,
 
-    /// Effect execution mode derived from the replay archive state.
-    pub effect_runtime_mode: EffectRuntimeMode,
+    /// Runtime execution strategy (FLOWIP-120r).
+    pub runtime_execution: crate::execution::RuntimeExecution,
 
     /// Flow-scoped typed ports available to replay-safe effects.
     pub effect_ports: EffectPortRegistry,
@@ -348,7 +344,8 @@ pub(crate) struct TransformContext<H: UnifiedTransformHandler> {
     pub backpressure_readers: HashMap<StageId, BackpressureReader>,
 
     /// Pending data outputs blocked on downstream credits (Phase 1: bounded to one input).
-    pub(crate) pending_outputs: VecDeque<ChainEvent>,
+    pub(crate) pending_outputs:
+        VecDeque<crate::stages::common::supervision::backpressure_drain::PendingOutput>,
 
     /// Parent envelope for pending outputs (input that produced them).
     pub(crate) pending_parent: Option<EventEnvelope<ChainEvent>>,
@@ -424,7 +421,7 @@ impl<H: UnifiedTransformHandler + Send + Sync + 'static> FsmAction for Transform
 
                 ctx.subscription = Some(subscription);
 
-                if let Some(archive) = &ctx.replay_archive {
+                if let Some(archive) = ctx.runtime_execution.archive_for_io() {
                     let history = EffectHistory::load(archive, &ctx.stage_name)
                         .await
                         .map_err(|e| {
@@ -459,11 +456,7 @@ impl<H: UnifiedTransformHandler + Send + Sync + 'static> FsmAction for Transform
                     stage_id: ctx.stage_id,
                     stage_type: StageType::Transform,
                 };
-                let scope = if ctx.replay_archive.is_some() {
-                    MiddlewareExecutionScope::StrictReplayHandler
-                } else {
-                    MiddlewareExecutionScope::LiveHandler
-                };
+                let scope = ctx.runtime_execution.stage_scope(ctx.stage_id);
                 run_stage_lifecycle_observers(
                     &ctx.observers,
                     ctx.stage_id,
@@ -598,11 +591,7 @@ impl<H: UnifiedTransformHandler + Send + Sync + 'static> FsmAction for Transform
                     stage_id: ctx.stage_id,
                     stage_type: StageType::Transform,
                 };
-                let scope = if ctx.replay_archive.is_some() {
-                    MiddlewareExecutionScope::StrictReplayHandler
-                } else {
-                    MiddlewareExecutionScope::LiveHandler
-                };
+                let scope = ctx.runtime_execution.stage_scope(ctx.stage_id);
                 run_stage_lifecycle_observers(
                     &ctx.observers,
                     ctx.stage_id,
@@ -641,11 +630,7 @@ impl<H: UnifiedTransformHandler + Send + Sync + 'static> FsmAction for Transform
                     stage_id: ctx.stage_id,
                     stage_type: StageType::Transform,
                 };
-                let scope = if ctx.replay_archive.is_some() {
-                    MiddlewareExecutionScope::StrictReplayHandler
-                } else {
-                    MiddlewareExecutionScope::LiveHandler
-                };
+                let scope = ctx.runtime_execution.stage_scope(ctx.stage_id);
                 run_stage_lifecycle_observers(
                     &ctx.observers,
                     ctx.stage_id,

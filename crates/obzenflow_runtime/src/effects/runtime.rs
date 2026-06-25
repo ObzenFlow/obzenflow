@@ -33,7 +33,12 @@ impl Effects {
     }
 
     pub fn is_replaying(&self) -> bool {
-        !matches!(self.ctx.effect_runtime_mode, EffectRuntimeMode::Live)
+        self.ctx
+            .runtime_execution
+            .is_reconstructing(crate::execution::ExecutionPosition {
+                stage_id: self.ctx.stage_id,
+                position: self.ctx.input_seq,
+            })
     }
 
     pub fn drain_committed_facts(&mut self) -> Vec<ChainEvent> {
@@ -55,7 +60,12 @@ impl Effects {
             outcome,
             crate::stages::observer::EffectObserverOutcome::SuppressedByReplay
         ) {
-            self.ctx.effect_runtime_mode.into()
+            self.ctx
+                .runtime_execution
+                .scope_at(crate::execution::ExecutionPosition {
+                    stage_id: self.ctx.stage_id,
+                    position: self.ctx.input_seq,
+                })
         } else {
             obzenflow_core::MiddlewareExecutionScope::LiveEffectBoundary
         };
@@ -323,10 +333,14 @@ impl Effects {
                 return Ok(output);
             }
 
-            if matches!(
-                self.ctx.effect_runtime_mode,
-                EffectRuntimeMode::ReplayStrict
-            ) {
+            if self
+                .ctx
+                .runtime_execution
+                .missing_outcome_is_corruption(crate::execution::ExecutionPosition {
+                    stage_id: self.ctx.stage_id,
+                    position: self.ctx.input_seq,
+                })
+            {
                 return Err(EffectError::MissingRecordedEffect { cursor });
             }
         }
@@ -775,10 +789,14 @@ impl Effects {
                 return Ok(output);
             }
 
-            if matches!(
-                self.ctx.effect_runtime_mode,
-                EffectRuntimeMode::ReplayStrict
-            ) {
+            if self
+                .ctx
+                .runtime_execution
+                .missing_outcome_is_corruption(crate::execution::ExecutionPosition {
+                    stage_id: self.ctx.stage_id,
+                    position: self.ctx.input_seq,
+                })
+            {
                 return Err(EffectError::MissingRecordedEffect { cursor });
             }
         }

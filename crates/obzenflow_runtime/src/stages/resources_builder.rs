@@ -10,7 +10,8 @@
 use crate::backpressure::{
     BackpressurePlan, BackpressureReader, BackpressureRegistry, BackpressureWriter,
 };
-use crate::effects::{EffectDeclaration, EffectPortRegistry, EffectRuntimeMode};
+use crate::effects::{EffectDeclaration, EffectPortRegistry};
+use crate::execution::{RuntimeExecution, RuntimeMode};
 use crate::feed_plan::{FeedPlan, LogicalFeed, StageOutputContract};
 use crate::id_conversions::StageIdExt;
 use crate::message_bus::FsmMessageBus;
@@ -238,12 +239,11 @@ pub struct StageResources {
     /// exports it via `/metrics`.
     pub liveness_snapshots: LivenessSnapshots,
 
-    /// Optional replay archive injection (FLOWIP-095a). Sources use this to
-    /// read archived journals instead of calling external systems.
-    pub replay_archive: Option<Arc<dyn ReplayArchive>>,
-
-    /// Effect execution mode derived from the replay archive state.
-    pub effect_runtime_mode: EffectRuntimeMode,
+    /// Runtime execution strategy (FLOWIP-120r): the single authority for the
+    /// replay-versus-live decision, and the home of the replay archive as an
+    /// I/O resource (`archive_for_io`). Consumers query it; nothing branches on
+    /// archive presence or a mode value.
+    pub runtime_execution: RuntimeExecution,
 
     /// Flow-scoped typed ports available to replay-safe effects.
     pub effect_ports: EffectPortRegistry,
@@ -509,6 +509,18 @@ impl StageResourcesBuilder {
                     ReaderSelectionPolicy::CanonicalMerge;
             }
 
+            // FLOWIP-120r: the one strategy-selection point. In 120r the verb is
+            // exactly archive-presence (replay iff `--replay-from` opened an
+            // archive); 120n threads an explicit verb to distinguish resume.
+            let runtime_execution = RuntimeExecution::new(
+                if self.replay_archive.is_some() {
+                    RuntimeMode::Replay
+                } else {
+                    RuntimeMode::Live
+                },
+                self.replay_archive.clone(),
+            );
+
             let resources = StageResources {
                 flow_id: self.flow_id,
                 data_journal,
@@ -530,10 +542,7 @@ impl StageResourcesBuilder {
                 backpressure_readers,
                 backpressure_registry: backpressure_registry.clone(),
                 liveness_snapshots: liveness_snapshots.clone(),
-                effect_runtime_mode: EffectRuntimeMode::from_replay_archive(
-                    self.replay_archive.as_deref(),
-                ),
-                replay_archive: self.replay_archive.clone(),
+                runtime_execution,
                 effect_ports: self.effect_ports.clone(),
                 effect_declarations: Vec::new(),
                 synthesized_outcomes: Vec::new(),

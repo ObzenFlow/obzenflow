@@ -91,7 +91,6 @@ pub(super) async fn flush_pending_outputs<
             &mut ctx.backpressure_backoff,
             Some(&ctx.output_contract),
             Some(&ctx.observers),
-            crate::effects::scope_for_dispatch(ctx.effect_runtime_mode, None),
             &mut ctx.pending_outputs,
         )
         .await?
@@ -143,7 +142,7 @@ pub(super) async fn observe_join_input<H: JoinHandler>(
         stage_id: ctx.stage_id,
         stage_name: &ctx.stage_name,
         flow_context: &flow_context,
-        scope: crate::effects::scope_for_dispatch(ctx.effect_runtime_mode, None),
+        scope: ctx.runtime_execution.dispatch_scope(ctx.stage_id, None),
         input: Some(input),
         delivery,
         signal,
@@ -178,7 +177,7 @@ pub(super) async fn observe_join_outputs<H: JoinHandler>(
         stage_id: ctx.stage_id,
         stage_name: &ctx.stage_name,
         flow_context: &flow_context,
-        scope: crate::effects::scope_for_dispatch(ctx.effect_runtime_mode, None),
+        scope: ctx.runtime_execution.dispatch_scope(ctx.stage_id, None),
         input,
         delivery,
         signal,

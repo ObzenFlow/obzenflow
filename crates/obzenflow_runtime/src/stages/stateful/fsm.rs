@@ -8,7 +8,7 @@
 //! windowing operations, and session tracking.
 
 use crate::stages::observer::StageLifecyclePhase;
-use obzenflow_core::event::context::{FlowContext, MiddlewareExecutionScope, StageType};
+use obzenflow_core::event::context::{FlowContext, StageType};
 use obzenflow_core::event::event_envelope::EventEnvelope;
 use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
 use obzenflow_core::event::types::SeqNo;
@@ -24,14 +24,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::backpressure::{BackpressureReader, BackpressureWriter};
-use crate::effects::{EffectDeclaration, EffectHistory, EffectPortRegistry, EffectRuntimeMode};
+use crate::effects::{EffectDeclaration, EffectHistory, EffectPortRegistry};
 use crate::feed_plan::StageOutputContract;
 use crate::messaging::upstream_subscription::{
     ContractConfig, ContractsWiring, ReaderProgress, StageInputPosition,
 };
 use crate::messaging::UpstreamSubscription;
 use crate::metrics::instrumentation::StageInstrumentation;
-use crate::replay::ReplayArchive;
 use crate::stages::common::backpressure_activity_pulse::BackpressureActivityPulse;
 use crate::stages::common::control_strategies::SignalGate;
 use crate::stages::common::handlers::UnifiedStatefulHandler;
@@ -333,14 +332,11 @@ pub struct StatefulContext<H: UnifiedStatefulHandler> {
     /// Data journal for writing chain events
     pub data_journal: Arc<dyn Journal<ChainEvent>>,
 
-    /// Replay archive for loading recorded effect outcomes.
-    pub replay_archive: Option<Arc<dyn ReplayArchive>>,
-
     /// Recorded effect outcomes for replay suppression.
     pub effect_history: Option<Arc<EffectHistory>>,
 
-    /// Effect execution mode derived from the replay archive state.
-    pub effect_runtime_mode: EffectRuntimeMode,
+    /// Runtime execution strategy (FLOWIP-120r).
+    pub runtime_execution: crate::execution::RuntimeExecution,
 
     /// Flow-scoped typed ports available to replay-safe effects.
     pub effect_ports: EffectPortRegistry,
@@ -422,7 +418,8 @@ pub struct StatefulContext<H: UnifiedStatefulHandler> {
     pub backpressure_readers: HashMap<StageId, BackpressureReader>,
 
     /// Pending data outputs blocked on downstream credits (Phase 1: bounded to one input).
-    pub(crate) pending_outputs: VecDeque<ChainEvent>,
+    pub(crate) pending_outputs:
+        VecDeque<crate::stages::common::supervision::backpressure_drain::PendingOutput>,
 
     /// Pending state transition once blocked outputs are fully written.
     pub(crate) pending_transition: Option<PendingTransition>,
@@ -484,7 +481,7 @@ impl<H: UnifiedStatefulHandler + Send + Sync + 'static> FsmAction for StatefulAc
 
                     ctx.subscription = Some(subscription);
 
-                    if let Some(archive) = &ctx.replay_archive {
+                    if let Some(archive) = ctx.runtime_execution.archive_for_io() {
                         let history = EffectHistory::load(archive, &ctx.stage_name)
                             .await
                             .map_err(|e| {
@@ -540,11 +537,7 @@ impl<H: UnifiedStatefulHandler + Send + Sync + 'static> FsmAction for StatefulAc
                     stage_id: ctx.stage_id,
                     stage_type: StageType::Stateful,
                 };
-                let scope = if ctx.replay_archive.is_some() {
-                    MiddlewareExecutionScope::StrictReplayHandler
-                } else {
-                    MiddlewareExecutionScope::LiveHandler
-                };
+                let scope = ctx.runtime_execution.stage_scope(ctx.stage_id);
                 run_stage_lifecycle_observers(
                     &ctx.observers,
                     ctx.stage_id,
@@ -690,11 +683,7 @@ impl<H: UnifiedStatefulHandler + Send + Sync + 'static> FsmAction for StatefulAc
                     stage_id: ctx.stage_id,
                     stage_type: StageType::Stateful,
                 };
-                let scope = if ctx.replay_archive.is_some() {
-                    MiddlewareExecutionScope::StrictReplayHandler
-                } else {
-                    MiddlewareExecutionScope::LiveHandler
-                };
+                let scope = ctx.runtime_execution.stage_scope(ctx.stage_id);
                 run_stage_lifecycle_observers(
                     &ctx.observers,
                     ctx.stage_id,
@@ -733,11 +722,7 @@ impl<H: UnifiedStatefulHandler + Send + Sync + 'static> FsmAction for StatefulAc
                     stage_id: ctx.stage_id,
                     stage_type: StageType::Stateful,
                 };
-                let scope = if ctx.replay_archive.is_some() {
-                    MiddlewareExecutionScope::StrictReplayHandler
-                } else {
-                    MiddlewareExecutionScope::LiveHandler
-                };
+                let scope = ctx.runtime_execution.stage_scope(ctx.stage_id);
                 run_stage_lifecycle_observers(
                     &ctx.observers,
                     ctx.stage_id,

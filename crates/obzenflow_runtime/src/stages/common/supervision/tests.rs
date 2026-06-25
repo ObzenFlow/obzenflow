@@ -759,7 +759,10 @@ async fn drain_one_pending_reserves_before_journal_append_and_records_output_for
     let event = ChainEventFactory::data_event(WriterId::from(stage_id), "x", json!({"n": 1}));
 
     let outcome = drain_one_pending(
-        event,
+        crate::stages::common::supervision::backpressure_drain::PendingOutput {
+            event,
+            scope: obzenflow_core::MiddlewareExecutionScope::LiveHandler,
+        },
         &flow_context,
         stage_id,
         None,
@@ -772,7 +775,6 @@ async fn drain_one_pending_reserves_before_journal_append_and_records_output_for
         &mut backoff,
         Some(&output_contract),
         None,
-        obzenflow_core::MiddlewareExecutionScope::LiveHandler,
         &mut pending_outputs,
     )
     .await
@@ -817,7 +819,10 @@ async fn drain_one_pending_accepts_semantic_event_for_versioned_output_contract(
         ChainEventFactory::data_event(WriterId::from(stage_id), "semantic.test", json!({"n": 1}));
 
     let outcome = drain_one_pending(
-        event,
+        crate::stages::common::supervision::backpressure_drain::PendingOutput {
+            event,
+            scope: obzenflow_core::MiddlewareExecutionScope::LiveHandler,
+        },
         &flow_context,
         stage_id,
         None,
@@ -830,7 +835,6 @@ async fn drain_one_pending_accepts_semantic_event_for_versioned_output_contract(
         &mut backoff,
         Some(&output_contract),
         None,
-        obzenflow_core::MiddlewareExecutionScope::LiveHandler,
         &mut pending_outputs,
     )
     .await
@@ -872,7 +876,10 @@ async fn drain_one_pending_rejects_undeclared_data_output() {
         ChainEventFactory::data_event(WriterId::from(stage_id), "undeclared.v1", json!({"n": 1}));
 
     let err = drain_one_pending(
-        event,
+        crate::stages::common::supervision::backpressure_drain::PendingOutput {
+            event,
+            scope: obzenflow_core::MiddlewareExecutionScope::LiveHandler,
+        },
         &flow_context,
         stage_id,
         None,
@@ -885,7 +892,6 @@ async fn drain_one_pending_rejects_undeclared_data_output() {
         &mut backoff,
         Some(&output_contract),
         None,
-        obzenflow_core::MiddlewareExecutionScope::LiveHandler,
         &mut pending_outputs,
     )
     .await
@@ -932,7 +938,10 @@ async fn drain_one_pending_does_not_reserve_for_non_data() {
     let event = ChainEventFactory::drain_event(WriterId::from(stage_id));
 
     let outcome = drain_one_pending(
-        event,
+        crate::stages::common::supervision::backpressure_drain::PendingOutput {
+            event,
+            scope: obzenflow_core::MiddlewareExecutionScope::LiveHandler,
+        },
         &flow_context,
         stage_id,
         None,
@@ -945,7 +954,6 @@ async fn drain_one_pending_does_not_reserve_for_non_data() {
         &mut backoff,
         None,
         None,
-        obzenflow_core::MiddlewareExecutionScope::LiveHandler,
         &mut pending_outputs,
     )
     .await
@@ -992,7 +1000,10 @@ async fn drain_one_pending_requeues_and_returns_backed_off_when_reserve_fails() 
     let id = event.id;
 
     let outcome = drain_one_pending(
-        event,
+        crate::stages::common::supervision::backpressure_drain::PendingOutput {
+            event,
+            scope: obzenflow_core::MiddlewareExecutionScope::LiveHandler,
+        },
         &flow_context,
         stage_id,
         None,
@@ -1005,7 +1016,6 @@ async fn drain_one_pending_requeues_and_returns_backed_off_when_reserve_fails() 
         &mut backoff,
         None,
         None,
-        obzenflow_core::MiddlewareExecutionScope::LiveHandler,
         &mut pending_outputs,
     )
     .await
@@ -1013,5 +1023,5 @@ async fn drain_one_pending_requeues_and_returns_backed_off_when_reserve_fails() 
 
     assert_eq!(outcome, DrainOutcome::BackedOff);
     assert_eq!(pending_outputs.len(), 1);
-    assert_eq!(pending_outputs.front().expect("front").id, id);
+    assert_eq!(pending_outputs.front().expect("front").event.id, id);
 }

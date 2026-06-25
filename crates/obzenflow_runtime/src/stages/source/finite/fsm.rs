@@ -9,7 +9,7 @@
 //! start emitting events until the pipeline is ready.
 
 use crate::stages::observer::StageLifecyclePhase;
-use obzenflow_core::event::context::{FlowContext, MiddlewareExecutionScope, StageType};
+use obzenflow_core::event::context::{FlowContext, StageType};
 use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
 use obzenflow_core::event::types::{Count, JournalIndex, JournalPath, SeqNo};
 use obzenflow_core::event::{
@@ -29,7 +29,6 @@ use crate::backpressure::BackpressureWriter;
 use crate::feed_plan::StageOutputContract;
 use crate::metrics::instrumentation::{snapshot_stage_metrics, StageInstrumentation};
 use crate::metrics::tail_read;
-use crate::replay::ReplayArchive;
 use crate::stages::common::backpressure_activity_pulse::BackpressureActivityPulse;
 use crate::stages::common::stage_handle::{
     FORCE_SHUTDOWN_MESSAGE, STOP_REASON_TIMEOUT, STOP_REASON_USER_STOP,
@@ -266,8 +265,8 @@ pub struct FiniteSourceContext<H> {
     /// System journal for writing lifecycle events
     pub system_journal: Arc<dyn Journal<SystemEvent>>,
 
-    /// Optional replay archive injection (FLOWIP-095a).
-    pub replay_archive: Option<Arc<dyn ReplayArchive>>,
+    /// Runtime execution strategy (FLOWIP-120r).
+    pub runtime_execution: crate::execution::RuntimeExecution,
 
     /// Message bus for pipeline communication
     pub bus: Arc<crate::message_bus::FsmMessageBus>,
@@ -291,7 +290,8 @@ pub struct FiniteSourceContext<H> {
     pub output_contract: StageOutputContract,
 
     /// Pending stage outputs blocked on downstream credits (FLOWIP-086k).
-    pub(crate) pending_outputs: VecDeque<ChainEvent>,
+    pub(crate) pending_outputs:
+        VecDeque<crate::stages::common::supervision::backpressure_drain::PendingOutput>,
 
     /// Backpressure activity pulse accumulator (Hz UI animation driver).
     pub(crate) backpressure_pulse: BackpressureActivityPulse,
@@ -312,7 +312,7 @@ pub struct FiniteSourceContextInit {
     pub data_journal: Arc<dyn Journal<ChainEvent>>,
     pub error_journal: Arc<dyn Journal<ChainEvent>>,
     pub system_journal: Arc<dyn Journal<SystemEvent>>,
-    pub replay_archive: Option<Arc<dyn ReplayArchive>>,
+    pub runtime_execution: crate::execution::RuntimeExecution,
     pub bus: Arc<crate::message_bus::FsmMessageBus>,
     pub instrumentation: Arc<StageInstrumentation>,
     pub control_strategy: Arc<dyn CompletionGate>,
@@ -331,7 +331,7 @@ impl<H> FiniteSourceContext<H> {
             data_journal: init.data_journal,
             error_journal: init.error_journal,
             system_journal: init.system_journal,
-            replay_archive: init.replay_archive,
+            runtime_execution: init.runtime_execution,
             bus: init.bus,
             writer_id: None,
             instrumentation: init.instrumentation,
@@ -579,11 +579,7 @@ impl<H: Send + Sync + 'static> FsmAction for FiniteSourceAction<H> {
                     stage_id: ctx.stage_id,
                     stage_type: StageType::FiniteSource,
                 };
-                let scope = if ctx.replay_archive.is_some() {
-                    MiddlewareExecutionScope::StrictReplayHandler
-                } else {
-                    MiddlewareExecutionScope::LiveHandler
-                };
+                let scope = ctx.runtime_execution.stage_scope(ctx.stage_id);
                 run_stage_lifecycle_observers(
                     &ctx.observers,
                     ctx.stage_id,
@@ -654,11 +650,7 @@ impl<H: Send + Sync + 'static> FsmAction for FiniteSourceAction<H> {
                     stage_id: ctx.stage_id,
                     stage_type: StageType::FiniteSource,
                 };
-                let scope = if ctx.replay_archive.is_some() {
-                    MiddlewareExecutionScope::StrictReplayHandler
-                } else {
-                    MiddlewareExecutionScope::LiveHandler
-                };
+                let scope = ctx.runtime_execution.stage_scope(ctx.stage_id);
                 run_stage_lifecycle_observers(
                     &ctx.observers,
                     ctx.stage_id,
@@ -716,11 +708,7 @@ impl<H: Send + Sync + 'static> FsmAction for FiniteSourceAction<H> {
                     stage_id: ctx.stage_id,
                     stage_type: StageType::FiniteSource,
                 };
-                let scope = if ctx.replay_archive.is_some() {
-                    MiddlewareExecutionScope::StrictReplayHandler
-                } else {
-                    MiddlewareExecutionScope::LiveHandler
-                };
+                let scope = ctx.runtime_execution.stage_scope(ctx.stage_id);
                 run_stage_lifecycle_observers(
                     &ctx.observers,
                     ctx.stage_id,
@@ -964,7 +952,10 @@ mod tests {
                 data_journal: data_journal.clone(),
                 error_journal: error_journal.clone(),
                 system_journal: system_journal.clone(),
-                replay_archive: None,
+                runtime_execution: crate::execution::RuntimeExecution::new(
+                    crate::execution::RuntimeMode::Live,
+                    None,
+                ),
                 bus: bus.clone(),
                 instrumentation: instrumentation.clone(),
                 control_strategy,

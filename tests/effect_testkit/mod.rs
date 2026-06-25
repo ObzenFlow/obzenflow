@@ -15,9 +15,10 @@ use obzenflow_core::{FlowId, JournalOwner, JournalWriterId, StageId, WriterId};
 use obzenflow_infra::journal::MemoryJournal;
 use obzenflow_runtime::backpressure::BackpressureWriter;
 use obzenflow_runtime::effects::{
-    EffectDeclaration, EffectInvocationContext, EffectPortRegistry, EffectRuntimeMode,
+    EffectDeclaration, EffectInvocationContext, EffectPortRegistry,
     SynthesizedOutcomeRegistration,
 };
+use obzenflow_runtime::execution::{RuntimeExecution, RuntimeMode};
 use obzenflow_runtime::feed_plan::StageOutputContract;
 use obzenflow_runtime::messaging::upstream_subscription::StageInputPosition;
 
@@ -35,7 +36,7 @@ pub struct EffectInvocationContextBuilder {
     stage_logic_version: String,
     data_journal: Arc<dyn Journal<ChainEvent>>,
     parent: EventEnvelope<ChainEvent>,
-    effect_runtime_mode: EffectRuntimeMode,
+    runtime_execution: RuntimeExecution,
     effect_ports: EffectPortRegistry,
     effect_declarations: Vec<EffectDeclaration>,
     synthesized_outcomes: Vec<SynthesizedOutcomeRegistration>,
@@ -64,7 +65,7 @@ impl EffectInvocationContextBuilder {
             stage_logic_version: "test-v1".to_string(),
             data_journal,
             parent,
-            effect_runtime_mode: EffectRuntimeMode::Live,
+            runtime_execution: RuntimeExecution::new(RuntimeMode::Live, None),
             effect_ports: EffectPortRegistry::new(),
             effect_declarations: Vec::new(),
             synthesized_outcomes: Vec::new(),
@@ -73,8 +74,8 @@ impl EffectInvocationContextBuilder {
         }
     }
 
-    pub fn with_runtime_mode(mut self, mode: EffectRuntimeMode) -> Self {
-        self.effect_runtime_mode = mode;
+    pub fn with_runtime_execution(mut self, execution: RuntimeExecution) -> Self {
+        self.runtime_execution = execution;
         self
     }
 
@@ -108,7 +109,7 @@ impl EffectInvocationContextBuilder {
             heartbeat_state: None,
             parent: self.parent,
             effect_history: None,
-            effect_runtime_mode: self.effect_runtime_mode,
+            runtime_execution: self.runtime_execution,
             effect_ports: self.effect_ports,
             effect_declarations: self.effect_declarations,
             synthesized_outcomes: self.synthesized_outcomes,

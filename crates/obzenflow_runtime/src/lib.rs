@@ -18,6 +18,7 @@ pub mod contracts;
 pub mod control_plane;
 pub mod effects;
 pub mod errors;
+pub mod execution;
 pub mod feed_plan;
 pub mod id_conversions;
 pub mod journal;
@@ -107,7 +108,7 @@ pub mod prelude {
     // Event flow
     pub use crate::effects::{
         Effect, EffectCommitHandle, EffectContext, EffectDeclaration, EffectError,
-        EffectOutcomePayload, EffectRuntimeMode, EffectSafety, Effects, IdempotencyKey,
+        EffectOutcomePayload, EffectSafety, Effects, IdempotencyKey,
         TransactionalEffectPort,
     };
     pub use crate::messaging::UpstreamSubscription;

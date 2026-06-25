@@ -2710,11 +2710,15 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
         for mw in all_middleware {
             builder = builder.with(mw);
         }
-        // FLOWIP-120a: bind the stage's replay mode so handler-level control
+        // FLOWIP-120a: bind the stage's replay scope so handler-level control
         // middleware suppresses its side effects during deterministic replay.
+        // FLOWIP-120r: sourced from the runtime execution strategy. The join's
+        // handler scope is stage-independent in 120r (constant per run), so it
+        // stays build-time-static here; FLOWIP-120n adds the per-call
+        // UnifiedJoinHandler seam when the resume predicate makes it positional.
         let handler_with_middleware = builder
             .build()
-            .with_execution_scope(resources.effect_runtime_mode.into());
+            .with_execution_scope(resources.runtime_execution.stage_scope(config.stage_id));
 
         // Extract join-mode configuration from the handler before moving it into the runtime.
         let reference_mode = handler_with_middleware.reference_mode();
@@ -3522,8 +3526,10 @@ mod tests {
             backpressure_readers: Default::default(),
             backpressure_registry,
             liveness_snapshots: LivenessSnapshots::new(),
-            replay_archive: None,
-            effect_runtime_mode: obzenflow_runtime::effects::EffectRuntimeMode::Live,
+            runtime_execution: obzenflow_runtime::execution::RuntimeExecution::new(
+                obzenflow_runtime::execution::RuntimeMode::Live,
+                None,
+            ),
             effect_ports: obzenflow_runtime::effects::EffectPortRegistry::new(),
             effect_declarations: Vec::new(),
             synthesized_outcomes: Vec::new(),

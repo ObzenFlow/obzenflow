@@ -257,7 +257,7 @@ async fn dispatch_event<H: UnifiedSinkHandler + Clone + std::fmt::Debug + Send +
                 .consume_report(
                     envelope_event,
                     None,
-                    crate::effects::scope_for_dispatch(ctx.effect_runtime_mode, None),
+                    ctx.runtime_execution.dispatch_scope(ctx.stage_id, None),
                 )
                 .await
             {
@@ -365,7 +365,7 @@ async fn dispatch_control_event<
                 .consume_report(
                     envelope_event,
                     None,
-                    crate::effects::scope_for_dispatch(ctx.effect_runtime_mode, None),
+                    ctx.runtime_execution.dispatch_scope(ctx.stage_id, None),
                 )
                 .await
             {
@@ -498,7 +498,7 @@ async fn dispatch_data_event<
             heartbeat_state: None,
             parent: envelope.clone(),
             effect_history: ctx.effect_history.clone(),
-            effect_runtime_mode: ctx.effect_runtime_mode,
+            runtime_execution: ctx.runtime_execution.clone(),
             effect_ports: ctx.effect_ports.clone(),
             effect_declarations: ctx.effect_declarations.clone(),
             synthesized_outcomes: Vec::new(),
@@ -512,7 +512,7 @@ async fn dispatch_data_event<
 
     // FLOWIP-120c H3: per-event middleware execution scope, computed at
     // dispatch from the delivered position.
-    let scope = crate::effects::scope_for_dispatch(ctx.effect_runtime_mode, stage_input_position);
+    let scope = ctx.runtime_execution.dispatch_scope(ctx.stage_id, stage_input_position);
 
     // FLOWIP-115b: the sink-delivery boundary wraps the data-event consume
     // attempt. Pre-extract the boundary so the closure borrows only

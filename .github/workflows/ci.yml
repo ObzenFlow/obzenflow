@@ -453,6 +453,38 @@ jobs:
 
           echo "OK: all tokio::time::sleep(...) calls are annotated with // hang-guard:."
 
+      - name: Guard the runtime execution strategy (FLOWIP-120r)
+        run: |
+          set -euo pipefail
+
+          # FLOWIP-120r: the replay-versus-live decision is owned by the runtime
+          # execution strategy (crate::execution). Branching on replay-archive
+          # presence for a mode/phase decision is forbidden outside the single
+          # bootstrap selector (resources_builder.rs); archive access goes
+          # through RuntimeExecution::archive_for_io().
+          archive_branches="$(
+            rg -n '\.replay_archive\.is_some\(\)|if let Some\([^)]*\)\s*=\s*[^;]*\.replay_archive' \
+              crates/obzenflow_runtime/src crates/obzenflow_dsl/src \
+              -g '!**/resources_builder.rs' -g '!**/tests.rs' -g '!**/tests/**' \
+              || true
+          )"
+          if [[ -n "${archive_branches}" ]]; then
+            echo "FLOWIP-120r: forbidden replay-archive mode/phase branch (use crate::execution):"
+            echo "${archive_branches}"
+            exit 1
+          fi
+
+          # `scope_for_dispatch` is retired; `RuntimeExecution::handler_scope_for`
+          # / `dispatch_scope` replace it. `EffectRuntimeMode` survives only as a
+          # `#[cfg(test)]` parameterization aid, which the compiler keeps out of
+          # production builds.
+          if rg -n 'scope_for_dispatch' crates/obzenflow_runtime/src crates/obzenflow_dsl/src; then
+            echo "FLOWIP-120r: scope_for_dispatch is retired; use the runtime execution strategy."
+            exit 1
+          fi
+
+          echo "OK: replay/live decisions go through the runtime execution strategy."
+
       - name: Install cargo-deny
         uses: taiki-e/install-action@v2
         with:

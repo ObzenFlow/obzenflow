@@ -364,11 +364,7 @@ impl<H: AsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
                     self.stage_id,
                     StageType::InfiniteSource,
                 );
-                let observer_scope = if ctx.replay_archive.is_some() {
-                    obzenflow_core::MiddlewareExecutionScope::StrictReplayHandler
-                } else {
-                    obzenflow_core::MiddlewareExecutionScope::LiveHandler
-                };
+                let observer_scope = ctx.runtime_execution.stage_scope(self.stage_id);
 
                 if let Some(directive) = drain_pending_outputs_async(
                     &mut ctx.pending_outputs,
@@ -384,7 +380,6 @@ impl<H: AsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
                     &mut ctx.backpressure_backoff,
                     Some(&ctx.output_contract),
                     Some(&ctx.observers),
-                    observer_scope,
                     &mut self.external_events,
                     || InfiniteSourceEvent::Error("External control channel closed".to_string()),
                 )
@@ -409,7 +404,7 @@ impl<H: AsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
                     .event_loops_total
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-                if let Some(replay_archive) = ctx.replay_archive.as_deref() {
+                if let Some(replay_archive) = ctx.runtime_execution.archive_for_io().map(|a| a.as_ref()) {
                     if self.replay_driver.is_none() {
                         let stage_key = ctx.stage_name.as_str();
                         let journal_path = replay_archive
@@ -496,6 +491,7 @@ impl<H: AsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
                                 &stage_flow_context,
                                 &ctx.instrumentation,
                                 per_data_event_duration,
+                                observer_scope,
                                 &mut ctx.pending_outputs,
                             );
 
@@ -584,6 +580,7 @@ impl<H: AsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
                                 control_events,
                                 &stage_flow_context,
                                 &ctx.instrumentation,
+                                observer_scope,
                                 &mut ctx.pending_outputs,
                             ) {
                                 self.pending_boundary_begin_drain = true;
@@ -616,6 +613,7 @@ impl<H: AsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
                                     &stage_flow_context,
                                     &ctx.instrumentation,
                                     poll.poll_duration,
+                                    observer_scope,
                                     &mut ctx.pending_outputs,
                                 );
 
@@ -639,6 +637,7 @@ impl<H: AsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
                                         &stage_flow_context,
                                         &ctx.instrumentation,
                                         Duration::from_nanos(0),
+                                        observer_scope,
                                         &mut ctx.pending_outputs,
                                     );
                                 }
@@ -671,6 +670,7 @@ impl<H: AsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
                                         &stage_flow_context,
                                         &ctx.instrumentation,
                                         Duration::from_nanos(0),
+                                        observer_scope,
                                         &mut ctx.pending_outputs,
                                     );
                                     self.pending_boundary_begin_drain = true;
@@ -712,6 +712,7 @@ impl<H: AsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
                                         &stage_flow_context,
                                         &ctx.instrumentation,
                                         Duration::from_nanos(0),
+                                        observer_scope,
                                         &mut ctx.pending_outputs,
                                     );
                                     self.pending_boundary_error = Some(error);
