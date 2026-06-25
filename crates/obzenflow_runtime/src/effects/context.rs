@@ -122,7 +122,9 @@ pub struct EffectInvocationContext {
     pub heartbeat_state: Option<Arc<HeartbeatState>>,
     pub parent: EventEnvelope<ChainEvent>,
     pub effect_history: Option<Arc<EffectHistory>>,
-    pub effect_runtime_mode: EffectRuntimeMode,
+    /// Runtime execution strategy (FLOWIP-120r): one authority for the
+    /// replay-versus-live decision at the effect boundary.
+    pub runtime_execution: crate::execution::RuntimeExecution,
     pub effect_ports: EffectPortRegistry,
     pub effect_declarations: Vec<EffectDeclaration>,
     pub synthesized_outcomes: Vec<SynthesizedOutcomeRegistration>,
@@ -187,6 +189,13 @@ impl EffectInvocationContext {
     }
 }
 
+// FLOWIP-120r: the runtime execution strategy (`crate::execution`) is now the
+// single replay-versus-live authority. `EffectRuntimeMode` survives only as a
+// test parameterization aid (the `RuntimeExecution::from_effect_runtime_mode`
+// bridge maps it to a strategy); the per-dispatch scope helper, the
+// archive-to-mode derivation, and the scope `From` impl are gone, replaced by
+// the strategy.
+#[cfg(test)]
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum EffectRuntimeMode {
     #[default]
@@ -195,71 +204,6 @@ pub enum EffectRuntimeMode {
     ResumeIncomplete,
 }
 
-impl EffectRuntimeMode {
-    pub fn from_replay_archive(archive: Option<&dyn ReplayArchive>) -> Self {
-        let Some(archive) = archive else {
-            return Self::Live;
-        };
-
-        if matches!(
-            archive.archive_status(),
-            ArchiveStatus::Completed | ArchiveStatus::Cancelled
-        ) {
-            Self::ReplayStrict
-        } else if archive.allow_incomplete_archive() {
-            Self::ResumeIncomplete
-        } else {
-            Self::ReplayStrict
-        }
-    }
-}
-
-/// Compute the middleware execution scope for one dispatched event
-/// (FLOWIP-120c H3).
-///
-/// Supervisors hold the delivered position at dispatch and call this per
-/// event, replacing the build-time-static `with_execution_scope` binding on
-/// the middleware wrappers. Today the decision depends only on the stage's
-/// runtime mode; FLOWIP-120n's resume phase predicate adds the
-/// position-versus-seeded-high-water-mark comparison here, which is why the
-/// delivered position already rides the signature.
-pub fn scope_for_dispatch(
-    mode: EffectRuntimeMode,
-    position: Option<crate::messaging::upstream_subscription::StageInputPosition>,
-) -> obzenflow_core::MiddlewareExecutionScope {
-    let _ = position;
-    mode.into()
-}
-
-/// Map a stage's effect runtime mode onto the handler-level middleware execution
-/// scope (FLOWIP-120a). Live runs reconstruct nothing, so handler middleware runs
-/// live. Strict replay and incomplete-archive resume both reconstruct the handler
-/// shell from recorded events, so handler-level control middleware must suppress
-/// its side effects. Live work that resume performs happens at the effect boundary,
-/// which is scoped separately as `LiveEffectBoundary`.
-impl From<EffectRuntimeMode> for obzenflow_core::MiddlewareExecutionScope {
-    fn from(mode: EffectRuntimeMode) -> Self {
-        match mode {
-            EffectRuntimeMode::Live => Self::LiveHandler,
-            EffectRuntimeMode::ReplayStrict => Self::StrictReplayHandler,
-            EffectRuntimeMode::ResumeIncomplete => Self::ResumeHandler,
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::messaging::upstream_subscription::StageInputPosition;
-
-    #[test]
-    fn resume_scope_remains_reconstruction_until_phase_predicate_lands() {
-        assert_eq!(
-            scope_for_dispatch(
-                EffectRuntimeMode::ResumeIncomplete,
-                Some(StageInputPosition(42))
-            ),
-            obzenflow_core::MiddlewareExecutionScope::ResumeHandler
-        );
-    }
-}
+// FLOWIP-120r: the former `resume_scope_remains_reconstruction_until_phase_predicate_lands`
+// test moved to `crate::execution` (the strategy policy matrix), which now owns
+// the replay-incomplete -> ResumeHandler mapping.

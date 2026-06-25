@@ -8,7 +8,6 @@
 //! Unlike transforms which have single upstream, joins track two distinct upstreams
 //! (reference and stream) with different behaviors.
 
-use crate::effects::{scope_for_dispatch, EffectRuntimeMode};
 use crate::stages::observer::StageLifecyclePhase;
 use obzenflow_core::event::context::{FlowContext, StageType};
 use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
@@ -295,10 +294,8 @@ pub struct JoinContext<H: JoinHandler> {
     /// Runtime observer bundle attached to this stage.
     pub observers: crate::stages::observer::StageObserverBundle,
 
-    /// Effect runtime mode (live vs replay) for this stage. Used to derive the
-    /// observer execution scope so live-only observers are suppressed under
-    /// strict replay and resume, instead of hard-coding a live scope.
-    pub effect_runtime_mode: EffectRuntimeMode,
+    /// Runtime execution strategy (FLOWIP-120r).
+    pub runtime_execution: crate::execution::RuntimeExecution,
 
     /// Flow name for flow context
     pub flow_name: String,
@@ -395,7 +392,8 @@ pub struct JoinContext<H: JoinHandler> {
     pub backpressure_readers: HashMap<StageId, BackpressureReader>,
 
     /// Pending data outputs blocked on downstream credits (Phase 1: bounded to one input).
-    pub(crate) pending_outputs: VecDeque<ChainEvent>,
+    pub(crate) pending_outputs:
+        VecDeque<crate::stages::common::supervision::backpressure_drain::PendingOutput>,
 
     /// Parent envelope for pending outputs (input that produced them).
     pub(crate) pending_parent: Option<EventEnvelope<ChainEvent>>,
@@ -550,7 +548,7 @@ impl<H: JoinHandler + Send + Sync + 'static> FsmAction for JoinAction<H> {
                     ctx.stage_id,
                     &ctx.stage_name,
                     &flow_context,
-                    scope_for_dispatch(ctx.effect_runtime_mode, None),
+                    ctx.runtime_execution.dispatch_scope(ctx.stage_id, None),
                     StageLifecyclePhase::Running,
                     &ctx.data_journal,
                     &ctx.instrumentation,
@@ -696,7 +694,7 @@ impl<H: JoinHandler + Send + Sync + 'static> FsmAction for JoinAction<H> {
                     ctx.stage_id,
                     &ctx.stage_name,
                     &flow_context,
-                    scope_for_dispatch(ctx.effect_runtime_mode, None),
+                    ctx.runtime_execution.dispatch_scope(ctx.stage_id, None),
                     StageLifecyclePhase::Completed,
                     &ctx.data_journal,
                     &ctx.instrumentation,
@@ -734,7 +732,7 @@ impl<H: JoinHandler + Send + Sync + 'static> FsmAction for JoinAction<H> {
                     ctx.stage_id,
                     &ctx.stage_name,
                     &flow_context,
-                    scope_for_dispatch(ctx.effect_runtime_mode, None),
+                    ctx.runtime_execution.dispatch_scope(ctx.stage_id, None),
                     StageLifecyclePhase::Failed,
                     &ctx.data_journal,
                     &ctx.instrumentation,

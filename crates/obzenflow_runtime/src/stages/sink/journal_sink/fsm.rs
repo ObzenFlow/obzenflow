@@ -9,11 +9,10 @@
 //! data is written before shutdown.
 
 use crate::backpressure::{BackpressureReader, BackpressureWriter};
-use crate::effects::{EffectDeclaration, EffectHistory, EffectPortRegistry, EffectRuntimeMode};
+use crate::effects::{EffectDeclaration, EffectHistory, EffectPortRegistry};
 use crate::messaging::upstream_subscription::{ContractConfig, ContractsWiring, ReaderProgress};
 use crate::messaging::UpstreamSubscription;
 use crate::metrics::instrumentation::StageInstrumentation;
-use crate::replay::ReplayArchive;
 use crate::stages::common::control_strategies::SignalGate;
 use crate::stages::common::handlers::UnifiedSinkHandler;
 use crate::stages::common::heartbeat::HeartbeatHandle;
@@ -22,7 +21,7 @@ use crate::stages::observer::dispatch::run_stage_lifecycle_observers;
 use crate::stages::observer::{StageLifecyclePhase, StageObserverBundle};
 use crate::stages::resources_builder::BoundSubscriptionFactory;
 use obzenflow_core::event::context::causality_context::CausalityContext;
-use obzenflow_core::event::context::{FlowContext, MiddlewareExecutionScope, StageType};
+use obzenflow_core::event::context::{FlowContext, StageType};
 use obzenflow_core::event::payloads::delivery_payload::DeliveryPayload;
 use obzenflow_core::event::{ChainEventFactory, EventEnvelope, SystemEvent};
 use obzenflow_core::journal::Journal;
@@ -298,14 +297,11 @@ pub struct JournalSinkContext<H: UnifiedSinkHandler> {
     /// Data journal for writing delivery events
     pub data_journal: Arc<dyn Journal<ChainEvent>>,
 
-    /// Replay archive for loading recorded effect outcomes.
-    pub replay_archive: Option<Arc<dyn ReplayArchive>>,
-
     /// Recorded effect outcomes for replay suppression.
     pub effect_history: Option<Arc<EffectHistory>>,
 
-    /// Effect execution mode derived from the replay archive state.
-    pub effect_runtime_mode: EffectRuntimeMode,
+    /// Runtime execution strategy (FLOWIP-120r).
+    pub runtime_execution: crate::execution::RuntimeExecution,
 
     /// Flow-scoped typed ports available to replay-safe effects.
     pub effect_ports: EffectPortRegistry,
@@ -406,7 +402,9 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAct
 
                 ctx.subscription = Some(subscription);
 
-                if let Some(archive) = &ctx.replay_archive {
+                // archive-io: recorded effect history is genuine I/O, not a phase decision (FLOWIP-120r).
+                let recorded_history = ctx.runtime_execution.archive_for_io();
+                if let Some(archive) = recorded_history {
                     let history = EffectHistory::load(archive, &ctx.stage_name)
                         .await
                         .map_err(|e| {
@@ -441,11 +439,7 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAct
                     stage_id: ctx.stage_id,
                     stage_type: StageType::Sink,
                 };
-                let scope = if ctx.replay_archive.is_some() {
-                    MiddlewareExecutionScope::StrictReplayHandler
-                } else {
-                    MiddlewareExecutionScope::LiveHandler
-                };
+                let scope = ctx.runtime_execution.stage_scope(ctx.stage_id);
                 run_stage_lifecycle_observers(
                     &ctx.observers,
                     ctx.stage_id,
@@ -487,11 +481,7 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAct
                     stage_id: ctx.stage_id,
                     stage_type: StageType::Sink,
                 };
-                let scope = if ctx.replay_archive.is_some() {
-                    MiddlewareExecutionScope::StrictReplayHandler
-                } else {
-                    MiddlewareExecutionScope::LiveHandler
-                };
+                let scope = ctx.runtime_execution.stage_scope(ctx.stage_id);
                 run_stage_lifecycle_observers(
                     &ctx.observers,
                     ctx.stage_id,
@@ -530,11 +520,7 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAct
                     stage_id: ctx.stage_id,
                     stage_type: StageType::Sink,
                 };
-                let scope = if ctx.replay_archive.is_some() {
-                    MiddlewareExecutionScope::StrictReplayHandler
-                } else {
-                    MiddlewareExecutionScope::LiveHandler
-                };
+                let scope = ctx.runtime_execution.stage_scope(ctx.stage_id);
                 run_stage_lifecycle_observers(
                     &ctx.observers,
                     ctx.stage_id,

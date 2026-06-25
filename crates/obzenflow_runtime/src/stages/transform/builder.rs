@@ -98,7 +98,13 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
         let cycle_guard_config = self.config.cycle_guard.clone();
         let heartbeat_config = self.heartbeat_config.clone();
 
-        let heartbeat = if self.resources.replay_archive.is_some() || !heartbeat_config.enabled {
+        let heartbeat = if self
+            .resources
+            .runtime_execution
+            .heartbeat_policy_for(self.config.stage_id)
+            == crate::execution::HeartbeatExecutionPolicy::Suppressed
+            || !heartbeat_config.enabled
+        {
             None
         } else {
             let heartbeat_state = HeartbeatState::new(self.resources.upstream_stages.clone());
@@ -122,9 +128,8 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
             flow_name: self.config.flow_name.clone(),
             flow_id: self.resources.flow_id,
             data_journal: self.resources.data_journal.clone(),
-            replay_archive: self.resources.replay_archive.clone(),
             effect_history: None,
-            effect_runtime_mode: self.resources.effect_runtime_mode,
+            runtime_execution: self.resources.runtime_execution.clone(),
             effect_ports: self.resources.effect_ports.clone(),
             effect_declarations: self.resources.effect_declarations.clone(),
             synthesized_outcomes: self.resources.synthesized_outcomes.clone(),

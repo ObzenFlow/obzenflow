@@ -61,9 +61,6 @@ pub(super) async fn dispatch_accumulating<
         sup.stage_id,
         StageType::Stateful,
     );
-    let pending_observer_scope =
-        crate::effects::scope_for_dispatch(ctx.effect_runtime_mode, ctx.last_input_position);
-
     if sup.subscription.is_none() {
         sup.subscription = ctx.subscription.take();
     }
@@ -85,7 +82,6 @@ pub(super) async fn dispatch_accumulating<
             &mut ctx.backpressure_backoff,
             Some(&ctx.output_contract),
             Some(&ctx.observers),
-            pending_observer_scope,
             &mut ctx.pending_outputs,
         )
         .await?
@@ -267,7 +263,7 @@ pub(super) async fn dispatch_accumulating<
                             heartbeat_state: heartbeat_state.clone(),
                             parent: envelope.clone(),
                             effect_history: ctx.effect_history.clone(),
-                            effect_runtime_mode: ctx.effect_runtime_mode,
+                            runtime_execution: ctx.runtime_execution.clone(),
                             effect_ports: ctx.effect_ports.clone(),
                             effect_declarations: ctx.effect_declarations.clone(),
                             synthesized_outcomes: Vec::new(),
@@ -299,10 +295,9 @@ pub(super) async fn dispatch_accumulating<
                     });
 
                     // FLOWIP-120c H3: per-event middleware execution scope.
-                    let scope = crate::effects::scope_for_dispatch(
-                        ctx.effect_runtime_mode,
-                        stage_input_position,
-                    );
+                    let scope = ctx
+                        .runtime_execution
+                        .dispatch_scope(ctx.stage_id, stage_input_position);
                     let observer_ctx = StatefulObserverContext {
                         stage_id: ctx.stage_id,
                         stage_name: &ctx.stage_name,
@@ -586,8 +581,9 @@ pub(super) async fn dispatch_emitting<
         sup.stage_id,
         StageType::Stateful,
     );
-    let observer_scope =
-        crate::effects::scope_for_dispatch(ctx.effect_runtime_mode, ctx.last_input_position);
+    let observer_scope = ctx
+        .runtime_execution
+        .dispatch_scope(ctx.stage_id, ctx.last_input_position);
 
     if sup.subscription.is_none() {
         sup.subscription = ctx.subscription.take();
@@ -616,7 +612,6 @@ pub(super) async fn dispatch_emitting<
                 &mut ctx.backpressure_backoff,
                 Some(&ctx.output_contract),
                 Some(&ctx.observers),
-                observer_scope,
                 &mut ctx.pending_outputs,
             )
             .await?
@@ -755,7 +750,13 @@ pub(super) async fn dispatch_emitting<
                         .await
                         .map_err(|e| format!("Failed to write stateful error event: {e}"))?;
                 } else {
-                    ctx.pending_outputs.push_back(event);
+                    let scope = observer_scope;
+                    ctx.pending_outputs.push_back(
+                        crate::stages::common::supervision::backpressure_drain::PendingOutput {
+                            event,
+                            scope,
+                        },
+                    );
                 }
             }
 

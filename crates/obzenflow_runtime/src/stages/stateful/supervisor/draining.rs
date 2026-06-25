@@ -51,9 +51,11 @@ pub(super) async fn dispatch_draining<
         sup.stage_id,
         StageType::Stateful,
     );
-    let observer_scope =
-        crate::effects::scope_for_dispatch(ctx.effect_runtime_mode, ctx.last_input_position);
-
+    // FLOWIP-120r: per-event observer dispatch scope (distinct from the frozen
+    // scope each pending output now carries through the drain).
+    let observer_scope = ctx
+        .runtime_execution
+        .dispatch_scope(ctx.stage_id, ctx.last_input_position);
     if sup.subscription.is_none() {
         sup.subscription = ctx.subscription.take();
     }
@@ -74,7 +76,6 @@ pub(super) async fn dispatch_draining<
             &mut ctx.backpressure_backoff,
             Some(&ctx.output_contract),
             Some(&ctx.observers),
-            observer_scope,
             &mut ctx.pending_outputs,
         )
         .await?
@@ -155,7 +156,7 @@ pub(super) async fn dispatch_draining<
                             heartbeat_state: ctx.heartbeat.as_ref().map(|h| h.state.clone()),
                             parent: envelope.clone(),
                             effect_history: ctx.effect_history.clone(),
-                            effect_runtime_mode: ctx.effect_runtime_mode,
+                            runtime_execution: ctx.runtime_execution.clone(),
                             effect_ports: ctx.effect_ports.clone(),
                             effect_declarations: ctx.effect_declarations.clone(),
                             synthesized_outcomes: Vec::new(),
@@ -189,10 +190,9 @@ pub(super) async fn dispatch_draining<
                     });
 
                     // FLOWIP-120c H3: per-event middleware execution scope.
-                    let scope = crate::effects::scope_for_dispatch(
-                        ctx.effect_runtime_mode,
-                        stage_input_position,
-                    );
+                    let scope = ctx
+                        .runtime_execution
+                        .dispatch_scope(ctx.stage_id, stage_input_position);
                     let observer_ctx = StatefulObserverContext {
                         stage_id: ctx.stage_id,
                         stage_name: &ctx.stage_name,
@@ -395,7 +395,13 @@ pub(super) async fn dispatch_draining<
                                                     )
                                                 })?;
                                         } else {
-                                            ctx.pending_outputs.push_back(out);
+                                            let scope = observer_scope;
+                                            ctx.pending_outputs.push_back(
+                                                crate::stages::common::supervision::backpressure_drain::PendingOutput {
+                                                    event: out,
+                                                    scope,
+                                                },
+                                            );
                                         }
                                     }
 
@@ -451,7 +457,13 @@ pub(super) async fn dispatch_draining<
                                     if let Some(upstream) = upstream_stage {
                                         ctx.pending_ack_upstream = Some(upstream);
                                     }
-                                    ctx.pending_outputs.push_back(error_event);
+                                    let scope = observer_scope;
+                                    ctx.pending_outputs.push_back(
+                                        crate::stages::common::supervision::backpressure_drain::PendingOutput {
+                                            event: error_event,
+                                            scope,
+                                        },
+                                    );
                                 }
 
                                 // Keep draining; do not transition to Failed on per-record handler errors.
@@ -623,7 +635,13 @@ pub(super) async fn dispatch_draining<
                             format!("Failed to write stateful drain() error event: {e}")
                         })?;
                 } else {
-                    ctx.pending_outputs.push_back(event);
+                    let scope = observer_scope;
+                    ctx.pending_outputs.push_back(
+                        crate::stages::common::supervision::backpressure_drain::PendingOutput {
+                            event,
+                            scope,
+                        },
+                    );
                 }
             }
 

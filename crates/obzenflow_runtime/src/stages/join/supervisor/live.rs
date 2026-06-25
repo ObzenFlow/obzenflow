@@ -895,7 +895,7 @@ async fn write_stage_outputs_and_ack<H: JoinHandler>(
     subscription: &mut crate::messaging::UpstreamSubscription<ChainEvent>,
     ctx: &mut JoinContext<H>,
     source_id: obzenflow_core::StageId,
-    mut outputs: VecDeque<ChainEvent>,
+    outputs: VecDeque<ChainEvent>,
     pending_parent: Option<&EventEnvelope<ChainEvent>>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if outputs.is_empty() {
@@ -914,6 +914,20 @@ async fn write_stage_outputs_and_ack<H: JoinHandler>(
         StageType::Join,
     );
 
+    // FLOWIP-120r: freeze the join's execution scope onto each deferred output.
+    let scope = ctx.runtime_execution.stage_scope(ctx.stage_id);
+    let mut outputs: VecDeque<
+        crate::stages::common::supervision::backpressure_drain::PendingOutput,
+    > = outputs
+        .into_iter()
+        .map(
+            |event| crate::stages::common::supervision::backpressure_drain::PendingOutput {
+                event,
+                scope,
+            },
+        )
+        .collect();
+
     while let Some(event) = outputs.pop_front() {
         match drain_one_pending(
             event,
@@ -929,7 +943,6 @@ async fn write_stage_outputs_and_ack<H: JoinHandler>(
             &mut ctx.backpressure_backoff,
             Some(&ctx.output_contract),
             Some(&ctx.observers),
-            crate::effects::scope_for_dispatch(ctx.effect_runtime_mode, None),
             &mut outputs,
         )
         .await?

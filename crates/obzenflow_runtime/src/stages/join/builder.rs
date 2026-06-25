@@ -124,7 +124,13 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Superviso
         }
 
         let heartbeat_config = self.heartbeat_config.clone();
-        let heartbeat = if self.resources.replay_archive.is_some() || !heartbeat_config.enabled {
+        let heartbeat = if self
+            .resources
+            .runtime_execution
+            .heartbeat_policy_for(self.config.stage_id)
+            == crate::execution::HeartbeatExecutionPolicy::Suppressed
+            || !heartbeat_config.enabled
+        {
             None
         } else {
             let heartbeat_state = HeartbeatState::new(self.resources.upstream_stages.clone());
@@ -149,7 +155,7 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Superviso
             stage_name: self.config.stage_name.clone(),
             observers: self.config.observers.clone(),
             flow_name: self.config.flow_name.clone(),
-            effect_runtime_mode: self.resources.effect_runtime_mode,
+            runtime_execution: self.resources.runtime_execution.clone(),
             flow_id: self.resources.flow_id,
             reference_stage_id: self.config.reference_source_id,
             data_journal: self.resources.data_journal.clone(),

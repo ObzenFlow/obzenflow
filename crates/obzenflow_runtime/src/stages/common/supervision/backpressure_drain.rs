@@ -63,9 +63,18 @@ pub(crate) enum DrainAttempt {
 /// The caller supplies all the context fields individually so that this helper
 /// does not require a reference to the full FSM context. This avoids borrow
 /// conflicts when the subscription is held separately.
+/// A backpressure-deferred output carrying the execution scope frozen at the
+/// moment it was produced (FLOWIP-120r). A late flush after a resume handoff
+/// then stays scoped as it was produced rather than re-judged at drain time.
+#[derive(Debug, Clone)]
+pub(crate) struct PendingOutput {
+    pub(crate) event: ChainEvent,
+    pub(crate) scope: obzenflow_core::MiddlewareExecutionScope,
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn drain_one_pending(
-    pending: ChainEvent,
+    pending: PendingOutput,
     flow_context: &FlowContext,
     stage_id: StageId,
     heartbeat_state: Option<Arc<HeartbeatState>>,
@@ -78,8 +87,7 @@ pub(crate) async fn drain_one_pending(
     backpressure_backoff: &mut IdleBackoff,
     output_contract: Option<&StageOutputContract>,
     observers: Option<&crate::stages::observer::StageObserverBundle>,
-    observer_scope: obzenflow_core::MiddlewareExecutionScope,
-    pending_outputs: &mut std::collections::VecDeque<ChainEvent>,
+    pending_outputs: &mut std::collections::VecDeque<PendingOutput>,
 ) -> Result<DrainOutcome, Box<dyn std::error::Error + Send + Sync>> {
     match drain_one_pending_resolve(
         pending,
@@ -95,7 +103,6 @@ pub(crate) async fn drain_one_pending(
         backpressure_backoff,
         output_contract,
         observers,
-        observer_scope,
         pending_outputs,
     )
     .await?
@@ -117,7 +124,7 @@ pub(crate) async fn drain_one_pending(
 /// `tokio::select!` to remain responsive to external events).
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn drain_one_pending_resolve(
-    pending: ChainEvent,
+    pending: PendingOutput,
     flow_context: &FlowContext,
     stage_id: StageId,
     heartbeat_state: Option<Arc<HeartbeatState>>,
@@ -130,10 +137,9 @@ pub(crate) async fn drain_one_pending_resolve(
     backpressure_backoff: &mut IdleBackoff,
     output_contract: Option<&StageOutputContract>,
     observers: Option<&crate::stages::observer::StageObserverBundle>,
-    observer_scope: obzenflow_core::MiddlewareExecutionScope,
-    pending_outputs: &mut std::collections::VecDeque<ChainEvent>,
+    pending_outputs: &mut std::collections::VecDeque<PendingOutput>,
 ) -> Result<DrainAttempt, Box<dyn std::error::Error + Send + Sync>> {
-    let is_data = pending.is_data();
+    let is_data = pending.event.is_data();
 
     // FLOWIP-120b Step 1: the commit core (flow/runtime enrichment, per-type
     // counting, journal append, heartbeat tracking, middleware mirror) is owned
@@ -148,12 +154,12 @@ pub(crate) async fn drain_one_pending_resolve(
         heartbeat_state: heartbeat_state.as_ref(),
         output_contract,
         observers,
-        observer_scope,
+        observer_scope: pending.scope,
     };
 
     if is_data {
         committer.validate_prebuilt(
-            &pending,
+            &pending.event,
             CommitOptions {
                 count_output: true,
                 validate_output_contract: true,
@@ -195,7 +201,7 @@ pub(crate) async fn drain_one_pending_resolve(
 
         committer
             .commit_prebuilt(
-                pending,
+                pending.event,
                 pending_parent,
                 CommitOptions {
                     count_output: true,
@@ -213,7 +219,7 @@ pub(crate) async fn drain_one_pending_resolve(
         // Non-data events bypass credit gating.
         committer
             .commit_prebuilt(
-                pending,
+                pending.event,
                 pending_parent,
                 CommitOptions {
                     count_output: false,

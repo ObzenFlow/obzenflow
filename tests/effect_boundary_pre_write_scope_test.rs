@@ -25,7 +25,8 @@ use obzenflow_adapters::middleware::{
 };
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
 use obzenflow_core::{MiddlewareExecutionScope, StageId, WriterId};
-use obzenflow_runtime::effects::{EffectInvocationContext, EffectRuntimeMode};
+use obzenflow_runtime::effects::EffectInvocationContext;
+use obzenflow_runtime::execution::{RuntimeExecution, RuntimeMode};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::transform::traits::UnifiedTransformHandler;
 
@@ -118,7 +119,7 @@ async fn effectful_results_pre_write_carries_stage_scope() {
 
     let event = ChainEventFactory::data_event(WriterId::from(StageId::new()), "test", json!({}));
     let effect_context = EffectInvocationContextBuilder::new()
-        .with_runtime_mode(EffectRuntimeMode::ReplayStrict)
+        .with_runtime_execution(RuntimeExecution::new(RuntimeMode::Replay, None))
         .build();
 
     wrapped

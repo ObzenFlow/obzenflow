@@ -512,7 +512,10 @@ fn invocation_context_with_mode(
         heartbeat_state: None,
         parent,
         effect_history,
-        effect_runtime_mode,
+        runtime_execution: crate::execution::RuntimeExecution::from_effect_runtime_mode(
+            effect_runtime_mode,
+            None,
+        ),
         effect_ports,
         effect_declarations: vec![
             EffectDeclaration::of::<CountingEffect>(),
@@ -2706,7 +2709,10 @@ async fn transactional_boundary_abort_restores_output_ordinal() {
         heartbeat_state: None,
         parent: parent.clone(),
         effect_history: None,
-        effect_runtime_mode: EffectRuntimeMode::Live,
+        runtime_execution: crate::execution::RuntimeExecution::new(
+            crate::execution::RuntimeMode::Live,
+            None,
+        ),
         effect_ports: ports,
         effect_declarations: vec![
             EffectDeclaration::of::<CountingEffect>(),

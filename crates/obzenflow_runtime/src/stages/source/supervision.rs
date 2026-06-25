@@ -67,7 +67,10 @@ pub(crate) fn emit_batch_to_pending_outputs(
     stage_flow_context: &FlowContext,
     instrumentation: &Arc<StageInstrumentation>,
     per_data_event_duration: Duration,
-    pending_outputs: &mut VecDeque<ChainEvent>,
+    scope: obzenflow_core::MiddlewareExecutionScope,
+    pending_outputs: &mut VecDeque<
+        crate::stages::common::supervision::backpressure_drain::PendingOutput,
+    >,
 ) {
     for event in events {
         let staged_event = event.with_flow_context(stage_flow_context.clone());
@@ -84,7 +87,12 @@ pub(crate) fn emit_batch_to_pending_outputs(
                 .fetch_add(1, Ordering::Relaxed);
             instrumentation.record_processing_time(per_data_event_duration);
         }
-        pending_outputs.push_back(staged_event);
+        pending_outputs.push_back(
+            crate::stages::common::supervision::backpressure_drain::PendingOutput {
+                event: staged_event,
+                scope,
+            },
+        );
     }
 }
 
@@ -176,7 +184,10 @@ pub(crate) fn stage_source_poll_outputs(
     stage_flow_context: &FlowContext,
     instrumentation: &Arc<StageInstrumentation>,
     poll_duration: Duration,
-    pending_outputs: &mut VecDeque<ChainEvent>,
+    scope: obzenflow_core::MiddlewareExecutionScope,
+    pending_outputs: &mut VecDeque<
+        crate::stages::common::supervision::backpressure_drain::PendingOutput,
+    >,
 ) {
     let data_events_in_tick = events.iter().filter(|event| event.is_data()).count();
     let per_data_event_duration =
@@ -186,6 +197,7 @@ pub(crate) fn stage_source_poll_outputs(
         stage_flow_context,
         instrumentation,
         per_data_event_duration,
+        scope,
         pending_outputs,
     );
 }
@@ -194,7 +206,10 @@ pub(crate) fn stage_boundary_control_events(
     control_events: Vec<ChainEvent>,
     stage_flow_context: &FlowContext,
     instrumentation: &Arc<StageInstrumentation>,
-    pending_outputs: &mut VecDeque<ChainEvent>,
+    scope: obzenflow_core::MiddlewareExecutionScope,
+    pending_outputs: &mut VecDeque<
+        crate::stages::common::supervision::backpressure_drain::PendingOutput,
+    >,
 ) -> bool {
     if control_events.is_empty() {
         return false;
@@ -205,6 +220,7 @@ pub(crate) fn stage_boundary_control_events(
         stage_flow_context,
         instrumentation,
         Duration::from_nanos(0),
+        scope,
         pending_outputs,
     );
     true
@@ -212,7 +228,9 @@ pub(crate) fn stage_boundary_control_events(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn drain_pending_outputs_sync(
-    pending_outputs: &mut VecDeque<ChainEvent>,
+    pending_outputs: &mut VecDeque<
+        crate::stages::common::supervision::backpressure_drain::PendingOutput,
+    >,
     stage_flow_context: &FlowContext,
     stage_id: StageId,
     heartbeat_state: Option<Arc<HeartbeatState>>,
@@ -225,16 +243,17 @@ pub(crate) async fn drain_pending_outputs_sync(
     backpressure_backoff: &mut IdleBackoff,
     output_contract: Option<&StageOutputContract>,
     observers: Option<&crate::stages::observer::StageObserverBundle>,
-    observer_scope: obzenflow_core::MiddlewareExecutionScope,
 ) -> Result<bool, BoxError> {
     while let Some(pending) = pending_outputs.pop_front() {
         if matches!(
-            pending.processing_info.status,
+            pending.event.processing_info.status,
             ProcessingStatus::Error { .. }
         ) {
-            let pending = pending.with_runtime_context(instrumentation.snapshot_with_control());
+            let event = pending
+                .event
+                .with_runtime_context(instrumentation.snapshot_with_control());
             error_journal
-                .append(pending, None)
+                .append(event, None)
                 .await
                 .map_err(|e| format!("Failed to write event: {e}"))?;
             continue;
@@ -254,7 +273,6 @@ pub(crate) async fn drain_pending_outputs_sync(
             backpressure_backoff,
             output_contract,
             observers,
-            observer_scope,
             pending_outputs,
         )
         .await?
@@ -269,7 +287,9 @@ pub(crate) async fn drain_pending_outputs_sync(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn drain_pending_outputs_async<E>(
-    pending_outputs: &mut VecDeque<ChainEvent>,
+    pending_outputs: &mut VecDeque<
+        crate::stages::common::supervision::backpressure_drain::PendingOutput,
+    >,
     stage_flow_context: &FlowContext,
     stage_id: StageId,
     heartbeat_state: Option<Arc<HeartbeatState>>,
@@ -282,7 +302,6 @@ pub(crate) async fn drain_pending_outputs_async<E>(
     backpressure_backoff: &mut IdleBackoff,
     output_contract: Option<&StageOutputContract>,
     observers: Option<&crate::stages::observer::StageObserverBundle>,
-    observer_scope: obzenflow_core::MiddlewareExecutionScope,
     external_events: &mut EventReceiver<E>,
     on_channel_closed: impl FnOnce() -> E,
 ) -> Result<Option<EventLoopDirective<E>>, BoxError>
@@ -293,12 +312,14 @@ where
 
     while let Some(pending) = pending_outputs.pop_front() {
         if matches!(
-            pending.processing_info.status,
+            pending.event.processing_info.status,
             ProcessingStatus::Error { .. }
         ) {
-            let pending = pending.with_runtime_context(instrumentation.snapshot_with_control());
+            let event = pending
+                .event
+                .with_runtime_context(instrumentation.snapshot_with_control());
             error_journal
-                .append(pending, None)
+                .append(event, None)
                 .await
                 .map_err(|e| format!("Failed to write event: {e}"))?;
             continue;
@@ -318,7 +339,6 @@ where
             backpressure_backoff,
             output_contract,
             observers,
-            observer_scope,
             pending_outputs,
         )
         .await?
@@ -488,17 +508,19 @@ mod tests {
             vec![control_event],
             &stage_flow_context,
             &instrumentation,
+            obzenflow_core::MiddlewareExecutionScope::LiveHandler,
             &mut pending_outputs,
         ));
         assert_eq!(pending_outputs.len(), 1);
         let staged = pending_outputs.pop_front().expect("staged control event");
-        assert_eq!(staged.flow_context.stage_name, "source");
-        assert_eq!(staged.flow_context.stage_id, stage_id);
+        assert_eq!(staged.event.flow_context.stage_name, "source");
+        assert_eq!(staged.event.flow_context.stage_id, stage_id);
 
         assert!(!stage_boundary_control_events(
             Vec::new(),
             &stage_flow_context,
             &instrumentation,
+            obzenflow_core::MiddlewareExecutionScope::LiveHandler,
             &mut pending_outputs,
         ));
         assert!(pending_outputs.is_empty());
@@ -542,11 +564,16 @@ mod tests {
         };
 
         let mut pending_outputs = VecDeque::new();
-        pending_outputs.push_back(ChainEventFactory::data_event(
-            WriterId::from(s),
-            "test.event",
-            serde_json::json!({"x": 1}),
-        ));
+        pending_outputs.push_back(
+            crate::stages::common::supervision::backpressure_drain::PendingOutput {
+                event: ChainEventFactory::data_event(
+                    WriterId::from(s),
+                    "test.event",
+                    serde_json::json!({"x": 1}),
+                ),
+                scope: obzenflow_core::MiddlewareExecutionScope::LiveHandler,
+            },
+        );
 
         let mut backpressure_pulse = BackpressureActivityPulse::new();
         let mut backpressure_backoff = IdleBackoff::exponential_with_cap(
@@ -574,7 +601,6 @@ mod tests {
                 &mut backpressure_backoff,
                 None,
                 None,
-                obzenflow_core::MiddlewareExecutionScope::LiveHandler,
                 &mut receiver,
                 || TestEvent::ChannelClosed,
             )
