@@ -483,6 +483,24 @@ jobs:
             exit 1
           fi
 
+          # archive_for_io() is an I/O accessor, not a phase predicate. A direct
+          # presence-branch on it (`if let Some(...) = ...archive_for_io()` or
+          # `.archive_for_io().is_some()`) is the Gap-1 misuse: the replay-vs-live
+          # decision must come from source_phase_for / the strategy. Genuine I/O
+          # binds the archive separately first (see the `// archive-io:` effect-
+          # history loads), which does not match these patterns.
+          afio="$(
+            rg -n '\.archive_for_io\(\)\.is_some\(\)|if let Some\([^)]*\)\s*=\s*[^;]*\.archive_for_io\(\)' \
+              crates/obzenflow_runtime/src crates/obzenflow_dsl/src \
+              -g '!**/resources_builder.rs' -g '!**/tests.rs' -g '!**/tests/**' \
+              || true
+          )"
+          if [[ -n "${afio}" ]]; then
+            echo "FLOWIP-120r: archive_for_io() used as a phase predicate (use source_phase_for / the strategy):"
+            echo "${afio}"
+            exit 1
+          fi
+
           echo "OK: replay/live decisions go through the runtime execution strategy."
 
       - name: Install cargo-deny

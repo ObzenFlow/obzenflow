@@ -750,7 +750,7 @@ pub(super) async fn dispatch_emitting<
                         .await
                         .map_err(|e| format!("Failed to write stateful error event: {e}"))?;
                 } else {
-                    let scope = ctx.runtime_execution.stage_scope(ctx.stage_id);
+                    let scope = observer_scope;
                     ctx.pending_outputs.push_back(
                         crate::stages::common::supervision::backpressure_drain::PendingOutput {
                             event,

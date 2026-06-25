@@ -416,9 +416,15 @@ impl<H: AsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
                     .event_loops_total
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-                if let Some(replay_archive) =
-                    ctx.runtime_execution.archive_for_io().map(|a| a.as_ref())
-                {
+                if matches!(
+                    ctx.runtime_execution.source_phase_for(self.stage_id),
+                    crate::execution::SourceExecutionPhase::Replaying
+                ) {
+                    let replay_archive = ctx
+                        .runtime_execution
+                        .archive_for_io()
+                        .map(|a| a.as_ref())
+                        .expect("Replaying phase requires a replay archive (archive_for_io)");
                     if self.replay_driver.is_none() {
                         let stage_key = ctx.stage_name.as_str();
                         let journal_path = replay_archive
@@ -512,22 +518,32 @@ impl<H: AsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
                             Ok(EventLoopDirective::Continue)
                         }
                         Ok(None) => {
-                            let (replayed_count, skipped_count) = self
-                                .replay_driver
-                                .as_ref()
-                                .map_or((0, 0), |d| (d.replayed_events(), d.skipped_events()));
-                            self.replay_completion
-                                .maybe_emit_completed(
-                                    self.stage_id,
-                                    &ctx.stage_name,
-                                    &self.system_journal,
-                                    self.replay_started_at,
-                                    replayed_count,
-                                    skipped_count,
-                                )
-                                .await;
+                            match ctx.runtime_execution.source_replay_exhausted(self.stage_id) {
+                                crate::execution::SourceReplayExhaustion::Terminate => {
+                                    let (replayed_count, skipped_count) =
+                                        self.replay_driver.as_ref().map_or((0, 0), |d| {
+                                            (d.replayed_events(), d.skipped_events())
+                                        });
+                                    self.replay_completion
+                                        .maybe_emit_completed(
+                                            self.stage_id,
+                                            &ctx.stage_name,
+                                            &self.system_journal,
+                                            self.replay_started_at,
+                                            replayed_count,
+                                            skipped_count,
+                                        )
+                                        .await;
 
-                            Ok(EventLoopDirective::Transition(FiniteSourceEvent::Completed))
+                                    Ok(EventLoopDirective::Transition(FiniteSourceEvent::Completed))
+                                }
+                                // FLOWIP-120n: recorded prefix exhausted; drop the replay
+                                // driver and continue from the live handler.
+                                crate::execution::SourceReplayExhaustion::ContinueLive => {
+                                    self.replay_driver = None;
+                                    Ok(EventLoopDirective::Continue)
+                                }
+                            }
                         }
                         Err(e) => Ok(EventLoopDirective::Transition(FiniteSourceEvent::Error(
                             e.to_string(),

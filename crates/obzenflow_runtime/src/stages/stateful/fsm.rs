@@ -481,7 +481,9 @@ impl<H: UnifiedStatefulHandler + Send + Sync + 'static> FsmAction for StatefulAc
 
                     ctx.subscription = Some(subscription);
 
-                    if let Some(archive) = ctx.runtime_execution.archive_for_io() {
+                    // archive-io: recorded effect history is genuine I/O, not a phase decision (FLOWIP-120r).
+                    let recorded_history = ctx.runtime_execution.archive_for_io();
+                    if let Some(archive) = recorded_history {
                         let history = EffectHistory::load(archive, &ctx.stage_name)
                             .await
                             .map_err(|e| {
