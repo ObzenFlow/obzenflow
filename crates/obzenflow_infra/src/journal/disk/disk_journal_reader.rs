@@ -35,6 +35,7 @@ fn open_readable_std_file(path: &Path) -> Result<StdFile, JournalError> {
     } else {
         StdFile::options()
             .create(true)
+            .truncate(false)
             .read(true)
             .write(true)
             .open(path)
