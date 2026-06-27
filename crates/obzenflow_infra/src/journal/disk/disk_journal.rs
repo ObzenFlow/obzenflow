@@ -1054,4 +1054,58 @@ mod tests {
 
         std::fs::remove_dir_all(&test_dir).ok();
     }
+
+    #[tokio::test]
+    async fn live_tail_reader_resumes_after_a_corrupt_record() {
+        // FLOWIP-120q live-tail observer resilience: a live reader that hits a
+        // corrupt committed record reports it once, then resumes at the next
+        // record on the following poll, so a best-effort observer that keeps
+        // polling recovers rather than losing the rest of the stream.
+        let test_id = Uuid::new_v4();
+        let test_dir =
+            std::path::PathBuf::from(format!("target/test-logs/resume_corrupt_{test_id}"));
+        std::fs::create_dir_all(&test_dir).unwrap();
+        let log_path = test_dir.join("resume.log");
+        let writer_id = WriterId::from(StageId::new());
+
+        let log = DiskJournal::<ChainEvent>::with_owner(
+            log_path.clone(),
+            obzenflow_core::JournalOwner::stage(StageId::new()),
+        )
+        .unwrap();
+        for i in 0..3 {
+            let e = ChainEventFactory::data_event(writer_id, "e", serde_json::json!({"i": i}));
+            log.append(e, None).await.unwrap();
+        }
+
+        // Flip a byte inside the second record's body (just before its
+        // terminating newline) so its CRC no longer matches: committed corruption
+        // with intact records on either side.
+        let mut bytes = std::fs::read(&log_path).unwrap();
+        let newlines: Vec<usize> = bytes
+            .iter()
+            .enumerate()
+            .filter(|(_, &b)| b == b'\n')
+            .map(|(i, _)| i)
+            .collect();
+        let target = newlines[1] - 5;
+        bytes[target] ^= 0xff;
+        std::fs::write(&log_path, &bytes).unwrap();
+
+        let mut reader = log.reader().await.unwrap();
+        assert!(
+            reader.next().await.unwrap().is_some(),
+            "the first record reads cleanly"
+        );
+        assert!(
+            reader.next().await.is_err(),
+            "the corrupt middle record is reported as an error"
+        );
+        assert!(
+            reader.next().await.unwrap().is_some(),
+            "the reader resumes at the record after the corrupt one"
+        );
+
+        std::fs::remove_dir_all(&test_dir).ok();
+    }
 }
