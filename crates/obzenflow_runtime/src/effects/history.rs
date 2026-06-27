@@ -3,6 +3,7 @@
 // https://obzenflow.dev
 
 use super::*;
+use obzenflow_core::journal::ArchiveStatus;
 
 #[async_trait]
 pub trait EffectHistoryReader: Send {
@@ -45,12 +46,32 @@ impl EffectHistory {
             }
         }
 
-        Self::from_records(archive.archive_flow_id().to_string(), records)
+        // Only a non-`Completed` archive may carry a torn tail, so only then is
+        // an incomplete outcome group tolerated as absent.
+        Self::from_records_with_policy(
+            archive.archive_flow_id().to_string(),
+            records,
+            archive.archive_status() != ArchiveStatus::Completed,
+        )
     }
 
+    /// Tolerant constructor: a torn-tail incomplete outcome group is dropped as
+    /// absent. `load` uses [`Self::from_records_with_policy`] for the
+    /// status-derived policy.
     pub fn from_records(
         recorded_flow_id: impl Into<RecordedFlowId>,
         records: Vec<EffectRecord>,
+    ) -> Result<Self, EffectError> {
+        Self::from_records_with_policy(recorded_flow_id, records, true)
+    }
+
+    /// Build under an explicit torn-tail policy. With `tolerate_torn_tail` false
+    /// (a `Completed` archive), an incomplete outcome group is corruption and
+    /// fails loud instead of being dropped.
+    pub(crate) fn from_records_with_policy(
+        recorded_flow_id: impl Into<RecordedFlowId>,
+        records: Vec<EffectRecord>,
+        tolerate_torn_tail: bool,
     ) -> Result<Self, EffectError> {
         let fallback_recorded_flow_id = recorded_flow_id.into();
         let recorded_flow_id =
@@ -77,7 +98,7 @@ impl EffectHistory {
                 Ok(()) => {}
                 Err(EffectError::IncompleteOutcomeGroup {
                     expected, present, ..
-                }) => {
+                }) if tolerate_torn_tail => {
                     tracing::warn!(
                         ?cursor,
                         expected,
@@ -85,6 +106,16 @@ impl EffectHistory {
                         "dropping uncommitted effect outcome group (torn tail); effect treated as absent"
                     );
                     incomplete.push(cursor.clone());
+                }
+                // No torn tail permitted here, so an incomplete group is
+                // corruption, not an uncommitted tail. Fail loud rather than
+                // dropping it as absent.
+                Err(EffectError::IncompleteOutcomeGroup {
+                    expected, present, ..
+                }) => {
+                    return Err(EffectError::EffectProvenanceMismatch(format!(
+                        "effect outcome group for cursor {cursor:?} is incomplete (present {present} of {expected}) on a completed archive, which permits no torn tail"
+                    )));
                 }
                 Err(other) => return Err(other),
             }

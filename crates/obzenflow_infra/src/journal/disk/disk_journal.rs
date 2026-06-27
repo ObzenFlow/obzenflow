@@ -538,6 +538,10 @@ impl<T: JournalEvent + 'static> Journal<T> for DiskJournal<T> {
             return Ok(None);
         }
 
+        // Keep direct reads under the same journal read lock as full scans. Drop
+        // the index lock first so read_event never holds both locks with append.
+        let _read_guard = self.read_write_lock.read().await;
+
         // Read from file at specific offset
         let mut file = File::open(&self.path)
             .await
@@ -564,8 +568,10 @@ impl<T: JournalEvent + 'static> Journal<T> for DiskJournal<T> {
             Some((_, termination)) => match dispose(
                 classify_frame::<T>(&buf),
                 termination,
+                // Indexed offsets name committed records; an unterminated frame
+                // here is corruption.
                 ReadPolicy::SealedScan {
-                    tolerate_torn_tail: true,
+                    tolerate_torn_tail: false,
                 },
             ) {
                 Disposition::Yield(record) => Ok(Some(EventEnvelope {
@@ -1104,6 +1110,43 @@ mod tests {
         assert!(
             reader.next().await.unwrap().is_some(),
             "the reader resumes at the record after the corrupt one"
+        );
+
+        std::fs::remove_dir_all(&test_dir).ok();
+    }
+
+    #[tokio::test]
+    async fn read_event_fails_loud_on_externally_truncated_record() {
+        // A committed record truncated externally must fail loud, not return None.
+        let test_id = Uuid::new_v4();
+        let test_dir =
+            std::path::PathBuf::from(format!("target/test-logs/read_event_trunc_{test_id}"));
+        std::fs::create_dir_all(&test_dir).unwrap();
+        let log_path = test_dir.join("trunc.log");
+        let writer_id = WriterId::from(StageId::new());
+
+        let log = DiskJournal::<ChainEvent>::with_owner(
+            log_path.clone(),
+            obzenflow_core::JournalOwner::stage(StageId::new()),
+        )
+        .unwrap();
+        let env = log
+            .append(
+                ChainEventFactory::data_event(writer_id, "e", serde_json::json!({"i": 1})),
+                None,
+            )
+            .await
+            .unwrap();
+        let id = env.event.id;
+
+        // Truncate the committed record's frame (drop the newline and some body),
+        // leaving the index pointing at now-torn bytes.
+        let bytes = std::fs::read(&log_path).unwrap();
+        std::fs::write(&log_path, &bytes[..bytes.len() - 5]).unwrap();
+
+        assert!(
+            log.read_event(&id).await.is_err(),
+            "a truncated indexed record must fail loud, not return None"
         );
 
         std::fs::remove_dir_all(&test_dir).ok();

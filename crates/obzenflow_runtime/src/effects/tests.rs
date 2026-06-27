@@ -1062,6 +1062,76 @@ fn incomplete_outcome_group_torn_tail_is_dropped_as_absent() {
     );
 }
 
+#[test]
+fn incomplete_outcome_group_on_completed_archive_fails_loud() {
+    // FLOWIP-120q: the same incomplete group that a torn-tail-tolerant load drops
+    // (above) must fail loud under the strict policy a `Completed` archive uses,
+    // because a clean archive flushed every record and permits no torn tail.
+    let cursor = EffectCursor::new("flow", "stage", 0, 0);
+    let descriptor = EffectDescriptor::new("fx", "fx", 1, "1", "input");
+    let fact = |ordinal: u32| EffectRecord {
+        cursor: cursor.clone(),
+        descriptor_hash: "hash".into(),
+        descriptor: descriptor.clone(),
+        outcome: EffectOutcomePayload::SucceededFact {
+            event_type: "fx.out".into(),
+            output: json!({ "ordinal": ordinal }),
+            outcome_fact_ordinal: OutcomeFactOrdinal::new(ordinal),
+            outcome_fact_count: OutcomeFactCount::new(3),
+        },
+        origin: None,
+    };
+
+    let err =
+        EffectHistory::from_records_with_policy("flow".to_string(), vec![fact(0), fact(1)], false)
+            .expect_err("an incomplete group on a completed archive must fail loud");
+
+    assert!(matches!(err, EffectError::EffectProvenanceMismatch(_)));
+}
+
+#[test]
+fn interleaved_incomplete_groups_all_drop_on_interrupted_archive() {
+    // FLOWIP-120q: torn-tail tolerance is position-independent. Interleaved
+    // commits can leave more than one group incomplete; an interrupted archive
+    // drops them all as absent regardless of journal order (resume re-executes).
+    // Locks out any "only the last group may be incomplete" positional assumption.
+    let cursor_a = EffectCursor::new("flow", "stage", 0, 0);
+    let cursor_b = EffectCursor::new("flow", "stage", 1, 0);
+    let descriptor = EffectDescriptor::new("fx", "fx", 1, "1", "input");
+    let fact = |cursor: &EffectCursor, ordinal: u32, count: u32| EffectRecord {
+        cursor: cursor.clone(),
+        descriptor_hash: "hash".into(),
+        descriptor: descriptor.clone(),
+        outcome: EffectOutcomePayload::SucceededFact {
+            event_type: "fx.out".into(),
+            output: json!({ "ordinal": ordinal }),
+            outcome_fact_ordinal: OutcomeFactOrdinal::new(ordinal),
+            outcome_fact_count: OutcomeFactCount::new(count),
+        },
+        origin: None,
+    };
+
+    // Journal order interleaves the groups, each missing its top ordinal(s):
+    // A is {0,1} of 3, B is {0} of 2, B's fact sits between A's two facts.
+    let records = vec![
+        fact(&cursor_a, 0, 3),
+        fact(&cursor_b, 0, 2),
+        fact(&cursor_a, 1, 3),
+    ];
+
+    let history = EffectHistory::from_records("flow".to_string(), records)
+        .expect("an interrupted archive tolerates multiple torn-tail groups");
+
+    assert!(
+        history.find_group(&cursor_a).is_none(),
+        "group A is dropped as absent"
+    );
+    assert!(
+        history.find_group(&cursor_b).is_none(),
+        "group B is dropped as absent"
+    );
+}
+
 #[tokio::test]
 async fn perform_rejects_undeclared_effect_before_execution() {
     let stage_id = StageId::new();

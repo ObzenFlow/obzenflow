@@ -249,6 +249,26 @@ paid, cancelled, and unavailable deliveries are reconstructed with the same
 outcomes. That is the durable-execution property: a recorded run replays
 exactly, without re-pulling inputs or re-firing side effects.
 
+### Inspecting the run
+
+The run directory holds the durable journals as internal framed storage
+(`<len>:<crc>:<json>` records in `.log` files). Read them through the supported
+journal subcommands rather than parsing the files directly:
+
+```sh
+RUN=$(ls -dt target/payment-gateway-logs/flows/*/ | head -1)
+
+# A human summary plus a per-stage event listing:
+cargo run -p obzenflow -- journal inspect "$RUN"
+
+# One JSON object per committed record (system, data, and error journals):
+cargo run -p obzenflow -- journal export-jsonl "$RUN"
+```
+
+Both commands read through the same framed parser as replay and verification, so
+they fail loud on a corrupt record with its file and offset rather than silently
+skipping it.
+
 ## 5. Resilience as the Second Layer
 
 While the live run is in progress, the gateway stage also carries a circuit

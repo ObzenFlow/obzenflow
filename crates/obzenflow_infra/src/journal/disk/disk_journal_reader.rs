@@ -2,9 +2,11 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Efficient cursor-based reader for DiskJournal
+//! Cursor-based reader for DiskJournal
 //!
-//! Maintains an open file handle and tracks position for O(1) sequential reads.
+//! Tracks logical position and byte offset. Live polls open a fresh read handle
+//! at the tracked offset so cancellation-heavy observer loops cannot leave a
+//! stored file handle mid-frame.
 
 use super::scanner::{classify_frame, dispose, read_frame_async, Disposition, ReadPolicy};
 use async_trait::async_trait;
@@ -16,7 +18,7 @@ use obzenflow_core::journal::journal_error::JournalError;
 use obzenflow_core::journal::journal_reader::JournalReader;
 use std::fs::File as StdFile;
 use std::io::SeekFrom;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::fs::File;
 use tokio::io::{AsyncBufReadExt, AsyncSeekExt, BufReader};
@@ -27,10 +29,45 @@ use tokio::sync::RwLock;
 /// (FLOWIP-120q). Sealed readers never reach this path.
 const MAX_STALL_POLLS: u32 = 5;
 
-/// Efficient reader for DiskJournal that maintains position
+fn open_readable_std_file(path: &Path) -> Result<StdFile, JournalError> {
+    if path.exists() {
+        open_existing_std_file(path)
+    } else {
+        StdFile::options()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(path)
+            .map_err(|e| {
+                tracing::error!(
+                    path = %path.display(),
+                    os_error = %e,
+                    "DiskJournalReader failed to create journal file"
+                );
+                JournalError::Implementation {
+                    message: format!("Failed to create journal file: {}", path.display()),
+                    source: Box::new(e),
+                }
+            })
+    }
+}
+
+fn open_existing_std_file(path: &Path) -> Result<StdFile, JournalError> {
+    StdFile::open(path).map_err(|e| {
+        tracing::error!(
+            path = %path.display(),
+            os_error = %e,
+            "DiskJournalReader failed to open journal file"
+        );
+        JournalError::Implementation {
+            message: format!("Failed to open journal file: {}", path.display()),
+            source: Box::new(e),
+        }
+    })
+}
+
+/// Reader for DiskJournal that maintains logical and byte position.
 pub struct DiskJournalReader<T: JournalEvent> {
-    /// Buffered reader over the file
-    reader: BufReader<File>,
     /// Current position (number of committed events read)
     position: u64,
     /// Byte offset of the next unread record. Advances only past a committed
@@ -52,6 +89,8 @@ pub struct DiskJournalReader<T: JournalEvent> {
     at_end: bool,
     /// Shared lock to avoid reading partial writes
     read_write_lock: Arc<RwLock<()>>,
+    /// Whether a live reader may create a missing empty file.
+    create_if_missing: bool,
     _phantom: std::marker::PhantomData<T>,
 }
 
@@ -64,22 +103,9 @@ impl<T: JournalEvent> DiskJournalReader<T> {
     ) -> Result<Self, JournalError> {
         // If file doesn't exist, create an empty reader at EOF
         if !path.exists() {
-            // Create empty file using blocking std I/O, then wrap in async File
-            let std_file = StdFile::create(&path).map_err(|e| {
-                tracing::error!(
-                    path = %path.display(),
-                    os_error = %e,
-                    "DiskJournalReader failed to create journal file"
-                );
-                JournalError::Implementation {
-                    message: format!("Failed to create journal file: {}", path.display()),
-                    source: Box::new(e),
-                }
-            })?;
-            let file = File::from_std(std_file);
+            let _std_file = open_readable_std_file(&path)?;
 
             return Ok(Self {
-                reader: BufReader::new(file),
                 position: 0,
                 read_offset: 0,
                 stall_polls: 0,
@@ -89,13 +115,14 @@ impl<T: JournalEvent> DiskJournalReader<T> {
                 journal_id,
                 at_end: true,
                 read_write_lock: read_write_lock.clone(),
+                create_if_missing: true,
                 _phantom: std::marker::PhantomData,
             });
         }
 
-        // Open using blocking std I/O, then wrap in async File to avoid Tokio's
-        // per-open background task failures under high concurrency.
-        let std_file = StdFile::open(&path).map_err(|e| {
+        // Validate that the file is readable. Actual reads use a fresh handle
+        // per poll so cancelled observer polls cannot poison stored file state.
+        let _std_file = StdFile::open(&path).map_err(|e| {
             tracing::error!(
                 path = %path.display(),
                 os_error = %e,
@@ -106,10 +133,8 @@ impl<T: JournalEvent> DiskJournalReader<T> {
                 source: Box::new(e),
             }
         })?;
-        let file = File::from_std(std_file);
 
         Ok(Self {
-            reader: BufReader::new(file),
             position: 0,
             read_offset: 0,
             stall_polls: 0,
@@ -119,6 +144,7 @@ impl<T: JournalEvent> DiskJournalReader<T> {
             journal_id,
             at_end: false,
             read_write_lock,
+            create_if_missing: true,
             _phantom: std::marker::PhantomData,
         })
     }
@@ -132,7 +158,7 @@ impl<T: JournalEvent> DiskJournalReader<T> {
         read_write_lock: Arc<RwLock<()>>,
         policy: ReadPolicy,
     ) -> Result<Self, JournalError> {
-        let std_file = StdFile::open(&path).map_err(|e| {
+        let _std_file = StdFile::open(&path).map_err(|e| {
             tracing::error!(
                 path = %path.display(),
                 os_error = %e,
@@ -143,10 +169,8 @@ impl<T: JournalEvent> DiskJournalReader<T> {
                 source: Box::new(e),
             }
         })?;
-        let file = File::from_std(std_file);
 
         Ok(Self {
-            reader: BufReader::new(file),
             position: 0,
             read_offset: 0,
             stall_polls: 0,
@@ -156,6 +180,7 @@ impl<T: JournalEvent> DiskJournalReader<T> {
             journal_id,
             at_end: false,
             read_write_lock,
+            create_if_missing: false,
             _phantom: std::marker::PhantomData,
         })
     }
@@ -192,7 +217,6 @@ impl<T: JournalEvent> DiskJournalReader<T> {
                 Ok(0) => {
                     // Reached EOF while skipping
                     return Ok(Self {
-                        reader,
                         position,
                         read_offset,
                         stall_polls: 0,
@@ -202,6 +226,7 @@ impl<T: JournalEvent> DiskJournalReader<T> {
                         journal_id,
                         at_end: true,
                         read_write_lock: read_write_lock.clone(),
+                        create_if_missing: false,
                         _phantom: std::marker::PhantomData,
                     });
                 }
@@ -221,7 +246,6 @@ impl<T: JournalEvent> DiskJournalReader<T> {
         }
 
         Ok(Self {
-            reader,
             position,
             read_offset,
             stall_polls: 0,
@@ -231,8 +255,26 @@ impl<T: JournalEvent> DiskJournalReader<T> {
             journal_id,
             at_end: false,
             read_write_lock,
+            create_if_missing: false,
             _phantom: std::marker::PhantomData,
         })
+    }
+
+    async fn reader_at_offset(&self) -> Result<BufReader<File>, JournalError> {
+        let std_file = if self.create_if_missing {
+            open_readable_std_file(&self.path)?
+        } else {
+            open_existing_std_file(&self.path)?
+        };
+        let mut reader = BufReader::new(File::from_std(std_file));
+        reader
+            .seek(SeekFrom::Start(self.read_offset))
+            .await
+            .map_err(|e| JournalError::Implementation {
+                message: format!("Failed to seek journal to offset {}: {e}", self.read_offset),
+                source: Box::new(e),
+            })?;
+        Ok(reader)
     }
 }
 
@@ -243,8 +285,14 @@ impl<T: JournalEvent> JournalReader<T> for DiskJournalReader<T> {
         // pick up new appends.
         let _read_guard = self.read_write_lock.read().await;
 
+        // Keep the byte offset as the source of truth. Metrics and other
+        // observers poll through cancellation-heavy select loops; using a fresh
+        // read handle per poll prevents a cancelled Tokio file operation from
+        // leaving this reader's stored cursor mid-frame.
+        let mut reader = self.reader_at_offset().await?;
+
         loop {
-            let frame = read_frame_async(&mut self.reader, &mut self.buf)
+            let frame = read_frame_async(&mut reader, &mut self.buf)
                 .await
                 .map_err(|e| JournalError::Implementation {
                     message: format!("Failed to read from journal at offset {}", self.read_offset),
@@ -277,19 +325,9 @@ impl<T: JournalEvent> JournalReader<T> for DiskJournalReader<T> {
                     }));
                 }
                 Disposition::Skip => {
-                    // Live-tail unterminated tail: rewind to the record start so
-                    // the next poll re-reads the whole record once the writer
-                    // completes it, instead of reading forward over the partial.
-                    self.reader
-                        .seek(SeekFrom::Start(self.read_offset))
-                        .await
-                        .map_err(|e| JournalError::Implementation {
-                            message: format!(
-                                "Failed to rewind journal to offset {}",
-                                self.read_offset
-                            ),
-                            source: Box::new(e),
-                        })?;
+                    // Live-tail unterminated tail: leave read_offset at the
+                    // record start so the next poll re-reads the whole record
+                    // once the writer completes it.
                     self.stall_polls += 1;
                     if self.stall_polls > MAX_STALL_POLLS {
                         let msg = format!(
@@ -357,10 +395,11 @@ impl<T: JournalEvent> JournalReader<T> for DiskJournalReader<T> {
         let mut skipped = 0;
         let mut line = String::new();
         let _read_guard = self.read_write_lock.read().await;
+        let mut reader = self.reader_at_offset().await?;
 
         for _ in 0..n {
             line.clear();
-            match self.reader.read_line(&mut line).await {
+            match reader.read_line(&mut line).await {
                 Ok(0) => {
                     // EOF reached
                     self.at_end = true;
@@ -518,5 +557,19 @@ mod tests {
         // Should read index 7
         let envelope = reader2.next().await.unwrap().expect("Should have event");
         assert_eq!(envelope.event.payload()["index"], 7);
+    }
+
+    #[tokio::test]
+    async fn new_missing_file_creates_readable_empty_reader() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("missing.log");
+        let read_write_lock = Arc::new(RwLock::new(()));
+
+        let mut reader =
+            DiskJournalReader::<ChainEvent>::new(path, JournalId::new(), read_write_lock)
+                .await
+                .unwrap();
+
+        assert!(reader.next().await.unwrap().is_none());
     }
 }
