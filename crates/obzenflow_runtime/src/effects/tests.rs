@@ -1008,6 +1008,7 @@ fn effect_history_rejects_partial_multi_fact_outcome_group() {
                 event_type: FirstOutput::versioned_event_type().into(),
                 output: json!({ "value": 10 }),
                 outcome_fact_ordinal: OutcomeFactOrdinal::new(0),
+                outcome_fact_count: OutcomeFactCount::new(3),
             },
             origin: None,
         },
@@ -1019,6 +1020,7 @@ fn effect_history_rejects_partial_multi_fact_outcome_group() {
                 event_type: SecondOutput::versioned_event_type().into(),
                 output: json!({ "value": "twenty" }),
                 outcome_fact_ordinal: OutcomeFactOrdinal::new(2),
+                outcome_fact_count: OutcomeFactCount::new(3),
             },
             origin: None,
         },
@@ -1028,6 +1030,36 @@ fn effect_history_rejects_partial_multi_fact_outcome_group() {
         .expect_err("missing ordinal 1 must fail loud");
 
     assert!(matches!(err, EffectError::EffectProvenanceMismatch(_)));
+}
+
+#[test]
+fn incomplete_outcome_group_torn_tail_is_dropped_as_absent() {
+    // FLOWIP-120q: a group missing its top ordinal (a torn tail dropped fact 2)
+    // is detected via the recorded count and treated as absent, so load
+    // succeeds and the cursor is not found (replay re-executes / errors absent).
+    let cursor = EffectCursor::new("flow", "stage", 0, 0);
+    let descriptor = EffectDescriptor::new("fx", "fx", 1, "1", "input");
+    let fact = |ordinal: u32| EffectRecord {
+        cursor: cursor.clone(),
+        descriptor_hash: "hash".into(),
+        descriptor: descriptor.clone(),
+        outcome: EffectOutcomePayload::SucceededFact {
+            event_type: "fx.out".into(),
+            output: json!({ "ordinal": ordinal }),
+            outcome_fact_ordinal: OutcomeFactOrdinal::new(ordinal),
+            // The group declared 3 facts, but only 0 and 1 survived the tail.
+            outcome_fact_count: OutcomeFactCount::new(3),
+        },
+        origin: None,
+    };
+
+    let history = EffectHistory::from_records("flow".to_string(), vec![fact(0), fact(1)])
+        .expect("an incomplete final group is dropped, not an error");
+
+    assert!(
+        history.find_group(&cursor).is_none(),
+        "a torn-tail outcome group must be treated as absent"
+    );
 }
 
 #[tokio::test]

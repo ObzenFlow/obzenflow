@@ -460,6 +460,7 @@ mod tests {
         }
         RunManifest {
             manifest_version: "2.0".to_string(),
+            journal_format_version: 1,
             obzenflow_version: "0.1.2".to_string(),
             flow_id: flow_id.to_string(),
             flow_name: "test_flow".to_string(),
@@ -491,6 +492,7 @@ mod tests {
             descriptor_hash: "hash".into(),
             descriptor: EffectDescriptor::new("fx", "fx", 1, "1", "input"),
             outcome_fact_ordinal: None,
+            outcome_fact_count: None,
             group_id: None,
             fact_owner: Default::default(),
             origin: None,

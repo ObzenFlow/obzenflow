@@ -12,8 +12,8 @@ pub use obzenflow_core::event::payloads::effect_payload::{
     EffectFactOwner, EffectFailureCause, EffectFailureCode, EffectFailureKind, EffectFailureSource,
     EffectInputPosition, EffectLabel, EffectOrdinal, EffectOutcomeGroupId, EffectOutcomePayload,
     EffectProvenance, EffectRecord, EffectSchemaVersion, EffectStageKey, EffectType,
-    OutcomeFactOrdinal, RecordedFlowId, RetryDisposition, StageLogicVersion, CAPTURE_EVENT_TYPE,
-    EFFECT_RECORD_EVENT_TYPE,
+    OutcomeFactCount, OutcomeFactOrdinal, RecordedFlowId, RetryDisposition, StageLogicVersion,
+    CAPTURE_EVENT_TYPE, EFFECT_RECORD_EVENT_TYPE,
 };
 // `EffectOutcomeFacts` re-exports both the trait and its derive (FLOWIP-120m).
 pub use obzenflow_core::event::schema::{

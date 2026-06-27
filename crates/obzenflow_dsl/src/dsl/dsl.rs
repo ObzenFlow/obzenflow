@@ -1096,6 +1096,7 @@ macro_rules! build_typed_flow {
 
         let run_manifest = obzenflow_core::journal::run_manifest::RunManifest {
             manifest_version: obzenflow_core::journal::run_manifest::RUN_MANIFEST_VERSION.to_string(),
+            journal_format_version: obzenflow_core::journal::run_manifest::JOURNAL_FORMAT_VERSION,
             obzenflow_version: obzenflow_core::build_info::OBZENFLOW_VERSION.to_string(),
             flow_id: flow_id.to_string(),
             flow_name: $flow_name.to_string(),

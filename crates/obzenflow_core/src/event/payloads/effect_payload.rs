@@ -315,6 +315,38 @@ impl From<u32> for OutcomeFactOrdinal {
     }
 }
 
+/// Total number of facts in a multi-fact effect outcome group (FLOWIP-120q).
+///
+/// Stamped on every fact of the group so a reader can prove the group is
+/// complete. Sizing the completeness check to this recorded count, rather than
+/// to the number of records present, is what lets a group missing its
+/// highest-ordinal fact be detected instead of passing as a smaller group.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct OutcomeFactCount(u32);
+
+impl OutcomeFactCount {
+    pub const fn new(value: u32) -> Self {
+        Self(value)
+    }
+
+    pub const fn get(self) -> u32 {
+        self.0
+    }
+}
+
+impl fmt::Display for OutcomeFactCount {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl From<u32> for OutcomeFactCount {
+    fn from(value: u32) -> Self {
+        Self::new(value)
+    }
+}
+
 impl TryFrom<usize> for OutcomeFactOrdinal {
     type Error = std::num::TryFromIntError;
 
@@ -495,6 +527,9 @@ pub enum EffectOutcomePayload {
         event_type: EventType,
         output: Value,
         outcome_fact_ordinal: OutcomeFactOrdinal,
+        /// Cardinality of the outcome group this fact belongs to (FLOWIP-120q).
+        /// Every fact of one effect outcome carries the same count.
+        outcome_fact_count: OutcomeFactCount,
     },
     Failed {
         error_type: EffectFailureKind,
@@ -553,6 +588,11 @@ pub struct EffectProvenance {
     /// do not set this; user-authored effect outcome facts must set it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub outcome_fact_ordinal: Option<OutcomeFactOrdinal>,
+    /// Cardinality of the effect outcome group (FLOWIP-120q). Set on the same
+    /// user-authored outcome facts that set `outcome_fact_ordinal`; reserved
+    /// framework rows leave it `None`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub outcome_fact_count: Option<OutcomeFactCount>,
     /// Deterministic id shared by every fact from the same effect outcome.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub group_id: Option<EffectOutcomeGroupId>,
@@ -577,6 +617,7 @@ impl EffectProvenance {
             descriptor_hash: record.descriptor_hash.clone(),
             descriptor: record.descriptor.clone(),
             outcome_fact_ordinal: None,
+            outcome_fact_count: None,
             group_id: Some(effect_outcome_group_id(&record.cursor)),
             fact_owner,
             origin: record.origin.clone(),

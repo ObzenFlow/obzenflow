@@ -8,6 +8,10 @@
 
 use super::disk_journal_reader::DiskJournalReader;
 use super::log_record::LogRecord;
+use super::scanner::{
+    classify_frame, dispose, read_frame_async, read_frame_sync, Disposition, ParseOutcome,
+    ReadPolicy,
+};
 use async_trait::async_trait;
 use chrono::Utc;
 use crc32fast::Hasher;
@@ -22,15 +26,15 @@ use obzenflow_core::journal::journal_reader::JournalReader;
 use obzenflow_core::journal::Journal;
 use std::collections::HashMap;
 use std::fs::File as StdFile;
+use std::io::BufReader;
 use std::io::SeekFrom;
-use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::OnceLock;
 use tokio::fs::File;
-use tokio::io::{AsyncBufReadExt, AsyncSeekExt};
+use tokio::io::AsyncSeekExt;
 use tokio::sync::RwLock;
 use ulid::Ulid;
 
@@ -41,11 +45,17 @@ static JOURNAL_LOCKS: OnceLock<
 > = OnceLock::new();
 
 fn shared_lock_for_path(path: &Path) -> Arc<RwLock<()>> {
+    // FLOWIP-120q: key by a normalized absolute path so the same file maps to one
+    // lock regardless of how the path is expressed (relative vs absolute), so a
+    // reader and a writer that reach the same file by different spellings still
+    // coordinate. Normalizing never touches the filesystem; fall back to the raw
+    // path if it fails (e.g., no current dir).
+    let key = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
     let registry =
         JOURNAL_LOCKS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
     let mut guard = registry.lock().unwrap();
     guard
-        .entry(path.to_path_buf())
+        .entry(key)
         .or_insert_with(|| Arc::new(RwLock::new(())))
         .clone()
 }
@@ -90,47 +100,9 @@ impl<T: JournalEvent> DiskJournal<T> {
         // Get current file size if it exists
         let write_offset = std::fs::metadata(&log_path).map(|m| m.len()).unwrap_or(0);
 
-        // Build index if file exists
-        let mut index = HashMap::with_capacity(10000);
-        let mut writer_clocks = HashMap::new();
-
-        if log_path.exists() {
-            // Read through file to rebuild index and writer clocks
-            let file = StdFile::open(&log_path).map_err(|e| JournalError::Implementation {
-                message: "Failed to open log file".to_string(),
-                source: Box::new(e),
-            })?;
-            let reader = BufReader::new(file);
-            let mut offset = 0u64;
-
-            for line in reader.lines() {
-                let line = line.map_err(|e| JournalError::Implementation {
-                    message: "Failed to read line".to_string(),
-                    source: Box::new(e),
-                })?;
-                if !line.trim().is_empty() {
-                    match parse_framed_record::<T>(&line) {
-                        ParseOutcome::Complete(record) => {
-                            index.insert(record.event_id, offset);
-
-                            // Update writer clocks
-                            writer_clocks.insert(record.writer_id, record.vector_clock);
-                        }
-                        // Skip partial lines when rebuilding index; they'll be retried on read
-                        ParseOutcome::Partial => {}
-                        ParseOutcome::Corrupt(e) => {
-                            tracing::warn!(
-                                offset,
-                                path = %log_path.display(),
-                                parse_error = %e,
-                                "Skipping corrupt record while rebuilding index"
-                            );
-                        }
-                    }
-                    offset += line.len() as u64 + 1; // +1 for newline
-                }
-            }
-        }
+        // Build index and writer clocks from the framed log (FLOWIP-120q): one
+        // shared rebuild helper, so `new` and `with_owner` cannot drift.
+        let (index, writer_clocks) = rebuild_index_from_path::<T>(&log_path)?;
 
         // Open a single shared file handle for appends
         let std_file = StdFile::options()
@@ -169,35 +141,10 @@ impl<T: JournalEvent> DiskJournal<T> {
         // Get current file size if it exists
         let write_offset = std::fs::metadata(&log_path).map(|m| m.len()).unwrap_or(0);
 
-        // Build index if file exists
-        let mut index = HashMap::with_capacity(10000);
-        let mut writer_clocks = HashMap::new();
-
-        if log_path.exists() {
-            // Read through file to rebuild index and writer clocks
-            let file = StdFile::open(&log_path).map_err(|e| JournalError::Implementation {
-                message: "Failed to open log file".to_string(),
-                source: Box::new(e),
-            })?;
-            let reader = BufReader::new(file);
-            let mut offset = 0u64;
-
-            for line in reader.lines() {
-                let line = line.map_err(|e| JournalError::Implementation {
-                    message: "Failed to read line".to_string(),
-                    source: Box::new(e),
-                })?;
-                if !line.trim().is_empty() {
-                    if let Ok(record) = serde_json::from_str::<LogRecord<T>>(&line) {
-                        index.insert(record.event_id, offset);
-
-                        // Update writer clocks
-                        writer_clocks.insert(record.writer_id, record.vector_clock);
-                    }
-                    offset += line.len() as u64 + 1; // +1 for newline
-                }
-            }
-        }
+        // FLOWIP-120q P3 fix: rebuild via the framed parser through the same
+        // shared helper as `new`, not raw `serde_json::from_str` (which fails on
+        // framed records and used to leave the index and writer clocks empty).
+        let (index, writer_clocks) = rebuild_index_from_path::<T>(&log_path)?;
 
         // Open a single shared file handle for appends
         let std_file = StdFile::options()
@@ -231,29 +178,42 @@ impl<T: JournalEvent> DiskJournal<T> {
             return Ok(events);
         }
 
+        // FLOWIP-120q full-read lock: hold the shared read lock so an in-process
+        // append cannot be observed mid-frame, and scan with sealed/full-scan
+        // policy so corruption fails loud instead of silently shortening the
+        // snapshot that backs `read_causally_ordered`/`read_causally_after`.
+        let _read_guard = self.read_write_lock.read().await;
+
         let file = File::open(&self.path)
             .await
             .map_err(|e| JournalError::Implementation {
                 message: "Failed to open file".to_string(),
                 source: Box::new(e),
             })?;
-        let reader = tokio::io::BufReader::new(file);
-        let mut lines = reader.lines();
+        let mut reader = tokio::io::BufReader::new(file);
+        let mut buf = Vec::new();
+        let mut offset = 0u64;
 
-        while let Some(line) =
-            lines
-                .next_line()
-                .await
-                .map_err(|e| JournalError::Implementation {
-                    message: "Failed to read line".to_string(),
-                    source: Box::new(e),
-                })?
+        while let Some((consumed, termination)) = read_frame_async(&mut reader, &mut buf)
+            .await
+            .map_err(|e| JournalError::Implementation {
+                message: "Failed to read line".to_string(),
+                source: Box::new(e),
+            })?
         {
-            if line.trim().is_empty() {
+            let record_offset = offset;
+            offset += consumed as u64;
+            if buf.iter().all(u8::is_ascii_whitespace) {
                 continue;
             }
-            match parse_framed_record::<T>(&line) {
-                ParseOutcome::Complete(record) => {
+            match dispose(
+                classify_frame::<T>(&buf),
+                termination,
+                ReadPolicy::SealedScan {
+                    tolerate_torn_tail: false,
+                },
+            ) {
+                Disposition::Yield(record) => {
                     events.push(EventEnvelope {
                         journal_writer_id: JournalWriterId::from(self.journal_id),
                         vector_clock: record.vector_clock,
@@ -261,12 +221,17 @@ impl<T: JournalEvent> DiskJournal<T> {
                         event: record.event,
                     });
                 }
-                // For read_all, treat partial as transient and skip
-                ParseOutcome::Partial => continue,
-                ParseOutcome::Corrupt(e) => {
+                Disposition::EndOfCommittedRecords | Disposition::Skip => break,
+                Disposition::Corrupt(problem) => {
                     return Err(JournalError::Implementation {
-                        message: format!("Failed to parse record: {e}"),
-                        source: Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, e)),
+                        message: format!(
+                            "Corrupt record at offset {record_offset} in {}: {problem}",
+                            self.path.display()
+                        ),
+                        source: Box::new(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            problem.to_string(),
+                        )),
                     });
                 }
             }
@@ -276,60 +241,71 @@ impl<T: JournalEvent> DiskJournal<T> {
     }
 }
 
-/// Outcome of attempting to parse a framed log line
-pub(crate) enum ParseOutcome<R: JournalEvent> {
-    Complete(LogRecord<R>),
-    Partial,
-    Corrupt(String),
-}
+/// In-memory index (`event_id -> byte offset`) plus per-writer vector clocks
+/// rebuilt from a journal file.
+type RebuiltIndex = (HashMap<Ulid, u64>, HashMap<WriterId, VectorClock>);
 
-pub(crate) fn parse_framed_record<R: JournalEvent>(line: &str) -> ParseOutcome<R> {
-    let trimmed = line.trim_end_matches('\n');
+/// Rebuild a disk journal's in-memory index and writer clocks from the framed
+/// log on disk (FLOWIP-120q). Shared by `DiskJournal::new` and
+/// `DiskJournal::with_owner` so the two constructors cannot diverge. Uses the
+/// sealed full-scan policy: fail loud on committed corruption, tolerate only a
+/// final torn tail (a crash mid-append leaves an unterminated last record).
+fn rebuild_index_from_path<T: JournalEvent>(log_path: &Path) -> Result<RebuiltIndex, JournalError> {
+    let mut index = HashMap::with_capacity(10000);
+    let mut writer_clocks = HashMap::new();
 
-    // Attempt framed format: <len>:<crc>:<json>
-    let mut parts = trimmed.splitn(3, ':');
-    if let (Some(len_str), Some(crc_str), Some(payload)) =
-        (parts.next(), parts.next(), parts.next())
+    if !log_path.exists() {
+        return Ok((index, writer_clocks));
+    }
+
+    let file = StdFile::open(log_path).map_err(|e| JournalError::Implementation {
+        message: "Failed to open log file".to_string(),
+        source: Box::new(e),
+    })?;
+    let mut reader = BufReader::new(file);
+    let mut buf = Vec::new();
+    let mut offset = 0u64;
+
+    while let Some((consumed, termination)) =
+        read_frame_sync(&mut reader, &mut buf).map_err(|e| JournalError::Implementation {
+            message: "Failed to read line".to_string(),
+            source: Box::new(e),
+        })?
     {
-        if let (Ok(expected_len), Ok(expected_crc)) =
-            (len_str.parse::<usize>(), crc_str.parse::<u32>())
-        {
-            // Check length first
-            let payload_bytes = payload.as_bytes();
-            if payload_bytes.len() < expected_len {
-                return ParseOutcome::Partial;
-            }
-
-            let body = &payload_bytes[..expected_len];
-            let mut hasher = Hasher::new();
-            hasher.update(body);
-            let actual_crc = hasher.finalize();
-            if actual_crc != expected_crc {
-                return ParseOutcome::Partial;
-            }
-
-            match serde_json::from_slice::<LogRecord<R>>(body) {
-                Ok(rec) => return ParseOutcome::Complete(rec),
-                // CRC matched, so this is truly malformed JSON rather than a torn read
-                Err(e) => return ParseOutcome::Corrupt(format!("json parse error: {e}")),
-            }
-        } else {
-            // Header present but not parseable - likely read mid-line
-            return ParseOutcome::Partial;
+        let record_offset = offset;
+        offset += consumed as u64;
+        if buf.iter().all(u8::is_ascii_whitespace) {
+            continue;
         }
-    } else {
-        // No header delimiters, likely a torn prefix/suffix
-        // Fall through to legacy JSON parsing below
-    }
-
-    // Fallback to legacy pure-JSON line
-    match serde_json::from_str::<LogRecord<R>>(trimmed) {
-        Ok(rec) => ParseOutcome::Complete(rec),
-        Err(_) => {
-            // Legacy JSON parse failed: treat as partial to allow retry instead of hard-corrupt
-            ParseOutcome::Partial
+        match dispose(
+            classify_frame::<T>(&buf),
+            termination,
+            ReadPolicy::SealedScan {
+                tolerate_torn_tail: true,
+            },
+        ) {
+            Disposition::Yield(record) => {
+                index.insert(record.event_id, record_offset);
+                writer_clocks.insert(record.writer_id, record.vector_clock);
+            }
+            // A tolerated torn tail ends the committed records.
+            Disposition::EndOfCommittedRecords | Disposition::Skip => break,
+            Disposition::Corrupt(problem) => {
+                return Err(JournalError::Implementation {
+                    message: format!(
+                        "Corrupt record while rebuilding index at offset {record_offset} in {}: {problem}",
+                        log_path.display()
+                    ),
+                    source: Box::new(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        problem.to_string(),
+                    )),
+                });
+            }
         }
     }
+
+    Ok((index, writer_clocks))
 }
 
 impl<T: JournalEvent> Clone for DiskJournal<T> {
@@ -576,32 +552,41 @@ impl<T: JournalEvent + 'static> Journal<T> for DiskJournal<T> {
                 source: Box::new(e),
             })?;
 
-        let reader = tokio::io::BufReader::new(file);
-        let mut lines = reader.lines();
+        let mut reader = tokio::io::BufReader::new(file);
+        let mut buf = Vec::new();
 
-        if let Some(line) = lines
-            .next_line()
-            .await
-            .map_err(|e| JournalError::Implementation {
+        match read_frame_async(&mut reader, &mut buf).await.map_err(|e| {
+            JournalError::Implementation {
                 message: "Failed to read line".to_string(),
                 source: Box::new(e),
-            })?
-        {
-            match parse_framed_record::<T>(&line) {
-                ParseOutcome::Complete(record) => Ok(Some(EventEnvelope {
+            }
+        })? {
+            Some((_, termination)) => match dispose(
+                classify_frame::<T>(&buf),
+                termination,
+                ReadPolicy::SealedScan {
+                    tolerate_torn_tail: true,
+                },
+            ) {
+                Disposition::Yield(record) => Ok(Some(EventEnvelope {
                     journal_writer_id: JournalWriterId::from(self.journal_id),
                     vector_clock: record.vector_clock,
                     timestamp: record.timestamp,
                     event: record.event,
                 })),
-                ParseOutcome::Partial => Ok(None),
-                ParseOutcome::Corrupt(e) => Err(JournalError::Implementation {
-                    message: format!("Failed to parse record: {e}"),
-                    source: Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, e)),
+                Disposition::EndOfCommittedRecords | Disposition::Skip => Ok(None),
+                Disposition::Corrupt(problem) => Err(JournalError::Implementation {
+                    message: format!(
+                        "Failed to parse record at {}: {problem}",
+                        self.path.display()
+                    ),
+                    source: Box::new(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        problem.to_string(),
+                    )),
                 }),
-            }
-        } else {
-            Ok(None)
+            },
+            None => Ok(None),
         }
     }
 
@@ -697,7 +682,10 @@ impl<T: JournalEvent + 'static> Journal<T> for DiskJournal<T> {
                     continue;
                 }
 
-                match parse_framed_record::<T>(line) {
+                // read_last_n is a best-effort tail/observability helper
+                // (FLOWIP-120q): classify per line and skip anything that is not a
+                // committed record. It is never a replay/verification contract.
+                match classify_frame::<T>(line.as_bytes()) {
                     ParseOutcome::Complete(record) => {
                         let envelope = EventEnvelope {
                             journal_writer_id: JournalWriterId::from(self.journal_id),
@@ -707,14 +695,14 @@ impl<T: JournalEvent + 'static> Journal<T> for DiskJournal<T> {
                         };
                         results.push(envelope);
                     }
-                    ParseOutcome::Partial => {
-                        // Skip partial records - they might be at chunk boundary
+                    ParseOutcome::Incomplete(_) => {
+                        // Likely a chunk-boundary fragment; skip.
                         continue;
                     }
-                    ParseOutcome::Corrupt(e) => {
+                    ParseOutcome::Corrupt(problem) => {
                         tracing::warn!(
                             path = %self.path.display(),
-                            parse_error = %e,
+                            parse_error = %problem,
                             "Skipping corrupt record during backwards read"
                         );
                         continue;
@@ -926,6 +914,143 @@ mod tests {
 
         let expected: Vec<u64> = (1..=task_count as u64).collect();
         assert_eq!(writer_seqs, expected);
+
+        std::fs::remove_dir_all(&test_dir).ok();
+    }
+
+    #[tokio::test]
+    async fn with_owner_reopen_rebuilds_index_and_writer_clocks() {
+        // FLOWIP-120q P3: reopening an owned framed journal must rebuild the
+        // index (so read_event by id works) and the writer clocks (so a new
+        // append continues the sequence) via the framed parser.
+        let test_id = Uuid::new_v4();
+        let test_dir =
+            std::path::PathBuf::from(format!("target/test-logs/with_owner_reopen_{test_id}"));
+        std::fs::create_dir_all(&test_dir).unwrap();
+        let log_path = test_dir.join("reopen.log");
+        let writer_id = WriterId::from(StageId::new());
+        let writer_key = writer_id.to_string();
+
+        let kept_id;
+        {
+            let log = DiskJournal::<ChainEvent>::with_owner(
+                log_path.clone(),
+                obzenflow_core::JournalOwner::stage(StageId::new()),
+            )
+            .unwrap();
+            let e1 = ChainEventFactory::data_event(writer_id, "a", serde_json::json!({"n": 1}));
+            let env1 = log.append(e1, None).await.unwrap();
+            let e2 = ChainEventFactory::data_event(writer_id, "b", serde_json::json!({"n": 2}));
+            log.append(e2, Some(&env1)).await.unwrap();
+            kept_id = env1.event.id;
+        }
+
+        let reopened = DiskJournal::<ChainEvent>::with_owner(
+            log_path,
+            obzenflow_core::JournalOwner::stage(StageId::new()),
+        )
+        .unwrap();
+
+        assert!(
+            reopened.read_event(&kept_id).await.unwrap().is_some(),
+            "read_event by id must work after reopen (index rebuilt)"
+        );
+        assert_eq!(reopened.read_causally_ordered().await.unwrap().len(), 2);
+
+        let e3 = ChainEventFactory::data_event(writer_id, "c", serde_json::json!({"n": 3}));
+        let env3 = reopened.append(e3, None).await.unwrap();
+        assert!(
+            env3.vector_clock.get(&writer_key) >= 3,
+            "writer clock must continue after reopen, not reset"
+        );
+
+        std::fs::remove_dir_all(&test_dir).ok();
+    }
+
+    #[tokio::test]
+    async fn read_causally_ordered_fails_loud_on_mid_file_corruption() {
+        // FLOWIP-120q: a corrupt committed record must fail loud rather than be
+        // silently skipped to produce a shortened stream.
+        let test_id = Uuid::new_v4();
+        let test_dir =
+            std::path::PathBuf::from(format!("target/test-logs/read_all_corrupt_{test_id}"));
+        std::fs::create_dir_all(&test_dir).unwrap();
+        let log_path = test_dir.join("corrupt.log");
+        let writer_id = WriterId::from(StageId::new());
+
+        let log = DiskJournal::<ChainEvent>::with_owner(
+            log_path.clone(),
+            obzenflow_core::JournalOwner::stage(StageId::new()),
+        )
+        .unwrap();
+        for i in 0..3 {
+            let e = ChainEventFactory::data_event(writer_id, "e", serde_json::json!({"i": i}));
+            log.append(e, None).await.unwrap();
+        }
+
+        // Flip a byte inside the first record's body (mid-file): its CRC no
+        // longer matches, so it is committed corruption.
+        let mut bytes = std::fs::read(&log_path).unwrap();
+        let brace = bytes.iter().position(|&b| b == b'{').unwrap();
+        bytes[brace + 5] ^= 0xff;
+        std::fs::write(&log_path, &bytes).unwrap();
+
+        assert!(
+            log.read_causally_ordered().await.is_err(),
+            "mid-file corruption must fail loud"
+        );
+
+        std::fs::remove_dir_all(&test_dir).ok();
+    }
+
+    #[tokio::test]
+    async fn live_tail_reader_handles_concurrent_appends_without_misalignment() {
+        // FLOWIP-120q: a live-tail reader sharing the per-path lock with the
+        // writer must read every committed record under concurrent append, never
+        // misaligning into a mid-record "malformed" read and never erroring.
+        let test_id = Uuid::new_v4();
+        let test_dir = std::path::PathBuf::from(format!("target/test-logs/live_tail_{test_id}"));
+        std::fs::create_dir_all(&test_dir).unwrap();
+        let log_path = test_dir.join("tail.log");
+        let log = Arc::new(
+            DiskJournal::<ChainEvent>::with_owner(
+                log_path,
+                obzenflow_core::JournalOwner::stage(StageId::new()),
+            )
+            .unwrap(),
+        );
+        let writer_id = WriterId::from(StageId::new());
+
+        const N: usize = 50;
+        let writer_log = log.clone();
+        let writer = tokio::spawn(async move {
+            for i in 0..N {
+                let e = ChainEventFactory::data_event(
+                    writer_id,
+                    "tail.event",
+                    serde_json::json!({"i": i}),
+                );
+                writer_log.append(e, None).await.unwrap();
+                tokio::task::yield_now().await;
+            }
+        });
+
+        let mut reader = log.reader().await.unwrap();
+        let mut seen = 0usize;
+        let mut polls = 0u32;
+        while seen < N {
+            match reader.next().await {
+                Ok(Some(_)) => seen += 1,
+                Ok(None) => {
+                    tokio::task::yield_now().await;
+                    polls += 1;
+                    assert!(polls < 1_000_000, "live-tail reader stalled at {seen}/{N}");
+                }
+                Err(e) => panic!("live-tail reader must not error on concurrent append: {e}"),
+            }
+        }
+        writer.await.unwrap();
+        assert_eq!(seen, N);
 
         std::fs::remove_dir_all(&test_dir).ok();
     }

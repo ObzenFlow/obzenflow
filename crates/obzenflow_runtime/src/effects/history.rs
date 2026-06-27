@@ -63,12 +63,34 @@ impl EffectHistory {
                 .push(position);
         }
 
-        for positions in index.values() {
+        // FLOWIP-120q: an incomplete outcome group is an uncommitted torn tail.
+        // Treat it as absent (drop it from the index) so strict replay raises
+        // MissingRecordedEffect and resume re-executes, rather than feeding a
+        // partial outcome back. Any other validation error is corruption.
+        let mut incomplete = Vec::new();
+        for (cursor, positions) in index.iter() {
             let group = positions
                 .iter()
                 .filter_map(|position| records.get(*position))
                 .collect::<Vec<_>>();
-            validate_effect_outcome_group(&group)?;
+            match validate_effect_outcome_group(&group) {
+                Ok(()) => {}
+                Err(EffectError::IncompleteOutcomeGroup {
+                    expected, present, ..
+                }) => {
+                    tracing::warn!(
+                        ?cursor,
+                        expected,
+                        present,
+                        "dropping uncommitted effect outcome group (torn tail); effect treated as absent"
+                    );
+                    incomplete.push(cursor.clone());
+                }
+                Err(other) => return Err(other),
+            }
+        }
+        for cursor in incomplete {
+            index.remove(&cursor);
         }
 
         Ok(Self {

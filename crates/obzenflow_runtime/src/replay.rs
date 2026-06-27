@@ -160,14 +160,12 @@ impl ReplayDriver {
                     })?;
 
             let Some(envelope) = next else {
-                if self.archive_reader.is_at_end() {
-                    return Ok(None);
-                }
-                return Err(ReplayError::CorruptedArchive {
-                    path: self.journal_path.clone(),
-                    record_position: self.archive_reader.position(),
-                    message: "archive record appears partial".to_string(),
-                });
+                // FLOWIP-120q: the reader applies the archive's status-derived
+                // torn-tail policy, so `None` is always a clean end (true EOF or
+                // a tolerated final torn tail) and corruption arrives as the
+                // `Err` mapped above. The reader owns finality; the driver no
+                // longer second-guesses it via `is_at_end`.
+                return Ok(None);
             };
 
             let original_event = envelope.event;

@@ -241,6 +241,12 @@ pub(super) async fn append_domain_effect_success_facts(
         ));
     }
 
+    // FLOWIP-120q: the full fact set is in hand here, so stamp the group
+    // cardinality on every fact. Sized completeness checks read this back.
+    let outcome_fact_count = OutcomeFactCount::new(u32::try_from(facts.len()).map_err(|_| {
+        EffectError::Execution("effect outcome fact count exceeds u32 range".to_string())
+    })?);
+
     let committer = OutputCommitter {
         data_journal,
         flow_context,
@@ -268,6 +274,7 @@ pub(super) async fn append_domain_effect_success_facts(
                 event_type: fact.event_type.clone(),
                 output: fact.payload.clone(),
                 outcome_fact_ordinal: ordinal,
+                outcome_fact_count,
             },
             origin: origin.clone(),
         };
@@ -292,6 +299,7 @@ pub(super) async fn append_domain_effect_success_facts(
         // provenance carries it without a separate assignment.
         let mut provenance = EffectProvenance::from_record(&record, EffectFactOwner::User);
         provenance.outcome_fact_ordinal = Some(ordinal);
+        provenance.outcome_fact_count = Some(outcome_fact_count);
         event = event.with_effect_provenance(provenance);
 
         let committed_event = event.clone();

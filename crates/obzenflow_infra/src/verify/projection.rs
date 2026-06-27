@@ -218,6 +218,7 @@ mod tests {
             descriptor_hash: "hash".into(),
             descriptor: EffectDescriptor::new("payment.charge", "charge", 1, "1", "input"),
             outcome_fact_ordinal: None,
+            outcome_fact_count: None,
             group_id: None,
             fact_owner: Default::default(),
             origin: None,

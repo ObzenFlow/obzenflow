@@ -6,6 +6,7 @@
 //!
 //! Maintains an open file handle and tracks position for O(1) sequential reads.
 
+use super::scanner::{classify_frame, dispose, read_frame_async, Disposition, ReadPolicy};
 use async_trait::async_trait;
 use obzenflow_core::event::event_envelope::EventEnvelope;
 use obzenflow_core::event::identity::JournalWriterId;
@@ -14,22 +15,35 @@ use obzenflow_core::id::JournalId;
 use obzenflow_core::journal::journal_error::JournalError;
 use obzenflow_core::journal::journal_reader::JournalReader;
 use std::fs::File as StdFile;
+use std::io::SeekFrom;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::fs::File;
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncSeekExt, BufReader};
 use tokio::sync::RwLock;
+
+/// Live-tail polls allowed at the same unterminated record before a stuck or
+/// crashed writer is treated as a hard error rather than an endless retry
+/// (FLOWIP-120q). Sealed readers never reach this path.
+const MAX_STALL_POLLS: u32 = 5;
 
 /// Efficient reader for DiskJournal that maintains position
 pub struct DiskJournalReader<T: JournalEvent> {
     /// Buffered reader over the file
     reader: BufReader<File>,
-    /// Current position (number of events read)
+    /// Current position (number of committed events read)
     position: u64,
-    /// Consecutive partial read attempts at the current position
-    partial_retries: u32,
-    /// Position associated with the current partial retry budget
-    last_partial_position: Option<u64>,
+    /// Byte offset of the next unread record. Advances only past a committed
+    /// record, so it is both the rewind point for a torn tail (FLOWIP-120q) and
+    /// the record position reported in corruption errors.
+    read_offset: u64,
+    /// Consecutive `Skip` polls at `read_offset` (live-tail stall guard).
+    stall_polls: u32,
+    /// Read policy: live-tail retries a torn tail, a sealed scan fails loud or
+    /// tolerates a final torn tail per `tolerate_torn_tail`.
+    policy: ReadPolicy,
+    /// Reusable byte buffer for the framed-line reader.
+    buf: Vec<u8>,
     /// Path to the journal file (for error messages)
     path: PathBuf,
     /// Journal ID for creating JournalWriterId
@@ -42,7 +56,7 @@ pub struct DiskJournalReader<T: JournalEvent> {
 }
 
 impl<T: JournalEvent> DiskJournalReader<T> {
-    /// Create a new reader starting from the beginning
+    /// Create a new live-tail reader starting from the beginning
     pub async fn new(
         path: PathBuf,
         journal_id: JournalId,
@@ -67,8 +81,10 @@ impl<T: JournalEvent> DiskJournalReader<T> {
             return Ok(Self {
                 reader: BufReader::new(file),
                 position: 0,
-                partial_retries: 0,
-                last_partial_position: None,
+                read_offset: 0,
+                stall_polls: 0,
+                policy: ReadPolicy::LiveTail,
+                buf: Vec::new(),
                 path,
                 journal_id,
                 at_end: true,
@@ -95,8 +111,10 @@ impl<T: JournalEvent> DiskJournalReader<T> {
         Ok(Self {
             reader: BufReader::new(file),
             position: 0,
-            partial_retries: 0,
-            last_partial_position: None,
+            read_offset: 0,
+            stall_polls: 0,
+            policy: ReadPolicy::LiveTail,
+            buf: Vec::new(),
             path,
             journal_id,
             at_end: false,
@@ -105,13 +123,14 @@ impl<T: JournalEvent> DiskJournalReader<T> {
         })
     }
 
-    /// Open an existing journal for read-only sequential access.
-    ///
-    /// Unlike `new()`, this never creates the file if missing.
-    pub async fn open_existing(
+    /// Open an existing journal for read-only sequential access under an explicit
+    /// read policy. Unlike `new()`, this never creates the file if missing.
+    /// Archive readers pass a sealed policy (FLOWIP-120q).
+    pub(crate) async fn open_existing(
         path: PathBuf,
         journal_id: JournalId,
         read_write_lock: Arc<RwLock<()>>,
+        policy: ReadPolicy,
     ) -> Result<Self, JournalError> {
         let std_file = StdFile::open(&path).map_err(|e| {
             tracing::error!(
@@ -129,8 +148,10 @@ impl<T: JournalEvent> DiskJournalReader<T> {
         Ok(Self {
             reader: BufReader::new(file),
             position: 0,
-            partial_retries: 0,
-            last_partial_position: None,
+            read_offset: 0,
+            stall_polls: 0,
+            policy,
+            buf: Vec::new(),
             path,
             journal_id,
             at_end: false,
@@ -139,7 +160,7 @@ impl<T: JournalEvent> DiskJournalReader<T> {
         })
     }
 
-    /// Create a new reader starting from a specific position
+    /// Create a new live-tail reader starting from a specific event position
     pub async fn from_position(
         path: PathBuf,
         journal_id: JournalId,
@@ -161,6 +182,7 @@ impl<T: JournalEvent> DiskJournalReader<T> {
 
         let mut reader = BufReader::new(file);
         let mut position = 0;
+        let mut read_offset = 0u64;
 
         // Skip to start position efficiently
         let mut line = String::new();
@@ -172,8 +194,10 @@ impl<T: JournalEvent> DiskJournalReader<T> {
                     return Ok(Self {
                         reader,
                         position,
-                        partial_retries: 0,
-                        last_partial_position: None,
+                        read_offset,
+                        stall_polls: 0,
+                        policy: ReadPolicy::LiveTail,
+                        buf: Vec::new(),
                         path,
                         journal_id,
                         at_end: true,
@@ -181,7 +205,8 @@ impl<T: JournalEvent> DiskJournalReader<T> {
                         _phantom: std::marker::PhantomData,
                     });
                 }
-                Ok(_) => {
+                Ok(bytes) => {
+                    read_offset += bytes as u64;
                     if !line.trim().is_empty() {
                         position += 1;
                     }
@@ -198,8 +223,10 @@ impl<T: JournalEvent> DiskJournalReader<T> {
         Ok(Self {
             reader,
             position,
-            partial_retries: 0,
-            last_partial_position: None,
+            read_offset,
+            stall_polls: 0,
+            policy: ReadPolicy::LiveTail,
+            buf: Vec::new(),
             path,
             journal_id,
             at_end: false,
@@ -212,166 +239,112 @@ impl<T: JournalEvent> DiskJournalReader<T> {
 #[async_trait]
 impl<T: JournalEvent> JournalReader<T> for DiskJournalReader<T> {
     async fn next(&mut self) -> Result<Option<EventEnvelope<T>>, JournalError> {
-        // Remove the early return for at_end - we want to retry after EOF
-        // to check for new events (like tail -f behavior)
-
-        let mut line = String::new();
-        // Prevent reading partial writes by holding a shared lock
+        // Don't permanently latch at_end: a live-tail reader retries after EOF to
+        // pick up new appends.
         let _read_guard = self.read_write_lock.read().await;
 
         loop {
-            line.clear();
-            match self.reader.read_line(&mut line).await {
-                Ok(0) => {
-                    // EOF reached - but don't permanently set at_end
-                    // Just return None for this call, allowing retry on next call
-                    self.at_end = true;
-                    self.partial_retries = 0;
-                    self.last_partial_position = None;
+            let frame = read_frame_async(&mut self.reader, &mut self.buf)
+                .await
+                .map_err(|e| JournalError::Implementation {
+                    message: format!("Failed to read from journal at offset {}", self.read_offset),
+                    source: Box::new(e),
+                })?;
+
+            let Some((consumed, termination)) = frame else {
+                // Clean EOF: return None for this call, allowing retry on the next.
+                self.at_end = true;
+                self.stall_polls = 0;
+                return Ok(None);
+            };
+            self.at_end = false;
+
+            if self.buf.iter().all(u8::is_ascii_whitespace) {
+                self.read_offset += consumed as u64;
+                continue;
+            }
+
+            match dispose(classify_frame::<T>(&self.buf), termination, self.policy) {
+                Disposition::Yield(record) => {
+                    self.read_offset += consumed as u64;
+                    self.position += 1;
+                    self.stall_polls = 0;
+                    return Ok(Some(EventEnvelope {
+                        journal_writer_id: JournalWriterId::from(self.journal_id),
+                        vector_clock: record.vector_clock,
+                        timestamp: record.timestamp,
+                        event: record.event,
+                    }));
+                }
+                Disposition::Skip => {
+                    // Live-tail unterminated tail: rewind to the record start so
+                    // the next poll re-reads the whole record once the writer
+                    // completes it, instead of reading forward over the partial.
+                    self.reader
+                        .seek(SeekFrom::Start(self.read_offset))
+                        .await
+                        .map_err(|e| JournalError::Implementation {
+                            message: format!(
+                                "Failed to rewind journal to offset {}",
+                                self.read_offset
+                            ),
+                            source: Box::new(e),
+                        })?;
+                    self.stall_polls += 1;
+                    if self.stall_polls > MAX_STALL_POLLS {
+                        let msg = format!(
+                            "Partial read retries exceeded at offset {} in {}",
+                            self.read_offset,
+                            self.path.display()
+                        );
+                        tracing::error!(
+                            read_offset = self.read_offset,
+                            path = %self.path.display(),
+                            stall_polls = self.stall_polls,
+                            "Journal record partial retry budget exceeded"
+                        );
+                        return Err(JournalError::Implementation {
+                            message: msg.clone(),
+                            source: Box::new(std::io::Error::new(
+                                std::io::ErrorKind::UnexpectedEof,
+                                msg,
+                            )),
+                        });
+                    }
                     return Ok(None);
                 }
-                Ok(_) => {
-                    // We got data - no longer at EOF
-                    self.at_end = false;
-
-                    // Skip empty lines
-                    if line.trim().is_empty() {
-                        continue;
-                    }
-                    tracing::debug!(
-                        path = %self.path.display(),
-                        position = self.position,
-                        line_len = line.len(),
-                        lock_ptr = ?Arc::as_ptr(&self.read_write_lock),
-                        line_preview = %if line.len() > 120 { format!("{}... [truncated]", &line[..120]) } else { line.clone() },
-                        "DiskJournalReader read line"
-                    );
-
-                    // Inspect header before parsing for diagnostics
-                    let mut parts = line.trim_end_matches('\n').splitn(3, ':');
-                    let expected_len = parts.next().and_then(|s| s.parse::<usize>().ok());
-                    let expected_crc = parts.next().and_then(|s| s.parse::<u32>().ok());
-                    let header_present = expected_len.is_some() && expected_crc.is_some();
-                    let payload = parts.next().unwrap_or("");
-                    let payload_len = payload.len();
-                    let crc_ok = expected_crc.map(|crc| {
-                        let mut hasher = crc32fast::Hasher::new();
-                        hasher.update(payload.as_bytes());
-                        hasher.finalize() == crc
-                    });
-
-                    match super::disk_journal::parse_framed_record::<T>(&line) {
-                        super::disk_journal::ParseOutcome::Complete(record) => {
-                            let envelope = EventEnvelope {
-                                journal_writer_id: JournalWriterId::from(self.journal_id),
-                                vector_clock: record.vector_clock,
-                                timestamp: record.timestamp,
-                                event: record.event,
-                            };
-
-                            self.position += 1;
-                            self.partial_retries = 0;
-                            self.last_partial_position = None;
-                            return Ok(Some(envelope));
-                        }
-                        super::disk_journal::ParseOutcome::Partial => {
-                            if self.last_partial_position == Some(self.position) {
-                                self.partial_retries += 1;
-                            } else {
-                                self.partial_retries = 1;
-                                self.last_partial_position = Some(self.position);
-                            }
-
-                            if self.partial_retries > 5 {
-                                let err_msg = format!(
-                                    "Partial read retries exceeded at position {}",
-                                    self.position
-                                );
-                                tracing::error!(
-                                    position = self.position,
-                                    path = %self.path.display(),
-                                    line_len = line.len(),
-                                    header_present,
-                                    expected_len,
-                                    expected_crc,
-                                    payload_len,
-                                    crc_ok,
-                                    lock_ptr = ?Arc::as_ptr(&self.read_write_lock),
-                                    partial_retries = self.partial_retries,
-                                    "Journal record partial retry budget exceeded"
-                                );
-                                return Err(JournalError::Implementation {
-                                    message: err_msg.clone(),
-                                    source: Box::new(std::io::Error::new(
-                                        std::io::ErrorKind::UnexpectedEof,
-                                        err_msg,
-                                    )),
-                                });
-                            }
-
-                            tracing::debug!(
-                                position = self.position,
-                                path = %self.path.display(),
-                                line_len = line.len(),
-                                header_present,
-                                expected_len,
-                                expected_crc,
-                                payload_len,
-                                crc_ok,
-                                lock_ptr = ?Arc::as_ptr(&self.read_write_lock),
-                                partial_retries = self.partial_retries,
-                                "Journal record appears partial; will retry"
-                            );
-                            return Ok(None);
-                        }
-                        super::disk_journal::ParseOutcome::Corrupt(e) => {
-                            let line_preview = if line.len() > 200 {
-                                format!(
-                                    "{}... [truncated, {} bytes total]",
-                                    &line[..200],
-                                    line.len()
-                                )
-                            } else {
-                                line.clone()
-                            };
-
-                            tracing::error!(
-                                position = self.position,
-                                path = %self.path.display(),
-                                line_len = line.len(),
-                                header_present,
-                                expected_len,
-                                expected_crc,
-                                payload_len,
-                                crc_ok,
-                                lock_ptr = ?Arc::as_ptr(&self.read_write_lock),
-                                parse_error = %e,
-                                line_preview = %line_preview,
-                                "Failed to parse journal record"
-                            );
-
-                            self.partial_retries = 0;
-                            self.last_partial_position = None;
-                            return Err(JournalError::Implementation {
-                                message: format!(
-                                    "Failed to parse journal record at position {}: {}",
-                                    self.position, e
-                                ),
-                                source: Box::new(std::io::Error::new(
-                                    std::io::ErrorKind::InvalidData,
-                                    e,
-                                )),
-                            });
-                        }
-                    }
+                Disposition::EndOfCommittedRecords => {
+                    // Sealed scan tolerated a final torn tail: clean end.
+                    self.at_end = true;
+                    self.stall_polls = 0;
+                    return Ok(None);
                 }
-                Err(e) => {
+                Disposition::Corrupt(problem) => {
+                    // FLOWIP-120q live-tail observer resilience: advance past the
+                    // unreadable record so a best-effort observer that keeps
+                    // polling after the error resumes at the next record rather
+                    // than re-reading this one. Strict consumers (replay,
+                    // verification, sealed scans) abort on this error, so the
+                    // advance is harmless for them.
+                    let corrupt_at = self.read_offset;
+                    self.read_offset += consumed as u64;
+                    self.stall_polls = 0;
+                    tracing::error!(
+                        read_offset = corrupt_at,
+                        path = %self.path.display(),
+                        parse_error = %problem,
+                        "Failed to parse journal record"
+                    );
                     return Err(JournalError::Implementation {
                         message: format!(
-                            "Failed to read from journal at position {}",
-                            self.position
+                            "Failed to parse journal record at offset {} in {}: {problem}",
+                            corrupt_at,
+                            self.path.display()
                         ),
-                        source: Box::new(e),
+                        source: Box::new(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            problem.to_string(),
+                        )),
                     });
                 }
             }
@@ -393,9 +366,10 @@ impl<T: JournalEvent> JournalReader<T> for DiskJournalReader<T> {
                     self.at_end = true;
                     break;
                 }
-                Ok(_) => {
+                Ok(bytes) => {
                     // Got data - no longer at EOF
                     self.at_end = false;
+                    self.read_offset += bytes as u64;
 
                     if !line.trim().is_empty() {
                         skipped += 1;

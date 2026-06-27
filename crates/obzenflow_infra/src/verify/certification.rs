@@ -118,6 +118,7 @@ mod tests {
         }
         RunManifest {
             manifest_version: "2.0".to_string(),
+            journal_format_version: 1,
             obzenflow_version: "0.1.2".to_string(),
             flow_id: "flow_test".to_string(),
             flow_name: "test".to_string(),

@@ -15,9 +15,18 @@ use std::collections::HashMap;
 pub const RUN_MANIFEST_FILENAME: &str = "run_manifest.json";
 pub const RUN_MANIFEST_VERSION: &str = "2.0";
 
+/// On-disk journal record format version (FLOWIP-120q). Bumped only when the
+/// framed record byte format changes. Readers gate on this in the same raw-JSON
+/// check that gates `manifest_version`, so an archive written by an incompatible
+/// format is refused before any record is parsed. There is no mixed-format file:
+/// append and resume across a changed format refuse or start a new segment.
+pub const JOURNAL_FORMAT_VERSION: u32 = 1;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunManifest {
     pub manifest_version: String,
+    /// FLOWIP-120q: framed record format version. See `JOURNAL_FORMAT_VERSION`.
+    pub journal_format_version: u32,
     pub obzenflow_version: String,
     pub flow_id: String,
     pub flow_name: String,

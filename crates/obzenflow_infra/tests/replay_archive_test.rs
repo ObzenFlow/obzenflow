@@ -44,6 +44,7 @@ fn write_manifest(dir: &Path) {
 
     let manifest = RunManifest {
         manifest_version: RUN_MANIFEST_VERSION.to_string(),
+        journal_format_version: 1,
         obzenflow_version: OBZENFLOW_VERSION.to_string(),
         flow_id: "flow_01H000000000000000000000000".to_string(),
         flow_name: "test_flow".to_string(),
@@ -178,6 +179,7 @@ fn write_manifest_with_version(dir: &Path, version: &str) {
 
     let manifest = RunManifest {
         manifest_version: RUN_MANIFEST_VERSION.to_string(),
+        journal_format_version: 1,
         obzenflow_version: version.to_string(),
         flow_id: "flow_01H000000000000000000000000".to_string(),
         flow_name: "test_flow".to_string(),

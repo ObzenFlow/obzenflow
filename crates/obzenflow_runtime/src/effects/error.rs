@@ -53,6 +53,15 @@ pub enum EffectError {
     #[error("effect provenance mismatch: {0}")]
     EffectProvenanceMismatch(String),
 
+    #[error(
+        "incomplete effect outcome group for cursor {cursor:?}: {present} of {expected} facts present"
+    )]
+    IncompleteOutcomeGroup {
+        cursor: EffectCursor,
+        expected: usize,
+        present: usize,
+    },
+
     #[error("non-idempotent effect '{effect_type}' has no idempotency key")]
     MissingIdempotencyKey { effect_type: String },
 
@@ -98,6 +107,7 @@ impl EffectError {
             EffectError::RecordedFailure { retry, .. }
             | EffectError::BoundaryRejected { retry, .. } => retry.is_retryable(),
             EffectError::EffectProvenanceMismatch(_) => false,
+            EffectError::IncompleteOutcomeGroup { .. } => false,
             EffectError::MissingRecordedEffect { .. }
             | EffectError::DuplicateRecordedEffect { .. }
             | EffectError::DescriptorMismatch { .. }
@@ -129,6 +139,7 @@ impl EffectError {
             EffectError::RecordedFailure { error_type, .. } => return error_type.clone(),
             EffectError::BoundaryRejected { .. } => "boundary_rejected",
             EffectError::EffectProvenanceMismatch(_) => "effect_provenance_mismatch",
+            EffectError::IncompleteOutcomeGroup { .. } => "incomplete_outcome_group",
             EffectError::MissingIdempotencyKey { .. } => "missing_idempotency_key",
             EffectError::UndeclaredEffect { .. } => "undeclared_effect",
             EffectError::UndeclaredOutput { .. } => "undeclared_output",
@@ -168,6 +179,7 @@ impl EffectError {
             EffectError::MissingRecordedEffect { .. }
             | EffectError::DuplicateRecordedEffect { .. }
             | EffectError::DescriptorMismatch { .. }
+            | EffectError::IncompleteOutcomeGroup { .. }
             | EffectError::MissingIdempotencyKey { .. }
             | EffectError::UndeclaredEffect { .. }
             | EffectError::UndeclaredOutput { .. }

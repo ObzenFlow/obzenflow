@@ -45,6 +45,11 @@ pub(super) fn effect_record_from_event(
                     "domain effect outcome facts must set outcome_fact_ordinal".to_string(),
                 )
             })?;
+            let outcome_fact_count = provenance.outcome_fact_count.ok_or_else(|| {
+                EffectError::EffectProvenanceMismatch(
+                    "domain effect outcome facts must set outcome_fact_count".to_string(),
+                )
+            })?;
 
             let record = EffectRecord {
                 cursor: provenance.cursor.clone(),
@@ -54,6 +59,7 @@ pub(super) fn effect_record_from_event(
                     event_type: event_type.clone().into(),
                     output: payload.clone(),
                     outcome_fact_ordinal,
+                    outcome_fact_count,
                 },
                 origin: provenance.origin.clone(),
             };
@@ -161,31 +167,41 @@ pub(super) fn validate_effect_outcome_group(records: &[&EffectRecord]) -> Result
     let Some(first) = records.first() else {
         return Ok(());
     };
-    if records.len() == 1 {
-        match &first.outcome {
-            EffectOutcomePayload::Succeeded { .. } | EffectOutcomePayload::Failed { .. } => {
-                return Ok(());
-            }
-            EffectOutcomePayload::SucceededFact {
-                outcome_fact_ordinal,
-                ..
-            } if outcome_fact_ordinal.get() == 0 => return Ok(()),
-            EffectOutcomePayload::SucceededFact {
-                outcome_fact_ordinal,
-                ..
-            } => {
+    // Non-fact outcomes (legacy single payload, or a failure) are singletons.
+    // A multi-fact domain group declares its cardinality on every fact.
+    let expected = match &first.outcome {
+        EffectOutcomePayload::Succeeded { .. } | EffectOutcomePayload::Failed { .. } => {
+            if records.len() != 1 {
                 return Err(EffectError::EffectProvenanceMismatch(format!(
-                    "single domain effect outcome fact for cursor {:?} must use ordinal 0, found {outcome_fact_ordinal}",
+                    "effect outcome group for cursor {:?} mixes a non-fact outcome with other records",
                     first.cursor
                 )));
             }
+            return Ok(());
         }
+        EffectOutcomePayload::SucceededFact {
+            outcome_fact_count, ..
+        } => usize::try_from(outcome_fact_count.get()).map_err(|_| {
+            EffectError::EffectProvenanceMismatch(format!(
+                "effect outcome fact count for cursor {:?} exceeds usize range",
+                first.cursor
+            ))
+        })?,
+    };
+    if expected == 0 {
+        return Err(EffectError::EffectProvenanceMismatch(format!(
+            "effect outcome group for cursor {:?} declares zero facts",
+            first.cursor
+        )));
     }
 
     let cursor = first.cursor.clone();
     let descriptor_hash = first.descriptor_hash.clone();
     let descriptor = first.descriptor.clone();
-    let mut seen = vec![false; records.len()];
+    // FLOWIP-120q: size the presence check to the recorded group cardinality,
+    // not to the number of records present, so a group missing its top fact is
+    // detected instead of passing as a smaller complete group.
+    let mut seen = vec![false; expected];
     for record in records {
         if record.cursor != cursor {
             return Err(EffectError::EffectProvenanceMismatch(
@@ -205,6 +221,7 @@ pub(super) fn validate_effect_outcome_group(records: &[&EffectRecord]) -> Result
 
         let EffectOutcomePayload::SucceededFact {
             outcome_fact_ordinal,
+            outcome_fact_count,
             ..
         } = &record.outcome
         else {
@@ -212,6 +229,11 @@ pub(super) fn validate_effect_outcome_group(records: &[&EffectRecord]) -> Result
                 "multi-fact effect outcome group for cursor {cursor:?} contains a non-domain-success record"
             )));
         };
+        if usize::try_from(outcome_fact_count.get()).unwrap_or(usize::MAX) != expected {
+            return Err(EffectError::EffectProvenanceMismatch(format!(
+                "effect outcome group for cursor {cursor:?} disagrees on outcome_fact_count"
+            )));
+        }
         let ordinal = usize::try_from(outcome_fact_ordinal.get()).map_err(|_| {
             EffectError::EffectProvenanceMismatch(format!(
                 "effect outcome fact ordinal for cursor {cursor:?} exceeds usize range"
@@ -219,7 +241,7 @@ pub(super) fn validate_effect_outcome_group(records: &[&EffectRecord]) -> Result
         })?;
         let Some(slot) = seen.get_mut(ordinal) else {
             return Err(EffectError::EffectProvenanceMismatch(format!(
-                "effect outcome group for cursor {cursor:?} has non-contiguous ordinal {outcome_fact_ordinal}"
+                "effect outcome group for cursor {cursor:?} has ordinal {outcome_fact_ordinal} beyond declared count {expected}"
             )));
         };
         if *slot {
@@ -230,13 +252,23 @@ pub(super) fn validate_effect_outcome_group(records: &[&EffectRecord]) -> Result
         *slot = true;
     }
 
-    if seen.iter().any(|present| !present) {
-        return Err(EffectError::EffectProvenanceMismatch(format!(
-            "effect outcome group for cursor {cursor:?} has missing outcome fact ordinals"
-        )));
+    let present_count = seen.iter().filter(|flag| **flag).count();
+    if present_count == expected {
+        return Ok(());
     }
-
-    Ok(())
+    // Incomplete. A contiguous prefix {0..present-1} is a tolerated torn tail
+    // that dropped the top ordinals, so the whole group is treated as absent. A
+    // gap in the middle cannot come from a torn tail and is corruption.
+    if seen[..present_count].iter().all(|flag| *flag) {
+        return Err(EffectError::IncompleteOutcomeGroup {
+            cursor,
+            expected,
+            present: present_count,
+        });
+    }
+    Err(EffectError::EffectProvenanceMismatch(format!(
+        "effect outcome group for cursor {cursor:?} is missing interior outcome fact ordinals"
+    )))
 }
 
 pub(super) fn decode_effect_outcome_group<T>(records: &[&EffectRecord]) -> Result<T, EffectError>
