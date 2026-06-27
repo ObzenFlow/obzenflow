@@ -268,18 +268,17 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
                                 directive = Ok(EventLoopDirective::Continue)
                             }
                             Err(e) => {
-                                tracing::error!(
+                                // FLOWIP-120q live-tail observer resilience: the metrics
+                                // aggregator is a best-effort observer, so a recoverable
+                                // subscription read error is logged and skipped, not fatal.
+                                // The reader advances past the unreadable record, so the
+                                // next poll resumes after it instead of re-reading it.
+                                tracing::warn!(
                                     error = %e,
-                                    "Metrics aggregator system subscription errored"
+                                    "Metrics aggregator system subscription read error; skipping record and continuing"
                                 );
-                                tracing::error!(
-                                    error = %e,
-                                    "Metrics aggregator emitting Error event from system subscription"
-                                );
-                                directive =
-                                    Ok(EventLoopDirective::Transition(MetricsAggregatorEvent::Error(
-                                        format!("system subscription error: {e}"),
-                                    )))
+                                idle_backoff().await;
+                                directive = Ok(EventLoopDirective::Continue)
                             }
                         }
                     }
@@ -319,21 +318,14 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
                                 directive = Ok(EventLoopDirective::Continue)
                             }
                             PollResult::Error(e) => {
-                                let err_msg = format!("Data journal read error: {e}");
-                                if err_msg.contains("Partial read retries exceeded") {
-                                    tracing::warn!(
-                                        error = %err_msg,
-                                        "Metrics aggregator dropping partial read after retries"
-                                    );
-                                    return Ok(EventLoopDirective::Continue);
-                                }
-                                tracing::error!(
-                                    error = %err_msg,
-                                    "Metrics aggregator emitting Error event"
+                                // FLOWIP-120q live-tail observer resilience: best-effort
+                                // observer, so skip the unreadable record and continue.
+                                tracing::warn!(
+                                    error = %e,
+                                    "Metrics aggregator data journal read error; skipping record and continuing"
                                 );
-                                directive = Ok(EventLoopDirective::Transition(
-                                    MetricsAggregatorEvent::Error(err_msg),
-                                ));
+                                idle_backoff().await;
+                                directive = Ok(EventLoopDirective::Continue);
                             }
                         }
                     }
@@ -366,21 +358,14 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
                                 directive = Ok(EventLoopDirective::Continue)
                             }
                             Err(e) => {
-                                let err_msg = format!("Error journal read error: {e}");
-                                if err_msg.contains("Partial read retries exceeded") {
-                                    tracing::warn!(
-                                        error = %err_msg,
-                                        "Metrics aggregator dropping partial error journal read after retries"
-                                    );
-                                    return Ok(EventLoopDirective::Continue);
-                                }
-                                tracing::error!(
-                                    error = %err_msg,
-                                    "Metrics aggregator emitting Error event"
+                                // FLOWIP-120q live-tail observer resilience: best-effort
+                                // observer, so skip the unreadable record and continue.
+                                tracing::warn!(
+                                    error = %e,
+                                    "Metrics aggregator error journal read error; skipping record and continuing"
                                 );
-                                directive = Ok(EventLoopDirective::Transition(
-                                    MetricsAggregatorEvent::Error(err_msg),
-                                ));
+                                idle_backoff().await;
+                                directive = Ok(EventLoopDirective::Continue);
                             }
                         }
                     }
@@ -428,12 +413,14 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
                         }
                         PollResult::NoEvents => {}
                         PollResult::Error(e) => {
-                            let err_msg =
-                                format!("Error reading system events during draining: {e}");
-                            tracing::error!(error = %err_msg, "Metrics aggregator draining system subscription errored");
-                            return Ok(EventLoopDirective::Transition(
-                                MetricsAggregatorEvent::Error(err_msg),
-                            ));
+                            // FLOWIP-120q live-tail observer resilience: best-effort
+                            // observer, so skip the unreadable record and keep draining.
+                            tracing::warn!(
+                                error = %e,
+                                "Metrics aggregator draining system read error; skipping record and continuing"
+                            );
+                            idle_backoff().await;
+                            return Ok(EventLoopDirective::Continue);
                         }
                     }
                 }
@@ -474,21 +461,14 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
                         }
                         PollResult::NoEvents => {}
                         PollResult::Error(e) => {
-                            let err_msg = format!("Data journal read error during draining: {e}");
-                            if err_msg.contains("Partial read retries exceeded") {
-                                tracing::warn!(
-                                    error = %err_msg,
-                                    "Metrics aggregator draining dropping partial read after retries"
-                                );
-                                return Ok(EventLoopDirective::Continue);
-                            }
-                            tracing::error!(
-                                error = %err_msg,
-                                "Metrics aggregator draining emitting Error event"
+                            // FLOWIP-120q live-tail observer resilience: best-effort
+                            // observer, so skip the unreadable record and keep draining.
+                            tracing::warn!(
+                                error = %e,
+                                "Metrics aggregator draining data read error; skipping record and continuing"
                             );
-                            return Ok(EventLoopDirective::Transition(
-                                MetricsAggregatorEvent::Error(err_msg),
-                            ));
+                            idle_backoff().await;
+                            return Ok(EventLoopDirective::Continue);
                         }
                     }
                 }
@@ -520,21 +500,14 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
                         }
                         PollResult::NoEvents => {}
                         PollResult::Error(e) => {
-                            let err_msg = format!("Error journal read error during draining: {e}");
-                            if err_msg.contains("Partial read retries exceeded") {
-                                tracing::warn!(
-                                    error = %err_msg,
-                                    "Metrics aggregator draining dropping partial error journal read after retries"
-                                );
-                                return Ok(EventLoopDirective::Continue);
-                            }
-                            tracing::error!(
-                                error = %err_msg,
-                                "Metrics aggregator draining emitting Error event"
+                            // FLOWIP-120q live-tail observer resilience: best-effort
+                            // observer, so skip the unreadable record and keep draining.
+                            tracing::warn!(
+                                error = %e,
+                                "Metrics aggregator draining error read error; skipping record and continuing"
                             );
-                            return Ok(EventLoopDirective::Transition(
-                                MetricsAggregatorEvent::Error(err_msg),
-                            ));
+                            idle_backoff().await;
+                            return Ok(EventLoopDirective::Continue);
                         }
                     }
                 }

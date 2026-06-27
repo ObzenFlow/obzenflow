@@ -79,7 +79,13 @@ fn footer_for(outcome: RunPresentationOutcome) -> Footer {
         }
         _ => "Next: replay this run with --replay-from, or scrape /metrics for obzenflow_circuit_breaker_*.",
     };
-    outcome.into_footer().paragraph(next_step)
+    // The raw .log files are internal framed storage; the supported way to read a
+    // run is the journal subcommands (FLOWIP-120q).
+    let inspect_step = "Inspect the run with `obzenflow journal inspect <run-dir>`, or `obzenflow journal export-jsonl <run-dir>` for one JSON object per committed record.";
+    outcome
+        .into_footer()
+        .paragraph(next_step)
+        .paragraph(inspect_step)
 }
 
 /// Exit codes follow the FLOWIP-095j verification contract when `--verify`

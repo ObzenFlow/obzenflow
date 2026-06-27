@@ -8,6 +8,7 @@
 
 pub mod disk;
 pub mod factory;
+pub mod inspect;
 pub mod memory;
 
 // Re-export implementations

@@ -8,22 +8,22 @@
 //! archived disk journals, exposed to runtime services via the `ReplayArchive`
 //! trait.
 
-use super::disk_journal::parse_framed_record;
 use super::disk_journal_reader::DiskJournalReader;
+use super::scanner::{classify_frame, dispose, read_frame_sync, Disposition, ReadPolicy};
 use async_trait::async_trait;
 use obzenflow_core::build_info::OBZENFLOW_VERSION;
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::SystemEvent;
 use obzenflow_core::id::JournalId;
 use obzenflow_core::journal::run_manifest::{
-    RunManifest, RUN_MANIFEST_FILENAME, RUN_MANIFEST_VERSION,
+    RunManifest, JOURNAL_FORMAT_VERSION, RUN_MANIFEST_FILENAME, RUN_MANIFEST_VERSION,
 };
 use obzenflow_core::journal::JournalReader;
 use obzenflow_core::journal::{ArchiveStatus, StatusDerivation};
 use obzenflow_core::{ChainEvent, StageId};
 use obzenflow_runtime::replay::{ReplayArchive, ReplayError};
 use std::fs::File;
-use std::io::{BufRead, BufReader};
+use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
@@ -89,6 +89,20 @@ impl DiskReplayArchive {
                 supported: RUN_MANIFEST_VERSION,
             });
         }
+        // FLOWIP-120q: refuse an archive whose framed record format this build
+        // does not read, in the same raw-JSON gate as manifest_version, so a
+        // stale archive is rejected before any record is parsed.
+        let journal_format_version = manifest_value
+            .get("journal_format_version")
+            .and_then(|v| v.as_u64());
+        if journal_format_version != Some(u64::from(JOURNAL_FORMAT_VERSION)) {
+            return Err(ReplayError::Parse {
+                message: format!(
+                    "unsupported journal_format_version {journal_format_version:?} in {} (supported: {JOURNAL_FORMAT_VERSION})",
+                    manifest_path.display()
+                ),
+            });
+        }
         let manifest: RunManifest =
             serde_json::from_value(manifest_value).map_err(|e| ReplayError::Parse {
                 message: format!(
@@ -151,6 +165,17 @@ impl DiskReplayArchive {
     pub fn status_derivation(&self) -> StatusDerivation {
         self.status_derivation.clone()
     }
+
+    /// FLOWIP-120q torn-tail policy. A cleanly `Completed` run flushed every
+    /// record before its terminal event, so a torn final record is corruption.
+    /// Any other status was interrupted, so an unterminated final record is a
+    /// tolerated torn tail. `allow_incomplete_archive` governs only whether a
+    /// non-terminal archive may be opened, never read-time tolerance.
+    fn read_policy(&self) -> ReadPolicy {
+        ReadPolicy::SealedScan {
+            tolerate_torn_tail: self.status != ArchiveStatus::Completed,
+        }
+    }
 }
 
 #[async_trait]
@@ -195,6 +220,7 @@ impl ReplayArchive for DiskReplayArchive {
             data_path,
             JournalId::new(),
             self.read_write_lock.clone(),
+            self.read_policy(),
         )
         .await
         .map_err(|e| ReplayError::Io {
@@ -236,6 +262,7 @@ impl ReplayArchive for DiskReplayArchive {
             data_path,
             JournalId::new(),
             self.read_write_lock.clone(),
+            self.read_policy(),
         )
         .await
         .map_err(|e| ReplayError::Io {
@@ -325,21 +352,35 @@ pub(crate) fn derive_status_derivation_from_system_log(
         message: format!("Failed to open system.log at {}", path.display()),
         source: e,
     })?;
-    let reader = BufReader::new(file);
+    let mut reader = BufReader::new(file);
+    let mut buf = Vec::new();
 
     let mut chosen = ArchiveStatus::Unknown;
     let mut terminal_events_found: u64 = 0;
-    for (idx, line) in reader.lines().enumerate() {
-        let line = line.map_err(|e| ReplayError::Io {
+    let mut line_no = 0u64;
+
+    // FLOWIP-120q: the status-derivation bootstrap tolerates a torn tail, because
+    // a crashed run legitimately leaves a torn final system record; that tail
+    // just means no terminal event was committed. Mid-file corruption fails loud.
+    while let Some((_, termination)) =
+        read_frame_sync(&mut reader, &mut buf).map_err(|e| ReplayError::Io {
             message: format!("Failed to read system.log at {}", path.display()),
             source: e,
-        })?;
-        if line.trim().is_empty() {
+        })?
+    {
+        line_no += 1;
+        if buf.iter().all(u8::is_ascii_whitespace) {
             continue;
         }
 
-        match parse_framed_record::<SystemEvent>(&line) {
-            super::disk_journal::ParseOutcome::Complete(record) => {
+        match dispose(
+            classify_frame::<SystemEvent>(&buf),
+            termination,
+            ReadPolicy::SealedScan {
+                tolerate_torn_tail: true,
+            },
+        ) {
+            Disposition::Yield(record) => {
                 if let obzenflow_core::event::SystemEventType::PipelineLifecycle(event) =
                     &record.event.event
                 {
@@ -360,22 +401,12 @@ pub(crate) fn derive_status_derivation_from_system_log(
                     }
                 }
             }
-            super::disk_journal::ParseOutcome::Partial => {
+            Disposition::EndOfCommittedRecords | Disposition::Skip => break,
+            Disposition::Corrupt(problem) => {
                 return Err(ReplayError::Parse {
                     message: format!(
-                        "system.log appears partially written at line {} in {}",
-                        idx + 1,
+                        "system.log record corrupt at line {line_no} in {}: {problem}",
                         path.display()
-                    ),
-                });
-            }
-            super::disk_journal::ParseOutcome::Corrupt(e) => {
-                return Err(ReplayError::Parse {
-                    message: format!(
-                        "system.log record corrupt at line {} in {}: {}",
-                        idx + 1,
-                        path.display(),
-                        e
                     ),
                 });
             }

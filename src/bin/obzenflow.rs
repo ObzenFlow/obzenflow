@@ -16,6 +16,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Args, Parser, Subcommand};
+use obzenflow_infra::journal::inspect::{export_jsonl, inspect};
 use obzenflow_infra::verify::{render_verdict, verify_run_dirs, VerifyOptions};
 
 #[derive(Parser)]
@@ -30,6 +31,41 @@ enum Command {
     /// Verify a replayed (or recorded) run against a baseline run of the
     /// same flow, from the journals (FLOWIP-095j).
     Verify(VerifyArgs),
+
+    /// Inspect a run's durable journals through the supported JSONL projection
+    /// (FLOWIP-120q). The raw `.log` files are internal framed storage.
+    Journal(JournalArgs),
+}
+
+#[derive(Args)]
+struct JournalArgs {
+    #[command(subcommand)]
+    command: JournalCommand,
+}
+
+#[derive(Subcommand)]
+enum JournalCommand {
+    /// Export a run's system, data, and error journals as JSONL, one JSON
+    /// object per committed record. Fails loud on corruption.
+    ExportJsonl {
+        /// The run directory (the one containing `run_manifest.json`).
+        run_dir: PathBuf,
+        /// Write to this file instead of stdout.
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
+
+    /// Print a run summary plus a filtered listing of stage data journals.
+    Inspect {
+        /// The run directory (the one containing `run_manifest.json`).
+        run_dir: PathBuf,
+        /// Limit the listing to one stage key.
+        #[arg(long)]
+        stage: Option<String>,
+        /// Limit the listing to one event type.
+        #[arg(long)]
+        event_type: Option<String>,
+    },
 }
 
 #[derive(Args)]
@@ -72,5 +108,27 @@ fn main() -> ExitCode {
                 }
             }
         }
+        Command::Journal(args) => match args.command {
+            JournalCommand::ExportJsonl { run_dir, output } => {
+                match export_jsonl(&run_dir, output.as_deref()) {
+                    Ok(()) => ExitCode::SUCCESS,
+                    Err(err) => {
+                        eprintln!("journal export-jsonl failed: {err}");
+                        ExitCode::from(4)
+                    }
+                }
+            }
+            JournalCommand::Inspect {
+                run_dir,
+                stage,
+                event_type,
+            } => match inspect(&run_dir, stage.as_deref(), event_type.as_deref()) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(err) => {
+                    eprintln!("journal inspect failed: {err}");
+                    ExitCode::from(4)
+                }
+            },
+        },
     }
 }

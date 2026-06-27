@@ -11,17 +11,19 @@
 //! quiescent by the time verification runs, so no journal locking applies.
 
 use std::fs::File;
-use std::io::{BufRead, BufReader, Lines};
+use std::io::BufReader;
 use std::path::{Path, PathBuf};
 
 use obzenflow_core::event::ChainEvent;
 use obzenflow_core::journal::run_manifest::{
-    RunManifest, RUN_MANIFEST_FILENAME, RUN_MANIFEST_VERSION,
+    RunManifest, JOURNAL_FORMAT_VERSION, RUN_MANIFEST_FILENAME, RUN_MANIFEST_VERSION,
 };
 use obzenflow_core::journal::ArchiveStatus;
 
-use crate::journal::disk::disk_journal::{parse_framed_record, ParseOutcome};
 use crate::journal::disk::replay_archive::derive_status_derivation_from_system_log;
+use crate::journal::disk::scanner::{
+    classify_frame, dispose, read_frame_sync, Disposition, ReadPolicy,
+};
 
 use super::error::{RefusalReason, VerifyError};
 
@@ -97,6 +99,17 @@ impl DiskRunSource {
                 supported: RUN_MANIFEST_VERSION.to_string(),
             }));
         }
+        // FLOWIP-120q: refuse an archive whose framed record format this build
+        // does not read, in the same raw-JSON gate as manifest_version.
+        let journal_format_version = value.get("journal_format_version").and_then(|v| v.as_u64());
+        if journal_format_version != Some(u64::from(JOURNAL_FORMAT_VERSION)) {
+            return Err(SourceOpenError::Failed(VerifyError::Parse {
+                path: manifest_path.clone(),
+                message: format!(
+                    "unsupported journal_format_version {journal_format_version:?} (supported: {JOURNAL_FORMAT_VERSION})"
+                ),
+            }));
+        }
         let manifest: RunManifest = serde_json::from_value(value).map_err(|e| {
             SourceOpenError::Failed(VerifyError::Parse {
                 path: manifest_path.clone(),
@@ -146,50 +159,80 @@ impl RunSource for DiskRunSource {
             source,
         })?;
         Ok(Box::new(JournalRows {
-            lines: BufReader::new(file).lines(),
+            reader: BufReader::new(file),
+            buf: Vec::new(),
             journal: journal_file.to_string(),
             path,
             line_no: 0,
+            byte_offset: 0,
+            // FLOWIP-120q: verification is a sealed reader. Tolerate a final torn
+            // tail only for a non-`Completed` source (cancelled-baseline prefix
+            // comparison); fail loud on any committed corruption.
+            policy: ReadPolicy::SealedScan {
+                tolerate_torn_tail: self.status != ArchiveStatus::Completed,
+            },
+            done: false,
         }))
     }
 }
 
 struct JournalRows {
-    lines: Lines<BufReader<File>>,
+    reader: BufReader<File>,
+    buf: Vec<u8>,
     journal: String,
     path: PathBuf,
     line_no: u64,
+    byte_offset: u64,
+    policy: ReadPolicy,
+    done: bool,
 }
 
 impl Iterator for JournalRows {
     type Item = Result<ChainEvent, VerifyError>;
 
     fn next(&mut self) -> Option<Self::Item> {
+        if self.done {
+            return None;
+        }
         loop {
-            let line = match self.lines.next()? {
-                Ok(line) => line,
+            let (consumed, termination) = match read_frame_sync(&mut self.reader, &mut self.buf) {
+                Ok(Some(frame)) => frame,
+                Ok(None) => {
+                    self.done = true;
+                    return None;
+                }
                 Err(source) => {
+                    self.done = true;
                     return Some(Err(VerifyError::Io {
                         path: self.path.clone(),
                         source,
-                    }))
+                    }));
                 }
             };
+            let record_offset = self.byte_offset;
+            self.byte_offset += consumed as u64;
             self.line_no += 1;
-            if line.trim().is_empty() {
+            if self.buf.iter().all(u8::is_ascii_whitespace) {
                 continue;
             }
-            match parse_framed_record::<ChainEvent>(&line) {
-                ParseOutcome::Complete(record) => return Some(Ok(record.event)),
-                // A trailing partial record is a torn final write on a killed
-                // run; the sealed history ends at the last complete record.
-                ParseOutcome::Partial => continue,
-                ParseOutcome::Corrupt(message) => {
+            match dispose(
+                classify_frame::<ChainEvent>(&self.buf),
+                termination,
+                self.policy,
+            ) {
+                Disposition::Yield(record) => return Some(Ok(record.event)),
+                // A tolerated final torn tail ends the sealed history cleanly.
+                Disposition::EndOfCommittedRecords | Disposition::Skip => {
+                    self.done = true;
+                    return None;
+                }
+                Disposition::Corrupt(problem) => {
+                    self.done = true;
                     return Some(Err(VerifyError::CorruptRecord {
                         journal: self.journal.clone(),
                         line: self.line_no,
-                        message,
-                    }))
+                        message: format!("at offset {record_offset}: {problem}"),
+                    }));
                 }
             }
         }

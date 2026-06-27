@@ -23,8 +23,8 @@ pub use journal_reader::JournalReader;
 pub use journal_trait::Journal;
 pub use journal_trait::JournalStorageKind;
 pub use run_manifest::{
-    RunManifest, RunManifestReplayConfig, RunManifestStage, RUN_MANIFEST_FILENAME,
-    RUN_MANIFEST_VERSION,
+    RunManifest, RunManifestReplayConfig, RunManifestStage, JOURNAL_FORMAT_VERSION,
+    RUN_MANIFEST_FILENAME, RUN_MANIFEST_VERSION,
 };
 
 // Type aliases for clarity
