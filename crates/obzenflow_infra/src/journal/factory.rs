@@ -21,9 +21,9 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 
-use super::disk::disk_journal::DiskJournal;
+use super::disk::DiskJournal;
 use super::disk::replay_archive::DiskReplayArchive;
-use super::memory::memory_journal::MemoryJournal;
+use super::memory::MemoryJournal;
 
 static LAST_RUN_DIR: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
 

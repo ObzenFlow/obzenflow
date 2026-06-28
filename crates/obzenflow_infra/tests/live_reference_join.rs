@@ -13,7 +13,7 @@ use obzenflow_core::event::SystemEvent;
 use obzenflow_core::journal::journal_owner::JournalOwner;
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{ChainEvent, FlowId, StageId, SystemId, TypedPayload, WriterId};
-use obzenflow_infra::journal::disk::disk_journal::DiskJournal;
+use obzenflow_infra::journal::DiskJournal;
 use obzenflow_runtime::id_conversions::StageIdExt;
 use obzenflow_runtime::stages::common::control_strategies::JonestownSignalStrategy;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;

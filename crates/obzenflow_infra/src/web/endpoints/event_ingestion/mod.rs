@@ -451,6 +451,10 @@ mod tests {
             })
         }
 
+        async fn read_all_unordered(&self) -> Result<Vec<EventEnvelope<T>>, JournalError> {
+            self.inner.read_all_unordered().await
+        }
+
         async fn read_causally_ordered(&self) -> Result<Vec<EventEnvelope<T>>, JournalError> {
             self.inner.read_causally_ordered().await
         }

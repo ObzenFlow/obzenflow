@@ -296,18 +296,6 @@ mod tests {
             Ok(Some(envelope))
         }
 
-        async fn skip(&mut self, n: u64) -> Result<u64, JournalError> {
-            let guard = self
-                .events
-                .lock()
-                .expect("MemoryJournalReader: poisoned lock");
-            let len = guard.len();
-            drop(guard);
-            let before = self.pos;
-            self.pos = std::cmp::min(len, self.pos.saturating_add(n as usize));
-            Ok((self.pos - before) as u64)
-        }
-
         fn position(&self) -> u64 {
             self.pos as u64
         }
@@ -336,6 +324,10 @@ mod tests {
             let mut guard = self.events.lock().expect("MemoryJournal: poisoned lock");
             guard.push(envelope.clone());
             Ok(envelope)
+        }
+
+        async fn read_all_unordered(&self) -> Result<Vec<EventEnvelope<T>>, JournalError> {
+            self.read_causally_ordered().await
         }
 
         async fn read_causally_ordered(&self) -> Result<Vec<EventEnvelope<T>>, JournalError> {

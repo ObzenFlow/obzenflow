@@ -21,7 +21,7 @@ use std::io::SeekFrom;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::fs::File;
-use tokio::io::{AsyncBufReadExt, AsyncSeekExt, BufReader};
+use tokio::io::{AsyncSeekExt, BufReader};
 use tokio::sync::RwLock;
 
 /// Live-tail polls allowed at the same unterminated record before a stuck or
@@ -186,79 +186,106 @@ impl<T: JournalEvent> DiskJournalReader<T> {
         })
     }
 
-    /// Create a new live-tail reader starting from a specific event position
+    /// Create a new live-tail reader advanced to a specific append position.
+    /// Equivalent to `new()` followed by advancing past `start_position`
+    /// committed records, so a reader created at position N matches a reader
+    /// advanced past N records, including corruption and torn-tail handling
+    /// (FLOWIP-120t: one parsing path, the same `dispose` traversal as `next()`).
     pub async fn from_position(
         path: PathBuf,
         journal_id: JournalId,
         start_position: u64,
         read_write_lock: Arc<RwLock<()>>,
     ) -> Result<Self, JournalError> {
-        let std_file = StdFile::open(&path).map_err(|e| {
-            tracing::error!(
-                path = %path.display(),
-                os_error = %e,
-                "DiskJournalReader failed to open journal file from_position"
-            );
-            JournalError::Implementation {
-                message: format!("Failed to open journal file: {}", path.display()),
-                source: Box::new(e),
-            }
-        })?;
-        let file = File::from_std(std_file);
+        let mut reader = Self::new(path, journal_id, read_write_lock).await?;
+        reader.advance_to(start_position).await?;
+        Ok(reader)
+    }
 
-        let mut reader = BufReader::new(file);
-        let mut position = 0;
-        let mut read_offset = 0u64;
-
-        // Skip to start position efficiently
-        let mut line = String::new();
-        while position < start_position {
-            line.clear();
-            match reader.read_line(&mut line).await {
-                Ok(0) => {
-                    // Reached EOF while skipping
-                    return Ok(Self {
-                        position,
-                        read_offset,
-                        stall_polls: 0,
-                        policy: ReadPolicy::LiveTail,
-                        buf: Vec::new(),
-                        path,
-                        journal_id,
-                        at_end: true,
-                        read_write_lock: read_write_lock.clone(),
-                        create_if_missing: false,
-                        _phantom: std::marker::PhantomData,
-                    });
+    /// Advance the cursor forward to `target` committed records from the start,
+    /// driving the same framed scanner and `dispose` path as `next()`. Stops
+    /// early at a clean EOF or an unterminated torn tail; fails loud on committed
+    /// corruption before the target.
+    async fn advance_to(&mut self, target: u64) -> Result<(), JournalError> {
+        if self.position >= target {
+            return Ok(());
+        }
+        // Lock through a cloned Arc so the guard borrows a local, not `self`,
+        // leaving `self` free for the `&mut self` advance below.
+        let lock = self.read_write_lock.clone();
+        let _read_guard = lock.read().await;
+        let mut reader = self.reader_at_offset().await?;
+        while self.position < target {
+            let (disposition, frame_start) = self.advance_one(&mut reader).await?;
+            match disposition {
+                Disposition::Yield(_) => {}
+                Disposition::EndOfCommittedRecords => {
+                    self.at_end = true;
+                    break;
                 }
-                Ok(bytes) => {
-                    read_offset += bytes as u64;
-                    if !line.trim().is_empty() {
-                        position += 1;
-                    }
+                Disposition::Skip => {
+                    self.at_end = false;
+                    break;
                 }
-                Err(e) => {
+                Disposition::Corrupt(problem) => {
                     return Err(JournalError::Implementation {
-                        message: format!("Failed to skip to position {start_position} in journal"),
-                        source: Box::new(e),
+                        message: format!(
+                            "Failed to parse journal record at offset {} in {}: {problem}",
+                            frame_start,
+                            self.path.display()
+                        ),
+                        source: Box::new(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            problem.to_string(),
+                        )),
                     });
                 }
             }
         }
+        Ok(())
+    }
 
-        Ok(Self {
-            position,
-            read_offset,
-            stall_polls: 0,
-            policy: ReadPolicy::LiveTail,
-            buf: Vec::new(),
-            path,
-            journal_id,
-            at_end: false,
-            read_write_lock,
-            create_if_missing: false,
-            _phantom: std::marker::PhantomData,
-        })
+    /// Read one logical record from `reader` under the current policy, advancing
+    /// `read_offset` and `position` exactly as a committed read does. The
+    /// internal loop skips blank lines and advances past a corrupt record so a
+    /// best-effort observer resumes at the next one. Returns the disposition plus
+    /// the byte offset where the disposed (post-whitespace) frame began, for
+    /// corruption reporting. Leaves `at_end`/`stall_polls` to the caller. Clean
+    /// EOF maps to `EndOfCommittedRecords`.
+    async fn advance_one<B: tokio::io::AsyncBufRead + Unpin>(
+        &mut self,
+        reader: &mut B,
+    ) -> Result<(Disposition<T>, u64), JournalError> {
+        loop {
+            let frame_start = self.read_offset;
+            let Some((consumed, termination)) = read_frame_async(reader, &mut self.buf)
+                .await
+                .map_err(|e| JournalError::Implementation {
+                    message: format!("Failed to read from journal at offset {}", self.read_offset),
+                    source: Box::new(e),
+                })?
+            else {
+                return Ok((Disposition::EndOfCommittedRecords, frame_start));
+            };
+
+            if self.buf.iter().all(u8::is_ascii_whitespace) {
+                self.read_offset += consumed as u64;
+                continue;
+            }
+
+            match dispose(classify_frame::<T>(&self.buf), termination, self.policy) {
+                Disposition::Yield(record) => {
+                    self.read_offset += consumed as u64;
+                    self.position += 1;
+                    return Ok((Disposition::Yield(record), frame_start));
+                }
+                Disposition::Corrupt(problem) => {
+                    self.read_offset += consumed as u64;
+                    return Ok((Disposition::Corrupt(problem), frame_start));
+                }
+                other => return Ok((other, frame_start)),
+            }
+        }
     }
 
     async fn reader_at_offset(&self) -> Result<BufReader<File>, JournalError> {
@@ -283,149 +310,84 @@ impl<T: JournalEvent> DiskJournalReader<T> {
 impl<T: JournalEvent> JournalReader<T> for DiskJournalReader<T> {
     async fn next(&mut self) -> Result<Option<EventEnvelope<T>>, JournalError> {
         // Don't permanently latch at_end: a live-tail reader retries after EOF to
-        // pick up new appends.
-        let _read_guard = self.read_write_lock.read().await;
-
-        // Keep the byte offset as the source of truth. Metrics and other
-        // observers poll through cancellation-heavy select loops; using a fresh
-        // read handle per poll prevents a cancelled Tokio file operation from
-        // leaving this reader's stored cursor mid-frame.
+        // pick up new appends. A fresh read handle per poll keeps a cancelled
+        // observer poll from leaving the stored cursor mid-frame.
+        // Lock through a cloned Arc so the guard borrows a local, not `self`,
+        // leaving `self` free for the `&mut self` advance below.
+        let lock = self.read_write_lock.clone();
+        let _read_guard = lock.read().await;
         let mut reader = self.reader_at_offset().await?;
 
-        loop {
-            let frame = read_frame_async(&mut reader, &mut self.buf)
-                .await
-                .map_err(|e| JournalError::Implementation {
-                    message: format!("Failed to read from journal at offset {}", self.read_offset),
-                    source: Box::new(e),
-                })?;
-
-            let Some((consumed, termination)) = frame else {
-                // Clean EOF: return None for this call, allowing retry on the next.
+        let (disposition, frame_start) = self.advance_one(&mut reader).await?;
+        match disposition {
+            Disposition::Yield(record) => {
+                self.at_end = false;
+                self.stall_polls = 0;
+                Ok(Some(EventEnvelope {
+                    journal_writer_id: JournalWriterId::from(self.journal_id),
+                    vector_clock: record.vector_clock,
+                    timestamp: record.timestamp,
+                    event: record.event,
+                }))
+            }
+            Disposition::EndOfCommittedRecords => {
+                // Clean EOF (live tail) or a tolerated final torn tail (sealed).
                 self.at_end = true;
                 self.stall_polls = 0;
-                return Ok(None);
-            };
-            self.at_end = false;
-
-            if self.buf.iter().all(u8::is_ascii_whitespace) {
-                self.read_offset += consumed as u64;
-                continue;
+                Ok(None)
             }
-
-            match dispose(classify_frame::<T>(&self.buf), termination, self.policy) {
-                Disposition::Yield(record) => {
-                    self.read_offset += consumed as u64;
-                    self.position += 1;
-                    self.stall_polls = 0;
-                    return Ok(Some(EventEnvelope {
-                        journal_writer_id: JournalWriterId::from(self.journal_id),
-                        vector_clock: record.vector_clock,
-                        timestamp: record.timestamp,
-                        event: record.event,
-                    }));
-                }
-                Disposition::Skip => {
-                    // Live-tail unterminated tail: leave read_offset at the
-                    // record start so the next poll re-reads the whole record
-                    // once the writer completes it.
-                    self.stall_polls += 1;
-                    if self.stall_polls > MAX_STALL_POLLS {
-                        let msg = format!(
-                            "Partial read retries exceeded at offset {} in {}",
-                            self.read_offset,
-                            self.path.display()
-                        );
-                        tracing::error!(
-                            read_offset = self.read_offset,
-                            path = %self.path.display(),
-                            stall_polls = self.stall_polls,
-                            "Journal record partial retry budget exceeded"
-                        );
-                        return Err(JournalError::Implementation {
-                            message: msg.clone(),
-                            source: Box::new(std::io::Error::new(
-                                std::io::ErrorKind::UnexpectedEof,
-                                msg,
-                            )),
-                        });
-                    }
-                    return Ok(None);
-                }
-                Disposition::EndOfCommittedRecords => {
-                    // Sealed scan tolerated a final torn tail: clean end.
-                    self.at_end = true;
-                    self.stall_polls = 0;
-                    return Ok(None);
-                }
-                Disposition::Corrupt(problem) => {
-                    // FLOWIP-120q live-tail observer resilience: advance past the
-                    // unreadable record so a best-effort observer that keeps
-                    // polling after the error resumes at the next record rather
-                    // than re-reading this one. Strict consumers (replay,
-                    // verification, sealed scans) abort on this error, so the
-                    // advance is harmless for them.
-                    let corrupt_at = self.read_offset;
-                    self.read_offset += consumed as u64;
-                    self.stall_polls = 0;
+            Disposition::Skip => {
+                // Live-tail unterminated tail: advance_one left read_offset at the
+                // record start, so the next poll re-reads it once the writer
+                // completes it.
+                self.at_end = false;
+                self.stall_polls += 1;
+                if self.stall_polls > MAX_STALL_POLLS {
+                    let msg = format!(
+                        "Partial read retries exceeded at offset {} in {}",
+                        self.read_offset,
+                        self.path.display()
+                    );
                     tracing::error!(
-                        read_offset = corrupt_at,
+                        read_offset = self.read_offset,
                         path = %self.path.display(),
-                        parse_error = %problem,
-                        "Failed to parse journal record"
+                        stall_polls = self.stall_polls,
+                        "Journal record partial retry budget exceeded"
                     );
                     return Err(JournalError::Implementation {
-                        message: format!(
-                            "Failed to parse journal record at offset {} in {}: {problem}",
-                            corrupt_at,
-                            self.path.display()
-                        ),
+                        message: msg.clone(),
                         source: Box::new(std::io::Error::new(
-                            std::io::ErrorKind::InvalidData,
-                            problem.to_string(),
+                            std::io::ErrorKind::UnexpectedEof,
+                            msg,
                         )),
                     });
                 }
+                Ok(None)
+            }
+            Disposition::Corrupt(problem) => {
+                // advance_one already advanced read_offset past the unreadable
+                // record so a best-effort observer that keeps polling resumes at
+                // the next one. Strict consumers abort on this error.
+                self.stall_polls = 0;
+                tracing::error!(
+                    read_offset = frame_start,
+                    path = %self.path.display(),
+                    parse_error = %problem,
+                    "Failed to parse journal record"
+                );
+                Err(JournalError::Implementation {
+                    message: format!(
+                        "Failed to parse journal record at offset {} in {}: {problem}",
+                        frame_start,
+                        self.path.display()
+                    ),
+                    source: Box::new(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        problem.to_string(),
+                    )),
+                })
             }
         }
-    }
-
-    async fn skip(&mut self, n: u64) -> Result<u64, JournalError> {
-        // Don't early return on at_end - allow retry to check for new events
-
-        let mut skipped = 0;
-        let mut line = String::new();
-        let _read_guard = self.read_write_lock.read().await;
-        let mut reader = self.reader_at_offset().await?;
-
-        for _ in 0..n {
-            line.clear();
-            match reader.read_line(&mut line).await {
-                Ok(0) => {
-                    // EOF reached
-                    self.at_end = true;
-                    break;
-                }
-                Ok(bytes) => {
-                    // Got data - no longer at EOF
-                    self.at_end = false;
-                    self.read_offset += bytes as u64;
-
-                    if !line.trim().is_empty() {
-                        skipped += 1;
-                        self.position += 1;
-                    }
-                }
-                Err(e) => {
-                    return Err(JournalError::Implementation {
-                        message: format!("Failed to skip in journal at position {}", self.position),
-                        source: Box::new(e),
-                    });
-                }
-            }
-        }
-
-        Ok(skipped)
     }
 
     fn position(&self) -> u64 {
@@ -508,7 +470,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_skip_and_resume() {
+    async fn test_from_position_resume() {
         // Create a temporary journal file
         let mut temp_file = NamedTempFile::new().unwrap();
         let path = temp_file.path().to_path_buf();
@@ -535,16 +497,17 @@ mod tests {
         temp_file.flush().unwrap();
 
         let read_write_lock = Arc::new(RwLock::new(()));
-        // Create reader and skip first 5
-        let mut reader =
-            DiskJournalReader::<ChainEvent>::new(path.clone(), journal_id, read_write_lock.clone())
-                .await
-                .unwrap();
-        let skipped = reader.skip(5).await.unwrap();
-        assert_eq!(skipped, 5);
+        // A reader created at position 5 reads index 5 next (FLOWIP-120t: the same
+        // dispose-based traversal as next(), no separate read_line path).
+        let mut reader = DiskJournalReader::<ChainEvent>::from_position(
+            path.clone(),
+            journal_id,
+            5,
+            read_write_lock.clone(),
+        )
+        .await
+        .unwrap();
         assert_eq!(reader.position(), 5);
-
-        // Read next event (should be index 5)
         let envelope = reader.next().await.unwrap().expect("Should have event");
         assert_eq!(envelope.event.payload()["index"], 5);
 

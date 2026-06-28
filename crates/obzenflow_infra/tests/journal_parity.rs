@@ -5,10 +5,12 @@
 //! Simple parity test to ensure DiskJournal and MemoryJournal behave identically
 
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
+use obzenflow_core::event::system_event::SystemEventFactory;
 use obzenflow_core::event::types::EventId;
+use obzenflow_core::event::{JournalEvent, SystemEvent};
 use obzenflow_core::journal::journal_owner::JournalOwner;
 use obzenflow_core::Journal;
-use obzenflow_core::{StageId, WriterId};
+use obzenflow_core::{StageId, SystemId, WriterId};
 use obzenflow_infra::journal::{DiskJournal, MemoryJournal};
 use serde_json::json;
 use std::sync::Arc;
@@ -375,4 +377,166 @@ async fn test_diamond_like_dag_is_timestamp_independent_for_concurrent_siblings(
             "concurrent siblings should be ordered by EventId, not by append-time timestamp"
         );
     }
+}
+
+#[tokio::test]
+async fn test_reader_surface_parity() {
+    // FLOWIP-120t: the reader/position surfaces are backend-specific, so parity
+    // is asserted directly. A reader created at position N matches a reader
+    // advanced past N records, on both backends.
+    let temp_dir = TempDir::new().unwrap();
+    let owner = JournalOwner::stage(StageId::new());
+    let log_path = temp_dir.path().join("reader_surface.log");
+    let disk = Arc::new(DiskJournal::with_owner(log_path, owner.clone()).unwrap())
+        as Arc<dyn Journal<ChainEvent> + Send + Sync>;
+    let memory =
+        Arc::new(MemoryJournal::with_owner(owner)) as Arc<dyn Journal<ChainEvent> + Send + Sync>;
+
+    let writer = WriterId::from(StageId::new());
+    const N: usize = 6;
+    // The same chained sequence goes to both, so event ids match across backends
+    // and a single writer makes append order the unambiguous read order.
+    let events: Vec<ChainEvent> = (0..N)
+        .map(|i| ChainEventFactory::data_event(writer, "reader.surface", json!({ "i": i })))
+        .collect();
+    let ids: Vec<_> = events.iter().map(|e| e.id).collect();
+
+    for journal in [&disk, &memory] {
+        let mut parent = None;
+        for event in &events {
+            let env = journal.append(event.clone(), parent.as_ref()).await.unwrap();
+            parent = Some(env);
+        }
+    }
+
+    // reader(): yields every event in append order, position climbs, ends at_end.
+    for journal in [&disk, &memory] {
+        let mut reader = journal.reader().await.unwrap();
+        for (i, id) in ids.iter().enumerate() {
+            let env = reader.next().await.unwrap().expect("event");
+            assert_eq!(env.event.id, *id, "reader order mismatch at {i}");
+            assert_eq!(reader.position(), i as u64 + 1);
+        }
+        assert!(reader.next().await.unwrap().is_none());
+        assert!(reader.is_at_end());
+    }
+
+    // reader_from(k): starts at position k and yields event k next, identically
+    // on disk and memory (the round-trip with an advanced reader).
+    for k in [0usize, 2, N] {
+        for journal in [&disk, &memory] {
+            let mut reader = journal.reader_from(k as u64).await.unwrap();
+            assert_eq!(reader.position(), k as u64, "reader_from({k}) position");
+            if k < N {
+                let env = reader.next().await.unwrap().expect("event");
+                assert_eq!(env.event.id, ids[k], "reader_from({k}) first event");
+            } else {
+                assert!(reader.next().await.unwrap().is_none());
+            }
+        }
+    }
+
+    // read_event by id: both backends find every event and miss an unknown id.
+    for id in &ids {
+        assert!(disk.read_event(id).await.unwrap().is_some());
+        assert!(memory.read_event(id).await.unwrap().is_some());
+    }
+    assert!(disk.read_event(&EventId::new()).await.unwrap().is_none());
+    assert!(memory.read_event(&EventId::new()).await.unwrap().is_none());
+
+    // read_last_n: most recent first, identical across backends.
+    let disk_last: Vec<_> = disk
+        .read_last_n(3)
+        .await
+        .unwrap()
+        .iter()
+        .map(|e| e.event.id)
+        .collect();
+    let memory_last: Vec<_> = memory
+        .read_last_n(3)
+        .await
+        .unwrap()
+        .iter()
+        .map(|e| e.event.id)
+        .collect();
+    assert_eq!(
+        disk_last,
+        vec![ids[5], ids[4], ids[3]],
+        "read_last_n must be most-recent-first"
+    );
+    assert_eq!(disk_last, memory_last, "read_last_n parity");
+}
+
+#[tokio::test]
+async fn test_system_event_parity() {
+    // FLOWIP-120t: parity must hold for SystemEvent journals too, not only
+    // ChainEvent.
+    let temp_dir = TempDir::new().unwrap();
+    let owner = JournalOwner::system(SystemId::new());
+    let log_path = temp_dir.path().join("system_parity.log");
+    let disk = Arc::new(DiskJournal::<SystemEvent>::with_owner(log_path, owner.clone()).unwrap())
+        as Arc<dyn Journal<SystemEvent> + Send + Sync>;
+    let memory = Arc::new(MemoryJournal::<SystemEvent>::with_owner(owner))
+        as Arc<dyn Journal<SystemEvent> + Send + Sync>;
+
+    let factory = SystemEventFactory::new(SystemId::new());
+    let stage = StageId::new();
+    let events = vec![
+        factory.stage_running(stage),
+        factory.stage_draining(stage),
+        factory.stage_drained(stage),
+    ];
+
+    for journal in [&disk, &memory] {
+        let mut parent = None;
+        for event in &events {
+            let env = journal.append(event.clone(), parent.as_ref()).await.unwrap();
+            parent = Some(env);
+        }
+    }
+
+    let disk_ordered: Vec<_> = disk
+        .read_causally_ordered()
+        .await
+        .unwrap()
+        .iter()
+        .map(|e| *e.event.id())
+        .collect();
+    let memory_ordered: Vec<_> = memory
+        .read_causally_ordered()
+        .await
+        .unwrap()
+        .iter()
+        .map(|e| *e.event.id())
+        .collect();
+    assert_eq!(disk_ordered.len(), 3);
+    assert_eq!(disk_ordered, memory_ordered, "SystemEvent causal-order parity");
+
+    // reader() parity: both yield all three.
+    for journal in [&disk, &memory] {
+        let mut reader = journal.reader().await.unwrap();
+        let mut count = 0;
+        while reader.next().await.unwrap().is_some() {
+            count += 1;
+        }
+        assert_eq!(count, 3);
+    }
+
+    // read_last_n most-recent-first parity.
+    let disk_last: Vec<_> = disk
+        .read_last_n(2)
+        .await
+        .unwrap()
+        .iter()
+        .map(|e| *e.event.id())
+        .collect();
+    let memory_last: Vec<_> = memory
+        .read_last_n(2)
+        .await
+        .unwrap()
+        .iter()
+        .map(|e| *e.event.id())
+        .collect();
+    assert_eq!(disk_last.len(), 2);
+    assert_eq!(disk_last, memory_last, "SystemEvent read_last_n parity");
 }

@@ -641,6 +641,10 @@ mod tests {
             Ok(env)
         }
 
+        async fn read_all_unordered(&self) -> Result<Vec<EventEnvelope<T>>, JournalError> {
+            self.read_causally_ordered().await
+        }
+
         async fn read_causally_ordered(&self) -> Result<Vec<EventEnvelope<T>>, JournalError> {
             let guard = self.events.lock().expect("journal events lock");
             Ok(guard.clone())
@@ -696,12 +700,6 @@ mod tests {
                 self.pos += 1;
                 Ok(env)
             }
-        }
-
-        async fn skip(&mut self, n: u64) -> Result<u64, JournalError> {
-            let start = self.pos as u64;
-            self.pos = (self.pos as u64 + n) as usize;
-            Ok((self.pos as u64).saturating_sub(start))
         }
 
         fn position(&self) -> u64 {

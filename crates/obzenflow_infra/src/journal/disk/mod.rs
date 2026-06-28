@@ -5,8 +5,11 @@
 //! Disk-based journal implementation
 
 pub mod config;
-pub mod disk_journal;
-pub mod disk_journal_reader;
+pub mod inspect;
+pub mod journal;
 pub mod log_record;
+pub mod reader;
 pub mod replay_archive;
 pub(crate) mod scanner;
+
+pub use journal::DiskJournal;

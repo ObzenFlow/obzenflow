@@ -21,8 +21,10 @@ use obzenflow_core::journal::Journal;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-struct MemoryJournalState<T: JournalEvent> {
-    events: Vec<EventEnvelope<T>>,
+use super::reader::MemoryJournalReader;
+
+pub(super) struct MemoryJournalState<T: JournalEvent> {
+    pub(super) events: Vec<EventEnvelope<T>>,
     writer_clocks: HashMap<WriterId, VectorClock>,
 }
 
@@ -33,27 +35,6 @@ pub struct MemoryJournal<T: JournalEvent> {
     journal_id: JournalId,
     state: Arc<Mutex<MemoryJournalState<T>>>,
     _phantom: std::marker::PhantomData<T>,
-}
-
-/// Reader for MemoryJournal
-///
-/// This reader iterates over the journal as events are appended (tail-like semantics).
-/// When it reaches the current end of the journal it returns `Ok(None)` for that call,
-/// but subsequent calls will observe newly appended events.
-pub struct MemoryJournalReader<T: JournalEvent> {
-    state: Arc<Mutex<MemoryJournalState<T>>>,
-    position: u64,
-}
-
-impl<T: JournalEvent> MemoryJournalReader<T> {
-    fn new(state: Arc<Mutex<MemoryJournalState<T>>>, position: u64) -> Self {
-        let len = state.lock().unwrap().events.len() as u64;
-        let clamped = position.min(len);
-        Self {
-            state,
-            position: clamped,
-        }
-    }
 }
 
 impl<T: JournalEvent> Default for MemoryJournal<T> {
@@ -88,16 +69,6 @@ impl<T: JournalEvent> MemoryJournal<T> {
             _phantom: std::marker::PhantomData,
         }
     }
-
-    /// Get the current number of events
-    pub fn len(&self) -> usize {
-        self.state.lock().unwrap().events.len()
-    }
-
-    /// Check if the journal is empty
-    pub fn is_empty(&self) -> bool {
-        self.state.lock().unwrap().events.is_empty()
-    }
 }
 
 #[async_trait]
@@ -119,38 +90,19 @@ impl<T: JournalEvent + 'static> Journal<T> for MemoryJournal<T> {
         event: T,
         parent: Option<&EventEnvelope<T>>,
     ) -> Result<EventEnvelope<T>, JournalError> {
-        // Safety check: Ensure journal has an owner before allowing writes
-        if self.owner.is_none() {
-            return Err(JournalError::Implementation {
-                message: "Cannot write to an unowned journal. Journal must have an owner."
-                    .to_string(),
-                source: "Unowned journal write attempt".into(),
-            });
-        }
+        crate::journal::ensure_owned(self.owner.as_ref())?;
         // Get writer_id from the event
         let writer_id = *event.writer_id();
 
         let mut state = self.state.lock().unwrap();
 
-        // Get or create vector clock for this writer
-        let mut vector_clock = state
-            .writer_clocks
-            .get(&writer_id)
-            .cloned()
-            .unwrap_or_else(VectorClock::new);
-
-        // Update vector clock based on parent
-        if let Some(parent_envelope) = parent {
-            CausalOrderingService::update_with_parent(
-                &mut vector_clock,
-                &parent_envelope.vector_clock,
-            );
-        }
-
-        // Increment for this writer
-        CausalOrderingService::increment(&mut vector_clock, &writer_id.to_string());
-
-        // Update stored clock
+        // Compute and store this writer's next clock under the mutex.
+        let current = state.writer_clocks.get(&writer_id).cloned();
+        let vector_clock = CausalOrderingService::advance_for_append(
+            current.as_ref(),
+            &writer_id.to_string(),
+            parent.map(|p| &p.vector_clock),
+        );
         state.writer_clocks.insert(writer_id, vector_clock.clone());
 
         // Create envelope with proper vector clock
@@ -167,30 +119,9 @@ impl<T: JournalEvent + 'static> Journal<T> for MemoryJournal<T> {
         Ok(envelope)
     }
 
-    async fn read_causally_ordered(&self) -> Result<Vec<EventEnvelope<T>>, JournalError> {
-        let events_copy = {
-            let state = self.state.lock().unwrap();
-            state.events.clone()
-        };
-
-        CausalOrderingService::order_envelopes_by_event_id(events_copy)
-    }
-
-    async fn read_causally_after(
-        &self,
-        after_event_id: &EventId,
-    ) -> Result<Vec<EventEnvelope<T>>, JournalError> {
-        let all_events = self.read_causally_ordered().await?;
-
-        // Find the position of the reference event
-        let position = all_events
-            .iter()
-            .position(|e| e.event.id() == after_event_id);
-
-        match position {
-            Some(pos) => Ok(all_events.into_iter().skip(pos + 1).collect()),
-            None => Ok(Vec::new()), // Event not found, return empty vec
-        }
+    async fn read_all_unordered(&self) -> Result<Vec<EventEnvelope<T>>, JournalError> {
+        let state = self.state.lock().unwrap();
+        Ok(state.events.clone())
     }
 
     async fn read_event(
@@ -203,10 +134,6 @@ impl<T: JournalEvent + 'static> Journal<T> for MemoryJournal<T> {
             .iter()
             .find(|e| e.event.id() == event_id)
             .cloned())
-    }
-
-    async fn reader(&self) -> Result<Box<dyn JournalReader<T>>, JournalError> {
-        Ok(Box::new(MemoryJournalReader::new(self.state.clone(), 0)))
     }
 
     async fn reader_from(&self, position: u64) -> Result<Box<dyn JournalReader<T>>, JournalError> {
@@ -229,42 +156,6 @@ impl<T: JournalEvent + 'static> Journal<T> for MemoryJournal<T> {
         let mut result: Vec<_> = state.events[start..].to_vec();
         result.reverse();
         Ok(result)
-    }
-}
-
-#[async_trait]
-impl<T: JournalEvent + 'static> JournalReader<T> for MemoryJournalReader<T> {
-    async fn next(&mut self) -> Result<Option<EventEnvelope<T>>, JournalError> {
-        let env = {
-            let state = self.state.lock().unwrap();
-            state.events.get(self.position as usize).cloned()
-        };
-
-        if env.is_some() {
-            self.position += 1;
-        } else {
-            // This reader is frequently polled inside tight async loops that rely on timers.
-            // Without an `.await` point here, `next()` can complete immediately forever and
-            // starve the executor (preventing timeouts/other tasks from making progress).
-            tokio::task::yield_now().await;
-        }
-        Ok(env)
-    }
-
-    async fn skip(&mut self, n: u64) -> Result<u64, JournalError> {
-        let len = self.state.lock().unwrap().events.len() as u64;
-        let start = self.position;
-        let target = (self.position + n).min(len);
-        self.position = target;
-        Ok(target - start)
-    }
-
-    fn position(&self) -> u64 {
-        self.position
-    }
-
-    fn is_at_end(&self) -> bool {
-        self.position as usize >= self.state.lock().unwrap().events.len()
     }
 }
 

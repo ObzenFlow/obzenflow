@@ -6,7 +6,7 @@
 //!
 //! Provides optimal sequential writes and natural event ordering
 
-use super::disk_journal_reader::DiskJournalReader;
+use super::reader::DiskJournalReader;
 use super::log_record::LogRecord;
 use super::scanner::{
     classify_frame, dispose, read_frame_async, read_frame_sync, Disposition, ParseOutcome,
@@ -169,76 +169,6 @@ impl<T: JournalEvent> DiskJournal<T> {
             _phantom: std::marker::PhantomData,
         })
     }
-
-    /// Read all events from disk (internal helper)
-    async fn read_all_raw(&self) -> Result<Vec<EventEnvelope<T>>, JournalError> {
-        let mut events = Vec::new();
-
-        if !self.path.exists() {
-            return Ok(events);
-        }
-
-        // FLOWIP-120q full-read lock: hold the shared read lock so an in-process
-        // append cannot be observed mid-frame, and scan with sealed/full-scan
-        // policy so corruption fails loud instead of silently shortening the
-        // snapshot that backs `read_causally_ordered`/`read_causally_after`.
-        let _read_guard = self.read_write_lock.read().await;
-
-        let file = File::open(&self.path)
-            .await
-            .map_err(|e| JournalError::Implementation {
-                message: "Failed to open file".to_string(),
-                source: Box::new(e),
-            })?;
-        let mut reader = tokio::io::BufReader::new(file);
-        let mut buf = Vec::new();
-        let mut offset = 0u64;
-
-        while let Some((consumed, termination)) = read_frame_async(&mut reader, &mut buf)
-            .await
-            .map_err(|e| JournalError::Implementation {
-                message: "Failed to read line".to_string(),
-                source: Box::new(e),
-            })?
-        {
-            let record_offset = offset;
-            offset += consumed as u64;
-            if buf.iter().all(u8::is_ascii_whitespace) {
-                continue;
-            }
-            match dispose(
-                classify_frame::<T>(&buf),
-                termination,
-                ReadPolicy::SealedScan {
-                    tolerate_torn_tail: false,
-                },
-            ) {
-                Disposition::Yield(record) => {
-                    events.push(EventEnvelope {
-                        journal_writer_id: JournalWriterId::from(self.journal_id),
-                        vector_clock: record.vector_clock,
-                        timestamp: record.timestamp,
-                        event: record.event,
-                    });
-                }
-                Disposition::EndOfCommittedRecords | Disposition::Skip => break,
-                Disposition::Corrupt(problem) => {
-                    return Err(JournalError::Implementation {
-                        message: format!(
-                            "Corrupt record at offset {record_offset} in {}: {problem}",
-                            self.path.display()
-                        ),
-                        source: Box::new(std::io::Error::new(
-                            std::io::ErrorKind::InvalidData,
-                            problem.to_string(),
-                        )),
-                    });
-                }
-            }
-        }
-
-        Ok(events)
-    }
 }
 
 /// In-memory index (`event_id -> byte offset`) plus per-writer vector clocks
@@ -343,14 +273,7 @@ impl<T: JournalEvent + 'static> Journal<T> for DiskJournal<T> {
         event: T,
         parent: Option<&EventEnvelope<T>>,
     ) -> Result<EventEnvelope<T>, JournalError> {
-        // Safety check: Ensure journal has an owner before allowing writes
-        if self.owner.is_none() {
-            return Err(JournalError::Implementation {
-                message: "Cannot write to an unowned journal. Journal must have an owner."
-                    .to_string(),
-                source: "Unowned journal write attempt".into(),
-            });
-        }
+        crate::journal::ensure_owned(self.owner.as_ref())?;
         // Get writer_id from the event
         let writer_id = *event.writer_id();
 
@@ -360,25 +283,17 @@ impl<T: JournalEvent + 'static> Journal<T> for DiskJournal<T> {
         // cannot compute the same `writer_seq` from a stale snapshot.
         let _lock = self.read_write_lock.write().await;
 
-        // Get or create vector clock for this writer
-        let mut vector_clock = {
+        // Compute this writer's next clock under the write lock. The helper is
+        // store-free, so the writer clock is committed only after the file write
+        // and flush succeed below.
+        let vector_clock = {
             let writer_clocks = self.writer_clocks.read().await;
-            writer_clocks
-                .get(&writer_id)
-                .cloned()
-                .unwrap_or_else(VectorClock::new)
+            CausalOrderingService::advance_for_append(
+                writer_clocks.get(&writer_id),
+                &writer_id.to_string(),
+                parent.map(|p| &p.vector_clock),
+            )
         };
-
-        // Update vector clock based on parent
-        if let Some(parent_envelope) = parent {
-            CausalOrderingService::update_with_parent(
-                &mut vector_clock,
-                &parent_envelope.vector_clock,
-            );
-        }
-
-        // Increment for this writer
-        CausalOrderingService::increment(&mut vector_clock, &writer_id.to_string());
 
         // Create envelope
         let envelope = EventEnvelope {
@@ -498,26 +413,73 @@ impl<T: JournalEvent + 'static> Journal<T> for DiskJournal<T> {
         Ok(envelope)
     }
 
-    async fn read_causally_ordered(&self) -> Result<Vec<EventEnvelope<T>>, JournalError> {
-        let events = self.read_all_raw().await?;
-        CausalOrderingService::order_envelopes_by_event_id(events)
-    }
+    async fn read_all_unordered(&self) -> Result<Vec<EventEnvelope<T>>, JournalError> {
+        let mut events = Vec::new();
 
-    async fn read_causally_after(
-        &self,
-        after_event_id: &EventId,
-    ) -> Result<Vec<EventEnvelope<T>>, JournalError> {
-        let all_events = self.read_causally_ordered().await?;
-
-        // Find the position of the reference event
-        let position = all_events
-            .iter()
-            .position(|e| e.event.id() == after_event_id);
-
-        match position {
-            Some(pos) => Ok(all_events.into_iter().skip(pos + 1).collect()),
-            None => Ok(Vec::new()),
+        if !self.path.exists() {
+            return Ok(events);
         }
+
+        // FLOWIP-120q full-read lock: hold the shared read lock so an in-process
+        // append cannot be observed mid-frame, and scan with sealed/full-scan
+        // policy so corruption fails loud instead of silently shortening the
+        // causally-ordered snapshot derived from this enumeration.
+        let _read_guard = self.read_write_lock.read().await;
+
+        let file = File::open(&self.path)
+            .await
+            .map_err(|e| JournalError::Implementation {
+                message: "Failed to open file".to_string(),
+                source: Box::new(e),
+            })?;
+        let mut reader = tokio::io::BufReader::new(file);
+        let mut buf = Vec::new();
+        let mut offset = 0u64;
+
+        while let Some((consumed, termination)) = read_frame_async(&mut reader, &mut buf)
+            .await
+            .map_err(|e| JournalError::Implementation {
+                message: "Failed to read line".to_string(),
+                source: Box::new(e),
+            })?
+        {
+            let record_offset = offset;
+            offset += consumed as u64;
+            if buf.iter().all(u8::is_ascii_whitespace) {
+                continue;
+            }
+            match dispose(
+                classify_frame::<T>(&buf),
+                termination,
+                ReadPolicy::SealedScan {
+                    tolerate_torn_tail: false,
+                },
+            ) {
+                Disposition::Yield(record) => {
+                    events.push(EventEnvelope {
+                        journal_writer_id: JournalWriterId::from(self.journal_id),
+                        vector_clock: record.vector_clock,
+                        timestamp: record.timestamp,
+                        event: record.event,
+                    });
+                }
+                Disposition::EndOfCommittedRecords | Disposition::Skip => break,
+                Disposition::Corrupt(problem) => {
+                    return Err(JournalError::Implementation {
+                        message: format!(
+                            "Corrupt record at offset {record_offset} in {}: {problem}",
+                            self.path.display()
+                        ),
+                        source: Box::new(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            problem.to_string(),
+                        )),
+                    });
+                }
+            }
+        }
+
+        Ok(events)
     }
 
     async fn read_event(
@@ -594,17 +556,6 @@ impl<T: JournalEvent + 'static> Journal<T> for DiskJournal<T> {
             },
             None => Ok(None),
         }
-    }
-
-    async fn reader(&self) -> Result<Box<dyn JournalReader<T>>, JournalError> {
-        Ok(Box::new(
-            DiskJournalReader::new(
-                self.path.clone(),
-                self.journal_id,
-                self.read_write_lock.clone(),
-            )
-            .await?,
-        ))
     }
 
     async fn reader_from(&self, position: u64) -> Result<Box<dyn JournalReader<T>>, JournalError> {
@@ -1147,6 +1098,88 @@ mod tests {
         assert!(
             log.read_event(&id).await.is_err(),
             "a truncated indexed record must fail loud, not return None"
+        );
+
+        std::fs::remove_dir_all(&test_dir).ok();
+    }
+
+    #[tokio::test]
+    async fn reader_from_fails_loud_on_mid_file_corruption() {
+        // FLOWIP-120t: from_position drives the same dispose path as next(), so a
+        // corrupt committed record before the target position fails loud instead
+        // of being silently counted and skipped (the old read_line behaviour).
+        let test_id = Uuid::new_v4();
+        let test_dir =
+            std::path::PathBuf::from(format!("target/test-logs/reader_from_corrupt_{test_id}"));
+        std::fs::create_dir_all(&test_dir).unwrap();
+        let log_path = test_dir.join("corrupt.log");
+        let writer_id = WriterId::from(StageId::new());
+
+        let log = DiskJournal::<ChainEvent>::with_owner(
+            log_path.clone(),
+            obzenflow_core::JournalOwner::stage(StageId::new()),
+        )
+        .unwrap();
+        for i in 0..4 {
+            let e = ChainEventFactory::data_event(writer_id, "e", serde_json::json!({"i": i}));
+            log.append(e, None).await.unwrap();
+        }
+
+        // Flip a byte in the second record's body so its CRC fails: mid-file
+        // committed corruption with intact records on either side.
+        let mut bytes = std::fs::read(&log_path).unwrap();
+        let newlines: Vec<usize> = bytes
+            .iter()
+            .enumerate()
+            .filter(|(_, &b)| b == b'\n')
+            .map(|(i, _)| i)
+            .collect();
+        let target = newlines[1] - 5;
+        bytes[target] ^= 0xff;
+        std::fs::write(&log_path, &bytes).unwrap();
+
+        assert!(
+            log.reader_from(3).await.is_err(),
+            "from_position past a mid-file corrupt record must fail loud"
+        );
+
+        std::fs::remove_dir_all(&test_dir).ok();
+    }
+
+    #[tokio::test]
+    async fn reader_from_stops_short_at_torn_tail_without_counting_it() {
+        // FLOWIP-120t: an unterminated final record (torn tail) is not a
+        // committed position, so from_position stops at it rather than counting
+        // it as a position the way the old read_line skip did.
+        let test_id = Uuid::new_v4();
+        let test_dir =
+            std::path::PathBuf::from(format!("target/test-logs/reader_from_torn_{test_id}"));
+        std::fs::create_dir_all(&test_dir).unwrap();
+        let log_path = test_dir.join("torn.log");
+        let writer_id = WriterId::from(StageId::new());
+
+        let log = DiskJournal::<ChainEvent>::with_owner(
+            log_path.clone(),
+            obzenflow_core::JournalOwner::stage(StageId::new()),
+        )
+        .unwrap();
+        for i in 0..3 {
+            let e = ChainEventFactory::data_event(writer_id, "e", serde_json::json!({"i": i}));
+            log.append(e, None).await.unwrap();
+        }
+
+        // Drop the final newline: the last record becomes an unterminated tail.
+        let mut bytes = std::fs::read(&log_path).unwrap();
+        assert_eq!(*bytes.last().unwrap(), b'\n');
+        bytes.pop();
+        std::fs::write(&log_path, &bytes).unwrap();
+
+        // Only two records are committed; asking for position 3 stops at 2.
+        let reader = log.reader_from(3).await.unwrap();
+        assert_eq!(
+            reader.position(),
+            2,
+            "a torn tail must not be counted as a committed position"
         );
 
         std::fs::remove_dir_all(&test_dir).ok();

@@ -38,13 +38,6 @@ impl JournalReader<ChainEvent> for TestReader {
         Ok(None)
     }
 
-    async fn skip(&mut self, n: u64) -> Result<u64, JournalError> {
-        let remaining = (self.envelopes.len().saturating_sub(self.pos)) as u64;
-        let to_skip = remaining.min(n) as usize;
-        self.pos += to_skip;
-        Ok(to_skip as u64)
-    }
-
     fn position(&self) -> u64 {
         self.pos as u64
     }

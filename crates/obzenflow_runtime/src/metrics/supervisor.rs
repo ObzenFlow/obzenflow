@@ -584,10 +584,6 @@ mod tests {
             Ok(None)
         }
 
-        async fn skip(&mut self, _n: u64) -> Result<u64, JournalError> {
-            Ok(0)
-        }
-
         fn position(&self) -> u64 {
             self.position
         }
@@ -629,6 +625,10 @@ mod tests {
                 message: "append failed".to_string(),
                 source: Box::new(std::io::Error::other("append failed")),
             })
+        }
+
+        async fn read_all_unordered(&self) -> Result<Vec<EventEnvelope<T>>, JournalError> {
+            self.read_causally_ordered().await
         }
 
         async fn read_causally_ordered(&self) -> Result<Vec<EventEnvelope<T>>, JournalError> {

@@ -217,10 +217,6 @@ mod tests {
             Ok(None)
         }
 
-        async fn skip(&mut self, _n: u64) -> Result<u64, JournalError> {
-            Ok(0)
-        }
-
         fn position(&self) -> u64 {
             self.position
         }
@@ -262,6 +258,10 @@ mod tests {
                 message: "append not supported in EmptyJournal".to_string(),
                 source: Box::new(std::io::Error::other("append not supported")),
             })
+        }
+
+        async fn read_all_unordered(&self) -> Result<Vec<EventEnvelope<T>>, JournalError> {
+            self.read_causally_ordered().await
         }
 
         async fn read_causally_ordered(&self) -> Result<Vec<EventEnvelope<T>>, JournalError> {
@@ -342,6 +342,12 @@ mod tests {
                 .expect("lock poisoned")
                 .push(event.clone());
             Ok(EventEnvelope::new(JournalWriterId::new(), event))
+        }
+
+        async fn read_all_unordered(
+            &self,
+        ) -> Result<Vec<EventEnvelope<SystemEvent>>, JournalError> {
+            self.read_causally_ordered().await
         }
 
         async fn read_causally_ordered(

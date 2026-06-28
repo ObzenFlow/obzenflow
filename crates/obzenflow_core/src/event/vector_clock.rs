@@ -73,6 +73,22 @@ impl CausalOrderingService {
         }
     }
 
+    /// Advance a writer's clock for an append: start from the writer's current
+    /// clock, merge the parent's causal history, then increment the writer.
+    /// Store-free, so each backend decides when to commit the result.
+    pub fn advance_for_append(
+        current: Option<&VectorClock>,
+        writer_key: &str,
+        parent: Option<&VectorClock>,
+    ) -> VectorClock {
+        let mut clock = current.cloned().unwrap_or_default();
+        if let Some(parent) = parent {
+            Self::update_with_parent(&mut clock, parent);
+        }
+        Self::increment(&mut clock, writer_key);
+        clock
+    }
+
     /// Check if a happened before b
     pub fn happened_before(a: &VectorClock, b: &VectorClock) -> bool {
         // a happened-before b if:

@@ -3410,6 +3410,10 @@ mod tests {
                 })
             }
 
+            async fn read_all_unordered(&self) -> Result<Vec<EventEnvelope<T>>, JournalError> {
+                self.read_causally_ordered().await
+            }
+
             async fn read_causally_ordered(&self) -> Result<Vec<EventEnvelope<T>>, JournalError> {
                 Ok(Vec::new())
             }
@@ -3452,10 +3456,6 @@ mod tests {
         impl<T: JournalEvent + 'static> JournalReader<T> for NoopReader {
             async fn next(&mut self) -> Result<Option<EventEnvelope<T>>, JournalError> {
                 Ok(None)
-            }
-
-            async fn skip(&mut self, _n: u64) -> Result<u64, JournalError> {
-                Ok(0)
             }
 
             fn position(&self) -> u64 {

@@ -2473,6 +2473,12 @@ mod tests {
                 })
             }
 
+            async fn read_all_unordered(
+                &self,
+            ) -> Result<Vec<obzenflow_core::EventEnvelope<T>>, JournalError> {
+                self.read_causally_ordered().await
+            }
+
             async fn read_causally_ordered(
                 &self,
             ) -> Result<Vec<obzenflow_core::EventEnvelope<T>>, JournalError> {
@@ -2518,10 +2524,6 @@ mod tests {
                 &mut self,
             ) -> Result<Option<obzenflow_core::EventEnvelope<T>>, JournalError> {
                 Ok(None)
-            }
-
-            async fn skip(&mut self, _n: u64) -> Result<u64, JournalError> {
-                Ok(0)
             }
 
             fn position(&self) -> u64 {

@@ -32,7 +32,7 @@ use obzenflow_core::journal::Journal;
 use obzenflow_core::{StageId, TypedPayload, WriterId};
 use obzenflow_dsl::{flow, sink, source, transform};
 use obzenflow_infra::application::FlowApplication;
-use obzenflow_infra::journal::disk::disk_journal::DiskJournal;
+use obzenflow_infra::journal::DiskJournal;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{FiniteSourceHandler, SinkHandler};

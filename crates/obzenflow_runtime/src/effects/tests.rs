@@ -46,13 +46,6 @@ impl<T: JournalEvent + 'static> JournalReader<T> for MemoryJournalReader<T> {
         Ok(next)
     }
 
-    async fn skip(&mut self, n: u64) -> Result<u64, JournalError> {
-        let remaining = self.events.len().saturating_sub(self.position);
-        let skipped = remaining.min(n as usize);
-        self.position += skipped;
-        Ok(skipped as u64)
-    }
-
     fn position(&self) -> u64 {
         self.position as u64
     }
@@ -79,6 +72,10 @@ impl<T: JournalEvent + 'static> Journal<T> for MemoryJournal<T> {
             .expect("events lock poisoned")
             .push(envelope.clone());
         Ok(envelope)
+    }
+
+    async fn read_all_unordered(&self) -> Result<Vec<EventEnvelope<T>>, JournalError> {
+        self.read_causally_ordered().await
     }
 
     async fn read_causally_ordered(&self) -> Result<Vec<EventEnvelope<T>>, JournalError> {

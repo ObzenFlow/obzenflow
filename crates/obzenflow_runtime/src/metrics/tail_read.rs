@@ -329,6 +329,12 @@ mod tests {
             Ok(envelope)
         }
 
+        async fn read_all_unordered(
+            &self,
+        ) -> Result<Vec<EventEnvelope<ChainEvent>>, JournalError> {
+            self.read_causally_ordered().await
+        }
+
         async fn read_causally_ordered(
             &self,
         ) -> Result<Vec<EventEnvelope<ChainEvent>>, JournalError> {
@@ -391,12 +397,6 @@ mod tests {
                 self.pos += 1;
                 Ok(envelope)
             }
-        }
-
-        async fn skip(&mut self, n: u64) -> Result<u64, JournalError> {
-            let start = self.pos as u64;
-            self.pos = (self.pos as u64 + n) as usize;
-            Ok(self.pos as u64 - start)
         }
 
         fn position(&self) -> u64 {

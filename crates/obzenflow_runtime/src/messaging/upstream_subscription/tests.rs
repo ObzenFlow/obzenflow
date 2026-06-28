@@ -104,6 +104,12 @@ impl<T: JournalEvent + 'static> Journal<T> for TestJournal<T> {
         Ok(envelope)
     }
 
+    async fn read_all_unordered(
+        &self,
+    ) -> std::result::Result<Vec<EventEnvelope<T>>, JournalError> {
+        self.read_causally_ordered().await
+    }
+
     async fn read_causally_ordered(
         &self,
     ) -> std::result::Result<Vec<EventEnvelope<T>>, JournalError> {
@@ -185,6 +191,12 @@ impl<T: JournalEvent + 'static> Journal<T> for ControlledJournal<T> {
         Ok(envelope)
     }
 
+    async fn read_all_unordered(
+        &self,
+    ) -> std::result::Result<Vec<EventEnvelope<T>>, JournalError> {
+        self.read_causally_ordered().await
+    }
+
     async fn read_causally_ordered(
         &self,
     ) -> std::result::Result<Vec<EventEnvelope<T>>, JournalError> {
@@ -249,12 +261,6 @@ impl<T: JournalEvent + 'static> JournalReader<T> for TestJournalReader<T> {
         }
     }
 
-    async fn skip(&mut self, n: u64) -> std::result::Result<u64, JournalError> {
-        let start = self.pos as u64;
-        self.pos = (self.pos as u64 + n) as usize;
-        Ok(self.pos as u64 - start)
-    }
-
     fn position(&self) -> u64 {
         self.pos as u64
     }
@@ -302,6 +308,12 @@ impl<T: JournalEvent + 'static> Journal<T> for EmfileJournal<T> {
             message: "append not supported".to_string(),
             source: "append not supported".into(),
         })
+    }
+
+    async fn read_all_unordered(
+        &self,
+    ) -> std::result::Result<Vec<EventEnvelope<T>>, JournalError> {
+        self.read_causally_ordered().await
     }
 
     async fn read_causally_ordered(
@@ -2173,14 +2185,6 @@ impl JournalReader<ChainEvent> for SharedTestJournalReader {
         }
     }
 
-    async fn skip(&mut self, n: u64) -> std::result::Result<u64, JournalError> {
-        let len = self.events.lock().unwrap().len();
-        let available = len.saturating_sub(self.pos) as u64;
-        let skipped = available.min(n);
-        self.pos += skipped as usize;
-        Ok(skipped)
-    }
-
     fn position(&self) -> u64 {
         self.pos as u64
     }
@@ -2208,6 +2212,12 @@ impl Journal<ChainEvent> for SharedTestJournal {
         let envelope = EventEnvelope::new(JournalWriterId::from(self.id), event);
         self.events.lock().unwrap().push(envelope.clone());
         Ok(envelope)
+    }
+
+    async fn read_all_unordered(
+        &self,
+    ) -> std::result::Result<Vec<EventEnvelope<ChainEvent>>, JournalError> {
+        self.read_causally_ordered().await
     }
 
     async fn read_causally_ordered(

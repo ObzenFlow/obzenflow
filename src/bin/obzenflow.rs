@@ -16,7 +16,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Args, Parser, Subcommand};
-use obzenflow_infra::journal::inspect::{export_jsonl, inspect};
+use obzenflow_infra::journal::disk::inspect::{export_jsonl, inspect};
 use obzenflow_infra::verify::{render_verdict, verify_run_dirs, VerifyOptions};
 
 #[derive(Parser)]
