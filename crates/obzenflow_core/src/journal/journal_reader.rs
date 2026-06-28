@@ -31,12 +31,6 @@ where
     /// This method should be efficient - O(1) regardless of journal size.
     async fn next(&mut self) -> Result<Option<EventEnvelope<T>>, JournalError>;
 
-    /// Skip forward by n events without reading them
-    ///
-    /// Returns the number of events actually skipped (may be less than n if EOF reached).
-    /// This is useful for resuming from a checkpoint.
-    async fn skip(&mut self, n: u64) -> Result<u64, JournalError>;
-
     /// Get the current position in the journal
     ///
     /// The position is journal-specific (e.g., line number for disk, index for memory).

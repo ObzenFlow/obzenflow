@@ -6,7 +6,7 @@ use obzenflow_core::event::chain_event::ChainEventFactory;
 use obzenflow_core::journal::journal_owner::JournalOwner;
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{StageId, WriterId};
-use obzenflow_infra::journal::disk::disk_journal::DiskJournal;
+use obzenflow_infra::journal::DiskJournal;
 use serde_json::json;
 use std::path::PathBuf;
 use uuid::Uuid;

@@ -4,6 +4,7 @@
 
 //! In-memory journal implementation
 
-pub mod memory_journal;
+pub mod journal;
+pub mod reader;
 
-pub use memory_journal::MemoryJournal;
+pub use journal::MemoryJournal;

@@ -451,15 +451,8 @@ mod tests {
             })
         }
 
-        async fn read_causally_ordered(&self) -> Result<Vec<EventEnvelope<T>>, JournalError> {
-            self.inner.read_causally_ordered().await
-        }
-
-        async fn read_causally_after(
-            &self,
-            after_event_id: &EventId,
-        ) -> Result<Vec<EventEnvelope<T>>, JournalError> {
-            self.inner.read_causally_after(after_event_id).await
+        async fn read_all_unordered(&self) -> Result<Vec<EventEnvelope<T>>, JournalError> {
+            self.inner.read_all_unordered().await
         }
 
         async fn read_event(
@@ -467,10 +460,6 @@ mod tests {
             event_id: &EventId,
         ) -> Result<Option<EventEnvelope<T>>, JournalError> {
             self.inner.read_event(event_id).await
-        }
-
-        async fn reader(&self) -> Result<Box<dyn JournalReader<T>>, JournalError> {
-            self.inner.reader().await
         }
 
         async fn reader_from(

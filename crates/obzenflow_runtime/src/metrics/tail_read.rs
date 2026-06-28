@@ -329,18 +329,9 @@ mod tests {
             Ok(envelope)
         }
 
-        async fn read_causally_ordered(
-            &self,
-        ) -> Result<Vec<EventEnvelope<ChainEvent>>, JournalError> {
+        async fn read_all_unordered(&self) -> Result<Vec<EventEnvelope<ChainEvent>>, JournalError> {
             let guard = self.events.lock().unwrap();
             Ok(guard.clone())
-        }
-
-        async fn read_causally_after(
-            &self,
-            _after_event_id: &obzenflow_core::EventId,
-        ) -> Result<Vec<EventEnvelope<ChainEvent>>, JournalError> {
-            Ok(Vec::new())
         }
 
         async fn read_event(
@@ -348,14 +339,6 @@ mod tests {
             _event_id: &obzenflow_core::EventId,
         ) -> Result<Option<EventEnvelope<ChainEvent>>, JournalError> {
             Ok(None)
-        }
-
-        async fn reader(&self) -> Result<Box<dyn JournalReader<ChainEvent>>, JournalError> {
-            let guard = self.events.lock().unwrap();
-            Ok(Box::new(InMemoryReader {
-                events: guard.clone(),
-                pos: 0,
-            }))
         }
 
         async fn reader_from(
@@ -391,12 +374,6 @@ mod tests {
                 self.pos += 1;
                 Ok(envelope)
             }
-        }
-
-        async fn skip(&mut self, n: u64) -> Result<u64, JournalError> {
-            let start = self.pos as u64;
-            self.pos = (self.pos as u64 + n) as usize;
-            Ok(self.pos as u64 - start)
         }
 
         fn position(&self) -> u64 {

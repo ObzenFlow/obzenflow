@@ -22,8 +22,8 @@ use obzenflow_core::journal::run_manifest::{
 use obzenflow_core::journal::ArchiveStatus;
 use thiserror::Error;
 
-use super::disk::replay_archive::derive_status_derivation_from_system_log;
-use super::disk::scanner::{classify_frame, dispose, read_frame_sync, Disposition, ReadPolicy};
+use super::replay_archive::derive_status_derivation_from_system_log;
+use super::scanner::{classify_frame, dispose, read_frame_sync, Disposition, ReadPolicy};
 
 #[derive(Debug, Error)]
 pub enum JournalInspectError {

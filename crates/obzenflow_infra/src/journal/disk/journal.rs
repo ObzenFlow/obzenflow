@@ -6,8 +6,8 @@
 //!
 //! Provides optimal sequential writes and natural event ordering
 
-use super::disk_journal_reader::DiskJournalReader;
 use super::log_record::LogRecord;
+use super::reader::DiskJournalReader;
 use super::scanner::{
     classify_frame, dispose, read_frame_async, read_frame_sync, Disposition, ParseOutcome,
     ReadPolicy,
@@ -29,7 +29,7 @@ use std::fs::File as StdFile;
 use std::io::BufReader;
 use std::io::SeekFrom;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::OnceLock;
@@ -72,8 +72,6 @@ pub struct DiskJournal<T: JournalEvent> {
     path: PathBuf,
     /// Shared synchronous file handle for appends (opened once)
     write_file: Arc<Mutex<StdFile>>,
-    /// Atomic write offset for tracking file position
-    write_offset: Arc<AtomicU64>,
     /// In-memory index: event_id -> file offset
     index: Arc<RwLock<HashMap<Ulid, u64>>>,
     /// Shared lock to coordinate readers/writers
@@ -82,11 +80,108 @@ pub struct DiskJournal<T: JournalEvent> {
     read_write_lock: Arc<RwLock<()>>,
     /// Track vector clocks for each writer
     writer_clocks: Arc<RwLock<HashMap<WriterId, VectorClock>>>,
+    /// Set when a failed append could not be rolled back, leaving the file in an
+    /// unknown state. Further appends are rejected until the journal is reopened.
+    poisoned: Arc<AtomicBool>,
     _phantom: std::marker::PhantomData<T>,
 }
 
 /// Buffer size for backwards reading (64KB)
 const BACKWARD_READ_BUFFER_SIZE: usize = 64 * 1024;
+
+/// A successfully committed append: the byte offset the record was written at
+/// and the resulting end-of-file offset.
+#[derive(Debug)]
+struct CommittedAppend {
+    offset: u64,
+    next_offset: u64,
+}
+
+/// Why an append's file write did not commit.
+#[derive(Debug)]
+enum AppendFailure {
+    /// The write failed and the file was truncated back to the pre-append EOF,
+    /// so the journal is still usable.
+    RolledBack(JournalError),
+    /// The write failed and the rollback also failed, so the file may carry a
+    /// partial record. The journal is unsafe to append to until reopened.
+    Poisoned(JournalError),
+}
+
+/// The append file operations, behind a trait so the commit/rollback logic is
+/// testable with a fake writer instead of induced filesystem failures.
+trait FrameSink {
+    fn end_offset(&mut self) -> std::io::Result<u64>;
+    fn write_all(&mut self, bytes: &[u8]) -> std::io::Result<()>;
+    fn flush(&mut self) -> std::io::Result<()>;
+    fn rollback_to(&mut self, offset: u64) -> std::io::Result<()>;
+}
+
+impl FrameSink for StdFile {
+    fn end_offset(&mut self) -> std::io::Result<u64> {
+        use std::io::Seek;
+        self.seek(SeekFrom::End(0))
+    }
+    fn write_all(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+        use std::io::Write;
+        Write::write_all(self, bytes)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        use std::io::Write;
+        Write::flush(self)
+    }
+    fn rollback_to(&mut self, offset: u64) -> std::io::Result<()> {
+        use std::io::Seek;
+        self.set_len(offset)?;
+        self.seek(SeekFrom::Start(offset))?;
+        Ok(())
+    }
+}
+
+/// Append one framed record, committing the EOF only after write+flush succeed.
+/// The offset is read from the file (not a speculative cursor) under the caller's
+/// lock. On write failure the file is truncated back to the pre-append EOF; if
+/// that rollback also fails the journal must be poisoned, because a partial
+/// record may remain that a later append would turn into mid-file corruption.
+fn append_frame<S: FrameSink>(
+    sink: &mut S,
+    bytes: &[u8],
+    path: &Path,
+) -> Result<CommittedAppend, AppendFailure> {
+    let offset = sink.end_offset().map_err(|e| {
+        // Nothing was written, so the file is unchanged and still usable.
+        AppendFailure::RolledBack(JournalError::Implementation {
+            message: format!(
+                "Failed to seek journal end before append: {}",
+                path.display()
+            ),
+            source: Box::new(e),
+        })
+    })?;
+
+    match sink.write_all(bytes).and_then(|()| sink.flush()) {
+        Ok(()) => Ok(CommittedAppend {
+            offset,
+            next_offset: offset + bytes.len() as u64,
+        }),
+        Err(write_error) => match sink.rollback_to(offset) {
+            Ok(()) => Err(AppendFailure::RolledBack(JournalError::Implementation {
+                message: format!(
+                    "Failed to append record to {}; rolled back to offset {offset}",
+                    path.display()
+                ),
+                source: Box::new(write_error),
+            })),
+            Err(rollback_error) => Err(AppendFailure::Poisoned(JournalError::Implementation {
+                message: format!(
+                    "Failed to append record to {}; rollback to offset {offset} also failed: {rollback_error}",
+                    path.display()
+                ),
+                source: Box::new(write_error),
+            })),
+        },
+    }
+}
 
 impl<T: JournalEvent> DiskJournal<T> {
     /// Create a new flow event log
@@ -96,9 +191,6 @@ impl<T: JournalEvent> DiskJournal<T> {
             source: Box::new(e),
         })?;
         let log_path = base_path.join(format!("{flow_id}.log"));
-
-        // Get current file size if it exists
-        let write_offset = std::fs::metadata(&log_path).map(|m| m.len()).unwrap_or(0);
 
         // Build index and writer clocks from the framed log (FLOWIP-120q): one
         // shared rebuild helper, so `new` and `with_owner` cannot drift.
@@ -120,10 +212,10 @@ impl<T: JournalEvent> DiskJournal<T> {
             journal_id: JournalId::new(),
             path: log_path.clone(),
             write_file: Arc::new(Mutex::new(write_file)),
-            write_offset: Arc::new(AtomicU64::new(write_offset)),
             index: Arc::new(RwLock::new(index)),
             read_write_lock: shared_lock_for_path(&log_path),
             writer_clocks: Arc::new(RwLock::new(writer_clocks)),
+            poisoned: Arc::new(AtomicBool::new(false)),
             _phantom: std::marker::PhantomData,
         })
     }
@@ -137,9 +229,6 @@ impl<T: JournalEvent> DiskJournal<T> {
                 source: Box::new(e),
             })?;
         }
-
-        // Get current file size if it exists
-        let write_offset = std::fs::metadata(&log_path).map(|m| m.len()).unwrap_or(0);
 
         // FLOWIP-120q P3 fix: rebuild via the framed parser through the same
         // shared helper as `new`, not raw `serde_json::from_str` (which fails on
@@ -162,82 +251,12 @@ impl<T: JournalEvent> DiskJournal<T> {
             journal_id: JournalId::new(),
             path: log_path.clone(),
             write_file: Arc::new(Mutex::new(write_file)),
-            write_offset: Arc::new(AtomicU64::new(write_offset)),
             index: Arc::new(RwLock::new(index)),
             read_write_lock: shared_lock_for_path(&log_path),
             writer_clocks: Arc::new(RwLock::new(writer_clocks)),
+            poisoned: Arc::new(AtomicBool::new(false)),
             _phantom: std::marker::PhantomData,
         })
-    }
-
-    /// Read all events from disk (internal helper)
-    async fn read_all_raw(&self) -> Result<Vec<EventEnvelope<T>>, JournalError> {
-        let mut events = Vec::new();
-
-        if !self.path.exists() {
-            return Ok(events);
-        }
-
-        // FLOWIP-120q full-read lock: hold the shared read lock so an in-process
-        // append cannot be observed mid-frame, and scan with sealed/full-scan
-        // policy so corruption fails loud instead of silently shortening the
-        // snapshot that backs `read_causally_ordered`/`read_causally_after`.
-        let _read_guard = self.read_write_lock.read().await;
-
-        let file = File::open(&self.path)
-            .await
-            .map_err(|e| JournalError::Implementation {
-                message: "Failed to open file".to_string(),
-                source: Box::new(e),
-            })?;
-        let mut reader = tokio::io::BufReader::new(file);
-        let mut buf = Vec::new();
-        let mut offset = 0u64;
-
-        while let Some((consumed, termination)) = read_frame_async(&mut reader, &mut buf)
-            .await
-            .map_err(|e| JournalError::Implementation {
-                message: "Failed to read line".to_string(),
-                source: Box::new(e),
-            })?
-        {
-            let record_offset = offset;
-            offset += consumed as u64;
-            if buf.iter().all(u8::is_ascii_whitespace) {
-                continue;
-            }
-            match dispose(
-                classify_frame::<T>(&buf),
-                termination,
-                ReadPolicy::SealedScan {
-                    tolerate_torn_tail: false,
-                },
-            ) {
-                Disposition::Yield(record) => {
-                    events.push(EventEnvelope {
-                        journal_writer_id: JournalWriterId::from(self.journal_id),
-                        vector_clock: record.vector_clock,
-                        timestamp: record.timestamp,
-                        event: record.event,
-                    });
-                }
-                Disposition::EndOfCommittedRecords | Disposition::Skip => break,
-                Disposition::Corrupt(problem) => {
-                    return Err(JournalError::Implementation {
-                        message: format!(
-                            "Corrupt record at offset {record_offset} in {}: {problem}",
-                            self.path.display()
-                        ),
-                        source: Box::new(std::io::Error::new(
-                            std::io::ErrorKind::InvalidData,
-                            problem.to_string(),
-                        )),
-                    });
-                }
-            }
-        }
-
-        Ok(events)
     }
 }
 
@@ -315,10 +334,10 @@ impl<T: JournalEvent> Clone for DiskJournal<T> {
             journal_id: self.journal_id,
             path: self.path.clone(),
             write_file: self.write_file.clone(),
-            write_offset: self.write_offset.clone(),
             index: self.index.clone(),
             read_write_lock: self.read_write_lock.clone(),
             writer_clocks: self.writer_clocks.clone(),
+            poisoned: self.poisoned.clone(),
             _phantom: std::marker::PhantomData,
         }
     }
@@ -343,12 +362,14 @@ impl<T: JournalEvent + 'static> Journal<T> for DiskJournal<T> {
         event: T,
         parent: Option<&EventEnvelope<T>>,
     ) -> Result<EventEnvelope<T>, JournalError> {
-        // Safety check: Ensure journal has an owner before allowing writes
-        if self.owner.is_none() {
+        crate::journal::ensure_owned(self.owner.as_ref())?;
+        if self.poisoned.load(Ordering::SeqCst) {
             return Err(JournalError::Implementation {
-                message: "Cannot write to an unowned journal. Journal must have an owner."
-                    .to_string(),
-                source: "Unowned journal write attempt".into(),
+                message: format!(
+                    "Journal {} is poisoned after a failed append rollback; reopen to continue",
+                    self.path.display()
+                ),
+                source: "poisoned journal".into(),
             });
         }
         // Get writer_id from the event
@@ -360,25 +381,17 @@ impl<T: JournalEvent + 'static> Journal<T> for DiskJournal<T> {
         // cannot compute the same `writer_seq` from a stale snapshot.
         let _lock = self.read_write_lock.write().await;
 
-        // Get or create vector clock for this writer
-        let mut vector_clock = {
+        // Compute this writer's next clock under the write lock. The helper is
+        // store-free, so the writer clock is committed only after the file write
+        // and flush succeed below.
+        let vector_clock = {
             let writer_clocks = self.writer_clocks.read().await;
-            writer_clocks
-                .get(&writer_id)
-                .cloned()
-                .unwrap_or_else(VectorClock::new)
+            CausalOrderingService::advance_for_append(
+                writer_clocks.get(&writer_id),
+                &writer_id.to_string(),
+                parent.map(|p| &p.vector_clock),
+            )
         };
-
-        // Update vector clock based on parent
-        if let Some(parent_envelope) = parent {
-            CausalOrderingService::update_with_parent(
-                &mut vector_clock,
-                &parent_envelope.vector_clock,
-            );
-        }
-
-        // Increment for this writer
-        CausalOrderingService::increment(&mut vector_clock, &writer_id.to_string());
 
         // Create envelope
         let envelope = EventEnvelope {
@@ -414,82 +427,72 @@ impl<T: JournalEvent + 'static> Journal<T> for DiskJournal<T> {
         bytes.extend_from_slice(&json_body);
         bytes.push(b'\n');
 
-        // Get current offset and reserve space
-        let offset = self.write_offset.load(Ordering::SeqCst);
-        self.write_offset
-            .fetch_add(bytes.len() as u64, Ordering::SeqCst);
-
-        // Write to file using the shared StdFile handle on a blocking thread.
+        // Write the framed record on a blocking thread. The commit point is the
+        // successful write+flush: only then do the index and the writer clock
+        // advance. On write failure the file rolls back to the pre-append EOF;
+        // if rollback fails the journal is poisoned.
         let path = self.path.clone();
         let write_file = self.write_file.clone();
-        let write_bytes = bytes.clone();
+        let write_bytes = bytes;
 
-        tokio::task::spawn_blocking(move || -> Result<(), JournalError> {
-            use std::io::{Error, Write};
+        let outcome =
+            tokio::task::spawn_blocking(move || -> Result<CommittedAppend, AppendFailure> {
+                let mut file = match write_file.lock() {
+                    Ok(guard) => guard,
+                    Err(e) => {
+                        // A poisoned mutex means a prior writer panicked
+                        // mid-append; the file may carry a partial record.
+                        return Err(AppendFailure::Poisoned(JournalError::Implementation {
+                            message: format!("Failed to lock journal file: {}", path.display()),
+                            source: Box::new(std::io::Error::other(format!("Mutex poisoned: {e}"))),
+                        }));
+                    }
+                };
+                append_frame(&mut *file, &write_bytes, &path)
+            })
+            .await;
 
-            let mut file = match write_file.lock() {
-                Ok(guard) => guard,
-                Err(e) => {
-                    return Err(JournalError::Implementation {
-                        message: format!("Failed to lock journal file: {}", path.display()),
-                        source: Box::new(Error::other(format!("Mutex poisoned: {e}"))),
-                    });
-                }
-            };
+        let committed = match outcome {
+            Ok(Ok(committed)) => committed,
+            Ok(Err(AppendFailure::RolledBack(e))) => return Err(e),
+            Ok(Err(AppendFailure::Poisoned(e))) => {
+                self.poisoned.store(true, Ordering::SeqCst);
+                return Err(e);
+            }
+            Err(join_error) => {
+                // The blocking task panicked or was cancelled, so the file state
+                // is unknown: poison rather than risk appending past a partial.
+                self.poisoned.store(true, Ordering::SeqCst);
+                return Err(JournalError::Implementation {
+                    message: format!(
+                        "Background writer task {} for journal {}",
+                        if join_error.is_cancelled() {
+                            "was cancelled"
+                        } else if join_error.is_panic() {
+                            "panicked"
+                        } else {
+                            "failed"
+                        },
+                        self.path.display()
+                    ),
+                    source: Box::new(join_error),
+                });
+            }
+        };
 
-            file.write_all(&write_bytes).map_err(|e| {
-                tracing::error!(
-                    path = %path.display(),
-                    os_error = %e,
-                    "DiskJournal failed to write to file"
-                );
-                JournalError::Implementation {
-                    message: "Failed to write to file".to_string(),
-                    source: Box::new(e),
-                }
-            })?;
-
-            file.flush().map_err(|e| {
-                tracing::error!(
-                    path = %path.display(),
-                    os_error = %e,
-                    "DiskJournal failed to flush file"
-                );
-                JournalError::Implementation {
-                    message: "Failed to flush file".to_string(),
-                    source: Box::new(e),
-                }
-            })?;
-
-            Ok(())
-        })
-        .await
-        .map_err(|e| JournalError::Implementation {
-            message: format!(
-                "Background writer task {} for journal {}",
-                if e.is_cancelled() {
-                    "was cancelled"
-                } else if e.is_panic() {
-                    "panicked"
-                } else {
-                    "failed"
-                },
-                self.path.display()
-            ),
-            source: Box::new(e),
-        })??;
         tracing::debug!(
             path = %self.path.display(),
-            offset,
-            bytes = bytes.len(),
+            offset = committed.offset,
+            bytes = committed.next_offset - committed.offset,
             write_lock_ptr = ?Arc::as_ptr(&self.read_write_lock),
             "DiskJournal appended framed record"
         );
 
-        // Update index
-        self.index.write().await.insert(record.event_id, offset);
-
-        // Update writer's clock
+        // Commit in-memory state only after the durable write succeeded.
+        self.index
+            .write()
+            .await
+            .insert(record.event_id, committed.offset);
         self.writer_clocks
             .write()
             .await
@@ -498,26 +501,73 @@ impl<T: JournalEvent + 'static> Journal<T> for DiskJournal<T> {
         Ok(envelope)
     }
 
-    async fn read_causally_ordered(&self) -> Result<Vec<EventEnvelope<T>>, JournalError> {
-        let events = self.read_all_raw().await?;
-        CausalOrderingService::order_envelopes_by_event_id(events)
-    }
+    async fn read_all_unordered(&self) -> Result<Vec<EventEnvelope<T>>, JournalError> {
+        let mut events = Vec::new();
 
-    async fn read_causally_after(
-        &self,
-        after_event_id: &EventId,
-    ) -> Result<Vec<EventEnvelope<T>>, JournalError> {
-        let all_events = self.read_causally_ordered().await?;
-
-        // Find the position of the reference event
-        let position = all_events
-            .iter()
-            .position(|e| e.event.id() == after_event_id);
-
-        match position {
-            Some(pos) => Ok(all_events.into_iter().skip(pos + 1).collect()),
-            None => Ok(Vec::new()),
+        if !self.path.exists() {
+            return Ok(events);
         }
+
+        // FLOWIP-120q full-read lock: hold the shared read lock so an in-process
+        // append cannot be observed mid-frame, and scan with sealed/full-scan
+        // policy so corruption fails loud instead of silently shortening the
+        // causally-ordered snapshot derived from this enumeration.
+        let _read_guard = self.read_write_lock.read().await;
+
+        let file = File::open(&self.path)
+            .await
+            .map_err(|e| JournalError::Implementation {
+                message: "Failed to open file".to_string(),
+                source: Box::new(e),
+            })?;
+        let mut reader = tokio::io::BufReader::new(file);
+        let mut buf = Vec::new();
+        let mut offset = 0u64;
+
+        while let Some((consumed, termination)) = read_frame_async(&mut reader, &mut buf)
+            .await
+            .map_err(|e| JournalError::Implementation {
+                message: "Failed to read line".to_string(),
+                source: Box::new(e),
+            })?
+        {
+            let record_offset = offset;
+            offset += consumed as u64;
+            if buf.iter().all(u8::is_ascii_whitespace) {
+                continue;
+            }
+            match dispose(
+                classify_frame::<T>(&buf),
+                termination,
+                ReadPolicy::SealedScan {
+                    tolerate_torn_tail: false,
+                },
+            ) {
+                Disposition::Yield(record) => {
+                    events.push(EventEnvelope {
+                        journal_writer_id: JournalWriterId::from(self.journal_id),
+                        vector_clock: record.vector_clock,
+                        timestamp: record.timestamp,
+                        event: record.event,
+                    });
+                }
+                Disposition::EndOfCommittedRecords | Disposition::Skip => break,
+                Disposition::Corrupt(problem) => {
+                    return Err(JournalError::Implementation {
+                        message: format!(
+                            "Corrupt record at offset {record_offset} in {}: {problem}",
+                            self.path.display()
+                        ),
+                        source: Box::new(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            problem.to_string(),
+                        )),
+                    });
+                }
+            }
+        }
+
+        Ok(events)
     }
 
     async fn read_event(
@@ -594,17 +644,6 @@ impl<T: JournalEvent + 'static> Journal<T> for DiskJournal<T> {
             },
             None => Ok(None),
         }
-    }
-
-    async fn reader(&self) -> Result<Box<dyn JournalReader<T>>, JournalError> {
-        Ok(Box::new(
-            DiskJournalReader::new(
-                self.path.clone(),
-                self.journal_id,
-                self.read_write_lock.clone(),
-            )
-            .await?,
-        ))
     }
 
     async fn reader_from(&self, position: u64) -> Result<Box<dyn JournalReader<T>>, JournalError> {
@@ -1147,6 +1186,236 @@ mod tests {
         assert!(
             log.read_event(&id).await.is_err(),
             "a truncated indexed record must fail loud, not return None"
+        );
+
+        std::fs::remove_dir_all(&test_dir).ok();
+    }
+
+    #[tokio::test]
+    async fn reader_from_fails_loud_on_mid_file_corruption() {
+        // FLOWIP-120t: from_position drives the same dispose path as next(), so a
+        // corrupt committed record before the target position fails loud instead
+        // of being silently counted and skipped (the old read_line behaviour).
+        let test_id = Uuid::new_v4();
+        let test_dir =
+            std::path::PathBuf::from(format!("target/test-logs/reader_from_corrupt_{test_id}"));
+        std::fs::create_dir_all(&test_dir).unwrap();
+        let log_path = test_dir.join("corrupt.log");
+        let writer_id = WriterId::from(StageId::new());
+
+        let log = DiskJournal::<ChainEvent>::with_owner(
+            log_path.clone(),
+            obzenflow_core::JournalOwner::stage(StageId::new()),
+        )
+        .unwrap();
+        for i in 0..4 {
+            let e = ChainEventFactory::data_event(writer_id, "e", serde_json::json!({"i": i}));
+            log.append(e, None).await.unwrap();
+        }
+
+        // Flip a byte in the second record's body so its CRC fails: mid-file
+        // committed corruption with intact records on either side.
+        let mut bytes = std::fs::read(&log_path).unwrap();
+        let newlines: Vec<usize> = bytes
+            .iter()
+            .enumerate()
+            .filter(|(_, &b)| b == b'\n')
+            .map(|(i, _)| i)
+            .collect();
+        let target = newlines[1] - 5;
+        bytes[target] ^= 0xff;
+        std::fs::write(&log_path, &bytes).unwrap();
+
+        assert!(
+            log.reader_from(3).await.is_err(),
+            "from_position past a mid-file corrupt record must fail loud"
+        );
+
+        std::fs::remove_dir_all(&test_dir).ok();
+    }
+
+    #[tokio::test]
+    async fn reader_from_stops_short_at_torn_tail_without_counting_it() {
+        // FLOWIP-120t: an unterminated final record (torn tail) is not a
+        // committed position, so from_position stops at it rather than counting
+        // it as a position the way the old read_line skip did.
+        let test_id = Uuid::new_v4();
+        let test_dir =
+            std::path::PathBuf::from(format!("target/test-logs/reader_from_torn_{test_id}"));
+        std::fs::create_dir_all(&test_dir).unwrap();
+        let log_path = test_dir.join("torn.log");
+        let writer_id = WriterId::from(StageId::new());
+
+        let log = DiskJournal::<ChainEvent>::with_owner(
+            log_path.clone(),
+            obzenflow_core::JournalOwner::stage(StageId::new()),
+        )
+        .unwrap();
+        for i in 0..3 {
+            let e = ChainEventFactory::data_event(writer_id, "e", serde_json::json!({"i": i}));
+            log.append(e, None).await.unwrap();
+        }
+
+        // Drop the final newline: the last record becomes an unterminated tail.
+        let mut bytes = std::fs::read(&log_path).unwrap();
+        assert_eq!(*bytes.last().unwrap(), b'\n');
+        bytes.pop();
+        std::fs::write(&log_path, &bytes).unwrap();
+
+        // Only two records are committed; asking for position 3 stops at 2.
+        let reader = log.reader_from(3).await.unwrap();
+        assert_eq!(
+            reader.position(),
+            2,
+            "a torn tail must not be counted as a committed position"
+        );
+
+        std::fs::remove_dir_all(&test_dir).ok();
+    }
+
+    #[derive(Clone, Copy)]
+    enum FailMode {
+        Ok,
+        FailBeforeWrite,
+        PartialThenFail(usize),
+        FailOnFlush,
+        FailFlushAndRollback,
+    }
+
+    /// In-memory FrameSink so append_frame's commit/rollback path is tested
+    /// without inducing real filesystem failures (FLOWIP-120t).
+    struct MockSink {
+        buf: Vec<u8>,
+        mode: FailMode,
+    }
+
+    impl FrameSink for MockSink {
+        fn end_offset(&mut self) -> std::io::Result<u64> {
+            Ok(self.buf.len() as u64)
+        }
+        fn write_all(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+            match self.mode {
+                FailMode::FailBeforeWrite => Err(std::io::Error::other("fail before write")),
+                FailMode::PartialThenFail(k) => {
+                    let n = k.min(bytes.len());
+                    self.buf.extend_from_slice(&bytes[..n]);
+                    Err(std::io::Error::other("fail after partial write"))
+                }
+                _ => {
+                    self.buf.extend_from_slice(bytes);
+                    Ok(())
+                }
+            }
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            match self.mode {
+                FailMode::FailOnFlush | FailMode::FailFlushAndRollback => {
+                    Err(std::io::Error::other("fail on flush"))
+                }
+                _ => Ok(()),
+            }
+        }
+        fn rollback_to(&mut self, offset: u64) -> std::io::Result<()> {
+            match self.mode {
+                FailMode::FailFlushAndRollback => Err(std::io::Error::other("rollback failed")),
+                _ => {
+                    self.buf.truncate(offset as usize);
+                    Ok(())
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn append_frame_commits_on_success() {
+        let mut sink = MockSink {
+            buf: b"PRE".to_vec(),
+            mode: FailMode::Ok,
+        };
+        let rec = b"record-bytes";
+        let committed = append_frame(&mut sink, rec, Path::new("x.log")).unwrap();
+        assert_eq!(committed.offset, 3);
+        assert_eq!(committed.next_offset, 3 + rec.len() as u64);
+        assert_eq!(sink.buf, b"PRErecord-bytes");
+    }
+
+    #[test]
+    fn append_frame_rolls_back_when_write_fails_before_any_bytes() {
+        let mut sink = MockSink {
+            buf: b"PRE".to_vec(),
+            mode: FailMode::FailBeforeWrite,
+        };
+        let err = append_frame(&mut sink, b"rec", Path::new("x.log")).unwrap_err();
+        assert!(matches!(err, AppendFailure::RolledBack(_)));
+        assert_eq!(sink.buf, b"PRE", "no bytes written, file unchanged");
+    }
+
+    #[test]
+    fn append_frame_rolls_back_a_partial_write() {
+        let mut sink = MockSink {
+            buf: b"PRE".to_vec(),
+            mode: FailMode::PartialThenFail(2),
+        };
+        let err = append_frame(&mut sink, b"record", Path::new("x.log")).unwrap_err();
+        assert!(matches!(err, AppendFailure::RolledBack(_)));
+        assert_eq!(
+            sink.buf, b"PRE",
+            "partial bytes truncated back to pre-append EOF"
+        );
+    }
+
+    #[test]
+    fn append_frame_rolls_back_on_flush_failure() {
+        let mut sink = MockSink {
+            buf: b"PRE".to_vec(),
+            mode: FailMode::FailOnFlush,
+        };
+        let err = append_frame(&mut sink, b"record", Path::new("x.log")).unwrap_err();
+        assert!(matches!(err, AppendFailure::RolledBack(_)));
+        assert_eq!(sink.buf, b"PRE", "unflushed bytes truncated back");
+    }
+
+    #[test]
+    fn append_frame_poisons_when_rollback_also_fails() {
+        let mut sink = MockSink {
+            buf: b"PRE".to_vec(),
+            mode: FailMode::FailFlushAndRollback,
+        };
+        let err = append_frame(&mut sink, b"record", Path::new("x.log")).unwrap_err();
+        assert!(matches!(err, AppendFailure::Poisoned(_)));
+    }
+
+    #[tokio::test]
+    async fn poisoned_journal_rejects_appends() {
+        let test_id = Uuid::new_v4();
+        let test_dir = std::path::PathBuf::from(format!("target/test-logs/poisoned_{test_id}"));
+        std::fs::create_dir_all(&test_dir).unwrap();
+        let log_path = test_dir.join("poison.log");
+        let writer_id = WriterId::from(StageId::new());
+
+        let log = DiskJournal::<ChainEvent>::with_owner(
+            log_path,
+            obzenflow_core::JournalOwner::stage(StageId::new()),
+        )
+        .unwrap();
+        log.append(
+            ChainEventFactory::data_event(writer_id, "e", serde_json::json!({"i": 0})),
+            None,
+        )
+        .await
+        .unwrap();
+
+        // Simulate an unrecoverable rollback failure.
+        log.poisoned.store(true, Ordering::SeqCst);
+
+        assert!(
+            log.append(
+                ChainEventFactory::data_event(writer_id, "e", serde_json::json!({"i": 1})),
+                None,
+            )
+            .await
+            .is_err(),
+            "a poisoned journal must reject further appends"
         );
 
         std::fs::remove_dir_all(&test_dir).ok();

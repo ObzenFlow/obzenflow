@@ -8,7 +8,7 @@
 //! archived disk journals, exposed to runtime services via the `ReplayArchive`
 //! trait.
 
-use super::disk_journal_reader::DiskJournalReader;
+use super::reader::DiskJournalReader;
 use super::scanner::{classify_frame, dispose, read_frame_sync, Disposition, ReadPolicy};
 use async_trait::async_trait;
 use obzenflow_core::build_info::OBZENFLOW_VERSION;

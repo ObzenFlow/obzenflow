@@ -396,10 +396,6 @@ mod tests {
             Ok(None)
         }
 
-        async fn skip(&mut self, _n: u64) -> Result<u64, JournalError> {
-            Ok(0)
-        }
-
         fn position(&self) -> u64 {
             self.position
         }
@@ -440,14 +436,7 @@ mod tests {
             Ok(EventEnvelope::new(JournalWriterId::new(), event))
         }
 
-        async fn read_causally_ordered(&self) -> Result<Vec<EventEnvelope<T>>, JournalError> {
-            Ok(Vec::new())
-        }
-
-        async fn read_causally_after(
-            &self,
-            _after_event_id: &EventId,
-        ) -> Result<Vec<EventEnvelope<T>>, JournalError> {
+        async fn read_all_unordered(&self) -> Result<Vec<EventEnvelope<T>>, JournalError> {
             Ok(Vec::new())
         }
 
@@ -456,13 +445,6 @@ mod tests {
             _event_id: &EventId,
         ) -> Result<Option<EventEnvelope<T>>, JournalError> {
             Ok(None)
-        }
-
-        async fn reader(&self) -> Result<Box<dyn JournalReader<T>>, JournalError> {
-            Ok(Box::new(EmptyReader {
-                position: 0,
-                _phantom: PhantomData,
-            }))
         }
 
         async fn reader_from(

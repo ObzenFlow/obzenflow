@@ -3410,14 +3410,7 @@ mod tests {
                 })
             }
 
-            async fn read_causally_ordered(&self) -> Result<Vec<EventEnvelope<T>>, JournalError> {
-                Ok(Vec::new())
-            }
-
-            async fn read_causally_after(
-                &self,
-                _after_event_id: &obzenflow_core::EventId,
-            ) -> Result<Vec<EventEnvelope<T>>, JournalError> {
+            async fn read_all_unordered(&self) -> Result<Vec<EventEnvelope<T>>, JournalError> {
                 Ok(Vec::new())
             }
 
@@ -3426,10 +3419,6 @@ mod tests {
                 _event_id: &obzenflow_core::EventId,
             ) -> Result<Option<EventEnvelope<T>>, JournalError> {
                 Ok(None)
-            }
-
-            async fn reader(&self) -> Result<Box<dyn JournalReader<T>>, JournalError> {
-                Ok(Box::new(NoopReader))
             }
 
             async fn reader_from(
@@ -3452,10 +3441,6 @@ mod tests {
         impl<T: JournalEvent + 'static> JournalReader<T> for NoopReader {
             async fn next(&mut self) -> Result<Option<EventEnvelope<T>>, JournalError> {
                 Ok(None)
-            }
-
-            async fn skip(&mut self, _n: u64) -> Result<u64, JournalError> {
-                Ok(0)
             }
 
             fn position(&self) -> u64 {

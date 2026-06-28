@@ -104,18 +104,9 @@ impl<T: JournalEvent + 'static> Journal<T> for TestJournal<T> {
         Ok(envelope)
     }
 
-    async fn read_causally_ordered(
-        &self,
-    ) -> std::result::Result<Vec<EventEnvelope<T>>, JournalError> {
+    async fn read_all_unordered(&self) -> std::result::Result<Vec<EventEnvelope<T>>, JournalError> {
         let guard = self.events.lock().unwrap();
         Ok(guard.clone())
-    }
-
-    async fn read_causally_after(
-        &self,
-        _after_event_id: &obzenflow_core::EventId,
-    ) -> std::result::Result<Vec<EventEnvelope<T>>, JournalError> {
-        Ok(Vec::new())
     }
 
     async fn read_event(
@@ -123,14 +114,6 @@ impl<T: JournalEvent + 'static> Journal<T> for TestJournal<T> {
         _event_id: &obzenflow_core::EventId,
     ) -> std::result::Result<Option<EventEnvelope<T>>, JournalError> {
         Ok(None)
-    }
-
-    async fn reader(&self) -> std::result::Result<Box<dyn JournalReader<T>>, JournalError> {
-        let guard = self.events.lock().unwrap();
-        Ok(Box::new(TestJournalReader {
-            events: guard.clone(),
-            pos: 0,
-        }))
     }
 
     async fn reader_from(
@@ -185,18 +168,9 @@ impl<T: JournalEvent + 'static> Journal<T> for ControlledJournal<T> {
         Ok(envelope)
     }
 
-    async fn read_causally_ordered(
-        &self,
-    ) -> std::result::Result<Vec<EventEnvelope<T>>, JournalError> {
+    async fn read_all_unordered(&self) -> std::result::Result<Vec<EventEnvelope<T>>, JournalError> {
         let guard = self.events.lock().unwrap();
         Ok(guard.clone())
-    }
-
-    async fn read_causally_after(
-        &self,
-        _after_event_id: &obzenflow_core::EventId,
-    ) -> std::result::Result<Vec<EventEnvelope<T>>, JournalError> {
-        Ok(Vec::new())
     }
 
     async fn read_event(
@@ -204,14 +178,6 @@ impl<T: JournalEvent + 'static> Journal<T> for ControlledJournal<T> {
         _event_id: &obzenflow_core::EventId,
     ) -> std::result::Result<Option<EventEnvelope<T>>, JournalError> {
         Ok(None)
-    }
-
-    async fn reader(&self) -> std::result::Result<Box<dyn JournalReader<T>>, JournalError> {
-        let guard = self.events.lock().unwrap();
-        Ok(Box::new(TestJournalReader {
-            events: guard.clone(),
-            pos: 0,
-        }))
     }
 
     async fn reader_from(
@@ -247,12 +213,6 @@ impl<T: JournalEvent + 'static> JournalReader<T> for TestJournalReader<T> {
             self.pos += 1;
             Ok(envelope)
         }
-    }
-
-    async fn skip(&mut self, n: u64) -> std::result::Result<u64, JournalError> {
-        let start = self.pos as u64;
-        self.pos = (self.pos as u64 + n) as usize;
-        Ok(self.pos as u64 - start)
     }
 
     fn position(&self) -> u64 {
@@ -304,16 +264,7 @@ impl<T: JournalEvent + 'static> Journal<T> for EmfileJournal<T> {
         })
     }
 
-    async fn read_causally_ordered(
-        &self,
-    ) -> std::result::Result<Vec<EventEnvelope<T>>, JournalError> {
-        Ok(Vec::new())
-    }
-
-    async fn read_causally_after(
-        &self,
-        _after_event_id: &obzenflow_core::EventId,
-    ) -> std::result::Result<Vec<EventEnvelope<T>>, JournalError> {
+    async fn read_all_unordered(&self) -> std::result::Result<Vec<EventEnvelope<T>>, JournalError> {
         Ok(Vec::new())
     }
 
@@ -324,6 +275,8 @@ impl<T: JournalEvent + 'static> Journal<T> for EmfileJournal<T> {
         Ok(None)
     }
 
+    // Non-default: opening a reader returns EMFILE. reader_from delegates here,
+    // so this override stays (the default reader() would recurse via reader_from).
     async fn reader(&self) -> std::result::Result<Box<dyn JournalReader<T>>, JournalError> {
         Err(JournalError::Implementation {
             message: "open failed".to_string(),
@@ -2173,14 +2126,6 @@ impl JournalReader<ChainEvent> for SharedTestJournalReader {
         }
     }
 
-    async fn skip(&mut self, n: u64) -> std::result::Result<u64, JournalError> {
-        let len = self.events.lock().unwrap().len();
-        let available = len.saturating_sub(self.pos) as u64;
-        let skipped = available.min(n);
-        self.pos += skipped as usize;
-        Ok(skipped)
-    }
-
     fn position(&self) -> u64 {
         self.pos as u64
     }
@@ -2210,17 +2155,10 @@ impl Journal<ChainEvent> for SharedTestJournal {
         Ok(envelope)
     }
 
-    async fn read_causally_ordered(
+    async fn read_all_unordered(
         &self,
     ) -> std::result::Result<Vec<EventEnvelope<ChainEvent>>, JournalError> {
         Ok(self.events.lock().unwrap().clone())
-    }
-
-    async fn read_causally_after(
-        &self,
-        _after_event_id: &obzenflow_core::EventId,
-    ) -> std::result::Result<Vec<EventEnvelope<ChainEvent>>, JournalError> {
-        Ok(Vec::new())
     }
 
     async fn read_event(
@@ -2228,15 +2166,6 @@ impl Journal<ChainEvent> for SharedTestJournal {
         _event_id: &obzenflow_core::EventId,
     ) -> std::result::Result<Option<EventEnvelope<ChainEvent>>, JournalError> {
         Ok(None)
-    }
-
-    async fn reader(
-        &self,
-    ) -> std::result::Result<Box<dyn JournalReader<ChainEvent>>, JournalError> {
-        Ok(Box::new(SharedTestJournalReader {
-            events: self.events.clone(),
-            pos: 0,
-        }))
     }
 
     async fn reader_from(

@@ -571,14 +571,7 @@ impl Journal<ChainEvent> for CreditCheckingJournal {
         Ok(EventEnvelope::new(JournalWriterId::from(self.id), event))
     }
 
-    async fn read_causally_ordered(&self) -> Result<Vec<EventEnvelope<ChainEvent>>, JournalError> {
-        Ok(Vec::new())
-    }
-
-    async fn read_causally_after(
-        &self,
-        _after_event_id: &obzenflow_core::event::types::EventId,
-    ) -> Result<Vec<EventEnvelope<ChainEvent>>, JournalError> {
+    async fn read_all_unordered(&self) -> Result<Vec<EventEnvelope<ChainEvent>>, JournalError> {
         Ok(Vec::new())
     }
 
@@ -587,10 +580,6 @@ impl Journal<ChainEvent> for CreditCheckingJournal {
         _event_id: &obzenflow_core::event::types::EventId,
     ) -> Result<Option<EventEnvelope<ChainEvent>>, JournalError> {
         Ok(None)
-    }
-
-    async fn reader(&self) -> Result<Box<dyn JournalReader<ChainEvent>>, JournalError> {
-        Ok(Box::new(NoopReader::<ChainEvent>::default()))
     }
 
     async fn reader_from(
@@ -624,10 +613,6 @@ impl<T: JournalEvent> Default for NoopReader<T> {
 impl<T: JournalEvent> JournalReader<T> for NoopReader<T> {
     async fn next(&mut self) -> Result<Option<EventEnvelope<T>>, JournalError> {
         Ok(None)
-    }
-
-    async fn skip(&mut self, _n: u64) -> Result<u64, JournalError> {
-        Ok(0)
     }
 
     fn position(&self) -> u64 {
@@ -670,14 +655,7 @@ impl<T: JournalEvent + 'static> Journal<T> for NoopJournal<T> {
         Ok(EventEnvelope::new(JournalWriterId::from(self.id), event))
     }
 
-    async fn read_causally_ordered(&self) -> Result<Vec<EventEnvelope<T>>, JournalError> {
-        Ok(Vec::new())
-    }
-
-    async fn read_causally_after(
-        &self,
-        _after_event_id: &obzenflow_core::event::types::EventId,
-    ) -> Result<Vec<EventEnvelope<T>>, JournalError> {
+    async fn read_all_unordered(&self) -> Result<Vec<EventEnvelope<T>>, JournalError> {
         Ok(Vec::new())
     }
 
@@ -686,10 +664,6 @@ impl<T: JournalEvent + 'static> Journal<T> for NoopJournal<T> {
         _event_id: &obzenflow_core::event::types::EventId,
     ) -> Result<Option<EventEnvelope<T>>, JournalError> {
         Ok(None)
-    }
-
-    async fn reader(&self) -> Result<Box<dyn JournalReader<T>>, JournalError> {
-        Ok(Box::new(NoopReader::<T>::default()))
     }
 
     async fn reader_from(&self, _position: u64) -> Result<Box<dyn JournalReader<T>>, JournalError> {

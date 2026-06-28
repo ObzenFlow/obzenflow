@@ -50,10 +50,6 @@ where
         Ok(None)
     }
 
-    async fn skip(&mut self, _n: u64) -> std::result::Result<u64, JournalError> {
-        Ok(0)
-    }
-
     fn position(&self) -> u64 {
         0
     }

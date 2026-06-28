@@ -46,13 +46,6 @@ impl<T: JournalEvent + 'static> JournalReader<T> for MemoryJournalReader<T> {
         Ok(next)
     }
 
-    async fn skip(&mut self, n: u64) -> Result<u64, JournalError> {
-        let remaining = self.events.len().saturating_sub(self.position);
-        let skipped = remaining.min(n as usize);
-        self.position += skipped;
-        Ok(skipped as u64)
-    }
-
     fn position(&self) -> u64 {
         self.position as u64
     }
@@ -81,15 +74,8 @@ impl<T: JournalEvent + 'static> Journal<T> for MemoryJournal<T> {
         Ok(envelope)
     }
 
-    async fn read_causally_ordered(&self) -> Result<Vec<EventEnvelope<T>>, JournalError> {
+    async fn read_all_unordered(&self) -> Result<Vec<EventEnvelope<T>>, JournalError> {
         Ok(self.events())
-    }
-
-    async fn read_causally_after(
-        &self,
-        _after_event_id: &EventId,
-    ) -> Result<Vec<EventEnvelope<T>>, JournalError> {
-        Ok(Vec::new())
     }
 
     async fn read_event(
@@ -100,13 +86,6 @@ impl<T: JournalEvent + 'static> Journal<T> for MemoryJournal<T> {
             .events()
             .into_iter()
             .find(|envelope| *envelope.event.id() == *event_id))
-    }
-
-    async fn reader(&self) -> Result<Box<dyn JournalReader<T>>, JournalError> {
-        Ok(Box::new(MemoryJournalReader {
-            events: self.events(),
-            position: 0,
-        }))
     }
 
     async fn reader_from(&self, position: u64) -> Result<Box<dyn JournalReader<T>>, JournalError> {
