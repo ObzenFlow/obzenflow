@@ -572,17 +572,6 @@ impl Journal<ChainEvent> for CreditCheckingJournal {
     }
 
     async fn read_all_unordered(&self) -> Result<Vec<EventEnvelope<ChainEvent>>, JournalError> {
-        self.read_causally_ordered().await
-    }
-
-    async fn read_causally_ordered(&self) -> Result<Vec<EventEnvelope<ChainEvent>>, JournalError> {
-        Ok(Vec::new())
-    }
-
-    async fn read_causally_after(
-        &self,
-        _after_event_id: &obzenflow_core::event::types::EventId,
-    ) -> Result<Vec<EventEnvelope<ChainEvent>>, JournalError> {
         Ok(Vec::new())
     }
 
@@ -591,10 +580,6 @@ impl Journal<ChainEvent> for CreditCheckingJournal {
         _event_id: &obzenflow_core::event::types::EventId,
     ) -> Result<Option<EventEnvelope<ChainEvent>>, JournalError> {
         Ok(None)
-    }
-
-    async fn reader(&self) -> Result<Box<dyn JournalReader<ChainEvent>>, JournalError> {
-        Ok(Box::new(NoopReader::<ChainEvent>::default()))
     }
 
     async fn reader_from(
@@ -671,17 +656,6 @@ impl<T: JournalEvent + 'static> Journal<T> for NoopJournal<T> {
     }
 
     async fn read_all_unordered(&self) -> Result<Vec<EventEnvelope<T>>, JournalError> {
-        self.read_causally_ordered().await
-    }
-
-    async fn read_causally_ordered(&self) -> Result<Vec<EventEnvelope<T>>, JournalError> {
-        Ok(Vec::new())
-    }
-
-    async fn read_causally_after(
-        &self,
-        _after_event_id: &obzenflow_core::event::types::EventId,
-    ) -> Result<Vec<EventEnvelope<T>>, JournalError> {
         Ok(Vec::new())
     }
 
@@ -690,10 +664,6 @@ impl<T: JournalEvent + 'static> Journal<T> for NoopJournal<T> {
         _event_id: &obzenflow_core::event::types::EventId,
     ) -> Result<Option<EventEnvelope<T>>, JournalError> {
         Ok(None)
-    }
-
-    async fn reader(&self) -> Result<Box<dyn JournalReader<T>>, JournalError> {
-        Ok(Box::new(NoopReader::<T>::default()))
     }
 
     async fn reader_from(&self, _position: u64) -> Result<Box<dyn JournalReader<T>>, JournalError> {

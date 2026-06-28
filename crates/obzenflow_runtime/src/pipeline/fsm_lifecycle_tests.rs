@@ -95,23 +95,8 @@ where
     }
 
     async fn read_all_unordered(&self) -> Result<Vec<EventEnvelope<T>>, JournalError> {
-        self.read_causally_ordered().await
-    }
-
-    async fn read_causally_ordered(&self) -> Result<Vec<EventEnvelope<T>>, JournalError> {
         let guard = self.events.lock().expect("MemoryJournal: poisoned lock");
         Ok(guard.clone())
-    }
-
-    async fn read_causally_after(
-        &self,
-        after_event_id: &obzenflow_core::EventId,
-    ) -> Result<Vec<EventEnvelope<T>>, JournalError> {
-        let guard = self.events.lock().expect("MemoryJournal: poisoned lock");
-        if let Some(idx) = guard.iter().position(|e| e.event.id() == after_event_id) {
-            return Ok(guard.iter().skip(idx + 1).cloned().collect());
-        }
-        Ok(Vec::new())
     }
 
     async fn read_event(
@@ -120,13 +105,6 @@ where
     ) -> Result<Option<EventEnvelope<T>>, JournalError> {
         let guard = self.events.lock().expect("MemoryJournal: poisoned lock");
         Ok(guard.iter().find(|e| e.event.id() == event_id).cloned())
-    }
-
-    async fn reader(&self) -> Result<Box<dyn JournalReader<T>>, JournalError> {
-        Ok(Box::new(MemoryJournalReader {
-            events: Arc::clone(&self.events),
-            pos: 0,
-        }))
     }
 
     async fn reader_from(&self, position: u64) -> Result<Box<dyn JournalReader<T>>, JournalError> {

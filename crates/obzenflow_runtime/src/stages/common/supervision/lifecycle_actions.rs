@@ -261,17 +261,6 @@ mod tests {
         }
 
         async fn read_all_unordered(&self) -> Result<Vec<EventEnvelope<T>>, JournalError> {
-            self.read_causally_ordered().await
-        }
-
-        async fn read_causally_ordered(&self) -> Result<Vec<EventEnvelope<T>>, JournalError> {
-            Ok(Vec::new())
-        }
-
-        async fn read_causally_after(
-            &self,
-            _after_event_id: &EventId,
-        ) -> Result<Vec<EventEnvelope<T>>, JournalError> {
             Ok(Vec::new())
         }
 
@@ -280,13 +269,6 @@ mod tests {
             _event_id: &EventId,
         ) -> Result<Option<EventEnvelope<T>>, JournalError> {
             Ok(None)
-        }
-
-        async fn reader(&self) -> Result<Box<dyn JournalReader<T>>, JournalError> {
-            Ok(Box::new(EmptyReader {
-                position: 0,
-                _phantom: PhantomData,
-            }))
         }
 
         async fn reader_from(
@@ -347,19 +329,6 @@ mod tests {
         async fn read_all_unordered(
             &self,
         ) -> Result<Vec<EventEnvelope<SystemEvent>>, JournalError> {
-            self.read_causally_ordered().await
-        }
-
-        async fn read_causally_ordered(
-            &self,
-        ) -> Result<Vec<EventEnvelope<SystemEvent>>, JournalError> {
-            Ok(Vec::new())
-        }
-
-        async fn read_causally_after(
-            &self,
-            _after_event_id: &EventId,
-        ) -> Result<Vec<EventEnvelope<SystemEvent>>, JournalError> {
             Ok(Vec::new())
         }
 
@@ -368,13 +337,6 @@ mod tests {
             _event_id: &EventId,
         ) -> Result<Option<EventEnvelope<SystemEvent>>, JournalError> {
             Ok(None)
-        }
-
-        async fn reader(&self) -> Result<Box<dyn JournalReader<SystemEvent>>, JournalError> {
-            Ok(Box::new(EmptyReader {
-                position: 0,
-                _phantom: PhantomData,
-            }))
         }
 
         async fn reader_from(

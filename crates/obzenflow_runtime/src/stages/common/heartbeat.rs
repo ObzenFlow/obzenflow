@@ -642,19 +642,8 @@ mod tests {
         }
 
         async fn read_all_unordered(&self) -> Result<Vec<EventEnvelope<T>>, JournalError> {
-            self.read_causally_ordered().await
-        }
-
-        async fn read_causally_ordered(&self) -> Result<Vec<EventEnvelope<T>>, JournalError> {
             let guard = self.events.lock().expect("journal events lock");
             Ok(guard.clone())
-        }
-
-        async fn read_causally_after(
-            &self,
-            _after_event_id: &EventId,
-        ) -> Result<Vec<EventEnvelope<T>>, JournalError> {
-            Ok(Vec::new())
         }
 
         async fn read_event(
@@ -662,13 +651,6 @@ mod tests {
             _event_id: &EventId,
         ) -> Result<Option<EventEnvelope<T>>, JournalError> {
             Ok(None)
-        }
-
-        async fn reader(&self) -> Result<Box<dyn JournalReader<T>>, JournalError> {
-            Ok(Box::new(TestJournalReader {
-                events: self.events.clone(),
-                pos: 0,
-            }))
         }
 
         async fn reader_from(

@@ -404,7 +404,10 @@ async fn test_reader_surface_parity() {
     for journal in [&disk, &memory] {
         let mut parent = None;
         for event in &events {
-            let env = journal.append(event.clone(), parent.as_ref()).await.unwrap();
+            let env = journal
+                .append(event.clone(), parent.as_ref())
+                .await
+                .unwrap();
             parent = Some(env);
         }
     }
@@ -490,7 +493,10 @@ async fn test_system_event_parity() {
     for journal in [&disk, &memory] {
         let mut parent = None;
         for event in &events {
-            let env = journal.append(event.clone(), parent.as_ref()).await.unwrap();
+            let env = journal
+                .append(event.clone(), parent.as_ref())
+                .await
+                .unwrap();
             parent = Some(env);
         }
     }
@@ -510,7 +516,10 @@ async fn test_system_event_parity() {
         .map(|e| *e.event.id())
         .collect();
     assert_eq!(disk_ordered.len(), 3);
-    assert_eq!(disk_ordered, memory_ordered, "SystemEvent causal-order parity");
+    assert_eq!(
+        disk_ordered, memory_ordered,
+        "SystemEvent causal-order parity"
+    );
 
     // reader() parity: both yield all three.
     for journal in [&disk, &memory] {

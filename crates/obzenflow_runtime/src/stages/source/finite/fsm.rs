@@ -834,20 +834,8 @@ mod tests {
         }
 
         async fn read_all_unordered(&self) -> Result<Vec<EventEnvelope<T>>, JournalError> {
-            self.read_causally_ordered().await
-        }
-
-        async fn read_causally_ordered(&self) -> Result<Vec<EventEnvelope<T>>, JournalError> {
             let guard = self.events.lock().unwrap();
             Ok(guard.clone())
-        }
-
-        async fn read_causally_after(
-            &self,
-            _after_event_id: &obzenflow_core::EventId,
-        ) -> Result<Vec<EventEnvelope<T>>, JournalError> {
-            // Not needed for this test
-            Ok(Vec::new())
         }
 
         async fn read_event(
@@ -856,14 +844,6 @@ mod tests {
         ) -> Result<Option<EventEnvelope<T>>, JournalError> {
             // Not needed for this test
             Ok(None)
-        }
-
-        async fn reader(&self) -> Result<Box<dyn JournalReader<T>>, JournalError> {
-            let guard = self.events.lock().unwrap();
-            Ok(Box::new(TestJournalReader {
-                events: guard.clone(),
-                pos: 0,
-            }))
         }
 
         async fn reader_from(

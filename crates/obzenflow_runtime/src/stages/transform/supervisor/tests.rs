@@ -233,19 +233,8 @@ impl<T: JournalEvent + 'static> Journal<T> for TestJournal<T> {
     }
 
     async fn read_all_unordered(&self) -> Result<Vec<EventEnvelope<T>>, JournalError> {
-        self.read_causally_ordered().await
-    }
-
-    async fn read_causally_ordered(&self) -> Result<Vec<EventEnvelope<T>>, JournalError> {
         let guard = self.events.lock().unwrap();
         Ok(guard.clone())
-    }
-
-    async fn read_causally_after(
-        &self,
-        _after_event_id: &obzenflow_core::EventId,
-    ) -> Result<Vec<EventEnvelope<T>>, JournalError> {
-        Ok(Vec::new())
     }
 
     async fn read_event(
@@ -253,13 +242,6 @@ impl<T: JournalEvent + 'static> Journal<T> for TestJournal<T> {
         _event_id: &obzenflow_core::EventId,
     ) -> Result<Option<EventEnvelope<T>>, JournalError> {
         Ok(None)
-    }
-
-    async fn reader(&self) -> Result<Box<dyn JournalReader<T>>, JournalError> {
-        Ok(Box::new(TestJournalReader {
-            events: self.events.clone(),
-            pos: 0,
-        }))
     }
 
     async fn reader_from(&self, position: u64) -> Result<Box<dyn JournalReader<T>>, JournalError> {
