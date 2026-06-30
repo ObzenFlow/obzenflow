@@ -6,12 +6,12 @@
 
 pub mod input_order;
 pub mod join;
-pub mod trace_invariant;
 pub mod observer;
 pub mod resource_managed;
 pub mod sink;
 pub mod source;
 pub mod stateful;
+pub mod trace_invariant;
 pub mod transform;
 
 // Re-export all handler traits for convenience

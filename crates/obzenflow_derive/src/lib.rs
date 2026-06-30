@@ -394,9 +394,8 @@ impl syn::parse::Parse for TraceInvariantArgs {
             input.error("#[trace_invariant] requires `new = <expr that builds the handler>`")
         })?;
         let inputs = inputs.ok_or_else(|| {
-            input.error(
-                "#[trace_invariant] requires `inputs = <Vec<Vec<ChainEvent>> sample words>`",
-            )
+            input
+                .error("#[trace_invariant] requires `inputs = <Vec<Vec<ChainEvent>> sample words>`")
         })?;
         let crate_path = match crate_path {
             Some(path) => quote!(#path),

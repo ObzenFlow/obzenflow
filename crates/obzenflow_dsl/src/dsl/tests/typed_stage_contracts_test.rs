@@ -29,9 +29,9 @@ mod tests {
     use std::time::Duration;
 
     use crate::dsl::error::{EdgeTypingMismatchKind, FlowBuildError};
+    use crate::dsl::stage_descriptor::OrderRole;
     use crate::dsl::stage_descriptor::StageDescriptor;
     use crate::dsl::stage_descriptor::TransformDescriptor;
-    use crate::dsl::stage_descriptor::OrderRole;
     use crate::dsl::typing::{
         collect_stage_typing_info, derive_feed_plan, validate_edge_typing,
         validate_effectful_deterministic_input_order, validate_stage_typing_metadata,
@@ -2923,9 +2923,18 @@ mod tests {
             topology.add_stage_with_id(id.to_topology_id(), Some(name.to_string()), role);
             topology.reset_current();
         }
-        topology.add_edge(source_a_id.to_topology_id(), cycle_entry_id.to_topology_id());
-        topology.add_edge(cycle_entry_id.to_topology_id(), cycle_back_id.to_topology_id());
-        topology.add_edge(cycle_back_id.to_topology_id(), cycle_entry_id.to_topology_id());
+        topology.add_edge(
+            source_a_id.to_topology_id(),
+            cycle_entry_id.to_topology_id(),
+        );
+        topology.add_edge(
+            cycle_entry_id.to_topology_id(),
+            cycle_back_id.to_topology_id(),
+        );
+        topology.add_edge(
+            cycle_back_id.to_topology_id(),
+            cycle_entry_id.to_topology_id(),
+        );
         topology.add_edge(cycle_back_id.to_topology_id(), merge_id.to_topology_id());
         topology.add_edge(source_b_id.to_topology_id(), merge_id.to_topology_id());
         topology.add_edge(merge_id.to_topology_id(), fold_id.to_topology_id());
@@ -3146,9 +3155,18 @@ mod tests {
             topology.add_stage_with_id(id.to_topology_id(), Some(name.to_string()), role);
             topology.reset_current();
         }
-        topology.add_edge(source_a_id.to_topology_id(), cycle_entry_id.to_topology_id());
-        topology.add_edge(cycle_entry_id.to_topology_id(), cycle_back_id.to_topology_id());
-        topology.add_edge(cycle_back_id.to_topology_id(), cycle_entry_id.to_topology_id());
+        topology.add_edge(
+            source_a_id.to_topology_id(),
+            cycle_entry_id.to_topology_id(),
+        );
+        topology.add_edge(
+            cycle_entry_id.to_topology_id(),
+            cycle_back_id.to_topology_id(),
+        );
+        topology.add_edge(
+            cycle_back_id.to_topology_id(),
+            cycle_entry_id.to_topology_id(),
+        );
         topology.add_edge(cycle_back_id.to_topology_id(), merge_id.to_topology_id());
         topology.add_edge(source_b_id.to_topology_id(), merge_id.to_topology_id());
         topology.add_edge(merge_id.to_topology_id(), fold_id.to_topology_id());

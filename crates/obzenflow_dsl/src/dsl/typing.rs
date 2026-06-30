@@ -12,8 +12,8 @@ use obzenflow_core::ai::{
     AiMapReduceChunkFailed, AiMapReducePlanningManifest, AiMapReduceTaggedPartial,
 };
 use obzenflow_core::event::context::StageType;
-use obzenflow_core::journal::run_manifest::OrderDecision;
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
+use obzenflow_core::journal::run_manifest::OrderDecision;
 use obzenflow_core::TypedPayload;
 use obzenflow_core::{ChainEvent, StageId, WriterId};
 use obzenflow_runtime::effects::SynthesizedOutcomeKind;
@@ -2114,9 +2114,7 @@ pub fn validate_input_order_declarations(
                 continue;
             }
             // A barrier strictly above the observer shields it and ends the cone.
-            if current != *stage_id
-                && id_to_order_role.get(&current) == Some(&OrderRole::Barrier)
-            {
+            if current != *stage_id && id_to_order_role.get(&current) == Some(&OrderRole::Barrier) {
                 continue;
             }
             let upstreams = inbound.get(&current).cloned().unwrap_or_default();
