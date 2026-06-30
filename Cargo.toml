@@ -249,6 +249,11 @@ path = "tests/deterministic_fan_in_replay_test.rs"
 required-features = ["test-support"]
 
 [[test]]
+name = "commutative_barrier_fan_in_replay_test"
+path = "tests/commutative_barrier_fan_in_replay_test.rs"
+required-features = ["test-support"]
+
+[[test]]
 name = "effectful_fan_in_envelope_test"
 path = "tests/effectful_fan_in_envelope_test.rs"
 required-features = ["test-support"]

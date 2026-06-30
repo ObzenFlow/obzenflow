@@ -2897,6 +2897,85 @@ mod tests {
             .expect("a stateful fold below a marked fan-in has deterministic input order");
     }
 
+    /// FLOWIP-095l Tier 1 (build-time, barrier case): a commutative fold declared
+    /// `#[trace_invariant]` is a Barrier, so the two-source fan-in feeding it directly
+    /// is NOT marked for the canonical merge and keeps availability-driven scheduling.
+    /// This pins the build-time half of `commutative_barrier_fan_in_replay_test`: the
+    /// runtime fidelity there is only meaningful because the fan-in is genuinely
+    /// unordered, which is asserted here. Complements
+    /// `barrier_shields_its_fan_in_from_a_downstream_observer` (barrier with an observer
+    /// below) by covering the barrier-as-direct-consumer shape with no observer at all.
+    #[test]
+    fn commutative_barrier_as_fan_in_consumer_keeps_availability_scheduling() {
+        let source_a_id = StageId::new();
+        let source_b_id = StageId::new();
+        let barrier_id = StageId::new();
+        let sink_id = StageId::new();
+
+        let mut descriptors: HashMap<String, Box<dyn StageDescriptor>> = HashMap::new();
+        descriptors.insert(
+            "source_a".to_string(),
+            crate::source!(name: "source_a", InputEvent => placeholder!()),
+        );
+        descriptors.insert(
+            "source_b".to_string(),
+            crate::source!(name: "source_b", InputEvent => placeholder!()),
+        );
+        descriptors.insert(
+            "barrier".to_string(),
+            crate::stateful!(name: "barrier", InputEvent -> OutputEvent => CommutativeStateful),
+        );
+        descriptors.insert(
+            "sink".to_string(),
+            crate::sink!(name: "sink", OutputEvent => ExactSink),
+        );
+
+        // The build classifies the barrier from its declaration, before any wrapping.
+        assert_eq!(descriptors["barrier"].order_role(), OrderRole::Barrier);
+
+        let mut name_to_id = HashMap::new();
+        name_to_id.insert("source_a".to_string(), source_a_id);
+        name_to_id.insert("source_b".to_string(), source_b_id);
+        name_to_id.insert("barrier".to_string(), barrier_id);
+        name_to_id.insert("sink".to_string(), sink_id);
+
+        let mut topology = TopologyBuilder::new();
+        for (id, name, stage_type) in [
+            (source_a_id, "source_a", TopologyStageType::FiniteSource),
+            (source_b_id, "source_b", TopologyStageType::FiniteSource),
+            (barrier_id, "barrier", TopologyStageType::Transform),
+            (sink_id, "sink", TopologyStageType::Sink),
+        ] {
+            topology.add_stage_with_id(id.to_topology_id(), Some(name.to_string()), stage_type);
+            topology.reset_current();
+        }
+        topology.add_edge(source_a_id.to_topology_id(), barrier_id.to_topology_id());
+        topology.add_edge(source_b_id.to_topology_id(), barrier_id.to_topology_id());
+        topology.add_edge(barrier_id.to_topology_id(), sink_id.to_topology_id());
+        let topology = topology.build_unchecked().unwrap();
+
+        // The barrier absorbs input order, so its fan-in is NOT marked: it keeps
+        // availability-driven scheduling rather than the canonical merge.
+        let marked = crate::dsl::typing::derive_deterministic_fan_in_stages(
+            &topology,
+            &descriptors,
+            &name_to_id,
+        );
+        assert!(
+            !marked.contains(&barrier_id),
+            "a commutative barrier's fan-in must stay availability-scheduled"
+        );
+
+        // And the build accepts it: a declared barrier is neither an undeclared
+        // observer nor an order-sensitive stage needing a merge.
+        crate::dsl::typing::wrap_deterministic_orderers(&mut descriptors, &name_to_id, &marked);
+        assert!(!descriptors["barrier"].is_deterministic_input_orderer());
+        crate::dsl::typing::validate_input_order_declarations(&topology, &descriptors, &name_to_id)
+            .expect("a declared barrier is not an undeclared observer");
+        validate_effectful_deterministic_input_order(&topology, &descriptors, &name_to_id)
+            .expect("a barrier consumer needs no deterministic input order");
+    }
+
     #[test]
     fn decorators_forward_order_role() {
         // FLOWIP-095l Gap 6: a defaulted trait method is not auto-forwarded, so the

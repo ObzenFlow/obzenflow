@@ -1,0 +1,16 @@
+error[E0423]: cannot initialize a tuple struct which contains private fields
+  --> tests/compile_fail/trace_invariant_variant_needs_proof.rs:12:49
+   |
+12 |     let _ = InputOrderSemantics::TraceInvariant(TraceInvarianceProof(()));
+   |                                                 ^^^^^^^^^^^^^^^^^^^^
+   |
+note: constructor is not visible here due to private fields
+  --> src/stages/common/handlers/input_order.rs
+   |
+   | pub struct TraceInvarianceProof(());
+   |                                 ^^ private field
+help: you might have meant to use the `__minted_by_trace_invariant_attribute` associated function
+   |
+12 -     let _ = InputOrderSemantics::TraceInvariant(TraceInvarianceProof(()));
+12 +     let _ = InputOrderSemantics::TraceInvariant(TraceInvarianceProof::__minted_by_trace_invariant_attribute());
+   |

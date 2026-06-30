@@ -11,6 +11,7 @@
 //! test calling [`assert_trace_invariant`] and is the only minter of the witness
 //! a `TraceInvariant` declaration carries.
 
+use crate::stages::common::handler_error::HandlerError;
 use crate::stages::common::handlers::stateful::StatefulHandler;
 use obzenflow_core::event::schema::TypedPayload;
 use obzenflow_core::{ChainEvent, StageId, WriterId};
@@ -29,35 +30,80 @@ pub fn word_from<T: TypedPayload>(inputs: impl IntoIterator<Item = T>) -> Vec<Ch
         .collect()
 }
 
-/// Observe a stateful handler's output and state for one input word: fold the word
-/// in, then project both. The output is `create_events` as a run-id-free
-/// `(event_type, payload)` sequence. The state digest is the handler's
-/// `state_digest`, or a full serialization of the state when the handler does not
-/// narrow it (FLOWIP-095l Gap 11). Comparing the state, not only the output, stops a
-/// fold with order-dependent state and order-invariant output from being declared a
-/// barrier and silently breaking resume's `S_N` reconstruction.
-pub fn observe_output<H: StatefulHandler>(
-    make: &impl Fn() -> H,
-    word: &[ChainEvent],
-) -> (Vec<ProjectedOutput>, serde_json::Value)
-where
-    H::State: serde::Serialize,
-{
-    let mut handler = make();
-    let mut state = handler.initial_state();
-    for event in word {
-        handler.accumulate(&mut state, event.clone());
-    }
-    let state_digest = match handler.state_digest(&state) {
-        serde_json::Value::Null => serde_json::to_value(&state).unwrap_or(serde_json::Value::Null),
-        narrowed => narrowed,
-    };
-    let output = match handler.create_events(&state) {
+/// Project one emission result into the run-id-free observable word. On error a
+/// single sentinel row is produced, so an order-dependent failure still surfaces as
+/// a divergence rather than vanishing.
+fn project_emission(result: Result<Vec<ChainEvent>, HandlerError>) -> Vec<ProjectedOutput> {
+    match result {
         Ok(events) => events
             .iter()
             .map(|event| (event.event_type(), event.payload()))
             .collect(),
         Err(err) => vec![(format!("<handler-error: {err:?}>"), serde_json::Value::Null)],
+    }
+}
+
+/// Observe a stateful handler's transition over one input word: run the same
+/// protocol the supervisor runs, then project the emitted word and the carried
+/// state.
+///
+/// The supervisor folds each event and, after each one, checks `should_emit` and
+/// may `emit` mid-stream (`stages/stateful/supervisor/running.rs`), then `drain`s at
+/// EOF (`stages/stateful/supervisor/draining.rs`). A batch fold plus one final
+/// `create_events` misses every mid-stream emission, so a handler can look
+/// order-invariant in its final output while its durable emitted facts depend on
+/// order. This drives the real protocol instead: per data event `accumulate` then
+/// `should_emit`/`emit`, and a terminal `drain`, accumulating every emission into
+/// one observable word.
+///
+/// Faithfulness rules drawn from the supervisor:
+/// - The handler is cloned per transition (`(*ctx.handler).clone()`); `State` is the
+///   only carrier. So this clones the prototype for each step and threads one state,
+///   never persisting `&mut self` across events.
+/// - `emit_interval_hint` is processing-time emission, not an input-trace property,
+///   so it cannot be proven by permuting inputs and is refused here (FLOWIP-120d).
+///
+/// The state digest is the handler's `state_digest`, or a full serialization when
+/// the handler does not narrow it (FLOWIP-095l Gap 11). Comparing the state as well
+/// as the output stops a fold with order-dependent state and order-invariant output
+/// from being declared a barrier and silently breaking resume's `S_N`.
+fn observe_transition<H>(
+    make: &impl Fn() -> H,
+    word: &[ChainEvent],
+) -> (Vec<ProjectedOutput>, serde_json::Value)
+where
+    H: StatefulHandler + Clone,
+    H::State: serde::Serialize,
+{
+    let prototype = make();
+    assert!(
+        prototype.emit_interval_hint().is_none(),
+        "FLOWIP-095l #[trace_invariant] does not support emit_interval_hint: processing-time \
+         emission is not an input-trace property, so permuting inputs cannot prove it \
+         order-invariant (see FLOWIP-120d). Declare the handler OrderSensitive instead."
+    );
+
+    let mut state = prototype.initial_state();
+    let mut output = Vec::new();
+    for event in word {
+        // Fresh clone per transition, like the supervisor; state is the carrier.
+        let mut handler = prototype.clone();
+        handler.accumulate(&mut state, event.clone());
+        if handler.should_emit(&mut state) {
+            output.extend(project_emission(prototype.clone().emit(&mut state)));
+        }
+    }
+    // Terminal drain mirrors the supervisor's EOF path. Drain is async; block on it
+    // with a minimal executor so the trial and its proc-macro test stay synchronous.
+    // A barrier drain is a pure projection of state, so no tokio reactor is needed.
+    let drain_handler = prototype.clone();
+    output.extend(project_emission(futures::executor::block_on(
+        drain_handler.drain(&state),
+    )));
+
+    let state_digest = match prototype.state_digest(&state) {
+        serde_json::Value::Null => serde_json::to_value(&state).unwrap_or(serde_json::Value::Null),
+        narrowed => narrowed,
     };
     (output, state_digest)
 }
@@ -72,14 +118,23 @@ where
 /// Permutations are exhaustive for words up to length 6 and a deterministic
 /// sample (reversal, every rotation, adjacent swaps) beyond that, so a long word
 /// still exercises non-trivial reorderings without factorial blow-up.
-pub fn assert_trace_invariant<H: StatefulHandler>(make: impl Fn() -> H, words: &[Vec<ChainEvent>])
+pub fn assert_trace_invariant<H>(make: impl Fn() -> H, words: &[Vec<ChainEvent>])
 where
+    H: StatefulHandler + Clone,
     H::State: serde::Serialize,
 {
+    // A sample with no word of length >= 2 has nothing to reorder, so the trial
+    // would pass vacuously and mint a barrier with no evidence. Refuse it.
+    assert!(
+        words.iter().any(|word| word.len() >= 2),
+        "FLOWIP-095l #[trace_invariant] needs at least one sample word with >= 2 inputs; an \
+         empty or singleton sample proves nothing. Provide representative concurrent inputs in \
+         `inputs = ...` (include short words, since resume frontiers are per-multiset)."
+    );
     for (index, word) in words.iter().enumerate() {
-        let (baseline_output, baseline_state) = observe_output(&make, word);
+        let (baseline_output, baseline_state) = observe_transition(&make, word);
         for permutation in permutations(word) {
-            let (output, state) = observe_output(&make, &permutation);
+            let (output, state) = observe_transition(&make, &permutation);
             assert!(
                 output == baseline_output,
                 "FLOWIP-095l #[trace_invariant] trial failed on sample word {index}: the \
@@ -190,7 +245,7 @@ mod tests {
     }
 
     /// Commutative: state is a running sum, output is the total.
-    #[derive(Default)]
+    #[derive(Clone, Default)]
     struct Sum;
     #[async_trait]
     impl StatefulHandler for Sum {
@@ -207,7 +262,7 @@ mod tests {
     }
 
     /// Order-sensitive: state is the arrival-ordered list.
-    #[derive(Default)]
+    #[derive(Clone, Default)]
     struct Listy;
     #[async_trait]
     impl StatefulHandler for Listy {
@@ -248,7 +303,7 @@ mod tests {
     /// OUTPUT. State is the arrival-ordered list; output is only its length, which
     /// commutes. The pre-Gap-11 output-only trial admitted this as a barrier; the
     /// state check now rejects it.
-    #[derive(Default)]
+    #[derive(Clone, Default)]
     struct CountOnly;
     #[async_trait]
     impl StatefulHandler for CountOnly {
@@ -275,7 +330,7 @@ mod tests {
     // End-to-end: the #[trace_invariant] attribute on a commutative handler.
     // `crate = crate` makes the generated paths resolve inside obzenflow_runtime
     // itself; external crates use the default `::obzenflow_runtime`.
-    #[derive(Default)]
+    #[derive(Clone, Default)]
     struct ProvenSum;
     #[crate::trace_invariant(
         crate = crate,
@@ -302,5 +357,164 @@ mod tests {
             ProvenSum.declared_input_order(),
             InputOrderSemantics::TraceInvariant(_)
         ));
+    }
+
+    /// A four-input sample, long enough for a two-input emission window to fire
+    /// twice. Resume frontiers are per-multiset, so short words matter.
+    fn pair_sample() -> Vec<Vec<ChainEvent>> {
+        vec![word_from([
+            Num { value: 1 },
+            Num { value: 2 },
+            Num { value: 3 },
+            Num { value: 4 },
+        ])]
+    }
+
+    #[derive(Serialize, Deserialize)]
+    struct PairOut {
+        values: Vec<u64>,
+    }
+    impl TypedPayload for PairOut {
+        const EVENT_TYPE: &'static str = "test.trace_invariant.pair";
+    }
+
+    #[derive(Clone, Default, Serialize)]
+    struct PairState {
+        total: u64,
+        pending: Vec<u64>,
+    }
+
+    /// FLOWIP-095l increment-2 regression: order-invariant final state and an empty
+    /// final `create_events`, but order-DEPENDENT mid-stream emissions. `should_emit`
+    /// fires every two inputs and `emit` writes the pair in arrival order, so
+    /// `[1,2,3,4]` emits `[1,2],[3,4]` while `[2,1,3,4]` emits `[2,1],[3,4]`. The
+    /// batch-fold trial admitted this as a barrier; the transition trial catches it on
+    /// the emitted word. Its `state_digest` even narrows to `total`, so the state
+    /// check passes honestly and the emitted-word check is the only witness.
+    #[derive(Clone, Default)]
+    struct PairEmitter;
+    #[async_trait]
+    impl StatefulHandler for PairEmitter {
+        type State = PairState;
+        fn accumulate(&mut self, state: &mut PairState, event: ChainEvent) {
+            let n = event.payload()["value"].as_u64().unwrap_or(0);
+            state.total += n;
+            state.pending.push(n);
+        }
+        fn initial_state(&self) -> PairState {
+            PairState::default()
+        }
+        fn should_emit(&self, state: &mut PairState) -> bool {
+            state.pending.len() == 2
+        }
+        fn emit(&self, state: &mut PairState) -> Result<Vec<ChainEvent>, HandlerError> {
+            let values = std::mem::take(&mut state.pending);
+            Ok(vec![emit(PairOut { values })])
+        }
+        fn create_events(&self, _state: &PairState) -> Result<Vec<ChainEvent>, HandlerError> {
+            Ok(Vec::new())
+        }
+        fn state_digest(&self, state: &PairState) -> serde_json::Value {
+            serde_json::json!({ "total": state.total })
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "OUTPUT depends on input order")]
+    fn order_dependent_mid_stream_emission_is_caught() {
+        assert_trace_invariant(|| PairEmitter, &pair_sample());
+    }
+
+    /// Windowed emission that IS order-invariant: emit the running input count every
+    /// two inputs. The count after k inputs is k regardless of order, so every
+    /// permutation emits the same word. Proves the trial admits genuine
+    /// order-invariant windowed emitters rather than rejecting all windowing.
+    #[derive(Clone, Default)]
+    struct RunningCount;
+    #[async_trait]
+    impl StatefulHandler for RunningCount {
+        type State = u64;
+        fn accumulate(&mut self, state: &mut u64, _event: ChainEvent) {
+            *state += 1;
+        }
+        fn initial_state(&self) -> u64 {
+            0
+        }
+        fn should_emit(&self, state: &mut u64) -> bool {
+            (*state).is_multiple_of(2)
+        }
+        fn create_events(&self, state: &u64) -> Result<Vec<ChainEvent>, HandlerError> {
+            Ok(vec![emit(CountOut { n: *state })])
+        }
+    }
+
+    #[test]
+    fn order_invariant_windowed_emitter_passes() {
+        assert_trace_invariant(|| RunningCount, &pair_sample());
+    }
+
+    /// A timer-emitting handler: `emit_interval_hint` is set, so the trial refuses it
+    /// because processing-time emission is not an input-trace property (FLOWIP-120d).
+    #[derive(Clone, Default)]
+    struct Ticking;
+    #[async_trait]
+    impl StatefulHandler for Ticking {
+        type State = u64;
+        fn accumulate(&mut self, state: &mut u64, event: ChainEvent) {
+            *state += event.payload()["value"].as_u64().unwrap_or(0);
+        }
+        fn initial_state(&self) -> u64 {
+            0
+        }
+        fn create_events(&self, state: &u64) -> Result<Vec<ChainEvent>, HandlerError> {
+            Ok(vec![emit(SumOut { total: *state })])
+        }
+        fn emit_interval_hint(&self) -> Option<std::time::Duration> {
+            Some(std::time::Duration::from_millis(1))
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "emit_interval_hint")]
+    fn timer_emitting_handler_is_refused() {
+        assert_trace_invariant(|| Ticking, &pair_sample());
+    }
+
+    #[test]
+    #[should_panic(expected = ">= 2 inputs")]
+    fn singleton_sample_is_refused() {
+        let words = vec![word_from([Num { value: 1 }])];
+        assert_trace_invariant(|| Sum, &words);
+    }
+
+    /// Pins the assumption the trial relies on: the supervisor reaches a stateful
+    /// handler through `UnifiedStatefulHandler::{emit_with_context, drain_with_context}`
+    /// while the trial drives `StatefulHandler::{emit, drain}`. These must agree, so a
+    /// future change to the blanket impl that diverges trips here.
+    #[tokio::test]
+    async fn unified_with_context_matches_plain_emit_and_drain() {
+        use crate::stages::common::handlers::UnifiedStatefulHandler;
+        let handler = Sum;
+        let base: u64 = 5;
+
+        let mut s_plain = base;
+        let plain_emit = project_emission(StatefulHandler::emit(&handler, &mut s_plain));
+        let mut s_ctx = base;
+        let unified_emit = project_emission(UnifiedStatefulHandler::emit_with_context(
+            &handler, &mut s_ctx, None,
+        ));
+        assert_eq!(
+            plain_emit, unified_emit,
+            "emit_with_context(None) must equal emit"
+        );
+
+        let plain_drain = project_emission(StatefulHandler::drain(&handler, &base).await);
+        let unified_drain = project_emission(
+            UnifiedStatefulHandler::drain_with_context(&handler, &base, None).await,
+        );
+        assert_eq!(
+            plain_drain, unified_drain,
+            "drain_with_context(None) must equal drain"
+        );
     }
 }

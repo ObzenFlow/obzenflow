@@ -139,6 +139,11 @@ pub trait StatefulHandler: Send + Sync {
     /// cone must declare (the build refuses an undeclared one). Apply
     /// `#[trace_invariant(inputs = ...)]` to declare order-invariance with a proof,
     /// or override this to return `InputOrderSemantics::OrderSensitive`.
+    ///
+    /// Declaring `#[trace_invariant]` additionally requires `Self::State:
+    /// serde::Serialize` and `Self: Clone`: the proof trial clones the handler per
+    /// transition and serializes the reconstructed state to compare it across input
+    /// permutations.
     fn declared_input_order(&self) -> InputOrderSemantics {
         InputOrderSemantics::Undeclared
     }
