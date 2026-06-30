@@ -230,6 +230,30 @@ pub enum FlowBuildError {
          Move the effect to a single-input deterministic path or out of the cycle."
     )]
     EffectfulFanInRequiresDeterministicOrder { stage_name: String },
+
+    #[error(
+        "Order-sensitive stage '{stage_name}' is reachable only through a cycle-fed \
+         fan-in, whose delivery order this release cannot make deterministic (the \
+         canonical merge cannot run on a cycle edge), so its reconstructed state is \
+         not reproducible. Make the transition commutative and declare it \
+         `trace_invariant` (it becomes a Barrier and reconstructs faithfully), move \
+         it off the cycle's output, or override `accepts_cycle_nondeterminism()` on \
+         the handler to accept it (the flow then cannot be resumed, FLOWIP-120n)."
+    )]
+    OrderSensitiveStageUnderCycle { stage_name: String },
+
+    #[error(
+        "Stateful or join stage '{stage_name}' sits in a multi-source fan-in cone but \
+         has not declared its input-order semantics. The framework cannot infer \
+         whether its output depends on input order, and silently imposing the \
+         canonical merge (rate coupling) or silently trusting commutativity are both \
+         wrong. Declare it: apply `#[trace_invariant(inputs = ...)]` to the handler \
+         impl when its output is invariant under input permutation (it becomes a \
+         barrier and the fan-in pays no merge cost), or override \
+         `declared_input_order` to return `InputOrderSemantics::OrderSensitive` to run \
+         the deterministic merge."
+    )]
+    UndeclaredInputOrderSemantics { stage_name: String },
 }
 
 impl FlowBuildError {

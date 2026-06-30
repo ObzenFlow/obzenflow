@@ -9,6 +9,7 @@
 use crate::effects::{EffectInvocationContext, Effects};
 use crate::messaging::upstream_subscription::StageInputPosition;
 use crate::stages::common::handler_error::HandlerError;
+use crate::stages::common::handlers::input_order::InputOrderSemantics;
 use async_trait::async_trait;
 use obzenflow_core::event::schema::{TypedFact, TypedFactSet, TypedFactSetError, TypedPayload};
 use obzenflow_core::{ChainEvent, EventEnvelope, WriterId};
@@ -132,6 +133,24 @@ pub trait StatefulHandler: Send + Sync {
     ) -> std::result::Result<Vec<ChainEvent>, HandlerError>;
 
     // --- Advanced methods with sensible defaults ---
+
+    /// FLOWIP-095l: declare whether this handler's output depends on the order of
+    /// its inputs. Default `Undeclared`; a stateful stage in a multi-source fan-in
+    /// cone must declare (the build refuses an undeclared one). Apply
+    /// `#[trace_invariant(inputs = ...)]` to declare order-invariance with a proof,
+    /// or override this to return `InputOrderSemantics::OrderSensitive`.
+    fn declared_input_order(&self) -> InputOrderSemantics {
+        InputOrderSemantics::Undeclared
+    }
+
+    /// FLOWIP-095l Gap 4: opt into running below a cycle-fed fan-in with
+    /// non-deterministic, non-resumable input order. Default false, so the build
+    /// refuses an order-sensitive fold reachable only through a cycle. Override to
+    /// true only when the irreproducibility of this stage's state is acceptable;
+    /// the verifier still reports its region as uncertifiable.
+    fn accepts_cycle_nondeterminism(&self) -> bool {
+        false
+    }
 
     /// Optional idle tick interval hint for the supervisor.
     ///

@@ -16,7 +16,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use obzenflow_core::journal::run_manifest::RunManifest;
+use obzenflow_core::journal::run_manifest::{OrderDecision, RunManifest};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum StageCertification {
@@ -49,9 +49,12 @@ pub fn certify(
             let baseline_ordered = baseline
                 .stages
                 .get(key)
-                .map(|s| s.ordered_delivery)
+                .map(|s| s.order_decision == OrderDecision::Ordered)
                 .unwrap_or(false);
-            (key.as_str(), stage.ordered_delivery && baseline_ordered)
+            (
+                key.as_str(),
+                stage.order_decision == OrderDecision::Ordered && baseline_ordered,
+            )
         })
         .collect();
 
@@ -112,7 +115,11 @@ mod tests {
                     data_journal_file: format!("{key}.log"),
                     error_journal_file: format!("{key}_error.log"),
                     inbound: inbound.iter().map(|s| s.to_string()).collect(),
-                    ordered_delivery: *ordered,
+                    order_decision: if *ordered {
+                        OrderDecision::Ordered
+                    } else {
+                        OrderDecision::OrderInsensitive
+                    },
                 },
             );
         }

@@ -734,6 +734,16 @@ macro_rules! build_typed_flow {
             &deterministic_fan_in_stages,
         );
 
+        // FLOWIP-095l Gap 2: an undeclared stateful or join stage in a multi-source
+        // fan-in cone is refused before the determinism walk, so the author gets a
+        // clear "declare it" message rather than an order-determinism error.
+        $crate::dsl::typing::validate_input_order_declarations(
+            &topology,
+            &descriptors,
+            &name_to_id,
+        )
+        .map_err(|err| *err)?;
+
         $crate::dsl::typing::validate_effectful_deterministic_input_order(
             &topology,
             &descriptors,
@@ -1067,10 +1077,13 @@ macro_rules! build_typed_flow {
                 name: format!("{}_error", descriptor.name()),
             }
             .to_filename();
-            let (inbound, ordered_delivery) = manifest_delivery_metadata
+            let (inbound, order_decision) = manifest_delivery_metadata
                 .get(&stage_id)
                 .cloned()
-                .unwrap_or((Vec::new(), true));
+                .unwrap_or((
+                    Vec::new(),
+                    obzenflow_core::journal::run_manifest::OrderDecision::Ordered,
+                ));
             manifest_stages.insert(
                 stage_key,
                 obzenflow_core::journal::run_manifest::RunManifestStage {
@@ -1081,7 +1094,7 @@ macro_rules! build_typed_flow {
                     data_journal_file,
                     error_journal_file,
                     inbound,
-                    ordered_delivery,
+                    order_decision,
                 },
             );
         }

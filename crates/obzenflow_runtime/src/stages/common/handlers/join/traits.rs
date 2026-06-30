@@ -8,6 +8,7 @@
 //! (reference and stream) and emit enriched events.
 
 use crate::stages::common::handler_error::HandlerError;
+use crate::stages::common::handlers::input_order::InputOrderSemantics;
 use crate::stages::join::config::{JoinReferenceMode, DEFAULT_REFERENCE_BATCH_CAP};
 use async_trait::async_trait;
 use obzenflow_core::{ChainEvent, StageId, WriterId};
@@ -54,6 +55,21 @@ pub trait JoinHandler: Send + Sync + Clone {
         source_id: StageId,
         writer_id: WriterId,
     ) -> std::result::Result<Vec<ChainEvent>, HandlerError>;
+
+    /// FLOWIP-095l: declare whether this join's output depends on the order of its
+    /// stream inputs. Default `Undeclared`; a join in a multi-source fan-in cone
+    /// must declare. A hydrating (`FiniteEof`) join is a structural orderer and is
+    /// exempt, so this matters for symmetric joins.
+    fn declared_input_order(&self) -> InputOrderSemantics {
+        InputOrderSemantics::Undeclared
+    }
+
+    /// FLOWIP-095l Gap 4: opt into running below a cycle-fed fan-in with
+    /// non-deterministic, non-resumable input order. Default false. Override to
+    /// true only when the irreproducibility of this join's state is acceptable.
+    fn accepts_cycle_nondeterminism(&self) -> bool {
+        false
+    }
 
     /// Join reference mode (default: `FiniteEof`).
     ///

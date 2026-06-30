@@ -11,7 +11,7 @@ use obzenflow_core::event::vector_clock::VectorClock;
 use obzenflow_core::event::{PipelineLifecycleEvent, SystemEvent, SystemEventType};
 use obzenflow_core::id::{JournalId, SystemId};
 use obzenflow_core::journal::run_manifest::{
-    RunManifest, RunManifestStage, RUN_MANIFEST_FILENAME, RUN_MANIFEST_VERSION,
+    OrderDecision, RunManifest, RunManifestStage, RUN_MANIFEST_FILENAME, RUN_MANIFEST_VERSION,
 };
 use obzenflow_core::journal::ArchiveStatus;
 use obzenflow_core::WriterId;
@@ -38,7 +38,7 @@ fn write_manifest(dir: &Path) {
             error_journal_file: "FiniteSource_returns_error_stage_01H000000000000000000000000.log"
                 .to_string(),
             inbound: Vec::new(),
-            ordered_delivery: true,
+            order_decision: OrderDecision::Ordered,
         },
     );
 
@@ -173,7 +173,7 @@ fn write_manifest_with_version(dir: &Path, version: &str) {
             error_journal_file: "FiniteSource_returns_error_stage_01H000000000000000000000000.log"
                 .to_string(),
             inbound: Vec::new(),
-            ordered_delivery: true,
+            order_decision: OrderDecision::Ordered,
         },
     );
 

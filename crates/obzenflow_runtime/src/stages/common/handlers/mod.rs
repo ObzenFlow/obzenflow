@@ -4,7 +4,9 @@
 
 //! Handler-related components organized by type
 
+pub mod input_order;
 pub mod join;
+pub mod trace_invariant;
 pub mod observer;
 pub mod resource_managed;
 pub mod sink;
@@ -13,6 +15,7 @@ pub mod stateful;
 pub mod transform;
 
 // Re-export all handler traits for convenience
+pub use input_order::{InputOrderSemantics, TraceInvarianceProof};
 pub use join::JoinHandler;
 pub use observer::ObserverHandler;
 pub use resource_managed::ResourceManaged;

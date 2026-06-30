@@ -16,8 +16,8 @@ mod tests {
     use obzenflow_runtime::stages::common::handlers::source::SourceError;
     use obzenflow_runtime::stages::common::handlers::{
         AsyncFiniteSourceHandler, AsyncInfiniteSourceHandler, AsyncTransformHandler,
-        EffectfulTransformHandler, FiniteSourceHandler, InfiniteSourceHandler, JoinHandler,
-        SinkHandler, StatefulHandler, TransformHandler,
+        EffectfulTransformHandler, FiniteSourceHandler, InfiniteSourceHandler, InputOrderSemantics,
+        JoinHandler, SinkHandler, StatefulHandler, TransformHandler,
     };
     use obzenflow_runtime::typing::{
         JoinTyping, SinkTyping, SourceTyping, StatefulTyping, TransformTyping,
@@ -31,6 +31,7 @@ mod tests {
     use crate::dsl::error::{EdgeTypingMismatchKind, FlowBuildError};
     use crate::dsl::stage_descriptor::StageDescriptor;
     use crate::dsl::stage_descriptor::TransformDescriptor;
+    use crate::dsl::stage_descriptor::OrderRole;
     use crate::dsl::typing::{
         collect_stage_typing_info, derive_feed_plan, validate_edge_typing,
         validate_effectful_deterministic_input_order, validate_stage_typing_metadata,
@@ -279,6 +280,65 @@ mod tests {
 
         fn create_events(&self, _state: &Self::State) -> Result<Vec<ChainEvent>, HandlerError> {
             Ok(vec![])
+        }
+    }
+
+    /// FLOWIP-095l: a stateful handler declared trace-invariant (a barrier). The
+    /// proof witness is minted directly here for the guard tests; production code
+    /// mints it only through `#[trace_invariant]` and the trial it emits.
+    #[derive(Clone, Debug)]
+    struct CommutativeStateful;
+
+    impl StatefulTyping for CommutativeStateful {
+        type Input = InputEvent;
+        type Output = OutputEvent;
+    }
+
+    #[async_trait]
+    impl StatefulHandler for CommutativeStateful {
+        type State = ();
+
+        fn accumulate(&mut self, _state: &mut Self::State, _event: ChainEvent) {}
+
+        fn initial_state(&self) -> Self::State {}
+
+        fn create_events(&self, _state: &Self::State) -> Result<Vec<ChainEvent>, HandlerError> {
+            Ok(vec![])
+        }
+
+        fn declared_input_order(&self) -> InputOrderSemantics {
+            InputOrderSemantics::__trace_invariant_proven()
+        }
+    }
+
+    /// FLOWIP-095l Gap 4: an order-sensitive fold that explicitly accepts running
+    /// below a cycle with non-reproducible order (the escape hatch).
+    #[derive(Clone, Debug)]
+    struct CycleTolerantStateful;
+
+    impl StatefulTyping for CycleTolerantStateful {
+        type Input = InputEvent;
+        type Output = OutputEvent;
+    }
+
+    #[async_trait]
+    impl StatefulHandler for CycleTolerantStateful {
+        type State = ();
+
+        fn accumulate(&mut self, _state: &mut Self::State, _event: ChainEvent) {}
+
+        fn initial_state(&self) -> Self::State {}
+
+        fn create_events(&self, _state: &Self::State) -> Result<Vec<ChainEvent>, HandlerError> {
+            Ok(vec![])
+        }
+
+        fn declared_input_order(&self) -> InputOrderSemantics {
+            InputOrderSemantics::OrderSensitive
+        }
+
+        fn accepts_cycle_nondeterminism(&self) -> bool {
+            true
         }
     }
 
@@ -2708,5 +2768,405 @@ mod tests {
         assert!(rendered.contains("'stream_b'"));
         assert!(rendered.contains(type_name::<StreamEvent>()));
         assert!(rendered.contains(type_name::<AlternateEvent>()));
+    }
+
+    #[test]
+    fn order_observer_stateful_marks_its_fan_in() {
+        // FLOWIP-095l: a non-effectful stateful fold is an order Observer, so the
+        // two-source fan-in feeding it is marked for the canonical merge. Before
+        // 095l only effects seeded the walk, leaving this fan-in unordered and its
+        // reconstructed state non-reproducible.
+        let source_a_id = StageId::new();
+        let source_b_id = StageId::new();
+        let fold_id = StageId::new();
+        let sink_id = StageId::new();
+
+        let mut descriptors: HashMap<String, Box<dyn StageDescriptor>> = HashMap::new();
+        descriptors.insert(
+            "source_a".to_string(),
+            crate::source!(name: "source_a", InputEvent => placeholder!()),
+        );
+        descriptors.insert(
+            "source_b".to_string(),
+            crate::source!(name: "source_b", InputEvent => placeholder!()),
+        );
+        descriptors.insert(
+            "fold".to_string(),
+            crate::stateful!(name: "fold", InputEvent -> OutputEvent => ExactStateful),
+        );
+        descriptors.insert(
+            "sink".to_string(),
+            crate::sink!(name: "sink", OutputEvent => ExactSink),
+        );
+
+        let mut name_to_id = HashMap::new();
+        name_to_id.insert("source_a".to_string(), source_a_id);
+        name_to_id.insert("source_b".to_string(), source_b_id);
+        name_to_id.insert("fold".to_string(), fold_id);
+        name_to_id.insert("sink".to_string(), sink_id);
+
+        let mut topology = TopologyBuilder::new();
+        for (id, name, stage_type) in [
+            (source_a_id, "source_a", TopologyStageType::FiniteSource),
+            (source_b_id, "source_b", TopologyStageType::FiniteSource),
+            (fold_id, "fold", TopologyStageType::Transform),
+            (sink_id, "sink", TopologyStageType::Sink),
+        ] {
+            topology.add_stage_with_id(id.to_topology_id(), Some(name.to_string()), stage_type);
+            topology.reset_current();
+        }
+        topology.add_edge(source_a_id.to_topology_id(), fold_id.to_topology_id());
+        topology.add_edge(source_b_id.to_topology_id(), fold_id.to_topology_id());
+        topology.add_edge(fold_id.to_topology_id(), sink_id.to_topology_id());
+        let topology = topology.build_unchecked().unwrap();
+
+        let marked = crate::dsl::typing::derive_deterministic_fan_in_stages(
+            &topology,
+            &descriptors,
+            &name_to_id,
+        );
+        assert!(
+            marked.contains(&fold_id),
+            "the two-source fan-in feeding a stateful observer must be marked"
+        );
+
+        // Once the orderer is wired, the guard accepts the fold's input order.
+        crate::dsl::typing::wrap_deterministic_orderers(&mut descriptors, &name_to_id, &marked);
+        validate_effectful_deterministic_input_order(&topology, &descriptors, &name_to_id)
+            .expect("a stateful fold below a marked fan-in has deterministic input order");
+    }
+
+    #[test]
+    fn decorators_forward_order_role() {
+        // FLOWIP-095l Gap 6: a defaulted trait method is not auto-forwarded, so the
+        // build-time wrappers forward order_role explicitly. The macro wraps the
+        // descriptor (TypedStageDescriptor) and wrap_deterministic_orderers adds
+        // DeterministicOrdererOverride; the Carrier role must survive both, or a
+        // wrapped Barrier would silently degrade to Observer.
+        let mut descriptors: HashMap<String, Box<dyn StageDescriptor>> = HashMap::new();
+        descriptors.insert(
+            "t".to_string(),
+            crate::transform!(name: "t", InputEvent -> OutputEvent => ExactTransform),
+        );
+        assert_eq!(descriptors["t"].order_role(), OrderRole::Carrier);
+
+        let t_id = StageId::new();
+        let mut name_to_id = HashMap::new();
+        name_to_id.insert("t".to_string(), t_id);
+        let marked: std::collections::HashSet<StageId> = std::iter::once(t_id).collect();
+        crate::dsl::typing::wrap_deterministic_orderers(&mut descriptors, &name_to_id, &marked);
+
+        assert!(descriptors["t"].is_deterministic_input_orderer());
+        assert_eq!(
+            descriptors["t"].order_role(),
+            OrderRole::Carrier,
+            "the orderer override must forward the inner Carrier role"
+        );
+    }
+
+    #[test]
+    fn order_sensitive_stateful_under_cycle_is_rejected() {
+        // FLOWIP-095l Gap 4: a non-effectful order Observer (a stateful fold) whose
+        // input arrives through a cycle-fed fan-in cannot be made deterministic this
+        // release, so the build refuses it with a distinct, correctly named error
+        // rather than the effect-specific one.
+        let source_a_id = StageId::new();
+        let source_b_id = StageId::new();
+        let cycle_entry_id = StageId::new();
+        let cycle_back_id = StageId::new();
+        let merge_id = StageId::new();
+        let fold_id = StageId::new();
+
+        let mut descriptors: HashMap<String, Box<dyn StageDescriptor>> = HashMap::new();
+        descriptors.insert(
+            "source_a".to_string(),
+            crate::source!(name: "source_a", InputEvent => placeholder!()),
+        );
+        descriptors.insert(
+            "source_b".to_string(),
+            crate::source!(name: "source_b", InputEvent => placeholder!()),
+        );
+        descriptors.insert(
+            "cycle_entry".to_string(),
+            crate::transform!(name: "cycle_entry", InputEvent -> OutputEvent => ExactTransform),
+        );
+        descriptors.insert(
+            "cycle_back".to_string(),
+            crate::transform!(name: "cycle_back", InputEvent -> OutputEvent => ExactTransform),
+        );
+        descriptors.insert(
+            "merge".to_string(),
+            crate::transform!(name: "merge", InputEvent -> OutputEvent => ExactTransform),
+        );
+        descriptors.insert(
+            "fold".to_string(),
+            crate::stateful!(name: "fold", InputEvent -> OutputEvent => ExactStateful),
+        );
+
+        let mut name_to_id = HashMap::new();
+        name_to_id.insert("source_a".to_string(), source_a_id);
+        name_to_id.insert("source_b".to_string(), source_b_id);
+        name_to_id.insert("cycle_entry".to_string(), cycle_entry_id);
+        name_to_id.insert("cycle_back".to_string(), cycle_back_id);
+        name_to_id.insert("merge".to_string(), merge_id);
+        name_to_id.insert("fold".to_string(), fold_id);
+
+        let mut topology = TopologyBuilder::new();
+        for (id, name, role) in [
+            (source_a_id, "source_a", TopologyStageType::FiniteSource),
+            (source_b_id, "source_b", TopologyStageType::FiniteSource),
+            (cycle_entry_id, "cycle_entry", TopologyStageType::Transform),
+            (cycle_back_id, "cycle_back", TopologyStageType::Transform),
+            (merge_id, "merge", TopologyStageType::Transform),
+            (fold_id, "fold", TopologyStageType::Transform),
+        ] {
+            topology.add_stage_with_id(id.to_topology_id(), Some(name.to_string()), role);
+            topology.reset_current();
+        }
+        topology.add_edge(source_a_id.to_topology_id(), cycle_entry_id.to_topology_id());
+        topology.add_edge(cycle_entry_id.to_topology_id(), cycle_back_id.to_topology_id());
+        topology.add_edge(cycle_back_id.to_topology_id(), cycle_entry_id.to_topology_id());
+        topology.add_edge(cycle_back_id.to_topology_id(), merge_id.to_topology_id());
+        topology.add_edge(source_b_id.to_topology_id(), merge_id.to_topology_id());
+        topology.add_edge(merge_id.to_topology_id(), fold_id.to_topology_id());
+        let topology = topology.build_unchecked().unwrap();
+
+        let marked = crate::dsl::typing::derive_deterministic_fan_in_stages(
+            &topology,
+            &descriptors,
+            &name_to_id,
+        );
+        crate::dsl::typing::wrap_deterministic_orderers(&mut descriptors, &name_to_id, &marked);
+
+        let err =
+            *validate_effectful_deterministic_input_order(&topology, &descriptors, &name_to_id)
+                .expect_err("an order-sensitive fold fed from a cycle must be rejected");
+        match err {
+            FlowBuildError::OrderSensitiveStageUnderCycle { stage_name } => {
+                assert_eq!(stage_name, "fold");
+            }
+            other => panic!("unexpected error variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn barrier_shields_its_fan_in_from_a_downstream_observer() {
+        // FLOWIP-095l: a trace-invariant fold is a barrier. The two-source fan-in
+        // feeding it is order-insensitive, so an effect downstream of the barrier
+        // does not drag that fan-in into the merge.
+        let source_a_id = StageId::new();
+        let source_b_id = StageId::new();
+        let barrier_id = StageId::new();
+        let effect_id = StageId::new();
+        let sink_id = StageId::new();
+
+        let mut descriptors: HashMap<String, Box<dyn StageDescriptor>> = HashMap::new();
+        descriptors.insert(
+            "source_a".to_string(),
+            crate::source!(name: "source_a", InputEvent => placeholder!()),
+        );
+        descriptors.insert(
+            "source_b".to_string(),
+            crate::source!(name: "source_b", InputEvent => placeholder!()),
+        );
+        descriptors.insert(
+            "barrier".to_string(),
+            crate::stateful!(name: "barrier", InputEvent -> OutputEvent => CommutativeStateful),
+        );
+        descriptors.insert(
+            "effect".to_string(),
+            crate::effectful_transform!(
+                name: "effect",
+                OutputEvent -> OutputEvent => EffectfulExactTransform,
+                effects: [],
+                middleware: []
+            ),
+        );
+        descriptors.insert(
+            "sink".to_string(),
+            crate::sink!(name: "sink", OutputEvent => ExactSink),
+        );
+
+        let mut name_to_id = HashMap::new();
+        name_to_id.insert("source_a".to_string(), source_a_id);
+        name_to_id.insert("source_b".to_string(), source_b_id);
+        name_to_id.insert("barrier".to_string(), barrier_id);
+        name_to_id.insert("effect".to_string(), effect_id);
+        name_to_id.insert("sink".to_string(), sink_id);
+
+        let mut topology = TopologyBuilder::new();
+        for (id, name, role) in [
+            (source_a_id, "source_a", TopologyStageType::FiniteSource),
+            (source_b_id, "source_b", TopologyStageType::FiniteSource),
+            (barrier_id, "barrier", TopologyStageType::Transform),
+            (effect_id, "effect", TopologyStageType::Transform),
+            (sink_id, "sink", TopologyStageType::Sink),
+        ] {
+            topology.add_stage_with_id(id.to_topology_id(), Some(name.to_string()), role);
+            topology.reset_current();
+        }
+        topology.add_edge(source_a_id.to_topology_id(), barrier_id.to_topology_id());
+        topology.add_edge(source_b_id.to_topology_id(), barrier_id.to_topology_id());
+        topology.add_edge(barrier_id.to_topology_id(), effect_id.to_topology_id());
+        topology.add_edge(effect_id.to_topology_id(), sink_id.to_topology_id());
+        let topology = topology.build_unchecked().unwrap();
+
+        let marked = crate::dsl::typing::derive_deterministic_fan_in_stages(
+            &topology,
+            &descriptors,
+            &name_to_id,
+        );
+        assert!(
+            !marked.contains(&barrier_id),
+            "a barrier's fan-in must not be marked: the barrier absorbs input order"
+        );
+        // The build accepts it: a declared barrier needs no further declaration.
+        crate::dsl::typing::validate_input_order_declarations(&topology, &descriptors, &name_to_id)
+            .expect("a declared barrier is not an undeclared observer");
+    }
+
+    #[test]
+    fn undeclared_stateful_in_fan_in_cone_is_rejected() {
+        // FLOWIP-095l Gap 2: an undeclared stateful fold below a multi-source
+        // fan-in must declare; the build refuses it with a clear message.
+        let source_a_id = StageId::new();
+        let source_b_id = StageId::new();
+        let fold_id = StageId::new();
+        let sink_id = StageId::new();
+
+        let mut descriptors: HashMap<String, Box<dyn StageDescriptor>> = HashMap::new();
+        descriptors.insert(
+            "source_a".to_string(),
+            crate::source!(name: "source_a", InputEvent => placeholder!()),
+        );
+        descriptors.insert(
+            "source_b".to_string(),
+            crate::source!(name: "source_b", InputEvent => placeholder!()),
+        );
+        descriptors.insert(
+            "fold".to_string(),
+            crate::stateful!(name: "fold", InputEvent -> OutputEvent => ExactStateful),
+        );
+        descriptors.insert(
+            "sink".to_string(),
+            crate::sink!(name: "sink", OutputEvent => ExactSink),
+        );
+
+        let mut name_to_id = HashMap::new();
+        name_to_id.insert("source_a".to_string(), source_a_id);
+        name_to_id.insert("source_b".to_string(), source_b_id);
+        name_to_id.insert("fold".to_string(), fold_id);
+        name_to_id.insert("sink".to_string(), sink_id);
+
+        let mut topology = TopologyBuilder::new();
+        for (id, name, role) in [
+            (source_a_id, "source_a", TopologyStageType::FiniteSource),
+            (source_b_id, "source_b", TopologyStageType::FiniteSource),
+            (fold_id, "fold", TopologyStageType::Transform),
+            (sink_id, "sink", TopologyStageType::Sink),
+        ] {
+            topology.add_stage_with_id(id.to_topology_id(), Some(name.to_string()), role);
+            topology.reset_current();
+        }
+        topology.add_edge(source_a_id.to_topology_id(), fold_id.to_topology_id());
+        topology.add_edge(source_b_id.to_topology_id(), fold_id.to_topology_id());
+        topology.add_edge(fold_id.to_topology_id(), sink_id.to_topology_id());
+        let topology = topology.build_unchecked().unwrap();
+
+        let err = *crate::dsl::typing::validate_input_order_declarations(
+            &topology,
+            &descriptors,
+            &name_to_id,
+        )
+        .expect_err("an undeclared stateful fold in a fan-in cone must be rejected");
+        match err {
+            FlowBuildError::UndeclaredInputOrderSemantics { stage_name } => {
+                assert_eq!(stage_name, "fold");
+            }
+            other => panic!("unexpected error variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cycle_tolerant_stateful_builds_with_opt_in() {
+        // FLOWIP-095l Gap 4: the exact cycle topology that rejects a plain
+        // order-sensitive fold (see order_sensitive_stateful_under_cycle_is_rejected)
+        // builds when the handler overrides accepts_cycle_nondeterminism, exercising
+        // the opt-in branch end to end.
+        let source_a_id = StageId::new();
+        let source_b_id = StageId::new();
+        let cycle_entry_id = StageId::new();
+        let cycle_back_id = StageId::new();
+        let merge_id = StageId::new();
+        let fold_id = StageId::new();
+
+        let mut descriptors: HashMap<String, Box<dyn StageDescriptor>> = HashMap::new();
+        descriptors.insert(
+            "source_a".to_string(),
+            crate::source!(name: "source_a", InputEvent => placeholder!()),
+        );
+        descriptors.insert(
+            "source_b".to_string(),
+            crate::source!(name: "source_b", InputEvent => placeholder!()),
+        );
+        descriptors.insert(
+            "cycle_entry".to_string(),
+            crate::transform!(name: "cycle_entry", InputEvent -> OutputEvent => ExactTransform),
+        );
+        descriptors.insert(
+            "cycle_back".to_string(),
+            crate::transform!(name: "cycle_back", InputEvent -> OutputEvent => ExactTransform),
+        );
+        descriptors.insert(
+            "merge".to_string(),
+            crate::transform!(name: "merge", InputEvent -> OutputEvent => ExactTransform),
+        );
+        descriptors.insert(
+            "fold".to_string(),
+            crate::stateful!(name: "fold", InputEvent -> OutputEvent => CycleTolerantStateful),
+        );
+
+        let mut name_to_id = HashMap::new();
+        name_to_id.insert("source_a".to_string(), source_a_id);
+        name_to_id.insert("source_b".to_string(), source_b_id);
+        name_to_id.insert("cycle_entry".to_string(), cycle_entry_id);
+        name_to_id.insert("cycle_back".to_string(), cycle_back_id);
+        name_to_id.insert("merge".to_string(), merge_id);
+        name_to_id.insert("fold".to_string(), fold_id);
+
+        let mut topology = TopologyBuilder::new();
+        for (id, name, role) in [
+            (source_a_id, "source_a", TopologyStageType::FiniteSource),
+            (source_b_id, "source_b", TopologyStageType::FiniteSource),
+            (cycle_entry_id, "cycle_entry", TopologyStageType::Transform),
+            (cycle_back_id, "cycle_back", TopologyStageType::Transform),
+            (merge_id, "merge", TopologyStageType::Transform),
+            (fold_id, "fold", TopologyStageType::Transform),
+        ] {
+            topology.add_stage_with_id(id.to_topology_id(), Some(name.to_string()), role);
+            topology.reset_current();
+        }
+        topology.add_edge(source_a_id.to_topology_id(), cycle_entry_id.to_topology_id());
+        topology.add_edge(cycle_entry_id.to_topology_id(), cycle_back_id.to_topology_id());
+        topology.add_edge(cycle_back_id.to_topology_id(), cycle_entry_id.to_topology_id());
+        topology.add_edge(cycle_back_id.to_topology_id(), merge_id.to_topology_id());
+        topology.add_edge(source_b_id.to_topology_id(), merge_id.to_topology_id());
+        topology.add_edge(merge_id.to_topology_id(), fold_id.to_topology_id());
+        let topology = topology.build_unchecked().unwrap();
+
+        crate::dsl::typing::validate_input_order_declarations(&topology, &descriptors, &name_to_id)
+            .expect("a declared fold is not an undeclared observer");
+        let marked = crate::dsl::typing::derive_deterministic_fan_in_stages(
+            &topology,
+            &descriptors,
+            &name_to_id,
+        );
+        crate::dsl::typing::wrap_deterministic_orderers(&mut descriptors, &name_to_id, &marked);
+        crate::dsl::typing::validate_effectful_deterministic_input_order(
+            &topology,
+            &descriptors,
+            &name_to_id,
+        )
+        .expect("an opted-in fold below a cycle builds instead of being rejected");
     }
 }

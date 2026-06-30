@@ -41,7 +41,8 @@ use obzenflow_runtime::{
                 AsyncFiniteSourceHandler, AsyncInfiniteSourceHandler, AsyncTransformHandler,
                 EffectfulSinkHandler, EffectfulStatefulHandler, EffectfulStatefulHandlerAdapter,
                 EffectfulTransformHandler, EffectfulTransformHandlerAdapter, FiniteSourceHandler,
-                InfiniteSourceHandler, JoinHandler, SinkHandler, StatefulHandler, TransformHandler,
+                InfiniteSourceHandler, InputOrderSemantics, JoinHandler, SinkHandler,
+                StatefulHandler, TransformHandler,
             },
             stage_handle::{BoxedStageHandle, StageEvent, FORCE_SHUTDOWN_MESSAGE},
         },
@@ -513,6 +514,22 @@ pub enum PolicyGuardSurface {
     Sink,
 }
 
+/// FLOWIP-095l. A stage's relationship to concurrent fan-in delivery order: the
+/// input to canonical-merge enablement, as `is_deterministic_input_orderer()` is
+/// its output. Observers seed the merge, carriers relay order, barriers absorb
+/// it. Illegal states are unrepresentable; consumers query `order_role()`, never
+/// matching on `stage_type()`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OrderRole {
+    /// Reconstruction reads an order-dependent value here (a non-commutative
+    /// state fold, or an effect whose cursor is the merged input position).
+    Observer,
+    /// Relays input order to its output word but reads nothing order-dependent.
+    Carrier,
+    /// Output is invariant under input permutation, so it absorbs reordering.
+    Barrier,
+}
+
 /// Trait for stage descriptors that know how to create their supervisors
 #[async_trait]
 pub trait StageDescriptor: Send + Sync {
@@ -625,6 +642,29 @@ pub trait StageDescriptor: Send + Sync {
         false
     }
 
+    /// FLOWIP-095l. This stage's role in fan-in order propagation, the input to
+    /// merge enablement. Conservative by default (Observer over-orders, which is
+    /// always correctness-safe); carriers and barriers override per descriptor.
+    fn order_role(&self) -> OrderRole {
+        OrderRole::Observer
+    }
+
+    /// FLOWIP-095l Gap 4. Whether the author has explicitly accepted that this
+    /// order-sensitive stage runs non-deterministically below a cycle (forfeiting
+    /// resume). Default: not accepted, so the build refuses.
+    fn accepts_cycle_nondeterminism(&self) -> bool {
+        false
+    }
+
+    /// FLOWIP-095l Gap 2. Whether this stage is a stateful or symmetric-join order
+    /// observer that has not declared its input-order semantics. Such a stage in a
+    /// multi-source fan-in cone is a build error: the author must choose
+    /// `trace_invariant` or `OrderSensitive`. Default false (effects, transforms,
+    /// sources, sinks, and hydrating joins are exempt; their role is inferred).
+    fn is_undeclared_order_observer(&self) -> bool {
+        false
+    }
+
     fn stage_logic_version(&self) -> String {
         "1".to_string()
     }
@@ -724,6 +764,10 @@ pub struct FiniteSourceDescriptor<H: FiniteSourceHandler + 'static> {
 impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDescriptor
     for FiniteSourceDescriptor<H>
 {
+    fn order_role(&self) -> OrderRole {
+        OrderRole::Carrier
+    }
+
     fn name(&self) -> &str {
         &self.name
     }
@@ -879,6 +923,10 @@ impl<H: AsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
 impl<H: AsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDescriptor
     for AsyncFiniteSourceDescriptor<H>
 {
+    fn order_role(&self) -> OrderRole {
+        OrderRole::Carrier
+    }
+
     fn name(&self) -> &str {
         &self.name
     }
@@ -1001,6 +1049,10 @@ pub struct InfiniteSourceDescriptor<H: InfiniteSourceHandler + 'static> {
 impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDescriptor
     for InfiniteSourceDescriptor<H>
 {
+    fn order_role(&self) -> OrderRole {
+        OrderRole::Carrier
+    }
+
     fn name(&self) -> &str {
         &self.name
     }
@@ -1156,6 +1208,10 @@ impl<H: AsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
 impl<H: AsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
     StageDescriptor for AsyncInfiniteSourceDescriptor<H>
 {
+    fn order_role(&self) -> OrderRole {
+        OrderRole::Carrier
+    }
+
     fn name(&self) -> &str {
         &self.name
     }
@@ -1279,6 +1335,10 @@ pub struct TransformDescriptor<H: TransformHandler + 'static> {
 impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDescriptor
     for TransformDescriptor<H>
 {
+    fn order_role(&self) -> OrderRole {
+        OrderRole::Carrier
+    }
+
     fn name(&self) -> &str {
         &self.name
     }
@@ -1411,6 +1471,10 @@ pub struct AsyncTransformDescriptor<H: AsyncTransformHandler + 'static> {
 impl<H: AsyncTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDescriptor
     for AsyncTransformDescriptor<H>
 {
+    fn order_role(&self) -> OrderRole {
+        OrderRole::Carrier
+    }
+
     fn name(&self) -> &str {
         &self.name
     }
@@ -1831,6 +1895,10 @@ pub struct SinkDescriptor<H: SinkHandler + 'static> {
 impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDescriptor
     for SinkDescriptor<H>
 {
+    fn order_role(&self) -> OrderRole {
+        OrderRole::Carrier
+    }
+
     fn name(&self) -> &str {
         &self.name
     }
@@ -2240,6 +2308,29 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> State
 impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDescriptor
     for StatefulDescriptor<H>
 {
+    /// FLOWIP-095l: a stateful fold takes its order role from its declared input
+    /// semantics. Undeclared defaults to Observer (safe); a multi-source fan-in
+    /// cone forces an explicit declaration via the build-time check.
+    fn order_role(&self) -> OrderRole {
+        match self.handler.declared_input_order() {
+            InputOrderSemantics::TraceInvariant(_) => OrderRole::Barrier,
+            InputOrderSemantics::OrderSensitive | InputOrderSemantics::Undeclared => {
+                OrderRole::Observer
+            }
+        }
+    }
+
+    fn is_undeclared_order_observer(&self) -> bool {
+        matches!(
+            self.handler.declared_input_order(),
+            InputOrderSemantics::Undeclared
+        )
+    }
+
+    fn accepts_cycle_nondeterminism(&self) -> bool {
+        self.handler.accepts_cycle_nondeterminism()
+    }
+
     fn name(&self) -> &str {
         &self.name
     }
@@ -2646,6 +2737,35 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
     /// builder wires when the flow build marks the stage.
     fn is_deterministic_input_orderer(&self) -> bool {
         self.handler.reference_mode() == JoinReferenceMode::FiniteEof
+    }
+
+    /// FLOWIP-095l: a hydrating join self-orders its fan-in and relays the
+    /// ordering requirement upward, so it is a Carrier, never a Barrier (which
+    /// keeps 095d correction 4 intact). A symmetric join takes its role from its
+    /// declared input-order semantics, exactly as a stateful fold does.
+    fn order_role(&self) -> OrderRole {
+        if self.handler.reference_mode() == JoinReferenceMode::FiniteEof {
+            return OrderRole::Carrier;
+        }
+        match self.handler.declared_input_order() {
+            InputOrderSemantics::TraceInvariant(_) => OrderRole::Barrier,
+            InputOrderSemantics::OrderSensitive | InputOrderSemantics::Undeclared => {
+                OrderRole::Observer
+            }
+        }
+    }
+
+    fn is_undeclared_order_observer(&self) -> bool {
+        // A hydrating join is a structural orderer, exempt from declaration.
+        self.handler.reference_mode() != JoinReferenceMode::FiniteEof
+            && matches!(
+                self.handler.declared_input_order(),
+                InputOrderSemantics::Undeclared
+            )
+    }
+
+    fn accepts_cycle_nondeterminism(&self) -> bool {
+        self.handler.accepts_cycle_nondeterminism()
     }
 
     async fn create_handle_with_flow_middleware(

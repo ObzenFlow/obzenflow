@@ -5,7 +5,7 @@
 //! Common types and utilities for join handlers
 
 use crate::stages::common::handler_error::HandlerError;
-use crate::stages::common::handlers::JoinHandler;
+use crate::stages::common::handlers::{InputOrderSemantics, JoinHandler};
 use crate::stages::join::config::JoinReferenceMode;
 use crate::typing::JoinTyping;
 use obzenflow_core::event::context::causality_context::CausalityContext;
@@ -165,6 +165,15 @@ where
     StreamKeyFn: Fn(&S::StreamType) -> S::Key + Send + Sync + Clone + 'static,
 {
     type State = TypedJoinState<S::CatalogType, S::StreamType, S::Key>;
+
+    /// FLOWIP-095l: a join observes the interleaving of its reference and stream
+    /// sides, so its output depends on input order. In live (symmetric) mode it is
+    /// an order observer and the canonical merge gives it a deterministic,
+    /// replay-reproducible order; a hydrating (`FiniteEof`) join is a structural
+    /// orderer and is exempt from this declaration by its descriptor.
+    fn declared_input_order(&self) -> InputOrderSemantics {
+        InputOrderSemantics::OrderSensitive
+    }
 
     fn initial_state(&self) -> Self::State {
         TypedJoinState {

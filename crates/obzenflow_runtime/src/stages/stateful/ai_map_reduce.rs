@@ -15,7 +15,7 @@
 //! intentional (FLOWIP-086z-part-2).
 
 use crate::stages::common::handler_error::HandlerError;
-use crate::stages::common::handlers::StatefulHandler;
+use crate::stages::common::handlers::{InputOrderSemantics, StatefulHandler};
 use crate::typing::StatefulTyping;
 use async_trait::async_trait;
 use obzenflow_core::ai::{
@@ -391,6 +391,15 @@ where
     Collected: Clone + Serialize + TypedPayload + Send + Sync + 'static,
 {
     type State = CollectByInputState<Partial, Collected>;
+
+    /// FLOWIP-095l: the collector applies a caller-supplied reduce incrementally,
+    /// so the framework cannot assume it commutes. OrderSensitive runs the
+    /// canonical merge on the map fan-in, giving the reduce a deterministic
+    /// partial-delivery order; an owner who knows their reduce is order-invariant
+    /// can tighten a specific collector to a barrier.
+    fn declared_input_order(&self) -> InputOrderSemantics {
+        InputOrderSemantics::OrderSensitive
+    }
 
     fn accumulate(&mut self, state: &mut Self::State, event: ChainEvent) {
         let ChainEventContent::Data { event_type, .. } = &event.content else {

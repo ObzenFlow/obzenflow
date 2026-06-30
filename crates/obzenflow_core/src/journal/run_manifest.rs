@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 pub const RUN_MANIFEST_FILENAME: &str = "run_manifest.json";
-pub const RUN_MANIFEST_VERSION: &str = "2.0";
+pub const RUN_MANIFEST_VERSION: &str = "3.0";
 
 /// On-disk journal record format version (FLOWIP-120q). Bumped only when the
 /// framed record byte format changes. Readers gate on this in the same raw-JSON
@@ -21,6 +21,24 @@ pub const RUN_MANIFEST_VERSION: &str = "2.0";
 /// format is refused before any record is parsed. There is no mixed-format file:
 /// append and resume across a changed format refuse or start a new segment.
 pub const JOURNAL_FORMAT_VERSION: u32 = 1;
+
+/// FLOWIP-095l. The build's input-ordering verdict for a stage, replacing the
+/// FLOWIP-095j `ordered_delivery` boolean. Self-describing so the verifier can
+/// distinguish a non-deterministic cycle member from a legitimately
+/// order-insensitive fan-in, and compare two runs only under a matching regime.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum OrderDecision {
+    /// The canonical merge runs, or the stage is single-input or a structural
+    /// orderer: delivery order is deterministic and certifiable.
+    Ordered,
+    /// No descendant observes the order, so it is free: two correct runs may
+    /// interleave differently while reconstructing equal state and content.
+    OrderInsensitive,
+    /// A cycle member: backflow interleaves by timing, so order is
+    /// non-deterministic and the region is not certifiable.
+    CycleNonDeterministic,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunManifest {
@@ -60,12 +78,12 @@ pub struct RunManifestStage {
     pub data_journal_file: String,
     pub error_journal_file: String,
     /// FLOWIP-095j: upstream stage keys delivering into this stage over forward
-    /// edges, sorted and deduplicated. Together with `ordered_delivery` this makes
+    /// edges, sorted and deduplicated. Together with `order_decision` this makes
     /// the archive self-describing for order-certification at verify time.
     pub inbound: Vec<String>,
-    /// FLOWIP-095j: whether this stage's input delivery order is deterministic
-    /// (zero or one inbound edge outside a cycle, an FLOWIP-095d marked fan-in,
-    /// or a structural orderer such as the hydrating join). Cycle members are
-    /// always false; backflow arrivals interleave by timing.
-    pub ordered_delivery: bool,
+    /// FLOWIP-095l: the build's input-ordering verdict for this stage, replacing
+    /// the 095j `ordered_delivery` boolean. `Ordered` when single-input, a 095d
+    /// marked fan-in, or a structural orderer; `CycleNonDeterministic` for a cycle
+    /// member; `OrderInsensitive` for a fan-in with no order-observing descendant.
+    pub order_decision: OrderDecision,
 }

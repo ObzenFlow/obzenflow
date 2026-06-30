@@ -17,6 +17,7 @@ test-support = ["tokio/test-util"]
 [dependencies]
 # Internal dependencies
 obzenflow_core = { workspace = true }
+obzenflow_derive = { workspace = true }
 obzenflow-topology = { workspace = true }
 obzenflow-fsm = { workspace = true }
 

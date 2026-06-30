@@ -403,7 +403,7 @@ mod tests {
     };
     use obzenflow_core::event::ChainEvent;
     use obzenflow_core::journal::run_manifest::{
-        RunManifest, RunManifestReplayConfig, RunManifestStage,
+        OrderDecision, RunManifest, RunManifestReplayConfig, RunManifestStage,
     };
     use obzenflow_core::journal::ArchiveStatus;
     use obzenflow_core::{StageId, WriterId};
@@ -454,7 +454,11 @@ mod tests {
                     data_journal_file: format!("{key}.log"),
                     error_journal_file: format!("{key}_error.log"),
                     inbound: inbound.iter().map(|s| s.to_string()).collect(),
-                    ordered_delivery: *ordered,
+                    order_decision: if *ordered {
+                        OrderDecision::Ordered
+                    } else {
+                        OrderDecision::OrderInsensitive
+                    },
                 },
             );
         }

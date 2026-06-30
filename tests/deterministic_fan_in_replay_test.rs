@@ -19,7 +19,7 @@ use obzenflow_core::{
     id::StageId,
     TypedPayload, WriterId,
 };
-use obzenflow_dsl::{effectful_transform, flow, sink, source, transform, FlowDefinition};
+use obzenflow_dsl::{effectful_transform, flow, sink, source, stateful, transform, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::effects::{
@@ -27,9 +27,11 @@ use obzenflow_runtime::effects::{
 };
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    EffectfulTransformHandler, FiniteSourceHandler, SinkHandler, TransformHandler,
+    EffectfulTransformHandler, FiniteSourceHandler, InputOrderSemantics, SinkHandler,
+    StatefulHandler, TransformHandler,
 };
 use obzenflow_runtime::stages::SourceError;
+use obzenflow_runtime::typing::StatefulTyping;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::ffi::OsString;
@@ -648,4 +650,132 @@ async fn fan_in_replay_unaffected_by_mid_stream_reader_telemetry() {
         &["source_a", "tap"],
     )
     .await;
+}
+
+// ----- FLOWIP-095l: a non-effect order observer enables the merge -----
+
+/// An order-sensitive stateful fold over the merged stream. Declaring it makes
+/// the two-source fan-in above it run the canonical merge.
+#[derive(Clone, Debug)]
+struct StatefulTail;
+
+impl StatefulTyping for StatefulTail {
+    type Input = MergedRecord;
+    type Output = FanInOutput;
+}
+
+#[async_trait]
+impl StatefulHandler for StatefulTail {
+    type State = Vec<u64>;
+
+    fn accumulate(&mut self, state: &mut Self::State, event: ChainEvent) {
+        if let Some(record) = MergedRecord::from_event(&event) {
+            state.push(record.value);
+        }
+    }
+
+    fn initial_state(&self) -> Self::State {
+        Vec::new()
+    }
+
+    fn create_events(&self, state: &Self::State) -> Result<Vec<ChainEvent>, HandlerError> {
+        let writer = WriterId::from(StageId::new());
+        let summary = FanInOutput {
+            channel: "fold".to_string(),
+            value: state.iter().sum(),
+            effect_value: state.len() as u64,
+        };
+        Ok(vec![summary.to_event(writer)])
+    }
+
+    // FLOWIP-095l: order-sensitive, so the fan-in above it runs the merge and its
+    // reconstructed state is reproducible on replay.
+    fn declared_input_order(&self) -> InputOrderSemantics {
+        InputOrderSemantics::OrderSensitive
+    }
+}
+
+fn build_stateful_fan_in_flow(journal_base: PathBuf, jitter_ms: u64) -> FlowDefinition {
+    flow! {
+        name: "stateful_fan_in",
+        journals: disk_journals(journal_base),
+        middleware: [],
+
+        stages: {
+            source_a = source!(FanInInput => ChannelSource::with_jitter("a", 4, jitter_ms));
+            source_b = source!(FanInInput => ChannelSource::with_jitter("b", 3, jitter_ms));
+            merge = transform!(FanInInput -> MergedRecord => MergeTransform::new());
+            fold = stateful!(MergedRecord -> FanInOutput => StatefulTail);
+            collector = sink!(FanInOutput => DropSink);
+        },
+
+        topology: {
+            source_a |> merge;
+            source_b |> merge;
+            merge |> fold;
+            fold |> collector;
+        }
+    }
+}
+
+/// FLOWIP-095l Tier 1: a non-effect, order-sensitive stateful fold under a
+/// two-source fan-in makes the canonical merge run, and the merge's delivery
+/// order reproduces byte-for-byte under `--replay-from`. Before 095l only an
+/// effect below the fan-in enabled the merge, so this flow replayed with a
+/// non-reproducible delivery order and a non-reconstructible fold state.
+#[tokio::test]
+async fn stateful_fold_fan_in_reproduces_delivery_order_under_replay() {
+    let _guard = FAN_IN_TEST_LOCK.lock().await;
+    let temp = tempfile::tempdir().expect("tempdir");
+    let journal_base = temp.path().join("journals");
+
+    run_live(
+        &journal_base,
+        build_stateful_fan_in_flow(journal_base.clone(), 5),
+    )
+    .await;
+    let live_run = replay_testkit::latest_run_dir(&journal_base);
+    let live_order =
+        replay_testkit::project_delivered_order(&live_run, "merge", &["source_a", "source_b"])
+            .await;
+    assert_eq!(
+        live_order.consumption_sequence().len(),
+        7,
+        "the merge must deliver all seven records under the canonical order"
+    );
+
+    run_replay(
+        &live_run,
+        build_stateful_fan_in_flow(journal_base.clone(), 0),
+    )
+    .await;
+    let replay_run = replay_testkit::latest_run_dir(&journal_base);
+    assert_ne!(live_run, replay_run);
+    replay_testkit::assert_same_delivered_order(
+        &live_run,
+        &replay_run,
+        "merge",
+        &["source_a", "source_b"],
+    )
+    .await;
+}
+
+/// FLOWIP-095l Tier 2 (contract, gated on FLOWIP-095k): replaying a cancelled or
+/// truncated archive of a stateful fan-in flow must reproduce the recorded prefix
+/// with no synthesized clean completion. Unignore when 095k lands
+/// `EofKind::Truncated`.
+#[tokio::test]
+#[ignore = "FLOWIP-095k: cancelled-archive replay needs EofKind::Truncated"]
+async fn tier2_cancelled_archive_replay_reproduces_prefix() {
+    panic!("contract pending FLOWIP-095k (truncated-archive EOF fidelity)");
+}
+
+/// FLOWIP-095l Tier 3 (contract, gated on FLOWIP-120n): `--resume-from` of a
+/// stateful fan-in archive must reconstruct S_N and continue live, with the
+/// recorded prefix stable under `replay_testkit::assert_prefix_stable`. Unignore
+/// when 120n lands `--resume-from`.
+#[tokio::test]
+#[ignore = "FLOWIP-120n: resume reconstruction needs --resume-from"]
+async fn tier3_resume_reconstructs_state_with_stable_prefix() {
+    panic!("contract pending FLOWIP-120n (durable resume)");
 }

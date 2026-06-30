@@ -1715,6 +1715,7 @@ dependencies = [
  "obzenflow-fsm",
  "obzenflow-topology",
  "obzenflow_core",
+ "obzenflow_derive",
  "ring",
  "serde",
  "serde_json",

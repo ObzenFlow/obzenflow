@@ -4,7 +4,7 @@
 
 //! Types-first metadata and descriptor wrappers for the DSL layer.
 
-use crate::dsl::stage_descriptor::StageDescriptor;
+use crate::dsl::stage_descriptor::{OrderRole, StageDescriptor};
 use crate::dsl::StageCreationResult;
 use async_trait::async_trait;
 use obzenflow_adapters::middleware::{control::ControlMiddlewareAggregator, MiddlewareFactory};
@@ -12,6 +12,7 @@ use obzenflow_core::ai::{
     AiMapReduceChunkFailed, AiMapReducePlanningManifest, AiMapReduceTaggedPartial,
 };
 use obzenflow_core::event::context::StageType;
+use obzenflow_core::journal::run_manifest::OrderDecision;
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
 use obzenflow_core::TypedPayload;
 use obzenflow_core::{ChainEvent, StageId, WriterId};
@@ -1047,6 +1048,20 @@ impl StageDescriptor for TypedStageDescriptor {
         self.inner.is_deterministic_input_orderer()
     }
 
+    // FLOWIP-095l: a defaulted trait method is not auto-forwarded; forward
+    // explicitly so a wrapped descriptor's declared role is not masked.
+    fn order_role(&self) -> OrderRole {
+        self.inner.order_role()
+    }
+
+    fn accepts_cycle_nondeterminism(&self) -> bool {
+        self.inner.accepts_cycle_nondeterminism()
+    }
+
+    fn is_undeclared_order_observer(&self) -> bool {
+        self.inner.is_undeclared_order_observer()
+    }
+
     fn stage_logic_version(&self) -> String {
         self.inner.stage_logic_version()
     }
@@ -1891,6 +1906,19 @@ pub fn validate_effectful_deterministic_input_order(
             return false;
         }
 
+        // FLOWIP-095l: a barrier (a proven order-invariant fold) absorbs input
+        // order, so it is a determinism source. Nothing above it needs ordering,
+        // which keeps the 095d hydrating-join both-halves rule (a Carrier) intact.
+        if descriptors
+            .get(&stage_id)
+            .map(|descriptor| descriptor.order_role() == OrderRole::Barrier)
+            .unwrap_or(false)
+        {
+            visiting.remove(&stage_id);
+            memo.insert(stage_id, true);
+            return true;
+        }
+
         let upstreams = inbound.get(&stage_id).cloned().unwrap_or_default();
         let deterministic = if upstreams.is_empty() {
             true
@@ -1924,7 +1952,9 @@ pub fn validate_effectful_deterministic_input_order(
         let Some(descriptor) = id_to_descriptor.get(&stage_id) else {
             continue;
         };
-        if !descriptor.is_effectful() {
+        // FLOWIP-095l: seed from order observers (effects + non-commutative
+        // stateful folds), not only effects. Effects are observers by type.
+        if descriptor.order_role() != OrderRole::Observer {
             continue;
         }
 
@@ -1936,14 +1966,29 @@ pub fn validate_effectful_deterministic_input_order(
             &mut memo,
             &mut visiting,
         ) {
-            return Err(Box::new(
-                crate::dsl::FlowBuildError::EffectfulFanInRequiresDeterministicOrder {
-                    stage_name: id_to_name
-                        .get(&stage_id)
-                        .cloned()
-                        .unwrap_or_else(|| descriptor.name().to_string()),
-                },
-            ));
+            let stage_name = id_to_name
+                .get(&stage_id)
+                .cloned()
+                .unwrap_or_else(|| descriptor.name().to_string());
+            // FLOWIP-095l Gap 4. An observer whose input determinism fails: once
+            // the acyclic walk has marked every fan-in above an observer, the only
+            // remaining cause is a cycle on the path. An effect is a hard rejection
+            // (its positional cursor cannot reproduce). A non-effect observer is
+            // rejected unless the author explicitly accepted the non-determinism.
+            if descriptor.is_effectful() {
+                return Err(Box::new(
+                    crate::dsl::FlowBuildError::EffectfulFanInRequiresDeterministicOrder {
+                        stage_name,
+                    },
+                ));
+            }
+            if !descriptor.accepts_cycle_nondeterminism() {
+                return Err(Box::new(
+                    crate::dsl::FlowBuildError::OrderSensitiveStageUnderCycle { stage_name },
+                ));
+            }
+            // Opted in: runs availability-scheduled; the manifest records
+            // OrderDecision::CycleNonDeterministic and resume is forfeited.
         }
     }
 
@@ -1981,9 +2026,18 @@ pub fn derive_deterministic_fan_in_stages(
             .push(StageId::from_ulid(edge.from.ulid()));
     }
 
+    // FLOWIP-095l: a reverse role index so the upward climb can stop at barriers.
+    let mut id_to_order_role: HashMap<StageId, OrderRole> = HashMap::new();
+    for (dsl_name, descriptor) in descriptors {
+        if let Some(stage_id) = name_to_id.get(dsl_name) {
+            id_to_order_role.insert(*stage_id, descriptor.order_role());
+        }
+    }
+
     let mut marked = HashSet::new();
     for (dsl_name, descriptor) in descriptors {
-        if !descriptor.is_effectful() {
+        // FLOWIP-095l: seed the merge from order observers, not only effects.
+        if descriptor.order_role() != OrderRole::Observer {
             continue;
         }
         let Some(stage_id) = name_to_id.get(dsl_name) else {
@@ -1996,6 +2050,13 @@ pub fn derive_deterministic_fan_in_stages(
             if !visited.insert(current) {
                 continue;
             }
+            // FLOWIP-095l: a barrier absorbs input order, so the fan-in feeding it
+            // is order-insensitive; the climb stops here, shielding everything
+            // above it from this observer. The seed is an Observer, never a
+            // Barrier, so it always climbs at least one hop.
+            if id_to_order_role.get(&current) == Some(&OrderRole::Barrier) {
+                continue;
+            }
             let upstreams = inbound.get(&current).cloned().unwrap_or_default();
             if upstreams.len() > 1 && !topology.is_in_cycle(current.to_topology_id()) {
                 marked.insert(current);
@@ -2004,6 +2065,78 @@ pub fn derive_deterministic_fan_in_stages(
         }
     }
     marked
+}
+
+/// FLOWIP-095l Gap 2: a stateful or symmetric-join stage in a multi-source fan-in
+/// cone must declare its input-order semantics. The framework cannot infer whether
+/// such a fold observes order, so an undeclared one is refused: the author chooses
+/// `trace_invariant` (a proven barrier) or `OrderSensitive` (run the merge). A
+/// barrier strictly above the stage shields it and ends the cone.
+pub fn validate_input_order_declarations(
+    topology: &Topology,
+    descriptors: &HashMap<String, Box<dyn StageDescriptor>>,
+    name_to_id: &HashMap<String, StageId>,
+) -> Result<(), Box<crate::dsl::error::FlowBuildError>> {
+    let mut inbound: HashMap<StageId, Vec<StageId>> = HashMap::new();
+    for edge in topology.edges() {
+        if edge.kind != EdgeKind::Forward {
+            continue;
+        }
+        inbound
+            .entry(StageId::from_ulid(edge.to.ulid()))
+            .or_default()
+            .push(StageId::from_ulid(edge.from.ulid()));
+    }
+
+    let mut id_to_order_role: HashMap<StageId, OrderRole> = HashMap::new();
+    for (dsl_name, descriptor) in descriptors {
+        if let Some(stage_id) = name_to_id.get(dsl_name) {
+            id_to_order_role.insert(*stage_id, descriptor.order_role());
+        }
+    }
+
+    let mut names: Vec<&String> = descriptors.keys().collect();
+    names.sort();
+    for dsl_name in names {
+        let descriptor = &descriptors[dsl_name];
+        if !descriptor.is_undeclared_order_observer() {
+            continue;
+        }
+        let Some(stage_id) = name_to_id.get(dsl_name) else {
+            continue;
+        };
+
+        let mut stack = vec![*stage_id];
+        let mut visited = HashSet::new();
+        let mut in_cone = false;
+        while let Some(current) = stack.pop() {
+            if !visited.insert(current) {
+                continue;
+            }
+            // A barrier strictly above the observer shields it and ends the cone.
+            if current != *stage_id
+                && id_to_order_role.get(&current) == Some(&OrderRole::Barrier)
+            {
+                continue;
+            }
+            let upstreams = inbound.get(&current).cloned().unwrap_or_default();
+            if upstreams.len() > 1 && !topology.is_in_cycle(current.to_topology_id()) {
+                in_cone = true;
+                break;
+            }
+            stack.extend(upstreams);
+        }
+
+        if in_cone {
+            return Err(Box::new(
+                crate::dsl::FlowBuildError::UndeclaredInputOrderSemantics {
+                    stage_name: descriptor.name().to_string(),
+                },
+            ));
+        }
+    }
+
+    Ok(())
 }
 
 /// FLOWIP-095j: per-stage delivery metadata recorded in the run manifest.
@@ -2026,7 +2159,7 @@ pub fn derive_manifest_delivery_metadata(
     topology: &Topology,
     descriptors: &HashMap<String, Box<dyn StageDescriptor>>,
     name_to_id: &HashMap<String, StageId>,
-) -> HashMap<StageId, (Vec<String>, bool)> {
+) -> HashMap<StageId, (Vec<String>, OrderDecision)> {
     let mut id_to_stage_key: HashMap<StageId, String> = HashMap::new();
     for (dsl_name, stage_id) in name_to_id {
         if let Some(descriptor) = descriptors.get(dsl_name.as_str()) {
@@ -2061,12 +2194,17 @@ pub fn derive_manifest_delivery_metadata(
         inbound.sort();
         inbound.dedup();
 
-        let ordered_delivery = if topology.is_in_cycle(stage_id.to_topology_id()) {
-            false
+        // FLOWIP-095l: record the build's ordering verdict, not just a boolean, so
+        // the verifier separates a non-deterministic cycle member from an
+        // order-insensitive fan-in with no order-observing descendant.
+        let order_decision = if topology.is_in_cycle(stage_id.to_topology_id()) {
+            OrderDecision::CycleNonDeterministic
+        } else if inbound.len() <= 1 || descriptor.is_deterministic_input_orderer() {
+            OrderDecision::Ordered
         } else {
-            inbound.len() <= 1 || descriptor.is_deterministic_input_orderer()
+            OrderDecision::OrderInsensitive
         };
-        metadata.insert(*stage_id, (inbound, ordered_delivery));
+        metadata.insert(*stage_id, (inbound, order_decision));
     }
     metadata
 }
@@ -2152,6 +2290,20 @@ impl StageDescriptor for DeterministicOrdererOverride {
 
     fn is_deterministic_input_orderer(&self) -> bool {
         true
+    }
+
+    // FLOWIP-095l: forward the role explicitly (a defaulted trait method is not
+    // auto-forwarded; without this a wrapped Barrier would mask to Observer).
+    fn order_role(&self) -> OrderRole {
+        self.inner.order_role()
+    }
+
+    fn accepts_cycle_nondeterminism(&self) -> bool {
+        self.inner.accepts_cycle_nondeterminism()
+    }
+
+    fn is_undeclared_order_observer(&self) -> bool {
+        self.inner.is_undeclared_order_observer()
     }
 
     fn stage_logic_version(&self) -> String {
