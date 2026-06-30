@@ -143,6 +143,19 @@ pub trait StatefulHandler: Send + Sync {
         InputOrderSemantics::Undeclared
     }
 
+    /// FLOWIP-095l Gap 11: an order-bearing projection of this handler's state for
+    /// the `#[trace_invariant]` barrier trial. The trial compares this across input
+    /// permutations alongside the output word, so a fold whose state is
+    /// order-dependent cannot be declared a barrier even when its output is
+    /// order-invariant (which would otherwise break resume's `S_N` reconstruction).
+    ///
+    /// Default `Value::Null` means "do not narrow": the trial then compares a full
+    /// serialization of the state. Override only to project the order-invariant part
+    /// of a state whose order-bearing remainder is provably never observed.
+    fn state_digest(&self, _state: &Self::State) -> serde_json::Value {
+        serde_json::Value::Null
+    }
+
     /// FLOWIP-095l Gap 4: opt into running below a cycle-fed fan-in with
     /// non-deterministic, non-resumable input order. Default false, so the build
     /// refuses an order-sensitive fold reachable only through a cycle. Override to

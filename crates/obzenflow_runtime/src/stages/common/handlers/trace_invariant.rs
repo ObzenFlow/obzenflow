@@ -29,46 +29,72 @@ pub fn word_from<T: TypedPayload>(inputs: impl IntoIterator<Item = T>) -> Vec<Ch
         .collect()
 }
 
-/// Observe a stateful handler's output for one input word: fold the word in, then
-/// project `create_events` to a run-id-free `(event_type, payload)` sequence.
+/// Observe a stateful handler's output and state for one input word: fold the word
+/// in, then project both. The output is `create_events` as a run-id-free
+/// `(event_type, payload)` sequence. The state digest is the handler's
+/// `state_digest`, or a full serialization of the state when the handler does not
+/// narrow it (FLOWIP-095l Gap 11). Comparing the state, not only the output, stops a
+/// fold with order-dependent state and order-invariant output from being declared a
+/// barrier and silently breaking resume's `S_N` reconstruction.
 pub fn observe_output<H: StatefulHandler>(
     make: &impl Fn() -> H,
     word: &[ChainEvent],
-) -> Vec<ProjectedOutput> {
+) -> (Vec<ProjectedOutput>, serde_json::Value)
+where
+    H::State: serde::Serialize,
+{
     let mut handler = make();
     let mut state = handler.initial_state();
     for event in word {
         handler.accumulate(&mut state, event.clone());
     }
-    match handler.create_events(&state) {
+    let state_digest = match handler.state_digest(&state) {
+        serde_json::Value::Null => serde_json::to_value(&state).unwrap_or(serde_json::Value::Null),
+        narrowed => narrowed,
+    };
+    let output = match handler.create_events(&state) {
         Ok(events) => events
             .iter()
             .map(|event| (event.event_type(), event.payload()))
             .collect(),
         Err(err) => vec![(format!("<handler-error: {err:?}>"), serde_json::Value::Null)],
-    }
+    };
+    (output, state_digest)
 }
 
-/// FLOWIP-095l: assert a stateful handler's observable output is invariant under
-/// input permutation. For each sample word, every permutation must produce the
-/// same output as the original order. Sound and conservative: it proves
-/// output-order-invariance over the sampled words, which is exactly what a
+/// FLOWIP-095l: assert a stateful handler's observable transition is invariant
+/// under input permutation. For each sample word, every permutation must produce
+/// the same output word AND the same reconstructed state as the original order
+/// (Gap 11: the state is checked because resume reconstructs it). Sound and
+/// conservative over the sampled words, which is exactly what a
 /// `#[trace_invariant]` barrier claims.
 ///
 /// Permutations are exhaustive for words up to length 6 and a deterministic
 /// sample (reversal, every rotation, adjacent swaps) beyond that, so a long word
 /// still exercises non-trivial reorderings without factorial blow-up.
-pub fn assert_trace_invariant<H: StatefulHandler>(make: impl Fn() -> H, words: &[Vec<ChainEvent>]) {
+pub fn assert_trace_invariant<H: StatefulHandler>(make: impl Fn() -> H, words: &[Vec<ChainEvent>])
+where
+    H::State: serde::Serialize,
+{
     for (index, word) in words.iter().enumerate() {
-        let baseline = observe_output(&make, word);
+        let (baseline_output, baseline_state) = observe_output(&make, word);
         for permutation in permutations(word) {
-            let observed = observe_output(&make, &permutation);
+            let (output, state) = observe_output(&make, &permutation);
             assert!(
-                observed == baseline,
+                output == baseline_output,
                 "FLOWIP-095l #[trace_invariant] trial failed on sample word {index}: the \
-                 handler's output depends on input order. A reordering produced {observed:?} \
-                 but the original order produced {baseline:?}. This handler is not \
+                 handler's OUTPUT depends on input order. A reordering produced {output:?} but \
+                 the original order produced {baseline_output:?}. This handler is not \
                  order-invariant; declare it OrderSensitive instead of #[trace_invariant]."
+            );
+            assert!(
+                state == baseline_state,
+                "FLOWIP-095l #[trace_invariant] trial failed on sample word {index}: the \
+                 handler's STATE depends on input order. Its output is order-invariant but its \
+                 reconstructed state is not, and resume reconstructs state, so this would break \
+                 S_N. A reordering produced state {state} but the original produced \
+                 {baseline_state}. Declare it OrderSensitive, narrow `state_digest` to the \
+                 order-invariant part."
             );
         }
     }
@@ -151,6 +177,14 @@ mod tests {
         const EVENT_TYPE: &'static str = "test.trace_invariant.list";
     }
 
+    #[derive(Serialize, Deserialize)]
+    struct CountOut {
+        n: u64,
+    }
+    impl TypedPayload for CountOut {
+        const EVENT_TYPE: &'static str = "test.trace_invariant.count";
+    }
+
     fn emit<T: TypedPayload>(payload: T) -> ChainEvent {
         payload.to_event(WriterId::from(StageId::new()))
     }
@@ -208,6 +242,34 @@ mod tests {
     #[should_panic(expected = "trace_invariant")]
     fn order_sensitive_handler_is_caught() {
         assert_trace_invariant(|| Listy, &sample());
+    }
+
+    /// FLOWIP-095l Gap 11 regression: order-dependent STATE, order-invariant
+    /// OUTPUT. State is the arrival-ordered list; output is only its length, which
+    /// commutes. The pre-Gap-11 output-only trial admitted this as a barrier; the
+    /// state check now rejects it.
+    #[derive(Default)]
+    struct CountOnly;
+    #[async_trait]
+    impl StatefulHandler for CountOnly {
+        type State = Vec<u64>;
+        fn accumulate(&mut self, state: &mut Vec<u64>, event: ChainEvent) {
+            state.push(event.payload()["value"].as_u64().unwrap_or(0));
+        }
+        fn initial_state(&self) -> Vec<u64> {
+            Vec::new()
+        }
+        fn create_events(&self, state: &Vec<u64>) -> Result<Vec<ChainEvent>, HandlerError> {
+            Ok(vec![emit(CountOut {
+                n: state.len() as u64,
+            })])
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "STATE depends on input order")]
+    fn order_dependent_state_is_caught_even_when_output_commutes() {
+        assert_trace_invariant(|| CountOnly, &sample());
     }
 
     // End-to-end: the #[trace_invariant] attribute on a commutative handler.

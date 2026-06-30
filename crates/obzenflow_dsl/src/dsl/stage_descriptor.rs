@@ -39,10 +39,10 @@ use obzenflow_runtime::{
             control_strategies::{JonestownSignalStrategy, SignalGate},
             handlers::{
                 AsyncFiniteSourceHandler, AsyncInfiniteSourceHandler, AsyncTransformHandler,
-                EffectfulSinkHandler, EffectfulStatefulHandler, EffectfulStatefulHandlerAdapter,
-                EffectfulTransformHandler, EffectfulTransformHandlerAdapter, FiniteSourceHandler,
-                InfiniteSourceHandler, InputOrderSemantics, JoinHandler, SinkHandler,
-                StatefulHandler, TransformHandler,
+                DestinationOrder, EffectfulSinkHandler, EffectfulStatefulHandler,
+                EffectfulStatefulHandlerAdapter, EffectfulTransformHandler,
+                EffectfulTransformHandlerAdapter, FiniteSourceHandler, InfiniteSourceHandler,
+                InputOrderSemantics, JoinHandler, SinkHandler, StatefulHandler, TransformHandler,
             },
             stage_handle::{BoxedStageHandle, StageEvent, FORCE_SHUTDOWN_MESSAGE},
         },
@@ -524,7 +524,14 @@ pub enum OrderRole {
     /// Reconstruction reads an order-dependent value here (a non-commutative
     /// state fold, or an effect whose cursor is the merged input position).
     Observer,
-    /// Relays input order to its output word but reads nothing order-dependent.
+    /// Relays input order to its output word but reads nothing order-dependent, so
+    /// the order is pinned only when a downstream observer requires it. FLOWIP-095l
+    /// Gap 13: transforms, sources, and sinks are Carriers by their descriptor type
+    /// with no declaration, which trusts that a transform is genuinely stateless (its
+    /// output a pure function of each single input). A transform that smuggles state
+    /// (`Arc<Mutex>`, an atomic, `thread_local!`) is order-sensitive yet typed Carrier;
+    /// enforcing that is FLOWIP-120d's determinism scope, and a CI guard flags the
+    /// obvious cases.
     Carrier,
     /// Output is invariant under input permutation, so it absorbs reordering.
     Barrier,
@@ -1895,8 +1902,15 @@ pub struct SinkDescriptor<H: SinkHandler + 'static> {
 impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDescriptor
     for SinkDescriptor<H>
 {
+    /// FLOWIP-095l Gap 14: a sink is terminal for ordering by default (a Carrier),
+    /// so delivery-order fidelity is FLOWIP-090f/095g's contract. A sink whose
+    /// destination is order-sensitive declares `DestinationOrder::Ordered` and
+    /// becomes an Observer, seeding the canonical merge at its upstream fan-in.
     fn order_role(&self) -> OrderRole {
-        OrderRole::Carrier
+        match self.handler.destination_order() {
+            DestinationOrder::Insensitive => OrderRole::Carrier,
+            DestinationOrder::Ordered => OrderRole::Observer,
+        }
     }
 
     fn name(&self) -> &str {
@@ -2740,19 +2754,20 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
     }
 
     /// FLOWIP-095l: a hydrating join self-orders its fan-in and relays the
-    /// ordering requirement upward, so it is a Carrier, never a Barrier (which
-    /// keeps 095d correction 4 intact). A symmetric join takes its role from its
-    /// declared input-order semantics, exactly as a stateful fold does.
+    /// ordering requirement upward, so it is a Carrier, which keeps 095d
+    /// correction 4 intact. A symmetric (Live) join observes the interleaving of
+    /// its two sides, so it is an Observer.
+    ///
+    /// FLOWIP-095l Gap 12: a join is never a Barrier in v1. The commutativity
+    /// trial proves only `StatefulHandler` folds, so there is no proof path for a
+    /// join; a hand-declared `TraceInvariant` is ignored here rather than trusted.
+    /// A genuinely commutative symmetric join waits on a `JoinHandler` trial that
+    /// drives `process_event` permutations and `on_source_eof`.
     fn order_role(&self) -> OrderRole {
         if self.handler.reference_mode() == JoinReferenceMode::FiniteEof {
             return OrderRole::Carrier;
         }
-        match self.handler.declared_input_order() {
-            InputOrderSemantics::TraceInvariant(_) => OrderRole::Barrier,
-            InputOrderSemantics::OrderSensitive | InputOrderSemantics::Undeclared => {
-                OrderRole::Observer
-            }
-        }
+        OrderRole::Observer
     }
 
     fn is_undeclared_order_observer(&self) -> bool {

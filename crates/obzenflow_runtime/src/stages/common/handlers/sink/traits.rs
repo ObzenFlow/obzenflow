@@ -81,6 +81,19 @@ pub struct SinkLifecycleReport {
     pub commit_receipts: Vec<CommitReceipt>,
 }
 
+/// FLOWIP-095l Gap 14: whether a sink's external destination observes the order in
+/// which concurrent fan-in inputs are merged. `Insensitive` (the default) treats the
+/// sink as terminal for ordering, so delivery-order fidelity is FLOWIP-090f and
+/// FLOWIP-095g's contract rather than the merge's. `Ordered` (an append-only log, a
+/// partitioned topic) makes the sink an order observer, so the canonical merge runs
+/// at its upstream fan-in and replay and resume reproduce the recorded order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DestinationOrder {
+    #[default]
+    Insensitive,
+    Ordered,
+}
+
 /// Trait every **sink stage** must implement.
 #[async_trait]
 pub trait SinkHandler: Send + Sync {
@@ -141,6 +154,14 @@ pub trait SinkHandler: Send + Sync {
             audit_payload: self.drain().await?,
             commit_receipts: Vec::new(),
         })
+    }
+
+    /// FLOWIP-095l Gap 14: declare whether this sink's external destination is
+    /// order-sensitive. Default `Insensitive`. Return `Ordered` for an append-only
+    /// or partitioned destination so the canonical merge runs at the fan-in above
+    /// this sink and replay and resume reproduce the recorded delivery order.
+    fn destination_order(&self) -> DestinationOrder {
+        DestinationOrder::Insensitive
     }
 }
 

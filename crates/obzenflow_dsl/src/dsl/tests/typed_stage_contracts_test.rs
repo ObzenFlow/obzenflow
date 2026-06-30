@@ -1309,6 +1309,67 @@ mod tests {
         assert!(!descriptor.is_deterministic_input_orderer());
     }
 
+    /// FLOWIP-095l Gap 12: a join is never a Barrier in v1. The witness minter is
+    /// `pub` so the `#[trace_invariant]` attribute can mint it cross-crate, which
+    /// means a Live join could hand-mint a `TraceInvariant` declaration. The
+    /// descriptor neutralizes that unproven claim: a Live join always reports
+    /// `Observer`, so it can never escape the merge without a real (StatefulHandler)
+    /// trial proving it.
+    #[test]
+    fn live_join_claiming_trace_invariant_is_still_an_observer() {
+        use obzenflow_runtime::stages::common::handlers::InputOrderSemantics;
+
+        #[derive(Clone, Debug)]
+        struct LiveJoinClaimingBarrier;
+
+        #[async_trait]
+        impl JoinHandler for LiveJoinClaimingBarrier {
+            type State = ();
+
+            fn initial_state(&self) -> Self::State {}
+
+            fn reference_mode(&self) -> obzenflow_runtime::stages::join::JoinReferenceMode {
+                obzenflow_runtime::stages::join::JoinReferenceMode::Live
+            }
+
+            fn declared_input_order(&self) -> InputOrderSemantics {
+                // The unproven hand-mint that Gap 12 neutralizes at the descriptor.
+                InputOrderSemantics::__trace_invariant_proven()
+            }
+
+            fn process_event(
+                &self,
+                _state: &mut Self::State,
+                _event: ChainEvent,
+                _source_id: StageId,
+                _writer_id: WriterId,
+            ) -> Result<Vec<ChainEvent>, HandlerError> {
+                Ok(vec![])
+            }
+
+            fn on_source_eof(
+                &self,
+                _state: &mut Self::State,
+                _source_id: StageId,
+                _writer_id: WriterId,
+            ) -> Result<Vec<ChainEvent>, HandlerError> {
+                Ok(vec![])
+            }
+        }
+
+        let descriptor = crate::dsl::stage_descriptor::JoinDescriptor {
+            name: "join".to_string(),
+            reference_stage_id: StageId::new(),
+            reference_stage_var: None,
+            handler: LiveJoinClaimingBarrier,
+            middleware: vec![],
+        };
+        assert_eq!(
+            descriptor.order_role(),
+            crate::dsl::stage_descriptor::OrderRole::Observer
+        );
+    }
+
     /// FLOWIP-095d guard hardening: an orderer declaration must not mask a
     /// nondeterministic fan-in above it. The stability induction needs both
     /// halves (the stage orders its inputs AND every input stream is itself
@@ -3032,6 +3093,98 @@ mod tests {
         // The build accepts it: a declared barrier needs no further declaration.
         crate::dsl::typing::validate_input_order_declarations(&topology, &descriptors, &name_to_id)
             .expect("a declared barrier is not an undeclared observer");
+    }
+
+    /// FLOWIP-095l Gap 14: a sink whose destination is order-sensitive
+    /// (`DestinationOrder::Ordered`) is an Observer and seeds the canonical merge at
+    /// its upstream fan-in; an order-insensitive sink (the default) is a Carrier and
+    /// does not.
+    #[test]
+    fn ordered_sink_seeds_its_fan_in() {
+        #[derive(Clone, Debug)]
+        struct OrderedSink;
+        impl SinkTyping for OrderedSink {
+            type Input = OutputEvent;
+        }
+        #[async_trait]
+        impl SinkHandler for OrderedSink {
+            async fn consume(
+                &mut self,
+                _event: ChainEvent,
+            ) -> Result<DeliveryPayload, HandlerError> {
+                Ok(DeliveryPayload::success("sink", DeliveryMethod::Noop, None))
+            }
+            fn destination_order(
+                &self,
+            ) -> obzenflow_runtime::stages::common::handlers::DestinationOrder {
+                obzenflow_runtime::stages::common::handlers::DestinationOrder::Ordered
+            }
+        }
+
+        let source_a_id = StageId::new();
+        let source_b_id = StageId::new();
+        let ordered_id = StageId::new();
+        let insensitive_id = StageId::new();
+
+        let mut descriptors: HashMap<String, Box<dyn StageDescriptor>> = HashMap::new();
+        descriptors.insert(
+            "source_a".to_string(),
+            crate::source!(name: "source_a", OutputEvent => placeholder!()),
+        );
+        descriptors.insert(
+            "source_b".to_string(),
+            crate::source!(name: "source_b", OutputEvent => placeholder!()),
+        );
+        descriptors.insert(
+            "ordered".to_string(),
+            crate::sink!(name: "ordered", OutputEvent => OrderedSink),
+        );
+        descriptors.insert(
+            "insensitive".to_string(),
+            crate::sink!(name: "insensitive", OutputEvent => ExactSink),
+        );
+
+        let mut name_to_id = HashMap::new();
+        name_to_id.insert("source_a".to_string(), source_a_id);
+        name_to_id.insert("source_b".to_string(), source_b_id);
+        name_to_id.insert("ordered".to_string(), ordered_id);
+        name_to_id.insert("insensitive".to_string(), insensitive_id);
+
+        let mut topology = TopologyBuilder::new();
+        for (id, name, role) in [
+            (source_a_id, "source_a", TopologyStageType::FiniteSource),
+            (source_b_id, "source_b", TopologyStageType::FiniteSource),
+            (ordered_id, "ordered", TopologyStageType::Sink),
+            (insensitive_id, "insensitive", TopologyStageType::Sink),
+        ] {
+            topology.add_stage_with_id(id.to_topology_id(), Some(name.to_string()), role);
+            topology.reset_current();
+        }
+        topology.add_edge(source_a_id.to_topology_id(), ordered_id.to_topology_id());
+        topology.add_edge(source_b_id.to_topology_id(), ordered_id.to_topology_id());
+        topology.add_edge(
+            source_a_id.to_topology_id(),
+            insensitive_id.to_topology_id(),
+        );
+        topology.add_edge(
+            source_b_id.to_topology_id(),
+            insensitive_id.to_topology_id(),
+        );
+        let topology = topology.build_unchecked().unwrap();
+
+        let marked = crate::dsl::typing::derive_deterministic_fan_in_stages(
+            &topology,
+            &descriptors,
+            &name_to_id,
+        );
+        assert!(
+            marked.contains(&ordered_id),
+            "an Ordered sink seeds the canonical merge at its fan-in"
+        );
+        assert!(
+            !marked.contains(&insensitive_id),
+            "an Insensitive sink stays a Carrier and does not seed the merge"
+        );
     }
 
     #[test]

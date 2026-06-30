@@ -503,6 +503,38 @@ jobs:
 
           echo "OK: replay/live decisions go through the runtime execution strategy."
 
+      - name: Guard carrier statelessness (FLOWIP-095l Gap 13)
+        run: |
+          set -euo pipefail
+
+          # FLOWIP-095l Gap 13: a transform is an order-role Carrier by its descriptor
+          # type, which trusts it is stateless (its output a pure function of each
+          # single input). Interior mutability in a transform handler module breaks
+          # that assumption silently. Flag the obvious cases; a legitimate use must
+          # carry an // interior-mutability-exempted: <reason> annotation. Full
+          # enforcement is FLOWIP-120d's determinism scope.
+          matches="$(
+            rg -n 'Arc<Mutex|Arc<RwLock|thread_local!|AtomicU|AtomicI|AtomicBool' \
+              crates/obzenflow_runtime/src/stages/common/handlers/transform \
+              crates/obzenflow_runtime/src/stages/transform \
+              -g '!**/tests.rs' -g '!**/tests/**' \
+              || true
+          )"
+
+          if [[ -z "${matches}" ]]; then
+            echo "OK: no interior mutability in transform handler modules."
+            exit 0
+          fi
+
+          violations="$(printf '%s\n' "${matches}" | rg -v 'interior-mutability-exempted:' || true)"
+          if [[ -n "${violations}" ]]; then
+            echo "FLOWIP-095l Gap 13: interior mutability in a transform (Carrier) without // interior-mutability-exempted: annotation:"
+            echo "${violations}"
+            exit 1
+          fi
+
+          echo "OK: all interior mutability in transform handler modules is annotated."
+
       - name: Install cargo-deny
         uses: taiki-e/install-action@v2
         with:

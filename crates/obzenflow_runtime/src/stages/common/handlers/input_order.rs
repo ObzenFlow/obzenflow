@@ -32,17 +32,20 @@ pub enum InputOrderSemantics {
 pub struct TraceInvarianceProof(());
 
 impl TraceInvarianceProof {
-    /// Mint the witness. Called only by the `#[trace_invariant]` expansion next
-    /// to the trial it emits; not for hand use.
-    #[doc(hidden)]
-    pub const fn __minted_by_trace_invariant_attribute() -> Self {
+    /// Mint the witness. FLOWIP-095l Gap 12: `pub(crate)` so the struct cannot be
+    /// fabricated from another crate (its field is also private). The single
+    /// cross-crate mint path is [`InputOrderSemantics::__trace_invariant_proven`].
+    pub(crate) const fn __minted_by_trace_invariant_attribute() -> Self {
         Self(())
     }
 }
 
 impl InputOrderSemantics {
-    /// A proven trace-invariant claim. Hidden because only the attribute
-    /// expansion, which also emits the trial, should construct one.
+    /// A proven trace-invariant claim, the only cross-crate minter of the witness.
+    /// FLOWIP-095l Gap 12: hidden and called by exactly one blessed path, the
+    /// `#[trace_invariant]` attribute expansion, which also emits the trial. Hand use
+    /// is unsupported; a join descriptor ignores a `TraceInvariant` declaration, so
+    /// minting one for a join has no effect.
     #[doc(hidden)]
     pub const fn __trace_invariant_proven() -> Self {
         Self::TraceInvariant(TraceInvarianceProof::__minted_by_trace_invariant_attribute())
