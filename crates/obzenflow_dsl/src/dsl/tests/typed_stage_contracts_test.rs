@@ -33,7 +33,7 @@ mod tests {
     use crate::dsl::stage_descriptor::TransformDescriptor;
     use crate::dsl::typing::{
         collect_stage_typing_info, derive_feed_plan, validate_edge_typing,
-        validate_effectful_deterministic_input_order, validate_stage_typing_metadata,
+        validate_order_observer_deterministic_input_order, validate_stage_typing_metadata,
         EdgeInputRole, TypeHint,
     };
     #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1075,9 +1075,13 @@ mod tests {
         topology.add_edge(merge_id.to_topology_id(), effectful_id.to_topology_id());
         let topology = topology.build_unchecked().unwrap();
 
-        let err =
-            *validate_effectful_deterministic_input_order(&topology, &descriptors, &name_to_id)
-                .expect_err("effectful stage below transitive fan-in must be rejected");
+        let err = *validate_order_observer_deterministic_input_order(
+            &topology,
+            &descriptors,
+            &name_to_id,
+            &crate::dsl::typing::order_observer_stage_ids(&descriptors, &name_to_id),
+        )
+        .expect_err("effectful stage below transitive fan-in must be rejected");
 
         match err {
             FlowBuildError::EffectfulFanInRequiresDeterministicOrder { stage_name } => {
@@ -1162,8 +1166,13 @@ mod tests {
         // The negative control first: without the enablement walk the guard
         // rejects this topology.
         assert!(
-            validate_effectful_deterministic_input_order(&topology, &descriptors, &name_to_id)
-                .is_err(),
+            validate_order_observer_deterministic_input_order(
+                &topology,
+                &descriptors,
+                &name_to_id,
+                &crate::dsl::typing::order_observer_stage_ids(&descriptors, &name_to_id)
+            )
+            .is_err(),
             "without enablement the fan-in must still be rejected"
         );
 
@@ -1180,8 +1189,13 @@ mod tests {
         assert!(descriptors["orderer"].is_deterministic_input_orderer());
 
         assert!(
-            validate_effectful_deterministic_input_order(&topology, &descriptors, &name_to_id)
-                .is_ok(),
+            validate_order_observer_deterministic_input_order(
+                &topology,
+                &descriptors,
+                &name_to_id,
+                &crate::dsl::typing::order_observer_stage_ids(&descriptors, &name_to_id)
+            )
+            .is_ok(),
             "effectful stage below the enabled orderer must be accepted"
         );
     }
@@ -1247,6 +1261,319 @@ mod tests {
             middleware: vec![],
         };
         assert!(!descriptor.is_deterministic_input_orderer());
+    }
+
+    /// FLOWIP-095m: a non-effectful stateful stage is an order observer, so a
+    /// multi-source fan-in feeding it is marked for the canonical merge with no
+    /// handler declaration. This is the widening beyond 095d's effect-only seed.
+    #[test]
+    fn stateful_fan_in_is_marked_without_declaration() {
+        let source_a_id = StageId::new();
+        let source_b_id = StageId::new();
+        let counter_id = StageId::new();
+
+        let mut descriptors: HashMap<String, Box<dyn StageDescriptor>> = HashMap::new();
+        descriptors.insert(
+            "source_a".to_string(),
+            crate::source!(name: "source_a", InputEvent => placeholder!()),
+        );
+        descriptors.insert(
+            "source_b".to_string(),
+            crate::source!(name: "source_b", InputEvent => placeholder!()),
+        );
+        descriptors.insert(
+            "counter".to_string(),
+            crate::stateful!(name: "counter", InputEvent -> OutputEvent => ExactStateful),
+        );
+
+        let mut name_to_id = HashMap::new();
+        name_to_id.insert("source_a".to_string(), source_a_id);
+        name_to_id.insert("source_b".to_string(), source_b_id);
+        name_to_id.insert("counter".to_string(), counter_id);
+
+        let mut topology = TopologyBuilder::new();
+        for (id, name, role) in [
+            (source_a_id, "source_a", TopologyStageType::FiniteSource),
+            (source_b_id, "source_b", TopologyStageType::FiniteSource),
+            (counter_id, "counter", TopologyStageType::Stateful),
+        ] {
+            topology.add_stage_with_id(id.to_topology_id(), Some(name.to_string()), role);
+            topology.reset_current();
+        }
+        topology.add_edge(source_a_id.to_topology_id(), counter_id.to_topology_id());
+        topology.add_edge(source_b_id.to_topology_id(), counter_id.to_topology_id());
+        let topology = topology.build_unchecked().unwrap();
+
+        let marked = crate::dsl::typing::derive_deterministic_fan_in_stages(
+            &topology,
+            &descriptors,
+            &name_to_id,
+        );
+        assert!(
+            marked.contains(&counter_id),
+            "a multi-source stateful fan-in must be marked with no declaration"
+        );
+
+        crate::dsl::typing::wrap_deterministic_orderers(&mut descriptors, &name_to_id, &marked);
+        validate_order_observer_deterministic_input_order(
+            &topology,
+            &descriptors,
+            &name_to_id,
+            &crate::dsl::typing::order_observer_stage_ids(&descriptors, &name_to_id),
+        )
+        .expect("a stateful fan-in wrapped as an orderer must be accepted");
+    }
+
+    /// FLOWIP-095m minimality: a single-input stateful stage is an observer but
+    /// has no fan-in to order, so the walk marks nothing and it pays no merge
+    /// cost.
+    #[test]
+    fn single_input_stateful_stage_is_not_marked() {
+        let source_id = StageId::new();
+        let counter_id = StageId::new();
+
+        let mut descriptors: HashMap<String, Box<dyn StageDescriptor>> = HashMap::new();
+        descriptors.insert(
+            "source".to_string(),
+            crate::source!(name: "source", InputEvent => placeholder!()),
+        );
+        descriptors.insert(
+            "counter".to_string(),
+            crate::stateful!(name: "counter", InputEvent -> OutputEvent => ExactStateful),
+        );
+
+        let mut name_to_id = HashMap::new();
+        name_to_id.insert("source".to_string(), source_id);
+        name_to_id.insert("counter".to_string(), counter_id);
+
+        let mut topology = TopologyBuilder::new();
+        topology.add_stage_with_id(
+            source_id.to_topology_id(),
+            Some("source".to_string()),
+            TopologyStageType::FiniteSource,
+        );
+        topology.reset_current();
+        topology.add_stage_with_id(
+            counter_id.to_topology_id(),
+            Some("counter".to_string()),
+            TopologyStageType::Stateful,
+        );
+        topology.reset_current();
+        topology.add_edge(source_id.to_topology_id(), counter_id.to_topology_id());
+        let topology = topology.build_unchecked().unwrap();
+
+        let marked = crate::dsl::typing::derive_deterministic_fan_in_stages(
+            &topology,
+            &descriptors,
+            &name_to_id,
+        );
+        assert!(
+            marked.is_empty(),
+            "a single-input stateful stage has no fan-in to order and must not be marked"
+        );
+    }
+
+    /// FLOWIP-095m: a stateful stage below a cycle-fed fan-in cannot reconstruct
+    /// a stable input order, so the build fails. It gets the order-observer
+    /// diagnostic, not the effect-specific one (the sibling-variant decision).
+    #[test]
+    fn cycle_fed_stateful_fan_in_is_rejected_with_order_observer_variant() {
+        let source_a_id = StageId::new();
+        let source_b_id = StageId::new();
+        let cycle_entry_id = StageId::new();
+        let cycle_back_id = StageId::new();
+        let merge_id = StageId::new();
+        let counter_id = StageId::new();
+
+        let mut descriptors: HashMap<String, Box<dyn StageDescriptor>> = HashMap::new();
+        descriptors.insert(
+            "source_a".to_string(),
+            crate::source!(name: "source_a", InputEvent => placeholder!()),
+        );
+        descriptors.insert(
+            "source_b".to_string(),
+            crate::source!(name: "source_b", InputEvent => placeholder!()),
+        );
+        descriptors.insert(
+            "cycle_entry".to_string(),
+            crate::transform!(name: "cycle_entry", InputEvent -> OutputEvent => ExactTransform),
+        );
+        descriptors.insert(
+            "cycle_back".to_string(),
+            crate::transform!(name: "cycle_back", InputEvent -> OutputEvent => ExactTransform),
+        );
+        descriptors.insert(
+            "merge".to_string(),
+            crate::transform!(name: "merge", InputEvent -> OutputEvent => ExactTransform),
+        );
+        descriptors.insert(
+            "counter".to_string(),
+            crate::stateful!(name: "counter", InputEvent -> OutputEvent => ExactStateful),
+        );
+
+        let mut name_to_id = HashMap::new();
+        name_to_id.insert("source_a".to_string(), source_a_id);
+        name_to_id.insert("source_b".to_string(), source_b_id);
+        name_to_id.insert("cycle_entry".to_string(), cycle_entry_id);
+        name_to_id.insert("cycle_back".to_string(), cycle_back_id);
+        name_to_id.insert("merge".to_string(), merge_id);
+        name_to_id.insert("counter".to_string(), counter_id);
+
+        let mut topology = TopologyBuilder::new();
+        for (id, name, role) in [
+            (source_a_id, "source_a", TopologyStageType::FiniteSource),
+            (source_b_id, "source_b", TopologyStageType::FiniteSource),
+            (cycle_entry_id, "cycle_entry", TopologyStageType::Transform),
+            (cycle_back_id, "cycle_back", TopologyStageType::Transform),
+            (merge_id, "merge", TopologyStageType::Transform),
+            (counter_id, "counter", TopologyStageType::Stateful),
+        ] {
+            topology.add_stage_with_id(id.to_topology_id(), Some(name.to_string()), role);
+            topology.reset_current();
+        }
+        topology.add_edge(
+            source_a_id.to_topology_id(),
+            cycle_entry_id.to_topology_id(),
+        );
+        topology.add_edge(
+            cycle_entry_id.to_topology_id(),
+            cycle_back_id.to_topology_id(),
+        );
+        topology.add_edge(
+            cycle_back_id.to_topology_id(),
+            cycle_entry_id.to_topology_id(),
+        );
+        topology.add_edge(cycle_back_id.to_topology_id(), merge_id.to_topology_id());
+        topology.add_edge(source_b_id.to_topology_id(), merge_id.to_topology_id());
+        topology.add_edge(merge_id.to_topology_id(), counter_id.to_topology_id());
+        let topology = topology.build_unchecked().unwrap();
+
+        let marked = crate::dsl::typing::derive_deterministic_fan_in_stages(
+            &topology,
+            &descriptors,
+            &name_to_id,
+        );
+        assert!(
+            marked.contains(&merge_id),
+            "the fan-in below the cycle must be marked"
+        );
+        assert!(
+            !marked.contains(&cycle_entry_id),
+            "cycle members must never be marked"
+        );
+        crate::dsl::typing::wrap_deterministic_orderers(&mut descriptors, &name_to_id, &marked);
+
+        let err = *validate_order_observer_deterministic_input_order(
+            &topology,
+            &descriptors,
+            &name_to_id,
+            &crate::dsl::typing::order_observer_stage_ids(&descriptors, &name_to_id),
+        )
+        .expect_err("a stateful stage below a cycle-fed fan-in must be rejected");
+        match err {
+            FlowBuildError::OrderObserverFanInRequiresDeterministicOrder { stage_name } => {
+                assert_eq!(stage_name, "counter");
+            }
+            other => panic!("unexpected error variant: {other:?}"),
+        }
+    }
+
+    /// FLOWIP-095m: a live/symmetric join is an order observer on its own (no
+    /// effect below), so the enablement walk marks its fan-in. 095d marked a
+    /// live join only through an effectful descendant; a hydrating join stays a
+    /// structural orderer and is not seeded.
+    #[test]
+    fn live_join_fan_in_is_marked_without_effect() {
+        #[derive(Clone, Debug)]
+        struct ObserverLiveJoin;
+
+        #[async_trait]
+        impl JoinHandler for ObserverLiveJoin {
+            type State = ();
+
+            fn initial_state(&self) -> Self::State {}
+
+            fn reference_mode(&self) -> obzenflow_runtime::stages::join::JoinReferenceMode {
+                obzenflow_runtime::stages::join::JoinReferenceMode::Live
+            }
+
+            fn process_event(
+                &self,
+                _state: &mut Self::State,
+                _event: ChainEvent,
+                _source_id: StageId,
+                _writer_id: WriterId,
+            ) -> Result<Vec<ChainEvent>, HandlerError> {
+                Ok(vec![])
+            }
+
+            fn on_source_eof(
+                &self,
+                _state: &mut Self::State,
+                _source_id: StageId,
+                _writer_id: WriterId,
+            ) -> Result<Vec<ChainEvent>, HandlerError> {
+                Ok(vec![])
+            }
+        }
+
+        let ref_id = StageId::new();
+        let stream_id = StageId::new();
+        let join_id = StageId::new();
+
+        let mut descriptors: HashMap<String, Box<dyn StageDescriptor>> = HashMap::new();
+        descriptors.insert(
+            "ref_src".to_string(),
+            crate::source!(name: "ref_src", InputEvent => placeholder!()),
+        );
+        descriptors.insert(
+            "stream_src".to_string(),
+            crate::source!(name: "stream_src", InputEvent => placeholder!()),
+        );
+        descriptors.insert(
+            "joined".to_string(),
+            Box::new(crate::dsl::stage_descriptor::JoinDescriptor {
+                name: "joined".to_string(),
+                reference_stage_id: ref_id,
+                reference_stage_var: None,
+                handler: ObserverLiveJoin,
+                middleware: vec![],
+            }),
+        );
+
+        let mut name_to_id = HashMap::new();
+        name_to_id.insert("ref_src".to_string(), ref_id);
+        name_to_id.insert("stream_src".to_string(), stream_id);
+        name_to_id.insert("joined".to_string(), join_id);
+
+        let observers = crate::dsl::typing::order_observer_stage_ids(&descriptors, &name_to_id);
+        assert!(
+            observers.contains(&join_id),
+            "a live join is an order observer"
+        );
+
+        let mut topology = TopologyBuilder::new();
+        for (id, name, role) in [
+            (ref_id, "ref_src", TopologyStageType::FiniteSource),
+            (stream_id, "stream_src", TopologyStageType::FiniteSource),
+            (join_id, "joined", TopologyStageType::Join),
+        ] {
+            topology.add_stage_with_id(id.to_topology_id(), Some(name.to_string()), role);
+            topology.reset_current();
+        }
+        topology.add_edge(ref_id.to_topology_id(), join_id.to_topology_id());
+        topology.add_edge(stream_id.to_topology_id(), join_id.to_topology_id());
+        let topology = topology.build_unchecked().unwrap();
+
+        let marked = crate::dsl::typing::derive_deterministic_fan_in_stages(
+            &topology,
+            &descriptors,
+            &name_to_id,
+        );
+        assert!(
+            marked.contains(&join_id),
+            "a live join fan-in must be marked with no effect below it"
+        );
     }
 
     /// FLOWIP-095d guard hardening: an orderer declaration must not mask a
@@ -1339,8 +1666,13 @@ mod tests {
         );
         assert!(descriptors["orderer"].is_deterministic_input_orderer());
         assert!(
-            validate_effectful_deterministic_input_order(&topology, &descriptors, &name_to_id)
-                .is_err(),
+            validate_order_observer_deterministic_input_order(
+                &topology,
+                &descriptors,
+                &name_to_id,
+                &crate::dsl::typing::order_observer_stage_ids(&descriptors, &name_to_id)
+            )
+            .is_err(),
             "a declared orderer must not mask the unordered fan-in above it"
         );
 
@@ -1357,8 +1689,13 @@ mod tests {
         );
         crate::dsl::typing::wrap_deterministic_orderers(&mut descriptors, &name_to_id, &marked);
         assert!(
-            validate_effectful_deterministic_input_order(&topology, &descriptors, &name_to_id)
-                .is_ok(),
+            validate_order_observer_deterministic_input_order(
+                &topology,
+                &descriptors,
+                &name_to_id,
+                &crate::dsl::typing::order_observer_stage_ids(&descriptors, &name_to_id)
+            )
+            .is_ok(),
             "with both fan-ins ordered the effectful stage must be accepted"
         );
     }
@@ -1458,9 +1795,13 @@ mod tests {
         );
         crate::dsl::typing::wrap_deterministic_orderers(&mut descriptors, &name_to_id, &marked);
 
-        let err =
-            *validate_effectful_deterministic_input_order(&topology, &descriptors, &name_to_id)
-                .expect_err("an ordered fan-in fed from a cycle must be rejected");
+        let err = *validate_order_observer_deterministic_input_order(
+            &topology,
+            &descriptors,
+            &name_to_id,
+            &crate::dsl::typing::order_observer_stage_ids(&descriptors, &name_to_id),
+        )
+        .expect_err("an ordered fan-in fed from a cycle must be rejected");
         match err {
             FlowBuildError::EffectfulFanInRequiresDeterministicOrder { stage_name } => {
                 assert_eq!(stage_name, "effectful");
@@ -1567,8 +1908,13 @@ mod tests {
         crate::dsl::typing::wrap_deterministic_orderers(&mut descriptors, &name_to_id, &marked);
 
         assert!(
-            validate_effectful_deterministic_input_order(&topology, &descriptors, &name_to_id)
-                .is_err(),
+            validate_order_observer_deterministic_input_order(
+                &topology,
+                &descriptors,
+                &name_to_id,
+                &crate::dsl::typing::order_observer_stage_ids(&descriptors, &name_to_id)
+            )
+            .is_err(),
             "a hydrating join fed from a cycle must not anchor an effectful stage"
         );
     }
@@ -1652,8 +1998,13 @@ mod tests {
         assert!(marked.contains(&merge_one_id) && marked.contains(&merge_two_id));
         crate::dsl::typing::wrap_deterministic_orderers(&mut descriptors, &name_to_id, &marked);
 
-        validate_effectful_deterministic_input_order(&topology, &descriptors, &name_to_id)
-            .expect("nested ordered fan-ins above an effectful stage must be accepted");
+        validate_order_observer_deterministic_input_order(
+            &topology,
+            &descriptors,
+            &name_to_id,
+            &crate::dsl::typing::order_observer_stage_ids(&descriptors, &name_to_id),
+        )
+        .expect("nested ordered fan-ins above an effectful stage must be accepted");
     }
 
     /// FLOWIP-120a: the single-upstream reset. An orderer followed by an ordinary
@@ -1755,8 +2106,13 @@ mod tests {
         crate::dsl::typing::wrap_deterministic_orderers(&mut descriptors, &name_to_id, &marked);
 
         assert!(
-            validate_effectful_deterministic_input_order(&topology, &descriptors, &name_to_id)
-                .is_ok(),
+            validate_order_observer_deterministic_input_order(
+                &topology,
+                &descriptors,
+                &name_to_id,
+                &crate::dsl::typing::order_observer_stage_ids(&descriptors, &name_to_id)
+            )
+            .is_ok(),
             "effectful stage two hops below the enabled orderer must be accepted"
         );
     }
@@ -1898,10 +2254,13 @@ mod tests {
         assert!(!marked.contains(&source_a_id));
 
         crate::dsl::typing::wrap_deterministic_orderers(&mut descriptors, &name_to_id, &marked);
-        assert!(
-            validate_effectful_deterministic_input_order(&topology, &descriptors, &name_to_id)
-                .is_ok()
-        );
+        assert!(validate_order_observer_deterministic_input_order(
+            &topology,
+            &descriptors,
+            &name_to_id,
+            &crate::dsl::typing::order_observer_stage_ids(&descriptors, &name_to_id)
+        )
+        .is_ok());
         assert!(
             !descriptors["plain_merge"].is_deterministic_input_orderer(),
             "unmarked descriptors stay unwrapped"
@@ -1977,8 +2336,13 @@ mod tests {
 
         crate::dsl::typing::wrap_deterministic_orderers(&mut descriptors, &name_to_id, &marked);
         assert!(
-            validate_effectful_deterministic_input_order(&topology, &descriptors, &name_to_id)
-                .is_err(),
+            validate_order_observer_deterministic_input_order(
+                &topology,
+                &descriptors,
+                &name_to_id,
+                &crate::dsl::typing::order_observer_stage_ids(&descriptors, &name_to_id)
+            )
+            .is_err(),
             "the guard stays the safety net for effectful stages below cycles"
         );
     }
