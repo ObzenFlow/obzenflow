@@ -1478,6 +1478,104 @@ mod tests {
         }
     }
 
+    /// FLOWIP-095m: a live/symmetric join is an order observer on its own (no
+    /// effect below), so the enablement walk marks its fan-in. 095d marked a
+    /// live join only through an effectful descendant; a hydrating join stays a
+    /// structural orderer and is not seeded.
+    #[test]
+    fn live_join_fan_in_is_marked_without_effect() {
+        #[derive(Clone, Debug)]
+        struct ObserverLiveJoin;
+
+        #[async_trait]
+        impl JoinHandler for ObserverLiveJoin {
+            type State = ();
+
+            fn initial_state(&self) -> Self::State {}
+
+            fn reference_mode(&self) -> obzenflow_runtime::stages::join::JoinReferenceMode {
+                obzenflow_runtime::stages::join::JoinReferenceMode::Live
+            }
+
+            fn process_event(
+                &self,
+                _state: &mut Self::State,
+                _event: ChainEvent,
+                _source_id: StageId,
+                _writer_id: WriterId,
+            ) -> Result<Vec<ChainEvent>, HandlerError> {
+                Ok(vec![])
+            }
+
+            fn on_source_eof(
+                &self,
+                _state: &mut Self::State,
+                _source_id: StageId,
+                _writer_id: WriterId,
+            ) -> Result<Vec<ChainEvent>, HandlerError> {
+                Ok(vec![])
+            }
+        }
+
+        let ref_id = StageId::new();
+        let stream_id = StageId::new();
+        let join_id = StageId::new();
+
+        let mut descriptors: HashMap<String, Box<dyn StageDescriptor>> = HashMap::new();
+        descriptors.insert(
+            "ref_src".to_string(),
+            crate::source!(name: "ref_src", InputEvent => placeholder!()),
+        );
+        descriptors.insert(
+            "stream_src".to_string(),
+            crate::source!(name: "stream_src", InputEvent => placeholder!()),
+        );
+        descriptors.insert(
+            "joined".to_string(),
+            Box::new(crate::dsl::stage_descriptor::JoinDescriptor {
+                name: "joined".to_string(),
+                reference_stage_id: ref_id,
+                reference_stage_var: None,
+                handler: ObserverLiveJoin,
+                middleware: vec![],
+            }),
+        );
+
+        let mut name_to_id = HashMap::new();
+        name_to_id.insert("ref_src".to_string(), ref_id);
+        name_to_id.insert("stream_src".to_string(), stream_id);
+        name_to_id.insert("joined".to_string(), join_id);
+
+        let observers = crate::dsl::typing::order_observer_stage_ids(&descriptors, &name_to_id);
+        assert!(
+            observers.contains(&join_id),
+            "a live join is an order observer"
+        );
+
+        let mut topology = TopologyBuilder::new();
+        for (id, name, role) in [
+            (ref_id, "ref_src", TopologyStageType::FiniteSource),
+            (stream_id, "stream_src", TopologyStageType::FiniteSource),
+            (join_id, "joined", TopologyStageType::Join),
+        ] {
+            topology.add_stage_with_id(id.to_topology_id(), Some(name.to_string()), role);
+            topology.reset_current();
+        }
+        topology.add_edge(ref_id.to_topology_id(), join_id.to_topology_id());
+        topology.add_edge(stream_id.to_topology_id(), join_id.to_topology_id());
+        let topology = topology.build_unchecked().unwrap();
+
+        let marked = crate::dsl::typing::derive_deterministic_fan_in_stages(
+            &topology,
+            &descriptors,
+            &name_to_id,
+        );
+        assert!(
+            marked.contains(&join_id),
+            "a live join fan-in must be marked with no effect below it"
+        );
+    }
+
     /// FLOWIP-095d guard hardening: an orderer declaration must not mask a
     /// nondeterministic fan-in above it. The stability induction needs both
     /// halves (the stage orders its inputs AND every input stream is itself

@@ -311,22 +311,26 @@ impl SinkHandler for DropSink {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-struct CountSummary {
-    total: u64,
+struct OrderedList {
+    items: Vec<String>,
 }
 
-impl TypedPayload for CountSummary {
-    const EVENT_TYPE: &'static str = "fan_in.count_summary";
+impl TypedPayload for OrderedList {
+    const EVENT_TYPE: &'static str = "fan_in.ordered_list";
 }
 
-/// Non-effectful running-sum fold. It is an order observer (FLOWIP-095m), so a
-/// fan-in feeding it runs the canonical merge even though no effect sits below.
+/// Non-effectful ORDER-DEPENDENT fold: it accumulates the arrival-ordered
+/// `channel:value` word and emits it at drain. Its durable output differs under
+/// a different fan-in interleaving, so reproducing it across live and replay
+/// witnesses that the canonical merge pinned the order (FLOWIP-095m). A
+/// commutative fold (e.g. a running sum) would emit the same output regardless
+/// of order and so could not witness this.
 #[derive(Clone, Debug)]
-struct CountingStateful {
+struct OrderedListStateful {
     writer_id: WriterId,
 }
 
-impl CountingStateful {
+impl OrderedListStateful {
     fn new() -> Self {
         Self {
             writer_id: WriterId::from(StageId::new()),
@@ -335,24 +339,26 @@ impl CountingStateful {
 }
 
 #[async_trait]
-impl StatefulHandler for CountingStateful {
-    type State = u64;
+impl StatefulHandler for OrderedListStateful {
+    type State = Vec<String>;
 
-    fn accumulate(&mut self, state: &mut u64, event: ChainEvent) {
+    fn accumulate(&mut self, state: &mut Vec<String>, event: ChainEvent) {
         if let Some(record) = MergedRecord::from_event(&event) {
-            *state += record.value;
+            state.push(format!("{}:{}", record.channel, record.value));
         }
     }
 
-    fn initial_state(&self) -> u64 {
-        0
+    fn initial_state(&self) -> Vec<String> {
+        Vec::new()
     }
 
-    fn create_events(&self, state: &u64) -> Result<Vec<ChainEvent>, HandlerError> {
+    fn create_events(&self, state: &Vec<String>) -> Result<Vec<ChainEvent>, HandlerError> {
         Ok(vec![ChainEventFactory::data_event(
             self.writer_id,
-            CountSummary::EVENT_TYPE,
-            json!(CountSummary { total: *state }),
+            OrderedList::EVENT_TYPE,
+            json!(OrderedList {
+                items: state.clone()
+            }),
         )])
     }
 }
@@ -448,8 +454,8 @@ fn build_two_channel_stateful_flow(journal_base: PathBuf) -> FlowDefinition {
             source_a = source!(FanInInput => ChannelSource::with_jitter("a", 4, 0));
             source_b = source!(FanInInput => ChannelSource::with_jitter("b", 3, 0));
             merge = transform!(FanInInput -> MergedRecord => MergeTransform::new());
-            counter = stateful!(MergedRecord -> CountSummary => CountingStateful::new());
-            collector = sink!(CountSummary => DropSink);
+            counter = stateful!(MergedRecord -> OrderedList => OrderedListStateful::new());
+            collector = sink!(OrderedList => DropSink);
         },
 
         topology: {
@@ -557,10 +563,21 @@ async fn fan_in_delivery_order_identical_across_live_replay_and_replay_of_replay
     .await;
 }
 
+/// Read the `counter` fold's emitted `channel:value` word from a run's journal.
+async fn counter_ordered_word(run_dir: &std::path::Path) -> Vec<String> {
+    replay_testkit::read_stage_envelopes(run_dir, "counter")
+        .await
+        .iter()
+        .filter_map(|envelope| OrderedList::from_event(&envelope.event))
+        .flat_map(|list| list.items)
+        .collect()
+}
+
 /// FLOWIP-095m: a non-effectful stateful stage below the fan-in triggers the
 /// canonical merge (095d fired only for effects), and the delivered order at
 /// `merge` reproduces under `--replay-from`. Without the widening `merge` would
-/// be availability-scheduled and this canonical alternation would not hold.
+/// be availability-scheduled and this canonical alternation would not hold. The
+/// fold is order-DEPENDENT, so its own durable output is a second witness.
 #[tokio::test]
 async fn stateful_fan_in_delivery_order_reproduces_under_replay() {
     let _guard = FAN_IN_TEST_LOCK.lock().await;
@@ -605,6 +622,24 @@ async fn stateful_fan_in_delivery_order_reproduces_under_replay() {
         &["source_a", "source_b"],
     )
     .await;
+
+    // FLOWIP-095m: the order-DEPENDENT fold's own durable output reproduces,
+    // which is the reconstruction property 120n's S_N relies on. A commutative
+    // fold could not witness this, since its output would not vary with order.
+    let expected_word: Vec<String> = ["a:1", "b:1", "a:2", "b:2", "a:3", "b:3", "a:4"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let live_word = counter_ordered_word(&live_run).await;
+    assert_eq!(
+        live_word, expected_word,
+        "the fold must record the canonical arrival order"
+    );
+    assert_eq!(
+        counter_ordered_word(&replay_run).await,
+        live_word,
+        "the fold's durable output must reproduce under replay"
+    );
 }
 
 /// Arrival-timing independence: two LIVE runs with different per-source

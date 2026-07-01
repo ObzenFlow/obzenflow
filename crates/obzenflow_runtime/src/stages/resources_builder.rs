@@ -256,8 +256,9 @@ pub struct StageResources {
     pub synthesized_outcomes: Vec<crate::effects::SynthesizedOutcomeRegistration>,
 
     /// Whether the flow build marked this stage as a deterministic fan-in
-    /// orderer (FLOWIP-095d): a multi-inbound stage with an effectful
-    /// descendant whose input delivery runs the canonical merge.
+    /// orderer (FLOWIP-095d/095m): a multi-inbound stage with an order-observing
+    /// descendant (an effect, a stateful fold, or a live join) whose input
+    /// delivery runs the canonical merge.
     pub deterministic_fan_in: bool,
 }
 
