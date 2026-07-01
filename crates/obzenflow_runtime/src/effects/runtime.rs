@@ -38,6 +38,9 @@ impl Effects {
             .is_reconstructing(crate::execution::ExecutionPosition {
                 stage_id: self.ctx.stage_id,
                 position: self.ctx.input_seq,
+                // The effect context carries no generation; the effect-miss
+                // decision is positional (FLOWIP-120n F7).
+                generation: None,
             })
     }
 
@@ -65,6 +68,9 @@ impl Effects {
                 .scope_at(crate::execution::ExecutionPosition {
                     stage_id: self.ctx.stage_id,
                     position: self.ctx.input_seq,
+                    // The effect context carries no generation; the effect-miss
+                    // decision is positional (FLOWIP-120n F7).
+                    generation: None,
                 })
         } else {
             obzenflow_core::MiddlewareExecutionScope::LiveEffectBoundary
@@ -337,6 +343,9 @@ impl Effects {
                 crate::execution::ExecutionPosition {
                     stage_id: self.ctx.stage_id,
                     position: self.ctx.input_seq,
+                    // The effect context carries no generation; the effect-miss
+                    // decision is positional (FLOWIP-120n F7).
+                    generation: None,
                 },
             ) {
                 return Err(EffectError::MissingRecordedEffect { cursor });
@@ -791,6 +800,9 @@ impl Effects {
                 crate::execution::ExecutionPosition {
                     stage_id: self.ctx.stage_id,
                     position: self.ctx.input_seq,
+                    // The effect context carries no generation; the effect-miss
+                    // decision is positional (FLOWIP-120n F7).
+                    generation: None,
                 },
             ) {
                 return Err(EffectError::MissingRecordedEffect { cursor });

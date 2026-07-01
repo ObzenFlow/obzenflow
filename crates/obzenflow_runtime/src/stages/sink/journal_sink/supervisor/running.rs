@@ -11,6 +11,9 @@ use crate::messaging::PollResult;
 use crate::metrics::instrumentation::process_with_instrumentation;
 use crate::stages::common::handlers::UnifiedSinkHandler;
 use crate::stages::common::heartbeat::HeartbeatProcessingGuard;
+use crate::stages::common::supervision::catch_up::{
+    consume_catch_up_watermark, CatchUpDisposition, CatchUpStage,
+};
 use crate::stages::common::supervision::control_resolution::{
     resolve_control_event_awaiting_pauses, ControlAction,
 };
@@ -257,7 +260,11 @@ async fn dispatch_event<H: UnifiedSinkHandler + Clone + std::fmt::Debug + Send +
                 .consume_report(
                     envelope_event,
                     None,
-                    ctx.runtime_execution.dispatch_scope(ctx.stage_id, None),
+                    ctx.runtime_execution.dispatch_scope(
+                        ctx.stage_id,
+                        None,
+                        subscription.last_delivered_generation(),
+                    ),
                 )
                 .await
             {
@@ -283,6 +290,40 @@ async fn dispatch_control_event<
     envelope: &EventEnvelope<ChainEvent>,
     signal: &FlowControlPayload,
 ) -> Result<EventLoopDirective<JournalSinkEvent<H>>, Box<dyn std::error::Error + Send + Sync>> {
+    // FLOWIP-120n: consume the catch-up watermark before the generic control
+    // resolution. The sink is terminal and authors nothing: a forwarded
+    // marker would violate F8 for readers of the sink journal.
+    if let FlowControlPayload::CatchUpComplete {
+        generation: announced,
+        ..
+    } = signal
+    {
+        let disposition = consume_catch_up_watermark(
+            *announced,
+            subscription.all_readers_caught_up(*announced),
+            subscription.delivered_data_count(),
+            CatchUpStage {
+                stage_id: ctx.stage_id,
+                stage_name: &ctx.stage_name,
+                flow_name: &ctx.flow_name,
+                flow_id: &ctx.flow_id.to_string(),
+                stage_type: StageType::Sink,
+                writer_id: ctx.writer_id,
+                data_journal: &ctx.data_journal,
+                instrumentation: &ctx.instrumentation,
+            },
+            /* author_marker */ false,
+            &ctx.runtime_execution,
+        )
+        .await;
+        return Ok(match disposition {
+            CatchUpDisposition::Consumed => EventLoopDirective::Continue,
+            CatchUpDisposition::Failed(message) => {
+                EventLoopDirective::Transition(JournalSinkEvent::Error(message))
+            }
+        });
+    }
+
     let upstream_stage = subscription.last_delivered_upstream_stage();
     let last_eof_outcome = subscription.last_eof_outcome().cloned();
     let contract_reader_count = ctx.contract_state.len();
@@ -365,7 +406,11 @@ async fn dispatch_control_event<
                 .consume_report(
                     envelope_event,
                     None,
-                    ctx.runtime_execution.dispatch_scope(ctx.stage_id, None),
+                    ctx.runtime_execution.dispatch_scope(
+                        ctx.stage_id,
+                        None,
+                        subscription.last_delivered_generation(),
+                    ),
                 )
                 .await
             {
@@ -511,10 +556,12 @@ async fn dispatch_data_event<
     });
 
     // FLOWIP-120c H3: per-event middleware execution scope, computed at
-    // dispatch from the delivered position.
-    let scope = ctx
-        .runtime_execution
-        .dispatch_scope(ctx.stage_id, stage_input_position);
+    // dispatch from the delivered position and generation.
+    let scope = ctx.runtime_execution.dispatch_scope(
+        ctx.stage_id,
+        stage_input_position,
+        subscription.last_delivered_generation(),
+    );
 
     // FLOWIP-115b: the sink-delivery boundary wraps the data-event consume
     // attempt. Pre-extract the boundary so the closure borrows only

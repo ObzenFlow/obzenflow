@@ -9,6 +9,7 @@ use crate::stages::common::supervision::control_resolution::{
     resolve_control_event_awaiting_pauses, ControlAction,
 };
 use crate::supervised_base::EventLoopDirective;
+use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_fsm::StateVariant;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
@@ -62,6 +63,23 @@ pub(super) async fn dispatch_hydrating<
 
             let directive = match &envelope.event.content {
                 obzenflow_core::event::ChainEventContent::FlowControl(signal) => {
+                    // FLOWIP-120n: consume the catch-up watermark before the
+                    // generic control resolution; the join authors its own at
+                    // the flip.
+                    if let FlowControlPayload::CatchUpComplete {
+                        generation: announced,
+                        ..
+                    } = signal
+                    {
+                        return Ok(common::consume_join_catch_up_watermark(
+                            sup.reference_subscription.as_ref(),
+                            sup.stream_subscription.as_ref(),
+                            ctx,
+                            *announced,
+                        )
+                        .await);
+                    }
+
                     let contract_reader_count = ctx.reference_contract_state.len();
                     let upstream_stage = subscription.last_delivered_upstream_stage();
                     let last_eof_outcome = subscription.last_eof_outcome().cloned();
@@ -150,10 +168,11 @@ pub(super) async fn dispatch_hydrating<
                         HeartbeatProcessingGuard::new(state.clone(), upstream_stage, event_id)
                     });
                     // FLOWIP-120n: per-delivery execution scope, computed at
-                    // dispatch from the delivered position.
+                    // dispatch from the delivered position and generation.
                     let scope = ctx.runtime_execution.dispatch_scope(
                         ctx.stage_id,
                         subscription.last_delivered_stage_input_position(),
+                        subscription.last_delivered_generation(),
                     );
                     let result = ctx.handler.process_event(
                         &mut ctx.handler_state,

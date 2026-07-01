@@ -39,7 +39,7 @@ use obzenflow_core::event::types::SeqNo;
 use obzenflow_core::event::vector_clock::VectorClock;
 use obzenflow_core::event::{ChainEvent, EventEnvelope, JournalEvent, JournalWriterId};
 use obzenflow_core::journal::journal_reader::JournalReader;
-use obzenflow_core::{EventId, EventType, StageId};
+use obzenflow_core::{EventId, EventType, ReaderGeneration, StageId};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use tokio::time::Instant;
@@ -70,6 +70,11 @@ pub(super) struct HeldHead<T: JournalEvent> {
     pub(super) envelope: EventEnvelope<T>,
     pub(super) is_authored_eof: bool,
     pub(super) is_drain: bool,
+    /// The announced generation when this head is a catch-up watermark
+    /// (FLOWIP-120n). Classified at acquisition by arrival edge; the held
+    /// head sorts at the reader's current generation, and delivery advances
+    /// the reader to this announced value.
+    pub(super) catch_up: Option<ReaderGeneration>,
 }
 
 /// Comparison metadata for the canonical merge's currently selected candidate.
@@ -77,6 +82,10 @@ pub(super) struct HeldHead<T: JournalEvent> {
 /// The join supervisor composes two subscriptions by comparing each side's
 /// candidate with the same rule the subscription applies internally.
 pub struct MergeCandidateMeta<'a> {
+    /// The reader's current generation, the coarsest ordering axis
+    /// (FLOWIP-120n): a recorded-generation head orders ahead of any live
+    /// head, applied after causality and above the (ordinal, key) tiebreak.
+    pub generation: ReaderGeneration,
     /// The tiebreak ordinal this delivery would take.
     pub ordinal: DeliveredOrdinal,
     /// The reader's stable tiebreak key (stage key, feed identity).
@@ -203,6 +212,16 @@ where
     /// identity; `StageId` ULIDs are per-run and must never participate in
     /// ordering decisions.
     reader_tiebreak_keys: Vec<ReaderTiebreakKey>,
+
+    /// Per-reader generation (FLOWIP-120n): 0 until the reader's catch-up
+    /// watermark is delivered in merge order, then the announced value.
+    /// Never advanced while a watermark head is merely held.
+    generation_by_reader: Vec<ReaderGeneration>,
+
+    /// Generation of the last delivered event: the delivering reader's
+    /// generation at delivery time (a watermark delivers at the generation it
+    /// closes, not the one it announces).
+    last_delivered_generation: Option<ReaderGeneration>,
 
     /// Set when a canonical-merge poll returned no event because a quiet input
     /// blocked delivery; cleared on the next delivery.
@@ -571,6 +590,30 @@ where
     /// need to re-observe historical EOF events.
     pub fn all_readers_logically_eof(&self) -> bool {
         self.state.logical_eof_count() == self.readers.len()
+    }
+
+    /// Generation of the last delivered event (FLOWIP-120n): the delivering
+    /// reader's generation at delivery time.
+    pub fn last_delivered_generation(&self) -> Option<ReaderGeneration> {
+        self.last_delivered_generation
+    }
+
+    /// Count of data events delivered so far (FLOWIP-120n F15): the fail-closed
+    /// re-delivery validation input, compared against the recorded high water
+    /// when the catch-up watermark arrives.
+    pub fn delivered_data_count(&self) -> u64 {
+        self.next_stage_input_position - 1
+    }
+
+    /// The caught-up frontier aggregate (FLOWIP-120n F10): true once every
+    /// reader has crossed to `target` or is EOF-exhausted. An EOF-exhausted
+    /// reader counts as vacuously crossed, authored EOF being strictly
+    /// stronger than the catch-up boundary (F17), which is what lets a stage
+    /// below a finite source author its own watermark.
+    pub fn all_readers_caught_up(&self, target: ReaderGeneration) -> bool {
+        (0..self.readers.len()).all(|index| {
+            self.generation_by_reader[index] >= target || self.state.is_reader_eof(index)
+        })
     }
 
     /// Check if there are any upstream journals

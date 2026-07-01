@@ -3,11 +3,15 @@
 // https://obzenflow.dev
 
 use crate::messaging::upstream_subscription::StageInputPosition;
+use crate::messaging::UpstreamSubscription;
 use crate::stages::common::handlers::UnifiedJoinHandler;
 use crate::stages::common::supervision::backpressure_drain::{drain_one_pending, DrainOutcome};
+use crate::stages::common::supervision::catch_up::{
+    consume_catch_up_watermark, CatchUpDisposition, CatchUpStage,
+};
 use crate::stages::common::supervision::flow_context_factory::make_flow_context;
 use crate::stages::common::supervision::forward_control_event::forward_control_event;
-use crate::stages::join::fsm::{JoinContext, PendingTransition};
+use crate::stages::join::fsm::{JoinContext, JoinEvent, PendingTransition};
 use crate::stages::observer::dispatch::{
     run_join_after_output_observers, run_join_before_input_observers,
 };
@@ -38,6 +42,52 @@ pub(super) fn ensure_subscriptions<
     }
     if sup.stream_subscription.is_none() {
         sup.stream_subscription = ctx.stream_subscription.take();
+    }
+}
+
+/// FLOWIP-120n: consume one side's delivered catch-up watermark. A one-sided
+/// arm reacts to either side's watermark; the flip requires BOTH sides caught
+/// up, so it happens when the second side crosses. A side whose subscription
+/// does not exist yet counts as not caught up (no premature flip).
+pub(super) async fn consume_join_catch_up_watermark<H: UnifiedJoinHandler>(
+    reference: Option<&UpstreamSubscription<ChainEvent>>,
+    stream: Option<&UpstreamSubscription<ChainEvent>>,
+    ctx: &JoinContext<H>,
+    announced: obzenflow_core::ReaderGeneration,
+) -> crate::supervised_base::EventLoopDirective<JoinEvent<H>> {
+    let side_caught_up = |side: Option<&UpstreamSubscription<ChainEvent>>| {
+        side.is_some_and(|subscription| subscription.all_readers_caught_up(announced))
+    };
+    let delivered = reference
+        .map(|subscription| subscription.delivered_data_count())
+        .unwrap_or(0)
+        + stream
+            .map(|subscription| subscription.delivered_data_count())
+            .unwrap_or(0);
+    let flow_id = ctx.flow_id.to_string();
+    let disposition = consume_catch_up_watermark(
+        announced,
+        side_caught_up(reference) && side_caught_up(stream),
+        delivered,
+        CatchUpStage {
+            stage_id: ctx.stage_id,
+            stage_name: &ctx.stage_name,
+            flow_name: &ctx.flow_name,
+            flow_id: &flow_id,
+            stage_type: StageType::Join,
+            writer_id: ctx.writer_id,
+            data_journal: &ctx.data_journal,
+            instrumentation: &ctx.instrumentation,
+        },
+        /* author_marker */ true,
+        &ctx.runtime_execution,
+    )
+    .await;
+    match disposition {
+        CatchUpDisposition::Consumed => crate::supervised_base::EventLoopDirective::Continue,
+        CatchUpDisposition::Failed(message) => {
+            crate::supervised_base::EventLoopDirective::Transition(JoinEvent::Error(message))
+        }
     }
 }
 
@@ -142,7 +192,9 @@ pub(super) async fn observe_join_input<H: UnifiedJoinHandler>(
         stage_id: ctx.stage_id,
         stage_name: &ctx.stage_name,
         flow_context: &flow_context,
-        scope: ctx.runtime_execution.dispatch_scope(ctx.stage_id, None),
+        scope: ctx
+            .runtime_execution
+            .dispatch_scope(ctx.stage_id, None, None),
         input: Some(input),
         delivery,
         signal,
@@ -177,7 +229,9 @@ pub(super) async fn observe_join_outputs<H: UnifiedJoinHandler>(
         stage_id: ctx.stage_id,
         stage_name: &ctx.stage_name,
         flow_context: &flow_context,
-        scope: ctx.runtime_execution.dispatch_scope(ctx.stage_id, None),
+        scope: ctx
+            .runtime_execution
+            .dispatch_scope(ctx.stage_id, None, None),
         input,
         delivery,
         signal,

@@ -67,7 +67,7 @@ pub use context::{
 pub(crate) use context::EffectRuntimeMode;
 pub use declaration::{
     Effect, EffectDeclaration, EffectSafety, IdempotencyKey, IdempotencyKeyPolicy,
-    TransactionalEffectPort,
+    SinkDeliverySafety, TransactionalEffectPort,
 };
 pub use error::EffectError;
 pub use history::{EffectHistory, EffectHistoryReader, EffectHistoryStore};

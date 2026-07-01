@@ -36,6 +36,22 @@ impl ChainEventFactory {
         )
     }
 
+    /// Create a catch-up watermark (FLOWIP-120n): authored by a stage into
+    /// its own journal once its recorded input is finished; never forwarded.
+    pub fn catch_up_complete_event(
+        writer_id: WriterId,
+        generation: crate::ReaderGeneration,
+        stage_key: crate::StageKey,
+    ) -> ChainEvent {
+        Self::create_event(
+            writer_id,
+            ChainEventContent::FlowControl(FlowControlPayload::CatchUpComplete {
+                generation,
+                stage_key,
+            }),
+        )
+    }
+
     /// Create a watermark signal
     pub fn watermark_event(
         writer_id: WriterId,

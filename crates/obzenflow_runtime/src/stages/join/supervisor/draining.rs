@@ -90,10 +90,12 @@ pub(super) async fn dispatch_draining<
                         )
                     });
                     // FLOWIP-120n: per-delivery execution scope, computed at
-                    // dispatch from the delivered position.
+                    // dispatch from the delivered position. Generation None:
+                    // drain follows the stage frontier.
                     let scope = ctx.runtime_execution.dispatch_scope(
                         ctx.stage_id,
                         subscription.last_delivered_stage_input_position(),
+                        None,
                     );
                     let result = ctx.handler.process_event(
                         &mut ctx.handler_state,
@@ -235,10 +237,12 @@ pub(super) async fn dispatch_draining<
                         HeartbeatProcessingGuard::new(state.clone(), Some(source_id), event_id)
                     });
                     // FLOWIP-120n: per-delivery execution scope, computed at
-                    // dispatch from the delivered position.
+                    // dispatch from the delivered position. Generation None:
+                    // drain follows the stage frontier.
                     let scope = ctx.runtime_execution.dispatch_scope(
                         ctx.stage_id,
                         subscription.last_delivered_stage_input_position(),
+                        None,
                     );
                     let result = ctx.handler.process_event(
                         &mut ctx.handler_state,

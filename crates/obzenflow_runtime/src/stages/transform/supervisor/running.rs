@@ -10,6 +10,9 @@ use crate::metrics::instrumentation::process_with_instrumentation;
 use crate::stages::common::handlers::transform::traits::UnifiedTransformHandler;
 use crate::stages::common::heartbeat::HeartbeatProcessingGuard;
 use crate::stages::common::supervision::backpressure_drain::{drain_one_pending, DrainOutcome};
+use crate::stages::common::supervision::catch_up::{
+    consume_catch_up_watermark, CatchUpDisposition, CatchUpStage,
+};
 use crate::stages::common::supervision::control_resolution::{
     is_terminal_eof, resolve_control_event_awaiting_pauses, ControlAction,
 };
@@ -177,6 +180,10 @@ async fn dispatch_running_inner<
                 .subscription
                 .as_ref()
                 .and_then(|subscription| subscription.last_delivered_stage_input_position());
+            let delivered_generation = sup
+                .subscription
+                .as_ref()
+                .and_then(|subscription| subscription.last_delivered_generation());
             let last_eof_outcome = sup
                 .subscription
                 .as_ref()
@@ -241,6 +248,43 @@ async fn dispatch_running_inner<
 
             let directive = match &envelope.event.content {
                 obzenflow_core::event::ChainEventContent::FlowControl(signal) => {
+                    // FLOWIP-120n: consume the catch-up watermark before the
+                    // generic control resolution; each stage authors its own.
+                    if let obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload::CatchUpComplete {
+                        generation: announced,
+                        ..
+                    } = signal
+                    {
+                        let subscription = sup
+                            .subscription
+                            .as_ref()
+                            .expect("subscription presence checked above");
+                        let disposition = consume_catch_up_watermark(
+                            *announced,
+                            subscription.all_readers_caught_up(*announced),
+                            subscription.delivered_data_count(),
+                            CatchUpStage {
+                                stage_id: ctx.stage_id,
+                                stage_name: &ctx.stage_name,
+                                flow_name: &ctx.flow_name,
+                                flow_id: &flow_context.flow_id,
+                                stage_type: StageType::Transform,
+                                writer_id: ctx.writer_id,
+                                data_journal: &ctx.data_journal,
+                                instrumentation: &ctx.instrumentation,
+                            },
+                            /* author_marker */ true,
+                            &ctx.runtime_execution,
+                        )
+                        .await;
+                        return Ok(match disposition {
+                            CatchUpDisposition::Consumed => EventLoopDirective::Continue,
+                            CatchUpDisposition::Failed(message) => {
+                                EventLoopDirective::Transition(TransformEvent::Error(message))
+                            }
+                        });
+                    }
+
                     let cycle_config = ctx.cycle_guard_config.as_ref();
                     let is_cycle_entry_point = cycle_config.is_some_and(|cfg| cfg.is_entry_point);
                     let contract_reader_count = ctx.contract_state.len();
@@ -411,9 +455,11 @@ async fn dispatch_running_inner<
                     // FLOWIP-120c H3: the middleware execution scope is
                     // computed per dispatched event from the delivered
                     // position, not baked into the wrapper at build time.
-                    let scope = ctx
-                        .runtime_execution
-                        .dispatch_scope(ctx.stage_id, stage_input_position);
+                    let scope = ctx.runtime_execution.dispatch_scope(
+                        ctx.stage_id,
+                        stage_input_position,
+                        delivered_generation,
+                    );
                     run_before_handler_observers(
                         &ctx.observers,
                         ctx.stage_id,

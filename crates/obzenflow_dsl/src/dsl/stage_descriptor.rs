@@ -27,7 +27,7 @@ use obzenflow_core::{StageId, WriterId};
 use obzenflow_runtime::{
     effects::{
         EffectDeclaration, EffectPortRegistry, EffectSafety, IdempotencyKeyPolicy,
-        SynthesizedOutcomeRegistration,
+        SinkDeliverySafety, SynthesizedOutcomeRegistration,
     },
     metrics::instrumentation::{InstrumentationConfig, StageInstrumentation},
     stages::StageResources,
@@ -460,6 +460,13 @@ fn build_source_middleware_and_register_policies(
             boundary: ingress_boundary,
         })
         .map_err(|e| format!("Stage '{}': {e}", config.name))?;
+        // FLOWIP-120n F12: under resume, hosted ingress refuses until the
+        // source supervisor marks the slot live at the catch-up handoff.
+        if obzenflow_runtime::bootstrap::replay_bootstrap()
+            .is_some_and(|replay| replay.verb == obzenflow_runtime::bootstrap::ReplayVerb::Resume)
+        {
+            slot.hold_for_resume_catch_up();
+        }
     }
 
     let source_policies = control_middleware.source_policies(&config.stage_id);
@@ -628,6 +635,14 @@ pub trait StageDescriptor: Send + Sync {
 
     fn stage_logic_version(&self) -> String {
         "1".to_string()
+    }
+
+    /// Snapshot of the sink handler's declared delivery safety, taken while
+    /// the descriptor still holds the concrete handler (FLOWIP-120n F16).
+    /// `None` for non-sink stages and undeclared sinks; read only by the
+    /// resume sink gate. Typed wrappers must forward to their inner descriptor.
+    fn sink_delivery_safety(&self) -> Option<SinkDeliverySafety> {
+        None
     }
 
     fn effect_declarations(&self) -> Vec<EffectDeclaration> {
@@ -1842,6 +1857,10 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
 
     fn stage_type(&self) -> StageType {
         StageType::Sink
+    }
+
+    fn sink_delivery_safety(&self) -> Option<SinkDeliverySafety> {
+        self.handler.delivery_safety()
     }
 
     fn stage_middleware_names(&self) -> Vec<String> {

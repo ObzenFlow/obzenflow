@@ -760,6 +760,16 @@ macro_rules! build_typed_flow {
                     cycle_members.join(", ")
                 )));
             }
+
+            // FLOWIP-120n F16: catch-up re-delivers the recorded prefix to
+            // sinks, so every sink must declare its delivery safety.
+            let allow_duplicate_sink_delivery =
+                obzenflow_runtime::bootstrap::replay_bootstrap()
+                    .is_some_and(|replay| replay.allow_duplicate_sink_delivery);
+            $crate::dsl::typing::validate_resume_sink_delivery_safety(
+                &descriptors,
+                allow_duplicate_sink_delivery,
+            )?;
         }
 
         // FLOWIP-051l (P0): backflow cycles are currently only supported for transform stages.

@@ -13,6 +13,7 @@
 use super::boundary::IngressBoundaryMiddleware;
 use super::IngressKey;
 use crate::{StageId, StageKey};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 
 /// The boundary plus replay-stable identity the DSL fills into a hosted-ingress
@@ -63,6 +64,9 @@ impl std::error::Error for HostedIngressAlreadyBound {}
 pub struct HostedIngressBindingSlot {
     ingress_key: IngressKey,
     cell: Arc<OnceLock<FilledHostedIngress>>,
+    /// FLOWIP-120n F12: whether the linked source is past resume catch-up.
+    /// True outside resume; held false from bind until the handoff.
+    resume_live: Arc<AtomicBool>,
 }
 
 impl HostedIngressBindingSlot {
@@ -70,6 +74,7 @@ impl HostedIngressBindingSlot {
         Self {
             ingress_key: ingress_key.into(),
             cell: Arc::new(OnceLock::new()),
+            resume_live: Arc::new(AtomicBool::new(true)),
         }
     }
 
@@ -93,5 +98,41 @@ impl HostedIngressBindingSlot {
     /// Whether the slot has been filled by source-stage materialization.
     pub fn is_filled(&self) -> bool {
         self.cell.get().is_some()
+    }
+
+    /// FLOWIP-120n F12: hold ingress admission until the linked source crosses
+    /// its catch-up boundary. Applied at DSL bind time under `--resume-from`.
+    pub fn hold_for_resume_catch_up(&self) {
+        self.resume_live.store(false, Ordering::Release);
+    }
+
+    /// FLOWIP-120n F12: mark the linked source live. The source supervisor
+    /// calls this at the catch-up handoff.
+    pub fn mark_resume_live(&self) {
+        self.resume_live.store(true, Ordering::Release);
+    }
+
+    /// Whether the linked source is past resume catch-up (always true outside
+    /// resume).
+    pub fn is_resume_live(&self) -> bool {
+        self.resume_live.load(Ordering::Acquire)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resume_live_defaults_true_and_flag_is_shared_across_clones() {
+        let slot = HostedIngressBindingSlot::new("orders");
+        let surface_half = slot.clone();
+        assert!(surface_half.is_resume_live());
+
+        slot.hold_for_resume_catch_up();
+        assert!(!surface_half.is_resume_live());
+
+        slot.mark_resume_live();
+        assert!(surface_half.is_resume_live());
     }
 }

@@ -298,7 +298,9 @@ impl IngestionState {
     }
 
     pub fn is_ready(&self) -> bool {
-        self.ready.load(Ordering::Acquire)
+        // FLOWIP-120n F12: during resume catch-up a Running pipeline still
+        // refuses ingress until the hosted source crosses to live.
+        self.ready.load(Ordering::Acquire) && self.ingress_slot.is_resume_live()
     }
 
     /// Wire ready signal from `FlowHandle::state_receiver()`.

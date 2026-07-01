@@ -14,6 +14,7 @@ use crate::stages::common::supervision::error_routing::route_to_error_journal;
 use crate::stages::common::supervision::flow_context_factory::make_flow_context;
 use crate::supervised_base::EventLoopDirective;
 use obzenflow_core::event::context::StageType;
+use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::status::processing_status::ProcessingStatus;
 use obzenflow_core::event::vector_clock::CausalOrderingService;
 use obzenflow_core::event::EventEnvelope;
@@ -71,6 +72,23 @@ pub(super) async fn dispatch_enriching<
 
             let directive = match &envelope.event.content {
                 obzenflow_core::event::ChainEventContent::FlowControl(signal) => {
+                    // FLOWIP-120n: consume the catch-up watermark before the
+                    // generic control resolution; the join authors its own at
+                    // the flip.
+                    if let FlowControlPayload::CatchUpComplete {
+                        generation: announced,
+                        ..
+                    } = signal
+                    {
+                        return Ok(common::consume_join_catch_up_watermark(
+                            sup.reference_subscription.as_ref(),
+                            sup.stream_subscription.as_ref(),
+                            ctx,
+                            *announced,
+                        )
+                        .await);
+                    }
+
                     if envelope.event.is_eof() {
                         ctx.buffered_eof = Some(envelope.event.clone());
                         ctx.drain_parent = Some(envelope.clone());
@@ -240,12 +258,13 @@ pub(super) async fn dispatch_enriching<
                         HeartbeatProcessingGuard::new(state.clone(), Some(source_id), event_id)
                     });
                     // FLOWIP-120n: per-delivery execution scope, computed at
-                    // dispatch from the delivered position.
+                    // dispatch from the delivered position and generation.
                     let scope = ctx.runtime_execution.dispatch_scope(
                         ctx.stage_id,
                         Some(StageInputPosition(
                             delivery_snapshot.delivered_stage_input_position,
                         )),
+                        subscription.last_delivered_generation(),
                     );
                     let result = ctx.handler.process_event(
                         &mut ctx.handler_state,
@@ -419,10 +438,14 @@ async fn write_stage_outputs_and_ack<H: UnifiedJoinHandler>(
         StageType::Join,
     );
 
-    // FLOWIP-120n: freeze the position-derived execution scope onto each deferred output.
+    // FLOWIP-120n: freeze the position-derived execution scope onto each
+    // deferred output. The triggering side's delivered generation rides
+    // along so a recorded-prefix output flushed after handoff stays
+    // reconstruction-scoped (F9).
     let scope = ctx.runtime_execution.dispatch_scope(
         ctx.stage_id,
         subscription.last_delivered_stage_input_position(),
+        subscription.last_delivered_generation(),
     );
     let mut outputs: VecDeque<
         crate::stages::common::supervision::backpressure_drain::PendingOutput,

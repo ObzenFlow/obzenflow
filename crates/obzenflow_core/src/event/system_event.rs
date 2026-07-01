@@ -421,6 +421,14 @@ pub enum ReplayLifecycleEvent {
         skipped_count: Count,
         duration_ms: DurationMs,
     },
+    /// Resume handoff (FLOWIP-120n): the source finished its catch-up and
+    /// continues live at `generation`. The transition announcement the
+    /// presentation layer surfaces.
+    ResumedLive {
+        archive_flow_id: String,
+        replayed_count: Count,
+        generation: u64,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -888,6 +896,7 @@ impl JournalEvent for SystemEvent {
             SystemEventType::ReplayLifecycle(event) => match event {
                 ReplayLifecycleEvent::Started { .. } => "system.replay.started",
                 ReplayLifecycleEvent::Completed { .. } => "system.replay.completed",
+                ReplayLifecycleEvent::ResumedLive { .. } => "system.replay.resumed_live",
             },
             SystemEventType::MetricsCoordination(event) => match event {
                 MetricsCoordinationEvent::Ready => "system.metrics.ready",

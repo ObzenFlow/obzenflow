@@ -211,9 +211,10 @@ async fn dispatch_draining_inner<
                 .map(|context| context.boundary_control_events.clone());
 
             // FLOWIP-120c H3: per-event scope, same as the running path.
-            let scope = ctx
-                .runtime_execution
-                .dispatch_scope(ctx.stage_id, stage_input_position);
+            // Generation None: drain follows the stage frontier (FLOWIP-120n).
+            let scope =
+                ctx.runtime_execution
+                    .dispatch_scope(ctx.stage_id, stage_input_position, None);
             run_before_handler_observers(
                 &ctx.observers,
                 ctx.stage_id,

@@ -47,7 +47,7 @@
 //! }
 //! ```
 
-use crate::effects::{EffectInvocationContext, Effects};
+use crate::effects::{EffectInvocationContext, Effects, SinkDeliverySafety};
 use crate::stages::common::handler_error::HandlerError;
 use async_trait::async_trait;
 use obzenflow_core::event::payloads::delivery_payload::DeliveryPayload;
@@ -142,6 +142,12 @@ pub trait SinkHandler: Send + Sync {
             commit_receipts: Vec::new(),
         })
     }
+
+    /// Declared delivery safety. `None` is undeclared: resume fails closed and
+    /// the error names both remedies (declare, or opt in to duplication).
+    fn delivery_safety(&self) -> Option<SinkDeliverySafety> {
+        None
+    }
 }
 
 #[doc(hidden)]
@@ -164,6 +170,12 @@ pub trait UnifiedSinkHandler: Send + Sync {
     fn stage_logic_version(&self) -> &str {
         "1"
     }
+
+    /// Declared delivery safety. `None` is undeclared: resume fails closed and
+    /// the error names both remedies (declare, or opt in to duplication).
+    fn delivery_safety(&self) -> Option<SinkDeliverySafety> {
+        None
+    }
 }
 
 #[async_trait]
@@ -183,6 +195,10 @@ impl<T: SinkHandler + Send + Sync> UnifiedSinkHandler for T {
 
     async fn drain_report(&mut self) -> Result<SinkLifecycleReport, HandlerError> {
         SinkHandler::drain_report(self).await
+    }
+
+    fn delivery_safety(&self) -> Option<SinkDeliverySafety> {
+        SinkHandler::delivery_safety(self)
     }
 }
 

@@ -12,6 +12,7 @@
 //! `SinkTyped` and `FallibleSinkTyped` eliminate that boilerplate by working
 //! with domain types that implement `TypedPayload`.
 
+use crate::effects::SinkDeliverySafety;
 use crate::stages::common::handler_error::HandlerError;
 use crate::stages::common::handlers::SinkHandler;
 use crate::typing::SinkTyping;
@@ -40,6 +41,7 @@ where
 {
     handler: F,
     allow_skip: bool,
+    delivery_safety: Option<SinkDeliverySafety>,
     _phantom: PhantomData<fn() -> (T, Fut)>,
 }
 
@@ -53,6 +55,7 @@ where
         Self {
             handler: self.handler.clone(),
             allow_skip: self.allow_skip,
+            delivery_safety: self.delivery_safety,
             _phantom: PhantomData,
         }
     }
@@ -77,6 +80,7 @@ where
         Self {
             handler,
             allow_skip: false,
+            delivery_safety: None,
             _phantom: PhantomData,
         }
     }
@@ -87,6 +91,18 @@ where
     /// data event type mismatch to catch miswired pipelines early.
     pub fn allow_skip(mut self) -> Self {
         self.allow_skip = true;
+        self
+    }
+
+    /// Declare the delivery path idempotent (safe to re-consume on resume).
+    pub fn idempotent(mut self) -> Self {
+        self.delivery_safety = Some(SinkDeliverySafety::IdempotentProjection);
+        self
+    }
+
+    /// Declare a non-idempotent external write (resume refuses without opt-in).
+    pub fn non_idempotent(mut self) -> Self {
+        self.delivery_safety = Some(SinkDeliverySafety::NonIdempotentExternal);
         self
     }
 }
@@ -182,6 +198,10 @@ where
             Some(1),
         ))
     }
+
+    fn delivery_safety(&self) -> Option<SinkDeliverySafety> {
+        self.delivery_safety
+    }
 }
 
 impl<T, F, Fut> std::fmt::Debug for SinkTyped<T, F, Fut>
@@ -194,6 +214,7 @@ where
         f.debug_struct("SinkTyped")
             .field("payload_type", &std::any::type_name::<T>())
             .field("allow_skip", &self.allow_skip)
+            .field("delivery_safety", &self.delivery_safety)
             .finish()
     }
 }
@@ -263,6 +284,7 @@ where
 {
     handler: F,
     allow_skip: bool,
+    delivery_safety: Option<SinkDeliverySafety>,
     _phantom: PhantomData<fn() -> (T, Fut)>,
 }
 
@@ -276,6 +298,7 @@ where
         Self {
             handler: self.handler.clone(),
             allow_skip: self.allow_skip,
+            delivery_safety: self.delivery_safety,
             _phantom: PhantomData,
         }
     }
@@ -291,6 +314,7 @@ where
         Self {
             handler,
             allow_skip: false,
+            delivery_safety: None,
             _phantom: PhantomData,
         }
     }
@@ -298,6 +322,18 @@ where
     /// Opt out of strict mode and silently skip non-matching event types.
     pub fn allow_skip(mut self) -> Self {
         self.allow_skip = true;
+        self
+    }
+
+    /// Declare the delivery path idempotent (safe to re-consume on resume).
+    pub fn idempotent(mut self) -> Self {
+        self.delivery_safety = Some(SinkDeliverySafety::IdempotentProjection);
+        self
+    }
+
+    /// Declare a non-idempotent external write (resume refuses without opt-in).
+    pub fn non_idempotent(mut self) -> Self {
+        self.delivery_safety = Some(SinkDeliverySafety::NonIdempotentExternal);
         self
     }
 }
@@ -360,6 +396,10 @@ where
             Some(1),
         ))
     }
+
+    fn delivery_safety(&self) -> Option<SinkDeliverySafety> {
+        self.delivery_safety
+    }
 }
 
 impl<T, F, Fut> std::fmt::Debug for SinkTypedWithDelivery<T, F, Fut>
@@ -372,6 +412,7 @@ where
         f.debug_struct("SinkTypedWithDelivery")
             .field("payload_type", &std::any::type_name::<T>())
             .field("allow_skip", &self.allow_skip)
+            .field("delivery_safety", &self.delivery_safety)
             .finish()
     }
 }
@@ -398,6 +439,7 @@ where
 {
     handler: F,
     allow_skip: bool,
+    delivery_safety: Option<SinkDeliverySafety>,
     _phantom: PhantomData<fn() -> (T, Fut)>,
 }
 
@@ -411,6 +453,7 @@ where
         Self {
             handler: self.handler.clone(),
             allow_skip: self.allow_skip,
+            delivery_safety: self.delivery_safety,
             _phantom: PhantomData,
         }
     }
@@ -435,6 +478,7 @@ where
         Self {
             handler,
             allow_skip: false,
+            delivery_safety: None,
             _phantom: PhantomData,
         }
     }
@@ -445,6 +489,18 @@ where
     /// on a data event type mismatch to catch miswired pipelines early.
     pub fn allow_skip(mut self) -> Self {
         self.allow_skip = true;
+        self
+    }
+
+    /// Declare the delivery path idempotent (safe to re-consume on resume).
+    pub fn idempotent(mut self) -> Self {
+        self.delivery_safety = Some(SinkDeliverySafety::IdempotentProjection);
+        self
+    }
+
+    /// Declare a non-idempotent external write (resume refuses without opt-in).
+    pub fn non_idempotent(mut self) -> Self {
+        self.delivery_safety = Some(SinkDeliverySafety::NonIdempotentExternal);
         self
     }
 }
@@ -514,6 +570,10 @@ where
             Some(1),
         ))
     }
+
+    fn delivery_safety(&self) -> Option<SinkDeliverySafety> {
+        self.delivery_safety
+    }
 }
 
 impl<T, F, Fut> std::fmt::Debug for FallibleSinkTyped<T, F, Fut>
@@ -526,6 +586,7 @@ where
         f.debug_struct("FallibleSinkTyped")
             .field("payload_type", &std::any::type_name::<T>())
             .field("allow_skip", &self.allow_skip)
+            .field("delivery_safety", &self.delivery_safety)
             .finish()
     }
 }
@@ -791,5 +852,47 @@ mod tests {
             DeliveryMethod::Custom(ref name) if name == "Skipped"
         ));
         assert_eq!(called.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn typed_sinks_default_to_undeclared_delivery_safety() {
+        let sink = SinkTyped::new(|_value: TestPayload| async move {});
+        assert_eq!(SinkHandler::delivery_safety(&sink), None);
+
+        let fallible = FallibleSinkTyped::new(|_value: TestPayload| async move { Ok(()) });
+        assert_eq!(SinkHandler::delivery_safety(&fallible), None);
+
+        let with_delivery =
+            SinkTyped::with_delivery(|_value: TestPayload, _delivery| async move {});
+        assert_eq!(SinkHandler::delivery_safety(&with_delivery), None);
+    }
+
+    #[test]
+    fn typed_sink_builders_declare_delivery_safety() {
+        let sink = SinkTyped::new(|_value: TestPayload| async move {}).idempotent();
+        assert_eq!(
+            SinkHandler::delivery_safety(&sink),
+            Some(SinkDeliverySafety::IdempotentProjection)
+        );
+
+        let sink = SinkTyped::new(|_value: TestPayload| async move {}).non_idempotent();
+        assert_eq!(
+            SinkHandler::delivery_safety(&sink),
+            Some(SinkDeliverySafety::NonIdempotentExternal)
+        );
+
+        let fallible = FallibleSinkTyped::new(|_value: TestPayload| async move { Ok(()) })
+            .non_idempotent();
+        assert_eq!(
+            SinkHandler::delivery_safety(&fallible),
+            Some(SinkDeliverySafety::NonIdempotentExternal)
+        );
+
+        let with_delivery = SinkTyped::with_delivery(|_value: TestPayload, _delivery| async move {})
+            .idempotent();
+        assert_eq!(
+            SinkHandler::delivery_safety(&with_delivery),
+            Some(SinkDeliverySafety::IdempotentProjection)
+        );
     }
 }

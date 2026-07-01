@@ -414,6 +414,12 @@ impl<H: AsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
                         .map(|a| a.as_ref())
                         .expect("Replaying phase requires a replay archive (archive_for_io)");
                     if self.replay_driver.is_none() {
+                        // FLOWIP-120n: an infinite source continues live at
+                        // archive exhaustion; registration makes ContinueLive
+                        // the Resume strategy's exhaustion answer.
+                        if let Some(control) = ctx.runtime_execution.resume_control() {
+                            control.register_infinite_source(self.stage_id);
+                        }
                         let stage_key = ctx.stage_name.as_str();
                         let journal_path = replay_archive
                             .source_data_journal_path(stage_key)
@@ -529,9 +535,81 @@ impl<H: AsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
                                         InfiniteSourceEvent::BeginDrain,
                                     ))
                                 }
-                                // FLOWIP-120n: recorded prefix exhausted; drop the replay
-                                // driver and continue from the live handler.
+                                // FLOWIP-120n handoff: author the catch-up watermark
+                                // behind the recorded outputs (F9), record the recorded
+                                // count and the boundary, then continue from the live
+                                // handler.
                                 crate::execution::SourceReplayExhaustion::ContinueLive => {
+                                    let control = ctx.runtime_execution.resume_control().expect(
+                                        "ContinueLive is only returned by the Resume strategy",
+                                    );
+                                    let (replayed_count, skipped_count) =
+                                        self.replay_driver.as_ref().map_or((0, 0), |d| {
+                                            (d.replayed_events(), d.skipped_events())
+                                        });
+                                    control
+                                        .record_delivered_high_water(self.stage_id, replayed_count);
+                                    let generation = control.resume_generation();
+                                    let marker =
+                                        obzenflow_core::event::ChainEventFactory::catch_up_complete_event(
+                                            WriterId::from(self.stage_id),
+                                            generation,
+                                            obzenflow_core::StageKey::from(
+                                                ctx.stage_name.clone(),
+                                            ),
+                                        );
+                                    emit_batch_to_pending_outputs(
+                                        vec![marker],
+                                        &stage_flow_context,
+                                        &ctx.instrumentation,
+                                        Duration::from_nanos(0),
+                                        observer_scope,
+                                        &mut ctx.pending_outputs,
+                                    );
+                                    self.replay_completion
+                                        .maybe_emit_completed(
+                                            self.stage_id,
+                                            &ctx.stage_name,
+                                            &self.system_journal,
+                                            self.replay_started_at,
+                                            replayed_count,
+                                            skipped_count,
+                                        )
+                                        .await;
+                                    let resumed_live = SystemEvent::new(
+                                        WriterId::from(self.stage_id),
+                                        SystemEventType::ReplayLifecycle(
+                                            ReplayLifecycleEvent::ResumedLive {
+                                                archive_flow_id: ctx
+                                                    .runtime_execution
+                                                    .archive_for_io()
+                                                    .map(|a| a.archive_flow_id().to_string())
+                                                    .unwrap_or_default(),
+                                                replayed_count: obzenflow_core::event::types::Count(
+                                                    replayed_count,
+                                                ),
+                                                generation: generation.0,
+                                            },
+                                        ),
+                                    );
+                                    if let Err(e) =
+                                        self.system_journal.append(resumed_live, None).await
+                                    {
+                                        tracing::error!(
+                                            stage_name = %ctx.stage_name,
+                                            journal_error = %e,
+                                            "Failed to append ReplayLifecycle::ResumedLive system event"
+                                        );
+                                    }
+                                    // The boundary flips source phase, stage scope, and
+                                    // heartbeat to live; late prefix events stay
+                                    // reconstruction-scoped by their in-band generation.
+                                    control.record_generation_boundary(self.stage_id, generation);
+                                    // FLOWIP-120n F12: a hosted ingress surface admits
+                                    // from here on.
+                                    if let Some(slot) = self.handler.hosted_ingress_slot() {
+                                        slot.mark_resume_live();
+                                    }
                                     self.replay_driver = None;
                                     Ok(EventLoopDirective::Continue)
                                 }

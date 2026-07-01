@@ -492,6 +492,18 @@ impl<H: UnifiedStatefulHandler + Send + Sync + 'static> FsmAction for StatefulAc
                                     ctx.stage_name
                                 ))
                             })?;
+                        // FLOWIP-120n F7: register the recorded effect mark so a
+                        // prefix cursor miss fails loud and a live-tail miss runs.
+                        if let Some(control) = ctx.runtime_execution.resume_control() {
+                            if let Some(max) = history.max_recorded_input_seq() {
+                                control.record_effect_high_water(
+                                    ctx.stage_id,
+                                    crate::messaging::upstream_subscription::StageInputPosition(
+                                        max,
+                                    ),
+                                );
+                            }
+                        }
                         ctx.effect_history = Some(Arc::new(history));
                     }
 

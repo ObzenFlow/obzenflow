@@ -548,7 +548,8 @@ impl<H: UnifiedJoinHandler + Clone + Send + Sync + 'static> FsmAction for JoinAc
                     ctx.stage_id,
                     &ctx.stage_name,
                     &flow_context,
-                    ctx.runtime_execution.dispatch_scope(ctx.stage_id, None),
+                    ctx.runtime_execution
+                        .dispatch_scope(ctx.stage_id, None, None),
                     StageLifecyclePhase::Running,
                     &ctx.data_journal,
                     &ctx.instrumentation,
@@ -694,7 +695,8 @@ impl<H: UnifiedJoinHandler + Clone + Send + Sync + 'static> FsmAction for JoinAc
                     ctx.stage_id,
                     &ctx.stage_name,
                     &flow_context,
-                    ctx.runtime_execution.dispatch_scope(ctx.stage_id, None),
+                    ctx.runtime_execution
+                        .dispatch_scope(ctx.stage_id, None, None),
                     StageLifecyclePhase::Completed,
                     &ctx.data_journal,
                     &ctx.instrumentation,
@@ -732,7 +734,8 @@ impl<H: UnifiedJoinHandler + Clone + Send + Sync + 'static> FsmAction for JoinAc
                     ctx.stage_id,
                     &ctx.stage_name,
                     &flow_context,
-                    ctx.runtime_execution.dispatch_scope(ctx.stage_id, None),
+                    ctx.runtime_execution
+                        .dispatch_scope(ctx.stage_id, None, None),
                     StageLifecyclePhase::Failed,
                     &ctx.data_journal,
                     &ctx.instrumentation,

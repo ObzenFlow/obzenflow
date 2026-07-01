@@ -102,12 +102,37 @@ where
         let (is_authored_eof, is_drain) = chain_event
             .map(|chain_event| Self::classify_eof_drain(chain_event, stage_id))
             .unwrap_or((false, false));
+        let catch_up = match chain_event.map(|chain_event| &chain_event.content) {
+            Some(ChainEventContent::FlowControl(FlowControlPayload::CatchUpComplete {
+                generation,
+                stage_key,
+            })) => {
+                // FLOWIP-120n F8: the watermark is re-admitted on replay with
+                // its original-run StageId preserved, so authorship is matched
+                // by the arrival edge's stable stage_key, never by StageId. A
+                // forwarded marker fails loud.
+                if stage_key.as_str() != self.readers[index].stage_key.as_str() {
+                    return Err(JournalError::Implementation {
+                        message: format!(
+                            "catch-up watermark authored by '{}' arrived on edge '{}'; \
+                             markers are authored per edge and never forwarded (FLOWIP-120n F8)",
+                            stage_key.as_str(),
+                            self.readers[index].stage_key.as_str()
+                        ),
+                        source: "forwarded CatchUpComplete marker".into(),
+                    });
+                }
+                Some(*generation)
+            }
+            _ => None,
+        };
         let is_data = chain_event.map(ChainEvent::is_data).unwrap_or(false);
         Ok(ReadStep::Head {
             head: HeldHead {
                 envelope,
                 is_authored_eof,
                 is_drain,
+                catch_up,
             },
             is_data,
         })
@@ -327,11 +352,34 @@ where
             envelope,
             is_authored_eof: is_eof,
             is_drain,
+            catch_up,
         } = head;
         let (stage_id, stage_key) = {
             let slot = &self.readers[reader_index];
             (slot.stage_id, slot.stage_key.clone())
         };
+
+        // FLOWIP-120n: a catch-up watermark delivers at the generation it
+        // closes, then advances its reader to the announced value. The
+        // advance is fail-closed (F11): exactly one, never a regression or a
+        // skip, so a corrupted boundary aborts instead of mis-ordering.
+        let reader_generation = self.generation_by_reader[reader_index];
+        if let Some(announced) = catch_up {
+            if announced.0 != reader_generation.0 + 1 {
+                return PollResult::Error(Box::new(JournalError::Implementation {
+                    message: format!(
+                        "catch-up watermark on edge '{}' announces generation {} from {}; \
+                         the boundary must advance by exactly one (FLOWIP-120n F11)",
+                        stage_key.as_str(),
+                        announced.0,
+                        reader_generation.0
+                    ),
+                    source: "generation boundary regression or skip".into(),
+                }));
+            }
+            self.generation_by_reader[reader_index] = announced;
+        }
+        self.last_delivered_generation = Some(reader_generation);
         let original_chain_event = (&envelope.event as &dyn Any).downcast_ref::<ChainEvent>();
 
         let normalized_contract_event =
@@ -823,8 +871,14 @@ where
         let head = |index: usize| self.held_heads[index].as_ref().expect("candidate has head");
         // Compared as the ordinal the delivery would take, the same key shape
         // the join's cross-side rule uses; counts never enter a comparison.
+        // Generation is the coarsest axis (FLOWIP-120n): every
+        // recorded-generation head orders ahead of any live head, applied
+        // after the causality filter, and same-generation order is
+        // byte-for-byte the (ordinal, key) order it always was. A held
+        // watermark sorts at its reader's current (pre-advance) generation.
         let tiebreak = |index: usize| {
             (
+                self.generation_by_reader[index],
                 self.delivered_count_by_reader[index].next_ordinal(),
                 &self.reader_tiebreak_keys[index],
             )
@@ -870,6 +924,7 @@ where
         let head = self.held_heads.get(index)?.as_ref()?;
         let key = self.reader_tiebreak_keys.get(index)?;
         Some(MergeCandidateMeta {
+            generation: self.generation_by_reader[index],
             ordinal: self.delivered_count_by_reader[index].next_ordinal(),
             key,
             vector_clock: &head.envelope.vector_clock,

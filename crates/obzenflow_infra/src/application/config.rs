@@ -213,6 +213,9 @@ impl ResolvedStartupConfig {
                 obzenflow_runtime::bootstrap::ReplayBootstrap {
                     archive_path: replay.from.clone(),
                     allow_incomplete_archive: replay.allow_incomplete_archive,
+                    // FLOWIP-120n F16: no config surface resolves this yet;
+                    // resume refuses duplicate-prone sinks by default.
+                    allow_duplicate_sink_delivery: false,
                     verb: replay.verb,
                 }
             }),
