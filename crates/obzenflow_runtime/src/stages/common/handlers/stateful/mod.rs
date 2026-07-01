@@ -7,6 +7,6 @@
 pub mod traits;
 pub mod wrapper;
 
+pub use traits::UnifiedStatefulHandler;
 pub use traits::{EffectfulStatefulHandler, EffectfulStatefulHandlerAdapter, StatefulHandler};
-pub use traits::{StatefulOutputContext, UnifiedStatefulHandler};
 pub use wrapper::{StatefulHandlerExt, StatefulHandlerWithEmission};

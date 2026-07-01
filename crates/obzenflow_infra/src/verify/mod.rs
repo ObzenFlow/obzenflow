@@ -46,6 +46,10 @@ use walker::{
 pub struct VerifyOptions {
     /// Cap on recorded divergences per journal; counting continues past it.
     pub max_divergences: usize,
+    /// FLOWIP-095l: max distinct row-contents a content (order-insensitive) walk
+    /// buffers before falling back to a bounded additive-digest verdict. Bounds
+    /// content-certification memory; exact row-level reporting is kept under it.
+    pub content_pinpoint_cap: usize,
     /// Report destination; defaults to
     /// `<candidate-run-dir>/verification/<baseline-flow-id>.json`.
     pub report_path: Option<PathBuf>,
@@ -57,6 +61,7 @@ impl Default for VerifyOptions {
     fn default() -> Self {
         Self {
             max_divergences: 5,
+            content_pinpoint_cap: 100_000,
             report_path: None,
             write_report: true,
         }
@@ -113,6 +118,7 @@ pub fn verify_sources(
             stop_at: None,
             journal_label,
             classification,
+            content_pinpoint_cap: options.content_pinpoint_cap,
         };
 
         let stage_report = match certification {
@@ -722,6 +728,70 @@ mod tests {
         assert_eq!(report.stages["merge"].certification, "none");
         assert!(report.stages["merge"].counts_by_type.is_some());
         assert!(!render_verdict(&outcome).contains(MATCHED_LINE));
+    }
+
+    #[test]
+    fn order_insensitive_over_cap_certifies_and_still_catches_divergence() {
+        // Bounded content certification (FLOWIP-095l): with the pinpoint cap set
+        // below the stage's distinct-content count, the verdict falls back to the
+        // additive digest — which still certifies a reordered-equal match and
+        // still catches a content difference, in bounded memory.
+        let stages: Vec<(&str, &[&str], OrderDecision)> = vec![
+            ("x", &[], Ordered),
+            ("y", &[], Ordered),
+            ("merge", &["x", "y"], OrderInsensitive),
+        ];
+        let bounded = VerifyOptions {
+            content_pinpoint_cap: 1,
+            ..no_write()
+        };
+
+        // Reordered-equal content over the cap -> certified match, exit 0.
+        let baseline = source(
+            manifest(&stages, None, "flow_b"),
+            ArchiveStatus::Completed,
+            &[(
+                "merge.log",
+                vec![data("t", json!({"n": 1})), data("t", json!({"n": 2}))],
+            )],
+            "/runs/b",
+        );
+        let candidate = source(
+            manifest(&stages, replay_block(), "flow_c"),
+            ArchiveStatus::Completed,
+            &[(
+                "merge.log",
+                vec![data("t", json!({"n": 2})), data("t", json!({"n": 1}))],
+            )],
+            "/runs/c",
+        );
+        let outcome = verify_sources(&baseline, &candidate, &bounded).unwrap();
+        assert_eq!(
+            outcome.exit_code(),
+            0,
+            "the bounded digest path certifies a reordered-equal match"
+        );
+        let VerifyOutcome::Completed { report, .. } = &outcome else {
+            panic!()
+        };
+        assert_eq!(report.stages["merge"].certification, "content");
+
+        // A content difference over the cap still diverges, exit 1.
+        let candidate2 = source(
+            manifest(&stages, replay_block(), "flow_c2"),
+            ArchiveStatus::Completed,
+            &[(
+                "merge.log",
+                vec![data("t", json!({"n": 1})), data("t", json!({"n": 3}))],
+            )],
+            "/runs/c2",
+        );
+        let outcome2 = verify_sources(&baseline, &candidate2, &bounded).unwrap();
+        assert_eq!(
+            outcome2.exit_code(),
+            1,
+            "the bounded digest path still catches a content difference"
+        );
     }
 
     #[test]

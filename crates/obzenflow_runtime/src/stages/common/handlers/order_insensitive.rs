@@ -486,35 +486,4 @@ mod tests {
         let words = vec![word_from([Num { value: 1 }])];
         assert_order_insensitive(|| Sum, &words);
     }
-
-    /// Pins the assumption the trial relies on: the supervisor reaches a stateful
-    /// handler through `UnifiedStatefulHandler::{emit_with_context, drain_with_context}`
-    /// while the trial drives `StatefulHandler::{emit, drain}`. These must agree, so a
-    /// future change to the blanket impl that diverges trips here.
-    #[tokio::test]
-    async fn unified_with_context_matches_plain_emit_and_drain() {
-        use crate::stages::common::handlers::UnifiedStatefulHandler;
-        let handler = Sum;
-        let base: u64 = 5;
-
-        let mut s_plain = base;
-        let plain_emit = project_emission(StatefulHandler::emit(&handler, &mut s_plain));
-        let mut s_ctx = base;
-        let unified_emit = project_emission(UnifiedStatefulHandler::emit_with_context(
-            &handler, &mut s_ctx, None,
-        ));
-        assert_eq!(
-            plain_emit, unified_emit,
-            "emit_with_context(None) must equal emit"
-        );
-
-        let plain_drain = project_emission(StatefulHandler::drain(&handler, &base).await);
-        let unified_drain = project_emission(
-            UnifiedStatefulHandler::drain_with_context(&handler, &base, None).await,
-        );
-        assert_eq!(
-            plain_drain, unified_drain,
-            "drain_with_context(None) must equal drain"
-        );
-    }
 }

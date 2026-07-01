@@ -7,22 +7,12 @@
 //! Examples: Aggregators, windowing operations, session tracking
 
 use crate::effects::{EffectInvocationContext, Effects};
-use crate::messaging::upstream_subscription::StageInputPosition;
 use crate::stages::common::handler_error::HandlerError;
 use crate::stages::common::handlers::input_order::InputOrderSemantics;
 use async_trait::async_trait;
 use obzenflow_core::event::schema::{TypedFact, TypedFactSet, TypedFactSetError, TypedPayload};
-use obzenflow_core::{ChainEvent, EventEnvelope, WriterId};
+use obzenflow_core::ChainEvent;
 use std::time::Duration;
-
-#[derive(Clone, Copy)]
-pub struct StatefulOutputContext<'a> {
-    pub writer_id: WriterId,
-    pub parent: &'a EventEnvelope<ChainEvent>,
-    pub recorded_flow_id: &'a str,
-    pub stage_key: &'a str,
-    pub input_seq: StageInputPosition,
-}
 
 /// Handler for stateful processing stages
 ///
@@ -241,27 +231,11 @@ pub trait UnifiedStatefulHandler: Send + Sync {
         self.create_events(state)
     }
 
-    fn emit_with_context(
-        &self,
-        state: &mut Self::State,
-        _output_context: Option<StatefulOutputContext<'_>>,
-    ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
-        self.emit(state)
-    }
-
     async fn drain(
         &self,
         state: &Self::State,
     ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
         self.create_events(state)
-    }
-
-    async fn drain_with_context(
-        &self,
-        state: &Self::State,
-        _output_context: Option<StatefulOutputContext<'_>>,
-    ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
-        self.drain(state).await
     }
 
     fn stage_logic_version(&self) -> &str {
@@ -307,25 +281,9 @@ impl<T: StatefulHandler + Send + Sync> UnifiedStatefulHandler for T {
         StatefulHandler::emit(self, state)
     }
 
-    fn emit_with_context(
-        &self,
-        state: &mut Self::State,
-        _output_context: Option<StatefulOutputContext<'_>>,
-    ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
-        StatefulHandler::emit(self, state)
-    }
-
     async fn drain(
         &self,
         state: &Self::State,
-    ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
-        StatefulHandler::drain(self, state).await
-    }
-
-    async fn drain_with_context(
-        &self,
-        state: &Self::State,
-        _output_context: Option<StatefulOutputContext<'_>>,
     ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
         StatefulHandler::drain(self, state).await
     }
@@ -447,28 +405,10 @@ where
         Ok(Vec::new())
     }
 
-    fn emit_with_context(
-        &self,
-        state: &mut Self::State,
-        _output_context: Option<StatefulOutputContext<'_>>,
-    ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
-        let _ = state;
-        Ok(Vec::new())
-    }
-
     async fn drain(
         &self,
         _state: &Self::State,
     ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
-        Ok(Vec::new())
-    }
-
-    async fn drain_with_context(
-        &self,
-        state: &Self::State,
-        _output_context: Option<StatefulOutputContext<'_>>,
-    ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
-        let _ = state;
         Ok(Vec::new())
     }
 
@@ -509,6 +449,7 @@ fn effectful_stateful_fact_set_error(error: TypedFactSetError) -> HandlerError {
 mod tests {
     use super::*;
     use obzenflow_core::event::ChainEventContent;
+    use obzenflow_core::WriterId;
     use serde::{Deserialize, Serialize};
 
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

@@ -96,6 +96,8 @@ fn main() -> ExitCode {
                 max_divergences: args.max_divergences,
                 report_path: args.report_path,
                 write_report: true,
+                // FLOWIP-095l: keep the default content-certification memory cap.
+                ..VerifyOptions::default()
             };
             match verify_run_dirs(&args.baseline, &args.candidate, &options) {
                 Ok(outcome) => {

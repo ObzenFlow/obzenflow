@@ -7,7 +7,7 @@
 use crate::effects::EffectInvocationContext;
 use crate::messaging::PollResult;
 use crate::metrics::instrumentation::process_with_instrumentation_no_count;
-use crate::stages::common::handlers::{StatefulOutputContext, UnifiedStatefulHandler};
+use crate::stages::common::handlers::UnifiedStatefulHandler;
 use crate::stages::common::heartbeat::HeartbeatProcessingGuard;
 use crate::stages::common::supervision::backpressure_drain::{drain_one_pending, DrainOutcome};
 use crate::stages::common::supervision::control_resolution::{
@@ -656,30 +656,13 @@ pub(super) async fn dispatch_emitting<
     let handler = (*ctx.handler).clone();
     let instrumentation = ctx.instrumentation.clone();
 
-    let output_context =
-        ctx.writer_id
-            .zip(ctx.last_consumed_envelope.as_ref())
-            .map(|(writer_id, parent)| StatefulOutputContext {
-                writer_id,
-                parent,
-                recorded_flow_id: ctx
-                    .effect_history
-                    .as_ref()
-                    .map(|history| history.recorded_flow_id().as_str())
-                    .unwrap_or(flow_id.as_str()),
-                stage_key: &ctx.stage_name,
-                input_seq: ctx.last_input_position.unwrap_or(
-                    crate::messaging::upstream_subscription::StageInputPosition(0),
-                ),
-            });
-
     let emit_result = process_with_instrumentation_no_count(&ctx.instrumentation, || async move {
-        handler
-            .emit_with_context(&mut *current_state, output_context)
-            .map_err(|err| -> Box<dyn std::error::Error + Send + Sync> {
+        handler.emit(&mut *current_state).map_err(
+            |err| -> Box<dyn std::error::Error + Send + Sync> {
                 instrumentation.record_error(err.kind());
                 err.into()
-            })
+            },
+        )
     })
     .await;
 

@@ -47,6 +47,10 @@ pub struct StageWalkOptions {
     pub identity: IdentityMode,
     /// Cap on recorded divergences per journal; counting continues past it.
     pub max_divergences: usize,
+    /// FLOWIP-095l: max distinct row-contents an order-insensitive (content) walk
+    /// buffers before falling back to a bounded additive-digest verdict. Caps
+    /// content-certification memory; exact row-level reporting is kept under it.
+    pub content_pinpoint_cap: usize,
     /// Compare only the first `n` positional rows of each side. Plumbed for
     /// resume-prefix verification (FLOWIP-120n); unset in v1 surfaces.
     pub stop_at: Option<u64>,
@@ -198,63 +202,158 @@ pub fn tally_journal(
     Ok(out)
 }
 
+/// An order-independent (multiset) digest of a stage's projected rows: the
+/// wrapping sum of each row's SHA-256, so equal multisets in any order collapse
+/// to one value and duplicates accumulate (MSet-Add-Hash; Clarke et al. 2003,
+/// Bellare-Micciancio AdHash 1997). XOR is deliberately avoided: `x ^ x == 0`
+/// cancels duplicate pairs, making it a set hash rather than a multiset hash.
+/// This is non-adversarial divergence detection, so it is unkeyed; the ~2^-128
+/// collision bound matches the trust the report's SHA-256 value deltas carry.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct MsetDigest {
+    lanes: [u64; 4],
+    rows: u64,
+}
+
+impl MsetDigest {
+    fn add(&mut self, content: &str) {
+        let digest = ring::digest::digest(&ring::digest::SHA256, content.as_bytes());
+        for (lane, chunk) in self.lanes.iter_mut().zip(digest.as_ref().chunks_exact(8)) {
+            *lane = lane.wrapping_add(u64::from_le_bytes(chunk.try_into().expect("8-byte chunk")));
+        }
+        self.rows += 1;
+    }
+
+    fn hex(&self) -> String {
+        let lanes: String = self
+            .lanes
+            .iter()
+            .map(|lane| format!("{lane:016x}"))
+            .collect();
+        format!("{lanes} ({} rows)", self.rows)
+    }
+}
+
 /// Content-equality walk for an order-insensitive region (FLOWIP-095l): compare
 /// the two journals as multisets of projected rows, tolerating any delivery
-/// reordering the region permits while still certifying content. Positions carry
-/// no meaning here, so a divergence is a row whose occurrence count differs, and
-/// its `position` is the index of that distinct content in sorted order.
+/// reordering the region permits while still certifying content.
 ///
-/// `WholeRun` requires equal counts per content. `BaselinePrefixOfCandidate`
-/// requires the baseline to be a sub-multiset of the candidate: a candidate
-/// deficit diverges, a candidate surplus is informational. Completion evidence
-/// is collected per side and compared by the caller exactly as the positional
-/// walk does.
+/// Memory is bounded, never O(run size). Up to `content_pinpoint_cap` distinct
+/// contents a signed per-content count map gives the exact, row-level result;
+/// beyond it (a high-cardinality order-insensitive stage) the verdict falls back
+/// to an order-independent additive digest, which certifies a match in constant
+/// memory and reports a divergence by per-type counts (the row is in the
+/// journals). Prefix mode (a cancelled baseline, FLOWIP-095k) is compared exactly
+/// with no cap and no digest, since bounding it is deferred to that work; a
+/// cancelled baseline is a truncated prefix, so the exact map stays modest.
+///
+/// `WholeRun` requires equal multisets. `BaselinePrefixOfCandidate` requires the
+/// baseline to be a sub-multiset of the candidate: a candidate deficit diverges,
+/// a candidate surplus is informational. Completion evidence is collected per
+/// side and compared by the caller exactly as the positional walk does.
 pub fn walk_journal_multiset(
     baseline: impl Iterator<Item = Result<ChainEvent, VerifyError>>,
     candidate: impl Iterator<Item = Result<ChainEvent, VerifyError>>,
     opts: &StageWalkOptions,
 ) -> Result<StageWalkOutput, VerifyError> {
     let mut out = StageWalkOutput::default();
-    let mut b_ns = BTreeSet::new();
-    let mut c_ns = BTreeSet::new();
-    let b = tally_multiset(baseline, opts.identity, &mut out.eof_baseline, &mut b_ns)?;
-    let c = tally_multiset(candidate, opts.identity, &mut out.eof_candidate, &mut c_ns)?;
+
+    // `None` = exact/unbounded (prefix); `Some(cap)` = bounded with a digest
+    // fallback (WholeRun). The digest is accumulated only when a cap is set.
+    let cap = match opts.mode {
+        WalkMode::WholeRun => Some(opts.content_pinpoint_cap),
+        WalkMode::BaselinePrefixOfCandidate => None,
+    };
+
+    let mut counts: BTreeMap<String, (u64, u64)> = BTreeMap::new();
+    let mut overflow = false;
+    let mut baseline_digest = MsetDigest::default();
+    let mut candidate_digest = MsetDigest::default();
+    let mut baseline_types: BTreeMap<String, u64> = BTreeMap::new();
+    let mut candidate_types: BTreeMap<String, u64> = BTreeMap::new();
+    let mut baseline_ns = BTreeSet::new();
+    let mut candidate_ns = BTreeSet::new();
+
+    out.positional_baseline = accumulate_side(
+        baseline,
+        opts,
+        cap,
+        true,
+        &mut counts,
+        &mut overflow,
+        &mut baseline_digest,
+        &mut baseline_types,
+        &mut baseline_ns,
+        &mut out.eof_baseline,
+    )?;
+    out.positional_candidate = accumulate_side(
+        candidate,
+        opts,
+        cap,
+        false,
+        &mut counts,
+        &mut overflow,
+        &mut candidate_digest,
+        &mut candidate_types,
+        &mut candidate_ns,
+        &mut out.eof_candidate,
+    )?;
 
     // Lineage parity with the positional walk: under `Lineage`, effect-lane rows
     // minted in disjoint namespaces mean the two runs are unrelated. A barrier-
     // shielded effect can legitimately sit in a content region, so guard here too.
-    if opts.identity == IdentityMode::Lineage
-        && !b_ns.is_empty()
-        && !c_ns.is_empty()
-        && b_ns.is_disjoint(&c_ns)
-    {
-        out.lineage_conflict = Some((
-            b_ns.into_iter().next().unwrap_or_default(),
-            c_ns.into_iter().next().unwrap_or_default(),
-        ));
+    if let Some(conflict) = lineage_conflict(opts.identity, &baseline_ns, &candidate_ns) {
+        out.lineage_conflict = Some(conflict);
         return Ok(out);
     }
 
-    out.positional_baseline = b.values().sum();
-    out.positional_candidate = c.values().sum();
+    if overflow {
+        // WholeRun over the cap: certify or diverge by the additive digest.
+        if baseline_digest != candidate_digest {
+            record_digest_divergence(
+                &mut out,
+                opts,
+                &baseline_digest,
+                &candidate_digest,
+                &baseline_types,
+                &candidate_types,
+            );
+        }
+        return Ok(out);
+    }
 
-    let keys: BTreeSet<&String> = b.keys().chain(c.keys()).collect();
-    for (position, key) in keys.into_iter().enumerate() {
-        let b_count = b.get(key).copied().unwrap_or(0);
-        let c_count = c.get(key).copied().unwrap_or(0);
+    // Exact, row-level. `counts` holds every distinct content with both sides'
+    // multiplicities, so a per-content mismatch is reported precisely.
+    for (position, (content, (baseline_count, candidate_count))) in counts
+        .iter()
+        .filter(|(_, (baseline, candidate))| baseline != candidate)
+        .enumerate()
+    {
         let position = position as u64;
         match opts.mode {
             WalkMode::WholeRun => {
-                if b_count != c_count {
-                    record_multiset_divergence(&mut out, opts, position, key, b_count, c_count);
-                }
+                record_multiset_divergence(
+                    &mut out,
+                    opts,
+                    position,
+                    content,
+                    *baseline_count,
+                    *candidate_count,
+                );
             }
             WalkMode::BaselinePrefixOfCandidate => {
-                if c_count < b_count {
+                if candidate_count < baseline_count {
                     // The baseline must be a sub-multiset of the candidate.
-                    record_multiset_divergence(&mut out, opts, position, key, b_count, c_count);
-                } else if c_count > b_count {
-                    out.candidate_surplus += c_count - b_count;
+                    record_multiset_divergence(
+                        &mut out,
+                        opts,
+                        position,
+                        content,
+                        *baseline_count,
+                        *candidate_count,
+                    );
+                } else {
+                    out.candidate_surplus += candidate_count - baseline_count;
                 }
             }
         }
@@ -262,30 +361,151 @@ pub fn walk_journal_multiset(
     Ok(out)
 }
 
-/// Count projected rows by canonical content, routing completion evidence to
-/// `eof_sink` exactly as the positional walk does.
-fn tally_multiset(
+/// Fold one journal into the shared per-content counts, the side's digest,
+/// per-type counts, namespaces, and completion evidence; return the projected
+/// row total. When `cap` is `Some`, a fresh content beyond the cap trips
+/// `overflow` (and stops admitting new contents) while the digest keeps
+/// accumulating. When `cap` is `None`, the walk is exact and the digest is
+/// skipped.
+#[allow(clippy::too_many_arguments)]
+fn accumulate_side(
     rows: impl Iterator<Item = Result<ChainEvent, VerifyError>>,
-    identity: IdentityMode,
-    eof_sink: &mut Vec<String>,
+    opts: &StageWalkOptions,
+    cap: Option<usize>,
+    is_baseline: bool,
+    counts: &mut BTreeMap<String, (u64, u64)>,
+    overflow: &mut bool,
+    digest: &mut MsetDigest,
+    types: &mut BTreeMap<String, u64>,
     namespaces: &mut BTreeSet<String>,
-) -> Result<BTreeMap<String, u64>, VerifyError> {
-    let mut counts: BTreeMap<String, u64> = BTreeMap::new();
+    eof: &mut Vec<String>,
+) -> Result<u64, VerifyError> {
+    let mut total = 0;
     for event in rows {
         match project(&event?) {
             Some(ProjectedRow::Positional(row)) => {
-                if identity == IdentityMode::Lineage {
+                total += 1;
+                let key = content_key(&row, opts.identity);
+                if cap.is_some() {
+                    digest.add(&key);
+                }
+                *types.entry(type_key(&row)).or_insert(0) += 1;
+                if opts.identity == IdentityMode::Lineage {
                     if let Some(id) = &row.identity {
                         namespaces.insert(id.namespace.clone());
                     }
                 }
-                *counts.entry(content_key(&row, identity)).or_insert(0) += 1;
+                fold_counts(counts, overflow, cap, key, is_baseline);
             }
-            Some(ProjectedRow::EofEvidence(evidence)) => eof_sink.push(evidence.to_string()),
+            Some(ProjectedRow::EofEvidence(evidence)) => eof.push(evidence.to_string()),
             None => {}
         }
     }
-    Ok(counts)
+    Ok(total)
+}
+
+/// Record one row into the capped per-content counts. Trips `overflow` (and stops
+/// admitting new contents) when a fresh content would exceed a set cap.
+fn fold_counts(
+    counts: &mut BTreeMap<String, (u64, u64)>,
+    overflow: &mut bool,
+    cap: Option<usize>,
+    key: String,
+    is_baseline: bool,
+) {
+    if *overflow {
+        return;
+    }
+    if let Some(cap) = cap {
+        if !counts.contains_key(&key) && counts.len() >= cap {
+            *overflow = true;
+            return;
+        }
+    }
+    let entry = counts.entry(key).or_insert((0, 0));
+    if is_baseline {
+        entry.0 += 1;
+    } else {
+        entry.1 += 1;
+    }
+}
+
+/// The event type of a projected row, the granularity of the over-cap advisory.
+fn type_key(row: &PositionalRow) -> String {
+    match &row.kind {
+        RowKind::Data { event_type } => event_type.clone(),
+        RowKind::Watermark => "<watermark>".to_string(),
+    }
+}
+
+/// Under `Lineage`, disjoint non-empty effect namespaces mean unrelated runs.
+fn lineage_conflict(
+    identity: IdentityMode,
+    baseline_ns: &BTreeSet<String>,
+    candidate_ns: &BTreeSet<String>,
+) -> Option<(String, String)> {
+    if identity == IdentityMode::Lineage
+        && !baseline_ns.is_empty()
+        && !candidate_ns.is_empty()
+        && baseline_ns.is_disjoint(candidate_ns)
+    {
+        Some((
+            baseline_ns.iter().next().cloned().unwrap_or_default(),
+            candidate_ns.iter().next().cloned().unwrap_or_default(),
+        ))
+    } else {
+        None
+    }
+}
+
+/// Over-cap divergence report: one entry per event type whose count differs
+/// (bounded by the number of types), or a single digest mismatch when per-type
+/// counts agree but a within-type payload differs (localizable only in the
+/// journals).
+fn record_digest_divergence(
+    out: &mut StageWalkOutput,
+    opts: &StageWalkOptions,
+    baseline_digest: &MsetDigest,
+    candidate_digest: &MsetDigest,
+    baseline_types: &BTreeMap<String, u64>,
+    candidate_types: &BTreeMap<String, u64>,
+) {
+    let types: BTreeSet<&String> = baseline_types
+        .keys()
+        .chain(candidate_types.keys())
+        .collect();
+    let mut any_type_delta = false;
+    for (position, event_type) in types.into_iter().enumerate() {
+        let baseline_count = baseline_types.get(event_type).copied().unwrap_or(0);
+        let candidate_count = candidate_types.get(event_type).copied().unwrap_or(0);
+        if baseline_count != candidate_count {
+            any_type_delta = true;
+            out.divergence_count += 1;
+            if out.divergences.len() < opts.max_divergences {
+                out.divergences.push(DivergenceReport {
+                    journal: opts.journal_label.to_string(),
+                    position: position as u64,
+                    field: "multiset_type_count".to_string(),
+                    baseline: delta_side(&format!("{baseline_count}x {event_type}")),
+                    candidate: delta_side(&format!("{candidate_count}x {event_type}")),
+                    classification: opts.classification.to_string(),
+                });
+            }
+        }
+    }
+    if !any_type_delta {
+        out.divergence_count += 1;
+        if out.divergences.len() < opts.max_divergences {
+            out.divergences.push(DivergenceReport {
+                journal: opts.journal_label.to_string(),
+                position: 0,
+                field: "multiset_digest".to_string(),
+                baseline: delta_side(&baseline_digest.hex()),
+                candidate: delta_side(&candidate_digest.hex()),
+                classification: opts.classification.to_string(),
+            });
+        }
+    }
 }
 
 /// The canonical multiset key for a projected row: the same comparable fields
@@ -440,6 +660,7 @@ mod tests {
             stop_at: None,
             journal_label: "data",
             classification: "unexpected",
+            content_pinpoint_cap: 100_000,
         }
     }
 
@@ -663,5 +884,87 @@ mod tests {
         assert_eq!(out.divergence_count, 0);
         assert_eq!(out.eof_baseline.len(), 1);
         assert_eq!(out.eof_candidate.len(), 1);
+    }
+
+    // ---- FLOWIP-095l: bounded over-cap content certification ----
+
+    fn capped(mode: WalkMode, cap: usize) -> StageWalkOptions {
+        StageWalkOptions {
+            content_pinpoint_cap: cap,
+            ..opts(mode)
+        }
+    }
+
+    #[test]
+    fn mset_digest_counts_multiplicity_unlike_xor() {
+        let mut once = MsetDigest::default();
+        once.add("x");
+        let mut twice = MsetDigest::default();
+        twice.add("x");
+        twice.add("x");
+        // XOR would give h(x) ^ h(x) == 0 == the empty digest; the additive
+        // digest keeps multiplicity, so {x} != {x,x} != {}.
+        assert_ne!(once, twice);
+        assert_ne!(twice, MsetDigest::default());
+    }
+
+    #[test]
+    fn multiset_over_cap_matches_via_digest() {
+        // Two distinct contents exceed cap 1, forcing the digest fallback; the
+        // content is reordered but equal, so it still certifies.
+        let baseline = vec![data("a", json!({"n": 1})), data("a", json!({"n": 2}))];
+        let candidate = vec![data("a", json!({"n": 2})), data("a", json!({"n": 1}))];
+        let out = walk_journal_multiset(
+            ok_rows(baseline),
+            ok_rows(candidate),
+            &capped(WalkMode::WholeRun, 1),
+        )
+        .unwrap();
+        assert_eq!(
+            out.divergence_count, 0,
+            "equal multiset certifies via the additive digest over the cap"
+        );
+    }
+
+    #[test]
+    fn multiset_over_cap_within_type_payload_difference_diverges_via_digest() {
+        // >cap distinct contents, same event type and per-type counts, different
+        // payload: only the digest catches it (the count-only advisory could not).
+        let baseline = vec![
+            data("sum", json!({"total": 316})),
+            data("k", json!({"n": 1})),
+        ];
+        let candidate = vec![
+            data("sum", json!({"total": 999})),
+            data("k", json!({"n": 1})),
+        ];
+        let out = walk_journal_multiset(
+            ok_rows(baseline),
+            ok_rows(candidate),
+            &capped(WalkMode::WholeRun, 1),
+        )
+        .unwrap();
+        assert_eq!(out.divergence_count, 1);
+        assert_eq!(out.divergences[0].field, "multiset_digest");
+    }
+
+    #[test]
+    fn multiset_over_cap_type_count_difference_diverges() {
+        let baseline = vec![
+            data("a", json!({"n": 1})),
+            data("a", json!({"n": 2})),
+            data("a", json!({"n": 2})),
+        ];
+        let candidate = vec![data("a", json!({"n": 1})), data("a", json!({"n": 2}))];
+        let out = walk_journal_multiset(
+            ok_rows(baseline),
+            ok_rows(candidate),
+            &capped(WalkMode::WholeRun, 1),
+        )
+        .unwrap();
+        assert!(out
+            .divergences
+            .iter()
+            .any(|d| d.field == "multiset_type_count"));
     }
 }
