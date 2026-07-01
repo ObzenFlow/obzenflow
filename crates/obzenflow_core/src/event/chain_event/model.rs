@@ -167,6 +167,16 @@ fn is_false(value: &bool) -> bool {
     !*value
 }
 
+/// Source-replay disposition of an event class (FLOWIP-120n).
+/// See [`ChainEvent::replay_disposition`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplayDisposition {
+    /// Source-authored, position-bearing: the `ReplayDriver` re-injects it.
+    ReAdmit,
+    /// Runtime-computed: the re-running stage regenerates it.
+    ReAuthor,
+}
+
 impl ChainEvent {
     /// Attach observability context to any event (wide events pattern)
     pub fn with_observability_context(mut self, observability: ObservabilityContext) -> Self {
@@ -230,29 +240,54 @@ impl ChainEvent {
         matches!(self.content, ChainEventContent::Observability(_))
     }
 
-    /// Whether this event should be re-injected as a fresh source event during
-    /// source replay (FLOWIP-095a). This is the source-replay admission predicate:
-    /// only original source-level data and watermark events are re-injected at the
-    /// top of the flow.
+    /// Source-replay disposition (FLOWIP-120n phase 6). `ReAdmit` rows are
+    /// source-authored and position-bearing; the `ReplayDriver` re-injects them
+    /// in place. `ReAuthor` rows are runtime-computed; re-running stages
+    /// regenerate them. Exhaustive with no wildcard arm, so a new variant fails
+    /// to compile until its disposition is declared.
     ///
-    /// Effect records are deliberately excluded when stored as framework-owned
-    /// `Data` facts with `effect_provenance`. They are re-admitted on replay
-    /// only through the separate persisted-history path, `EffectHistory::load`
-    /// (FLOWIP-120a/120b, in `obzenflow_runtime`), which filters effect records
-    /// inline by cursor.
-    pub fn is_source_replayable(&self) -> bool {
-        matches!(
-            &self.content,
-            ChainEventContent::FlowControl(FlowControlPayload::Watermark { .. })
-        ) || matches!(
-            &self.content,
-            ChainEventContent::Data { event_type, .. }
-                if !(self
+    /// The one data-dependent case: framework-owned effect records ride the
+    /// separate `EffectHistory::load` path, never the source re-injection.
+    pub fn replay_disposition(&self) -> ReplayDisposition {
+        match &self.content {
+            ChainEventContent::Data { event_type, .. } => {
+                let is_framework_effect_record = self
                     .effect_provenance
                     .as_ref()
                     .is_some_and(|provenance| provenance.fact_owner.is_framework())
-                    && is_framework_effect_event_type(event_type))
-        )
+                    && is_framework_effect_event_type(event_type);
+                if is_framework_effect_record {
+                    ReplayDisposition::ReAuthor
+                } else {
+                    ReplayDisposition::ReAdmit
+                }
+            }
+            ChainEventContent::FlowControl(payload) => match payload {
+                // The catch-up boundary's meaning is its stream position, so
+                // it re-admits like Watermark; EOF re-authors because replay
+                // reproduces source exhaustion (FLOWIP-120n F8).
+                FlowControlPayload::Watermark { .. }
+                | FlowControlPayload::CatchUpComplete { .. } => ReplayDisposition::ReAdmit,
+                FlowControlPayload::Eof { .. }
+                | FlowControlPayload::Checkpoint { .. }
+                | FlowControlPayload::Drain
+                | FlowControlPayload::PipelineAbort { .. }
+                | FlowControlPayload::SourceContract { .. }
+                | FlowControlPayload::ConsumptionProgress { .. }
+                | FlowControlPayload::ConsumptionGap { .. }
+                | FlowControlPayload::ConsumptionFinal { .. }
+                | FlowControlPayload::ReaderStalled { .. }
+                | FlowControlPayload::AtLeastOnceViolation { .. } => ReplayDisposition::ReAuthor,
+            },
+            ChainEventContent::Delivery(_) => ReplayDisposition::ReAuthor,
+            ChainEventContent::Observability(_) => ReplayDisposition::ReAuthor,
+        }
+    }
+
+    /// Whether this event should be re-injected as a fresh source event during
+    /// source replay (FLOWIP-095a). Derived from [`Self::replay_disposition`].
+    pub fn is_source_replayable(&self) -> bool {
+        self.replay_disposition() == ReplayDisposition::ReAdmit
     }
 
     /// Mark this event as an error with a structured ErrorKind.
@@ -301,6 +336,7 @@ impl ChainEvent {
             ChainEventContent::FlowControl(signal) => match signal {
                 FlowControlPayload::Eof { .. } => "control.eof".into(),
                 FlowControlPayload::Watermark { .. } => "control.watermark".into(),
+                FlowControlPayload::CatchUpComplete { .. } => "control.catch_up_complete".into(),
                 FlowControlPayload::Checkpoint { .. } => "control.checkpoint".into(),
                 FlowControlPayload::Drain => "control.drain".into(),
                 FlowControlPayload::PipelineAbort { .. } => "control.pipeline_abort".into(),

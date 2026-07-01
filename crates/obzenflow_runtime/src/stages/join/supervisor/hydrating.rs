@@ -3,7 +3,7 @@
 // https://obzenflow.dev
 
 use crate::messaging::PollResult;
-use crate::stages::common::handlers::JoinHandler;
+use crate::stages::common::handlers::UnifiedJoinHandler;
 use crate::stages::common::heartbeat::HeartbeatProcessingGuard;
 use crate::stages::common::supervision::control_resolution::{
     resolve_control_event_awaiting_pauses, ControlAction,
@@ -18,7 +18,7 @@ use super::JoinSupervisor;
 use crate::stages::join::fsm::{JoinContext, JoinEvent, JoinState};
 
 pub(super) async fn dispatch_hydrating<
-    H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
+    H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
 >(
     sup: &mut JoinSupervisor<H>,
     state: &JoinState<H>,
@@ -149,11 +149,18 @@ pub(super) async fn dispatch_hydrating<
                     let _processing = heartbeat_state.as_ref().map(|state| {
                         HeartbeatProcessingGuard::new(state.clone(), upstream_stage, event_id)
                     });
+                    // FLOWIP-120n: per-delivery execution scope, computed at
+                    // dispatch from the delivered position.
+                    let scope = ctx.runtime_execution.dispatch_scope(
+                        ctx.stage_id,
+                        subscription.last_delivered_stage_input_position(),
+                    );
                     let result = ctx.handler.process_event(
                         &mut ctx.handler_state,
                         event,
                         reference_stage_id,
                         writer_id,
+                        scope,
                     );
                     if let Some(state) = &heartbeat_state {
                         state.record_last_consumed(event_id);

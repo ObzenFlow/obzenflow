@@ -3,7 +3,7 @@
 // https://obzenflow.dev
 
 use crate::messaging::upstream_subscription::StageInputPosition;
-use crate::stages::common::handlers::JoinHandler;
+use crate::stages::common::handlers::UnifiedJoinHandler;
 use crate::stages::common::supervision::backpressure_drain::{drain_one_pending, DrainOutcome};
 use crate::stages::common::supervision::flow_context_factory::make_flow_context;
 use crate::stages::common::supervision::forward_control_event::forward_control_event;
@@ -28,7 +28,7 @@ use serde_json::json;
 use super::JoinSupervisor;
 
 pub(super) fn ensure_subscriptions<
-    H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
+    H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
 >(
     sup: &mut JoinSupervisor<H>,
     ctx: &mut JoinContext<H>,
@@ -41,7 +41,7 @@ pub(super) fn ensure_subscriptions<
     }
 }
 
-pub(super) async fn forward_control_event_and_mirror<H: JoinHandler>(
+pub(super) async fn forward_control_event_and_mirror<H: UnifiedJoinHandler>(
     ctx: &JoinContext<H>,
     envelope: &EventEnvelope<ChainEvent>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -62,7 +62,7 @@ pub(super) async fn forward_control_event_and_mirror<H: JoinHandler>(
 }
 
 pub(super) async fn flush_pending_outputs<
-    H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
+    H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
 >(
     sup: &mut JoinSupervisor<H>,
     ctx: &mut JoinContext<H>,
@@ -123,7 +123,7 @@ pub(super) async fn flush_pending_outputs<
     Ok(FlushOutcome::Drained)
 }
 
-pub(super) async fn observe_join_input<H: JoinHandler>(
+pub(super) async fn observe_join_input<H: UnifiedJoinHandler>(
     ctx: &JoinContext<H>,
     input: &ChainEvent,
     delivery: Option<&JoinDeliverySnapshot>,
@@ -157,7 +157,7 @@ pub(super) async fn observe_join_input<H: JoinHandler>(
     .await
 }
 
-pub(super) async fn observe_join_outputs<H: JoinHandler>(
+pub(super) async fn observe_join_outputs<H: UnifiedJoinHandler>(
     ctx: &JoinContext<H>,
     input: Option<&ChainEvent>,
     delivery: Option<&JoinDeliverySnapshot>,
@@ -230,7 +230,7 @@ pub(super) fn signal_snapshot(
     Some(JoinSignalSnapshot { side, signal })
 }
 
-pub(super) fn observe_reference_envelope<H: JoinHandler>(
+pub(super) fn observe_reference_envelope<H: UnifiedJoinHandler>(
     ctx: &mut JoinContext<H>,
     envelope: &EventEnvelope<ChainEvent>,
 ) {
@@ -243,7 +243,7 @@ pub(super) fn observe_reference_envelope<H: JoinHandler>(
 }
 
 fn track_output_event_for_pending_source<
-    H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
+    H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
 >(
     sup: &mut JoinSupervisor<H>,
     ctx: &JoinContext<H>,
@@ -279,7 +279,7 @@ pub(super) enum FlushOutcome {
     DrainCompleteReady,
 }
 
-pub(super) async fn emit_join_heartbeat_if_due<H: JoinHandler + Send + Sync + 'static>(
+pub(super) async fn emit_join_heartbeat_if_due<H: UnifiedJoinHandler + Send + Sync + 'static>(
     ctx: &mut JoinContext<H>,
     stage_id: StageId,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {

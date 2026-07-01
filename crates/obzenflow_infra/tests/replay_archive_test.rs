@@ -50,6 +50,7 @@ fn write_manifest(dir: &Path) {
         flow_name: "test_flow".to_string(),
         created_at: Utc::now(),
         replay: None,
+        resume: None,
         stages,
         system_journal_file: "system.log".to_string(),
     };
@@ -185,6 +186,7 @@ fn write_manifest_with_version(dir: &Path, version: &str) {
         flow_name: "test_flow".to_string(),
         created_at: Utc::now(),
         replay: None,
+        resume: None,
         stages,
         system_journal_file: "system.log".to_string(),
     };

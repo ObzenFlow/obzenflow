@@ -42,6 +42,7 @@ use obzenflow_runtime::{
                 EffectfulSinkHandler, EffectfulStatefulHandler, EffectfulStatefulHandlerAdapter,
                 EffectfulTransformHandler, EffectfulTransformHandlerAdapter, FiniteSourceHandler,
                 InfiniteSourceHandler, JoinHandler, SinkHandler, StatefulHandler, TransformHandler,
+                UnifiedJoinHandler,
             },
             stage_handle::{BoxedStageHandle, StageEvent, FORCE_SHUTDOWN_MESSAGE},
         },
@@ -2710,15 +2711,10 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
         for mw in all_middleware {
             builder = builder.with(mw);
         }
-        // FLOWIP-120a: bind the stage's replay scope so handler-level control
-        // middleware suppresses its side effects during deterministic replay.
-        // FLOWIP-120r: sourced from the runtime execution strategy. The join's
-        // handler scope is stage-independent in 120r (constant per run), so it
-        // stays build-time-static here; FLOWIP-120n adds the per-call
-        // UnifiedJoinHandler seam when the resume predicate makes it positional.
-        let handler_with_middleware = builder
-            .build()
-            .with_execution_scope(resources.runtime_execution.stage_scope(config.stage_id));
+        // FLOWIP-120n: the execution scope is per-delivery, computed by the
+        // join supervisor at dispatch and passed through the
+        // UnifiedJoinHandler seam.
+        let handler_with_middleware = builder.build();
 
         // Extract join-mode configuration from the handler before moving it into the runtime.
         let reference_mode = handler_with_middleware.reference_mode();

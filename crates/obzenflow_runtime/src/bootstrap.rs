@@ -48,6 +48,16 @@ pub enum MetricsExporterKind {
     Noop,
 }
 
+/// The operator's archive verb (FLOWIP-120n): bounded reconstruction that
+/// drains, or catch-up that continues live.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplayVerb {
+    /// `--replay-from`.
+    Replay,
+    /// `--resume-from`.
+    Resume,
+}
+
 /// Replay settings needed to bootstrap a flow from an existing run archive.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReplayBootstrap {
@@ -55,6 +65,8 @@ pub struct ReplayBootstrap {
     pub archive_path: PathBuf,
     /// When true, allow replay from an incomplete archive.
     pub allow_incomplete_archive: bool,
+    /// Which verb selected the archive.
+    pub verb: ReplayVerb,
 }
 
 /// Host-level metrics settings used during flow build and execution.
@@ -311,6 +323,7 @@ mod tests {
                 replay: Some(ReplayBootstrap {
                     archive_path: PathBuf::from("/tmp/archive"),
                     allow_incomplete_archive: true,
+                    verb: ReplayVerb::Replay,
                 }),
                 metrics: MetricsBootstrap {
                     enabled: false,

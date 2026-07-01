@@ -101,7 +101,7 @@ impl<H: UnifiedSinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Su
                 self.resources.liveness_snapshots.clone(),
                 heartbeat_state,
                 heartbeat_config,
-                /* is_replay */ false,
+                self.resources.runtime_execution.clone(),
             ))
         };
 

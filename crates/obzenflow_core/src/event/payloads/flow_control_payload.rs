@@ -7,9 +7,11 @@
 use std::fmt;
 
 use crate::event::types::{
-    Count, DurationMs, EventType, JournalIndex, JournalPath, RouteKey, SeqNo, ViolationCause,
+    Count, DurationMs, EventType, JournalIndex, JournalPath, ReaderGeneration, RouteKey, SeqNo,
+    ViolationCause,
 };
 use crate::event::vector_clock::VectorClock;
+use crate::id::StageKey;
 use crate::StageId;
 use crate::WriterId;
 use serde::de::{self, Visitor};
@@ -177,6 +179,19 @@ pub enum FlowControlPayload {
         stage_id: Option<WatermarkStageId>,
     },
 
+    /// Catch-up watermark (FLOWIP-120n): the recorded-generation boundary on
+    /// one edge, authored EOF one notch weaker. Authored by a stage into its
+    /// own output once its recorded input is finished; never forwarded.
+    /// `stage_key` is the author's replay-stable key, matched fail-closed at
+    /// the arrival edge (never the per-run `StageId`); `generation` is the
+    /// depth being entered, so re-admitted boundaries stack on a resume of a
+    /// resume.
+    #[serde(rename = "catch_up_complete")]
+    CatchUpComplete {
+        generation: ReaderGeneration,
+        stage_key: StageKey,
+    },
+
     /// Checkpoint for fault tolerance
     #[serde(rename = "checkpoint")]
     Checkpoint {
@@ -317,6 +332,7 @@ impl FlowControlPayload {
             | Self::AtLeastOnceViolation { .. } => true,
             Self::Eof { .. }
             | Self::Watermark { .. }
+            | Self::CatchUpComplete { .. }
             | Self::Checkpoint { .. }
             | Self::Drain
             | Self::PipelineAbort { .. }

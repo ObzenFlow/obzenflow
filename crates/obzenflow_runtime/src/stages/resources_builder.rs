@@ -347,6 +347,20 @@ impl StageResourcesBuilder {
 
         let liveness_snapshots = LivenessSnapshots::new();
 
+        // FLOWIP-120r/120n: the one strategy-selection point, constructed once
+        // per flow and cloned per stage. Per-stage construction would fork the
+        // shared `ResumeState` and every frontier write would be lost.
+        let runtime_mode = match (
+            &self.replay_archive,
+            crate::bootstrap::bootstrap_config().replay.map(|r| r.verb),
+        ) {
+            (None, _) => RuntimeMode::Live,
+            (Some(_), Some(crate::bootstrap::ReplayVerb::Resume)) => RuntimeMode::Resume,
+            (Some(_), _) => RuntimeMode::Replay,
+        };
+        let flow_runtime_execution =
+            RuntimeExecution::new(runtime_mode, self.replay_archive.clone());
+
         // Build stage resources for each stage
         let mut stage_resources = HashMap::new();
 
@@ -509,17 +523,7 @@ impl StageResourcesBuilder {
                     ReaderSelectionPolicy::CanonicalMerge;
             }
 
-            // FLOWIP-120r: the one strategy-selection point. In 120r the verb is
-            // exactly archive-presence (replay iff `--replay-from` opened an
-            // archive); 120n threads an explicit verb to distinguish resume.
-            let runtime_execution = RuntimeExecution::new(
-                if self.replay_archive.is_some() {
-                    RuntimeMode::Replay
-                } else {
-                    RuntimeMode::Live
-                },
-                self.replay_archive.clone(),
-            );
+            let runtime_execution = flow_runtime_execution.clone();
 
             let resources = StageResources {
                 flow_id: self.flow_id,

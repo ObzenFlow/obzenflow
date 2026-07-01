@@ -6,7 +6,9 @@ use crate::env::{env_bool, env_var};
 use clap::{ArgAction, Parser, ValueEnum};
 use obzenflow_core::journal::RUN_MANIFEST_FILENAME;
 use obzenflow_core::web::AuthPolicy;
-use obzenflow_runtime::bootstrap::{BootstrapConfig, MetricsBootstrap, MetricsExporterKind};
+use obzenflow_runtime::bootstrap::{
+    BootstrapConfig, MetricsBootstrap, MetricsExporterKind, ReplayVerb,
+};
 use serde::Deserialize;
 use std::fmt::{Display, Formatter};
 use std::path::{Path, PathBuf};
@@ -131,6 +133,14 @@ pub struct FlowConfig {
     #[arg(long)]
     pub replay_from: Option<PathBuf>,
 
+    /// Resume a recorded run: catch up on the archive with effects suppressed,
+    /// then continue live from the recorded high-water mark (FLOWIP-120n).
+    ///
+    /// The path must be the exact run directory containing `run_manifest.json`.
+    /// Mutually exclusive with `--replay-from`.
+    #[arg(long, conflicts_with = "replay_from")]
+    pub resume_from: Option<PathBuf>,
+
     /// Allow replaying from incomplete archives (failed/unknown/missing system.log).
     ///
     /// This is intended for debugging; outputs may be partial and not suitable for regression comparison.
@@ -185,6 +195,9 @@ pub(crate) struct ResolvedReplayConfig {
     pub allow_incomplete_archive: bool,
     /// FLOWIP-095j: verify the replay output against `from` after completion.
     pub verify: bool,
+    /// FLOWIP-120n: which verb selected the archive (replay drains, resume
+    /// continues live).
+    pub verb: ReplayVerb,
 }
 
 impl ResolvedStartupConfig {
@@ -200,6 +213,7 @@ impl ResolvedStartupConfig {
                 obzenflow_runtime::bootstrap::ReplayBootstrap {
                     archive_path: replay.from.clone(),
                     allow_incomplete_archive: replay.allow_incomplete_archive,
+                    verb: replay.verb,
                 }
             }),
             metrics: MetricsBootstrap {
@@ -311,6 +325,7 @@ struct RawFileMetricsConfig {
 #[serde(default, deny_unknown_fields)]
 struct RawFileReplayConfig {
     from: Option<PathBuf>,
+    resume_from: Option<PathBuf>,
     allow_incomplete_archive: Option<bool>,
     verify: Option<bool>,
 }
@@ -493,18 +508,47 @@ impl FlowConfig {
             parse_env_bool("OBZENFLOW_REPLAY_VERIFY", "replay.verify")?,
             false,
         );
-        let replay = replay_from.map(|from| ResolvedReplayConfig {
-            from,
-            allow_incomplete_archive,
-            verify,
-        });
+        let resume_from = resolve_optional(
+            self.resume_from,
+            file.replay.resume_from,
+            parse_env_path("OBZENFLOW_RESUME_FROM", "replay.resume_from")?,
+        );
+        if replay_from.is_some() && resume_from.is_some() {
+            return Err(ConfigError::at(
+                "replay.resume_from",
+                "mutually exclusive with replay.from",
+            ));
+        }
+        if verify && resume_from.is_some() {
+            return Err(ConfigError::at(
+                "replay.verify",
+                "requires replay.from; a resume continues live and cannot be verified as a bounded replay",
+            ));
+        }
+
+        let replay = match (replay_from, resume_from) {
+            (Some(from), None) => Some(ResolvedReplayConfig {
+                from,
+                allow_incomplete_archive,
+                verify,
+                verb: ReplayVerb::Replay,
+            }),
+            (None, Some(from)) => Some(ResolvedReplayConfig {
+                from,
+                allow_incomplete_archive,
+                verify: false,
+                verb: ReplayVerb::Resume,
+            }),
+            (None, None) => None,
+            (Some(_), Some(_)) => unreachable!("rejected above"),
+        };
 
         if let Some(replay) = &replay {
             validate_replay(replay)?;
         } else if allow_incomplete_archive {
             return Err(ConfigError::at(
                 "replay.allow_incomplete_archive",
-                "cannot be true without replay.from",
+                "cannot be true without replay.from or replay.resume_from",
             ));
         } else if verify {
             return Err(ConfigError::at(
@@ -898,6 +942,99 @@ enabled = true
         assert_eq!(
             err.to_string(),
             "config error at replay.from: must be a directory: /tmp/missing"
+        );
+    }
+
+    /// A directory that passes `validate_replay`: exists and holds a manifest.
+    fn fake_archive_dir(tempdir: &tempfile::TempDir, name: &str) -> PathBuf {
+        let archive = tempdir.path().join(name);
+        fs::create_dir(&archive).unwrap();
+        fs::write(archive.join(RUN_MANIFEST_FILENAME), "{}").unwrap();
+        archive
+    }
+
+    #[test]
+    fn resume_from_resolves_to_the_resume_verb() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let archive = fake_archive_dir(&tempdir, "archive");
+
+        let cli =
+            FlowConfig::try_parse_from(["obzenflow", "--resume-from", archive.to_str().unwrap()])
+                .unwrap();
+        let resolved = cli.resolve(None, false).unwrap();
+        let replay = resolved.replay.expect("resume resolves a replay config");
+        assert_eq!(replay.verb, ReplayVerb::Resume);
+        assert_eq!(replay.from, archive);
+        assert!(!replay.verify);
+    }
+
+    #[test]
+    fn replay_from_keeps_the_replay_verb() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let archive = fake_archive_dir(&tempdir, "archive");
+
+        let cli =
+            FlowConfig::try_parse_from(["obzenflow", "--replay-from", archive.to_str().unwrap()])
+                .unwrap();
+        let resolved = cli.resolve(None, false).unwrap();
+        let replay = resolved.replay.expect("replay resolves a replay config");
+        assert_eq!(replay.verb, ReplayVerb::Replay);
+        assert_eq!(replay.from, archive);
+    }
+
+    #[test]
+    fn replay_from_and_resume_from_conflict_at_the_cli() {
+        let err = FlowConfig::try_parse_from([
+            "obzenflow",
+            "--replay-from",
+            "/tmp/a",
+            "--resume-from",
+            "/tmp/b",
+        ])
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("cannot be used with"),
+            "clap must reject the verb pair: {err}"
+        );
+    }
+
+    #[test]
+    fn file_resume_from_conflicts_with_cli_replay_from_at_resolve() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let config_path = tempdir.path().join("obzenflow.toml");
+        fs::write(
+            &config_path,
+            r#"
+[replay]
+resume_from = "/tmp/recorded"
+"#,
+        )
+        .unwrap();
+
+        let cli = FlowConfig::try_parse_from([
+            "obzenflow",
+            "--config",
+            config_path.to_str().unwrap(),
+            "--replay-from",
+            "/tmp/other",
+        ])
+        .unwrap();
+        let err = cli.resolve(None, false).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "config error at replay.resume_from: mutually exclusive with replay.from"
+        );
+    }
+
+    #[test]
+    fn verify_with_resume_from_errors_at_resolve() {
+        let cli =
+            FlowConfig::try_parse_from(["obzenflow", "--resume-from", "/tmp/recorded", "--verify"])
+                .unwrap();
+        let err = cli.resolve(None, false).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "config error at replay.verify: requires replay.from; a resume continues live and cannot be verified as a bounded replay"
         );
     }
 

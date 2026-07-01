@@ -2,8 +2,9 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
+use crate::messaging::upstream_subscription::StageInputPosition;
 use crate::messaging::PollResult;
-use crate::stages::common::handlers::JoinHandler;
+use crate::stages::common::handlers::UnifiedJoinHandler;
 use crate::stages::common::heartbeat::HeartbeatProcessingGuard;
 use crate::stages::common::supervision::backpressure_drain::{drain_one_pending, DrainOutcome};
 use crate::stages::common::supervision::control_resolution::{
@@ -26,7 +27,7 @@ use super::JoinSupervisor;
 use crate::stages::join::fsm::{JoinContext, JoinEvent};
 
 pub(super) async fn dispatch_live<
-    H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
+    H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
 >(
     sup: &mut JoinSupervisor<H>,
     ctx: &mut JoinContext<H>,
@@ -99,7 +100,9 @@ pub(super) async fn dispatch_live<
     Ok(EventLoopDirective::Continue)
 }
 
-async fn poll_live_reference<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static>(
+async fn poll_live_reference<
+    H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
+>(
     sup: &mut JoinSupervisor<H>,
     ctx: &mut JoinContext<H>,
 ) -> Result<Option<EventLoopDirective<JoinEvent<H>>>, Box<dyn std::error::Error + Send + Sync>> {
@@ -124,7 +127,7 @@ async fn poll_live_reference<H: JoinHandler + Clone + std::fmt::Debug + Send + S
 /// Handle one delivered reference-side envelope (extracted from the poll path
 /// so the FLOWIP-095d canonical dispatch can deliver through the same code).
 async fn handle_reference_envelope<
-    H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
+    H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
 >(
     sup: &mut JoinSupervisor<H>,
     ctx: &mut JoinContext<H>,
@@ -272,11 +275,20 @@ async fn handle_reference_envelope<
             let _processing = heartbeat_state.as_ref().map(|state| {
                 HeartbeatProcessingGuard::new(state.clone(), Some(source_id), event_id)
             });
+            // FLOWIP-120n: per-delivery execution scope, computed at dispatch
+            // from the delivered position.
+            let scope = ctx.runtime_execution.dispatch_scope(
+                ctx.stage_id,
+                Some(StageInputPosition(
+                    delivery_snapshot.delivered_stage_input_position,
+                )),
+            );
             let result = ctx.handler.process_event(
                 &mut ctx.handler_state,
                 event.clone(),
                 source_id,
                 writer_id,
+                scope,
             );
             if let Some(state) = &heartbeat_state {
                 state.record_last_consumed(event_id);
@@ -371,7 +383,9 @@ async fn handle_reference_envelope<
     Ok(directive)
 }
 
-async fn poll_live_stream<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static>(
+async fn poll_live_stream<
+    H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
+>(
     sup: &mut JoinSupervisor<H>,
     ctx: &mut JoinContext<H>,
 ) -> Result<Option<EventLoopDirective<JoinEvent<H>>>, Box<dyn std::error::Error + Send + Sync>> {
@@ -396,7 +410,7 @@ async fn poll_live_stream<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync
 /// Handle one delivered stream-side envelope (extracted from the poll path so
 /// the FLOWIP-095d canonical dispatch can deliver through the same code).
 async fn handle_stream_envelope<
-    H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
+    H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
 >(
     sup: &mut JoinSupervisor<H>,
     ctx: &mut JoinContext<H>,
@@ -568,11 +582,20 @@ async fn handle_stream_envelope<
             let _processing = heartbeat_state.as_ref().map(|state| {
                 HeartbeatProcessingGuard::new(state.clone(), Some(source_id), event_id)
             });
+            // FLOWIP-120n: per-delivery execution scope, computed at dispatch
+            // from the delivered position.
+            let scope = ctx.runtime_execution.dispatch_scope(
+                ctx.stage_id,
+                Some(StageInputPosition(
+                    delivery_snapshot.delivered_stage_input_position,
+                )),
+            );
             let result = ctx.handler.process_event(
                 &mut ctx.handler_state,
                 event.clone(),
                 source_id,
                 writer_id,
+                scope,
             );
             if let Some(state) = &heartbeat_state {
                 state.record_last_consumed(event_id);
@@ -705,7 +728,7 @@ pub(crate) fn select_between(
 /// Run the periodic contract ticks for both join sides (the idle-path block
 /// shared by the unordered and canonical dispatchers).
 async fn run_live_contract_ticks<
-    H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
+    H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
 >(
     sup: &mut JoinSupervisor<H>,
     ctx: &mut JoinContext<H>,
@@ -739,7 +762,7 @@ async fn run_live_contract_ticks<
 /// the final tiebreak component. Any quiet side blocks delivery (the Kahn
 /// discipline), reported through the heartbeat as idle-by-rule.
 async fn dispatch_live_canonical<
-    H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
+    H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
 >(
     sup: &mut JoinSupervisor<H>,
     ctx: &mut JoinContext<H>,
@@ -891,7 +914,7 @@ async fn dispatch_live_canonical<
     Ok(directive.unwrap_or(EventLoopDirective::Continue))
 }
 
-async fn write_stage_outputs_and_ack<H: JoinHandler>(
+async fn write_stage_outputs_and_ack<H: UnifiedJoinHandler>(
     subscription: &mut crate::messaging::UpstreamSubscription<ChainEvent>,
     ctx: &mut JoinContext<H>,
     source_id: obzenflow_core::StageId,
@@ -914,8 +937,11 @@ async fn write_stage_outputs_and_ack<H: JoinHandler>(
         StageType::Join,
     );
 
-    // FLOWIP-120r: freeze the join's execution scope onto each deferred output.
-    let scope = ctx.runtime_execution.stage_scope(ctx.stage_id);
+    // FLOWIP-120n: freeze the position-derived execution scope onto each deferred output.
+    let scope = ctx.runtime_execution.dispatch_scope(
+        ctx.stage_id,
+        subscription.last_delivered_stage_input_position(),
+    );
     let mut outputs: VecDeque<
         crate::stages::common::supervision::backpressure_drain::PendingOutput,
     > = outputs

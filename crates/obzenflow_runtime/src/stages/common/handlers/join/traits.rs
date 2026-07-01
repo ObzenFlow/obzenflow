@@ -113,3 +113,89 @@ pub trait JoinHandler: Send + Sync + Clone {
         Ok(vec![])
     }
 }
+
+/// Unified join surface used by the join stage supervisor.
+///
+/// `process_event` takes the per-delivery middleware execution scope computed
+/// by the supervisor at dispatch (FLOWIP-120n); handlers without middleware
+/// ignore it.
+#[doc(hidden)]
+#[async_trait]
+pub trait UnifiedJoinHandler: Send + Sync {
+    type State: Clone + Send + Sync;
+
+    fn initial_state(&self) -> Self::State;
+
+    fn process_event(
+        &self,
+        state: &mut Self::State,
+        event: ChainEvent,
+        source_id: StageId,
+        writer_id: WriterId,
+        scope: obzenflow_core::MiddlewareExecutionScope,
+    ) -> std::result::Result<Vec<ChainEvent>, HandlerError>;
+
+    fn reference_mode(&self) -> JoinReferenceMode {
+        JoinReferenceMode::FiniteEof
+    }
+
+    fn reference_batch_cap(&self) -> Option<usize> {
+        Some(DEFAULT_REFERENCE_BATCH_CAP)
+    }
+
+    fn on_source_eof(
+        &self,
+        state: &mut Self::State,
+        source_id: StageId,
+        writer_id: WriterId,
+    ) -> std::result::Result<Vec<ChainEvent>, HandlerError>;
+
+    async fn drain(
+        &self,
+        state: &Self::State,
+    ) -> std::result::Result<Vec<ChainEvent>, HandlerError>;
+}
+
+#[async_trait]
+impl<T: JoinHandler> UnifiedJoinHandler for T {
+    type State = T::State;
+
+    fn initial_state(&self) -> Self::State {
+        JoinHandler::initial_state(self)
+    }
+
+    fn process_event(
+        &self,
+        state: &mut Self::State,
+        event: ChainEvent,
+        source_id: StageId,
+        writer_id: WriterId,
+        _scope: obzenflow_core::MiddlewareExecutionScope,
+    ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
+        JoinHandler::process_event(self, state, event, source_id, writer_id)
+    }
+
+    fn reference_mode(&self) -> JoinReferenceMode {
+        JoinHandler::reference_mode(self)
+    }
+
+    fn reference_batch_cap(&self) -> Option<usize> {
+        JoinHandler::reference_batch_cap(self)
+    }
+
+    fn on_source_eof(
+        &self,
+        state: &mut Self::State,
+        source_id: StageId,
+        writer_id: WriterId,
+    ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
+        JoinHandler::on_source_eof(self, state, source_id, writer_id)
+    }
+
+    async fn drain(
+        &self,
+        state: &Self::State,
+    ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
+        JoinHandler::drain(self, state).await
+    }
+}

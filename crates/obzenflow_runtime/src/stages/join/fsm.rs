@@ -30,7 +30,7 @@ use crate::messaging::upstream_subscription::{ContractConfig, ContractsWiring, R
 use crate::messaging::UpstreamSubscription;
 use crate::metrics::instrumentation::StageInstrumentation;
 use crate::stages::common::backpressure_activity_pulse::BackpressureActivityPulse;
-use crate::stages::common::handlers::JoinHandler;
+use crate::stages::common::handlers::UnifiedJoinHandler;
 use crate::stages::common::heartbeat::HeartbeatHandle;
 use crate::stages::common::supervision::lifecycle_actions;
 use crate::stages::observer::dispatch::run_stage_lifecycle_observers;
@@ -278,7 +278,7 @@ pub(crate) enum PendingTransition {
 }
 
 /// Context for join handlers - contains everything actions need
-pub struct JoinContext<H: JoinHandler> {
+pub struct JoinContext<H: UnifiedJoinHandler> {
     /// The handler instance (immutable, wrapped in Arc like StatefulContext)
     pub handler: Arc<H>,
 
@@ -419,14 +419,14 @@ pub struct JoinContext<H: JoinHandler> {
     pub(crate) deterministic_fan_in: bool,
 }
 
-impl<H: JoinHandler + 'static> FsmContext for JoinContext<H> {}
+impl<H: UnifiedJoinHandler + 'static> FsmContext for JoinContext<H> {}
 
 // ============================================================================
 // FSM Action Implementation
 // ============================================================================
 
 #[async_trait::async_trait]
-impl<H: JoinHandler + Send + Sync + 'static> FsmAction for JoinAction<H> {
+impl<H: UnifiedJoinHandler + Clone + Send + Sync + 'static> FsmAction for JoinAction<H> {
     type Context = JoinContext<H>;
 
     async fn execute(&self, ctx: &mut Self::Context) -> Result<(), obzenflow_fsm::FsmError> {

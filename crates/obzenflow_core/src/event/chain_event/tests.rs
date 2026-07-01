@@ -95,6 +95,47 @@ fn correlation_serializes_as_single_context_field() {
 }
 
 #[test]
+fn catch_up_complete_round_trips_and_classifies_re_admit() {
+    use crate::event::payloads::flow_control_payload::FlowControlPayload;
+    use crate::event::types::ReaderGeneration;
+    use crate::id::StageKey;
+
+    let payload = FlowControlPayload::CatchUpComplete {
+        generation: ReaderGeneration(1),
+        stage_key: StageKey("tx_source".into()),
+    };
+    assert!(!payload.is_reader_telemetry());
+
+    let json = serde_json::to_value(&payload).expect("payload should serialize");
+    assert_eq!(json["flow_control_type"], "catch_up_complete");
+    let back: FlowControlPayload =
+        serde_json::from_value(json).expect("payload should deserialize");
+    match back {
+        FlowControlPayload::CatchUpComplete {
+            generation,
+            stage_key,
+        } => {
+            assert_eq!(generation, ReaderGeneration(1));
+            assert_eq!(stage_key.as_str(), "tx_source");
+        }
+        other => panic!("expected CatchUpComplete, got {other:?}"),
+    }
+
+    let writer_id = WriterId::from(StageId::new());
+    let event = ChainEventFactory::source_event(
+        writer_id,
+        "tx_source",
+        ChainEventContent::FlowControl(FlowControlPayload::CatchUpComplete {
+            generation: ReaderGeneration(1),
+            stage_key: StageKey("tx_source".into()),
+        }),
+    );
+    assert_eq!(event.event_type(), "control.catch_up_complete");
+    assert_eq!(event.replay_disposition(), ReplayDisposition::ReAdmit);
+    assert!(event.is_source_replayable());
+}
+
+#[test]
 fn test_flow_signals() {
     let writer_id = WriterId::from(StageId::new());
 

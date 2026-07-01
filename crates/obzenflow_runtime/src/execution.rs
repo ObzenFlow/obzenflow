@@ -14,10 +14,11 @@
 //! `Resume` strategy (continue-live, position-based) plus a `ResumeControl`
 //! handle, without changing the read-only query trait below.
 
-use std::sync::Arc;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex};
 
 use obzenflow_core::journal::ArchiveStatus;
-use obzenflow_core::{MiddlewareExecutionScope, StageId};
+use obzenflow_core::{MiddlewareExecutionScope, ReaderGeneration, StageId};
 
 use crate::messaging::upstream_subscription::StageInputPosition;
 use crate::replay::ReplayArchive;
@@ -33,6 +34,9 @@ pub enum RuntimeMode {
     Live,
     /// `--replay-from`: reconstruct a bounded recording and drain at its end.
     Replay,
+    /// `--resume-from`: catch up on the recording, then continue live from the
+    /// recorded high-water mark (FLOWIP-120n).
+    Resume,
 }
 
 /// A positioned point of execution: a stage plus the merged delivery rank of
@@ -84,12 +88,14 @@ pub enum SourceReplayExhaustion {
     ContinueLive,
 }
 
-/// Whether a stage's heartbeat task should run. FLOWIP-120n adds
-/// `DormantUntilLive` for per-stage resume activation.
+/// Whether a stage's heartbeat task should run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HeartbeatExecutionPolicy {
     Active,
     Suppressed,
+    /// Resume catch-up: spawn the task but emit nothing until the stage's
+    /// frontier crosses to live (FLOWIP-120n). The runner re-queries per tick.
+    DormantUntilLive,
 }
 
 /// One implementation per run mode. These impls are the only place the
@@ -185,6 +191,142 @@ impl ExecutionStrategy for Replay {
     }
 }
 
+/// Shared state of a resume run (FLOWIP-120n). Owned jointly by the `Resume`
+/// strategy (reads) and the [`ResumeControl`] handle (writes), so the
+/// read-only [`ExecutionStrategy`] trait stays read-only.
+///
+/// The per-stage frontier generation starts at 0 (recorded) and advances to
+/// the announced value when the stage's catch-up watermark is delivered; a
+/// stage is live once its frontier reaches `resume_generation`.
+#[derive(Debug)]
+pub struct ResumeState {
+    resume_generation: ReaderGeneration,
+    frontier_by_stage: Mutex<HashMap<StageId, ReaderGeneration>>,
+    /// Sources registered as infinite at build; only these continue live at
+    /// archive exhaustion. A finite source under resume behaves as replay.
+    infinite_sources: Mutex<HashSet<StageId>>,
+}
+
+impl ResumeState {
+    fn new(resume_generation: ReaderGeneration) -> Self {
+        Self {
+            resume_generation,
+            frontier_by_stage: Mutex::new(HashMap::new()),
+            infinite_sources: Mutex::new(HashSet::new()),
+        }
+    }
+
+    fn frontier(&self, stage: StageId) -> ReaderGeneration {
+        self.frontier_by_stage
+            .lock()
+            .expect("resume frontier lock poisoned")
+            .get(&stage)
+            .copied()
+            .unwrap_or_default()
+    }
+
+    fn stage_is_live(&self, stage: StageId) -> bool {
+        self.frontier(stage) >= self.resume_generation
+    }
+
+    fn is_infinite_source(&self, stage: StageId) -> bool {
+        self.infinite_sources
+            .lock()
+            .expect("resume source registry lock poisoned")
+            .contains(&stage)
+    }
+}
+
+/// Write handle for resume state. Supervisors record a stage's generation
+/// boundary through this when the merge delivers its catch-up watermark, and
+/// source builders register infinite sources at build.
+#[derive(Debug, Clone)]
+pub struct ResumeControl(Arc<ResumeState>);
+
+impl ResumeControl {
+    /// The generation this resume run enters (max recorded + 1).
+    pub fn resume_generation(&self) -> ReaderGeneration {
+        self.0.resume_generation
+    }
+
+    /// Advance a stage's frontier to `generation`. Monotonic: a stale write
+    /// never regresses the frontier.
+    pub fn record_generation_boundary(&self, stage: StageId, generation: ReaderGeneration) {
+        let mut frontier = self
+            .0
+            .frontier_by_stage
+            .lock()
+            .expect("resume frontier lock poisoned");
+        let entry = frontier.entry(stage).or_default();
+        if generation > *entry {
+            *entry = generation;
+        }
+    }
+
+    /// Register a source as infinite, making `ContinueLive` its exhaustion
+    /// answer.
+    pub fn register_infinite_source(&self, stage: StageId) {
+        self.0
+            .infinite_sources
+            .lock()
+            .expect("resume source registry lock poisoned")
+            .insert(stage);
+    }
+}
+
+/// Catch-up reconstruction that continues live from the recorded high-water
+/// mark (FLOWIP-120n). Reconstruction scope is `ResumeHandler`, the lenient
+/// mode: the common resume input is a `Cancelled` SIGINT archive whose tail
+/// may be torn.
+///
+/// Until FLOWIP-120n's dispatch carries a per-event generation, both scope
+/// queries answer from the per-stage frontier; the per-event comparison lands
+/// with the generation field on [`ExecutionPosition`].
+#[derive(Debug)]
+struct Resume {
+    state: Arc<ResumeState>,
+}
+
+impl ExecutionStrategy for Resume {
+    fn scope_at(&self, at: ExecutionPosition) -> MiddlewareExecutionScope {
+        self.stage_scope(at.stage_id)
+    }
+    fn stage_scope(&self, stage: StageId) -> MiddlewareExecutionScope {
+        if self.state.stage_is_live(stage) {
+            MiddlewareExecutionScope::LiveHandler
+        } else {
+            MiddlewareExecutionScope::ResumeHandler
+        }
+    }
+    fn missing_outcome_is_corruption(&self, _at: ExecutionPosition) -> bool {
+        // Positional comparison against the recorded high-water mark lands
+        // with the recorded-mark state (F7): within the recorded range a miss
+        // is a torn prefix, beyond it a live call. Lenient until then.
+        false
+    }
+    fn source_phase_for(&self, stage: StageId) -> SourceExecutionPhase {
+        if self.state.stage_is_live(stage) {
+            SourceExecutionPhase::Live
+        } else {
+            SourceExecutionPhase::Replaying
+        }
+    }
+    fn source_replay_exhausted(&self, stage: StageId) -> SourceReplayExhaustion {
+        if self.state.is_infinite_source(stage) {
+            SourceReplayExhaustion::ContinueLive
+        } else {
+            SourceReplayExhaustion::Terminate
+        }
+    }
+    fn heartbeat_policy_for(&self, stage: StageId) -> HeartbeatExecutionPolicy {
+        if self.state.stage_is_live(stage) {
+            HeartbeatExecutionPolicy::Active
+        } else {
+            HeartbeatExecutionPolicy::DormantUntilLive
+        }
+    }
+}
+
 /// A sealed archive is a finished recording: a missing recorded outcome in it
 /// is genuine corruption. An archive that is neither completed nor cancelled is
 /// only ever reconstructed leniently, and then only under
@@ -210,6 +352,8 @@ fn replay_incomplete(status: ArchiveStatus, allow_incomplete: bool) -> bool {
 pub struct RuntimeExecution {
     strategy: Arc<dyn ExecutionStrategy>,
     archive: Option<Arc<dyn ReplayArchive>>,
+    /// Present only under `RuntimeMode::Resume` (FLOWIP-120n).
+    resume: Option<ResumeControl>,
 }
 
 impl std::fmt::Debug for RuntimeExecution {
@@ -229,6 +373,7 @@ impl RuntimeExecution {
     /// status is read exactly once here, only to set `Replay`'s `incomplete`
     /// flag. FLOWIP-120n adds the `RuntimeMode::Resume` arm and its strategy.
     pub fn new(mode: RuntimeMode, archive: Option<Arc<dyn ReplayArchive>>) -> Self {
+        let mut resume = None;
         let strategy: Arc<dyn ExecutionStrategy> = match mode {
             RuntimeMode::Live => Arc::new(Live),
             RuntimeMode::Replay => {
@@ -238,8 +383,27 @@ impl RuntimeExecution {
                     .unwrap_or(false);
                 Arc::new(Replay { incomplete })
             }
+            RuntimeMode::Resume => {
+                let archive_ref = archive
+                    .as_deref()
+                    .expect("--resume-from requires an archive; config layer must reject earlier");
+                let resume_generation =
+                    ReaderGeneration(archive_ref.max_recorded_generation().0 + 1);
+                let state = Arc::new(ResumeState::new(resume_generation));
+                resume = Some(ResumeControl(Arc::clone(&state)));
+                Arc::new(Resume { state })
+            }
         };
-        Self { strategy, archive }
+        Self {
+            strategy,
+            archive,
+            resume,
+        }
+    }
+
+    /// The resume write handle; `None` outside `RuntimeMode::Resume`.
+    pub fn resume_control(&self) -> Option<&ResumeControl> {
+        self.resume.as_ref()
     }
 
     /// Migration bridge from the legacy `EffectRuntimeMode`, for unit tests
@@ -256,7 +420,11 @@ impl RuntimeExecution {
             EffectRuntimeMode::ReplayStrict => Arc::new(Replay { incomplete: false }),
             EffectRuntimeMode::ResumeIncomplete => Arc::new(Replay { incomplete: true }),
         };
-        Self { strategy, archive }
+        Self {
+            strategy,
+            archive,
+            resume: None,
+        }
     }
 
     /// The archive object, for I/O and audit only: source readers,
@@ -400,6 +568,61 @@ mod tests {
             s.source_replay_exhausted(StageId::new()),
             SourceReplayExhaustion::Terminate
         );
+    }
+
+    #[test]
+    fn resume_strategy_answers_track_the_frontier() {
+        let state = Arc::new(ResumeState::new(ReaderGeneration(1)));
+        let control = ResumeControl(Arc::clone(&state));
+        let s = Resume {
+            state: Arc::clone(&state),
+        };
+        let stage = StageId::new();
+        let positioned = ExecutionPosition {
+            stage_id: stage,
+            position: StageInputPosition(3),
+        };
+
+        // Catch-up: reconstruction scope, replaying source, dormant heartbeat,
+        // lenient effect miss.
+        assert_eq!(s.scope_at(positioned), Scope::ResumeHandler);
+        assert_eq!(s.stage_scope(stage), Scope::ResumeHandler);
+        assert!(s.scope_at(positioned).is_deterministic_replay());
+        assert!(!s.missing_outcome_is_corruption(positioned));
+        assert_eq!(s.source_phase_for(stage), SourceExecutionPhase::Replaying);
+        assert_eq!(
+            s.heartbeat_policy_for(stage),
+            HeartbeatExecutionPolicy::DormantUntilLive
+        );
+
+        // Only registered infinite sources continue live at exhaustion.
+        assert_eq!(
+            s.source_replay_exhausted(stage),
+            SourceReplayExhaustion::Terminate
+        );
+        control.register_infinite_source(stage);
+        assert_eq!(
+            s.source_replay_exhausted(stage),
+            SourceReplayExhaustion::ContinueLive
+        );
+
+        // Crossing the boundary flips every per-stage answer to live.
+        control.record_generation_boundary(stage, ReaderGeneration(1));
+        assert_eq!(s.scope_at(positioned), Scope::LiveHandler);
+        assert_eq!(s.stage_scope(stage), Scope::LiveHandler);
+        assert_eq!(s.source_phase_for(stage), SourceExecutionPhase::Live);
+        assert_eq!(
+            s.heartbeat_policy_for(stage),
+            HeartbeatExecutionPolicy::Active
+        );
+
+        // The frontier is monotonic: a stale boundary never regresses it.
+        control.record_generation_boundary(stage, ReaderGeneration(0));
+        assert_eq!(s.stage_scope(stage), Scope::LiveHandler);
+
+        // Other stages stay reconstruction-scoped: the flip is per stage.
+        let other = StageId::new();
+        assert_eq!(s.stage_scope(other), Scope::ResumeHandler);
     }
 
     #[test]

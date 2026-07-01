@@ -33,7 +33,7 @@ pub mod strategies;
 pub mod supervisor;
 
 // Public API - only expose builder, handle, and essential types
-pub use crate::stages::common::handlers::JoinHandler;
+pub use crate::stages::common::handlers::{JoinHandler, UnifiedJoinHandler};
 pub use builder::JoinBuilder;
 pub use config::{JoinConfig, JoinReferenceMode};
 pub use fsm::{JoinEvent, JoinState};

@@ -2,8 +2,9 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
+use crate::messaging::upstream_subscription::StageInputPosition;
 use crate::messaging::PollResult;
-use crate::stages::common::handlers::JoinHandler;
+use crate::stages::common::handlers::UnifiedJoinHandler;
 use crate::stages::common::heartbeat::HeartbeatProcessingGuard;
 use crate::stages::common::supervision::backpressure_drain::{drain_one_pending, DrainOutcome};
 use crate::stages::common::supervision::control_resolution::{
@@ -27,7 +28,7 @@ use super::JoinSupervisor;
 use crate::stages::join::fsm::{JoinContext, JoinEvent, JoinState};
 
 pub(super) async fn dispatch_enriching<
-    H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
+    H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
 >(
     sup: &mut JoinSupervisor<H>,
     state: &JoinState<H>,
@@ -238,11 +239,20 @@ pub(super) async fn dispatch_enriching<
                     let _processing = heartbeat_state.as_ref().map(|state| {
                         HeartbeatProcessingGuard::new(state.clone(), Some(source_id), event_id)
                     });
+                    // FLOWIP-120n: per-delivery execution scope, computed at
+                    // dispatch from the delivered position.
+                    let scope = ctx.runtime_execution.dispatch_scope(
+                        ctx.stage_id,
+                        Some(StageInputPosition(
+                            delivery_snapshot.delivered_stage_input_position,
+                        )),
+                    );
                     let result = ctx.handler.process_event(
                         &mut ctx.handler_state,
                         event.clone(),
                         source_id,
                         writer_id,
+                        scope,
                     );
                     if let Some(state) = &heartbeat_state {
                         state.record_last_consumed(event_id);
@@ -386,7 +396,7 @@ pub(super) async fn dispatch_enriching<
     }
 }
 
-async fn write_stage_outputs_and_ack<H: JoinHandler>(
+async fn write_stage_outputs_and_ack<H: UnifiedJoinHandler>(
     subscription: &mut crate::messaging::UpstreamSubscription<ChainEvent>,
     ctx: &mut JoinContext<H>,
     source_id: obzenflow_core::StageId,
@@ -409,8 +419,11 @@ async fn write_stage_outputs_and_ack<H: JoinHandler>(
         StageType::Join,
     );
 
-    // FLOWIP-120r: freeze the join's execution scope onto each deferred output.
-    let scope = ctx.runtime_execution.stage_scope(ctx.stage_id);
+    // FLOWIP-120n: freeze the position-derived execution scope onto each deferred output.
+    let scope = ctx.runtime_execution.dispatch_scope(
+        ctx.stage_id,
+        subscription.last_delivered_stage_input_position(),
+    );
     let mut outputs: VecDeque<
         crate::stages::common::supervision::backpressure_drain::PendingOutput,
     > = outputs

@@ -13,7 +13,7 @@ pub mod stateful;
 pub mod transform;
 
 // Re-export all handler traits for convenience
-pub use join::JoinHandler;
+pub use join::{JoinHandler, UnifiedJoinHandler};
 pub use observer::ObserverHandler;
 pub use resource_managed::ResourceManaged;
 pub use sink::{

@@ -27,6 +27,7 @@ impl JournalEvent for ChainEvent {
             ChainEventContent::FlowControl(sig) => match sig {
                 FlowControlPayload::Eof { .. } => "control.eof",
                 FlowControlPayload::Watermark { .. } => "control.watermark",
+                FlowControlPayload::CatchUpComplete { .. } => "control.catch_up_complete",
                 FlowControlPayload::Checkpoint { .. } => "control.checkpoint",
                 FlowControlPayload::Drain => "control.drain",
                 FlowControlPayload::PipelineAbort { .. } => "control.pipeline_abort",

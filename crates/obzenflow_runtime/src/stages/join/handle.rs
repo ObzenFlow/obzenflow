@@ -4,7 +4,7 @@
 
 //! Handle for join stages
 
-use crate::stages::common::handlers::JoinHandler;
+use crate::stages::common::handlers::{JoinHandler, UnifiedJoinHandler};
 use crate::supervised_base::{HandleError, StandardHandle, SupervisorHandle};
 use obzenflow_core::StageId;
 
@@ -45,7 +45,7 @@ pub trait JoinHandleExt<H> {
     fn is_enriching(&self) -> bool;
 }
 
-impl<H: JoinHandler + Send + Sync + 'static> JoinHandleExt<H> for JoinHandle<H> {
+impl<H: UnifiedJoinHandler + Send + Sync + 'static> JoinHandleExt<H> for JoinHandle<H> {
     async fn initialize(&self) -> Result<(), HandleError> {
         self.send_event(JoinEvent::<H>::Initialize).await
     }

@@ -329,10 +329,19 @@ impl Presentation {
     }
 
     pub(crate) fn render_banner(&self, mode: &RunMode) -> RenderedBanner {
-        match &self.banner {
+        let mut rendered = match &self.banner {
             BannerSource::Static(banner) => banner.render_for_stdout(),
             BannerSource::ForMode(banner) => banner(mode).render_for_stdout(),
+        };
+        // FLOWIP-120n: a resume mixes recorded catch-up with a live tail in
+        // one run; announce it whether or not the application banner branches.
+        if let RunMode::Resume(ctx) = mode {
+            rendered.text.push_str(&format!(
+                "RESUME — catching up on {}, continuing live at the recorded high-water mark.\n",
+                ctx.source_label()
+            ));
         }
+        rendered
     }
 
     pub fn footer_banner(&self) -> Option<&Banner> {
@@ -402,6 +411,11 @@ impl RunPresentationOutcome {
                 source_path = ctx.archive_path.display(),
                 run_dir = run_dir.display(),
             ),
+            RunMode::Resume(ctx) => format!(
+                "{flow_name} {verb} (resumed from {source}).\nRecorded facts were caught up with effects suppressed, then the run continued live from the recorded high-water mark.\nJournal: {run_dir}\nReplay this run with: --replay-from {run_dir}",
+                source = ctx.source_label(),
+                run_dir = run_dir.display(),
+            ),
             _ => format!(
                 "{flow_name} {verb}. Journal: {run_dir}\nTo replay, add: --replay-from {run_dir}\n(Source config env vars are ignored during replay)",
                 run_dir = run_dir.display(),
@@ -444,8 +458,14 @@ impl RunPresentationOutcome {
                     .as_ref()
                     .map(|name| format!("{name} failed"))
                     .unwrap_or_else(|| "Flow failed".to_string());
-                if let RunMode::Replay(ctx) = run_mode {
-                    prefix = format!("{prefix} (strict replay of {})", ctx.source_label());
+                match run_mode {
+                    RunMode::Replay(ctx) => {
+                        prefix = format!("{prefix} (strict replay of {})", ctx.source_label());
+                    }
+                    RunMode::Resume(ctx) => {
+                        prefix = format!("{prefix} (resumed from {})", ctx.source_label());
+                    }
+                    _ => {}
                 }
                 match run_dir {
                     Some(run_dir) => Footer::new()
@@ -857,6 +877,71 @@ mod tests {
             failed.default_footer(),
             "flow failed (strict replay of flow_01SOURCE (tmp/archive)): err"
         );
+    }
+
+    #[test]
+    fn default_footer_announces_resume() {
+        let resume_mode = RunMode::Resume(super::super::run_mode::ReplayRunContext {
+            archive_path: PathBuf::from("tmp/archive"),
+            archive_flow_id: Some("flow_01SOURCE".to_string()),
+        });
+
+        let completed = RunPresentationOutcome::Completed {
+            flow_name: "flow".to_string(),
+            run_dir: Some(PathBuf::from("tmp/resume-run")),
+            run_mode: resume_mode.clone(),
+        };
+        let footer = completed.default_footer();
+        assert!(
+            footer.contains("resumed from flow_01SOURCE (tmp/archive)"),
+            "resume footer must name the source archive: {footer}"
+        );
+        assert!(
+            footer.contains("caught up with effects suppressed, then the run continued live"),
+            "resume footer must state catch-up then live continuation: {footer}"
+        );
+        assert!(
+            footer.contains("--replay-from tmp/resume-run"),
+            "resume footer must offer replay of the new journal: {footer}"
+        );
+        assert!(
+            !footer.contains("--verify"),
+            "a resume cannot be verified as a bounded replay: {footer}"
+        );
+
+        let failed = RunPresentationOutcome::Failed {
+            flow_name: Some("flow".to_string()),
+            error: "err".to_string(),
+            run_dir: None,
+            run_mode: resume_mode,
+        };
+        assert_eq!(
+            failed.default_footer(),
+            "flow failed (resumed from flow_01SOURCE (tmp/archive)): err"
+        );
+    }
+
+    /// FLOWIP-120n: the resume announcement rides the banner even when the
+    /// application banner does not branch on mode.
+    #[test]
+    fn banner_announces_resume_catch_up_then_live() {
+        let resume_mode = RunMode::Resume(super::super::run_mode::ReplayRunContext {
+            archive_path: PathBuf::from("tmp/archive"),
+            archive_flow_id: Some("flow_01SOURCE".to_string()),
+        });
+
+        let presentation = Presentation::new(Banner::new("Start"));
+        let rendered = presentation.render_banner(&resume_mode);
+        assert!(
+            rendered.text.contains(
+                "RESUME — catching up on flow_01SOURCE (tmp/archive), continuing live at the recorded high-water mark."
+            ),
+            "resume banner must announce catch-up then live: {}",
+            rendered.text
+        );
+
+        let live = presentation.render_banner(&RunMode::Live);
+        assert!(!live.text.contains("RESUME"));
     }
 
     #[test]

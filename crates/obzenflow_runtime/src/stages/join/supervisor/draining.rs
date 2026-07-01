@@ -3,7 +3,7 @@
 // https://obzenflow.dev
 
 use crate::messaging::PollResult;
-use crate::stages::common::handlers::JoinHandler;
+use crate::stages::common::handlers::UnifiedJoinHandler;
 use crate::stages::common::heartbeat::HeartbeatProcessingGuard;
 use crate::stages::common::supervision::error_routing::route_to_error_journal;
 use crate::supervised_base::EventLoopDirective;
@@ -18,7 +18,7 @@ use crate::stages::join::config::JoinReferenceMode;
 use crate::stages::join::fsm::{JoinContext, JoinEvent, JoinState, PendingTransition};
 
 pub(super) async fn dispatch_draining<
-    H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
+    H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
 >(
     sup: &mut JoinSupervisor<H>,
     state: &JoinState<H>,
@@ -89,11 +89,18 @@ pub(super) async fn dispatch_draining<
                             event_id,
                         )
                     });
+                    // FLOWIP-120n: per-delivery execution scope, computed at
+                    // dispatch from the delivered position.
+                    let scope = ctx.runtime_execution.dispatch_scope(
+                        ctx.stage_id,
+                        subscription.last_delivered_stage_input_position(),
+                    );
                     let result = ctx.handler.process_event(
                         &mut ctx.handler_state,
                         event,
                         reference_stage_id,
                         writer_id,
+                        scope,
                     );
                     if let Some(state) = &heartbeat_state {
                         state.record_last_consumed(event_id);
@@ -227,11 +234,18 @@ pub(super) async fn dispatch_draining<
                     let _processing = heartbeat_state.as_ref().map(|state| {
                         HeartbeatProcessingGuard::new(state.clone(), Some(source_id), event_id)
                     });
+                    // FLOWIP-120n: per-delivery execution scope, computed at
+                    // dispatch from the delivered position.
+                    let scope = ctx.runtime_execution.dispatch_scope(
+                        ctx.stage_id,
+                        subscription.last_delivered_stage_input_position(),
+                    );
                     let result = ctx.handler.process_event(
                         &mut ctx.handler_state,
                         event,
                         source_id,
                         writer_id,
+                        scope,
                     );
                     if let Some(state) = &heartbeat_state {
                         state.record_last_consumed(event_id);
@@ -359,7 +373,7 @@ pub(super) async fn dispatch_draining<
 }
 
 async fn dispatch_draining_live<
-    H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
+    H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
 >(
     sup: &mut JoinSupervisor<H>,
     ctx: &mut JoinContext<H>,

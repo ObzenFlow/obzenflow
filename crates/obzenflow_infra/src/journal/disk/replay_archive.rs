@@ -337,6 +337,19 @@ impl ReplayArchive for DiskReplayArchive {
     fn archive_path(&self) -> &Path {
         &self.archive_path
     }
+
+    /// Manifest-first (FLOWIP-120n): a resumed archive records the generation
+    /// it entered; a plain recording has none and answers 0. The source-journal
+    /// scan fallback lands in a later PR.
+    fn max_recorded_generation(&self) -> obzenflow_core::ReaderGeneration {
+        obzenflow_core::ReaderGeneration(
+            self.manifest
+                .resume
+                .as_ref()
+                .map(|resume| resume.resume_generation)
+                .unwrap_or(0),
+        )
+    }
 }
 
 pub(crate) fn derive_status_derivation_from_system_log(
