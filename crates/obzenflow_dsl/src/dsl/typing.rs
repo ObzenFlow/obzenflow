@@ -1851,10 +1851,11 @@ pub fn validate_edge_typing(
     }
 }
 
-pub fn validate_effectful_deterministic_input_order(
+pub fn validate_order_observer_deterministic_input_order(
     topology: &Topology,
     descriptors: &HashMap<String, Box<dyn StageDescriptor>>,
     name_to_id: &HashMap<String, StageId>,
+    observers: &HashSet<StageId>,
 ) -> Result<(), Box<crate::dsl::FlowBuildError>> {
     let mut id_to_descriptor: HashMap<StageId, &dyn StageDescriptor> = HashMap::new();
     let mut id_to_name: HashMap<StageId, String> = HashMap::new();
@@ -1924,7 +1925,9 @@ pub fn validate_effectful_deterministic_input_order(
         let Some(descriptor) = id_to_descriptor.get(&stage_id) else {
             continue;
         };
-        if !descriptor.is_effectful() {
+        // FLOWIP-095m: seed from the same observer set the marking walk used
+        // (effects, stateful folds, live/symmetric joins), not effects alone.
+        if !observers.contains(&stage_id) {
             continue;
         }
 
@@ -1936,35 +1939,78 @@ pub fn validate_effectful_deterministic_input_order(
             &mut memo,
             &mut visiting,
         ) {
-            return Err(Box::new(
-                crate::dsl::FlowBuildError::EffectfulFanInRequiresDeterministicOrder {
-                    stage_name: id_to_name
-                        .get(&stage_id)
-                        .cloned()
-                        .unwrap_or_else(|| descriptor.name().to_string()),
-                },
-            ));
+            let stage_name = id_to_name
+                .get(&stage_id)
+                .cloned()
+                .unwrap_or_else(|| descriptor.name().to_string());
+            // FLOWIP-095m: effects keep their specific diagnostic; a stateful or
+            // live-join observer gets the order-observer variant.
+            let err = if descriptor.is_effectful() {
+                crate::dsl::FlowBuildError::EffectfulFanInRequiresDeterministicOrder { stage_name }
+            } else {
+                crate::dsl::FlowBuildError::OrderObserverFanInRequiresDeterministicOrder {
+                    stage_name,
+                }
+            };
+            return Err(Box::new(err));
         }
     }
 
     Ok(())
 }
 
-/// FLOWIP-095d: the build-time enablement walk, the inverse of
-/// `validate_effectful_deterministic_input_order`.
+/// FLOWIP-095m: does this stage's reconstruction read fan-in delivery order?
+/// Effects (095d), stateful folds, and live/symmetric joins do; a hydrating join
+/// is a structural orderer, and sources, transforms, and sinks are carriers.
 ///
-/// Marks every multi-inbound stage that lies on a path above an effectful
-/// stage (including an effectful stage that is itself multi-inbound). Those
-/// stages run the canonical deterministic merge on their input subscriptions
-/// and report `is_deterministic_input_orderer()` true, so the FLOWIP-120a
-/// guard accepts the effectful stages below them.
+/// Must be evaluated on the UNWRAPPED descriptor: the join arm reads
+/// `is_deterministic_input_orderer()`, which `wrap_deterministic_orderers` forces
+/// to true on any marked stage, making a marked live join look hydrating.
+fn is_order_observer(descriptor: &dyn StageDescriptor) -> bool {
+    if descriptor.is_effectful() {
+        return true;
+    }
+    match descriptor.stage_type() {
+        StageType::Stateful => true,
+        StageType::Join => !descriptor.is_deterministic_input_orderer(),
+        _ => false,
+    }
+}
+
+/// FLOWIP-095m: the order-observer stages as ids, frozen pre-wrap for the guard.
+/// The marking walk applies [`is_order_observer`] inline (it runs before the
+/// wrap), but the guard runs after the wrap, where the join arm would misread, so
+/// it consumes this set instead.
+pub fn order_observer_stage_ids(
+    descriptors: &HashMap<String, Box<dyn StageDescriptor>>,
+    name_to_id: &HashMap<String, StageId>,
+) -> HashSet<StageId> {
+    let mut observers = HashSet::new();
+    for (dsl_name, descriptor) in descriptors {
+        if is_order_observer(descriptor.as_ref()) {
+            if let Some(stage_id) = name_to_id.get(dsl_name) {
+                observers.insert(*stage_id);
+            }
+        }
+    }
+    observers
+}
+
+/// FLOWIP-095m: the build-time enablement walk, the inverse of
+/// `validate_order_observer_deterministic_input_order`.
+///
+/// Marks every multi-inbound stage on a path above an order observer (an
+/// effect, a stateful fold, or a live/symmetric join; see
+/// [`order_observer_stage_ids`]). Those stages run the canonical deterministic
+/// merge on their input subscriptions and report `is_deterministic_input_orderer()`
+/// true, so the guard accepts the observers below them.
 ///
 /// The marking is transitive on purpose: the stability induction the guard
 /// encodes requires every fan-in above an ordered stage to be ordered too,
 /// and the guard verifies it by recursing through an orderer's own inputs.
 /// Cycle members are never marked; the merge is never enabled on a cycle
-/// edge, and the guard remains the safety net that rejects effectful stages
-/// below cycles, including a cycle that feeds an ordered fan-in from above.
+/// edge, and the guard remains the safety net that rejects observers below
+/// cycles, including a cycle that feeds an ordered fan-in from above.
 pub fn derive_deterministic_fan_in_stages(
     topology: &Topology,
     descriptors: &HashMap<String, Box<dyn StageDescriptor>>,
@@ -1983,13 +2029,12 @@ pub fn derive_deterministic_fan_in_stages(
 
     let mut marked = HashSet::new();
     for (dsl_name, descriptor) in descriptors {
-        if !descriptor.is_effectful() {
+        if !is_order_observer(descriptor.as_ref()) {
             continue;
         }
         let Some(stage_id) = name_to_id.get(dsl_name) else {
             continue;
         };
-
         let mut stack = vec![*stage_id];
         let mut visited = HashSet::new();
         while let Some(current) = stack.pop() {
