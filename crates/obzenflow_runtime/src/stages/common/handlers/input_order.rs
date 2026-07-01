@@ -18,37 +18,37 @@ pub enum InputOrderSemantics {
     /// merge so reconstruction is deterministic.
     OrderSensitive,
     /// The output is invariant under input permutation, carried by a proof token
-    /// the `#[trace_invariant]` attribute mints from a passing commutativity
+    /// the `#[order_insensitive]` attribute mints from a passing commutativity
     /// trial. Such a stage is a barrier: it absorbs reordering, so the fan-in
     /// above it pays no merge cost.
-    TraceInvariant(TraceInvarianceProof),
+    OrderInsensitive(OrderInsensitiveProof),
 }
 
 /// A sealed witness that a handler's order-invariance was checked by the trial
-/// the `#[trace_invariant]` attribute emits. It cannot be constructed by hand:
+/// the `#[order_insensitive]` attribute emits. It cannot be constructed by hand:
 /// the only constructor is hidden and is called solely by generated code, so a
-/// `TraceInvariant` declaration always carries a real, exercised obligation.
+/// `OrderInsensitive` declaration always carries a real, exercised obligation.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TraceInvarianceProof(());
+pub struct OrderInsensitiveProof(());
 
-impl TraceInvarianceProof {
+impl OrderInsensitiveProof {
     /// Mint the witness. FLOWIP-095l Gap 12: `pub(crate)` so the struct cannot be
     /// fabricated from another crate (its field is also private). The single
-    /// cross-crate mint path is [`InputOrderSemantics::__trace_invariant_proven`].
-    pub(crate) const fn __minted_by_trace_invariant_attribute() -> Self {
+    /// cross-crate mint path is [`InputOrderSemantics::__order_insensitive_proven`].
+    pub(crate) const fn __minted_by_order_insensitive_attribute() -> Self {
         Self(())
     }
 }
 
 impl InputOrderSemantics {
-    /// A proven trace-invariant claim, the only cross-crate minter of the witness.
+    /// A proven order-insensitive claim, the only cross-crate minter of the witness.
     /// FLOWIP-095l Gap 12: hidden and called by exactly one blessed path, the
-    /// `#[trace_invariant]` attribute expansion, which also emits the trial. Hand use
-    /// is unsupported; a join descriptor ignores a `TraceInvariant` declaration, so
+    /// `#[order_insensitive]` attribute expansion, which also emits the trial. Hand use
+    /// is unsupported; a join descriptor ignores a `OrderInsensitive` declaration, so
     /// minting one for a join has no effect.
     #[doc(hidden)]
-    pub const fn __trace_invariant_proven() -> Self {
-        Self::TraceInvariant(TraceInvarianceProof::__minted_by_trace_invariant_attribute())
+    pub const fn __order_insensitive_proven() -> Self {
+        Self::OrderInsensitive(OrderInsensitiveProof::__minted_by_order_insensitive_attribute())
     }
 
     /// Whether the author made an explicit declaration (declared at all).

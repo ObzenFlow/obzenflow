@@ -1,0 +1,10 @@
+error[E0624]: associated function `__minted_by_order_insensitive_attribute` is private
+  --> tests/compile_fail/order_insensitive_minter_is_in_crate.rs:11:36
+   |
+11 |     let _ = OrderInsensitiveProof::__minted_by_order_insensitive_attribute();
+   |                                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ private associated function
+   |
+  ::: src/stages/common/handlers/input_order.rs
+   |
+   |     pub(crate) const fn __minted_by_order_insensitive_attribute() -> Self {
+   |     --------------------------------------------------------------------- private associated function defined here

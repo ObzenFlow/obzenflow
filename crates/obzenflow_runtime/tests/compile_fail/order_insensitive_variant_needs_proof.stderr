@@ -1,0 +1,16 @@
+error[E0423]: cannot initialize a tuple struct which contains private fields
+  --> tests/compile_fail/order_insensitive_variant_needs_proof.rs:12:51
+   |
+12 |     let _ = InputOrderSemantics::OrderInsensitive(OrderInsensitiveProof(()));
+   |                                                   ^^^^^^^^^^^^^^^^^^^^^
+   |
+note: constructor is not visible here due to private fields
+  --> src/stages/common/handlers/input_order.rs
+   |
+   | pub struct OrderInsensitiveProof(());
+   |                                  ^^ private field
+help: you might have meant to use the `__minted_by_order_insensitive_attribute` associated function
+   |
+12 -     let _ = InputOrderSemantics::OrderInsensitive(OrderInsensitiveProof(()));
+12 +     let _ = InputOrderSemantics::OrderInsensitive(OrderInsensitiveProof::__minted_by_order_insensitive_attribute());
+   |

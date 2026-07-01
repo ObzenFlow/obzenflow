@@ -2070,7 +2070,7 @@ pub fn derive_deterministic_fan_in_stages(
 /// FLOWIP-095l Gap 2: a stateful or symmetric-join stage in a multi-source fan-in
 /// cone must declare its input-order semantics. The framework cannot infer whether
 /// such a fold observes order, so an undeclared one is refused: the author chooses
-/// `trace_invariant` (a proven barrier) or `OrderSensitive` (run the merge). A
+/// `order_insensitive` (a proven barrier) or `OrderSensitive` (run the merge). A
 /// barrier strictly above the stage shields it and ends the cone.
 pub fn validate_input_order_declarations(
     topology: &Topology,

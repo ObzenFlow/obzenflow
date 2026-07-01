@@ -11,10 +11,10 @@
 #[doc(hidden)]
 pub use obzenflow_core;
 
-// FLOWIP-095l: the `#[trace_invariant]` attribute macro, re-exported next to the
+// FLOWIP-095l: the `#[order_insensitive]` attribute macro, re-exported next to the
 // handler traits it applies to (the trial helpers live in
-// `stages::common::handlers::trace_invariant`).
-pub use obzenflow_derive::trace_invariant;
+// `stages::common::handlers::order_insensitive`).
+pub use obzenflow_derive::order_insensitive;
 
 // Core modules
 pub mod backpressure;

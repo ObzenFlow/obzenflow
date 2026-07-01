@@ -2,14 +2,14 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! FLOWIP-095l: the metamorphic commutativity trial behind `#[trace_invariant]`.
+//! FLOWIP-095l: the metamorphic commutativity trial behind `#[order_insensitive]`.
 //!
 //! A stage may declare its fold order-invariant (a barrier) only with a proof.
 //! The proof is this trial: for each sample input word, the handler's observable
 //! output must be identical under every permutation of that word. The proof is
-//! bound to the declaration by the `#[trace_invariant]` attribute, which emits a
-//! test calling [`assert_trace_invariant`] and is the only minter of the witness
-//! a `TraceInvariant` declaration carries.
+//! bound to the declaration by the `#[order_insensitive]` attribute, which emits a
+//! test calling [`assert_order_insensitive`] and is the only minter of the witness
+//! a `OrderInsensitive` declaration carries.
 
 use crate::stages::common::handler_error::HandlerError;
 use crate::stages::common::handlers::stateful::StatefulHandler;
@@ -78,7 +78,7 @@ where
     let prototype = make();
     assert!(
         prototype.emit_interval_hint().is_none(),
-        "FLOWIP-095l #[trace_invariant] does not support emit_interval_hint: processing-time \
+        "FLOWIP-095l #[order_insensitive] does not support emit_interval_hint: processing-time \
          emission is not an input-trace property, so permuting inputs cannot prove it \
          order-invariant (see FLOWIP-120d). Declare the handler OrderSensitive instead."
     );
@@ -113,12 +113,12 @@ where
 /// the same output word AND the same reconstructed state as the original order
 /// (Gap 11: the state is checked because resume reconstructs it). Sound and
 /// conservative over the sampled words, which is exactly what a
-/// `#[trace_invariant]` barrier claims.
+/// `#[order_insensitive]` barrier claims.
 ///
 /// Permutations are exhaustive for words up to length 6 and a deterministic
 /// sample (reversal, every rotation, adjacent swaps) beyond that, so a long word
 /// still exercises non-trivial reorderings without factorial blow-up.
-pub fn assert_trace_invariant<H>(make: impl Fn() -> H, words: &[Vec<ChainEvent>])
+pub fn assert_order_insensitive<H>(make: impl Fn() -> H, words: &[Vec<ChainEvent>])
 where
     H: StatefulHandler + Clone,
     H::State: serde::Serialize,
@@ -127,7 +127,7 @@ where
     // would pass vacuously and mint a barrier with no evidence. Refuse it.
     assert!(
         words.iter().any(|word| word.len() >= 2),
-        "FLOWIP-095l #[trace_invariant] needs at least one sample word with >= 2 inputs; an \
+        "FLOWIP-095l #[order_insensitive] needs at least one sample word with >= 2 inputs; an \
          empty or singleton sample proves nothing. Provide representative concurrent inputs in \
          `inputs = ...` (include short words, since resume frontiers are per-multiset)."
     );
@@ -137,14 +137,14 @@ where
             let (output, state) = observe_transition(&make, &permutation);
             assert!(
                 output == baseline_output,
-                "FLOWIP-095l #[trace_invariant] trial failed on sample word {index}: the \
+                "FLOWIP-095l #[order_insensitive] trial failed on sample word {index}: the \
                  handler's OUTPUT depends on input order. A reordering produced {output:?} but \
                  the original order produced {baseline_output:?}. This handler is not \
-                 order-invariant; declare it OrderSensitive instead of #[trace_invariant]."
+                 order-invariant; declare it OrderSensitive instead of #[order_insensitive]."
             );
             assert!(
                 state == baseline_state,
-                "FLOWIP-095l #[trace_invariant] trial failed on sample word {index}: the \
+                "FLOWIP-095l #[order_insensitive] trial failed on sample word {index}: the \
                  handler's STATE depends on input order. Its output is order-invariant but its \
                  reconstructed state is not, and resume reconstructs state, so this would break \
                  S_N. A reordering produced state {state} but the original produced \
@@ -213,7 +213,7 @@ mod tests {
         value: u64,
     }
     impl TypedPayload for Num {
-        const EVENT_TYPE: &'static str = "test.trace_invariant.num";
+        const EVENT_TYPE: &'static str = "test.order_insensitive.num";
     }
 
     #[derive(Serialize, Deserialize)]
@@ -221,7 +221,7 @@ mod tests {
         total: u64,
     }
     impl TypedPayload for SumOut {
-        const EVENT_TYPE: &'static str = "test.trace_invariant.sum";
+        const EVENT_TYPE: &'static str = "test.order_insensitive.sum";
     }
 
     #[derive(Serialize, Deserialize)]
@@ -229,7 +229,7 @@ mod tests {
         values: Vec<u64>,
     }
     impl TypedPayload for ListOut {
-        const EVENT_TYPE: &'static str = "test.trace_invariant.list";
+        const EVENT_TYPE: &'static str = "test.order_insensitive.list";
     }
 
     #[derive(Serialize, Deserialize)]
@@ -237,7 +237,7 @@ mod tests {
         n: u64,
     }
     impl TypedPayload for CountOut {
-        const EVENT_TYPE: &'static str = "test.trace_invariant.count";
+        const EVENT_TYPE: &'static str = "test.order_insensitive.count";
     }
 
     fn emit<T: TypedPayload>(payload: T) -> ChainEvent {
@@ -290,13 +290,13 @@ mod tests {
 
     #[test]
     fn commutative_handler_passes() {
-        assert_trace_invariant(|| Sum, &sample());
+        assert_order_insensitive(|| Sum, &sample());
     }
 
     #[test]
-    #[should_panic(expected = "trace_invariant")]
+    #[should_panic(expected = "order_insensitive")]
     fn order_sensitive_handler_is_caught() {
-        assert_trace_invariant(|| Listy, &sample());
+        assert_order_insensitive(|| Listy, &sample());
     }
 
     /// FLOWIP-095l Gap 11 regression: order-dependent STATE, order-invariant
@@ -324,15 +324,15 @@ mod tests {
     #[test]
     #[should_panic(expected = "STATE depends on input order")]
     fn order_dependent_state_is_caught_even_when_output_commutes() {
-        assert_trace_invariant(|| CountOnly, &sample());
+        assert_order_insensitive(|| CountOnly, &sample());
     }
 
-    // End-to-end: the #[trace_invariant] attribute on a commutative handler.
+    // End-to-end: the #[order_insensitive] attribute on a commutative handler.
     // `crate = crate` makes the generated paths resolve inside obzenflow_runtime
     // itself; external crates use the default `::obzenflow_runtime`.
     #[derive(Clone, Default)]
     struct ProvenSum;
-    #[crate::trace_invariant(
+    #[crate::order_insensitive(
         crate = crate,
         new = ProvenSum,
         inputs = vec![word_from([Num { value: 5 }, Num { value: 7 }, Num { value: 9 }])]
@@ -352,10 +352,10 @@ mod tests {
     }
 
     #[test]
-    fn attribute_injects_trace_invariant_declaration() {
+    fn attribute_injects_order_insensitive_declaration() {
         assert!(matches!(
             ProvenSum.declared_input_order(),
-            InputOrderSemantics::TraceInvariant(_)
+            InputOrderSemantics::OrderInsensitive(_)
         ));
     }
 
@@ -375,7 +375,7 @@ mod tests {
         values: Vec<u64>,
     }
     impl TypedPayload for PairOut {
-        const EVENT_TYPE: &'static str = "test.trace_invariant.pair";
+        const EVENT_TYPE: &'static str = "test.order_insensitive.pair";
     }
 
     #[derive(Clone, Default, Serialize)]
@@ -422,7 +422,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "OUTPUT depends on input order")]
     fn order_dependent_mid_stream_emission_is_caught() {
-        assert_trace_invariant(|| PairEmitter, &pair_sample());
+        assert_order_insensitive(|| PairEmitter, &pair_sample());
     }
 
     /// Windowed emission that IS order-invariant: emit the running input count every
@@ -450,7 +450,7 @@ mod tests {
 
     #[test]
     fn order_invariant_windowed_emitter_passes() {
-        assert_trace_invariant(|| RunningCount, &pair_sample());
+        assert_order_insensitive(|| RunningCount, &pair_sample());
     }
 
     /// A timer-emitting handler: `emit_interval_hint` is set, so the trial refuses it
@@ -477,14 +477,14 @@ mod tests {
     #[test]
     #[should_panic(expected = "emit_interval_hint")]
     fn timer_emitting_handler_is_refused() {
-        assert_trace_invariant(|| Ticking, &pair_sample());
+        assert_order_insensitive(|| Ticking, &pair_sample());
     }
 
     #[test]
     #[should_panic(expected = ">= 2 inputs")]
     fn singleton_sample_is_refused() {
         let words = vec![word_from([Num { value: 1 }])];
-        assert_trace_invariant(|| Sum, &words);
+        assert_order_insensitive(|| Sum, &words);
     }
 
     /// Pins the assumption the trial relies on: the supervisor reaches a stateful

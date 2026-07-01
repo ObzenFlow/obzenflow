@@ -7,15 +7,15 @@
 pub mod input_order;
 pub mod join;
 pub mod observer;
+pub mod order_insensitive;
 pub mod resource_managed;
 pub mod sink;
 pub mod source;
 pub mod stateful;
-pub mod trace_invariant;
 pub mod transform;
 
 // Re-export all handler traits for convenience
-pub use input_order::{InputOrderSemantics, TraceInvarianceProof};
+pub use input_order::{InputOrderSemantics, OrderInsensitiveProof};
 pub use join::JoinHandler;
 pub use observer::ObserverHandler;
 pub use resource_managed::ResourceManaged;

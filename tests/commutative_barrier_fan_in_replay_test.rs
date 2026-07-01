@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! FLOWIP-095l Tier 1 (barrier case): a commutative `#[trace_invariant]` fold under
+//! FLOWIP-095l Tier 1 (barrier case): a commutative `#[order_insensitive]` fold under
 //! a multi-source fan-in keeps the fan-in availability-scheduled (the barrier absorbs
 //! input order) and still reconstructs identical emitted facts across arrival
 //! interleavings and under `--replay-from`.
@@ -28,7 +28,7 @@ use obzenflow_dsl::{flow, sink, source, stateful, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
-use obzenflow_runtime::stages::common::handlers::trace_invariant::word_from;
+use obzenflow_runtime::stages::common::handlers::order_insensitive::word_from;
 use obzenflow_runtime::stages::common::handlers::{
     FiniteSourceHandler, SinkHandler, StatefulHandler,
 };
@@ -113,7 +113,7 @@ impl FiniteSourceHandler for ContribSource {
 }
 
 /// A commutative fold: a running sum emitted once at drain. Declared a barrier via
-/// `#[trace_invariant]`, so the fan-in above it is availability-scheduled. The
+/// `#[order_insensitive]`, so the fan-in above it is availability-scheduled. The
 /// attribute also emits its own `output_is_order_invariant` trial test into this
 /// binary (cfg(test) is active here).
 #[derive(Clone, Debug)]
@@ -124,7 +124,7 @@ impl StatefulTyping for SumBarrier {
     type Output = RunningTotal;
 }
 
-#[obzenflow_runtime::trace_invariant(
+#[obzenflow_runtime::order_insensitive(
     new = SumBarrier,
     inputs = vec![word_from([
         Contribution { value: 1 },

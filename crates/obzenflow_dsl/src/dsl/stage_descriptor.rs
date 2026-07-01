@@ -666,7 +666,7 @@ pub trait StageDescriptor: Send + Sync {
     /// FLOWIP-095l Gap 2. Whether this stage is a stateful or symmetric-join order
     /// observer that has not declared its input-order semantics. Such a stage in a
     /// multi-source fan-in cone is a build error: the author must choose
-    /// `trace_invariant` or `OrderSensitive`. Default false (effects, transforms,
+    /// `order_insensitive` or `OrderSensitive`. Default false (effects, transforms,
     /// sources, sinks, and hydrating joins are exempt; their role is inferred).
     fn is_undeclared_order_observer(&self) -> bool {
         false
@@ -2327,7 +2327,7 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Stage
     /// cone forces an explicit declaration via the build-time check.
     fn order_role(&self) -> OrderRole {
         match self.handler.declared_input_order() {
-            InputOrderSemantics::TraceInvariant(_) => OrderRole::Barrier,
+            InputOrderSemantics::OrderInsensitive(_) => OrderRole::Barrier,
             InputOrderSemantics::OrderSensitive | InputOrderSemantics::Undeclared => {
                 OrderRole::Observer
             }
@@ -2760,7 +2760,7 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
     ///
     /// FLOWIP-095l Gap 12: a join is never a Barrier in v1. The commutativity
     /// trial proves only `StatefulHandler` folds, so there is no proof path for a
-    /// join; a hand-declared `TraceInvariant` is ignored here rather than trusted.
+    /// join; a hand-declared `OrderInsensitive` is ignored here rather than trusted.
     /// A genuinely commutative symmetric join waits on a `JoinHandler` trial that
     /// drives `process_event` permutations and `on_source_eof`.
     fn order_role(&self) -> OrderRole {

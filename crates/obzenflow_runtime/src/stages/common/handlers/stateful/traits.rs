@@ -137,10 +137,10 @@ pub trait StatefulHandler: Send + Sync {
     /// FLOWIP-095l: declare whether this handler's output depends on the order of
     /// its inputs. Default `Undeclared`; a stateful stage in a multi-source fan-in
     /// cone must declare (the build refuses an undeclared one). Apply
-    /// `#[trace_invariant(inputs = ...)]` to declare order-invariance with a proof,
+    /// `#[order_insensitive(inputs = ...)]` to declare order-invariance with a proof,
     /// or override this to return `InputOrderSemantics::OrderSensitive`.
     ///
-    /// Declaring `#[trace_invariant]` additionally requires `Self::State:
+    /// Declaring `#[order_insensitive]` additionally requires `Self::State:
     /// serde::Serialize` and `Self: Clone`: the proof trial clones the handler per
     /// transition and serializes the reconstructed state to compare it across input
     /// permutations.
@@ -149,7 +149,7 @@ pub trait StatefulHandler: Send + Sync {
     }
 
     /// FLOWIP-095l Gap 11: an order-bearing projection of this handler's state for
-    /// the `#[trace_invariant]` barrier trial. The trial compares this across input
+    /// the `#[order_insensitive]` barrier trial. The trial compares this across input
     /// permutations alongside the output word, so a fold whose state is
     /// order-dependent cannot be declared a barrier even when its output is
     /// order-invariant (which would otherwise break resume's `S_N` reconstruction).

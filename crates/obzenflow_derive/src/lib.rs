@@ -316,86 +316,89 @@ fn expand_struct(
 /// FLOWIP-095l: declare a stateful handler's fold order-invariant, with a proof.
 ///
 /// Apply to a `StatefulHandler` impl. The attribute injects a
-/// `declared_input_order()` returning a proven `TraceInvariant`, and emits a
+/// `declared_input_order()` returning a proven `OrderInsensitive`, and emits a
 /// `#[cfg(test)]` trial that drives the handler over permutations of the sample
 /// inputs and fails if its output depends on order. The proof witness can be
-/// minted no other way, so a `TraceInvariant` declaration always carries a real,
+/// minted no other way, so a `OrderInsensitive` declaration always carries a real,
 /// exercised obligation, keyed to the handler as written.
 ///
 /// ```ignore
-/// #[trace_invariant(new = SumHandler::default(), inputs = vec![word_from([..])])]
+/// #[order_insensitive(new = SumHandler::default(), inputs = vec![word_from([..])])]
 /// #[async_trait]
 /// impl StatefulHandler for SumHandler { /* ... */ }
 /// ```
 ///
 /// Required: `new = <expr that builds the handler>`, `inputs = <expr yielding
 /// Vec<Vec<ChainEvent>> sample words>` (build words with
-/// `obzenflow_runtime::stages::common::handlers::trace_invariant::word_from`).
+/// `obzenflow_runtime::stages::common::handlers::order_insensitive::word_from`).
 /// Optional `crate = <path to obzenflow_runtime>` when it is reached only through
 /// a re-export.
 #[proc_macro_attribute]
-pub fn trace_invariant(attr: TokenStream, item: TokenStream) -> TokenStream {
-    let args = parse_macro_input!(attr as TraceInvariantArgs);
+pub fn order_insensitive(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let args = parse_macro_input!(attr as OrderInsensitiveArgs);
     let impl_block = parse_macro_input!(item as ItemImpl);
-    expand_trace_invariant(args, impl_block)
+    expand_order_insensitive(args, impl_block)
         .unwrap_or_else(syn::Error::into_compile_error)
         .into()
 }
 
-enum TraceArg {
+enum OrderInsensitiveArg {
     New(syn::Expr),
     Inputs(syn::Expr),
     Crate(syn::Path),
 }
 
-impl syn::parse::Parse for TraceArg {
+impl syn::parse::Parse for OrderInsensitiveArg {
     fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
         if input.peek(syn::Token![crate]) {
             input.parse::<syn::Token![crate]>()?;
             input.parse::<syn::Token![=]>()?;
-            return Ok(TraceArg::Crate(input.parse()?));
+            return Ok(OrderInsensitiveArg::Crate(input.parse()?));
         }
         let key: Ident = input.parse()?;
         input.parse::<syn::Token![=]>()?;
         match key.to_string().as_str() {
-            "new" => Ok(TraceArg::New(input.parse()?)),
-            "inputs" => Ok(TraceArg::Inputs(input.parse()?)),
+            "new" => Ok(OrderInsensitiveArg::New(input.parse()?)),
+            "inputs" => Ok(OrderInsensitiveArg::Inputs(input.parse()?)),
             other => Err(syn::Error::new(
                 key.span(),
                 format!(
-                    "unknown #[trace_invariant] argument `{other}`; expected `new`, `inputs`, or `crate`"
+                    "unknown #[order_insensitive] argument `{other}`; expected `new`, `inputs`, or `crate`"
                 ),
             )),
         }
     }
 }
 
-struct TraceInvariantArgs {
+struct OrderInsensitiveArgs {
     new: syn::Expr,
     inputs: syn::Expr,
     crate_path: proc_macro2::TokenStream,
 }
 
-impl syn::parse::Parse for TraceInvariantArgs {
+impl syn::parse::Parse for OrderInsensitiveArgs {
     fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
         let pairs =
-            syn::punctuated::Punctuated::<TraceArg, syn::Token![,]>::parse_terminated(input)?;
+            syn::punctuated::Punctuated::<OrderInsensitiveArg, syn::Token![,]>::parse_terminated(
+                input,
+            )?;
         let mut new = None;
         let mut inputs = None;
         let mut crate_path = None;
         for pair in pairs {
             match pair {
-                TraceArg::New(expr) => new = Some(expr),
-                TraceArg::Inputs(expr) => inputs = Some(expr),
-                TraceArg::Crate(path) => crate_path = Some(path),
+                OrderInsensitiveArg::New(expr) => new = Some(expr),
+                OrderInsensitiveArg::Inputs(expr) => inputs = Some(expr),
+                OrderInsensitiveArg::Crate(path) => crate_path = Some(path),
             }
         }
         let new = new.ok_or_else(|| {
-            input.error("#[trace_invariant] requires `new = <expr that builds the handler>`")
+            input.error("#[order_insensitive] requires `new = <expr that builds the handler>`")
         })?;
         let inputs = inputs.ok_or_else(|| {
-            input
-                .error("#[trace_invariant] requires `inputs = <Vec<Vec<ChainEvent>> sample words>`")
+            input.error(
+                "#[order_insensitive] requires `inputs = <Vec<Vec<ChainEvent>> sample words>`",
+            )
         })?;
         let crate_path = match crate_path {
             Some(path) => quote!(#path),
@@ -409,8 +412,8 @@ impl syn::parse::Parse for TraceInvariantArgs {
     }
 }
 
-fn expand_trace_invariant(
-    args: TraceInvariantArgs,
+fn expand_order_insensitive(
+    args: OrderInsensitiveArgs,
     mut impl_block: ItemImpl,
 ) -> Result<proc_macro2::TokenStream, syn::Error> {
     let type_ident = match &*impl_block.self_ty {
@@ -422,13 +425,13 @@ fn expand_trace_invariant(
             .ok_or_else(|| {
                 syn::Error::new_spanned(
                     &impl_block.self_ty,
-                    "#[trace_invariant] expects `impl StatefulHandler for <Type>`",
+                    "#[order_insensitive] expects `impl StatefulHandler for <Type>`",
                 )
             })?,
         other => {
             return Err(syn::Error::new_spanned(
                 other,
-                "#[trace_invariant] expects `impl StatefulHandler for <Type>`",
+                "#[order_insensitive] expects `impl StatefulHandler for <Type>`",
             ))
         }
     };
@@ -438,16 +441,16 @@ fn expand_trace_invariant(
     let inputs = &args.inputs;
 
     // Inject the declaration: the only in-tree minter of the proof witness, so a
-    // TraceInvariant claim cannot exist without this attribute and its trial.
+    // OrderInsensitive claim cannot exist without this attribute and its trial.
     impl_block.items.push(parse_quote! {
         fn declared_input_order(
             &self,
         ) -> #runtime::stages::common::handlers::InputOrderSemantics {
-            #runtime::stages::common::handlers::InputOrderSemantics::__trace_invariant_proven()
+            #runtime::stages::common::handlers::InputOrderSemantics::__order_insensitive_proven()
         }
     });
 
-    let mod_name = format_ident!("__trace_invariant_proof_{}", type_ident);
+    let mod_name = format_ident!("__order_insensitive_proof_{}", type_ident);
     Ok(quote! {
         #impl_block
 
@@ -458,9 +461,9 @@ fn expand_trace_invariant(
             use super::*;
 
             #[test]
-            fn output_is_order_invariant() {
+            fn order_insensitive_trial() {
                 let words = #inputs;
-                #runtime::stages::common::handlers::trace_invariant::assert_trace_invariant(
+                #runtime::stages::common::handlers::order_insensitive::assert_order_insensitive(
                     || #new,
                     &words,
                 );

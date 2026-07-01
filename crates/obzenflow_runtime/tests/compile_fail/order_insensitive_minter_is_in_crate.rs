@@ -3,10 +3,10 @@
 // https://obzenflow.dev
 
 // FLOWIP-095l Gap 12: the witness minter is `pub(crate)`, so an external crate cannot
-// call it to forge a `TraceInvariant` barrier proof without the trial.
+// call it to forge a `OrderInsensitive` barrier proof without the trial.
 
-use obzenflow_runtime::stages::common::handlers::TraceInvarianceProof;
+use obzenflow_runtime::stages::common::handlers::OrderInsensitiveProof;
 
 fn main() {
-    let _ = TraceInvarianceProof::__minted_by_trace_invariant_attribute();
+    let _ = OrderInsensitiveProof::__minted_by_order_insensitive_attribute();
 }

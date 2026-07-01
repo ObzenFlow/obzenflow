@@ -283,9 +283,9 @@ mod tests {
         }
     }
 
-    /// FLOWIP-095l: a stateful handler declared trace-invariant (a barrier). The
+    /// FLOWIP-095l: a stateful handler declared order-insensitive (a barrier). The
     /// proof witness is minted directly here for the guard tests; production code
-    /// mints it only through `#[trace_invariant]` and the trial it emits.
+    /// mints it only through `#[order_insensitive]` and the trial it emits.
     #[derive(Clone, Debug)]
     struct CommutativeStateful;
 
@@ -307,7 +307,7 @@ mod tests {
         }
 
         fn declared_input_order(&self) -> InputOrderSemantics {
-            InputOrderSemantics::__trace_invariant_proven()
+            InputOrderSemantics::__order_insensitive_proven()
         }
     }
 
@@ -1310,13 +1310,13 @@ mod tests {
     }
 
     /// FLOWIP-095l Gap 12: a join is never a Barrier in v1. The witness minter is
-    /// `pub` so the `#[trace_invariant]` attribute can mint it cross-crate, which
-    /// means a Live join could hand-mint a `TraceInvariant` declaration. The
+    /// `pub` so the `#[order_insensitive]` attribute can mint it cross-crate, which
+    /// means a Live join could hand-mint a `OrderInsensitive` declaration. The
     /// descriptor neutralizes that unproven claim: a Live join always reports
     /// `Observer`, so it can never escape the merge without a real (StatefulHandler)
     /// trial proving it.
     #[test]
-    fn live_join_claiming_trace_invariant_is_still_an_observer() {
+    fn live_join_claiming_order_insensitive_is_still_an_observer() {
         use obzenflow_runtime::stages::common::handlers::InputOrderSemantics;
 
         #[derive(Clone, Debug)]
@@ -1334,7 +1334,7 @@ mod tests {
 
             fn declared_input_order(&self) -> InputOrderSemantics {
                 // The unproven hand-mint that Gap 12 neutralizes at the descriptor.
-                InputOrderSemantics::__trace_invariant_proven()
+                InputOrderSemantics::__order_insensitive_proven()
             }
 
             fn process_event(
@@ -2898,7 +2898,7 @@ mod tests {
     }
 
     /// FLOWIP-095l Tier 1 (build-time, barrier case): a commutative fold declared
-    /// `#[trace_invariant]` is a Barrier, so the two-source fan-in feeding it directly
+    /// `#[order_insensitive]` is a Barrier, so the two-source fan-in feeding it directly
     /// is NOT marked for the canonical merge and keeps availability-driven scheduling.
     /// This pins the build-time half of `commutative_barrier_fan_in_replay_test`: the
     /// runtime fidelity there is only meaningful because the fan-in is genuinely
@@ -3100,7 +3100,7 @@ mod tests {
 
     #[test]
     fn barrier_shields_its_fan_in_from_a_downstream_observer() {
-        // FLOWIP-095l: a trace-invariant fold is a barrier. The two-source fan-in
+        // FLOWIP-095l: a order-insensitive fold is a barrier. The two-source fan-in
         // feeding it is order-insensitive, so an effect downstream of the barrier
         // does not drag that fan-in into the merge.
         let source_a_id = StageId::new();
