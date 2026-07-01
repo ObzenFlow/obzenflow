@@ -38,7 +38,9 @@ pub use walker::WalkMode;
 use certification::StageCertification;
 use report::{delta_side, CountsByType, DivergenceReport, RunSummary, StageReport, Totals};
 use source::SourceOpenError;
-use walker::{tally_journal, walk_journal, StageWalkOptions};
+use walker::{
+    tally_journal, walk_journal, walk_journal_multiset, StageWalkOptions, StageWalkOutput,
+};
 
 #[derive(Debug, Clone)]
 pub struct VerifyOptions {
@@ -104,109 +106,70 @@ pub fn verify_sources(
             "unexpected"
         };
 
+        let opts = |journal_label: &'static str| StageWalkOptions {
+            mode: plan.mode,
+            identity: plan.identity,
+            max_divergences: options.max_divergences,
+            stop_at: None,
+            journal_label,
+            classification,
+        };
+
         let stage_report = match certification {
-            StageCertification::Certified => {
-                let walk = |journal_label: &'static str,
-                            b_file: &str,
-                            c_file: &str|
-                 -> Result<walker::StageWalkOutput, VerifyError> {
-                    let opts = StageWalkOptions {
-                        mode: plan.mode,
-                        identity: plan.identity,
-                        max_divergences: options.max_divergences,
-                        stop_at: None,
-                        journal_label,
-                        classification,
-                    };
-                    walk_journal(
-                        baseline.stage_rows(b_file)?,
-                        candidate.stage_rows(c_file)?,
-                        &opts,
-                    )
-                };
-
-                let data = walk(
-                    "data",
-                    &b_stage.data_journal_file,
-                    &c_stage.data_journal_file,
+            StageCertification::Positional => {
+                let data = walk_journal(
+                    baseline.stage_rows(&b_stage.data_journal_file)?,
+                    candidate.stage_rows(&c_stage.data_journal_file)?,
+                    &opts("data"),
                 )?;
-                if let Some((b_ns, c_ns)) = data.lineage_conflict {
-                    return Ok(VerifyOutcome::Refused(RefusalReason::LineageMismatch {
-                        stage: stage_key.clone(),
-                        baseline_namespace: b_ns,
-                        candidate_namespace: c_ns,
-                    }));
-                }
-                let errors = walk(
-                    "error",
-                    &b_stage.error_journal_file,
-                    &c_stage.error_journal_file,
+                let errors = walk_journal(
+                    baseline.stage_rows(&b_stage.error_journal_file)?,
+                    candidate.stage_rows(&c_stage.error_journal_file)?,
+                    &opts("error"),
                 )?;
-                if let Some((b_ns, c_ns)) = errors.lineage_conflict {
-                    return Ok(VerifyOutcome::Refused(RefusalReason::LineageMismatch {
-                        stage: stage_key.clone(),
-                        baseline_namespace: b_ns,
-                        candidate_namespace: c_ns,
-                    }));
-                }
-
-                let mut divergences: Vec<DivergenceReport> = data.divergences;
-                divergences.extend(errors.divergences);
-                let mut divergence_count = data.divergence_count + errors.divergence_count;
-                let mut informational = Vec::new();
-
-                // Completion evidence: compared only when both runs reached
-                // completion; informational against a cancelled baseline.
-                match plan.mode {
-                    WalkMode::WholeRun => {
-                        if multiset(&data.eof_baseline) != multiset(&data.eof_candidate) {
-                            divergence_count += 1;
-                            if divergences.len() < options.max_divergences {
-                                divergences.push(DivergenceReport {
-                                    journal: "data".to_string(),
-                                    position: data.positional_baseline,
-                                    field: "eof_evidence".to_string(),
-                                    baseline: delta_side(&sorted_joined(&data.eof_baseline)),
-                                    candidate: delta_side(&sorted_joined(&data.eof_candidate)),
-                                    classification: classification.to_string(),
-                                });
-                            }
-                        }
-                    }
-                    WalkMode::BaselinePrefixOfCandidate => {
-                        if !data.eof_baseline.is_empty() || !data.eof_candidate.is_empty() {
-                            informational.push(format!(
-                                "completion evidence not compared against a cancelled baseline ({} baseline rows, {} candidate rows)",
-                                data.eof_baseline.len(),
-                                data.eof_candidate.len()
-                            ));
-                        }
-                        let surplus = data.candidate_surplus + errors.candidate_surplus;
-                        if surplus > 0 {
-                            informational.push(format!(
-                                "candidate carries {surplus} rows beyond the cancelled baseline prefix"
-                            ));
-                        }
-                    }
-                }
-
-                let diverged = divergence_count > 0;
-                StageReport {
-                    status: if diverged { "diverged" } else { "matched" }.to_string(),
-                    vacuous: false,
-                    order_certified: true,
-                    blocking: Vec::new(),
+                match assemble_certified_report(
+                    stage_key,
+                    data,
+                    errors,
+                    plan.mode,
+                    classification,
                     logic_version_changed,
-                    positional_rows_baseline: data.positional_baseline + errors.positional_baseline,
-                    positional_rows_candidate: data.positional_candidate
-                        + errors.positional_candidate,
-                    divergence_count,
-                    divergences,
-                    informational,
-                    counts_by_type: None,
+                    options.max_divergences,
+                    "positional",
+                ) {
+                    Ok(report) => report,
+                    Err(reason) => return Ok(VerifyOutcome::Refused(reason)),
                 }
             }
-            StageCertification::NotOrderCertified { blocking } => {
+            StageCertification::Content => {
+                // Order-insensitive region: compare content as a multiset, so a
+                // legitimate reordering matches while a content difference (the
+                // count-only advisory could not see) still diverges.
+                let data = walk_journal_multiset(
+                    baseline.stage_rows(&b_stage.data_journal_file)?,
+                    candidate.stage_rows(&c_stage.data_journal_file)?,
+                    &opts("data"),
+                )?;
+                let errors = walk_journal_multiset(
+                    baseline.stage_rows(&b_stage.error_journal_file)?,
+                    candidate.stage_rows(&c_stage.error_journal_file)?,
+                    &opts("error"),
+                )?;
+                match assemble_certified_report(
+                    stage_key,
+                    data,
+                    errors,
+                    plan.mode,
+                    classification,
+                    logic_version_changed,
+                    options.max_divergences,
+                    "content",
+                ) {
+                    Ok(report) => report,
+                    Err(reason) => return Ok(VerifyOutcome::Refused(reason)),
+                }
+            }
+            StageCertification::NotCertifiable { blocking } => {
                 let b_data = tally_journal(baseline.stage_rows(&b_stage.data_journal_file)?)?;
                 let b_err = tally_journal(baseline.stage_rows(&b_stage.error_journal_file)?)?;
                 let c_data = tally_journal(candidate.stage_rows(&c_stage.data_journal_file)?)?;
@@ -235,6 +198,7 @@ pub fn verify_sources(
                     .to_string(),
                     vacuous,
                     order_certified: false,
+                    certification: "none".to_string(),
                     blocking: blocking.clone(),
                     logic_version_changed,
                     positional_rows_baseline: positional_baseline,
@@ -393,6 +357,89 @@ fn merge_counts(into: &mut BTreeMap<String, u64>, from: BTreeMap<String, u64>) {
     }
 }
 
+/// Shared post-walk assembly for a certified stage, positional or content: refuse
+/// on a lineage conflict, fold in the completion-evidence comparison, and build
+/// the `StageReport`. Both certificates share every step but the row comparator,
+/// so `data`/`errors` are already-walked outputs and `certification` is
+/// `"positional"` or `"content"`.
+#[allow(clippy::too_many_arguments)]
+fn assemble_certified_report(
+    stage_key: &str,
+    data: StageWalkOutput,
+    errors: StageWalkOutput,
+    mode: WalkMode,
+    classification: &str,
+    logic_version_changed: bool,
+    max_divergences: usize,
+    certification: &str,
+) -> Result<StageReport, RefusalReason> {
+    for walk in [&data, &errors] {
+        if let Some((baseline_ns, candidate_ns)) = &walk.lineage_conflict {
+            return Err(RefusalReason::LineageMismatch {
+                stage: stage_key.to_string(),
+                baseline_namespace: baseline_ns.clone(),
+                candidate_namespace: candidate_ns.clone(),
+            });
+        }
+    }
+
+    let mut divergences: Vec<DivergenceReport> = data.divergences;
+    divergences.extend(errors.divergences);
+    let mut divergence_count = data.divergence_count + errors.divergence_count;
+    let mut informational = Vec::new();
+
+    // Completion evidence: compared only when both runs reached completion;
+    // informational against a cancelled baseline. Identical for both certificates.
+    match mode {
+        WalkMode::WholeRun => {
+            if multiset(&data.eof_baseline) != multiset(&data.eof_candidate) {
+                divergence_count += 1;
+                if divergences.len() < max_divergences {
+                    divergences.push(DivergenceReport {
+                        journal: "data".to_string(),
+                        position: data.positional_baseline,
+                        field: "eof_evidence".to_string(),
+                        baseline: delta_side(&sorted_joined(&data.eof_baseline)),
+                        candidate: delta_side(&sorted_joined(&data.eof_candidate)),
+                        classification: classification.to_string(),
+                    });
+                }
+            }
+        }
+        WalkMode::BaselinePrefixOfCandidate => {
+            if !data.eof_baseline.is_empty() || !data.eof_candidate.is_empty() {
+                informational.push(format!(
+                    "completion evidence not compared against a cancelled baseline ({} baseline rows, {} candidate rows)",
+                    data.eof_baseline.len(),
+                    data.eof_candidate.len()
+                ));
+            }
+            let surplus = data.candidate_surplus + errors.candidate_surplus;
+            if surplus > 0 {
+                informational.push(format!(
+                    "candidate carries {surplus} rows beyond the cancelled baseline prefix"
+                ));
+            }
+        }
+    }
+
+    let diverged = divergence_count > 0;
+    Ok(StageReport {
+        status: if diverged { "diverged" } else { "matched" }.to_string(),
+        vacuous: false,
+        order_certified: true,
+        certification: certification.to_string(),
+        blocking: Vec::new(),
+        logic_version_changed,
+        positional_rows_baseline: data.positional_baseline + errors.positional_baseline,
+        positional_rows_candidate: data.positional_candidate + errors.positional_candidate,
+        divergence_count,
+        divergences,
+        informational,
+        counts_by_type: None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -409,6 +456,7 @@ mod tests {
     use obzenflow_core::{StageId, WriterId};
     use serde_json::json;
     use std::collections::HashMap;
+    use OrderDecision::{CycleNonDeterministic, OrderInsensitive, Ordered};
 
     struct MemorySource {
         dir: PathBuf,
@@ -438,12 +486,12 @@ mod tests {
     }
 
     fn manifest(
-        stages: &[(&str, &[&str], bool)],
+        stages: &[(&str, &[&str], OrderDecision)],
         replay: Option<RunManifestReplayConfig>,
         flow_id: &str,
     ) -> RunManifest {
         let mut map = HashMap::new();
-        for (key, inbound, ordered) in stages {
+        for (key, inbound, order_decision) in stages {
             map.insert(
                 key.to_string(),
                 RunManifestStage {
@@ -454,11 +502,7 @@ mod tests {
                     data_journal_file: format!("{key}.log"),
                     error_journal_file: format!("{key}_error.log"),
                     inbound: inbound.iter().map(|s| s.to_string()).collect(),
-                    order_decision: if *ordered {
-                        OrderDecision::Ordered
-                    } else {
-                        OrderDecision::OrderInsensitive
-                    },
+                    order_decision: order_decision.clone(),
                 },
             );
         }
@@ -528,8 +572,8 @@ mod tests {
         }
     }
 
-    fn topology() -> Vec<(&'static str, &'static [&'static str], bool)> {
-        vec![("a", &[], true), ("b", &["a"], true)]
+    fn topology() -> Vec<(&'static str, &'static [&'static str], OrderDecision)> {
+        vec![("a", &[], Ordered), ("b", &["a"], Ordered)]
     }
 
     #[test]
@@ -576,11 +620,85 @@ mod tests {
     }
 
     #[test]
-    fn uncertified_stage_with_rows_exits_two_with_counts() {
-        let stages: Vec<(&str, &[&str], bool)> = vec![
-            ("x", &[], true),
-            ("y", &[], true),
-            ("merge", &["x", "y"], false),
+    fn order_insensitive_fan_in_with_equal_content_certifies() {
+        let stages: Vec<(&str, &[&str], OrderDecision)> = vec![
+            ("x", &[], Ordered),
+            ("y", &[], Ordered),
+            ("merge", &["x", "y"], OrderInsensitive),
+        ];
+        // Same multiset, different delivery order across the two runs.
+        let baseline_rows = vec![data("t", json!({"n": 1})), data("t", json!({"n": 2}))];
+        let candidate_rows = vec![data("t", json!({"n": 2})), data("t", json!({"n": 1}))];
+        let baseline = source(
+            manifest(&stages, None, "flow_b"),
+            ArchiveStatus::Completed,
+            &[("merge.log", baseline_rows)],
+            "/runs/b",
+        );
+        let candidate = source(
+            manifest(&stages, replay_block(), "flow_c"),
+            ArchiveStatus::Completed,
+            &[("merge.log", candidate_rows)],
+            "/runs/c",
+        );
+        let outcome = verify_sources(&baseline, &candidate, &no_write()).unwrap();
+        assert_eq!(
+            outcome.exit_code(),
+            0,
+            "reordered but equal content certifies"
+        );
+        let VerifyOutcome::Completed { report, .. } = &outcome else {
+            panic!()
+        };
+        assert_eq!(report.stages["merge"].status, "matched");
+        assert_eq!(report.stages["merge"].certification, "content");
+        assert!(report.stages["merge"].order_certified);
+        assert!(render_verdict(&outcome).contains(MATCHED_LINE));
+    }
+
+    #[test]
+    fn order_insensitive_fan_in_with_content_divergence_exits_one() {
+        // The count-only advisory cannot see this: one row per run, same type,
+        // different payload (the 316-vs-999 shape).
+        let stages: Vec<(&str, &[&str], OrderDecision)> = vec![
+            ("x", &[], Ordered),
+            ("y", &[], Ordered),
+            ("merge", &["x", "y"], OrderInsensitive),
+        ];
+        let baseline = source(
+            manifest(&stages, None, "flow_b"),
+            ArchiveStatus::Completed,
+            &[("merge.log", vec![data("sum", json!({"total": 316}))])],
+            "/runs/b",
+        );
+        let candidate = source(
+            manifest(&stages, replay_block(), "flow_c"),
+            ArchiveStatus::Completed,
+            &[("merge.log", vec![data("sum", json!({"total": 999}))])],
+            "/runs/c",
+        );
+        let outcome = verify_sources(&baseline, &candidate, &no_write()).unwrap();
+        assert_eq!(
+            outcome.exit_code(),
+            1,
+            "content divergence in an order-insensitive region diverges"
+        );
+        let VerifyOutcome::Completed { report, .. } = &outcome else {
+            panic!()
+        };
+        assert_eq!(report.stages["merge"].status, "diverged");
+        assert!(report.stages["merge"]
+            .divergences
+            .iter()
+            .any(|d| d.field == "multiset_count"));
+    }
+
+    #[test]
+    fn cycle_stage_with_rows_exits_two_with_counts() {
+        let stages: Vec<(&str, &[&str], OrderDecision)> = vec![
+            ("x", &[], Ordered),
+            ("y", &[], Ordered),
+            ("merge", &["x", "y"], CycleNonDeterministic),
         ];
         let rows = vec![data("t", json!({"n": 1}))];
         let baseline = source(
@@ -601,16 +719,17 @@ mod tests {
             panic!()
         };
         assert_eq!(report.stages["merge"].status, "not_order_certified");
+        assert_eq!(report.stages["merge"].certification, "none");
         assert!(report.stages["merge"].counts_by_type.is_some());
         assert!(!render_verdict(&outcome).contains(MATCHED_LINE));
     }
 
     #[test]
     fn uncertified_stage_with_no_positional_rows_is_vacuously_certified() {
-        let stages: Vec<(&str, &[&str], bool)> = vec![
-            ("x", &[], true),
-            ("y", &[], true),
-            ("sink", &["x", "y"], false),
+        let stages: Vec<(&str, &[&str], OrderDecision)> = vec![
+            ("x", &[], Ordered),
+            ("y", &[], Ordered),
+            ("sink", &["x", "y"], CycleNonDeterministic),
         ];
         // The sink journal carries only excluded rows (none projected).
         let baseline = source(
@@ -776,8 +895,11 @@ mod tests {
             &[],
             "/runs/b",
         );
-        let extended: Vec<(&str, &[&str], bool)> =
-            vec![("a", &[], true), ("b", &["a"], true), ("c", &["b"], true)];
+        let extended: Vec<(&str, &[&str], OrderDecision)> = vec![
+            ("a", &[], Ordered),
+            ("b", &["a"], Ordered),
+            ("c", &["b"], Ordered),
+        ];
         let candidate = source(
             manifest(&extended, replay_block(), "flow_c"),
             ArchiveStatus::Completed,

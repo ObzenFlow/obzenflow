@@ -281,6 +281,28 @@ async fn commutative_barrier_reconstructs_identical_facts_across_interleavings_a
         facts25,
         "--replay-from of the second interleaving reconstructs its identical barrier facts"
     );
+
+    // FLOWIP-095l Gap 1: `obzenflow verify` certifies the order-insensitive
+    // barrier region by content, so two interleavings and replay of each are a
+    // clean CertifiedMatch (exit 0), not the pre-fix uncertified-remainder
+    // (exit 2). This is the tool attesting what the facts assertions above show.
+    use obzenflow_infra::verify::{verify_run_dirs, Verdict, VerifyOptions};
+    let vopts = VerifyOptions {
+        write_report: false,
+        ..Default::default()
+    };
+    let across_interleavings = verify_run_dirs(&live0, &live25, &vopts).expect("verify runs");
+    assert_eq!(
+        across_interleavings.verdict(),
+        Verdict::CertifiedMatch,
+        "two interleavings of a commutative barrier certify by content"
+    );
+    let across_replay = verify_run_dirs(&live0, &replay0, &vopts).expect("verify runs");
+    assert_eq!(
+        across_replay.verdict(),
+        Verdict::CertifiedMatch,
+        "--replay-from of the barrier flow certifies by content"
+    );
 }
 
 /// FLOWIP-095l Tier 3 (contract, gated on FLOWIP-120n): `--resume-from` of an

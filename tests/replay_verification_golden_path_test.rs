@@ -384,7 +384,7 @@ async fn replay_verification_certifies_the_reconstruction_and_replay_closure() {
         .expect("verification should run");
     let report = assert_certified_match(&outcome);
 
-    assert_eq!(report.report_version, 1);
+    assert_eq!(report.report_version, 2);
     assert_eq!(report.mode, "whole_run");
     assert_eq!(
         report.identity_mode, "lineage",
@@ -400,14 +400,13 @@ async fn replay_verification_certifies_the_reconstruction_and_replay_closure() {
     assert!(report.stages["authorize"].order_certified);
     assert!(report.stages["authorize"].positional_rows_baseline > 0);
 
-    // The converging delivery sink sits outside the certified region and is
-    // vacuously certified: it must not block the headline verdict.
+    // The converging delivery sink is an order-insensitive fan-in, so it
+    // certifies by content (FLOWIP-095l Gap 1). Its projected content is empty
+    // (delivery receipts are excluded from the projection), so it is a trivial
+    // content match, never a blocker on the headline verdict.
     let sink = &report.stages["cancelled_orders"];
-    assert!(!sink.order_certified);
-    assert!(
-        sink.vacuous,
-        "delivery-only sink fan-in is vacuously certified"
-    );
+    assert!(sink.order_certified);
+    assert_eq!(sink.certification, "content");
     assert_eq!(sink.status, "matched");
 
     // The sidecar report is the receipt, inside the candidate run directory,

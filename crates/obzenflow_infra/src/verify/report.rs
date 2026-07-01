@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use ring::digest::{digest, SHA256};
 use serde::Serialize;
 
-pub const REPORT_VERSION: u32 = 1;
+pub const REPORT_VERSION: u32 = 2;
 
 /// Per-side truncation budget for divergence deltas, in bytes.
 pub const DELTA_TRUNCATION_BYTES: usize = 1024;
@@ -60,7 +60,14 @@ pub struct StageReport {
     /// projection contains no positionally compared rows, so it is vacuously
     /// certified (FLOWIP-095j section 2).
     pub vacuous: bool,
+    /// True when the stage carries a certificate, either positional (delivery
+    /// order pinned) or by content (order proven irrelevant). False only for a
+    /// not-certifiable stage (cycle or regime mismatch).
     pub order_certified: bool,
+    /// Which certificate was applied (FLOWIP-095l): `"positional"` (compared row
+    /// by row), `"content"` (compared as an order-insensitive multiset), or
+    /// `"none"` (not certifiable; per-type count advisory only).
+    pub certification: String,
     /// Ancestors (possibly including the stage itself) whose delivery order
     /// is unconstrained; empty when certified.
     #[serde(skip_serializing_if = "Vec::is_empty")]

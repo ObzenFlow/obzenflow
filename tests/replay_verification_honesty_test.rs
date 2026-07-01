@@ -2,15 +2,16 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! FLOWIP-095j honesty at unordered fan-ins, on real journals.
+//! FLOWIP-095j/FLOWIP-095l honesty at unordered fan-ins, on real journals.
 //!
-//! A multi-inbound stage with no effectful descendant keeps availability
+//! A multi-inbound stage with no order-observing descendant keeps availability
 //! driven delivery (FLOWIP-095d leaves it unordered), so its journal order is
 //! timing dependent and two correct runs can legitimately interleave
 //! differently. The verifier must neither report that interleaving as
-//! divergence nor fold the stage silently into the headline verdict: the
-//! stage is named `not_order_certified`, per-type row counts are an advisory,
-//! and the run exits 2.
+//! divergence nor fake a positional certificate: it recognises the region as
+//! order-insensitive (the build's `OrderInsensitive` verdict) and certifies it
+//! by content, an order-insensitive multiset. A legitimate reordering is a
+//! clean match; a content difference would still diverge. The run exits 0.
 
 use async_trait::async_trait;
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
@@ -135,7 +136,7 @@ fn latest_run_dir(base: &Path) -> PathBuf {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn unordered_fan_in_is_named_not_misreported() {
+async fn unordered_fan_in_certifies_by_content() {
     let temp = tempfile::tempdir().expect("tempdir");
     let journal_base = temp.path().join("journals");
 
@@ -161,41 +162,34 @@ async fn unordered_fan_in_is_named_not_misreported() {
         .expect("verification should run");
     assert_eq!(
         outcome.exit_code(),
-        2,
-        "an unordered fan-in carrying data rows must downgrade the verdict, never fake certainty"
+        0,
+        "an order-insensitive fan-in with reproducible content certifies by content (FLOWIP-095l Gap 1)"
     );
     let VerifyOutcome::Completed { report, .. } = &outcome else {
         panic!("expected a completed comparison");
     };
 
+    // The merge is order-insensitive: it is certified by content (an
+    // order-insensitive multiset), so a legitimate reordering is a match, never a
+    // divergence and never a faked positional certificate.
     let merge = &report.stages["merge"];
-    assert_eq!(merge.status, "not_order_certified");
-    assert!(!merge.vacuous);
-    assert_eq!(merge.blocking, vec!["merge".to_string()]);
+    assert_eq!(merge.status, "matched");
+    assert_eq!(merge.certification, "content");
+    assert!(merge.order_certified);
     assert_eq!(
         merge.divergence_count, 0,
-        "interleaving is never reported as divergence"
-    );
-    let counts = merge
-        .counts_by_type
-        .as_ref()
-        .expect("uncertified stages carry the count advisory");
-    assert_eq!(
-        counts.baseline, counts.candidate,
-        "per-type counts are order-insensitive and must agree"
+        "interleaving is absorbed by the multiset, never reported as divergence"
     );
 
-    // The sources upstream of the merge stay certified and matched.
+    // The sources upstream of the merge stay positionally certified and matched.
     assert!(report.stages["channel_a"].order_certified);
     assert_eq!(report.stages["channel_a"].status, "matched");
+    assert_eq!(report.stages["channel_a"].certification, "positional");
 
+    // A fully certified match now prints the headline.
     let rendered = obzenflow_infra::verify::render_verdict(&outcome);
     assert!(
-        !rendered.contains(MATCHED_LINE),
-        "the headline line must not print over an uncertified remainder: {rendered}"
-    );
-    assert!(
-        rendered.contains("merge"),
-        "the verdict names the uncertified stage: {rendered}"
+        rendered.contains(MATCHED_LINE),
+        "a content-certified order-insensitive region is a clean match: {rendered}"
     );
 }

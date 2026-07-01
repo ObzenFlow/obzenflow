@@ -2,17 +2,24 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Order-certification (FLOWIP-095j): which stages may be compared
-//! positionally.
+//! Order-certification (FLOWIP-095j, FLOWIP-095l): which comparison a stage
+//! admits.
 //!
-//! A stage is order-certified when every fan-in on every path from the
-//! sources to it delivers deterministically. The inputs are the manifest's
-//! recorded `inbound` edges and `ordered_delivery` flags (written at flow
-//! build, where the FLOWIP-095d marked set and structural orderers are
-//! known), so certification is a pure graph walk over manifest data and both
-//! verify surfaces certify identically. A stage's own `ordered_delivery` must
-//! be true in BOTH manifests: the flag is the ordering-regime record, and a
-//! mismatch means the runs executed under different regimes.
+//! Each stage's manifest `order_decision` is one of `Ordered`,
+//! `OrderInsensitive`, or `CycleNonDeterministic`, written at flow build where
+//! the FLOWIP-095d marked set, barriers, and cycles are known. Certification is
+//! a pure graph walk over the ancestor cone, reading both manifests so two runs
+//! are compared only under a matching regime:
+//!
+//! - every cone fan-in `Ordered` in both runs is `Positional`: delivery
+//!   positions reproduce, so the stage is compared row by row;
+//! - a cone fan-in `OrderInsensitive` in both runs (and no hard blocker) is
+//!   `Content`: positions may differ between correct runs, but the emitted
+//!   multiset is the complete observable (the build certified that no descendant
+//!   observes order), so the stage is compared as an order-insensitive multiset;
+//! - a `CycleNonDeterministic` member, or a per-stage regime mismatch between
+//!   the runs, on any path is `NotCertifiable`: order is neither pinned nor
+//!   proven irrelevant, so only a per-type count advisory is reported.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -20,18 +27,50 @@ use obzenflow_core::journal::run_manifest::{OrderDecision, RunManifest};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum StageCertification {
-    Certified,
-    /// Not positionally comparable. `blocking` names every ancestor
-    /// (possibly including the stage itself) whose delivery order is
-    /// unconstrained in at least one of the two runs.
-    NotOrderCertified {
-        blocking: Vec<String>,
-    },
+    /// Every fan-in on every path is `Ordered` in both runs: delivery positions
+    /// reproduce, so the stage is compared position by position.
+    Positional,
+    /// A fan-in on a path is `OrderInsensitive` in both runs (and no hard
+    /// blocker): delivery order may differ between correct runs, but the emitted
+    /// multiset is the complete observable, so the stage is compared as an
+    /// order-insensitive multiset.
+    Content,
+    /// A cycle member, or a per-stage regime mismatch between the runs, sits on
+    /// a path. `blocking` names every such ancestor (possibly the stage itself).
+    /// Order is neither pinned nor proven irrelevant, so the stage is not
+    /// certifiable and only a per-type count advisory is reported.
+    NotCertifiable { blocking: Vec<String> },
 }
 
 impl StageCertification {
+    /// True when the stage carries a certificate, positional or content.
     pub fn is_certified(&self) -> bool {
-        matches!(self, Self::Certified)
+        matches!(self, Self::Positional | Self::Content)
+    }
+}
+
+/// A stage's joint ordering regime across the two runs.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Regime {
+    /// `Ordered` in both runs.
+    Ordered,
+    /// `OrderInsensitive` in both runs.
+    Insensitive,
+    /// `CycleNonDeterministic` in either run, the two runs disagree, or the
+    /// stage is missing from a run. Not certifiable.
+    Hard,
+}
+
+fn joint_regime(baseline: &RunManifest, candidate: &RunManifest, key: &str) -> Regime {
+    let baseline = baseline.stages.get(key).map(|s| &s.order_decision);
+    let candidate = candidate.stages.get(key).map(|s| &s.order_decision);
+    match (baseline, candidate) {
+        (Some(OrderDecision::Ordered), Some(OrderDecision::Ordered)) => Regime::Ordered,
+        (Some(OrderDecision::OrderInsensitive), Some(OrderDecision::OrderInsensitive)) => {
+            Regime::Insensitive
+        }
+        // CycleNonDeterministic in either, a mismatch, or a missing stage.
+        _ => Regime::Hard,
     }
 }
 
@@ -42,55 +81,64 @@ pub fn certify(
     baseline: &RunManifest,
     candidate: &RunManifest,
 ) -> BTreeMap<String, StageCertification> {
-    let ordered_both: HashMap<&str, bool> = candidate
+    let regime: HashMap<&str, Regime> = candidate
         .stages
-        .iter()
-        .map(|(key, stage)| {
-            let baseline_ordered = baseline
-                .stages
-                .get(key)
-                .map(|s| s.order_decision == OrderDecision::Ordered)
-                .unwrap_or(false);
-            (
-                key.as_str(),
-                stage.order_decision == OrderDecision::Ordered && baseline_ordered,
-            )
-        })
+        .keys()
+        .map(|key| (key.as_str(), joint_regime(baseline, candidate, key)))
         .collect();
 
     let mut result = BTreeMap::new();
     for key in candidate.stages.keys() {
-        let mut blocking = HashSet::new();
+        let mut hard = HashSet::new();
+        let mut has_soft = false;
         let mut visited = HashSet::new();
-        collect_blocking(key, candidate, &ordered_both, &mut visited, &mut blocking);
-        let certification = if blocking.is_empty() {
-            StageCertification::Certified
-        } else {
-            let mut blocking: Vec<String> = blocking.into_iter().collect();
+        collect_cone(
+            key,
+            candidate,
+            &regime,
+            &mut visited,
+            &mut hard,
+            &mut has_soft,
+        );
+
+        let certification = if !hard.is_empty() {
+            let mut blocking: Vec<String> = hard.into_iter().collect();
             blocking.sort();
-            StageCertification::NotOrderCertified { blocking }
+            StageCertification::NotCertifiable { blocking }
+        } else if has_soft {
+            StageCertification::Content
+        } else {
+            StageCertification::Positional
         };
         result.insert(key.clone(), certification);
     }
     result
 }
 
-fn collect_blocking(
+/// Walk the ancestor cone of `key`, recording every hard-blocking stage and
+/// whether any cone stage is order-insensitive. Precedence at the call site: a
+/// hard blocker beats a soft (order-insensitive) stage beats all-ordered.
+fn collect_cone(
     key: &str,
     manifest: &RunManifest,
-    ordered_both: &HashMap<&str, bool>,
+    regime: &HashMap<&str, Regime>,
     visited: &mut HashSet<String>,
-    blocking: &mut HashSet<String>,
+    hard: &mut HashSet<String>,
+    has_soft: &mut bool,
 ) {
     if !visited.insert(key.to_string()) {
         return;
     }
-    if !ordered_both.get(key).copied().unwrap_or(false) {
-        blocking.insert(key.to_string());
+    match regime.get(key).copied().unwrap_or(Regime::Hard) {
+        Regime::Ordered => {}
+        Regime::Insensitive => *has_soft = true,
+        Regime::Hard => {
+            hard.insert(key.to_string());
+        }
     }
     if let Some(stage) = manifest.stages.get(key) {
         for upstream in &stage.inbound {
-            collect_blocking(upstream, manifest, ordered_both, visited, blocking);
+            collect_cone(upstream, manifest, regime, visited, hard, has_soft);
         }
     }
 }
@@ -102,9 +150,11 @@ mod tests {
     use obzenflow_core::journal::run_manifest::RunManifestStage;
     use std::collections::HashMap as StdHashMap;
 
-    fn manifest(stages: &[(&str, &[&str], bool)]) -> RunManifest {
+    use OrderDecision::{CycleNonDeterministic, OrderInsensitive, Ordered};
+
+    fn manifest(stages: &[(&str, &[&str], OrderDecision)]) -> RunManifest {
         let mut map = StdHashMap::new();
-        for (key, inbound, ordered) in stages {
+        for (key, inbound, order_decision) in stages {
             map.insert(
                 key.to_string(),
                 RunManifestStage {
@@ -115,16 +165,12 @@ mod tests {
                     data_journal_file: format!("{key}.log"),
                     error_journal_file: format!("{key}_error.log"),
                     inbound: inbound.iter().map(|s| s.to_string()).collect(),
-                    order_decision: if *ordered {
-                        OrderDecision::Ordered
-                    } else {
-                        OrderDecision::OrderInsensitive
-                    },
+                    order_decision: order_decision.clone(),
                 },
             );
         }
         RunManifest {
-            manifest_version: "2.0".to_string(),
+            manifest_version: "3.0".to_string(),
             journal_format_version: 1,
             obzenflow_version: "0.1.2".to_string(),
             flow_id: "flow_test".to_string(),
@@ -137,84 +183,96 @@ mod tests {
     }
 
     #[test]
-    fn single_input_chain_is_fully_certified() {
+    fn single_input_chain_is_positionally_certified() {
         let m = manifest(&[
-            ("source", &[], true),
-            ("transform", &["source"], true),
-            ("sink", &["transform"], true),
+            ("source", &[], Ordered),
+            ("transform", &["source"], Ordered),
+            ("sink", &["transform"], Ordered),
         ]);
         let certs = certify(&m, &m);
-        assert!(certs.values().all(StageCertification::is_certified));
+        assert!(certs.values().all(|c| *c == StageCertification::Positional));
     }
 
     #[test]
-    fn unordered_fan_in_poisons_descendants_and_names_the_blocker() {
+    fn order_insensitive_fan_in_is_content_certified_and_propagates() {
+        // A single-input `Ordered` stage below an `OrderInsensitive` fan-in is
+        // content-certified, not positional: its positions are run-dependent
+        // (its input arrived in a free order) while its multiset reproduces.
         let m = manifest(&[
-            ("a", &[], true),
-            ("b", &[], true),
-            ("merge", &["a", "b"], false),
-            ("downstream", &["merge"], true),
+            ("a", &[], Ordered),
+            ("b", &[], Ordered),
+            ("merge", &["a", "b"], OrderInsensitive),
+            ("downstream", &["merge"], Ordered),
         ]);
         let certs = certify(&m, &m);
-        assert!(certs["a"].is_certified());
-        assert!(certs["b"].is_certified());
-        assert_eq!(
-            certs["merge"],
-            StageCertification::NotOrderCertified {
-                blocking: vec!["merge".to_string()]
-            }
-        );
-        assert_eq!(
-            certs["downstream"],
-            StageCertification::NotOrderCertified {
-                blocking: vec!["merge".to_string()]
-            }
-        );
+        assert_eq!(certs["a"], StageCertification::Positional);
+        assert_eq!(certs["merge"], StageCertification::Content);
+        assert_eq!(certs["downstream"], StageCertification::Content);
     }
 
     #[test]
-    fn ordered_fan_in_certifies_when_both_regimes_agree() {
+    fn ordered_fan_in_is_positional_when_both_regimes_agree() {
         let m = manifest(&[
-            ("a", &[], true),
-            ("b", &[], true),
-            ("merge", &["a", "b"], true),
+            ("a", &[], Ordered),
+            ("b", &[], Ordered),
+            ("merge", &["a", "b"], Ordered),
         ]);
         let certs = certify(&m, &m);
-        assert!(certs["merge"].is_certified());
+        assert_eq!(certs["merge"], StageCertification::Positional);
     }
 
     #[test]
-    fn regime_mismatch_downgrades_the_stage() {
+    fn regime_mismatch_is_not_certifiable() {
         let baseline = manifest(&[
-            ("a", &[], true),
-            ("b", &[], true),
-            ("merge", &["a", "b"], false),
+            ("a", &[], Ordered),
+            ("b", &[], Ordered),
+            ("merge", &["a", "b"], OrderInsensitive),
         ]);
         let candidate = manifest(&[
-            ("a", &[], true),
-            ("b", &[], true),
-            ("merge", &["a", "b"], true),
+            ("a", &[], Ordered),
+            ("b", &[], Ordered),
+            ("merge", &["a", "b"], Ordered),
         ]);
         let certs = certify(&baseline, &candidate);
         assert_eq!(
             certs["merge"],
-            StageCertification::NotOrderCertified {
+            StageCertification::NotCertifiable {
                 blocking: vec!["merge".to_string()]
             }
         );
     }
 
     #[test]
-    fn cycles_terminate_and_stay_uncertified() {
-        // Cycle members record ordered_delivery=false at build time.
+    fn cycle_member_is_not_certifiable_and_names_the_blocker() {
         let m = manifest(&[
-            ("source", &[], true),
-            ("loop_a", &["source", "loop_b"], false),
-            ("loop_b", &["loop_a"], false),
+            ("source", &[], Ordered),
+            ("loop_a", &["source", "loop_b"], CycleNonDeterministic),
+            ("loop_b", &["loop_a"], CycleNonDeterministic),
         ]);
         let certs = certify(&m, &m);
-        assert!(!certs["loop_a"].is_certified());
-        assert!(!certs["loop_b"].is_certified());
-        assert!(certs["source"].is_certified());
+        assert_eq!(certs["source"], StageCertification::Positional);
+        assert!(matches!(
+            certs["loop_a"],
+            StageCertification::NotCertifiable { .. }
+        ));
+        assert!(matches!(
+            certs["loop_b"],
+            StageCertification::NotCertifiable { .. }
+        ));
+    }
+
+    #[test]
+    fn a_cycle_upstream_poisons_a_downstream_stage() {
+        let m = manifest(&[
+            ("source", &[], Ordered),
+            ("loop_a", &["source", "loop_b"], CycleNonDeterministic),
+            ("loop_b", &["loop_a"], CycleNonDeterministic),
+            ("downstream", &["loop_a"], Ordered),
+        ]);
+        let certs = certify(&m, &m);
+        let StageCertification::NotCertifiable { blocking } = &certs["downstream"] else {
+            panic!("a stage below a cycle is not certifiable");
+        };
+        assert!(blocking.contains(&"loop_a".to_string()));
     }
 }

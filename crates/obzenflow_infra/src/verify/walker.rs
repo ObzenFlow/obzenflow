@@ -17,7 +17,7 @@
 //! of resumed runs (FLOWIP-120n) is later a parameterization rather than a
 //! rewrite.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use obzenflow_core::event::ChainEvent;
 
@@ -196,6 +196,133 @@ pub fn tally_journal(
         }
     }
     Ok(out)
+}
+
+/// Content-equality walk for an order-insensitive region (FLOWIP-095l): compare
+/// the two journals as multisets of projected rows, tolerating any delivery
+/// reordering the region permits while still certifying content. Positions carry
+/// no meaning here, so a divergence is a row whose occurrence count differs, and
+/// its `position` is the index of that distinct content in sorted order.
+///
+/// `WholeRun` requires equal counts per content. `BaselinePrefixOfCandidate`
+/// requires the baseline to be a sub-multiset of the candidate: a candidate
+/// deficit diverges, a candidate surplus is informational. Completion evidence
+/// is collected per side and compared by the caller exactly as the positional
+/// walk does.
+pub fn walk_journal_multiset(
+    baseline: impl Iterator<Item = Result<ChainEvent, VerifyError>>,
+    candidate: impl Iterator<Item = Result<ChainEvent, VerifyError>>,
+    opts: &StageWalkOptions,
+) -> Result<StageWalkOutput, VerifyError> {
+    let mut out = StageWalkOutput::default();
+    let mut b_ns = BTreeSet::new();
+    let mut c_ns = BTreeSet::new();
+    let b = tally_multiset(baseline, opts.identity, &mut out.eof_baseline, &mut b_ns)?;
+    let c = tally_multiset(candidate, opts.identity, &mut out.eof_candidate, &mut c_ns)?;
+
+    // Lineage parity with the positional walk: under `Lineage`, effect-lane rows
+    // minted in disjoint namespaces mean the two runs are unrelated. A barrier-
+    // shielded effect can legitimately sit in a content region, so guard here too.
+    if opts.identity == IdentityMode::Lineage
+        && !b_ns.is_empty()
+        && !c_ns.is_empty()
+        && b_ns.is_disjoint(&c_ns)
+    {
+        out.lineage_conflict = Some((
+            b_ns.into_iter().next().unwrap_or_default(),
+            c_ns.into_iter().next().unwrap_or_default(),
+        ));
+        return Ok(out);
+    }
+
+    out.positional_baseline = b.values().sum();
+    out.positional_candidate = c.values().sum();
+
+    let keys: BTreeSet<&String> = b.keys().chain(c.keys()).collect();
+    for (position, key) in keys.into_iter().enumerate() {
+        let b_count = b.get(key).copied().unwrap_or(0);
+        let c_count = c.get(key).copied().unwrap_or(0);
+        let position = position as u64;
+        match opts.mode {
+            WalkMode::WholeRun => {
+                if b_count != c_count {
+                    record_multiset_divergence(&mut out, opts, position, key, b_count, c_count);
+                }
+            }
+            WalkMode::BaselinePrefixOfCandidate => {
+                if c_count < b_count {
+                    // The baseline must be a sub-multiset of the candidate.
+                    record_multiset_divergence(&mut out, opts, position, key, b_count, c_count);
+                } else if c_count > b_count {
+                    out.candidate_surplus += c_count - b_count;
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Count projected rows by canonical content, routing completion evidence to
+/// `eof_sink` exactly as the positional walk does.
+fn tally_multiset(
+    rows: impl Iterator<Item = Result<ChainEvent, VerifyError>>,
+    identity: IdentityMode,
+    eof_sink: &mut Vec<String>,
+    namespaces: &mut BTreeSet<String>,
+) -> Result<BTreeMap<String, u64>, VerifyError> {
+    let mut counts: BTreeMap<String, u64> = BTreeMap::new();
+    for event in rows {
+        match project(&event?) {
+            Some(ProjectedRow::Positional(row)) => {
+                if identity == IdentityMode::Lineage {
+                    if let Some(id) = &row.identity {
+                        namespaces.insert(id.namespace.clone());
+                    }
+                }
+                *counts.entry(content_key(&row, identity)).or_insert(0) += 1;
+            }
+            Some(ProjectedRow::EofEvidence(evidence)) => eof_sink.push(evidence.to_string()),
+            None => {}
+        }
+    }
+    Ok(counts)
+}
+
+/// The canonical multiset key for a projected row: the same comparable fields
+/// the positional walk uses (`kind` + `payload` + `status`, and `identity` only
+/// under `IdentityMode::Lineage`, mirroring `first_differing_field`). serde_json
+/// serializes objects with sorted keys (no `preserve_order` feature), so equal
+/// content maps to one key. Effect identity is kept under Lineage, where it is
+/// deterministic and an effect shielded by a barrier can legitimately sit in a
+/// content region; it is dropped otherwise, or per-run-regenerated event ids
+/// would false-diverge.
+fn content_key(row: &PositionalRow, identity: IdentityMode) -> String {
+    let mut row = row.clone();
+    if identity != IdentityMode::Lineage {
+        row.identity = None;
+    }
+    serde_json::to_string(&row).unwrap_or_default()
+}
+
+fn record_multiset_divergence(
+    out: &mut StageWalkOutput,
+    opts: &StageWalkOptions,
+    position: u64,
+    content: &str,
+    baseline_count: u64,
+    candidate_count: u64,
+) {
+    out.divergence_count += 1;
+    if out.divergences.len() < opts.max_divergences {
+        out.divergences.push(DivergenceReport {
+            journal: opts.journal_label.to_string(),
+            position,
+            field: "multiset_count".to_string(),
+            baseline: delta_side(&format!("{baseline_count}x {content}")),
+            candidate: delta_side(&format!("{candidate_count}x {content}")),
+            classification: opts.classification.to_string(),
+        });
+    }
 }
 
 fn next_positional(
@@ -440,5 +567,101 @@ mod tests {
         assert_eq!(out.positional, 3);
         assert_eq!(out.counts_by_type["a"], 2);
         assert_eq!(out.counts_by_type["b"], 1);
+    }
+
+    #[test]
+    fn multiset_tolerates_reordering_of_equal_content() {
+        let baseline = vec![data("a", json!({"n": 1})), data("a", json!({"n": 2}))];
+        let candidate = vec![data("a", json!({"n": 2})), data("a", json!({"n": 1}))];
+        let out = walk_journal_multiset(
+            ok_rows(baseline),
+            ok_rows(candidate),
+            &opts(WalkMode::WholeRun),
+        )
+        .unwrap();
+        assert_eq!(
+            out.divergence_count, 0,
+            "reordered but equal multiset matches"
+        );
+        assert_eq!(out.positional_baseline, 2);
+        assert_eq!(out.positional_candidate, 2);
+    }
+
+    #[test]
+    fn multiset_count_difference_on_same_content_diverges() {
+        let baseline = vec![data("a", json!({"n": 1})), data("a", json!({"n": 1}))];
+        let candidate = vec![data("a", json!({"n": 1}))];
+        let out = walk_journal_multiset(
+            ok_rows(baseline),
+            ok_rows(candidate),
+            &opts(WalkMode::WholeRun),
+        )
+        .unwrap();
+        assert_eq!(out.divergence_count, 1);
+        assert_eq!(out.divergences[0].field, "multiset_count");
+    }
+
+    #[test]
+    fn multiset_payload_difference_diverges() {
+        // The 316-vs-999 shape: distinct content the count-only advisory misses.
+        let baseline = vec![data("sum", json!({"total": 316}))];
+        let candidate = vec![data("sum", json!({"total": 999}))];
+        let out = walk_journal_multiset(
+            ok_rows(baseline),
+            ok_rows(candidate),
+            &opts(WalkMode::WholeRun),
+        )
+        .unwrap();
+        // Two distinct contents, each with a count mismatch (1 vs 0 and 0 vs 1).
+        assert_eq!(out.divergence_count, 2);
+        assert!(out.divergences.iter().all(|d| d.field == "multiset_count"));
+    }
+
+    #[test]
+    fn multiset_prefix_surplus_is_informational() {
+        let baseline = vec![data("a", json!({"n": 1}))];
+        let candidate = vec![data("a", json!({"n": 1})), data("a", json!({"n": 1}))];
+        let out = walk_journal_multiset(
+            ok_rows(baseline),
+            ok_rows(candidate),
+            &opts(WalkMode::BaselinePrefixOfCandidate),
+        )
+        .unwrap();
+        assert_eq!(out.divergence_count, 0);
+        assert_eq!(out.candidate_surplus, 1);
+    }
+
+    #[test]
+    fn multiset_prefix_missing_baseline_row_diverges() {
+        let baseline = vec![data("a", json!({"n": 1})), data("a", json!({"n": 1}))];
+        let candidate = vec![data("a", json!({"n": 1}))];
+        let out = walk_journal_multiset(
+            ok_rows(baseline),
+            ok_rows(candidate),
+            &opts(WalkMode::BaselinePrefixOfCandidate),
+        )
+        .unwrap();
+        assert_eq!(out.divergence_count, 1, "baseline must be a sub-multiset");
+    }
+
+    #[test]
+    fn multiset_collects_eof_evidence_without_comparing_it_positionally() {
+        let baseline = vec![
+            data("a", json!({"n": 1})),
+            ChainEventFactory::eof_event(writer(), true),
+        ];
+        let candidate = vec![
+            ChainEventFactory::eof_event(writer(), true),
+            data("a", json!({"n": 1})),
+        ];
+        let out = walk_journal_multiset(
+            ok_rows(baseline),
+            ok_rows(candidate),
+            &opts(WalkMode::WholeRun),
+        )
+        .unwrap();
+        assert_eq!(out.divergence_count, 0);
+        assert_eq!(out.eof_baseline.len(), 1);
+        assert_eq!(out.eof_candidate.len(), 1);
     }
 }
