@@ -17,8 +17,8 @@ mod tests {
     use obzenflow_runtime::stages::common::handlers::source::SourceError;
     use obzenflow_runtime::stages::common::handlers::{
         AsyncFiniteSourceHandler, AsyncInfiniteSourceHandler, AsyncTransformHandler,
-        EffectfulSinkHandler, EffectfulStatefulHandler, EffectfulTransformHandler,
-        FiniteSourceHandler, InfiniteSourceHandler, SinkHandler, StatefulHandler, TransformHandler,
+        EffectfulStatefulHandler, EffectfulTransformHandler, FiniteSourceHandler,
+        InfiniteSourceHandler, SinkHandler, StatefulHandler, TransformHandler,
     };
     use obzenflow_runtime::typing::{SinkTyping, SourceTyping, StatefulTyping, TransformTyping};
     use serde::{Deserialize, Serialize};
@@ -181,21 +181,6 @@ mod tests {
     #[async_trait]
     impl SinkHandler for Sn {
         async fn consume(&mut self, _e: ChainEvent) -> Result<DeliveryPayload, HandlerError> {
-            Ok(DeliveryPayload::success(DeliveryMethod::Noop, None))
-        }
-    }
-
-    #[derive(Clone, Debug)]
-    struct FxSn;
-    #[async_trait]
-    impl EffectfulSinkHandler for FxSn {
-        type Input = Out;
-
-        async fn consume(
-            &mut self,
-            _input: Out,
-            _fx: &mut Effects,
-        ) -> Result<DeliveryPayload, HandlerError> {
             Ok(DeliveryPayload::success(DeliveryMethod::Noop, None))
         }
     }
@@ -445,23 +430,5 @@ mod tests {
             delivery: idempotent,
             middleware: []
         );
-    }
-
-    // ── effectful_sink! ─────────────────────────────────────────────────────
-    #[test]
-    fn effectful_sink_typed_bare() {
-        let _ = crate::effectful_sink!(Out => FxSn, effects: [], middleware: []);
-    }
-    #[test]
-    fn effectful_sink_typed_mw() {
-        let _ = crate::effectful_sink!(Out => FxSn, effects: [], middleware: []);
-    }
-    #[test]
-    fn effectful_sink_typed_name() {
-        let _ = crate::effectful_sink!(name: "s", Out => FxSn, effects: [], middleware: []);
-    }
-    #[test]
-    fn effectful_sink_typed_name_mw() {
-        let _ = crate::effectful_sink!(name: "s", Out => FxSn, effects: [], middleware: []);
     }
 }

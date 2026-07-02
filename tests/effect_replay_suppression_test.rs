@@ -19,20 +19,19 @@ use obzenflow_core::{
     TypedPayload, WriterId,
 };
 use obzenflow_dsl::{
-    effectful_sink, effectful_stateful, effectful_transform, flow, sink, source, transform,
-    FlowDefinition,
+    effectful_stateful, effectful_transform, flow, sink, source, transform, FlowDefinition,
 };
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::effects::{
     is_framework_effect_event_type, Effect, EffectCommitHandle, EffectContext, EffectCursor,
     EffectError, EffectPortRegistry, EffectPortRequirement, EffectRecord, EffectSafety, Effects,
-    IdempotencyKey, TransactionalEffectPort, EFFECT_RECORD_EVENT_TYPE,
+    IdempotencyKey, SinkDeliverySafety, TransactionalEffectPort, EFFECT_RECORD_EVENT_TYPE,
 };
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    EffectfulSinkHandler, EffectfulStatefulHandler, EffectfulTransformHandler, FiniteSourceHandler,
-    SinkHandler, TransformHandler,
+    EffectfulStatefulHandler, EffectfulTransformHandler, FiniteSourceHandler, SinkHandler,
+    TransformHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
@@ -768,47 +767,10 @@ impl SinkHandler for CollectSink {
             None,
         ))
     }
-}
 
-#[derive(Clone, Debug)]
-struct EffectfulCollectSink {
-    calls: Arc<AtomicUsize>,
-    receipts: Arc<Mutex<Vec<ReplayOutput>>>,
-}
-
-#[async_trait]
-impl EffectfulSinkHandler for EffectfulCollectSink {
-    type Input = ReplayInput;
-
-    async fn consume(
-        &mut self,
-        input: ReplayInput,
-        fx: &mut Effects,
-    ) -> Result<DeliveryPayload, HandlerError> {
-        let effect_value = fx
-            .perform(CountingEffect {
-                value: input.value,
-                calls: self.calls.clone(),
-            })
-            .await
-            .map_err(|e| HandlerError::Other(e.to_string()))?;
-
-        self.receipts
-            .lock()
-            .expect("receipts lock poisoned")
-            .push(ReplayOutput {
-                value: input.value,
-                effect_value: effect_value.effect_value,
-            });
-
-        Ok(DeliveryPayload::success(
-            DeliveryMethod::Custom("Memory".to_string()),
-            None,
-        ))
-    }
-
-    fn stage_logic_version(&self) -> &str {
-        "effect-replay-sink-v1"
+    // In-memory collector: re-delivery under either archive verb is safe.
+    fn delivery_safety(&self) -> Option<SinkDeliverySafety> {
+        Some(SinkDeliverySafety::IdempotentProjection)
     }
 }
 
@@ -956,31 +918,6 @@ fn build_fan_out_flow(
             inputs |> fan_out;
             fan_out |> effectful;
             effectful |> collector;
-        }
-    }
-}
-
-fn build_effectful_sink_flow(
-    journal_base: PathBuf,
-    calls: Arc<AtomicUsize>,
-    receipts: Arc<Mutex<Vec<ReplayOutput>>>,
-) -> FlowDefinition {
-    flow! {
-        name: "effect_replay_sink",
-        journals: disk_journals(journal_base),
-        middleware: [],
-
-        stages: {
-            inputs = source!(ReplayInput => ReplaySource::new());
-            collector = effectful_sink!(
-                ReplayInput => EffectfulCollectSink { calls, receipts },
-                effects: [CountingEffect],
-                middleware: []
-            );
-        },
-
-        topology: {
-            inputs |> collector;
         }
     }
 }
@@ -1634,33 +1571,6 @@ async fn effect_rate_limiter_runtime_activity_in_stage(
                     });
             (ev.max(sum_ev), dl.max(sum_dl), ds.max(sum_ds))
         })
-}
-
-#[tokio::test]
-async fn effectful_sink_fails_closed_at_materialisation() {
-    let _guard = effect_replay_test_guard().await;
-    let temp = tempfile::tempdir().expect("tempdir");
-    let journal_base = temp.path().join("journals");
-
-    let calls = Arc::new(AtomicUsize::new(0));
-    let receipts = Arc::new(Mutex::new(Vec::new()));
-    let err = FlowApplication::builder()
-        .with_cli_args(["obzenflow"])
-        .run_async(build_effectful_sink_flow(
-            journal_base,
-            calls.clone(),
-            receipts.clone(),
-        ))
-        .await
-        .expect_err("effectful sinks are retired under FLOWIP-120b");
-
-    let message = err.to_string();
-    assert!(
-        message.contains("effectful sink") && message.contains("retired by FLOWIP-120b"),
-        "materialisation error should explain effectful sink retirement, got: {message}"
-    );
-    assert_eq!(calls.load(Ordering::SeqCst), 0);
-    assert!(receipts.lock().expect("receipts lock poisoned").is_empty());
 }
 
 #[tokio::test]

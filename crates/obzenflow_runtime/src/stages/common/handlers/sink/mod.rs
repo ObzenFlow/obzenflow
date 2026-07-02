@@ -9,7 +9,4 @@ pub mod traits;
 
 pub use delivery::{Delivered, Delivery};
 pub use traits::UnifiedSinkHandler;
-pub use traits::{
-    CommitReceipt, EffectfulSinkHandler, EffectfulSinkHandlerAdapter, SinkConsumeReport,
-    SinkHandler, SinkLifecycleReport,
-};
+pub use traits::{CommitReceipt, SinkConsumeReport, SinkHandler, SinkLifecycleReport};

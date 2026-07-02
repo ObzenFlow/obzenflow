@@ -1649,20 +1649,27 @@ pub fn validate_stage_typing_metadata(
     Ok(())
 }
 
-/// FLOWIP-120n F16 resume sink delivery-safety gate. Runs at flow build under
-/// the resume verb only: catch-up re-consumes the recorded prefix, so every
-/// sink must be classified. Effectful sinks pass structurally (their writes go
-/// through the replay-suppressed effect boundary). `IdempotentProjection`
-/// passes; `NonIdempotentExternal` and undeclared sinks refuse fail-loud
-/// unless the operator passed `allow_duplicate_sink_delivery`, which lets both
-/// through with a warning naming the stage. Live/replay runs never call this.
+/// FLOWIP-120n F16 archive sink delivery-safety gate, covering both archive
+/// verbs since FLOWIP-120v: deterministic replay re-consumes the recorded
+/// stream and resume re-delivers the recorded prefix during catch-up, so
+/// every sink must be classified. `IdempotentProjection` passes;
+/// `NonIdempotentExternal` and undeclared sinks refuse fail-loud unless the
+/// operator passed `allow_duplicate_sink_delivery`, which lets both through
+/// with a warning naming the stage. Live runs never call this.
 #[allow(clippy::result_large_err)]
-pub fn validate_resume_sink_delivery_safety(
+pub fn validate_archive_sink_delivery_safety(
     descriptors: &HashMap<String, Box<dyn StageDescriptor>>,
+    verb: obzenflow_runtime::bootstrap::ReplayVerb,
     allow_duplicate_sink_delivery: bool,
 ) -> Result<(), crate::dsl::error::FlowBuildError> {
     use crate::dsl::error::FlowBuildError;
+    use obzenflow_runtime::bootstrap::ReplayVerb;
     use obzenflow_runtime::effects::SinkDeliverySafety;
+
+    let verb_phrase = match verb {
+        ReplayVerb::Replay => "replay will re-perform",
+        ReplayVerb::Resume => "catch-up will duplicate",
+    };
 
     // Sorted so the refusal names a deterministic stage across builds.
     let mut names: Vec<&String> = descriptors.keys().collect();
@@ -1670,7 +1677,8 @@ pub fn validate_resume_sink_delivery_safety(
 
     for name in names {
         let descriptor = &descriptors[name];
-        if descriptor.stage_type() != StageType::Sink || descriptor.is_effectful() {
+        // Only plain sinks exist (FLOWIP-120v removed the effectful surface).
+        if descriptor.stage_type() != StageType::Sink {
             continue;
         }
 
@@ -1678,26 +1686,28 @@ pub fn validate_resume_sink_delivery_safety(
             Some(SinkDeliverySafety::IdempotentProjection) => {}
             Some(SinkDeliverySafety::NonIdempotentExternal) => {
                 if !allow_duplicate_sink_delivery {
-                    return Err(FlowBuildError::ResumeRefusedNonIdempotentSink {
+                    return Err(FlowBuildError::ArchiveRefusedNonIdempotentSink {
                         stage: name.clone(),
+                        verb,
                     });
                 }
                 tracing::warn!(
                     stage = %name,
-                    "allow_duplicate_sink_delivery: resuming past non-idempotent sink; \
-                     catch-up will duplicate its external writes"
+                    "allow_duplicate_sink_delivery: proceeding past non-idempotent \
+                     sink; {verb_phrase} its external writes"
                 );
             }
             None => {
                 if !allow_duplicate_sink_delivery {
-                    return Err(FlowBuildError::ResumeRefusedUndeclaredSink {
+                    return Err(FlowBuildError::ArchiveRefusedUndeclaredSink {
                         stage: name.clone(),
+                        verb,
                     });
                 }
                 tracing::warn!(
                     stage = %name,
-                    "allow_duplicate_sink_delivery: resuming past sink with undeclared \
-                     delivery safety; catch-up may duplicate its deliveries"
+                    "allow_duplicate_sink_delivery: proceeding past sink with \
+                     undeclared delivery safety; {verb_phrase} its deliveries"
                 );
             }
         }

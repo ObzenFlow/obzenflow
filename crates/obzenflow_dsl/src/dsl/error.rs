@@ -5,10 +5,50 @@
 use thiserror::Error;
 
 use obzenflow_adapters::middleware::MiddlewareFactoryError;
+use obzenflow_runtime::bootstrap::ReplayVerb;
 use obzenflow_topology::TopologyError;
 
 use crate::dsl::typing::EdgeInputRole;
 use crate::middleware_resolution::MiddlewareResolutionError;
+
+// Verb-aware refusal copy for the archive sink delivery-safety gate
+// (FLOWIP-120n F16, extended to both archive verbs by FLOWIP-120v): one
+// variant pair serves both verbs.
+fn archive_sink_refusal(verb: &ReplayVerb, stage: &str, undeclared: bool) -> String {
+    let (flag, re_execution) = match verb {
+        ReplayVerb::Replay => (
+            "--replay-from",
+            "deterministic replay re-consumes the recorded stream, so this sink would \
+             re-perform its external writes",
+        ),
+        ReplayVerb::Resume => (
+            "--resume-from",
+            "resume re-delivers the recorded prefix during catch-up, which would \
+             duplicate those writes",
+        ),
+    };
+    if undeclared {
+        format!(
+            "{flag} refused: sink '{stage}' has no declared delivery safety; \
+             {re_execution}, and the gate fails closed on undeclared sinks \
+             (FLOWIP-120n F16, FLOWIP-120v). Declare it where the handler lives: \
+             `delivery: idempotent` on a sink! closure, `.idempotent()` / \
+             `.non_idempotent()` on a typed sink handler expression, \
+             `SinkHandler::delivery_safety()` on a custom handler type, or `SAFETY` \
+             on a typed `Delivery`. A non-idempotent external write belongs behind \
+             the effect boundary (effectful transform plus plain sink). Or pass \
+             `allow_duplicate_sink_delivery`."
+        )
+    } else {
+        format!(
+            "{flag} refused: sink '{stage}' declares a non-idempotent external \
+             delivery path; {re_execution} (FLOWIP-120n F16, FLOWIP-120v). Declare \
+             `delivery: idempotent` if the destination absorbs duplicates, route the \
+             write through the effect boundary (effectful transform plus plain sink), \
+             or pass `allow_duplicate_sink_delivery` to accept the duplication."
+        )
+    }
+}
 
 #[derive(Debug, Error)]
 pub enum StageCreationError {
@@ -245,22 +285,11 @@ pub enum FlowBuildError {
     )]
     OrderObserverFanInRequiresDeterministicOrder { stage_name: String },
 
-    #[error(
-        "Sink '{stage}' declares a non-idempotent external delivery path; resume re-delivers \
-         the recorded prefix during catch-up, which would duplicate those writes \
-         (FLOWIP-120n F16). Pass `allow_duplicate_sink_delivery` to accept duplication."
-    )]
-    ResumeRefusedNonIdempotentSink { stage: String },
+    #[error("{}", archive_sink_refusal(.verb, .stage, false))]
+    ArchiveRefusedNonIdempotentSink { stage: String, verb: ReplayVerb },
 
-    #[error(
-        "Sink '{stage}' has no declared delivery safety; resume re-delivers the recorded \
-         prefix during catch-up and fails closed on undeclared sinks (FLOWIP-120n F16). \
-         Declare it where the handler lives: `delivery: idempotent` on a sink! closure, \
-         `.idempotent()` / `.non_idempotent()` on a typed sink handler expression, \
-         `SinkHandler::delivery_safety()` on a custom handler type, or `SAFETY` on a typed \
-         `Delivery`. Or pass `allow_duplicate_sink_delivery`."
-    )]
-    ResumeRefusedUndeclaredSink { stage: String },
+    #[error("{}", archive_sink_refusal(.verb, .stage, true))]
+    ArchiveRefusedUndeclaredSink { stage: String, verb: ReplayVerb },
 
     #[error(
         "Resume requires a durable current run (FLOWIP-120u F13). The live continuation \

@@ -162,7 +162,7 @@ fn build_flow(journal_base: PathBuf, nondeterministic: bool) -> FlowDefinition {
                 effects: [],
                 middleware: []
             );
-            out = sink!(Stamped => SinkTyped::with_delivery(discard::<Stamped>()));
+            out = sink!(Stamped => SinkTyped::with_delivery(discard::<Stamped>()).idempotent());
         },
 
         topology: {
@@ -185,7 +185,7 @@ fn build_flow_v2(journal_base: PathBuf) -> FlowDefinition {
                 effects: [],
                 middleware: []
             );
-            out = sink!(Stamped => SinkTyped::with_delivery(discard::<Stamped>()));
+            out = sink!(Stamped => SinkTyped::with_delivery(discard::<Stamped>()).idempotent());
         },
 
         topology: {

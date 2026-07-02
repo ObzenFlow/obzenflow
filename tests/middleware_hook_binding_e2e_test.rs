@@ -426,7 +426,7 @@ fn build_flow(
                     HookProofFactory::new(counters.clone(), 1)
                 ]
             );
-            output = sink!(HookOutput => SinkTyped::with_delivery(probe), middleware: [
+            output = sink!(HookOutput => SinkTyped::with_delivery(probe).idempotent(), middleware: [
                 HookProofFactory::new(counters.clone(), 1)
             ]);
         },

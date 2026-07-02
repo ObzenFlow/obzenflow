@@ -210,7 +210,7 @@ fn build_flow(journal_base: PathBuf, calls: Arc<AtomicUsize>) -> FlowDefinition 
                 effects: [ChargeEffect],
                 middleware: []
             );
-            receipts = sink!(Charged => SinkTyped::with_delivery(discard::<Charged>()));
+            receipts = sink!(Charged => SinkTyped::with_delivery(discard::<Charged>()).idempotent());
         },
 
         topology: {

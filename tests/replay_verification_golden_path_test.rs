@@ -292,9 +292,9 @@ fn build_flow(journal_base: PathBuf, calls: Arc<AtomicUsize>) -> FlowDefinition 
                 effects: [AuthorizeEffect],
                 middleware: []
             );
-            paid_orders = sink!(OrderAuthorized => SinkTyped::with_delivery(discard::<OrderAuthorized>()));
-            cancelled_orders = sink!(OrderCancelled => SinkTyped::with_delivery(discard::<OrderCancelled>()));
-            manual_review = sink!(AuthorizationUnavailable => SinkTyped::with_delivery(discard::<AuthorizationUnavailable>()));
+            paid_orders = sink!(OrderAuthorized => SinkTyped::with_delivery(discard::<OrderAuthorized>()).idempotent());
+            cancelled_orders = sink!(OrderCancelled => SinkTyped::with_delivery(discard::<OrderCancelled>()).idempotent());
+            manual_review = sink!(AuthorizationUnavailable => SinkTyped::with_delivery(discard::<AuthorizationUnavailable>()).idempotent());
         },
 
         topology: {

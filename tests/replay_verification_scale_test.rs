@@ -82,7 +82,7 @@ fn build_flow(journal_base: PathBuf) -> FlowDefinition {
 
         stages: {
             ticks = source!(Tick => Ticks::new());
-            out = sink!(Tick => SinkTyped::with_delivery(discard::<Tick>()));
+            out = sink!(Tick => SinkTyped::with_delivery(discard::<Tick>()).idempotent());
         },
 
         topology: {

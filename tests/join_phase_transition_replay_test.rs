@@ -29,7 +29,7 @@ use obzenflow_dsl::{effectful_transform, flow, join, sink, source, FlowDefinitio
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::effects::{
-    Effect, EffectContext, EffectError, EffectSafety, Effects, IdempotencyKey,
+    Effect, EffectContext, EffectError, EffectSafety, Effects, IdempotencyKey, SinkDeliverySafety,
 };
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
@@ -248,6 +248,11 @@ impl SinkHandler for DropSink {
                 None,
             ),
         )
+    }
+
+    // Deterministic local drop: re-delivery under either archive verb is safe.
+    fn delivery_safety(&self) -> Option<SinkDeliverySafety> {
+        Some(SinkDeliverySafety::IdempotentProjection)
     }
 }
 

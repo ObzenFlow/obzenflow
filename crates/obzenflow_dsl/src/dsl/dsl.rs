@@ -762,31 +762,30 @@ macro_rules! build_typed_flow {
         let feed_plan =
             $crate::dsl::typing::derive_feed_plan(&topology, &descriptors, &name_to_id);
 
-        // FLOWIP-120n F13: cyclic resume is a v1 non-goal; the
-        // condensation-frontier follow-on lifts it.
-        let resume_verb = obzenflow_runtime::bootstrap::replay_bootstrap()
-            .is_some_and(|replay| replay.verb == obzenflow_runtime::bootstrap::ReplayVerb::Resume);
-        if resume_verb {
-            let cycle_members: Vec<String> = topology
-                .stages()
-                .filter(|stage| topology.is_in_cycle(stage.id))
-                .map(|stage| stage.name.as_str().to_string())
-                .collect();
-            if !cycle_members.is_empty() {
-                return Err(FlowBuildError::UnsupportedCycleTopology(format!(
-                    "--resume-from does not support cyclic topologies (FLOWIP-120n F13); cycle members: {}",
-                    cycle_members.join(", ")
-                )));
+        if let Some(replay) = obzenflow_runtime::bootstrap::replay_bootstrap() {
+            // FLOWIP-120n F13: cyclic resume is a v1 non-goal; the
+            // condensation-frontier follow-on lifts it. Resume-only.
+            if replay.verb == obzenflow_runtime::bootstrap::ReplayVerb::Resume {
+                let cycle_members: Vec<String> = topology
+                    .stages()
+                    .filter(|stage| topology.is_in_cycle(stage.id))
+                    .map(|stage| stage.name.as_str().to_string())
+                    .collect();
+                if !cycle_members.is_empty() {
+                    return Err(FlowBuildError::UnsupportedCycleTopology(format!(
+                        "--resume-from does not support cyclic topologies (FLOWIP-120n F13); cycle members: {}",
+                        cycle_members.join(", ")
+                    )));
+                }
             }
 
-            // FLOWIP-120n F16: catch-up re-delivers the recorded prefix to
-            // sinks, so every sink must declare its delivery safety.
-            let allow_duplicate_sink_delivery =
-                obzenflow_runtime::bootstrap::replay_bootstrap()
-                    .is_some_and(|replay| replay.allow_duplicate_sink_delivery);
-            $crate::dsl::typing::validate_resume_sink_delivery_safety(
+            // FLOWIP-120n F16, FLOWIP-120v: both archive verbs re-execute
+            // recorded work at sinks, so every sink must declare its delivery
+            // safety.
+            $crate::dsl::typing::validate_archive_sink_delivery_safety(
                 &descriptors,
-                allow_duplicate_sink_delivery,
+                replay.verb,
+                replay.allow_duplicate_sink_delivery,
             )?;
         }
 
