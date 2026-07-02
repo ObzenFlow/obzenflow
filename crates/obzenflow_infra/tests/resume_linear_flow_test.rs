@@ -138,9 +138,10 @@ impl TransformHandler for DoubleTransform {
     }
 }
 
-/// Counts consumed `Doubled` events. Catch-up deliveries are reconstruction
-/// scoped and never reach the sink handler, so in the resumed run the counter
-/// witnesses exactly the live tail.
+/// Counts consumed `Doubled` events. The sink re-consumes the recorded prefix
+/// during catch-up (F14: only the policy boundary is bypassed under
+/// reconstruction scope, never the delivery), so in a resumed run the counter
+/// counts prefix re-deliveries plus the live tail.
 #[derive(Clone, Debug)]
 struct CountingSink {
     delivered: Arc<AtomicU64>,
@@ -357,10 +358,10 @@ async fn resume_linear_flow_replays_prefix_then_continues_live() -> Result<()> {
             }),
             ..BootstrapConfig::default()
         });
-        // Catch-up deliveries are reconstruction-scoped and suppressed at the
-        // sink, so the counter reaching LIVE proves the source crossed its
-        // boundary and the flow accepted new input after catch-up.
-        run_until_delivered(&journal_base, RECORDED + 1, LIVE, LIVE).await?;
+        // The sink re-consumes the recorded prefix during catch-up (F14), so
+        // the wait target is prefix + live; a live-only target is satisfied
+        // mid-catch-up and races the stop into the reconstruction phase.
+        run_until_delivered(&journal_base, RECORDED + 1, LIVE, RECORDED + LIVE).await?;
     }
 
     let resumed_run = replay_testkit::latest_run_dir(&journal_base);

@@ -330,7 +330,10 @@ async fn resume_of_resume_extends_the_prefix_at_generation_two() -> Result<()> {
             }),
             ..BootstrapConfig::default()
         });
-        run_until_delivered(&journal_base, R0_EVENTS + 1, R1_LIVE, R1_LIVE).await?;
+        // The sink re-consumes the recorded prefix during catch-up (F14), so
+        // the wait target is prefix + live; a live-only target races the stop
+        // into the catch-up phase.
+        run_until_delivered(&journal_base, R0_EVENTS + 1, R1_LIVE, R0_EVENTS + R1_LIVE).await?;
     }
     let r1 = replay_testkit::latest_run_dir(&journal_base);
     assert_ne!(r0, r1);
@@ -351,7 +354,13 @@ async fn resume_of_resume_extends_the_prefix_at_generation_two() -> Result<()> {
             }),
             ..BootstrapConfig::default()
         });
-        run_until_delivered(&journal_base, R0_EVENTS + R1_LIVE + 1, R2_LIVE, R2_LIVE).await?;
+        run_until_delivered(
+            &journal_base,
+            R0_EVENTS + R1_LIVE + 1,
+            R2_LIVE,
+            R0_EVENTS + R1_LIVE + R2_LIVE,
+        )
+        .await?;
     }
     let r2 = replay_testkit::latest_run_dir(&journal_base);
     assert_ne!(r1, r2);
