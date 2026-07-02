@@ -29,9 +29,7 @@ use obzenflow_core::journal::Journal;
 use obzenflow_core::{StageId, SystemId, TypedPayload, WriterId};
 use obzenflow_dsl::{flow, infinite_source, sink, transform, FlowDefinition};
 use obzenflow_infra::journal::{disk_journals, DiskJournal};
-use obzenflow_runtime::bootstrap::{
-    install_bootstrap_config, BootstrapConfig, ReplayBootstrap, ReplayVerb,
-};
+use obzenflow_runtime::bootstrap::{install_bootstrap_config, ReplayBootstrap, ReplayVerb};
 use obzenflow_runtime::effects::SinkDeliverySafety;
 use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
@@ -321,15 +319,15 @@ async fn resume_of_resume_extends_the_prefix_at_generation_two() -> Result<()> {
 
     // R1: resume R0, produce a live tail, stop.
     {
-        let _bootstrap = install_bootstrap_config(BootstrapConfig {
-            replay: Some(ReplayBootstrap {
+        let _bootstrap = install_bootstrap_config(
+            replay_testkit::bootstrap_with_archive(ReplayBootstrap {
                 archive_path: r0.clone(),
                 allow_incomplete_archive: true,
                 allow_duplicate_sink_delivery: false,
                 verb: ReplayVerb::Resume,
-            }),
-            ..BootstrapConfig::default()
-        });
+            })
+            .await,
+        );
         // The sink re-consumes the recorded prefix during catch-up (F14), so
         // the wait target is prefix + live; a live-only target races the stop
         // into the catch-up phase.
@@ -345,15 +343,15 @@ async fn resume_of_resume_extends_the_prefix_at_generation_two() -> Result<()> {
 
     // R2: resume R1.
     {
-        let _bootstrap = install_bootstrap_config(BootstrapConfig {
-            replay: Some(ReplayBootstrap {
+        let _bootstrap = install_bootstrap_config(
+            replay_testkit::bootstrap_with_archive(ReplayBootstrap {
                 archive_path: r1.clone(),
                 allow_incomplete_archive: true,
                 allow_duplicate_sink_delivery: false,
                 verb: ReplayVerb::Resume,
-            }),
-            ..BootstrapConfig::default()
-        });
+            })
+            .await,
+        );
         run_until_delivered(
             &journal_base,
             R0_EVENTS + R1_LIVE + 1,
@@ -430,15 +428,15 @@ async fn resume_of_resume_extends_the_prefix_at_generation_two() -> Result<()> {
     // the generation-1 watermark is re-admitted in place, between the prefix
     // and R1's live tail, and the run drains rather than continuing.
     {
-        let _bootstrap = install_bootstrap_config(BootstrapConfig {
-            replay: Some(ReplayBootstrap {
+        let _bootstrap = install_bootstrap_config(
+            replay_testkit::bootstrap_with_archive(ReplayBootstrap {
                 archive_path: r1.clone(),
                 allow_incomplete_archive: true,
                 allow_duplicate_sink_delivery: false,
                 verb: ReplayVerb::Replay,
-            }),
-            ..BootstrapConfig::default()
-        });
+            })
+            .await,
+        );
         run_replay_to_completion(&journal_base).await?;
     }
     let replay_run = replay_testkit::latest_run_dir(&journal_base);

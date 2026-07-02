@@ -4,6 +4,7 @@
 
 use super::fsm::{FlowStopMode, PipelineEvent, PipelineState};
 use crate::errors::FlowError;
+use crate::journal::RunSubstrateState;
 use crate::stages::common::stage_handle::STOP_REASON_TIMEOUT;
 use crate::stages::LivenessSnapshots;
 use crate::supervised_base::{HandleError, StandardHandle, SupervisorHandle};
@@ -25,6 +26,8 @@ pub(crate) struct FlowHandleExtras {
     pub contract_attachments: Option<ContractAttachments>,
     pub system_journal: Option<Arc<dyn Journal<SystemEvent>>>,
     pub liveness_snapshots: Option<LivenessSnapshots>,
+    /// The selected run substrate (FLOWIP-120u): durable with its locator, or ephemeral.
+    pub run_substrate: RunSubstrateState,
 }
 
 /// Structural middleware configuration for a stage (FLOWIP-059).
@@ -107,6 +110,9 @@ pub struct FlowHandle {
 
     /// Flow-scoped stage liveness snapshots (FLOWIP-063e).
     liveness_snapshots: Option<LivenessSnapshots>,
+
+    /// The selected run substrate (FLOWIP-120u).
+    run_substrate: RunSubstrateState,
 }
 
 impl FlowHandle {
@@ -122,6 +128,7 @@ impl FlowHandle {
             contract_attachments,
             system_journal,
             liveness_snapshots,
+            run_substrate,
         } = extras;
 
         Self {
@@ -132,7 +139,14 @@ impl FlowHandle {
             contract_attachments,
             system_journal,
             liveness_snapshots,
+            run_substrate,
         }
+    }
+
+    /// The run substrate selected at composition: durable with its current-run
+    /// locator, or ephemeral with none (FLOWIP-120u).
+    pub fn run_substrate(&self) -> &RunSubstrateState {
+        &self.run_substrate
     }
 
     /// Try to start the pipeline using only the currently observed state.
@@ -590,6 +604,7 @@ mod tests {
             contract_attachments: None,
             system_journal: None,
             liveness_snapshots: None,
+            run_substrate: RunSubstrateState::Ephemeral,
         }
     }
 

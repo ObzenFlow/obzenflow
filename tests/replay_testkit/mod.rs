@@ -22,6 +22,25 @@ use obzenflow_runtime::testing::DeliveredOrderProjection;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+/// FLOWIP-120u: the host opens the replay/resume input archive and the
+/// bootstrap snapshot carries it. Tests install through this helper so the
+/// build actually enters replay/resume instead of silently running live.
+pub async fn bootstrap_with_archive(
+    replay: obzenflow_runtime::bootstrap::ReplayBootstrap,
+) -> obzenflow_runtime::bootstrap::BootstrapConfig {
+    let archive = obzenflow_infra::journal::disk::replay_archive::DiskReplayArchive::open(
+        replay.archive_path.clone(),
+        replay.allow_incomplete_archive,
+    )
+    .await
+    .expect("test replay archive must open");
+    obzenflow_runtime::bootstrap::BootstrapConfig {
+        replay: Some(replay),
+        replay_archive: Some(std::sync::Arc::new(archive)),
+        ..Default::default()
+    }
+}
+
 /// The most recent run directory under `base/flows/`.
 pub fn latest_run_dir(base: &Path) -> PathBuf {
     let flows_dir = base.join("flows");

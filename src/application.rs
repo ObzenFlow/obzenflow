@@ -9,8 +9,8 @@
 //! alone.
 
 pub use obzenflow_infra::application::{
-    ApplicationError, Banner, FlowApplication, FlowApplicationBuilder, FlowConfig, Footer,
-    LogLevel, Presentation, RunPresentationOutcome,
+    ApplicationError, Banner, CurrentRunLocator, FlowApplication, FlowApplicationBuilder,
+    FlowConfig, Footer, LogLevel, Presentation, RunPresentationOutcome, RunSubstrateState,
 };
 
 /// Replay output verification (FLOWIP-095j): compare two recorded runs of the

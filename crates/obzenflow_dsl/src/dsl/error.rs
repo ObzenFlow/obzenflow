@@ -61,6 +61,9 @@ pub enum FlowBuildError {
     #[error("Journal factory failed: {0}")]
     JournalFactoryFailed(String),
 
+    #[error("Runtime resource preflight failed: {0}")]
+    ResourcePreflightFailed(String),
+
     #[error("Stage resources build failed: {0}")]
     StageResourcesFailed(String),
 
@@ -256,6 +259,15 @@ pub enum FlowBuildError {
          `.non_idempotent()` on the sink handler), or pass `allow_duplicate_sink_delivery`."
     )]
     ResumeRefusedUndeclaredSink { stage: String },
+
+    #[error(
+        "Resume requires a durable current run (FLOWIP-120u F13). The live continuation \
+         records new effect outcomes, and an ephemeral run has no location: the continuation \
+         could never be resumed, and its effects would re-execute on the next resume of the \
+         original archive. Switch `journals:` to `disk_journals(...)`, or use `--replay-from` \
+         for an effect-free bounded rehearsal."
+    )]
+    ResumeRefusedEphemeralRun,
 }
 
 impl FlowBuildError {

@@ -25,9 +25,7 @@ use obzenflow_core::event::{ChainEventContent, EventEnvelope};
 use obzenflow_core::{StageId, TypedPayload, WriterId};
 use obzenflow_dsl::{effectful_transform, flow, infinite_source, sink, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime::bootstrap::{
-    install_bootstrap_config, BootstrapConfig, ReplayBootstrap, ReplayVerb,
-};
+use obzenflow_runtime::bootstrap::{install_bootstrap_config, ReplayBootstrap, ReplayVerb};
 use obzenflow_runtime::effects::{
     Effect, EffectContext, EffectError, EffectSafety, Effects, IdempotencyKey, SinkDeliverySafety,
 };
@@ -448,15 +446,15 @@ async fn multi_source_resume_orders_every_recorded_input_before_any_live_input()
     // recorded prefix during catch-up (F14), so the wait target is
     // prefix + live; a live-only target races the stop into catch-up.
     let resumed_calls = {
-        let _bootstrap = install_bootstrap_config(BootstrapConfig {
-            replay: Some(ReplayBootstrap {
+        let _bootstrap = install_bootstrap_config(
+            replay_testkit::bootstrap_with_archive(ReplayBootstrap {
                 archive_path: recorded_run.clone(),
                 allow_incomplete_archive: true,
                 allow_duplicate_sink_delivery: false,
                 verb: ReplayVerb::Resume,
-            }),
-            ..BootstrapConfig::default()
-        });
+            })
+            .await,
+        );
         run_until_delivered(
             &journal_base,
             &live_ranges,

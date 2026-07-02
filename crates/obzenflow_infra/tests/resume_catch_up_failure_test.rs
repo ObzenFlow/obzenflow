@@ -27,9 +27,7 @@ use obzenflow_core::event::{ChainEventContent, EventEnvelope};
 use obzenflow_core::{StageId, TypedPayload, WriterId};
 use obzenflow_dsl::{effectful_transform, flow, infinite_source, sink, transform, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime::bootstrap::{
-    install_bootstrap_config, BootstrapConfig, ReplayBootstrap, ReplayVerb,
-};
+use obzenflow_runtime::bootstrap::{install_bootstrap_config, ReplayBootstrap, ReplayVerb};
 use obzenflow_runtime::effects::{
     Effect, EffectContext, EffectError, EffectSafety, Effects, IdempotencyKey, SinkDeliverySafety,
 };
@@ -438,15 +436,15 @@ async fn corrupted_source_archive_aborts_the_resume_before_any_live_admission() 
     let calls = Arc::new(AtomicUsize::new(0));
     let delivered = Arc::new(AtomicU64::new(0));
     let failure_reason = {
-        let _bootstrap = install_bootstrap_config(BootstrapConfig {
-            replay: Some(ReplayBootstrap {
+        let _bootstrap = install_bootstrap_config(
+            replay_testkit::bootstrap_with_archive(ReplayBootstrap {
                 archive_path: recorded_run.clone(),
                 allow_incomplete_archive: true,
                 allow_duplicate_sink_delivery: false,
                 verb: ReplayVerb::Resume,
-            }),
-            ..BootstrapConfig::default()
-        });
+            })
+            .await,
+        );
         let handle = build_flow(
             journal_base.clone(),
             &live_ranges,
@@ -525,18 +523,21 @@ async fn corrupted_source_archive_aborts_the_resume_before_any_live_admission() 
         "the corrupted source must not reach its live phase: {src_b_rows:#?}"
     );
 
-    // Nothing reached the effect boundary or the sink as live work: every
-    // delivered position lay inside the recorded prefix, so outcomes read
-    // from history and deliveries stayed suppressed.
+    // Nothing reached the effect boundary as live work: every delivered
+    // position lay inside the recorded prefix, so outcomes read from history.
     assert_eq!(
         calls.load(Ordering::SeqCst),
         0,
         "no effect executed during the failed catch-up"
     );
-    assert_eq!(
-        delivered.load(Ordering::SeqCst),
-        0,
-        "no sink delivery happened during the failed catch-up"
+    // The sink re-consumes the recorded prefix during catch-up (F14), so rows
+    // whose admission seq precedes the corrupt frame may reach it before
+    // teardown lands; how many is scheduling-dependent. The merge-row
+    // assertions above prove nothing outside the recorded prefix moved.
+    assert!(
+        delivered.load(Ordering::SeqCst) <= RECORDED_DELIVERED,
+        "only recorded-prefix re-consumption may reach the sink during a failed catch-up (saw {})",
+        delivered.load(Ordering::SeqCst)
     );
 
     Ok(())

@@ -138,19 +138,18 @@ mod tests {
 
     #[test]
     fn replay_footer_offers_comparison_not_live_metrics() {
+        let location = obzenflow_infra::application::CurrentRunLocator::new(PathBuf::from(
+            "target/payment-gateway-logs/flows/flow_01REPLAY",
+        ));
         let live = footer_for(RunPresentationOutcome::Completed {
             flow_name: "payment_gateway_resilience_demo".to_string(),
-            run_dir: Some(PathBuf::from(
-                "target/payment-gateway-logs/flows/flow_01REPLAY",
-            )),
+            location: Some(location.clone()),
             run_mode: RunMode::Live,
         })
         .finish();
         let replay = footer_for(RunPresentationOutcome::Completed {
             flow_name: "payment_gateway_resilience_demo".to_string(),
-            run_dir: Some(PathBuf::from(
-                "target/payment-gateway-logs/flows/flow_01REPLAY",
-            )),
+            location: Some(location),
             run_mode: replay_mode(),
         })
         .finish();

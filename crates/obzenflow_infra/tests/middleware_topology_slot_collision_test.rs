@@ -122,7 +122,7 @@ async fn topology_config_slot_collisions_are_configuration_errors() {
     .await;
 
     let err = built.err().expect("expected flow build to fail");
-    match err {
+    match err.error {
         obzenflow_dsl::dsl::FlowBuildError::StageResourcesFailed(msg) => {
             assert!(msg
                 .contains("multiple middleware claiming the CircuitBreaker topology config slot"));

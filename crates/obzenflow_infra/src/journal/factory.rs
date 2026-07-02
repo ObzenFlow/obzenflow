@@ -15,30 +15,20 @@ use obzenflow_core::{
     },
     FlowId,
 };
-use obzenflow_runtime::journal::FlowJournalFactory;
-use obzenflow_runtime::replay::{ReplayArchive, ReplayError};
+use obzenflow_runtime::journal::{
+    CurrentRunLocator, FlowJournalFactory, RunResourcePlan, RunSubstrateState,
+};
+use obzenflow_runtime::replay::ReplayArchive;
+use obzenflow_runtime::runtime_resource_limits::{
+    env_try_raise_nofile, estimate_disk_journal_fds, preflight_nofile_for_disk_journals,
+};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::Arc;
 
-use super::disk::replay_archive::DiskReplayArchive;
 use super::disk::DiskJournal;
 use super::memory::MemoryJournal;
-
-static LAST_RUN_DIR: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
-
-fn set_last_run_dir(path: PathBuf) {
-    let cell = LAST_RUN_DIR.get_or_init(|| Mutex::new(None));
-    let mut guard = cell.lock().unwrap_or_else(|e| e.into_inner());
-    *guard = Some(path);
-}
-
-pub(crate) fn take_last_run_dir() -> Option<PathBuf> {
-    let cell = LAST_RUN_DIR.get_or_init(|| Mutex::new(None));
-    let mut guard = cell.lock().unwrap_or_else(|e| e.into_inner());
-    guard.take()
-}
 
 /// Simple disk journal factory that creates files immediately
 pub struct DiskJournalFactory {
@@ -62,9 +52,6 @@ impl DiskJournalFactory {
             source: Box::new(e),
         })?;
 
-        // Stash the run directory so FlowApplication can print a replay hint on completion (OT-17).
-        set_last_run_dir(flow_path.clone());
-
         Ok(Self {
             base_path,
             flow_id,
@@ -72,6 +59,11 @@ impl DiskJournalFactory {
             system_journals: HashMap::new(),
             admission_sequencer: Arc::new(AtomicU64::new(0)),
         })
+    }
+
+    /// This flow run's directory (`<base>/flows/<flow_id>/`).
+    fn run_path(&self) -> PathBuf {
+        self.base_path.join("flows").join(self.flow_id.to_string())
     }
 
     pub fn create_chain_journal(
@@ -82,8 +74,7 @@ impl DiskJournalFactory {
         if let Some(journal) = self.chain_journals.get(&name) {
             return Ok(journal.clone());
         }
-        let flow_path = self.base_path.join("flows").join(self.flow_id.to_string());
-        let journal_path = flow_path.join(name.to_filename());
+        let journal_path = self.run_path().join(name.to_filename());
 
         // Create the file NOW if it doesn't exist
         if !journal_path.exists() {
@@ -109,8 +100,7 @@ impl DiskJournalFactory {
         if let Some(journal) = self.system_journals.get(&name) {
             return Ok(journal.clone());
         }
-        let flow_path = self.base_path.join("flows").join(self.flow_id.to_string());
-        let journal_path = flow_path.join(name.to_filename());
+        let journal_path = self.run_path().join(name.to_filename());
 
         // Create the file NOW if it doesn't exist
         if !journal_path.exists() {
@@ -125,17 +115,9 @@ impl DiskJournalFactory {
         Ok(journal)
     }
 
-    /// Path to this flow run directory (e.g., `<base>/flows/<flow_id>/`).
-    pub fn run_dir(&self) -> Option<PathBuf> {
-        Some(self.base_path.join("flows").join(self.flow_id.to_string()))
-    }
-
     /// Write `run_manifest.json` into the run directory (FLOWIP-095a).
     pub fn write_run_manifest(&self, manifest: &RunManifest) -> Result<(), JournalError> {
-        let Some(run_dir) = self.run_dir() else {
-            return Ok(());
-        };
-        let path = run_dir.join(RUN_MANIFEST_FILENAME);
+        let path = self.run_path().join(RUN_MANIFEST_FILENAME);
         let body =
             serde_json::to_string_pretty(manifest).map_err(|e| JournalError::Implementation {
                 message: format!("Failed to serialize run manifest: {}", path.display()),
@@ -146,19 +128,7 @@ impl DiskJournalFactory {
             source: Box::new(e),
         })?;
 
-        // Also refresh the run directory hint here in case the factory was reused across runs.
-        set_last_run_dir(run_dir);
-
         Ok(())
-    }
-
-    /// Build a replay archive implementation from the runtime bootstrap context (FLOWIP-095a).
-    pub async fn replay_archive(&self) -> Result<Option<Arc<dyn ReplayArchive>>, ReplayError> {
-        let archive = replay_archive().await?;
-        if let Some(archive) = &archive {
-            seed_admission_sequencer(&self.admission_sequencer, archive.as_ref());
-        }
-        Ok(archive)
     }
 }
 
@@ -209,25 +179,6 @@ impl MemoryJournalFactory {
             .or_insert_with(|| Arc::new(MemoryJournal::<SystemEvent>::with_owner(owner)))
             .clone())
     }
-
-    /// Memory journals do not have a run directory.
-    pub fn run_dir(&self) -> Option<PathBuf> {
-        None
-    }
-
-    /// Memory journals do not write manifests; this is a no-op.
-    pub fn write_run_manifest(&self, _manifest: &RunManifest) -> Result<(), JournalError> {
-        Ok(())
-    }
-
-    /// Build a replay archive implementation from the runtime bootstrap context (FLOWIP-095a).
-    pub async fn replay_archive(&self) -> Result<Option<Arc<dyn ReplayArchive>>, ReplayError> {
-        let archive = replay_archive().await?;
-        if let Some(archive) = &archive {
-            seed_admission_sequencer(&self.admission_sequencer, archive.as_ref());
-        }
-        Ok(archive)
-    }
 }
 
 /// Seed the flow sequencer above the archive's recorded maximum (FLOWIP-120n
@@ -242,16 +193,6 @@ fn seed_admission_sequencer(sequencer: &AtomicU64, archive: &dyn ReplayArchive) 
     );
 }
 
-async fn replay_archive() -> Result<Option<Arc<dyn ReplayArchive>>, ReplayError> {
-    let Some(replay) = obzenflow_runtime::bootstrap::replay_bootstrap() else {
-        return Ok(None);
-    };
-
-    let archive =
-        DiskReplayArchive::open(replay.archive_path, replay.allow_incomplete_archive).await?;
-    Ok(Some(Arc::new(archive)))
-}
-
 /// Simple factory functions for the DSL
 pub fn disk_journals(
     base_path: PathBuf,
@@ -263,8 +204,11 @@ pub fn memory_journals() -> impl Fn(FlowId) -> Result<MemoryJournalFactory, Jour
     move |flow_id| Ok(MemoryJournalFactory::new(flow_id))
 }
 
-#[async_trait::async_trait]
 impl FlowJournalFactory for DiskJournalFactory {
+    fn run_state(&self) -> RunSubstrateState {
+        RunSubstrateState::Durable(CurrentRunLocator::new(self.run_path()))
+    }
+
     fn create_chain_journal(
         &mut self,
         name: JournalName,
@@ -281,17 +225,70 @@ impl FlowJournalFactory for DiskJournalFactory {
         DiskJournalFactory::create_system_journal(self, name, owner)
     }
 
+    /// Runtime resource preflight guardrails (FLOWIP-086n; trigger moved here
+    /// by FLOWIP-120u). Disk-backed journals scale file descriptors with
+    /// topology size; fail fast before any journal file exists.
+    fn resource_preflight(&self, plan: &RunResourcePlan) -> Result<(), JournalError> {
+        let estimate =
+            estimate_disk_journal_fds(plan.stage_count, plan.edge_count, plan.metrics_enabled);
+
+        match preflight_nofile_for_disk_journals(estimate, env_try_raise_nofile()) {
+            Ok(Some(limit)) => {
+                tracing::info!(
+                    target: "flowip-086n",
+                    stages = estimate.stages,
+                    edges = estimate.edges,
+                    metrics_enabled = estimate.metrics_enabled,
+                    estimated_fds = estimate.estimated_fds,
+                    rlimit_soft = limit.soft,
+                    rlimit_hard = limit.hard,
+                    breakdown_writer_fds = estimate.breakdown.writer_fds,
+                    breakdown_stage_reader_fds = estimate.breakdown.stage_reader_fds,
+                    breakdown_metrics_reader_fds = estimate.breakdown.metrics_reader_fds,
+                    breakdown_system_reader_fds = estimate.breakdown.system_reader_fds,
+                    breakdown_overhead_fds = estimate.breakdown.overhead_fds,
+                    "Disk journal FD preflight"
+                );
+
+                // Warn when we're close to the current soft limit so operators can tune
+                // before hitting a hard failure at startup.
+                let warn_threshold = limit.soft.saturating_mul(70) / 100;
+                if estimate.estimated_fds >= warn_threshold {
+                    tracing::warn!(
+                        target: "flowip-086n",
+                        estimated_fds = estimate.estimated_fds,
+                        rlimit_soft = limit.soft,
+                        warn_threshold = warn_threshold,
+                        "Disk journal pipeline is near the current RLIMIT_NOFILE soft limit"
+                    );
+                }
+                Ok(())
+            }
+            Ok(None) => {
+                // Platform does not expose RLIMIT_NOFILE; skip preflight.
+                Ok(())
+            }
+            Err(message) => Err(JournalError::Implementation {
+                message,
+                source: Box::new(std::io::Error::other("RLIMIT_NOFILE preflight refused")),
+            }),
+        }
+    }
+
     fn write_run_manifest(&self, manifest: &RunManifest) -> Result<(), JournalError> {
         DiskJournalFactory::write_run_manifest(self, manifest)
     }
 
-    async fn replay_archive(&mut self) -> Result<Option<Arc<dyn ReplayArchive>>, ReplayError> {
-        DiskJournalFactory::replay_archive(self).await
+    fn seed_admission_from_archive(&self, archive: &dyn ReplayArchive) {
+        seed_admission_sequencer(&self.admission_sequencer, archive);
     }
 }
 
-#[async_trait::async_trait]
 impl FlowJournalFactory for MemoryJournalFactory {
+    fn run_state(&self) -> RunSubstrateState {
+        RunSubstrateState::Ephemeral
+    }
+
     fn create_chain_journal(
         &mut self,
         name: JournalName,
@@ -308,11 +305,10 @@ impl FlowJournalFactory for MemoryJournalFactory {
         MemoryJournalFactory::create_system_journal(self, name, owner)
     }
 
-    fn write_run_manifest(&self, manifest: &RunManifest) -> Result<(), JournalError> {
-        MemoryJournalFactory::write_run_manifest(self, manifest)
-    }
+    // resource_preflight and write_run_manifest inherit the accepting defaults:
+    // an ephemeral run has no location and no provider-specific resource shape.
 
-    async fn replay_archive(&mut self) -> Result<Option<Arc<dyn ReplayArchive>>, ReplayError> {
-        MemoryJournalFactory::replay_archive(self).await
+    fn seed_admission_from_archive(&self, archive: &dyn ReplayArchive) {
+        seed_admission_sequencer(&self.admission_sequencer, archive);
     }
 }

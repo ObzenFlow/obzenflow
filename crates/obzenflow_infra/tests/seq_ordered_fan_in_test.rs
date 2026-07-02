@@ -25,9 +25,7 @@ use obzenflow_core::event::ChainEventContent;
 use obzenflow_core::{StageId, TypedPayload, WriterId};
 use obzenflow_dsl::{flow, infinite_source, join, sink, stateful, FlowDefinition};
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime::bootstrap::{
-    install_bootstrap_config, BootstrapConfig, ReplayBootstrap, ReplayVerb,
-};
+use obzenflow_runtime::bootstrap::{install_bootstrap_config, ReplayBootstrap, ReplayVerb};
 use obzenflow_runtime::effects::SinkDeliverySafety;
 use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
@@ -388,15 +386,15 @@ async fn seq_fan_in_delivers_stream_while_reference_is_quiet_and_replays_exactly
     // keeps the wait and recomputes the identical order from the re-admitted
     // sequences alone.
     {
-        let _bootstrap = install_bootstrap_config(BootstrapConfig {
-            replay: Some(ReplayBootstrap {
+        let _bootstrap = install_bootstrap_config(
+            replay_testkit::bootstrap_with_archive(ReplayBootstrap {
                 archive_path: recorded_run.clone(),
                 allow_incomplete_archive: true,
                 allow_duplicate_sink_delivery: false,
                 verb: ReplayVerb::Replay,
-            }),
-            ..BootstrapConfig::default()
-        });
+            })
+            .await,
+        );
         let delivered = Arc::new(AtomicU64::new(0));
         let handle = build_flow(journal_base.clone(), 1, 1, TX_EVENTS, delivered)
             .await

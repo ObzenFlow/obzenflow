@@ -384,11 +384,22 @@ impl StageResourcesBuilder {
         // FLOWIP-120r/120n: the one strategy-selection point, constructed once
         // per flow and cloned per stage. Per-stage construction would fork the
         // shared `ResumeState` and every frontier write would be lost.
+        //
+        // FLOWIP-120u: the verb and the opened archive travel as separate
+        // bootstrap fields, so an installed verb without an archive must fail
+        // loud here rather than silently selecting Live.
         let runtime_mode = match (
             &self.replay_archive,
             crate::bootstrap::bootstrap_config().replay.map(|r| r.verb),
         ) {
-            (None, _) => RuntimeMode::Live,
+            (None, Some(verb)) => {
+                return Err(format!(
+                    "replay/resume bootstrap is installed (verb {verb:?}) but no opened archive \
+                     was provided; the host opens the archive into \
+                     BootstrapConfig::replay_archive (FLOWIP-120u); refusing to run live"
+                ));
+            }
+            (None, None) => RuntimeMode::Live,
             (Some(_), Some(crate::bootstrap::ReplayVerb::Resume)) => RuntimeMode::Resume,
             (Some(_), _) => RuntimeMode::Replay,
         };

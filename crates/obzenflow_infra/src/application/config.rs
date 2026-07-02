@@ -228,6 +228,9 @@ impl ResolvedStartupConfig {
                     verb: replay.verb,
                 }
             }),
+            // The host opens the archive at launch and fills this in before the
+            // install (FLOWIP-120u); config resolution carries settings only.
+            replay_archive: None,
             metrics: MetricsBootstrap {
                 enabled: self.metrics.enabled,
                 exporter: self.metrics.exporter,

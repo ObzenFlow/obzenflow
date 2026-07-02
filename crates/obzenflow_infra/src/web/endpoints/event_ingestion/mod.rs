@@ -310,7 +310,6 @@ mod tests {
     use obzenflow_core::journal::journal_reader::JournalReader;
     use obzenflow_core::journal::run_manifest::RUN_MANIFEST_FILENAME;
     use obzenflow_core::journal::Journal;
-    use obzenflow_core::journal::JournalStorageKind;
     use obzenflow_core::web::{HttpMethod, ManagedResponse, Request, Response};
     use obzenflow_core::StageId;
 
@@ -428,10 +427,6 @@ mod tests {
 
     #[async_trait]
     impl<T: JournalEvent + 'static> Journal<T> for FailingAppendJournal<T> {
-        fn storage_kind(&self) -> JournalStorageKind {
-            self.inner.storage_kind()
-        }
-
         fn id(&self) -> &JournalId {
             self.inner.id()
         }

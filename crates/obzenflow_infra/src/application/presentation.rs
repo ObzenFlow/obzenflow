@@ -3,9 +3,9 @@
 // https://obzenflow.dev
 
 use super::run_mode::RunMode;
+use obzenflow_runtime::journal::CurrentRunLocator;
 use std::fmt::Display;
 use std::io::IsTerminal;
-use std::path::PathBuf;
 
 const INDENT: &str = "  ";
 const NESTED_INDENT: &str = "    ";
@@ -363,18 +363,18 @@ impl Presentation {
 pub enum RunPresentationOutcome {
     Completed {
         flow_name: String,
-        run_dir: Option<PathBuf>,
+        location: Option<CurrentRunLocator>,
         run_mode: RunMode,
     },
     Stopped {
         flow_name: String,
-        run_dir: Option<PathBuf>,
+        location: Option<CurrentRunLocator>,
         run_mode: RunMode,
     },
     Failed {
         flow_name: Option<String>,
         error: String,
-        run_dir: Option<PathBuf>,
+        location: Option<CurrentRunLocator>,
         run_mode: RunMode,
     },
 }
@@ -401,24 +401,21 @@ impl RunPresentationOutcome {
     fn terminal_paragraph(
         verb: &str,
         flow_name: &str,
-        run_dir: &std::path::Path,
+        location: &CurrentRunLocator,
         mode: &RunMode,
     ) -> String {
         match mode {
             RunMode::Replay(ctx) => format!(
-                "{flow_name} {verb} (strict replay of {source}).\nArchived outcomes were reconstructed: source config ignored, effects suppressed, recorded facts reused.\nReplay journal: {run_dir}\nVerify it against the source archive: re-run with --replay-from {source_path} --verify\nReplay this replay with: --replay-from {run_dir}",
+                "{flow_name} {verb} (strict replay of {source}).\nArchived outcomes were reconstructed: source config ignored, effects suppressed, recorded facts reused.\nReplay journal: {location}\nVerify it against the source archive: re-run with --replay-from {source_path} --verify\nReplay this replay with: --replay-from {location}",
                 source = ctx.source_label(),
                 source_path = ctx.archive_path.display(),
-                run_dir = run_dir.display(),
             ),
             RunMode::Resume(ctx) => format!(
-                "{flow_name} {verb} (resumed from {source}).\nRecorded facts were caught up with effects suppressed, then the run continued live from the recorded high-water mark.\nJournal: {run_dir}\nReplay this run with: --replay-from {run_dir}\nResume it again with: --resume-from {run_dir}",
+                "{flow_name} {verb} (resumed from {source}).\nRecorded facts were caught up with effects suppressed, then the run continued live from the recorded high-water mark.\nJournal: {location}\nReplay this run with: --replay-from {location}\nResume it again with: --resume-from {location}",
                 source = ctx.source_label(),
-                run_dir = run_dir.display(),
             ),
             _ => format!(
-                "{flow_name} {verb}. Journal: {run_dir}\nTo verify with a bounded replay, add: --replay-from {run_dir}\nTo continue this run live from where it left off, add: --resume-from {run_dir}\n(Source config env vars are ignored during replay and catch-up)",
-                run_dir = run_dir.display(),
+                "{flow_name} {verb}. Journal: {location}\nTo verify with a bounded replay, add: --replay-from {location}\nTo continue this run live from where it left off, add: --resume-from {location}\n(Source config env vars are ignored during replay and catch-up)",
             ),
         }
     }
@@ -427,31 +424,31 @@ impl RunPresentationOutcome {
         match self {
             Self::Completed {
                 flow_name,
-                run_dir,
+                location,
                 run_mode,
-            } => match run_dir {
-                Some(run_dir) => Footer::new().paragraph(Self::terminal_paragraph(
+            } => match location {
+                Some(location) => Footer::new().paragraph(Self::terminal_paragraph(
                     "completed",
                     flow_name,
-                    run_dir,
+                    location,
                     run_mode,
                 )),
                 None => Footer::new().paragraph(format!("{flow_name} completed.")),
             },
             Self::Stopped {
                 flow_name,
-                run_dir,
+                location,
                 run_mode,
-            } => match run_dir {
-                Some(run_dir) => Footer::new().paragraph(Self::terminal_paragraph(
-                    "stopped", flow_name, run_dir, run_mode,
+            } => match location {
+                Some(location) => Footer::new().paragraph(Self::terminal_paragraph(
+                    "stopped", flow_name, location, run_mode,
                 )),
                 None => Footer::new().paragraph(format!("{flow_name} stopped.")),
             },
             Self::Failed {
                 flow_name,
                 error,
-                run_dir,
+                location,
                 run_mode,
             } => {
                 let mut prefix = flow_name
@@ -467,9 +464,10 @@ impl RunPresentationOutcome {
                     }
                     _ => {}
                 }
-                match run_dir {
-                    Some(run_dir) => Footer::new()
-                        .paragraph(format!("{prefix}: {error}. Journal: {}", run_dir.display())),
+                match location {
+                    Some(location) => {
+                        Footer::new().paragraph(format!("{prefix}: {error}. Journal: {location}"))
+                    }
                     None => Footer::new().paragraph(format!("{prefix}: {error}")),
                 }
             }
@@ -675,6 +673,7 @@ fn strip_ansi_escape_codes(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     #[test]
     fn plain_title_renders_with_separator() {
@@ -790,15 +789,15 @@ mod tests {
     fn default_footer_matches_outcomes() {
         let completed = RunPresentationOutcome::Completed {
             flow_name: "flow".to_string(),
-            run_dir: None,
+            location: None,
             run_mode: RunMode::Live,
         };
         assert_eq!(completed.default_footer(), "flow completed.");
 
-        let run_dir = PathBuf::from("tmp/run");
+        let location = CurrentRunLocator::new(PathBuf::from("tmp/run"));
         let completed_with_journal = RunPresentationOutcome::Completed {
             flow_name: "flow".to_string(),
-            run_dir: Some(run_dir.clone()),
+            location: Some(location.clone()),
             run_mode: RunMode::Live,
         };
         assert_eq!(
@@ -810,7 +809,7 @@ mod tests {
         // journal path, the operator's path back to replay or resume.
         let stopped_with_journal = RunPresentationOutcome::Stopped {
             flow_name: "flow".to_string(),
-            run_dir: Some(PathBuf::from("tmp/run")),
+            location: Some(CurrentRunLocator::new(PathBuf::from("tmp/run"))),
             run_mode: RunMode::Live,
         };
         let stopped_footer = stopped_with_journal.default_footer();
@@ -819,7 +818,7 @@ mod tests {
 
         let stopped = RunPresentationOutcome::Stopped {
             flow_name: "flow".to_string(),
-            run_dir: None,
+            location: None,
             run_mode: RunMode::Live,
         };
         assert_eq!(stopped.default_footer(), "flow stopped.");
@@ -827,7 +826,7 @@ mod tests {
         let failed = RunPresentationOutcome::Failed {
             flow_name: Some("flow".to_string()),
             error: "err".to_string(),
-            run_dir: None,
+            location: None,
             run_mode: RunMode::Live,
         };
         assert_eq!(failed.default_footer(), "flow failed: err");
@@ -835,7 +834,7 @@ mod tests {
         let failed_without_name = RunPresentationOutcome::Failed {
             flow_name: None,
             error: "err".to_string(),
-            run_dir: Some(run_dir),
+            location: Some(location),
             run_mode: RunMode::Live,
         };
         assert_eq!(
@@ -853,7 +852,7 @@ mod tests {
 
         let completed = RunPresentationOutcome::Completed {
             flow_name: "flow".to_string(),
-            run_dir: Some(PathBuf::from("tmp/replay-run")),
+            location: Some(CurrentRunLocator::new(PathBuf::from("tmp/replay-run"))),
             run_mode: replay_mode.clone(),
         };
         let footer = completed.default_footer();
@@ -881,7 +880,7 @@ mod tests {
         let failed = RunPresentationOutcome::Failed {
             flow_name: Some("flow".to_string()),
             error: "err".to_string(),
-            run_dir: None,
+            location: None,
             run_mode: replay_mode,
         };
         assert_eq!(
@@ -899,7 +898,7 @@ mod tests {
 
         let completed = RunPresentationOutcome::Completed {
             flow_name: "flow".to_string(),
-            run_dir: Some(PathBuf::from("tmp/resume-run")),
+            location: Some(CurrentRunLocator::new(PathBuf::from("tmp/resume-run"))),
             run_mode: resume_mode.clone(),
         };
         let footer = completed.default_footer();
@@ -927,7 +926,7 @@ mod tests {
         let failed = RunPresentationOutcome::Failed {
             flow_name: Some("flow".to_string()),
             error: "err".to_string(),
-            run_dir: None,
+            location: None,
             run_mode: resume_mode,
         };
         assert_eq!(
