@@ -70,7 +70,7 @@ struct NoopSink;
 #[async_trait]
 impl SinkHandler for NoopSink {
     async fn consume(&mut self, _event: ChainEvent) -> Result<DeliveryPayload, HandlerError> {
-        Ok(DeliveryPayload::success("noop", DeliveryMethod::Noop, None))
+        Ok(DeliveryPayload::success(DeliveryMethod::Noop, None))
     }
 }
 

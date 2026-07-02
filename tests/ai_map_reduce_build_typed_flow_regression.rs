@@ -145,7 +145,6 @@ struct NoopSink;
 impl SinkHandler for NoopSink {
     async fn consume(&mut self, _event: ChainEvent) -> Result<DeliveryPayload, HandlerError> {
         Ok(DeliveryPayload::success(
-            "noop",
             DeliveryMethod::Custom("Noop".to_string()),
             None,
         ))
@@ -193,7 +192,6 @@ impl SinkHandler for CountingOutSink {
         }
 
         Ok(DeliveryPayload::success(
-            "counting",
             DeliveryMethod::Custom("CountingOut".to_string()),
             None,
         ))

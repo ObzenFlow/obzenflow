@@ -5,47 +5,47 @@
 //! Handler trait for **sink stages** that *consume* events and emit a
 //! delivery receipt.
 //!
-//! Typical sinks: database writers, file outputs, HTTP/REST clients, Kafka
-//! producers.  The runtime journals each `DeliveryPayload` so delivery
-//! success, partials, and failures are durable and queryable.
+//! ## The sink contract (FLOWIP-120f/120s)
 //!
-//! ## Quick start
+//! A sink is delivery-only: it consumes facts and emits receipts, and it is
+//! the surface for **idempotent, recompute-safe, receipt-governed** writes,
+//! `view = f(facts)`: a materialized-view upsert, a keyed queue publish, a
+//! console projection. Replay and resume re-consume a sink's tape, so a
+//! non-idempotent external write whose outcome matters belongs behind the
+//! effect boundary instead: an effectful transform performs it through
+//! `fx.perform`, authors named outcome facts, and a plain sink projects
+//! those facts. A destination that absorbs duplicates itself may stay a
+//! sink, declared `NonIdempotentExternal`, governed by the archive-verb
+//! gates.
+//!
+//! The runtime journals each `DeliveryPayload`, stamping its `destination`
+//! from the handler's declared `delivery_type()` (else the stage name), so
+//! delivery success, partials, and failures are durable and queryable.
+//!
+//! ## Quick start: the typed tiers
+//!
+//! Most sinks never implement this trait directly. A quick projection is a
+//! `sink!` closure; a production destination is a typed
+//! [`Delivery`](super::delivery::Delivery), carrying identity and
+//! duplicate-safety on the type and bridging onto this trait automatically:
+//!
 //! ```ignore
-//! use obzenflow_runtime::stages::common::handlers::SinkHandler;
-//! use obzenflow_core::{ChainEvent, Result};
-//! use async_trait::async_trait;
-//! use std::collections::HashMap;
+//! // Tier 1/2: closures, optionally with declared safety and provenance.
+//! let quick = sink!(PaymentAuthorized => |authorized| { println!("{authorized:?}"); });
+//! let declared = sink!(
+//!     PaymentAuthorized => |authorized, delivery| {
+//!         audit(authorized, delivery.provenance());
+//!     },
+//!     delivery: idempotent
+//! );
 //!
-//! use obzenflow_core::event::payloads::delivery_payload::DeliveryPayload;
-//!
-//! /// Minimal HTTP POST sink.
-//! struct HttpSink {
-//!     client: YourHttpClient, // e.g., reqwest::Client
-//!     url:    String,
-//! }
-//!
-//! #[async_trait]
-//! impl SinkHandler for HttpSink {
-//!     async fn consume(&mut self, event: ChainEvent) -> Result<DeliveryPayload> {
-//!         let start = std::time::Instant::now();
-//!         let body  = event.payload().to_string();
-//!         let resp  = self.client.post(&self.url).body(body).send().await?;
-//!         let elapsed = start.elapsed().as_millis() as u64;
-//!
-//!         let headers: HashMap<_, _> = resp.headers().iter()
-//!             .map(|(k,v)| (k.to_string(), v.to_str().unwrap_or_default().to_string()))
-//!             .collect();
-//!
-//!         Ok(DeliveryPayload::http_post_success(
-//!             &self.url,
-//!             elapsed,
-//!             Some(resp.content_length().unwrap_or(0)),
-//!             Some(headers),
-//!             Some(resp.status().to_string()),
-//!         ))
-//!     }
-//! }
+//! // Tier 3: a typed delivery.
+//! let production = sink!(PaymentAuthorized => ShippingHandoff::new(queue));
 //! ```
+//!
+//! Implement `SinkHandler` directly only for buffered or otherwise
+//! non-trivial receipt protocols (see `consume_report`/`flush_report`), and
+//! declare `delivery_safety()` so resume and replay can classify the sink.
 
 use crate::effects::{EffectInvocationContext, Effects, SinkDeliverySafety};
 use crate::stages::common::handler_error::HandlerError;
@@ -148,6 +148,19 @@ pub trait SinkHandler: Send + Sync {
     fn delivery_safety(&self) -> Option<SinkDeliverySafety> {
         None
     }
+
+    /// Declared destination family (typed deliveries, FLOWIP-120s). `None`
+    /// for handlers with no declared destination; receipts then carry the
+    /// stage name.
+    fn delivery_type(&self) -> Option<&'static str> {
+        None
+    }
+
+    /// Declared destination instance coordinates for the FLOWIP-095g
+    /// recovery compatibility gate. `None` is undeclared.
+    fn canonical_destination(&self) -> Option<serde_json::Value> {
+        None
+    }
 }
 
 #[doc(hidden)]
@@ -171,11 +184,12 @@ pub trait UnifiedSinkHandler: Send + Sync {
         "1"
     }
 
-    /// Declared delivery safety. `None` is undeclared: resume fails closed and
-    /// the error names both remedies (declare, or opt in to duplication).
-    fn delivery_safety(&self) -> Option<SinkDeliverySafety> {
-        None
-    }
+    // Declaration hooks (`delivery_safety`, `delivery_type`,
+    // `canonical_destination`) deliberately do not exist on this trait.
+    // Declarations live on `SinkHandler` and are snapshotted by the
+    // descriptor from the raw handler before any wrapping; a runtime-side
+    // copy would let a wrapper silently attenuate them to undeclared
+    // (FLOWIP-120s, the `MiddlewareSink` finding).
 }
 
 #[async_trait]
@@ -195,10 +209,6 @@ impl<T: SinkHandler + Send + Sync> UnifiedSinkHandler for T {
 
     async fn drain_report(&mut self) -> Result<SinkLifecycleReport, HandlerError> {
         SinkHandler::drain_report(self).await
-    }
-
-    fn delivery_safety(&self) -> Option<SinkDeliverySafety> {
-        SinkHandler::delivery_safety(self)
     }
 }
 

@@ -128,7 +128,6 @@ impl SinkHandler for NoopSink {
         _event: ChainEvent,
     ) -> std::result::Result<DeliveryPayload, HandlerError> {
         Ok(DeliveryPayload::success(
-            "noop",
             DeliveryMethod::Custom("Noop".to_string()),
             None,
         ))

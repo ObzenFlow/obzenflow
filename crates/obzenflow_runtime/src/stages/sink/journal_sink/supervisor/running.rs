@@ -564,6 +564,8 @@ async fn dispatch_data_event<
     let envelope_event = envelope.event.clone();
     let event_id = envelope_event.id;
     let stage_name = ctx.stage_name.clone();
+    // FLOWIP-120s single-writer receipt identity, resolved at build.
+    let receipt_destination = ctx.receipt_destination.clone();
     let heartbeat_state = ctx.heartbeat.as_ref().map(|h| h.state.clone());
     let upstream_stage = subscription.last_delivered_upstream_stage();
     let effect_context = stage_input_position.and_then(|input_seq| {
@@ -694,22 +696,22 @@ async fn dispatch_data_event<
                 report,
             ))) => {
                 let mut report = *report;
-                report.primary.destination = stage_name.clone();
+                report.primary.destination = receipt_destination.clone();
                 for commit in &mut report.commit_receipts {
-                    commit.payload.destination = stage_name.clone();
+                    commit.payload.destination = receipt_destination.clone();
                 }
                 (report, None, false)
             }
             SinkDeliveryBoundaryOutcome::Attempted(SinkDeliveryAttemptOutcome::Delivered(Err(
                 err,
             ))) => {
-                let fail_payload = DeliveryPayload::failed(
-                    stage_name.clone(),
+                let mut fail_payload = DeliveryPayload::failed(
                     DeliveryMethod::Noop,
                     "sink_error",
                     err.to_string(),
                     /* final_attempt */ false,
                 );
+                fail_payload.destination = receipt_destination.clone();
                 (
                     crate::stages::common::handlers::SinkConsumeReport::new(fail_payload),
                     Some(err),
@@ -724,13 +726,13 @@ async fn dispatch_data_event<
                     panic = %message,
                     "SinkHandler::consume() panicked"
                 );
-                let fail_payload = DeliveryPayload::failed(
-                    stage_name.clone(),
+                let mut fail_payload = DeliveryPayload::failed(
                     DeliveryMethod::Noop,
                     "handler_panic",
                     message,
                     /* final_attempt */ true,
                 );
+                fail_payload.destination = receipt_destination.clone();
                 (
                     crate::stages::common::handlers::SinkConsumeReport::new(fail_payload),
                     None,
@@ -748,8 +750,7 @@ async fn dispatch_data_event<
                     reason = %rejection.reason,
                     "Sink delivery rejected by policy (FLOWIP-115b)"
                 );
-                let fail_payload = DeliveryPayload::failed(
-                    stage_name.clone(),
+                let mut fail_payload = DeliveryPayload::failed(
                     DeliveryMethod::Noop,
                     "sink_policy_rejected",
                     format!("{}: {}", rejection.policy, rejection.reason),
@@ -768,6 +769,7 @@ async fn dispatch_data_event<
                     "upstream_stage_id": upstream_stage.map(|stage_id| stage_id.to_string()),
                     "input_position": stage_input_position.map(|position| position.0)
                 }));
+                fail_payload.destination = receipt_destination.clone();
                 (
                     crate::stages::common::handlers::SinkConsumeReport::new(fail_payload),
                     None,
@@ -877,13 +879,13 @@ async fn dispatch_data_event<
         }
         Err(e) => {
             // Instrumentation-level or unexpected failure: treat as stage-fatal.
-            let fail_payload = DeliveryPayload::failed(
-                ctx.stage_name.clone(),
+            let mut fail_payload = DeliveryPayload::failed(
                 DeliveryMethod::Noop,
                 "sink_error",
                 e.to_string(),
                 /* final_attempt */ false,
             );
+            fail_payload.destination = ctx.receipt_destination.clone();
             journal_delivery_receipt(ctx, subscription, envelope, fail_payload)
                 .await
                 .map_err(|je| format!("Failed to journal sink failure: {je}"))?;

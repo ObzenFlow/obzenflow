@@ -179,7 +179,6 @@ impl SinkHandler for SummaryConsole {
             serde_json::to_string_pretty(&event.payload()).unwrap_or_default()
         );
         Ok(DeliveryPayload::success(
-            "summary_console",
             DeliveryMethod::Custom("Stdout".to_string()),
             None,
         ))

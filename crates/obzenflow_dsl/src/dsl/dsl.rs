@@ -146,7 +146,7 @@ macro_rules! __obzenflow_effect_ports_or_default {
 ///     stages: {
 ///         src = source!(MyEvent => sources::finite(vec![MyEvent { value: 1 }]));
 ///         map = transform!(MyEvent -> Doubled => transforms::map(|e: MyEvent| Doubled { value: e.value * 2 }));
-///         out = sink!(Doubled => |d: Doubled| { println!("{}", d.value); });
+///         out = sink!(Doubled => |d| { println!("{}", d.value); });
 ///     },
 ///
 ///     topology: {

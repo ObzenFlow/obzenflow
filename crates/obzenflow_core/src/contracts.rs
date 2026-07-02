@@ -988,7 +988,6 @@ mod tests {
         contract.on_read(&consumed, &mut read_ctx);
 
         let receipt_payload = DeliveryPayload::failed(
-            "dest",
             DeliveryMethod::Noop,
             "sink_error",
             "boom",
@@ -1020,7 +1019,7 @@ mod tests {
         contract.on_read(&consumed, &mut read_ctx);
 
         let receipt_payload =
-            DeliveryPayload::buffered("dest", DeliveryMethod::Noop, /* bytes */ None);
+            DeliveryPayload::buffered(DeliveryMethod::Noop, /* bytes */ None);
         let receipt =
             ChainEventFactory::delivery_event(WriterId::from(downstream), receipt_payload)
                 .with_causality(CausalityContext::with_parent(parent_id));
@@ -1061,8 +1060,7 @@ mod tests {
         contract.on_read(&consumed_a, &mut read_ctx);
         contract.on_read(&consumed_b, &mut read_ctx);
 
-        let receipt_payload =
-            DeliveryPayload::success("dest", DeliveryMethod::Noop, /* bytes */ None);
+        let receipt_payload = DeliveryPayload::success(DeliveryMethod::Noop, /* bytes */ None);
         let receipt =
             ChainEventFactory::delivery_event(WriterId::from(downstream), receipt_payload)
                 .with_causality(
@@ -1086,8 +1084,7 @@ mod tests {
         let (mut write_ctx, mut read_ctx, upstream, downstream) = dummy_ctx();
 
         // No consumed event observed, but a receipt arrives.
-        let receipt_payload =
-            DeliveryPayload::success("dest", DeliveryMethod::Noop, /* bytes */ None);
+        let receipt_payload = DeliveryPayload::success(DeliveryMethod::Noop, /* bytes */ None);
         let receipt =
             ChainEventFactory::delivery_event(WriterId::from(downstream), receipt_payload)
                 .with_causality(CausalityContext::with_parent(EventId::new()));

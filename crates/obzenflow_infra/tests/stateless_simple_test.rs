@@ -86,7 +86,6 @@ impl SinkHandler for Printer {
         _event: ChainEvent,
     ) -> std::result::Result<DeliveryPayload, HandlerError> {
         Ok(DeliveryPayload::success(
-            "printer",
             DeliveryMethod::Custom("Print".to_string()),
             None,
         ))

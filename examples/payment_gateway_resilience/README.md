@@ -318,6 +318,7 @@ has its own published tutorial.
 | `validation.rs` | One multi-type validation stage that classifies each order exactly once. |
 | `gateway.rs`  | Gateway authorization as a replay-suppressed effect, deriving cancellations from declines. |
 | `fixtures.rs` | The scripted upstream order-event sequence. |
-| `sinks.rs`    | Typed deliveries for paid, cancelled, and unavailable outcomes. |
+| `deliveries.rs` | The typed `ShippingHandoff` delivery: destination identity, duplicate-safety, and behaviour on the type (FLOWIP-120s tier 3). |
+| `console.rs`  | Console projection helpers with replay-provenance labels for the demo output. |
 | `flow.rs`     | The flow wiring and the circuit-breaker configuration. |
 | `main.rs`     | The entry point and CLI banner. |

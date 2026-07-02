@@ -177,11 +177,7 @@ impl SinkHandler for CountingSink {
         if Enriched::from_event(&event).is_some() {
             self.delivered.fetch_add(1, Ordering::SeqCst);
         }
-        Ok(DeliveryPayload::success(
-            "resume_effects_sink",
-            DeliveryMethod::Noop,
-            None,
-        ))
+        Ok(DeliveryPayload::success(DeliveryMethod::Noop, None))
     }
 
     fn delivery_safety(&self) -> Option<SinkDeliverySafety> {

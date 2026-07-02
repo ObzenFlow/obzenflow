@@ -865,11 +865,7 @@ where
         if !self.warned.swap(true, Ordering::Relaxed) {
             tracing::warn!("{}", placeholder_message("sink", self.message));
         }
-        Ok(DeliveryPayload::success(
-            "placeholder",
-            DeliveryMethod::Noop,
-            None,
-        ))
+        Ok(DeliveryPayload::success(DeliveryMethod::Noop, None))
     }
 
     async fn flush(&mut self) -> Result<Option<DeliveryPayload>, HandlerError> {
@@ -1053,6 +1049,14 @@ impl StageDescriptor for TypedStageDescriptor {
 
     fn sink_delivery_safety(&self) -> Option<obzenflow_runtime::effects::SinkDeliverySafety> {
         self.inner.sink_delivery_safety()
+    }
+
+    fn sink_delivery_type(&self) -> Option<&'static str> {
+        self.inner.sink_delivery_type()
+    }
+
+    fn sink_canonical_destination(&self) -> Option<serde_json::Value> {
+        self.inner.sink_canonical_destination()
     }
 
     fn effect_declarations(&self) -> Vec<obzenflow_runtime::effects::EffectDeclaration> {
@@ -2300,6 +2304,14 @@ impl StageDescriptor for DeterministicOrdererOverride {
 
     fn sink_delivery_safety(&self) -> Option<obzenflow_runtime::effects::SinkDeliverySafety> {
         self.inner.sink_delivery_safety()
+    }
+
+    fn sink_delivery_type(&self) -> Option<&'static str> {
+        self.inner.sink_delivery_type()
+    }
+
+    fn sink_canonical_destination(&self) -> Option<serde_json::Value> {
+        self.inner.sink_canonical_destination()
     }
 
     fn effect_declarations(&self) -> Vec<obzenflow_runtime::effects::EffectDeclaration> {

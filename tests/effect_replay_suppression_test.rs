@@ -764,7 +764,6 @@ impl SinkHandler for CollectSink {
         }
 
         Ok(DeliveryPayload::success(
-            "collector",
             DeliveryMethod::Custom("Memory".to_string()),
             None,
         ))
@@ -803,7 +802,6 @@ impl EffectfulSinkHandler for EffectfulCollectSink {
             });
 
         Ok(DeliveryPayload::success(
-            "effectful_collector",
             DeliveryMethod::Custom("Memory".to_string()),
             None,
         ))

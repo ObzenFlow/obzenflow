@@ -1,0 +1,7 @@
+error[E0046]: not all trait items implemented, missing: `SAFETY`
+  --> tests/compile_fail/delivery_missing_safety.rs:23:1
+   |
+23 | impl Delivery for MissingSafetyDelivery {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ missing `SAFETY` in implementation
+   |
+   = help: implement the missing item: `const SAFETY: SinkDeliverySafety = /* value */;`

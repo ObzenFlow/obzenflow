@@ -150,8 +150,6 @@ where
     Fut: Future<Output = ()> + Send,
 {
     async fn consume(&mut self, event: ChainEvent) -> Result<DeliveryPayload, HandlerError> {
-        let destination = std::any::type_name::<T>();
-
         let (event_type, payload) = match &event.content {
             ChainEventContent::Data {
                 event_type,
@@ -159,7 +157,6 @@ where
             } => (event_type.as_str(), payload),
             _ => {
                 return Ok(DeliveryPayload::success(
-                    destination,
                     DeliveryMethod::Custom("Skipped".to_string()),
                     None,
                 ))
@@ -169,7 +166,6 @@ where
         if !T::event_type_matches(event_type) {
             if self.allow_skip {
                 return Ok(DeliveryPayload::success(
-                    destination,
                     DeliveryMethod::Custom("Skipped".to_string()),
                     None,
                 ));
@@ -193,7 +189,6 @@ where
         (self.handler)(typed_event).await;
 
         Ok(DeliveryPayload::success(
-            destination,
             DeliveryMethod::Custom("TypedSink".to_string()),
             Some(1),
         ))
@@ -243,7 +238,7 @@ pub struct DeliveryContext {
 }
 
 impl DeliveryContext {
-    fn from_event(event: &ChainEvent) -> Self {
+    pub(crate) fn from_event(event: &ChainEvent) -> Self {
         Self {
             provenance: if event.replay_context.is_some() {
                 DeliveryProvenance::Replayed
@@ -346,8 +341,6 @@ where
     Fut: Future<Output = ()> + Send,
 {
     async fn consume(&mut self, event: ChainEvent) -> Result<DeliveryPayload, HandlerError> {
-        let destination = std::any::type_name::<T>();
-
         let (event_type, payload) = match &event.content {
             ChainEventContent::Data {
                 event_type,
@@ -355,7 +348,6 @@ where
             } => (event_type.as_str(), payload),
             _ => {
                 return Ok(DeliveryPayload::success(
-                    destination,
                     DeliveryMethod::Custom("Skipped".to_string()),
                     None,
                 ))
@@ -365,7 +357,6 @@ where
         if !T::event_type_matches(event_type) {
             if self.allow_skip {
                 return Ok(DeliveryPayload::success(
-                    destination,
                     DeliveryMethod::Custom("Skipped".to_string()),
                     None,
                 ));
@@ -391,7 +382,6 @@ where
         (self.handler)(typed_event, context).await;
 
         Ok(DeliveryPayload::success(
-            destination,
             DeliveryMethod::Custom("TypedSink".to_string()),
             Some(1),
         ))
@@ -522,8 +512,6 @@ where
     Fut: Future<Output = Result<(), HandlerError>> + Send,
 {
     async fn consume(&mut self, event: ChainEvent) -> Result<DeliveryPayload, HandlerError> {
-        let destination = std::any::type_name::<T>();
-
         let (event_type, payload) = match &event.content {
             ChainEventContent::Data {
                 event_type,
@@ -531,7 +519,6 @@ where
             } => (event_type.as_str(), payload),
             _ => {
                 return Ok(DeliveryPayload::success(
-                    destination,
                     DeliveryMethod::Custom("Skipped".to_string()),
                     None,
                 ))
@@ -541,7 +528,6 @@ where
         if !T::event_type_matches(event_type) {
             if self.allow_skip {
                 return Ok(DeliveryPayload::success(
-                    destination,
                     DeliveryMethod::Custom("Skipped".to_string()),
                     None,
                 ));
@@ -565,7 +551,6 @@ where
         (self.handler)(typed_event).await?;
 
         Ok(DeliveryPayload::success(
-            destination,
             DeliveryMethod::Custom("TypedSink".to_string()),
             Some(1),
         ))
@@ -588,6 +573,96 @@ where
             .field("allow_skip", &self.allow_skip)
             .field("delivery_safety", &self.delivery_safety)
             .finish()
+    }
+}
+
+mod sealed {
+    pub trait Sealed {}
+}
+
+/// Lowering target for the `sink!` macro's `delivery:` clause (FLOWIP-120s).
+/// Implemented only by the closure-tier typed sinks, so the clause fails by
+/// trait bound on any other handler: a typed `Delivery` carries `SAFETY` on
+/// the type, and a custom `SinkHandler` struct implements
+/// `SinkHandler::delivery_safety` directly. Type-level metadata is never
+/// restated at the flow site.
+#[diagnostic::on_unimplemented(
+    message = "the `delivery:` clause applies to closure-tier sinks only",
+    note = "a typed `Delivery` declares safety through its `SAFETY` const, and a custom \
+            `SinkHandler` implements `delivery_safety()` on the type; the site clause exists \
+            only for closures, which have no type to carry the declaration"
+)]
+pub trait DeclareDeliverySafety: sealed::Sealed + Sized {
+    fn declare_idempotent(self) -> Self;
+    fn declare_non_idempotent(self) -> Self;
+}
+
+impl<T, F, Fut> sealed::Sealed for SinkTyped<T, F, Fut>
+where
+    T: TypedPayload + DeserializeOwned + Send + Sync + 'static,
+    F: FnMut(T) -> Fut + Send + Sync + Clone,
+    Fut: Future<Output = ()> + Send,
+{
+}
+
+impl<T, F, Fut> DeclareDeliverySafety for SinkTyped<T, F, Fut>
+where
+    T: TypedPayload + DeserializeOwned + Send + Sync + 'static,
+    F: FnMut(T) -> Fut + Send + Sync + Clone,
+    Fut: Future<Output = ()> + Send,
+{
+    fn declare_idempotent(self) -> Self {
+        self.idempotent()
+    }
+
+    fn declare_non_idempotent(self) -> Self {
+        self.non_idempotent()
+    }
+}
+
+impl<T, F, Fut> sealed::Sealed for SinkTypedWithDelivery<T, F, Fut>
+where
+    T: TypedPayload + DeserializeOwned + Send + Sync + 'static,
+    F: FnMut(T, DeliveryContext) -> Fut + Send + Sync + Clone,
+    Fut: Future<Output = ()> + Send,
+{
+}
+
+impl<T, F, Fut> DeclareDeliverySafety for SinkTypedWithDelivery<T, F, Fut>
+where
+    T: TypedPayload + DeserializeOwned + Send + Sync + 'static,
+    F: FnMut(T, DeliveryContext) -> Fut + Send + Sync + Clone,
+    Fut: Future<Output = ()> + Send,
+{
+    fn declare_idempotent(self) -> Self {
+        self.idempotent()
+    }
+
+    fn declare_non_idempotent(self) -> Self {
+        self.non_idempotent()
+    }
+}
+
+impl<T, F, Fut> sealed::Sealed for FallibleSinkTyped<T, F, Fut>
+where
+    T: TypedPayload + DeserializeOwned + Send + Sync + 'static,
+    F: FnMut(T) -> Fut + Send + Sync + Clone,
+    Fut: Future<Output = Result<(), HandlerError>> + Send,
+{
+}
+
+impl<T, F, Fut> DeclareDeliverySafety for FallibleSinkTyped<T, F, Fut>
+where
+    T: TypedPayload + DeserializeOwned + Send + Sync + 'static,
+    F: FnMut(T) -> Fut + Send + Sync + Clone,
+    Fut: Future<Output = Result<(), HandlerError>> + Send,
+{
+    fn declare_idempotent(self) -> Self {
+        self.idempotent()
+    }
+
+    fn declare_non_idempotent(self) -> Self {
+        self.non_idempotent()
     }
 }
 

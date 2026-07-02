@@ -2,12 +2,12 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Tutorial sink actions.
+//! Console projection helpers for the tutorial's deliveries.
 //!
 //! These functions stand in for real subscribers. In production, paid orders
-//! might feed shipping, cancelled orders might feed customer notification and
-//! order-status services, and unavailable authorizations might feed retry or
-//! manual-review workflows.
+//! feed the `ShippingHandoff` typed delivery (see `deliveries.rs`), cancelled
+//! orders might feed customer notification and order-status services, and
+//! unavailable authorizations might feed retry or manual-review workflows.
 //!
 //! Sinks are external deliveries, not fact channels: `InvalidOrder` and
 //! `PaymentDeclined` are recorded in the journal as provenance but have no

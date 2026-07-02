@@ -2318,28 +2318,6 @@ macro_rules! effectful_sink {
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __obzenflow_sink_untyped {
-    (name = $name:literal, handler = |$arg:ident : $ty:ty| $body:block, middleware = [$($mw:expr),*]) => {{
-        use $crate::dsl::stage_descriptor::{SinkDescriptor, StageDescriptor};
-        Box::new(SinkDescriptor {
-            name: $name.to_string(),
-            handler: ::obzenflow_runtime::stages::sink::SinkTyped::new(move |$arg: $ty| {
-                $body;
-                async move {}
-            }),
-            middleware: vec![$(Box::new($mw)),*],
-        }) as Box<dyn StageDescriptor>
-    }};
-    (name = $name:literal, handler = move |$arg:ident : $ty:ty| $body:block, middleware = [$($mw:expr),*]) => {{
-        use $crate::dsl::stage_descriptor::{SinkDescriptor, StageDescriptor};
-        Box::new(SinkDescriptor {
-            name: $name.to_string(),
-            handler: ::obzenflow_runtime::stages::sink::SinkTyped::new(move |$arg: $ty| {
-                $body;
-                async move {}
-            }),
-            middleware: vec![$(Box::new($mw)),*],
-        }) as Box<dyn StageDescriptor>
-    }};
     (name = $name:literal, handler = $handler:expr, middleware = [$($mw:expr),*]) => {{
         use $crate::dsl::stage_descriptor::{SinkDescriptor, StageDescriptor};
         Box::new(SinkDescriptor {
@@ -2444,8 +2422,10 @@ macro_rules! __obzenflow_sink_typed {
     }};
 }
 
-/// Lower the optional `delivery:` clause of `sink!` onto the typed sink
-/// builder methods (FLOWIP-120n F16).
+/// Lower the optional `delivery:` clause of `sink!` (FLOWIP-120n F16,
+/// FLOWIP-120s). Routes through the sealed `DeclareDeliverySafety` trait so
+/// the clause is accepted only by the closure-tier typed sinks; a typed
+/// `Delivery` carries `SAFETY` on the type and fails here by trait bound.
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __obzenflow_sink_delivery {
@@ -2453,286 +2433,238 @@ macro_rules! __obzenflow_sink_delivery {
         $handler
     };
     ($handler:expr, idempotent) => {
-        $handler.idempotent()
+        ::obzenflow_runtime::stages::sink::DeclareDeliverySafety::declare_idempotent($handler)
     };
     ($handler:expr, non_idempotent) => {
-        $handler.non_idempotent()
+        ::obzenflow_runtime::stages::sink::DeclareDeliverySafety::declare_non_idempotent($handler)
+    };
+    ($handler:expr, $other:ident) => {
+        compile_error!("sink!: `delivery:` accepts `idempotent` or `non_idempotent`")
     };
 }
 
 /// Create a sink stage descriptor.
 ///
-/// Closure and custom-handler forms accept an optional trailing
-/// `delivery: idempotent` / `delivery: non_idempotent` clause declaring the
-/// sink's replay/resume delivery safety (FLOWIP-120n F16).
+/// Canonical grammar (FLOWIP-120s): `InputType => handler`, then an optional
+/// `delivery: idempotent | non_idempotent` safety clause (closure and
+/// custom-handler forms only; facades and typed `Delivery` impls declare
+/// their own safety), then an optional named `middleware: [ ... ]` clause,
+/// omitted when empty. Exact-contract closures take one argument
+/// (`|input| { ... }`) or two (`|input, delivery| { ... }`, receiving the
+/// per-delivery provenance context); the macro supplies `move` and
+/// `async move`, and the contract type annotates the first argument.
 #[macro_export]
 macro_rules! sink {
-    // ── typed (binding-derived name): closure shorthand ──
-    (|$arg:ident : $ty:ty| $body:block $(, delivery: $delivery:ident)?) => {
+    // ── typed (binding-derived name): no-contract closure shorthand ──
+    (|$arg:ident : $ty:ty| $body:block
+        $(, delivery: $delivery:ident)?
+        $(, middleware: [$($mw:expr),* $(,)?])?
+    ) => {
         $crate::__obzenflow_sink_typed!(
             input = exact($ty),
             name = "__obzenflow_binding_derived_name__",
             handler = $crate::__obzenflow_sink_delivery!(::obzenflow_runtime::stages::sink::SinkTyped::new(|$arg: $ty| async move $body) $(, $delivery)?),
-            middleware = []
+            middleware = [$($($mw),*)?]
         )
     };
-    (move |$arg:ident : $ty:ty| $body:block $(, delivery: $delivery:ident)?) => {
+    (move |$arg:ident : $ty:ty| $body:block
+        $(, delivery: $delivery:ident)?
+        $(, middleware: [$($mw:expr),* $(,)?])?
+    ) => {
         $crate::__obzenflow_sink_typed!(
             input = exact($ty),
             name = "__obzenflow_binding_derived_name__",
             handler = $crate::__obzenflow_sink_delivery!(::obzenflow_runtime::stages::sink::SinkTyped::new(move |$arg: $ty| async move $body) $(, $delivery)?),
-            middleware = []
+            middleware = [$($($mw),*)?]
         )
     };
-    (|$arg:ident : $ty:ty| $body:block, [$($mw:expr),*] $(, delivery: $delivery:ident)?) => {
+
+    // ── typed (binding-derived name): exact-contract closures (FLOWIP-120s) ──
+    ($in:ty => |$arg:ident| $body:block
+        $(, delivery: $delivery:ident)?
+        $(, middleware: [$($mw:expr),* $(,)?])?
+    ) => {
         $crate::__obzenflow_sink_typed!(
-            input = exact($ty),
+            input = exact($in),
             name = "__obzenflow_binding_derived_name__",
-            handler = $crate::__obzenflow_sink_delivery!(::obzenflow_runtime::stages::sink::SinkTyped::new(|$arg: $ty| async move $body) $(, $delivery)?),
-            middleware = [$($mw),*]
+            handler = $crate::__obzenflow_sink_delivery!(::obzenflow_runtime::stages::sink::SinkTyped::new(move |$arg: $in| async move $body) $(, $delivery)?),
+            middleware = [$($($mw),*)?]
         )
     };
-    (move |$arg:ident : $ty:ty| $body:block, [$($mw:expr),*] $(, delivery: $delivery:ident)?) => {
+    ($in:ty => |$arg:ident, $ctx:ident| $body:block
+        $(, delivery: $delivery:ident)?
+        $(, middleware: [$($mw:expr),* $(,)?])?
+    ) => {
         $crate::__obzenflow_sink_typed!(
-            input = exact($ty),
+            input = exact($in),
             name = "__obzenflow_binding_derived_name__",
-            handler = $crate::__obzenflow_sink_delivery!(::obzenflow_runtime::stages::sink::SinkTyped::new(move |$arg: $ty| async move $body) $(, $delivery)?),
-            middleware = [$($mw),*]
+            handler = $crate::__obzenflow_sink_delivery!(::obzenflow_runtime::stages::sink::SinkTyped::with_delivery(move |$arg: $in, $ctx| async move $body) $(, $delivery)?),
+            middleware = [$($($mw),*)?]
         )
     };
 
     // ── typed (binding-derived name): exact input ──
-    ($in:ty => placeholder!()) => {
-        $crate::__obzenflow_sink_typed!(input = exact($in), name = "__obzenflow_binding_derived_name__", handler = placeholder!(), middleware = [])
+    ($in:ty => placeholder!() $(, middleware: [$($mw:expr),* $(,)?])?) => {
+        $crate::__obzenflow_sink_typed!(input = exact($in), name = "__obzenflow_binding_derived_name__", handler = placeholder!(), middleware = [$($($mw),*)?])
     };
-    ($in:ty => placeholder!($msg:expr)) => {
-        $crate::__obzenflow_sink_typed!(input = exact($in), name = "__obzenflow_binding_derived_name__", handler = placeholder!($msg), middleware = [])
+    ($in:ty => placeholder!($msg:expr) $(, middleware: [$($mw:expr),* $(,)?])?) => {
+        $crate::__obzenflow_sink_typed!(input = exact($in), name = "__obzenflow_binding_derived_name__", handler = placeholder!($msg), middleware = [$($($mw),*)?])
     };
-    ($in:ty => placeholder!(), [$($mw:expr),*]) => {
-        $crate::__obzenflow_sink_typed!(input = exact($in), name = "__obzenflow_binding_derived_name__", handler = placeholder!(), middleware = [$($mw),*])
-    };
-    ($in:ty => placeholder!($msg:expr), [$($mw:expr),*]) => {
-        $crate::__obzenflow_sink_typed!(input = exact($in), name = "__obzenflow_binding_derived_name__", handler = placeholder!($msg), middleware = [$($mw),*])
-    };
-    ($in:ty => sinks::console($formatter:expr $(,)?)) => {
+    ($in:ty => sinks::console($formatter:expr $(,)?) $(, middleware: [$($mw:expr),* $(,)?])?) => {
         $crate::__obzenflow_sink_typed!(
             input = exact($in),
             name = "__obzenflow_binding_derived_name__",
             handler = sinks::console::<$in, _>($formatter),
-            middleware = []
+            middleware = [$($($mw),*)?]
         )
     };
-    ($in:ty => sinks::console($formatter:expr $(,)?), [$($mw:expr),*]) => {
-        $crate::__obzenflow_sink_typed!(
-            input = exact($in),
-            name = "__obzenflow_binding_derived_name__",
-            handler = sinks::console::<$in, _>($formatter),
-            middleware = [$($mw),*]
-        )
-    };
-    ($in:ty => sinks::table($columns:expr, $extractor:expr $(,)?)) => {
+    ($in:ty => sinks::table($columns:expr, $extractor:expr $(,)?) $(, middleware: [$($mw:expr),* $(,)?])?) => {
         $crate::__obzenflow_sink_typed!(
             input = exact($in),
             name = "__obzenflow_binding_derived_name__",
             handler = sinks::table::<$in, _>($columns, $extractor),
-            middleware = []
+            middleware = [$($($mw),*)?]
         )
     };
-    ($in:ty => sinks::table($columns:expr, $extractor:expr $(,)?), [$($mw:expr),*]) => {
-        $crate::__obzenflow_sink_typed!(
-            input = exact($in),
-            name = "__obzenflow_binding_derived_name__",
-            handler = sinks::table::<$in, _>($columns, $extractor),
-            middleware = [$($mw),*]
-        )
-    };
-    ($in:ty => sinks::json()) => {
+    ($in:ty => sinks::json() $(, middleware: [$($mw:expr),* $(,)?])?) => {
         $crate::__obzenflow_sink_typed!(
             input = exact($in),
             name = "__obzenflow_binding_derived_name__",
             handler = sinks::json::<$in>(),
-            middleware = []
+            middleware = [$($($mw),*)?]
         )
     };
-    ($in:ty => sinks::json(), [$($mw:expr),*]) => {
-        $crate::__obzenflow_sink_typed!(
-            input = exact($in),
-            name = "__obzenflow_binding_derived_name__",
-            handler = sinks::json::<$in>(),
-            middleware = [$($mw),*]
-        )
-    };
-    ($in:ty => sinks::json_pretty()) => {
+    ($in:ty => sinks::json_pretty() $(, middleware: [$($mw:expr),* $(,)?])?) => {
         $crate::__obzenflow_sink_typed!(
             input = exact($in),
             name = "__obzenflow_binding_derived_name__",
             handler = sinks::json_pretty::<$in>(),
-            middleware = []
+            middleware = [$($($mw),*)?]
         )
     };
-    ($in:ty => sinks::json_pretty(), [$($mw:expr),*]) => {
-        $crate::__obzenflow_sink_typed!(
-            input = exact($in),
-            name = "__obzenflow_binding_derived_name__",
-            handler = sinks::json_pretty::<$in>(),
-            middleware = [$($mw),*]
-        )
-    };
-    ($in:ty => sinks::debug()) => {
+    ($in:ty => sinks::debug() $(, middleware: [$($mw:expr),* $(,)?])?) => {
         $crate::__obzenflow_sink_typed!(
             input = exact($in),
             name = "__obzenflow_binding_derived_name__",
             handler = sinks::debug::<$in>(),
-            middleware = []
+            middleware = [$($($mw),*)?]
         )
     };
-    ($in:ty => sinks::debug(), [$($mw:expr),*]) => {
-        $crate::__obzenflow_sink_typed!(
-            input = exact($in),
-            name = "__obzenflow_binding_derived_name__",
-            handler = sinks::debug::<$in>(),
-            middleware = [$($mw),*]
-        )
-    };
-    ($in:ty => $handler:expr $(, delivery: $delivery:ident)?) => {
-        $crate::__obzenflow_sink_typed!(input = exact($in), name = "__obzenflow_binding_derived_name__", handler = $crate::__obzenflow_sink_delivery!($handler $(, $delivery)?), middleware = [])
-    };
-    ($in:ty => $handler:expr, [$($mw:expr),*] $(, delivery: $delivery:ident)?) => {
-        $crate::__obzenflow_sink_typed!(input = exact($in), name = "__obzenflow_binding_derived_name__", handler = $crate::__obzenflow_sink_delivery!($handler $(, $delivery)?), middleware = [$($mw),*])
+    ($in:ty => $handler:expr
+        $(, delivery: $delivery:ident)?
+        $(, middleware: [$($mw:expr),* $(,)?])?
+    ) => {
+        $crate::__obzenflow_sink_typed!(input = exact($in), name = "__obzenflow_binding_derived_name__", handler = $crate::__obzenflow_sink_delivery!($handler $(, $delivery)?), middleware = [$($($mw),*)?])
     };
 
-    // ── typed (explicit name override): closure shorthand ──
-    (name: $name:literal, |$arg:ident : $ty:ty| $body:block $(, delivery: $delivery:ident)?) => {
+    // ── typed (explicit name override): no-contract closure shorthand ──
+    (name: $name:literal, |$arg:ident : $ty:ty| $body:block
+        $(, delivery: $delivery:ident)?
+        $(, middleware: [$($mw:expr),* $(,)?])?
+    ) => {
         $crate::__obzenflow_sink_typed!(
             input = exact($ty),
             name = $name,
             handler = $crate::__obzenflow_sink_delivery!(::obzenflow_runtime::stages::sink::SinkTyped::new(|$arg: $ty| async move $body) $(, $delivery)?),
-            middleware = []
+            middleware = [$($($mw),*)?]
         )
     };
-    (name: $name:literal, move |$arg:ident : $ty:ty| $body:block $(, delivery: $delivery:ident)?) => {
+    (name: $name:literal, move |$arg:ident : $ty:ty| $body:block
+        $(, delivery: $delivery:ident)?
+        $(, middleware: [$($mw:expr),* $(,)?])?
+    ) => {
         $crate::__obzenflow_sink_typed!(
             input = exact($ty),
             name = $name,
             handler = $crate::__obzenflow_sink_delivery!(::obzenflow_runtime::stages::sink::SinkTyped::new(move |$arg: $ty| async move $body) $(, $delivery)?),
-            middleware = []
+            middleware = [$($($mw),*)?]
         )
     };
-    (name: $name:literal, |$arg:ident : $ty:ty| $body:block, [$($mw:expr),*] $(, delivery: $delivery:ident)?) => {
+
+    // ── typed (explicit name override): exact-contract closures (FLOWIP-120s) ──
+    (name: $name:literal, $in:ty => |$arg:ident| $body:block
+        $(, delivery: $delivery:ident)?
+        $(, middleware: [$($mw:expr),* $(,)?])?
+    ) => {
         $crate::__obzenflow_sink_typed!(
-            input = exact($ty),
+            input = exact($in),
             name = $name,
-            handler = $crate::__obzenflow_sink_delivery!(::obzenflow_runtime::stages::sink::SinkTyped::new(|$arg: $ty| async move $body) $(, $delivery)?),
-            middleware = [$($mw),*]
+            handler = $crate::__obzenflow_sink_delivery!(::obzenflow_runtime::stages::sink::SinkTyped::new(move |$arg: $in| async move $body) $(, $delivery)?),
+            middleware = [$($($mw),*)?]
         )
     };
-    (name: $name:literal, move |$arg:ident : $ty:ty| $body:block, [$($mw:expr),*] $(, delivery: $delivery:ident)?) => {
+    (name: $name:literal, $in:ty => |$arg:ident, $ctx:ident| $body:block
+        $(, delivery: $delivery:ident)?
+        $(, middleware: [$($mw:expr),* $(,)?])?
+    ) => {
         $crate::__obzenflow_sink_typed!(
-            input = exact($ty),
+            input = exact($in),
             name = $name,
-            handler = $crate::__obzenflow_sink_delivery!(::obzenflow_runtime::stages::sink::SinkTyped::new(move |$arg: $ty| async move $body) $(, $delivery)?),
-            middleware = [$($mw),*]
+            handler = $crate::__obzenflow_sink_delivery!(::obzenflow_runtime::stages::sink::SinkTyped::with_delivery(move |$arg: $in, $ctx| async move $body) $(, $delivery)?),
+            middleware = [$($($mw),*)?]
         )
     };
 
     // ── typed (explicit name override): exact input ──
-    (name: $name:literal, $in:ty => placeholder!()) => {
-        $crate::__obzenflow_sink_typed!(input = exact($in), name = $name, handler = placeholder!(), middleware = [])
+    (name: $name:literal, $in:ty => placeholder!() $(, middleware: [$($mw:expr),* $(,)?])?) => {
+        $crate::__obzenflow_sink_typed!(input = exact($in), name = $name, handler = placeholder!(), middleware = [$($($mw),*)?])
     };
-    (name: $name:literal, $in:ty => placeholder!($msg:expr)) => {
-        $crate::__obzenflow_sink_typed!(input = exact($in), name = $name, handler = placeholder!($msg), middleware = [])
+    (name: $name:literal, $in:ty => placeholder!($msg:expr) $(, middleware: [$($mw:expr),* $(,)?])?) => {
+        $crate::__obzenflow_sink_typed!(input = exact($in), name = $name, handler = placeholder!($msg), middleware = [$($($mw),*)?])
     };
-    (name: $name:literal, $in:ty => placeholder!(), [$($mw:expr),*]) => {
-        $crate::__obzenflow_sink_typed!(input = exact($in), name = $name, handler = placeholder!(), middleware = [$($mw),*])
-    };
-    (name: $name:literal, $in:ty => placeholder!($msg:expr), [$($mw:expr),*]) => {
-        $crate::__obzenflow_sink_typed!(input = exact($in), name = $name, handler = placeholder!($msg), middleware = [$($mw),*])
-    };
-    (name: $name:literal, $in:ty => sinks::console($formatter:expr $(,)?)) => {
+    (name: $name:literal, $in:ty => sinks::console($formatter:expr $(,)?) $(, middleware: [$($mw:expr),* $(,)?])?) => {
         $crate::__obzenflow_sink_typed!(
             input = exact($in),
             name = $name,
             handler = sinks::console::<$in, _>($formatter),
-            middleware = []
+            middleware = [$($($mw),*)?]
         )
     };
-    (name: $name:literal, $in:ty => sinks::console($formatter:expr $(,)?), [$($mw:expr),*]) => {
-        $crate::__obzenflow_sink_typed!(
-            input = exact($in),
-            name = $name,
-            handler = sinks::console::<$in, _>($formatter),
-            middleware = [$($mw),*]
-        )
-    };
-    (name: $name:literal, $in:ty => sinks::table($columns:expr, $extractor:expr $(,)?)) => {
+    (name: $name:literal, $in:ty => sinks::table($columns:expr, $extractor:expr $(,)?) $(, middleware: [$($mw:expr),* $(,)?])?) => {
         $crate::__obzenflow_sink_typed!(
             input = exact($in),
             name = $name,
             handler = sinks::table::<$in, _>($columns, $extractor),
-            middleware = []
+            middleware = [$($($mw),*)?]
         )
     };
-    (name: $name:literal, $in:ty => sinks::table($columns:expr, $extractor:expr $(,)?), [$($mw:expr),*]) => {
-        $crate::__obzenflow_sink_typed!(
-            input = exact($in),
-            name = $name,
-            handler = sinks::table::<$in, _>($columns, $extractor),
-            middleware = [$($mw),*]
-        )
-    };
-    (name: $name:literal, $in:ty => sinks::json()) => {
+    (name: $name:literal, $in:ty => sinks::json() $(, middleware: [$($mw:expr),* $(,)?])?) => {
         $crate::__obzenflow_sink_typed!(
             input = exact($in),
             name = $name,
             handler = sinks::json::<$in>(),
-            middleware = []
+            middleware = [$($($mw),*)?]
         )
     };
-    (name: $name:literal, $in:ty => sinks::json(), [$($mw:expr),*]) => {
-        $crate::__obzenflow_sink_typed!(
-            input = exact($in),
-            name = $name,
-            handler = sinks::json::<$in>(),
-            middleware = [$($mw),*]
-        )
-    };
-    (name: $name:literal, $in:ty => sinks::json_pretty()) => {
+    (name: $name:literal, $in:ty => sinks::json_pretty() $(, middleware: [$($mw:expr),* $(,)?])?) => {
         $crate::__obzenflow_sink_typed!(
             input = exact($in),
             name = $name,
             handler = sinks::json_pretty::<$in>(),
-            middleware = []
+            middleware = [$($($mw),*)?]
         )
     };
-    (name: $name:literal, $in:ty => sinks::json_pretty(), [$($mw:expr),*]) => {
-        $crate::__obzenflow_sink_typed!(
-            input = exact($in),
-            name = $name,
-            handler = sinks::json_pretty::<$in>(),
-            middleware = [$($mw),*]
-        )
-    };
-    (name: $name:literal, $in:ty => sinks::debug()) => {
+    (name: $name:literal, $in:ty => sinks::debug() $(, middleware: [$($mw:expr),* $(,)?])?) => {
         $crate::__obzenflow_sink_typed!(
             input = exact($in),
             name = $name,
             handler = sinks::debug::<$in>(),
-            middleware = []
+            middleware = [$($($mw),*)?]
         )
     };
-    (name: $name:literal, $in:ty => sinks::debug(), [$($mw:expr),*]) => {
-        $crate::__obzenflow_sink_typed!(
-            input = exact($in),
-            name = $name,
-            handler = sinks::debug::<$in>(),
-            middleware = [$($mw),*]
-        )
+    (name: $name:literal, $in:ty => $handler:expr
+        $(, delivery: $delivery:ident)?
+        $(, middleware: [$($mw:expr),* $(,)?])?
+    ) => {
+        $crate::__obzenflow_sink_typed!(input = exact($in), name = $name, handler = $crate::__obzenflow_sink_delivery!($handler $(, $delivery)?), middleware = [$($($mw),*)?])
     };
-    (name: $name:literal, $in:ty => $handler:expr $(, delivery: $delivery:ident)?) => {
-        $crate::__obzenflow_sink_typed!(input = exact($in), name = $name, handler = $crate::__obzenflow_sink_delivery!($handler $(, $delivery)?), middleware = [])
+
+    // ── clause-order guardrails (FLOWIP-120s): `delivery:` precedes `middleware:` ──
+    ($in:ty => $handler:expr, middleware: [$($mw:expr),* $(,)?], delivery: $delivery:ident) => {
+        compile_error!("sink!: clause order is `delivery:` then `middleware:`")
     };
-    (name: $name:literal, $in:ty => $handler:expr, [$($mw:expr),*] $(, delivery: $delivery:ident)?) => {
-        $crate::__obzenflow_sink_typed!(input = exact($in), name = $name, handler = $crate::__obzenflow_sink_delivery!($handler $(, $delivery)?), middleware = [$($mw),*])
+    (name: $name:literal, $in:ty => $handler:expr, middleware: [$($mw:expr),* $(,)?], delivery: $delivery:ident) => {
+        compile_error!("sink!: clause order is `delivery:` then `middleware:`")
     };
 }
 

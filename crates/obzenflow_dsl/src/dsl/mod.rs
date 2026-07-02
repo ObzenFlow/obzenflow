@@ -112,6 +112,98 @@
 //! // `with` must be followed by a bracketed policy list.
 //! let _ = effectful_transform!(In -> Out => handler, effects: [MyEffect with], middleware: []);
 //! ```
+//!
+//! ## FLOWIP-120s: the canonical `sink!` grammar
+//!
+//! Positional trailing middleware is deleted; the named `middleware:` clause
+//! is the only spelling.
+//!
+//! ```compile_fail
+//! use obzenflow_dsl::sink;
+//!
+//! struct Out;
+//! let handler = ();
+//!
+//! // Deleted positional middleware list.
+//! let _ = sink!(Out => handler, []);
+//! ```
+//!
+//! The clause order is `delivery:` then `middleware:`; the reverse must not
+//! compile.
+//!
+//! ```compile_fail
+//! use obzenflow_dsl::sink;
+//!
+//! struct Out;
+//! let handler = ();
+//!
+//! // Misordered clauses: `middleware:` before `delivery:`.
+//! let _ = sink!(Out => handler, middleware: [], delivery: idempotent);
+//! ```
+//!
+//! The `delivery:` clause accepts only `idempotent` or `non_idempotent`.
+//!
+//! ```compile_fail
+//! use obzenflow_dsl::sink;
+//!
+//! struct Out;
+//! let handler = ();
+//!
+//! // Unknown safety token.
+//! let _ = sink!(Out => handler, delivery: sometimes);
+//! ```
+//!
+//! Facade helpers self-declare their safety; the `delivery:` clause is
+//! rejected on them.
+//!
+//! ```compile_fail
+//! use obzenflow_dsl::sink;
+//!
+//! struct Out;
+//!
+//! // Facade forms take no `delivery:` clause.
+//! let _ = sink!(Out => sinks::json(), delivery: idempotent);
+//! ```
+//!
+//! A typed `Delivery` carries `SAFETY` on the type; the site adverb fails by
+//! the sealed `DeclareDeliverySafety` bound.
+//!
+//! ```compile_fail
+//! use async_trait::async_trait;
+//! use obzenflow_core::event::schema::TypedPayload;
+//! use obzenflow_dsl::sink;
+//! use obzenflow_runtime::effects::SinkDeliverySafety;
+//! use obzenflow_runtime::stages::common::handler_error::HandlerError;
+//! use obzenflow_runtime::stages::common::handlers::{Delivered, Delivery};
+//! use obzenflow_runtime::stages::sink::DeliveryContext;
+//! use serde::{Deserialize, Serialize};
+//!
+//! #[derive(Clone, Debug, Serialize, Deserialize)]
+//! struct Out;
+//! impl TypedPayload for Out {
+//!     const EVENT_TYPE: &'static str = "doc.out";
+//! }
+//!
+//! #[derive(Clone, Debug)]
+//! struct Typed;
+//!
+//! #[async_trait]
+//! impl Delivery for Typed {
+//!     type Input = Out;
+//!     const DELIVERY_TYPE: &'static str = "doc.typed";
+//!     const SAFETY: SinkDeliverySafety = SinkDeliverySafety::IdempotentProjection;
+//!     async fn deliver(
+//!         &mut self,
+//!         _input: Out,
+//!         _ctx: &DeliveryContext,
+//!     ) -> Result<Delivered, HandlerError> {
+//!         Ok(Delivered::one())
+//!     }
+//! }
+//!
+//! // The adverb has no home on the typed tier.
+//! let _ = sink!(Out => Typed, delivery: idempotent);
+//! ```
 
 mod binder;
 pub mod composites;

@@ -76,7 +76,6 @@ impl<H: SinkHandler> MiddlewareSink<H> {
                 MiddlewareAction::Skip { .. } => {
                     // Skip means don't consume - return success with no delivery
                     return Ok(SinkConsumeReport::new(DeliveryPayload::success(
-                        "middleware_sink",
                         DeliveryMethod::Noop,
                         None, // bytes_processed
                     )));
@@ -84,7 +83,6 @@ impl<H: SinkHandler> MiddlewareSink<H> {
                 MiddlewareAction::Abort { .. } => {
                     // Abort is also treated as success but with a different message
                     return Ok(SinkConsumeReport::new(DeliveryPayload::success(
-                        "middleware_sink",
                         DeliveryMethod::Noop,
                         None, // bytes_processed
                     )));
@@ -111,7 +109,6 @@ impl<H: SinkHandler> MiddlewareSink<H> {
                         ErrorAction::Recover(_) => {
                             // Recovery means success
                             return Ok(SinkConsumeReport::new(DeliveryPayload::success(
-                                "middleware_sink",
                                 DeliveryMethod::Noop,
                                 None, // bytes_processed
                             )));
@@ -151,6 +148,10 @@ impl<H: SinkHandler> UnifiedSinkHandler for MiddlewareSink<H> {
         // Drain is not intercepted by middleware - it's an infrastructure concern
         self.inner.drain_report().await
     }
+
+    // No declaration hooks exist on `UnifiedSinkHandler` to forward:
+    // declarations are descriptor-snapshotted pre-wrap (FLOWIP-120s), so a
+    // wrapper cannot attenuate them.
 }
 
 impl<H: SinkHandler> MiddlewareSink<H> {
@@ -220,11 +221,7 @@ mod tests {
             }
 
             self.consumed.lock().unwrap().push(event);
-            Ok(DeliveryPayload::success(
-                "test_sink",
-                DeliveryMethod::Noop,
-                None,
-            ))
+            Ok(DeliveryPayload::success(DeliveryMethod::Noop, None))
         }
     }
 

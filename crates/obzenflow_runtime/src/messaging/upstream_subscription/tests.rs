@@ -772,7 +772,7 @@ async fn record_delivery_receipt_advances_only_when_receipts_become_contiguous()
 
     let second_receipt = ChainEventFactory::delivery_event(
         WriterId::from(contract_stage),
-        DeliveryPayload::success("dest", DeliveryMethod::Noop, None),
+        DeliveryPayload::success(DeliveryMethod::Noop, None),
     )
     .with_causality(CausalityContext::with_parent(second.id));
 
@@ -783,7 +783,7 @@ async fn record_delivery_receipt_advances_only_when_receipts_become_contiguous()
 
     let first_receipt = ChainEventFactory::delivery_event(
         WriterId::from(contract_stage),
-        DeliveryPayload::success("dest", DeliveryMethod::Noop, None),
+        DeliveryPayload::success(DeliveryMethod::Noop, None),
     )
     .with_causality(CausalityContext::with_parent(first.id));
 

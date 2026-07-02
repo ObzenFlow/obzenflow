@@ -163,7 +163,6 @@ struct DropSink;
 impl SinkHandler for DropSink {
     async fn consume(&mut self, _event: ChainEvent) -> Result<DeliveryPayload, HandlerError> {
         Ok(DeliveryPayload::success(
-            "drops",
             DeliveryMethod::Custom("Memory".to_string()),
             None,
         ))

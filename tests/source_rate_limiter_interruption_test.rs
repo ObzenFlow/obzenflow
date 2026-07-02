@@ -98,7 +98,6 @@ struct NoopSink;
 impl SinkHandler for NoopSink {
     async fn consume(&mut self, _event: ChainEvent) -> Result<DeliveryPayload, HandlerError> {
         Ok(DeliveryPayload::success(
-            "noop_sink",
             DeliveryMethod::Custom("Noop".to_string()),
             None,
         ))

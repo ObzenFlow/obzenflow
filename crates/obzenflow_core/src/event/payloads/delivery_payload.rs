@@ -28,6 +28,12 @@ pub struct DeliveryPayload {
     /// Performance
     pub bytes_processed: Option<u64>,
 
+    /// Items delivered (typed deliveries, FLOWIP-120s). Distinct from
+    /// `bytes_processed`, which some closure-tier sinks historically misuse
+    /// as an item count.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub items_delivered: Option<u64>,
+
     /// When + any middleware extensions
     pub processed_at: DateTime<Utc>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -84,20 +90,21 @@ pub enum DeliveryResult {
 // Convenience builders
 // ────────────────────────────────────────────────────────────────────────────
 impl DeliveryPayload {
+    // The `destination` field is framework-stamped at journalling time from
+    // the sink's declared delivery type, else the stage name (FLOWIP-120s);
+    // constructors leave it empty.
+
     /// Generic full‑success builder (works for *any* delivery method).
-    pub fn success(
-        destination: impl Into<String>,
-        method: DeliveryMethod,
-        bytes_processed: Option<u64>,
-    ) -> Self {
+    pub fn success(method: DeliveryMethod, bytes_processed: Option<u64>) -> Self {
         Self {
             result: DeliveryResult::Success {
                 confirmation: None,
                 response_headers: None,
             },
-            destination: destination.into(),
+            destination: String::new(),
             delivery_method: method,
             bytes_processed,
+            items_delivered: None,
             processed_at: Utc::now(),
             middleware_context: None,
         }
@@ -105,16 +112,13 @@ impl DeliveryPayload {
 
     /// Generic buffered-accept builder for sinks that have accepted work into
     /// an in-memory or connector-local buffer but have not durably committed it yet.
-    pub fn buffered(
-        destination: impl Into<String>,
-        method: DeliveryMethod,
-        bytes_processed: Option<u64>,
-    ) -> Self {
+    pub fn buffered(method: DeliveryMethod, bytes_processed: Option<u64>) -> Self {
         Self {
             result: DeliveryResult::Buffered {},
-            destination: destination.into(),
+            destination: String::new(),
             delivery_method: method,
             bytes_processed,
+            items_delivered: None,
             processed_at: Utc::now(),
             middleware_context: None,
         }
@@ -122,7 +126,6 @@ impl DeliveryPayload {
 
     /// Failure helper (any method).
     pub fn failed(
-        destination: impl Into<String>,
         method: DeliveryMethod,
         error_type: impl Into<String>,
         error_msg: impl Into<String>,
@@ -135,9 +138,10 @@ impl DeliveryPayload {
                 error_code: None,
                 final_attempt,
             },
-            destination: destination.into(),
+            destination: String::new(),
             delivery_method: method,
             bytes_processed: None,
+            items_delivered: None,
             processed_at: Utc::now(),
             middleware_context: None,
         }
@@ -145,7 +149,6 @@ impl DeliveryPayload {
 
     /// Partial‑success helper.
     pub fn partial(
-        destination: impl Into<String>,
         method: DeliveryMethod,
         ok: u64,
         bad: u64,
@@ -159,9 +162,10 @@ impl DeliveryPayload {
                 error_summary: summary.into(),
                 failed_items,
             },
-            destination: destination.into(),
+            destination: String::new(),
             delivery_method: method,
             bytes_processed: None,
+            items_delivered: None,
             processed_at: Utc::now(),
             middleware_context: None,
         }
@@ -176,13 +180,14 @@ impl DeliveryPayload {
     ) -> Self {
         let url: String = url.into();
         Self {
-            destination: url.clone(),
+            destination: String::new(),
             delivery_method: DeliveryMethod::HttpPost { url },
             bytes_processed: bytes,
             result: DeliveryResult::Success {
                 confirmation,
                 response_headers: headers,
             },
+            items_delivered: None,
             processed_at: Utc::now(),
             middleware_context: None,
         }
@@ -200,6 +205,12 @@ impl DeliveryPayload {
     /// Update bytes processed (builder style)
     pub fn with_bytes_processed(mut self, bytes: u64) -> Self {
         self.bytes_processed = Some(bytes);
+        self
+    }
+
+    /// Set items delivered (builder style; typed deliveries, FLOWIP-120s)
+    pub fn with_items(mut self, items: u64) -> Self {
+        self.items_delivered = Some(items);
         self
     }
 }

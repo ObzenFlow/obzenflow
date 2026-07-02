@@ -143,7 +143,6 @@ impl SinkHandler for CollectorSink {
             }
         }
         Ok(DeliveryPayload::success(
-            "collector_sink",
             DeliveryMethod::Custom("Collect".to_string()),
             None,
         ))

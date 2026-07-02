@@ -40,4 +40,10 @@ pub struct JournalSinkConfig {
 
     /// Observe-only middleware hooks for sink delivery.
     pub observers: StageObserverBundle,
+
+    /// Descriptor-declared destination family (FLOWIP-120s). Snapshotted
+    /// from the raw handler before middleware wrapping, so wrappers cannot
+    /// attenuate it; the receipt stamp resolves from this, never from the
+    /// runtime handler.
+    pub delivery_type: Option<&'static str>,
 }

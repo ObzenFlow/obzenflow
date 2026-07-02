@@ -156,7 +156,6 @@ impl SinkHandler for CollectSink {
         self.events.lock().unwrap().push(event);
         self.event_ready.notify_waiters();
         Ok(DeliveryPayload::success(
-            "collect_sink",
             DeliveryMethod::Custom("Collect".to_string()),
             None,
         ))

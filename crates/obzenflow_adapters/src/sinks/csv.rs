@@ -336,7 +336,6 @@ impl CsvSinkInner {
 
     fn commit_payload(&self) -> DeliveryPayload {
         DeliveryPayload::success(
-            self.path.display().to_string(),
             DeliveryMethod::FileWrite {
                 path: self.path.clone(),
             },
@@ -346,7 +345,6 @@ impl CsvSinkInner {
 
     fn buffered_payload(&self) -> DeliveryPayload {
         DeliveryPayload::buffered(
-            self.path.display().to_string(),
             DeliveryMethod::FileWrite {
                 path: self.path.clone(),
             },
@@ -376,7 +374,6 @@ impl CsvSinkInner {
             .map(|row| CommitReceipt {
                 parent_event_id: row.parent_event_id,
                 payload: DeliveryPayload::success(
-                    path.display().to_string(),
                     DeliveryMethod::FileWrite { path: path.clone() },
                     None,
                 ),

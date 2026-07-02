@@ -70,7 +70,6 @@ impl SinkHandler for EventCounterSink {
             self.count.fetch_add(1, Ordering::Relaxed);
         }
         Ok(DeliveryPayload::success(
-            "counter_sink",
             DeliveryMethod::Custom("Count".to_string()),
             None,
         ))
@@ -301,7 +300,6 @@ impl SinkHandler for SumSink {
             self.sum.fetch_add(value, Ordering::Relaxed);
         }
         Ok(DeliveryPayload::success(
-            "sum_sink",
             DeliveryMethod::Custom("Sum".to_string()),
             None,
         ))

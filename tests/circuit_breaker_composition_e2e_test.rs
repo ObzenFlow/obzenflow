@@ -241,7 +241,6 @@ impl SinkHandler for CollectSink {
                 .push(output);
         }
         Ok(DeliveryPayload::success(
-            "collector",
             DeliveryMethod::Custom("Memory".to_string()),
             None,
         ))
@@ -280,7 +279,7 @@ fn build_flow(
             );
             // Sink breaker (stays closed; deliveries succeed) proves the breaker
             // binds onto the sink-delivery boundary and is replay-safe.
-            collector = sink!(CompOutput => CollectSink { outputs }, [ circuit_breaker(5) ]);
+            collector = sink!(CompOutput => CollectSink { outputs }, middleware: [circuit_breaker(5)]);
         },
 
         topology: {

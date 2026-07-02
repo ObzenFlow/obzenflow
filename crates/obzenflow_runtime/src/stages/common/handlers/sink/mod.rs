@@ -4,8 +4,10 @@
 
 //! Sink handler components
 
+pub mod delivery;
 pub mod traits;
 
+pub use delivery::{Delivered, Delivery};
 pub use traits::UnifiedSinkHandler;
 pub use traits::{
     CommitReceipt, EffectfulSinkHandler, EffectfulSinkHandlerAdapter, SinkConsumeReport,

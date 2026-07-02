@@ -232,7 +232,6 @@ impl SinkHandler for AggregateSink {
             guard.push(agg);
         }
         Ok(DeliveryPayload::success(
-            "aggregate_sink",
             DeliveryMethod::Custom("Collect".to_string()),
             None,
         ))
@@ -249,7 +248,6 @@ impl SinkHandler for AckSink {
         _event: ChainEvent,
     ) -> std::result::Result<DeliveryPayload, HandlerError> {
         Ok(DeliveryPayload::success(
-            "ack_sink",
             DeliveryMethod::Custom("Ack".to_string()),
             None,
         ))

@@ -142,7 +142,6 @@ async fn test_dsl_pipeline() -> Result<()> {
                 self.total.fetch_add(doubled, Ordering::Relaxed);
             }
             Ok(DeliveryPayload::success(
-                "summer",
                 DeliveryMethod::Custom("Sum".to_string()),
                 None,
             ))

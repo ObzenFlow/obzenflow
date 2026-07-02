@@ -315,7 +315,6 @@ impl SinkHandler for PrioritySink {
         }
 
         Ok(DeliveryPayload::success(
-            &self.name,
             DeliveryMethod::Custom("Processed".to_string()),
             Some(1),
         ))

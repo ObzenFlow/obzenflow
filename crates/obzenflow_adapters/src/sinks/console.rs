@@ -630,7 +630,6 @@ where
             } => {
                 if !T::event_type_matches(event_type) {
                     return Ok(DeliveryPayload::success(
-                        "console",
                         self.destination.delivery_method(),
                         None,
                     ));
@@ -656,7 +655,6 @@ where
         }
 
         Ok(DeliveryPayload::success(
-            "console",
             self.destination.delivery_method(),
             None,
         ))
@@ -670,7 +668,6 @@ where
         self.destination.write_line(&output);
 
         Ok(Some(DeliveryPayload::success(
-            "console",
             self.destination.delivery_method(),
             None,
         )))

@@ -98,7 +98,6 @@ mod tests {
     impl SinkHandler for NoopSink {
         async fn consume(&mut self, _event: ChainEvent) -> Result<DeliveryPayload, HandlerError> {
             Ok(DeliveryPayload::success(
-                "noop",
                 DeliveryMethod::Custom("test".to_string()),
                 None,
             ))

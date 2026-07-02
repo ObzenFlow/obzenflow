@@ -143,7 +143,6 @@ impl SinkHandler for EventCounterSink {
         }
 
         Ok(DeliveryPayload::success(
-            "counter_sink",
             DeliveryMethod::Custom("Count".to_string()),
             None,
         ))

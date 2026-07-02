@@ -248,7 +248,6 @@ impl SinkHandler for CountingSink {
         _event: ChainEvent,
     ) -> std::result::Result<DeliveryPayload, HandlerError> {
         Ok(DeliveryPayload::success(
-            "counting_sink",
             DeliveryMethod::Custom("Count".to_string()),
             None,
         ))

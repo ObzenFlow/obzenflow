@@ -46,7 +46,6 @@ impl SinkHandler for NoopSink {
         _event: ChainEvent,
     ) -> std::result::Result<DeliveryPayload, HandlerError> {
         Ok(DeliveryPayload::success(
-            "noop_sink",
             DeliveryMethod::Custom("Noop".to_string()),
             None,
         ))
@@ -72,7 +71,6 @@ impl SinkHandler for SlowSink {
     ) -> std::result::Result<DeliveryPayload, HandlerError> {
         tokio::time::sleep(self.sleep).await;
         Ok(DeliveryPayload::success(
-            "slow_sink",
             DeliveryMethod::Custom("Noop".to_string()),
             None,
         ))

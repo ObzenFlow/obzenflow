@@ -128,7 +128,6 @@ impl SinkHandler for TextSink {
         println!("TextSink received event of type {}", event.event_type());
 
         Ok(DeliveryPayload::success(
-            "stdout",
             DeliveryMethod::Custom("Print".to_string()),
             None,
         ))
