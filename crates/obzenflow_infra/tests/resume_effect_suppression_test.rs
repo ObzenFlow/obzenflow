@@ -370,7 +370,9 @@ async fn resume_suppresses_recorded_effects_and_executes_the_live_tail_once() ->
             }),
             ..BootstrapConfig::default()
         });
-        run_until_delivered(&journal_base, RECORDED + 1, LIVE, LIVE).await?
+        // Wait for prefix re-deliveries + live (the sink re-consumes the
+        // recorded prefix during catch-up, F14).
+        run_until_delivered(&journal_base, RECORDED + 1, LIVE, RECORDED + LIVE).await?
     };
     assert_eq!(
         resumed_calls, LIVE as usize,

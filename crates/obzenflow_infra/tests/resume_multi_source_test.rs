@@ -444,8 +444,9 @@ async fn multi_source_resume_orders_every_recorded_input_before_any_live_input()
         resume_rows(&replay_testkit::read_stage_envelopes_appended(&recorded_run, "merge").await);
     assert_eq!(recorded_merge.len() as u64, RECORDED_DELIVERED);
 
-    // Resume with both sources producing live. Every recorded input was
-    // delivered and recorded, so the sink consumes exactly the live outputs.
+    // Resume with both sources producing live. The sink re-consumes the
+    // recorded prefix during catch-up (F14), so the wait target is
+    // prefix + live; a live-only target races the stop into catch-up.
     let resumed_calls = {
         let _bootstrap = install_bootstrap_config(BootstrapConfig {
             replay: Some(ReplayBootstrap {
@@ -456,7 +457,12 @@ async fn multi_source_resume_orders_every_recorded_input_before_any_live_input()
             }),
             ..BootstrapConfig::default()
         });
-        run_until_delivered(&journal_base, &live_ranges, LIVE_DELIVERED).await?
+        run_until_delivered(
+            &journal_base,
+            &live_ranges,
+            RECORDED_DELIVERED + LIVE_DELIVERED,
+        )
+        .await?
     };
     assert_eq!(
         resumed_calls, LIVE_DELIVERED as usize,

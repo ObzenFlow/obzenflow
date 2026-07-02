@@ -488,7 +488,9 @@ async fn mixed_sources_resume_flips_the_fan_in_across_a_vacuous_eof_crossing() -
             }),
             ..BootstrapConfig::default()
         });
-        run_until_delivered(&journal_base, &live_ranges, LIVE).await?
+        // Wait for prefix re-deliveries + live (the sink re-consumes the
+        // recorded prefix during catch-up, F14).
+        run_until_delivered(&journal_base, &live_ranges, RECORDED + LIVE).await?
     };
     assert_eq!(
         resumed_calls, LIVE as usize,
@@ -633,7 +635,9 @@ async fn mixed_sources_resume_flips_when_the_eof_arrives_after_the_watermark() -
             }),
             ..BootstrapConfig::default()
         });
-        run_until_delivered(&journal_base, &live_ranges, LIVE).await?
+        // Wait for prefix re-deliveries + live (the sink re-consumes the
+        // recorded prefix during catch-up, F14).
+        run_until_delivered(&journal_base, &live_ranges, RECORDED_DELIVERED + LIVE).await?
     };
     assert_eq!(
         resumed_calls, LIVE as usize,
