@@ -64,6 +64,9 @@ ai-tiktoken = ["dep:tiktoken-rs"]
 # FLOWIP-114o: `test-util` enables `#[tokio::test(start_paused = true)]` for the
 # deterministic emit-interval clock test.
 tokio = { workspace = true, features = ["test-util"] }
+# FLOWIP-120n PR-G: the resume integration test reuses the workspace replay
+# testkit, which needs `obzenflow_runtime::testing`.
+obzenflow_runtime = { workspace = true, features = ["test-support"] }
 tokio-test = { workspace = true }
 tempfile = { workspace = true }
 uuid = { workspace = true }

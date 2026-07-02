@@ -376,6 +376,11 @@ pub(crate) struct TransformContext<H: UnifiedTransformHandler> {
 
     /// Optional per-stage heartbeat task (FLOWIP-063e).
     pub(crate) heartbeat: Option<HeartbeatHandle>,
+
+    /// Catch-up flip latch (FLOWIP-120n): the last generation this stage
+    /// flipped at, making the flip idempotent per generation across both
+    /// triggers (watermark and authored EOF).
+    pub(crate) catch_up_flip: Option<obzenflow_core::ReaderGeneration>,
 }
 
 impl<H: UnifiedTransformHandler + 'static> FsmContext for TransformContext<H> {}
@@ -432,6 +437,16 @@ impl<H: UnifiedTransformHandler + Send + Sync + 'static> FsmAction for Transform
                                 ctx.stage_name
                             ))
                         })?;
+                    // FLOWIP-120n F7: register the recorded effect mark so a
+                    // prefix cursor miss fails loud and a live-tail miss runs.
+                    if let Some(control) = ctx.runtime_execution.resume_control() {
+                        if let Some(max) = history.max_recorded_input_seq() {
+                            control.record_effect_high_water(
+                                ctx.stage_id,
+                                crate::messaging::upstream_subscription::StageInputPosition(max),
+                            );
+                        }
+                    }
                     ctx.effect_history = Some(Arc::new(history));
                 }
 

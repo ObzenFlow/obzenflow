@@ -410,6 +410,12 @@ async fn hydrating_join_phase_transition_reproduces_under_replay() {
 /// by the enablement walk through its effectful descendant) reproduces its
 /// merged delivery order and EOF-relative positions under replay, with the
 /// recorded effect outcomes returned and zero re-execution.
+///
+/// This join is source-fed, so it runs the seq-ordered merge (FLOWIP-120n
+/// F18): the live interleaving follows admission order, so how many stream
+/// rows find their catalog row is arrival-dependent. The assertions are
+/// therefore self-consistent (effects executed == joined outputs recorded)
+/// and reproduction-based, never a fixed alternation count.
 #[tokio::test]
 async fn live_join_canonical_merge_reproduces_under_replay() {
     let _guard = JOIN_REPLAY_TEST_LOCK.lock().await;
@@ -418,20 +424,25 @@ async fn live_join_canonical_merge_reproduces_under_replay() {
 
     let live_calls = Arc::new(AtomicUsize::new(0));
     run_live(build_live_flow(journal_base.clone(), live_calls.clone())).await;
+    let live_run = replay_testkit::latest_run_dir(&journal_base);
+
+    let live_joined = replay_testkit::read_stage_envelopes(&live_run, "joined")
+        .await
+        .iter()
+        .filter(|envelope| JoinedItem::from_event(&envelope.event).is_some())
+        .count();
     assert_eq!(
         live_calls.load(Ordering::SeqCst),
-        5,
-        "the canonical alternation keeps each catalog row ahead of its stream uses, \
-         so the live inner join emits all five"
+        live_joined,
+        "every joined output charged its effect live"
     );
-    let live_run = replay_testkit::latest_run_dir(&journal_base);
 
     let live_signature =
         replay_testkit::transport_row_signature(&live_run, "joined", &["ref_src", "stream_src"])
             .await;
     let live_projection =
         replay_testkit::project_delivered_order(&live_run, "joined", &["stream_src"]).await;
-    assert_eq!(live_projection.consumption_sequence().len(), 5);
+    assert_eq!(live_projection.consumption_sequence().len(), live_joined);
 
     let replay_calls = Arc::new(AtomicUsize::new(0));
     run_replay(

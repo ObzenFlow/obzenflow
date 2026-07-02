@@ -115,7 +115,7 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
                 self.resources.liveness_snapshots.clone(),
                 heartbeat_state,
                 heartbeat_config,
-                /* is_replay */ false,
+                self.resources.runtime_execution.clone(),
             ))
         };
 
@@ -164,6 +164,7 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
             drain_received: false,
             buffered_terminal_envelope: None,
             heartbeat,
+            catch_up_flip: None,
         };
 
         // Create supervisor (private - not exposed)

@@ -101,7 +101,7 @@ impl<H: UnifiedSinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Su
                 self.resources.liveness_snapshots.clone(),
                 heartbeat_state,
                 heartbeat_config,
-                /* is_replay */ false,
+                self.resources.runtime_execution.clone(),
             ))
         };
 
@@ -133,6 +133,7 @@ impl<H: UnifiedSinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Su
             backpressure_writer: self.resources.backpressure_writer.clone(),
             backpressure_readers: self.resources.backpressure_readers.clone(),
             heartbeat,
+            catch_up_flip: None,
         };
 
         // Create supervisor (private - not exposed)

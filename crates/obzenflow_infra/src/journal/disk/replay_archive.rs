@@ -36,6 +36,12 @@ pub struct DiskReplayArchive {
     status_derivation: StatusDerivation,
     allow_incomplete_archive: bool,
     read_write_lock: Arc<RwLock<()>>,
+    /// Max generation with a recorded catch-up boundary in any source journal
+    /// (FLOWIP-120n), scanned once at open. See [`scan_recorded_maxima`].
+    max_recorded_generation: obzenflow_core::ReaderGeneration,
+    /// Max recorded admission sequence in any source journal (FLOWIP-120n
+    /// F18), from the same scan. Seeds the resuming run's flow sequencer.
+    max_recorded_admission_seq: obzenflow_core::AdmissionSeq,
 }
 
 impl DiskReplayArchive {
@@ -148,6 +154,28 @@ impl DiskReplayArchive {
             return Err(ReplayError::IncompleteArchive { status });
         }
 
+        let (max_recorded_generation, max_recorded_admission_seq) = scan_recorded_maxima(
+            &archive_path,
+            &manifest,
+            ReadPolicy::SealedScan {
+                tolerate_torn_tail: status != ArchiveStatus::Completed,
+            },
+        )?;
+        let entered_generation = manifest
+            .resume
+            .as_ref()
+            .map(|resume| resume.resume_generation)
+            .unwrap_or(0);
+        if entered_generation > max_recorded_generation.0 {
+            tracing::debug!(
+                archive_path = %archive_path.display(),
+                manifest_generation = entered_generation,
+                scanned_generation = max_recorded_generation.0,
+                "torn catch-up: the manifest's entered generation has no recorded \
+                 boundary in any source journal; the journal scan is authoritative"
+            );
+        }
+
         Ok(Self {
             archive_path,
             manifest,
@@ -155,6 +183,8 @@ impl DiskReplayArchive {
             status_derivation,
             allow_incomplete_archive,
             read_write_lock: Arc::new(RwLock::new(())),
+            max_recorded_generation,
+            max_recorded_admission_seq,
         })
     }
 
@@ -337,6 +367,111 @@ impl ReplayArchive for DiskReplayArchive {
     fn archive_path(&self) -> &Path {
         &self.archive_path
     }
+
+    /// Journal-scan authority (FLOWIP-120n): the max generation with a
+    /// recorded catch-up boundary in any source journal, computed at open.
+    /// The manifest's resume field records the generation the archived run
+    /// ENTERED at bootstrap, an upper bound a torn catch-up never records.
+    fn max_recorded_generation(&self) -> obzenflow_core::ReaderGeneration {
+        self.max_recorded_generation
+    }
+
+    /// Max recorded admission sequence across the source journals (FLOWIP-120n
+    /// F18), 0 for archives predating the field. From the same open-time scan.
+    fn max_recorded_admission_seq(&self) -> obzenflow_core::AdmissionSeq {
+        self.max_recorded_admission_seq
+    }
+}
+
+/// Scan the archive's source journals once and return the max recorded
+/// generation and admission sequence, `0` each when none exists (FLOWIP-120n).
+/// The scan is the authority for the resume generation: a torn catch-up
+/// (interrupted before a source authored its watermark) leaves the manifest's
+/// entered generation with no recorded boundary, and entering past it would
+/// trip the downstream F11 exactly-one advance check. The admission-seq
+/// maximum (F18) seeds the resuming run's flow sequencer above every
+/// re-admitted sequence. Cost: one sequential read per source journal at
+/// bootstrap, journals resume re-reads anyway.
+fn scan_recorded_maxima(
+    archive_path: &Path,
+    manifest: &RunManifest,
+    policy: ReadPolicy,
+) -> Result<
+    (
+        obzenflow_core::ReaderGeneration,
+        obzenflow_core::AdmissionSeq,
+    ),
+    ReplayError,
+> {
+    use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
+    use obzenflow_core::event::ChainEventContent;
+
+    let mut max_generation = 0u64;
+    let mut max_admission_seq = 0u64;
+    for stage_info in manifest.stages.values() {
+        if !stage_info.stage_type.is_source() {
+            continue;
+        }
+        let path = archive_path.join(&stage_info.data_journal_file);
+        if !path.exists() {
+            // A missing journal records no boundary; the reader open path
+            // raises MissingJournal when resume actually needs it.
+            continue;
+        }
+        let file = File::open(&path).map_err(|e| ReplayError::Io {
+            message: format!("Failed to open source journal at {}", path.display()),
+            source: e,
+        })?;
+        let mut reader = BufReader::new(file);
+        let mut buf = Vec::new();
+        let mut line_no = 0u64;
+        loop {
+            let Some((_, termination)) =
+                read_frame_sync(&mut reader, &mut buf).map_err(|e| ReplayError::Io {
+                    message: format!("Failed to read source journal at {}", path.display()),
+                    source: e,
+                })?
+            else {
+                break;
+            };
+            line_no += 1;
+            if buf.iter().all(u8::is_ascii_whitespace) {
+                continue;
+            }
+            match dispose(classify_frame::<ChainEvent>(&buf), termination, policy) {
+                Disposition::Yield(record) => {
+                    if let ChainEventContent::FlowControl(FlowControlPayload::CatchUpComplete {
+                        generation,
+                        ..
+                    }) = &record.event.content
+                    {
+                        max_generation = max_generation.max(generation.0);
+                    }
+                    if let Some(seq) = record.event.admission_seq {
+                        max_admission_seq = max_admission_seq.max(seq.0);
+                    }
+                }
+                Disposition::EndOfCommittedRecords | Disposition::Skip => break,
+                Disposition::Corrupt(problem) => {
+                    // The scan only collects boundaries. The resume read path
+                    // re-reads this journal and fails loud on the same record
+                    // (FLOWIP-120q), before any boundary from it could matter.
+                    tracing::debug!(
+                        path = %path.display(),
+                        line = line_no,
+                        %problem,
+                        "generation scan stopped at a corrupt record; the resume \
+                         read path fails loud on it"
+                    );
+                    break;
+                }
+            }
+        }
+    }
+    Ok((
+        obzenflow_core::ReaderGeneration(max_generation),
+        obzenflow_core::AdmissionSeq(max_admission_seq),
+    ))
 }
 
 pub(crate) fn derive_status_derivation_from_system_log(

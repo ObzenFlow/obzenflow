@@ -4,7 +4,8 @@
 
 use super::{
     ContractConfig, ContractStatus, ContractsWiring, FeedIdentity, PollResult, ReaderProgress,
-    ReaderSelectionPolicy, SelectedFeedMetadata, SelectedFeedRole, UpstreamSubscription,
+    ReaderSelectionPolicy, SelectedFeedMetadata, SelectedFeedRole, StageInputPosition,
+    UpstreamSubscription,
 };
 use crate::control_plane::{ControlPlaneProvider, NoControlPlane};
 use async_trait::async_trait;
@@ -30,7 +31,9 @@ use obzenflow_core::journal::journal_error::JournalError;
 use obzenflow_core::journal::journal_owner::JournalOwner;
 use obzenflow_core::journal::journal_reader::JournalReader;
 use obzenflow_core::journal::Journal;
-use obzenflow_core::{EventId, EventType, StageId, TransportContract, WriterId};
+use obzenflow_core::{
+    AdmissionSeq, EventId, EventType, ReaderGeneration, StageId, TransportContract, WriterId,
+};
 use serde_json::json;
 use std::collections::HashMap;
 use std::io;
@@ -2080,6 +2083,9 @@ async fn forwarded_eof_with_missing_writer_is_not_terminal() {
 /// with explicit vector-clock stamping for causality tests. `TestJournal`
 /// snapshots events at reader creation, which cannot express "quiet input
 /// later produces a head".
+///
+/// Deliberately no admission-sequencer (FLOWIP-120n F18): seq-mode tests
+/// stamp `admission_seq` explicitly per event, so sequences are controllable.
 struct SharedTestJournal {
     id: JournalId,
     owner: Option<JournalOwner>,
@@ -2226,6 +2232,19 @@ fn merge_clock(entries: &[(&str, u64)]) -> VectorClock {
     clock
 }
 
+/// A catch-up watermark row (FLOWIP-120n) in `writer`'s journal, announcing
+/// `generation` with the given replay-stable payload stage key.
+fn merge_catch_up(writer: StageId, generation: u64, stage_key: &str) -> ChainEvent {
+    ChainEventFactory::source_event(
+        WriterId::Stage(writer),
+        stage_key,
+        ChainEventContent::FlowControl(FlowControlPayload::CatchUpComplete {
+            generation: ReaderGeneration(generation),
+            stage_key: obzenflow_core::StageKey::from(stage_key),
+        }),
+    )
+}
+
 async fn canonical_pair(
     name_a: &str,
     name_b: &str,
@@ -2275,6 +2294,28 @@ async fn canonical_pair_transport_only(
     (subscription.transport_only(), a, b)
 }
 
+/// Single-reader canonical merge over a shared in-memory journal.
+async fn canonical_single(
+    name: &str,
+) -> (
+    UpstreamSubscription<ChainEvent>,
+    StageId,
+    Arc<SharedTestJournal>,
+) {
+    let stage = StageId::new();
+    let journal = Arc::new(SharedTestJournal::new(JournalOwner::stage(stage)));
+    let upstreams = [(
+        stage,
+        name.to_string(),
+        journal.clone() as Arc<dyn Journal<ChainEvent>>,
+    )];
+    let subscription = UpstreamSubscription::new_with_names("merge_owner", &upstreams)
+        .await
+        .unwrap()
+        .with_reader_selection(ReaderSelectionPolicy::CanonicalMerge);
+    (subscription, stage, journal)
+}
+
 async fn expect_delivery(
     subscription: &mut UpstreamSubscription<ChainEvent>,
 ) -> EventEnvelope<ChainEvent> {
@@ -2285,6 +2326,13 @@ async fn expect_delivery(
             subscription.delivered_counts(),
             subscription.merge_wait(),
         ),
+    }
+}
+
+async fn expect_poll_error(subscription: &mut UpstreamSubscription<ChainEvent>) -> String {
+    match subscription.poll_next_with_state("test_fsm", None).await {
+        PollResult::Error(error) => error.to_string(),
+        other => panic!("expected PollResult::Error, got {other:?}"),
     }
 }
 
@@ -2890,4 +2938,472 @@ async fn delivered_upstream_identity_ignores_event_writer() {
         Some(upstream_stage),
         "edge identity must be the reader slot's stage, not the event author"
     );
+}
+
+// ---------------------------------------------------------------------------
+// FLOWIP-120n: catch-up generations in the canonical merge
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn catch_up_watermark_advances_reader_generation_at_delivery_only() {
+    let (mut subscription, (stage_a, journal_a), (stage_b, journal_b)) =
+        canonical_pair("upstream_a", "upstream_b").await;
+
+    journal_a.append_with_clock(merge_data(stage_a, "a1"), VectorClock::new());
+    journal_a.append_with_clock(merge_catch_up(stage_a, 1, "upstream_a"), VectorClock::new());
+    journal_a.append_with_clock(merge_data(stage_a, "a2"), VectorClock::new());
+    journal_b.append_with_clock(merge_data(stage_b, "b1"), VectorClock::new());
+    journal_b.append_with_clock(merge_data(stage_b, "b2"), VectorClock::new());
+
+    // a1 (gen 0, ordinal 1, key a) beats b1 (gen 0, ordinal 1, key b).
+    let first = expect_delivery(&mut subscription).await;
+    assert_eq!(first.event.event_type(), "a1");
+    assert_eq!(
+        subscription.last_delivered_generation(),
+        Some(ReaderGeneration(0))
+    );
+
+    // The held watermark (ordinal 2) loses to b1's strictly lower ordinal 1,
+    // and holding it must not advance A's generation.
+    let second = expect_delivery(&mut subscription).await;
+    assert_eq!(second.event.event_type(), "b1");
+    assert!(
+        !subscription.all_readers_caught_up(ReaderGeneration(1)),
+        "a merely held watermark must not advance its reader"
+    );
+    assert_eq!(
+        subscription.last_delivered_stage_input_position(),
+        Some(StageInputPosition(2))
+    );
+
+    // Ordinal tie at 2: the stage key decides and the watermark delivers,
+    // stamping the generation it closes (0), then advancing A to 1.
+    let third = expect_delivery(&mut subscription).await;
+    assert!(matches!(
+        third.event.content,
+        ChainEventContent::FlowControl(FlowControlPayload::CatchUpComplete { .. })
+    ));
+    assert_eq!(
+        subscription.last_delivered_generation(),
+        Some(ReaderGeneration(0)),
+        "the watermark delivers at the generation it closes"
+    );
+    assert_eq!(
+        subscription.last_delivered_stage_input_position(),
+        None,
+        "the watermark is control: it reports no data-input position"
+    );
+
+    // b2 (gen 0) beats a2 (gen 1), and takes position 3: the watermark
+    // consumed no StageInputPosition.
+    let fourth = expect_delivery(&mut subscription).await;
+    assert_eq!(fourth.event.event_type(), "b2");
+    assert_eq!(
+        subscription.last_delivered_stage_input_position(),
+        Some(StageInputPosition(3))
+    );
+
+    // B dry and unsealed: the live head a2 waits per the merge discipline.
+    match subscription.poll_next_with_state("test_fsm", None).await {
+        PollResult::NoEvents => {}
+        other => panic!("expected NoEvents while B is quiet, got {other:?}"),
+    }
+
+    // B seals: its EOF (gen 0, ordinal 3) still precedes a2 (gen 1, ordinal 3).
+    journal_b.append_with_clock(merge_authored_eof(stage_b), VectorClock::new());
+    let fifth = expect_delivery(&mut subscription).await;
+    assert!(matches!(
+        fifth.event.content,
+        ChainEventContent::FlowControl(FlowControlPayload::Eof { .. })
+    ));
+
+    let sixth = expect_delivery(&mut subscription).await;
+    assert_eq!(sixth.event.event_type(), "a2");
+    assert_eq!(
+        subscription.last_delivered_generation(),
+        Some(ReaderGeneration(1))
+    );
+    assert_eq!(
+        subscription.last_delivered_stage_input_position(),
+        Some(StageInputPosition(4))
+    );
+    assert_eq!(delivered(&subscription), [3, 3]);
+}
+
+#[tokio::test]
+async fn recorded_heads_deliver_before_any_live_head() {
+    let (mut subscription, (stage_a, journal_a), (stage_b, journal_b)) =
+        canonical_pair("upstream_a", "upstream_b").await;
+
+    journal_a.append_with_clock(merge_data(stage_a, "a1"), VectorClock::new());
+    journal_a.append_with_clock(merge_catch_up(stage_a, 1, "upstream_a"), VectorClock::new());
+    journal_a.append_with_clock(merge_data(stage_a, "a2"), VectorClock::new());
+    for label in ["b1", "b2", "b3"] {
+        journal_b.append_with_clock(merge_data(stage_b, label), VectorClock::new());
+    }
+
+    // Per (generation, ordinal, key): a1 (0,1,a) < b1 (0,1,b) < WM (0,2,a)
+    // < b2 (0,2,b) < b3 (0,3,b); a2 sits at generation 1 behind them all.
+    let mut order = Vec::new();
+    for _ in 0..5 {
+        let envelope = expect_delivery(&mut subscription).await;
+        order.push(envelope.event.event_type());
+    }
+    assert_eq!(order, ["a1", "b1", "control.catch_up_complete", "b2", "b3"]);
+    assert_eq!(delivered(&subscription), [2, 3]);
+
+    // Every recorded row is out; the live head a2 (generation 1) may not
+    // deliver while B has neither crossed nor sealed.
+    match subscription.poll_next_with_state("test_fsm", None).await {
+        PollResult::NoEvents => {}
+        other => panic!("expected NoEvents while B is quiet, got {other:?}"),
+    }
+    let wait = subscription.merge_wait().expect("merge wait recorded");
+    assert_eq!(wait.quiet_inputs, vec![(stage_b, "upstream_b".to_string())]);
+
+    // B seals: its EOF (generation 0) still precedes a2 (generation 1).
+    journal_b.append_with_clock(merge_authored_eof(stage_b), VectorClock::new());
+    let sixth = expect_delivery(&mut subscription).await;
+    assert_eq!(sixth.event.event_type(), "control.eof");
+    let seventh = expect_delivery(&mut subscription).await;
+    assert_eq!(seventh.event.event_type(), "a2");
+    assert_eq!(
+        subscription.last_delivered_generation(),
+        Some(ReaderGeneration(1))
+    );
+}
+
+#[tokio::test]
+async fn watermark_generation_skip_fails_closed() {
+    let (mut subscription, stage_a, journal_a) = canonical_single("upstream_a").await;
+    journal_a.append_with_clock(merge_data(stage_a, "a1"), VectorClock::new());
+    journal_a.append_with_clock(merge_catch_up(stage_a, 2, "upstream_a"), VectorClock::new());
+
+    let first = expect_delivery(&mut subscription).await;
+    assert_eq!(first.event.event_type(), "a1");
+
+    // Announcing 2 from 0 skips a boundary: the delivering poll fails closed.
+    let message = expect_poll_error(&mut subscription).await;
+    assert!(
+        message.contains("FLOWIP-120n F11"),
+        "error must name F11: {message}"
+    );
+    assert_eq!(
+        subscription.last_delivered_generation(),
+        Some(ReaderGeneration(0)),
+        "the rejected delivery stamps nothing"
+    );
+    assert!(
+        !subscription.all_readers_caught_up(ReaderGeneration(1)),
+        "the reader's generation must not advance on a rejected boundary"
+    );
+}
+
+#[tokio::test]
+async fn forwarded_watermark_stage_key_mismatch_fails_closed() {
+    let (mut subscription, stage_a, journal_a) = canonical_single("upstream_a").await;
+    // Authored by another edge's stage key, merely present in A's journal.
+    journal_a.append_with_clock(merge_catch_up(stage_a, 1, "upstream_b"), VectorClock::new());
+
+    let message = expect_poll_error(&mut subscription).await;
+    assert!(
+        message.contains("FLOWIP-120n F8"),
+        "error must name F8: {message}"
+    );
+}
+
+#[tokio::test]
+async fn all_readers_caught_up_counts_eof_as_crossed() {
+    let (mut subscription, (stage_a, journal_a), (stage_b, journal_b)) =
+        canonical_pair("upstream_a", "upstream_b").await;
+
+    journal_a.append_with_clock(merge_catch_up(stage_a, 1, "upstream_a"), VectorClock::new());
+    journal_a.append_with_clock(merge_authored_eof(stage_a), VectorClock::new());
+    journal_b.append_with_clock(merge_data(stage_b, "b1"), VectorClock::new());
+    journal_b.append_with_clock(merge_authored_eof(stage_b), VectorClock::new());
+
+    assert!(
+        !subscription.all_readers_caught_up(ReaderGeneration(1)),
+        "no reader has crossed before any delivery"
+    );
+
+    // A's watermark (0,1,a) beats b1 (0,1,b): A crosses to generation 1.
+    let first = expect_delivery(&mut subscription).await;
+    assert_eq!(first.event.event_type(), "control.catch_up_complete");
+    assert!(
+        !subscription.all_readers_caught_up(ReaderGeneration(1)),
+        "B has neither crossed nor delivered its EOF"
+    );
+
+    // b1 (generation 0) beats A's held EOF (generation 1).
+    let second = expect_delivery(&mut subscription).await;
+    assert_eq!(second.event.event_type(), "b1");
+    assert!(!subscription.all_readers_caught_up(ReaderGeneration(1)));
+
+    // B's delivered EOF counts as vacuously crossed (F17).
+    let third = expect_delivery(&mut subscription).await;
+    assert_eq!(third.event.event_type(), "control.eof");
+    assert!(subscription.all_readers_caught_up(ReaderGeneration(1)));
+
+    // EOF crossing is per-reader, never global: a pair where only B sealed
+    // and A never crossed stays below the target.
+    let (mut lagging, (lag_a, lag_journal_a), (lag_b, lag_journal_b)) =
+        canonical_pair("upstream_a", "upstream_b").await;
+    lag_journal_a.append_with_clock(merge_data(lag_a, "a1"), VectorClock::new());
+    lag_journal_a.append_with_clock(merge_data(lag_a, "a2"), VectorClock::new());
+    lag_journal_b.append_with_clock(merge_authored_eof(lag_b), VectorClock::new());
+
+    let first = expect_delivery(&mut lagging).await;
+    assert_eq!(first.event.event_type(), "a1");
+    let second = expect_delivery(&mut lagging).await;
+    assert_eq!(second.event.event_type(), "control.eof");
+    assert!(
+        !lagging.all_readers_caught_up(ReaderGeneration(1)),
+        "only B is EOF-exhausted; A has not crossed"
+    );
+}
+
+#[tokio::test]
+async fn resume_of_resume_watermarks_stack() {
+    let (mut subscription, stage_a, journal_a) = canonical_single("upstream_a").await;
+
+    journal_a.append_with_clock(merge_data(stage_a, "d1"), VectorClock::new());
+    journal_a.append_with_clock(merge_catch_up(stage_a, 1, "upstream_a"), VectorClock::new());
+    journal_a.append_with_clock(merge_data(stage_a, "d2"), VectorClock::new());
+    journal_a.append_with_clock(merge_catch_up(stage_a, 2, "upstream_a"), VectorClock::new());
+    journal_a.append_with_clock(merge_data(stage_a, "d3"), VectorClock::new());
+
+    // Re-admitted boundaries stack on a resume of a resume: each watermark
+    // delivers at the generation it closes and advances by exactly one.
+    let expected = [
+        ("d1", ReaderGeneration(0)),
+        ("control.catch_up_complete", ReaderGeneration(0)),
+        ("d2", ReaderGeneration(1)),
+        ("control.catch_up_complete", ReaderGeneration(1)),
+        ("d3", ReaderGeneration(2)),
+    ];
+    for (event_type, generation) in expected {
+        let envelope = expect_delivery(&mut subscription).await;
+        assert_eq!(envelope.event.event_type(), event_type);
+        assert_eq!(subscription.last_delivered_generation(), Some(generation));
+    }
+
+    assert!(subscription.all_readers_caught_up(ReaderGeneration(2)));
+    assert!(!subscription.all_readers_caught_up(ReaderGeneration(3)));
+}
+
+// ---------------------------------------------------------------------------
+// FLOWIP-120n F18: seq-ordered merge at source-fed fan-ins
+// ---------------------------------------------------------------------------
+
+fn with_seq(mut event: ChainEvent, seq: u64) -> ChainEvent {
+    event.admission_seq = Some(AdmissionSeq(seq));
+    event
+}
+
+/// `canonical_pair` in seq mode with the given entered generation.
+async fn seq_pair_with_entered(
+    name_a: &str,
+    name_b: &str,
+    entered_generation: u64,
+) -> (
+    UpstreamSubscription<ChainEvent>,
+    (StageId, Arc<SharedTestJournal>),
+    (StageId, Arc<SharedTestJournal>),
+) {
+    let (subscription, a, b) = canonical_pair(name_a, name_b).await;
+    (
+        subscription
+            .with_seq_ordered(true)
+            .with_entered_generation(ReaderGeneration(entered_generation)),
+        a,
+        b,
+    )
+}
+
+/// Seq mode in a live-run shape: entered generation 0, silence is proof from
+/// the first poll.
+async fn seq_pair(
+    name_a: &str,
+    name_b: &str,
+) -> (
+    UpstreamSubscription<ChainEvent>,
+    (StageId, Arc<SharedTestJournal>),
+    (StageId, Arc<SharedTestJournal>),
+) {
+    seq_pair_with_entered(name_a, name_b, 0).await
+}
+
+#[tokio::test]
+async fn seq_merge_delivers_available_head_while_sibling_is_quiet() {
+    let (mut subscription, (stage_a, journal_a), (_stage_b, journal_b)) =
+        seq_pair("upstream_a", "upstream_b").await;
+
+    journal_a.append_with_clock(with_seq(merge_data(stage_a, "a1"), 1), VectorClock::new());
+    journal_a.append_with_clock(with_seq(merge_data(stage_a, "a2"), 2), VectorClock::new());
+
+    // The liveness property: B's silence is proof (live run, generation 0 is
+    // at the entered generation), so A's heads deliver with B quiet.
+    let first = expect_delivery(&mut subscription).await;
+    assert_eq!(first.event.event_type(), "a1");
+    let second = expect_delivery(&mut subscription).await;
+    assert_eq!(second.event.event_type(), "a2");
+    assert!(subscription.merge_wait().is_none());
+    assert_eq!(delivered(&subscription), [2, 0]);
+
+    // Nothing anywhere: NoEvents without a blocking wait.
+    match subscription.poll_next_with_state("test_fsm", None).await {
+        PollResult::NoEvents => {}
+        other => panic!("expected NoEvents while both are quiet, got {other:?}"),
+    }
+    assert!(subscription.merge_wait().is_none());
+
+    // The quiet input later produces a (larger) sequence and delivers.
+    journal_b.append_with_clock(with_seq(merge_data(_stage_b, "b1"), 3), VectorClock::new());
+    let third = expect_delivery(&mut subscription).await;
+    assert_eq!(third.event.event_type(), "b1");
+}
+
+#[tokio::test]
+async fn seq_merge_orders_by_admission_seq_not_arrival() {
+    let (mut subscription, (stage_a, journal_a), (stage_b, journal_b)) =
+        seq_pair("upstream_a", "upstream_b").await;
+
+    // A's rows all arrive before B's, with interleaved sequences.
+    journal_a.append_with_clock(with_seq(merge_data(stage_a, "a1"), 2), VectorClock::new());
+    journal_a.append_with_clock(with_seq(merge_data(stage_a, "a2"), 4), VectorClock::new());
+    journal_a.append_with_clock(with_seq(merge_authored_eof(stage_a), 5), VectorClock::new());
+    journal_b.append_with_clock(with_seq(merge_data(stage_b, "b1"), 1), VectorClock::new());
+    journal_b.append_with_clock(with_seq(merge_data(stage_b, "b2"), 3), VectorClock::new());
+    journal_b.append_with_clock(with_seq(merge_authored_eof(stage_b), 6), VectorClock::new());
+
+    let mut order = Vec::new();
+    let mut delivering_stage = Vec::new();
+    loop {
+        match subscription.poll_next_with_state("test_fsm", None).await {
+            PollResult::Event(envelope) => {
+                order.push(envelope.event.event_type());
+                delivering_stage.push(subscription.last_delivered_upstream_stage().unwrap());
+            }
+            PollResult::NoEvents => break,
+            PollResult::Error(e) => panic!("unexpected poll error: {e:?}"),
+        }
+    }
+    // Data rows follow admission sequence, not arrival order. The EOFs are
+    // re-authored rows: they order by inherited journal position (B's
+    // inherits b2's 3, so it precedes a2's 4; A's inherits a2's 4), not by
+    // their per-run stamps (5, 6), which is what keeps them run-stable.
+    assert_eq!(
+        order,
+        ["b1", "a1", "b2", "control.eof", "a2", "control.eof"],
+        "delivery follows admission sequence with position-inherited control"
+    );
+    assert_eq!(
+        delivering_stage,
+        [stage_b, stage_a, stage_b, stage_b, stage_a, stage_a],
+    );
+    assert!(subscription.all_readers_eof());
+}
+
+#[tokio::test]
+async fn seq_merge_orders_re_authored_control_by_journal_position_not_stamp() {
+    // The resume shape that motivates inherited keys (FLOWIP-120n F18): a
+    // re-authored source contract is appended before the re-admitted prefix
+    // and stamped from the seeded (high) counter. Keyed by its own stamp it
+    // would block its reader's whole recorded prefix behind the sibling; by
+    // inherited position it delivers first, as it did in the recorded run.
+    let (mut subscription, (stage_a, journal_a), (stage_b, journal_b)) =
+        seq_pair("upstream_a", "upstream_b").await;
+
+    let contract = ChainEventFactory::source_contract_event(
+        WriterId::Stage(stage_a),
+        obzenflow_core::event::SourceContractEventParams {
+            expected_count: None,
+            source_id: stage_a,
+            route: None,
+            journal_path: obzenflow_core::event::types::JournalPath("upstream_a".to_string()),
+            journal_index: obzenflow_core::event::types::JournalIndex(0),
+            writer_seq: None,
+            vector_clock: None,
+        },
+    );
+    journal_a.append_with_clock(with_seq(contract, 999), VectorClock::new());
+    journal_a.append_with_clock(with_seq(merge_data(stage_a, "a1"), 1), VectorClock::new());
+    journal_a.append_with_clock(with_seq(merge_data(stage_a, "a2"), 3), VectorClock::new());
+    journal_b.append_with_clock(with_seq(merge_data(stage_b, "b1"), 2), VectorClock::new());
+    journal_b.append_with_clock(with_seq(merge_data(stage_b, "b2"), 4), VectorClock::new());
+
+    let expected = ["control.source_contract", "a1", "b1", "a2", "b2"];
+    for event_type in expected {
+        let envelope = expect_delivery(&mut subscription).await;
+        assert_eq!(envelope.event.event_type(), event_type);
+    }
+}
+
+#[tokio::test]
+async fn seq_merge_fails_closed_on_sequence_less_head() {
+    let (mut subscription, (stage_a, journal_a), (_stage_b, _journal_b)) =
+        seq_pair("upstream_a", "upstream_b").await;
+
+    journal_a.append_with_clock(merge_data(stage_a, "a1"), VectorClock::new());
+
+    let message = expect_poll_error(&mut subscription).await;
+    assert!(
+        message.contains("FLOWIP-120n F18"),
+        "error must name F18: {message}"
+    );
+    assert!(
+        message.contains("upstream_a"),
+        "error must name the reader's stage key: {message}"
+    );
+}
+
+#[tokio::test]
+async fn seq_reader_below_entered_generation_keeps_kahn_wait_until_crossing() {
+    // A resume-shaped run: entered generation 1, both readers start at 0, so
+    // a quiet reader may still present re-admitted rows and blocks the merge.
+    let (mut subscription, (stage_a, journal_a), (stage_b, journal_b)) =
+        seq_pair_with_entered("upstream_a", "upstream_b", 1).await;
+
+    journal_a.append_with_clock(with_seq(merge_data(stage_a, "a1"), 1), VectorClock::new());
+    match subscription.poll_next_with_state("test_fsm", None).await {
+        PollResult::NoEvents => {}
+        other => panic!("expected NoEvents while pre-crossing B is quiet, got {other:?}"),
+    }
+    let wait = subscription.merge_wait().expect("blocking wait recorded");
+    assert_eq!(wait.quiet_inputs, vec![(stage_b, "upstream_b".to_string())]);
+
+    // B presents its catch-up watermark: a1 (seq 1) delivers first, then the
+    // watermark is blocked by the still-pre-crossing quiet A.
+    journal_b.append_with_clock(
+        with_seq(merge_catch_up(stage_b, 1, "upstream_b"), 2),
+        VectorClock::new(),
+    );
+    let first = expect_delivery(&mut subscription).await;
+    assert_eq!(first.event.event_type(), "a1");
+    match subscription.poll_next_with_state("test_fsm", None).await {
+        PollResult::NoEvents => {}
+        other => panic!("expected NoEvents while pre-crossing A is quiet, got {other:?}"),
+    }
+    let wait = subscription.merge_wait().expect("blocking wait recorded");
+    assert_eq!(wait.quiet_inputs, vec![(stage_a, "upstream_a".to_string())]);
+
+    // Both watermarks deliver and both readers cross to the entered
+    // generation.
+    journal_a.append_with_clock(
+        with_seq(merge_catch_up(stage_a, 1, "upstream_a"), 3),
+        VectorClock::new(),
+    );
+    let second = expect_delivery(&mut subscription).await;
+    assert_eq!(second.event.event_type(), "control.catch_up_complete");
+    let third = expect_delivery(&mut subscription).await;
+    assert_eq!(third.event.event_type(), "control.catch_up_complete");
+    assert!(subscription.all_readers_caught_up(ReaderGeneration(1)));
+
+    // The same reader that blocked the merge no longer blocks: A is quiet
+    // but past the crossing, so B's live row delivers immediately.
+    journal_b.append_with_clock(with_seq(merge_data(stage_b, "b1"), 4), VectorClock::new());
+    let fourth = expect_delivery(&mut subscription).await;
+    assert_eq!(fourth.event.event_type(), "b1");
+    assert!(subscription.merge_wait().is_none());
 }

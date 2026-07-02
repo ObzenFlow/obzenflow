@@ -30,7 +30,7 @@ use crate::messaging::upstream_subscription::{ContractConfig, ContractsWiring, R
 use crate::messaging::UpstreamSubscription;
 use crate::metrics::instrumentation::StageInstrumentation;
 use crate::stages::common::backpressure_activity_pulse::BackpressureActivityPulse;
-use crate::stages::common::handlers::JoinHandler;
+use crate::stages::common::handlers::UnifiedJoinHandler;
 use crate::stages::common::heartbeat::HeartbeatHandle;
 use crate::stages::common::supervision::lifecycle_actions;
 use crate::stages::observer::dispatch::run_stage_lifecycle_observers;
@@ -278,7 +278,7 @@ pub(crate) enum PendingTransition {
 }
 
 /// Context for join handlers - contains everything actions need
-pub struct JoinContext<H: JoinHandler> {
+pub struct JoinContext<H: UnifiedJoinHandler> {
     /// The handler instance (immutable, wrapped in Arc like StatefulContext)
     pub handler: Arc<H>,
 
@@ -417,16 +417,26 @@ pub struct JoinContext<H: JoinHandler> {
     /// orderer (FLOWIP-095d). Ordered live joins run the canonical
     /// cross-subscription merge instead of preference polling.
     pub(crate) deterministic_fan_in: bool,
+
+    /// FLOWIP-120n F18: this join's inputs are all source journals; both side
+    /// subscriptions run the seq-ordered merge and the cross-side dispatch
+    /// applies the seq-mode wait rule.
+    pub(crate) seq_ordered: bool,
+
+    /// Catch-up flip latch (FLOWIP-120n): the last generation this stage
+    /// flipped at, making the flip idempotent per generation across both
+    /// triggers (watermark and authored EOF) and both sides.
+    pub(crate) catch_up_flip: Option<obzenflow_core::ReaderGeneration>,
 }
 
-impl<H: JoinHandler + 'static> FsmContext for JoinContext<H> {}
+impl<H: UnifiedJoinHandler + 'static> FsmContext for JoinContext<H> {}
 
 // ============================================================================
 // FSM Action Implementation
 // ============================================================================
 
 #[async_trait::async_trait]
-impl<H: JoinHandler + Send + Sync + 'static> FsmAction for JoinAction<H> {
+impl<H: UnifiedJoinHandler + Clone + Send + Sync + 'static> FsmAction for JoinAction<H> {
     type Context = JoinContext<H>;
 
     async fn execute(&self, ctx: &mut Self::Context) -> Result<(), obzenflow_fsm::FsmError> {
@@ -548,7 +558,8 @@ impl<H: JoinHandler + Send + Sync + 'static> FsmAction for JoinAction<H> {
                     ctx.stage_id,
                     &ctx.stage_name,
                     &flow_context,
-                    ctx.runtime_execution.dispatch_scope(ctx.stage_id, None),
+                    ctx.runtime_execution
+                        .dispatch_scope(ctx.stage_id, None, None),
                     StageLifecyclePhase::Running,
                     &ctx.data_journal,
                     &ctx.instrumentation,
@@ -694,7 +705,8 @@ impl<H: JoinHandler + Send + Sync + 'static> FsmAction for JoinAction<H> {
                     ctx.stage_id,
                     &ctx.stage_name,
                     &flow_context,
-                    ctx.runtime_execution.dispatch_scope(ctx.stage_id, None),
+                    ctx.runtime_execution
+                        .dispatch_scope(ctx.stage_id, None, None),
                     StageLifecyclePhase::Completed,
                     &ctx.data_journal,
                     &ctx.instrumentation,
@@ -732,7 +744,8 @@ impl<H: JoinHandler + Send + Sync + 'static> FsmAction for JoinAction<H> {
                     ctx.stage_id,
                     &ctx.stage_name,
                     &flow_context,
-                    ctx.runtime_execution.dispatch_scope(ctx.stage_id, None),
+                    ctx.runtime_execution
+                        .dispatch_scope(ctx.stage_id, None, None),
                     StageLifecyclePhase::Failed,
                     &ctx.data_journal,
                     &ctx.instrumentation,

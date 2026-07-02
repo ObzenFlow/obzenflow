@@ -25,7 +25,7 @@ use obzenflow_core::event::status::processing_status::ProcessingStatus;
 use obzenflow_core::MiddlewareExecutionScope;
 use obzenflow_core::{ChainEvent, StageId, WriterId};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
-use obzenflow_runtime::stages::common::handlers::JoinHandler;
+use obzenflow_runtime::stages::common::handlers::{JoinHandler, UnifiedJoinHandler};
 use std::sync::Arc;
 
 /// A JoinHandler wrapper that applies middleware to join operations
@@ -36,8 +36,6 @@ use std::sync::Arc;
 pub struct MiddlewareJoin<H: JoinHandler> {
     inner: H,
     middleware_chain: Arc<Vec<Arc<dyn Middleware>>>,
-    /// Replay execution scope for this stage (FLOWIP-120a).
-    execution_scope: MiddlewareExecutionScope,
 }
 
 impl<H: JoinHandler> std::fmt::Debug for MiddlewareJoin<H> {
@@ -55,25 +53,12 @@ impl<H: JoinHandler> MiddlewareJoin<H> {
         Self {
             inner,
             middleware_chain: Arc::new(Vec::new()),
-            execution_scope: MiddlewareExecutionScope::LiveHandler,
         }
     }
 
     /// Add middleware to the chain
     pub fn with_middleware(mut self, middleware: Box<dyn Middleware>) -> Self {
         Arc::make_mut(&mut self.middleware_chain).push(Arc::from(middleware));
-        self
-    }
-
-    /// Bind the replay execution scope for this stage (FLOWIP-120a).
-    ///
-    /// Transitional exception to the FLOWIP-120c H3 per-event scope: the join
-    /// runtime carries no effect runtime mode in its context and has no
-    /// unified handler seam yet, so the scope stays build-time-static here
-    /// until FLOWIP-120n's resume phase predicate needs joins, at which point
-    /// the seam follows the transform/sink/stateful pattern.
-    pub fn with_execution_scope(mut self, scope: MiddlewareExecutionScope) -> Self {
-        self.execution_scope = scope;
         self
     }
 
@@ -145,8 +130,11 @@ impl<H: JoinHandler> MiddlewareJoin<H> {
     }
 }
 
+/// Implements `UnifiedJoinHandler` directly (not `JoinHandler`, whose blanket
+/// impl would conflict) so the supervisor's per-delivery execution scope
+/// reaches the middleware context (FLOWIP-120n).
 #[async_trait]
-impl<H: JoinHandler + Clone> JoinHandler for MiddlewareJoin<H>
+impl<H: JoinHandler + Clone> UnifiedJoinHandler for MiddlewareJoin<H>
 where
     H::State: 'static,
 {
@@ -162,9 +150,10 @@ where
         event: ChainEvent,
         source_id: StageId,
         writer_id: WriterId,
+        scope: MiddlewareExecutionScope,
     ) -> Result<Vec<ChainEvent>, HandlerError> {
         // Create ephemeral context for this processing
-        let mut ctx = MiddlewareContext::with_scope(self.execution_scope);
+        let mut ctx = MiddlewareContext::with_scope(scope);
 
         // Apply pre-middleware (same for both reference and stream sides)
         if !self.apply_pre_middleware(&event, &mut ctx)? {
@@ -375,7 +364,13 @@ mod tests {
         // Normal event should be processed
         let event1 = ChainEventFactory::data_event(writer_id, "test", json!({"data": 1}));
         let results1 = handler
-            .process_event(&mut state, event1, source_id, writer_id)
+            .process_event(
+                &mut state,
+                event1,
+                source_id,
+                writer_id,
+                MiddlewareExecutionScope::LiveHandler,
+            )
             .expect("Join middleware should succeed for normal event");
         assert_eq!(process_count.load(Ordering::Relaxed), 1);
         assert_eq!(results1.len(), 1);
@@ -383,7 +378,13 @@ mod tests {
         // Event with "skip" should be skipped
         let event2 = ChainEventFactory::data_event(writer_id, "test", json!({"skip": true}));
         let results2 = handler
-            .process_event(&mut state, event2, source_id, writer_id)
+            .process_event(
+                &mut state,
+                event2,
+                source_id,
+                writer_id,
+                MiddlewareExecutionScope::LiveHandler,
+            )
             .expect("Join middleware should succeed for skipped event");
         assert_eq!(process_count.load(Ordering::Relaxed), 1); // Still 1
         assert_eq!(results2.len(), 0);
@@ -391,7 +392,13 @@ mod tests {
         // Another normal event from stream side (same middleware applies)
         let event3 = ChainEventFactory::data_event(writer_id, "test", json!({"data": 3}));
         let results3 = handler
-            .process_event(&mut state, event3, source_id, writer_id)
+            .process_event(
+                &mut state,
+                event3,
+                source_id,
+                writer_id,
+                MiddlewareExecutionScope::LiveHandler,
+            )
             .expect("Join middleware should succeed for second normal event");
         assert_eq!(process_count.load(Ordering::Relaxed), 2);
         assert_eq!(results3.len(), 1);

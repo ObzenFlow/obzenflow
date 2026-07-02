@@ -10,7 +10,8 @@
 use crate::event::context::StageType;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+use std::path::PathBuf;
 
 pub const RUN_MANIFEST_FILENAME: &str = "run_manifest.json";
 pub const RUN_MANIFEST_VERSION: &str = "2.0";
@@ -33,6 +34,9 @@ pub struct RunManifest {
     pub created_at: DateTime<Utc>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub replay: Option<RunManifestReplayConfig>,
+    /// Present when this run is a resume of a recorded archive (FLOWIP-120n).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume: Option<RunManifestResumeConfig>,
     pub stages: HashMap<String, RunManifestStage>,
     pub system_journal_file: String,
 }
@@ -43,6 +47,19 @@ pub struct RunManifestReplayConfig {
     pub replay_from: String,
     /// Whether replay proceeded despite missing/corrupt terminal evidence.
     pub allow_incomplete_archive: bool,
+}
+
+/// Present when this run is a resume of a recorded archive (FLOWIP-120n).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunManifestResumeConfig {
+    /// The archive this run resumed from.
+    pub resumed_from: PathBuf,
+    /// The generation this run enters (max recorded generation + 1).
+    pub resume_generation: u64,
+    /// Per-stage recorded high-water marks, populated by the catch-up read
+    /// (FLOWIP-120n PR-D); empty until then.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub high_water_by_stage: BTreeMap<String, u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

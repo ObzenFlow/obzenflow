@@ -53,9 +53,10 @@ pub(super) async fn dispatch_draining<
     );
     // FLOWIP-120r: per-event observer dispatch scope (distinct from the frozen
     // scope each pending output now carries through the drain).
-    let observer_scope = ctx
-        .runtime_execution
-        .dispatch_scope(ctx.stage_id, ctx.last_input_position);
+    // Generation None: drain follows the stage frontier (FLOWIP-120n).
+    let observer_scope =
+        ctx.runtime_execution
+            .dispatch_scope(ctx.stage_id, ctx.last_input_position, None);
     if sup.subscription.is_none() {
         sup.subscription = ctx.subscription.take();
     }
@@ -190,9 +191,13 @@ pub(super) async fn dispatch_draining<
                     });
 
                     // FLOWIP-120c H3: per-event middleware execution scope.
-                    let scope = ctx
-                        .runtime_execution
-                        .dispatch_scope(ctx.stage_id, stage_input_position);
+                    // Generation None: drain follows the stage frontier
+                    // (FLOWIP-120n).
+                    let scope = ctx.runtime_execution.dispatch_scope(
+                        ctx.stage_id,
+                        stage_input_position,
+                        None,
+                    );
                     let observer_ctx = StatefulObserverContext {
                         stage_id: ctx.stage_id,
                         stage_name: &ctx.stage_name,

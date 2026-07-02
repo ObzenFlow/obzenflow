@@ -1051,6 +1051,10 @@ impl StageDescriptor for TypedStageDescriptor {
         self.inner.stage_logic_version()
     }
 
+    fn sink_delivery_safety(&self) -> Option<obzenflow_runtime::effects::SinkDeliverySafety> {
+        self.inner.sink_delivery_safety()
+    }
+
     fn effect_declarations(&self) -> Vec<obzenflow_runtime::effects::EffectDeclaration> {
         self.inner.effect_declarations()
     }
@@ -1641,6 +1645,63 @@ pub fn validate_stage_typing_metadata(
     Ok(())
 }
 
+/// FLOWIP-120n F16 resume sink delivery-safety gate. Runs at flow build under
+/// the resume verb only: catch-up re-consumes the recorded prefix, so every
+/// sink must be classified. Effectful sinks pass structurally (their writes go
+/// through the replay-suppressed effect boundary). `IdempotentProjection`
+/// passes; `NonIdempotentExternal` and undeclared sinks refuse fail-loud
+/// unless the operator passed `allow_duplicate_sink_delivery`, which lets both
+/// through with a warning naming the stage. Live/replay runs never call this.
+#[allow(clippy::result_large_err)]
+pub fn validate_resume_sink_delivery_safety(
+    descriptors: &HashMap<String, Box<dyn StageDescriptor>>,
+    allow_duplicate_sink_delivery: bool,
+) -> Result<(), crate::dsl::error::FlowBuildError> {
+    use crate::dsl::error::FlowBuildError;
+    use obzenflow_runtime::effects::SinkDeliverySafety;
+
+    // Sorted so the refusal names a deterministic stage across builds.
+    let mut names: Vec<&String> = descriptors.keys().collect();
+    names.sort();
+
+    for name in names {
+        let descriptor = &descriptors[name];
+        if descriptor.stage_type() != StageType::Sink || descriptor.is_effectful() {
+            continue;
+        }
+
+        match descriptor.sink_delivery_safety() {
+            Some(SinkDeliverySafety::IdempotentProjection) => {}
+            Some(SinkDeliverySafety::NonIdempotentExternal) => {
+                if !allow_duplicate_sink_delivery {
+                    return Err(FlowBuildError::ResumeRefusedNonIdempotentSink {
+                        stage: name.clone(),
+                    });
+                }
+                tracing::warn!(
+                    stage = %name,
+                    "allow_duplicate_sink_delivery: resuming past non-idempotent sink; \
+                     catch-up will duplicate its external writes"
+                );
+            }
+            None => {
+                if !allow_duplicate_sink_delivery {
+                    return Err(FlowBuildError::ResumeRefusedUndeclaredSink {
+                        stage: name.clone(),
+                    });
+                }
+                tracing::warn!(
+                    stage = %name,
+                    "allow_duplicate_sink_delivery: resuming past sink with undeclared \
+                     delivery safety; catch-up may duplicate its deliveries"
+                );
+            }
+        }
+    }
+
+    Ok(())
+}
+
 /// Validate edge typing across forward edges in a built topology.
 ///
 /// Returns `Ok(())` when every edge is compatible, or `Err(errors)` listing
@@ -2051,6 +2112,40 @@ pub fn derive_deterministic_fan_in_stages(
     marked
 }
 
+/// FLOWIP-120n F18: ordered fan-ins whose every forward inbound edge comes
+/// from a source stage. Their inputs are re-admitted verbatim on replay, so
+/// the recorded `admission_seq` is a stable within-generation comparator and
+/// the merge needs no Kahn wait. Derived-fed ordered fan-ins stay Kahn: their
+/// inputs are re-authored on replay with fresh sequences.
+pub fn derive_seq_ordered_fan_ins(
+    topology: &Topology,
+    deterministic_fan_in_stages: &HashSet<StageId>,
+) -> HashSet<StageId> {
+    let mut inbound: HashMap<StageId, Vec<StageId>> = HashMap::new();
+    for edge in topology.edges() {
+        if edge.kind != EdgeKind::Forward {
+            continue;
+        }
+        inbound
+            .entry(StageId::from_ulid(edge.to.ulid()))
+            .or_default()
+            .push(StageId::from_ulid(edge.from.ulid()));
+    }
+
+    deterministic_fan_in_stages
+        .iter()
+        .copied()
+        .filter(|fan_in| {
+            inbound.get(fan_in).is_some_and(|upstreams| {
+                !upstreams.is_empty()
+                    && upstreams
+                        .iter()
+                        .all(|upstream| inbound.get(upstream).is_none_or(|edges| edges.is_empty()))
+            })
+        })
+        .collect()
+}
+
 /// FLOWIP-095j: per-stage delivery metadata recorded in the run manifest.
 ///
 /// For each stage: the upstream stage keys delivering into it over forward
@@ -2201,6 +2296,10 @@ impl StageDescriptor for DeterministicOrdererOverride {
 
     fn stage_logic_version(&self) -> String {
         self.inner.stage_logic_version()
+    }
+
+    fn sink_delivery_safety(&self) -> Option<obzenflow_runtime::effects::SinkDeliverySafety> {
+        self.inner.sink_delivery_safety()
     }
 
     fn effect_declarations(&self) -> Vec<obzenflow_runtime::effects::EffectDeclaration> {

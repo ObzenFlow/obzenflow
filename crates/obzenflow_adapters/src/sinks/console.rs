@@ -10,6 +10,7 @@ use async_trait::async_trait;
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
 use obzenflow_core::event::ChainEventContent;
 use obzenflow_core::{ChainEvent, TypedPayload};
+use obzenflow_runtime::effects::SinkDeliverySafety;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::SinkHandler;
 use obzenflow_runtime::typing::SinkTyping;
@@ -674,6 +675,12 @@ where
             None,
         )))
     }
+
+    // Console re-prints deterministically on catch-up; per-event labels mark
+    // replays (FLOWIP-120n F16).
+    fn delivery_safety(&self) -> Option<SinkDeliverySafety> {
+        Some(SinkDeliverySafety::IdempotentProjection)
+    }
 }
 
 #[cfg(test)]
@@ -694,6 +701,15 @@ mod tests {
     impl TypedPayload for TestEvent {
         const EVENT_TYPE: &'static str = "test.event";
         const SCHEMA_VERSION: u32 = 1;
+    }
+
+    #[test]
+    fn console_sink_declares_idempotent_delivery() {
+        let sink = ConsoleSink::<TestEvent>::json();
+        assert_eq!(
+            SinkHandler::delivery_safety(&sink),
+            Some(SinkDeliverySafety::IdempotentProjection)
+        );
     }
 
     #[test]

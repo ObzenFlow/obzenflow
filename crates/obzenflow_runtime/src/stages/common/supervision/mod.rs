@@ -10,6 +10,7 @@
 //! requiring stage-specific trait bounds.
 
 pub(crate) mod backpressure_drain;
+pub(crate) mod catch_up;
 pub(crate) mod control_resolution;
 pub(crate) mod error_routing;
 pub(crate) mod flow_context_factory;

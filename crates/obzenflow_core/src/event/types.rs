@@ -19,6 +19,24 @@ pub type FlowId = String;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct SeqNo(pub u64);
 
+/// Resume depth of a run (FLOWIP-120n). A first record is generation 0, its
+/// resume is 1, a resume of that is 2. Carried in the catch-up watermark's
+/// payload; the canonical merge orders by it as the coarsest axis.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
+#[serde(transparent)]
+pub struct ReaderGeneration(pub u64);
+
+/// Flow-global admission order (FLOWIP-120n F18): stamped from one per-run
+/// counter at the single-writer journal append, so sequence order equals
+/// append order. Re-admitted rows keep their recorded sequence; source-fed
+/// ordered fan-ins compare `(generation, admission_seq)` in place of the
+/// Kahn wait.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct AdmissionSeq(pub u64);
+
 /// Canonical event-type identity used when event types are map keys.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]

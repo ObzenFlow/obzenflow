@@ -24,6 +24,10 @@ impl IngestionHealthEndpoint {
 struct IngestionHealthResponse {
     status: &'static str,
     pipeline_ready: bool,
+    /// The two readiness conjuncts (FLOWIP-120n F12): the pipeline-running
+    /// watcher and the hosted source's resume-live flag.
+    pipeline_running: bool,
+    resume_live: bool,
     channel_depth: usize,
     channel_capacity: usize,
 }
@@ -44,6 +48,8 @@ impl HttpEndpoint for IngestionHealthEndpoint {
         let body = IngestionHealthResponse {
             status,
             pipeline_ready,
+            pipeline_running: self.state.pipeline_running(),
+            resume_live: self.state.resume_live(),
             channel_depth: self.state.channel_depth(),
             channel_capacity: self.state.buffer_capacity,
         };

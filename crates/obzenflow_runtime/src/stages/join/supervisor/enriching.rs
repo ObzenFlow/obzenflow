@@ -2,8 +2,9 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
+use crate::messaging::upstream_subscription::StageInputPosition;
 use crate::messaging::PollResult;
-use crate::stages::common::handlers::JoinHandler;
+use crate::stages::common::handlers::UnifiedJoinHandler;
 use crate::stages::common::heartbeat::HeartbeatProcessingGuard;
 use crate::stages::common::supervision::backpressure_drain::{drain_one_pending, DrainOutcome};
 use crate::stages::common::supervision::control_resolution::{
@@ -13,6 +14,7 @@ use crate::stages::common::supervision::error_routing::route_to_error_journal;
 use crate::stages::common::supervision::flow_context_factory::make_flow_context;
 use crate::supervised_base::EventLoopDirective;
 use obzenflow_core::event::context::StageType;
+use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::status::processing_status::ProcessingStatus;
 use obzenflow_core::event::vector_clock::CausalOrderingService;
 use obzenflow_core::event::EventEnvelope;
@@ -27,7 +29,7 @@ use super::JoinSupervisor;
 use crate::stages::join::fsm::{JoinContext, JoinEvent, JoinState};
 
 pub(super) async fn dispatch_enriching<
-    H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
+    H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
 >(
     sup: &mut JoinSupervisor<H>,
     state: &JoinState<H>,
@@ -70,9 +72,40 @@ pub(super) async fn dispatch_enriching<
 
             let directive = match &envelope.event.content {
                 obzenflow_core::event::ChainEventContent::FlowControl(signal) => {
+                    // FLOWIP-120n: consume the catch-up watermark before the
+                    // generic control resolution; the join authors its own at
+                    // the flip.
+                    if let FlowControlPayload::CatchUpComplete {
+                        generation: announced,
+                        ..
+                    } = signal
+                    {
+                        return Ok(common::consume_join_catch_up_watermark(
+                            sup.reference_subscription.as_ref(),
+                            sup.stream_subscription.as_ref(),
+                            ctx,
+                            *announced,
+                        )
+                        .await);
+                    }
+
                     if envelope.event.is_eof() {
                         ctx.buffered_eof = Some(envelope.event.clone());
                         ctx.drain_parent = Some(envelope.clone());
+
+                        // FLOWIP-120n F17: an authored EOF can be the delivery
+                        // that completes the caught-up frontier; no watermark
+                        // follows, so re-run the flip before normal EOF
+                        // handling.
+                        if let Some(directive) = common::flip_join_caught_up_on_eof(
+                            sup.reference_subscription.as_ref(),
+                            Some(&*subscription),
+                            ctx,
+                        )
+                        .await
+                        {
+                            return Ok(directive);
+                        }
                     }
 
                     let contract_reader_count = ctx.stream_contract_state.len();
@@ -238,11 +271,21 @@ pub(super) async fn dispatch_enriching<
                     let _processing = heartbeat_state.as_ref().map(|state| {
                         HeartbeatProcessingGuard::new(state.clone(), Some(source_id), event_id)
                     });
+                    // FLOWIP-120n: per-delivery execution scope, computed at
+                    // dispatch from the delivered position and generation.
+                    let scope = ctx.runtime_execution.dispatch_scope(
+                        ctx.stage_id,
+                        Some(StageInputPosition(
+                            delivery_snapshot.delivered_stage_input_position,
+                        )),
+                        subscription.last_delivered_generation(),
+                    );
                     let result = ctx.handler.process_event(
                         &mut ctx.handler_state,
                         event.clone(),
                         source_id,
                         writer_id,
+                        scope,
                     );
                     if let Some(state) = &heartbeat_state {
                         state.record_last_consumed(event_id);
@@ -386,7 +429,7 @@ pub(super) async fn dispatch_enriching<
     }
 }
 
-async fn write_stage_outputs_and_ack<H: JoinHandler>(
+async fn write_stage_outputs_and_ack<H: UnifiedJoinHandler>(
     subscription: &mut crate::messaging::UpstreamSubscription<ChainEvent>,
     ctx: &mut JoinContext<H>,
     source_id: obzenflow_core::StageId,
@@ -409,8 +452,15 @@ async fn write_stage_outputs_and_ack<H: JoinHandler>(
         StageType::Join,
     );
 
-    // FLOWIP-120r: freeze the join's execution scope onto each deferred output.
-    let scope = ctx.runtime_execution.stage_scope(ctx.stage_id);
+    // FLOWIP-120n: freeze the position-derived execution scope onto each
+    // deferred output. The triggering side's delivered generation rides
+    // along so a recorded-prefix output flushed after handoff stays
+    // reconstruction-scoped (F9).
+    let scope = ctx.runtime_execution.dispatch_scope(
+        ctx.stage_id,
+        subscription.last_delivered_stage_input_position(),
+        subscription.last_delivered_generation(),
+    );
     let mut outputs: VecDeque<
         crate::stages::common::supervision::backpressure_drain::PendingOutput,
     > = outputs

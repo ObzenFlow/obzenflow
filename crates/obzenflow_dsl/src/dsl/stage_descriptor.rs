@@ -27,7 +27,7 @@ use obzenflow_core::{StageId, WriterId};
 use obzenflow_runtime::{
     effects::{
         EffectDeclaration, EffectPortRegistry, EffectSafety, IdempotencyKeyPolicy,
-        SynthesizedOutcomeRegistration,
+        SinkDeliverySafety, SynthesizedOutcomeRegistration,
     },
     metrics::instrumentation::{InstrumentationConfig, StageInstrumentation},
     stages::StageResources,
@@ -42,6 +42,7 @@ use obzenflow_runtime::{
                 EffectfulSinkHandler, EffectfulStatefulHandler, EffectfulStatefulHandlerAdapter,
                 EffectfulTransformHandler, EffectfulTransformHandlerAdapter, FiniteSourceHandler,
                 InfiniteSourceHandler, JoinHandler, SinkHandler, StatefulHandler, TransformHandler,
+                UnifiedJoinHandler,
             },
             stage_handle::{BoxedStageHandle, StageEvent, FORCE_SHUTDOWN_MESSAGE},
         },
@@ -459,6 +460,13 @@ fn build_source_middleware_and_register_policies(
             boundary: ingress_boundary,
         })
         .map_err(|e| format!("Stage '{}': {e}", config.name))?;
+        // FLOWIP-120n F12: under resume, hosted ingress refuses until the
+        // source supervisor marks the slot live at the catch-up handoff.
+        if obzenflow_runtime::bootstrap::replay_bootstrap()
+            .is_some_and(|replay| replay.verb == obzenflow_runtime::bootstrap::ReplayVerb::Resume)
+        {
+            slot.hold_for_resume_catch_up();
+        }
     }
 
     let source_policies = control_middleware.source_policies(&config.stage_id);
@@ -627,6 +635,14 @@ pub trait StageDescriptor: Send + Sync {
 
     fn stage_logic_version(&self) -> String {
         "1".to_string()
+    }
+
+    /// Snapshot of the sink handler's declared delivery safety, taken while
+    /// the descriptor still holds the concrete handler (FLOWIP-120n F16).
+    /// `None` for non-sink stages and undeclared sinks; read only by the
+    /// resume sink gate. Typed wrappers must forward to their inner descriptor.
+    fn sink_delivery_safety(&self) -> Option<SinkDeliverySafety> {
+        None
     }
 
     fn effect_declarations(&self) -> Vec<EffectDeclaration> {
@@ -1843,6 +1859,10 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
         StageType::Sink
     }
 
+    fn sink_delivery_safety(&self) -> Option<SinkDeliverySafety> {
+        self.handler.delivery_safety()
+    }
+
     fn stage_middleware_names(&self) -> Vec<String> {
         self.middleware
             .iter()
@@ -2710,15 +2730,10 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
         for mw in all_middleware {
             builder = builder.with(mw);
         }
-        // FLOWIP-120a: bind the stage's replay scope so handler-level control
-        // middleware suppresses its side effects during deterministic replay.
-        // FLOWIP-120r: sourced from the runtime execution strategy. The join's
-        // handler scope is stage-independent in 120r (constant per run), so it
-        // stays build-time-static here; FLOWIP-120n adds the per-call
-        // UnifiedJoinHandler seam when the resume predicate makes it positional.
-        let handler_with_middleware = builder
-            .build()
-            .with_execution_scope(resources.runtime_execution.stage_scope(config.stage_id));
+        // FLOWIP-120n: the execution scope is per-delivery, computed by the
+        // join supervisor at dispatch and passed through the
+        // UnifiedJoinHandler seam.
+        let handler_with_middleware = builder.build();
 
         // Extract join-mode configuration from the handler before moving it into the runtime.
         let reference_mode = handler_with_middleware.reference_mode();
@@ -3519,6 +3534,7 @@ mod tests {
             effect_declarations: Vec::new(),
             synthesized_outcomes: Vec::new(),
             deterministic_fan_in: false,
+            seq_ordered_fan_in: false,
         };
 
         let descriptor = FiniteSourceDescriptor {

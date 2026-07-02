@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
+use crate::execution::{HeartbeatExecutionPolicy, RuntimeExecution};
 use obzenflow_core::event::system_event::{EdgeLivenessState, StageActivity, SystemEvent};
 use obzenflow_core::event::types::{DurationMs, SeqNo};
 use obzenflow_core::event::{EventId, SystemEventType, WriterId};
@@ -401,21 +402,13 @@ pub fn spawn_heartbeat(
     liveness_snapshots: LivenessSnapshots,
     state: Arc<HeartbeatState>,
     config: HeartbeatConfig,
-    is_replay: bool,
+    runtime_execution: RuntimeExecution,
 ) -> HeartbeatHandle {
     let (cancel, mut cancel_rx) = watch::channel(false);
     let writer_id = WriterId::from(stage_id);
     let state_for_task = state.clone();
 
     let task = tokio::spawn(async move {
-        if is_replay {
-            tracing::debug!(
-                stage_name = %stage_name,
-                "Heartbeat suppressed: replay mode"
-            );
-            return;
-        }
-
         if !config.enabled {
             return;
         }
@@ -427,6 +420,15 @@ pub fn spawn_heartbeat(
         loop {
             tokio::select! {
                 _ = tokio::time::sleep(config.interval) => {
+                    // FLOWIP-120n: DormantUntilLive spawns the task but emits
+                    // nothing; re-query per tick so emission starts once the
+                    // stage's frontier crosses to live.
+                    if runtime_execution.heartbeat_policy_for(stage_id)
+                        != HeartbeatExecutionPolicy::Active
+                    {
+                        continue;
+                    }
+
                     heartbeat_seq.0 = heartbeat_seq.0.saturating_add(1);
 
                     let activity = state_for_task.current_activity();
@@ -569,7 +571,10 @@ pub fn spawn_heartbeat(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::execution::RuntimeMode;
+    use crate::replay::{ReplayArchive, ReplayError};
     use async_trait::async_trait;
+    use obzenflow_core::event::context::StageType;
     use obzenflow_core::event::event_envelope::EventEnvelope;
     use obzenflow_core::event::identity::JournalWriterId;
     use obzenflow_core::event::journal_event::JournalEvent;
@@ -578,8 +583,72 @@ mod tests {
     use obzenflow_core::journal::journal_error::JournalError;
     use obzenflow_core::journal::journal_owner::JournalOwner;
     use obzenflow_core::journal::journal_reader::JournalReader;
-    use obzenflow_core::journal::Journal;
+    use obzenflow_core::journal::{ArchiveStatus, Journal, StatusDerivation};
+    use obzenflow_core::{ChainEvent, ReaderGeneration};
+    use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
+
+    fn live_execution() -> RuntimeExecution {
+        RuntimeExecution::new(RuntimeMode::Live, None)
+    }
+
+    /// Metadata-only archive stub; the resume strategy reads
+    /// `max_recorded_generation` (default 0) and never touches readers here.
+    struct StubArchive;
+
+    #[async_trait]
+    impl ReplayArchive for StubArchive {
+        async fn open_source_reader(
+            &self,
+            _stage_key: &str,
+            _expected_type: StageType,
+        ) -> Result<Box<dyn JournalReader<ChainEvent>>, ReplayError> {
+            unimplemented!("not used in heartbeat tests")
+        }
+
+        async fn open_effect_history(
+            &self,
+            _stage_key: &str,
+        ) -> Result<Box<dyn JournalReader<ChainEvent>>, ReplayError> {
+            unimplemented!("not used in heartbeat tests")
+        }
+
+        fn source_data_journal_path(&self, _stage_key: &str) -> Result<PathBuf, ReplayError> {
+            unimplemented!("not used in heartbeat tests")
+        }
+
+        fn archive_flow_id(&self) -> &str {
+            "flow_stub"
+        }
+
+        fn archived_stage_id(&self, _stage_key: &str) -> Result<StageId, ReplayError> {
+            unimplemented!("not used in heartbeat tests")
+        }
+
+        fn archive_status(&self) -> ArchiveStatus {
+            ArchiveStatus::Cancelled
+        }
+
+        fn status_derivation(&self) -> StatusDerivation {
+            StatusDerivation {
+                terminal_events_found: 1,
+                chosen: ArchiveStatus::Cancelled,
+                warning: None,
+            }
+        }
+
+        fn allow_incomplete_archive(&self) -> bool {
+            false
+        }
+
+        fn source_stage_keys(&self) -> Vec<String> {
+            Vec::new()
+        }
+
+        fn archive_path(&self) -> &Path {
+            Path::new("stub-archive")
+        }
+    }
 
     struct TestJournal<T: JournalEvent> {
         id: JournalId,
@@ -721,7 +790,7 @@ mod tests {
             liveness_snapshots.clone(),
             state.clone(),
             config,
-            /* is_replay */ false,
+            live_execution(),
         );
 
         tokio::task::yield_now().await;
@@ -786,7 +855,7 @@ mod tests {
             liveness_snapshots.clone(),
             state.clone(),
             config,
-            /* is_replay */ false,
+            live_execution(),
         );
 
         tokio::task::yield_now().await;
@@ -805,6 +874,78 @@ mod tests {
         assert!(
             matches!(snapshot.activity, StageActivity::Draining),
             "expected Draining when not processing in drain mode"
+        );
+
+        handle.cancel();
+    }
+
+    /// FLOWIP-120n: under resume the heartbeat task spawns dormant and emits
+    /// nothing until the stage's frontier crosses to live.
+    #[tokio::test(flavor = "current_thread")]
+    async fn dormant_heartbeat_emits_only_after_stage_goes_live() {
+        tokio::time::pause();
+
+        let upstream = StageId::new();
+        let stage_id = StageId::new();
+
+        let state = HeartbeatState::new(vec![upstream]);
+        let liveness_snapshots: LivenessSnapshots = new_liveness_snapshots();
+        let system_journal: Arc<dyn Journal<SystemEvent>> =
+            Arc::new(TestJournal::new(JournalOwner::system(SystemId::new())));
+
+        // StubArchive's max recorded generation is 0, so the run enters
+        // generation 1 and every stage starts DormantUntilLive.
+        let exec = RuntimeExecution::new(RuntimeMode::Resume, Some(Arc::new(StubArchive)));
+        let control = exec.resume_control().expect("resume control").clone();
+        assert_eq!(
+            exec.heartbeat_policy_for(stage_id),
+            HeartbeatExecutionPolicy::DormantUntilLive
+        );
+
+        let config = HeartbeatConfig {
+            interval: Duration::from_secs(1),
+            handler_warn_threshold: Duration::from_secs(30),
+            handler_stall_threshold: Duration::from_secs(120),
+            idle_threshold: Duration::from_secs(6),
+            enabled: true,
+        };
+
+        let handle = spawn_heartbeat(
+            stage_id,
+            "test_stage".to_string(),
+            system_journal,
+            liveness_snapshots.clone(),
+            state.clone(),
+            config,
+            exec,
+        );
+
+        tokio::task::yield_now().await;
+
+        // Dormant ticks emit nothing.
+        for _ in 0..3 {
+            tokio::time::advance(Duration::from_secs(1)).await;
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            liveness_snapshots.get(stage_id).is_none(),
+            "dormant heartbeat must not publish liveness"
+        );
+
+        // Crossing the frontier flips the per-tick answer to Active.
+        control.record_generation_boundary(stage_id, ReaderGeneration(1));
+        let mut snapshot = None;
+        for _ in 0..3 {
+            tokio::time::advance(Duration::from_secs(1)).await;
+            tokio::task::yield_now().await;
+            snapshot = liveness_snapshots.get(stage_id);
+            if snapshot.is_some() {
+                break;
+            }
+        }
+        assert!(
+            snapshot.is_some(),
+            "heartbeat must start emitting once the stage is live"
         );
 
         handle.cancel();

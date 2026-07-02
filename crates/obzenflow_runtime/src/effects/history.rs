@@ -157,6 +157,14 @@ impl EffectHistory {
     pub fn recorded_flow_id(&self) -> &RecordedFlowId {
         &self.recorded_flow_id
     }
+
+    /// Maximum recorded `input_seq` in the surviving index (FLOWIP-120n F7):
+    /// a position at or below it is recorded prefix, beyond it live tail.
+    /// Computed after torn-tail groups are dropped, so a torn boundary group
+    /// lowers the mark and resume re-executes it rather than failing loud.
+    pub fn max_recorded_input_seq(&self) -> Option<u64> {
+        self.index.keys().map(|cursor| cursor.input_seq.get()).max()
+    }
 }
 
 fn infer_recorded_flow_id(records: &[EffectRecord]) -> Result<Option<RecordedFlowId>, EffectError> {

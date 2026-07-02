@@ -142,6 +142,13 @@ impl CycleGuard {
                      TransportOnly subscription and never reaches signal forwarding"
                 )
             }
+            FlowControlPayload::CatchUpComplete { .. } => {
+                unreachable!(
+                    "FLOWIP-120n F13: --resume-from rejects cyclic flows at build, so the \
+                     catch-up watermark never reaches a cycle guard; the condensation-frontier \
+                     follow-on adds the SignalKind arm"
+                )
+            }
         };
 
         // Coarse dedup for one-shot style signals to avoid repeated emissions

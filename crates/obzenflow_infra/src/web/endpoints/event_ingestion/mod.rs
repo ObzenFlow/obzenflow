@@ -834,6 +834,52 @@ mod tests {
         );
     }
 
+    /// FLOWIP-120n F12: under `--resume-from` the DSL holds the hosted-ingress
+    /// slot at bind, so a Running pipeline still refuses ingress (503 NotReady)
+    /// until the source supervisor marks the slot live at the catch-up handoff.
+    #[tokio::test]
+    async fn single_event_rejects_during_resume_catch_up_until_source_is_live() {
+        let (state, mut rx, journal) = state_with_refusal_journal(IngestionConfig::default(), None);
+        // Pipeline is Running...
+        state.ready.store(true, Ordering::Release);
+        // ...but the resume hold (applied at DSL bind time under the Resume
+        // verb) is still on.
+        state.ingress_slot().hold_for_resume_catch_up();
+        let endpoint = SingleEventEndpoint::new(state.clone());
+
+        let resp = unwrap_unary(
+            endpoint
+                .handle(json_request(endpoint.path(), event_body("order.created")))
+                .await
+                .unwrap(),
+        );
+
+        assert_eq!(resp.status, 503);
+        assert_eq!(
+            resp.headers.get("Retry-After").map(String::as_str),
+            Some("1")
+        );
+        assert!(rx.try_recv().is_err());
+        assert_eq!(
+            refusal_facts(&journal).await,
+            vec![(IngressRefusalReason::NotReady, 1)]
+        );
+
+        // The source supervisor marks the slot live at the handoff; ingress
+        // now admits.
+        state.ingress_slot().mark_resume_live();
+        let resp = unwrap_unary(
+            endpoint
+                .handle(json_request(endpoint.path(), event_body("order.created")))
+                .await
+                .unwrap(),
+        );
+
+        assert_eq!(resp.status, 200);
+        let queued = rx.recv().await.expect("queued event");
+        assert_eq!(queued.event_type, "order.created");
+    }
+
     #[tokio::test]
     async fn single_event_accepts_when_ready_and_enqueues() {
         let (state, mut rx) = IngestionState::new(IngestionConfig::default());

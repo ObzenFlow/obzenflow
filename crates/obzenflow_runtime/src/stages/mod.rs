@@ -29,7 +29,7 @@ pub use common::{
 };
 
 // Re-export JoinHandler from common::handlers
-pub use common::handlers::JoinHandler;
+pub use common::handlers::{JoinHandler, UnifiedJoinHandler};
 
 // Re-export resources builder
 pub use crate::typing::{JoinTyping, SinkTyping, SourceTyping, StatefulTyping, TransformTyping};

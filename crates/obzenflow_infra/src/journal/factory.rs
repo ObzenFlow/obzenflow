@@ -19,6 +19,7 @@ use obzenflow_runtime::journal::FlowJournalFactory;
 use obzenflow_runtime::replay::{ReplayArchive, ReplayError};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use super::disk::replay_archive::DiskReplayArchive;
@@ -46,6 +47,10 @@ pub struct DiskJournalFactory {
     // Cache journals so all consumers share the same instance (and shared locks)
     chain_journals: HashMap<JournalName, Arc<dyn Journal<ChainEvent>>>,
     system_journals: HashMap<JournalName, Arc<dyn Journal<SystemEvent>>>,
+    /// Flow-global admission sequencer (FLOWIP-120n F18): one per run, shared
+    /// by every data/error journal; system journals skip it (system rows are
+    /// never merge inputs). Seeded above the archive maximum on replay/resume.
+    admission_sequencer: Arc<AtomicU64>,
 }
 
 impl DiskJournalFactory {
@@ -65,6 +70,7 @@ impl DiskJournalFactory {
             flow_id,
             chain_journals: HashMap::new(),
             system_journals: HashMap::new(),
+            admission_sequencer: Arc::new(AtomicU64::new(0)),
         })
     }
 
@@ -87,7 +93,10 @@ impl DiskJournalFactory {
             })?;
         }
 
-        let journal = Arc::new(DiskJournal::<ChainEvent>::with_owner(journal_path, owner)?);
+        let journal = Arc::new(
+            DiskJournal::<ChainEvent>::with_owner(journal_path, owner)?
+                .with_admission_sequencer(self.admission_sequencer.clone()),
+        );
         self.chain_journals.insert(name, journal.clone());
         Ok(journal)
     }
@@ -145,7 +154,11 @@ impl DiskJournalFactory {
 
     /// Build a replay archive implementation from the runtime bootstrap context (FLOWIP-095a).
     pub async fn replay_archive(&self) -> Result<Option<Arc<dyn ReplayArchive>>, ReplayError> {
-        replay_archive().await
+        let archive = replay_archive().await?;
+        if let Some(archive) = &archive {
+            seed_admission_sequencer(&self.admission_sequencer, archive.as_ref());
+        }
+        Ok(archive)
     }
 }
 
@@ -154,6 +167,8 @@ pub struct MemoryJournalFactory {
     // Keep created journals so we can return the same instance for the same name
     chain_journals: HashMap<JournalName, Arc<dyn Journal<ChainEvent>>>,
     system_journals: HashMap<JournalName, Arc<dyn Journal<SystemEvent>>>,
+    /// Flow-global admission sequencer (FLOWIP-120n F18); see `DiskJournalFactory`.
+    admission_sequencer: Arc<AtomicU64>,
 }
 
 impl MemoryJournalFactory {
@@ -161,6 +176,7 @@ impl MemoryJournalFactory {
         Self {
             chain_journals: HashMap::new(),
             system_journals: HashMap::new(),
+            admission_sequencer: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -169,10 +185,16 @@ impl MemoryJournalFactory {
         name: JournalName,
         owner: JournalOwner,
     ) -> Result<Arc<dyn Journal<ChainEvent>>, JournalError> {
+        let sequencer = self.admission_sequencer.clone();
         Ok(self
             .chain_journals
             .entry(name)
-            .or_insert_with(|| Arc::new(MemoryJournal::<ChainEvent>::with_owner(owner)))
+            .or_insert_with(|| {
+                Arc::new(
+                    MemoryJournal::<ChainEvent>::with_owner(owner)
+                        .with_admission_sequencer(sequencer),
+                )
+            })
             .clone())
     }
 
@@ -200,8 +222,24 @@ impl MemoryJournalFactory {
 
     /// Build a replay archive implementation from the runtime bootstrap context (FLOWIP-095a).
     pub async fn replay_archive(&self) -> Result<Option<Arc<dyn ReplayArchive>>, ReplayError> {
-        replay_archive().await
+        let archive = replay_archive().await?;
+        if let Some(archive) = &archive {
+            seed_admission_sequencer(&self.admission_sequencer, archive.as_ref());
+        }
+        Ok(archive)
     }
+}
+
+/// Seed the flow sequencer above the archive's recorded maximum (FLOWIP-120n
+/// F18) so this run's stamps order after every re-admitted sequence. Runs at
+/// flow build, before any stage appends.
+fn seed_admission_sequencer(sequencer: &AtomicU64, archive: &dyn ReplayArchive) {
+    let seed = archive.max_recorded_admission_seq().0 + 1;
+    sequencer.store(seed, Ordering::SeqCst);
+    tracing::debug!(
+        seed,
+        "seeded flow admission sequencer above the archive maximum (FLOWIP-120n F18)"
+    );
 }
 
 async fn replay_archive() -> Result<Option<Arc<dyn ReplayArchive>>, ReplayError> {

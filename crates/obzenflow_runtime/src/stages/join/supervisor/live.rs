@@ -2,8 +2,9 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
+use crate::messaging::upstream_subscription::StageInputPosition;
 use crate::messaging::PollResult;
-use crate::stages::common::handlers::JoinHandler;
+use crate::stages::common::handlers::UnifiedJoinHandler;
 use crate::stages::common::heartbeat::HeartbeatProcessingGuard;
 use crate::stages::common::supervision::backpressure_drain::{drain_one_pending, DrainOutcome};
 use crate::stages::common::supervision::control_resolution::{
@@ -13,6 +14,7 @@ use crate::stages::common::supervision::error_routing::route_to_error_journal;
 use crate::stages::common::supervision::flow_context_factory::make_flow_context;
 use crate::supervised_base::EventLoopDirective;
 use obzenflow_core::event::context::StageType;
+use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::status::processing_status::ProcessingStatus;
 use obzenflow_core::event::vector_clock::CausalOrderingService;
 use obzenflow_core::event::EventEnvelope;
@@ -26,7 +28,7 @@ use super::JoinSupervisor;
 use crate::stages::join::fsm::{JoinContext, JoinEvent};
 
 pub(super) async fn dispatch_live<
-    H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
+    H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
 >(
     sup: &mut JoinSupervisor<H>,
     ctx: &mut JoinContext<H>,
@@ -99,7 +101,9 @@ pub(super) async fn dispatch_live<
     Ok(EventLoopDirective::Continue)
 }
 
-async fn poll_live_reference<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static>(
+async fn poll_live_reference<
+    H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
+>(
     sup: &mut JoinSupervisor<H>,
     ctx: &mut JoinContext<H>,
 ) -> Result<Option<EventLoopDirective<JoinEvent<H>>>, Box<dyn std::error::Error + Send + Sync>> {
@@ -124,7 +128,7 @@ async fn poll_live_reference<H: JoinHandler + Clone + std::fmt::Debug + Send + S
 /// Handle one delivered reference-side envelope (extracted from the poll path
 /// so the FLOWIP-095d canonical dispatch can deliver through the same code).
 async fn handle_reference_envelope<
-    H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
+    H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
 >(
     sup: &mut JoinSupervisor<H>,
     ctx: &mut JoinContext<H>,
@@ -149,6 +153,39 @@ async fn handle_reference_envelope<
 
     let directive = match &envelope.event.content {
         obzenflow_core::event::ChainEventContent::FlowControl(signal) => {
+            // FLOWIP-120n: consume the catch-up watermark before the generic
+            // control resolution; the join authors its own at the flip.
+            if let FlowControlPayload::CatchUpComplete {
+                generation: announced,
+                ..
+            } = signal
+            {
+                return Ok(Some(
+                    common::consume_join_catch_up_watermark(
+                        sup.reference_subscription.as_ref(),
+                        sup.stream_subscription.as_ref(),
+                        ctx,
+                        *announced,
+                    )
+                    .await,
+                ));
+            }
+
+            // FLOWIP-120n F17: an authored EOF can be the delivery that
+            // completes the caught-up frontier; no watermark follows, so
+            // re-run the flip before normal EOF handling.
+            if envelope.event.is_eof() {
+                if let Some(directive) = common::flip_join_caught_up_on_eof(
+                    Some(&*subscription),
+                    sup.stream_subscription.as_ref(),
+                    ctx,
+                )
+                .await
+                {
+                    return Ok(Some(directive));
+                }
+            }
+
             let contract_reader_count = ctx.reference_contract_state.len();
             let upstream_stage = subscription.last_delivered_upstream_stage();
             let last_eof_outcome = subscription.last_eof_outcome().cloned();
@@ -272,11 +309,21 @@ async fn handle_reference_envelope<
             let _processing = heartbeat_state.as_ref().map(|state| {
                 HeartbeatProcessingGuard::new(state.clone(), Some(source_id), event_id)
             });
+            // FLOWIP-120n: per-delivery execution scope, computed at dispatch
+            // from the delivered position and generation.
+            let scope = ctx.runtime_execution.dispatch_scope(
+                ctx.stage_id,
+                Some(StageInputPosition(
+                    delivery_snapshot.delivered_stage_input_position,
+                )),
+                subscription.last_delivered_generation(),
+            );
             let result = ctx.handler.process_event(
                 &mut ctx.handler_state,
                 event.clone(),
                 source_id,
                 writer_id,
+                scope,
             );
             if let Some(state) = &heartbeat_state {
                 state.record_last_consumed(event_id);
@@ -371,7 +418,9 @@ async fn handle_reference_envelope<
     Ok(directive)
 }
 
-async fn poll_live_stream<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static>(
+async fn poll_live_stream<
+    H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
+>(
     sup: &mut JoinSupervisor<H>,
     ctx: &mut JoinContext<H>,
 ) -> Result<Option<EventLoopDirective<JoinEvent<H>>>, Box<dyn std::error::Error + Send + Sync>> {
@@ -396,7 +445,7 @@ async fn poll_live_stream<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync
 /// Handle one delivered stream-side envelope (extracted from the poll path so
 /// the FLOWIP-095d canonical dispatch can deliver through the same code).
 async fn handle_stream_envelope<
-    H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
+    H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
 >(
     sup: &mut JoinSupervisor<H>,
     ctx: &mut JoinContext<H>,
@@ -418,9 +467,40 @@ async fn handle_stream_envelope<
 
     let directive = match &envelope.event.content {
         obzenflow_core::event::ChainEventContent::FlowControl(signal) => {
+            // FLOWIP-120n: consume the catch-up watermark before the generic
+            // control resolution; the join authors its own at the flip.
+            if let FlowControlPayload::CatchUpComplete {
+                generation: announced,
+                ..
+            } = signal
+            {
+                return Ok(Some(
+                    common::consume_join_catch_up_watermark(
+                        sup.reference_subscription.as_ref(),
+                        sup.stream_subscription.as_ref(),
+                        ctx,
+                        *announced,
+                    )
+                    .await,
+                ));
+            }
+
             if envelope.event.is_eof() {
                 ctx.buffered_eof = Some(envelope.event.clone());
                 ctx.drain_parent = Some(envelope.clone());
+
+                // FLOWIP-120n F17: an authored EOF can be the delivery that
+                // completes the caught-up frontier; no watermark follows, so
+                // re-run the flip before normal EOF handling.
+                if let Some(directive) = common::flip_join_caught_up_on_eof(
+                    sup.reference_subscription.as_ref(),
+                    Some(&*subscription),
+                    ctx,
+                )
+                .await
+                {
+                    return Ok(Some(directive));
+                }
             }
 
             let contract_reader_count = ctx.stream_contract_state.len();
@@ -568,11 +648,21 @@ async fn handle_stream_envelope<
             let _processing = heartbeat_state.as_ref().map(|state| {
                 HeartbeatProcessingGuard::new(state.clone(), Some(source_id), event_id)
             });
+            // FLOWIP-120n: per-delivery execution scope, computed at dispatch
+            // from the delivered position and generation.
+            let scope = ctx.runtime_execution.dispatch_scope(
+                ctx.stage_id,
+                Some(StageInputPosition(
+                    delivery_snapshot.delivered_stage_input_position,
+                )),
+                subscription.last_delivered_generation(),
+            );
             let result = ctx.handler.process_event(
                 &mut ctx.handler_state,
                 event.clone(),
                 source_id,
                 writer_id,
+                scope,
             );
             if let Some(state) = &heartbeat_state {
                 state.record_last_consumed(event_id);
@@ -683,8 +773,12 @@ pub(crate) enum JoinSide {
 ///
 /// Applies the same rule as the subscription-internal merge: happened-before
 /// between non-EOF candidates first (authored EOFs are exempt and order by
-/// tiebreak alone), then the (ordinal, reader tiebreak key, join side)
-/// tiebreak.
+/// tiebreak alone), then generation as the coarsest axis (FLOWIP-120n; a
+/// recorded head orders ahead of a live head, and cross-generation causality
+/// never inverts, so the two rules cannot disagree), then `(generation,
+/// admission_seq)` when both candidates carry sequences (FLOWIP-120n F18, the
+/// seq-ordered join), falling through to the (ordinal, reader tiebreak key,
+/// join side) tiebreak otherwise.
 pub(crate) fn select_between(
     a: &crate::messaging::upstream_subscription::MergeCandidateMeta<'_>,
     a_side: JoinSide,
@@ -699,13 +793,19 @@ pub(crate) fn select_between(
             return std::cmp::Ordering::Greater;
         }
     }
-    (a.ordinal, a.key, a_side).cmp(&(b.ordinal, b.key, b_side))
+    if let (Some(a_seq), Some(b_seq)) = (a.admission_seq, b.admission_seq) {
+        let by_seq = (a.generation, a_seq).cmp(&(b.generation, b_seq));
+        if by_seq != std::cmp::Ordering::Equal {
+            return by_seq;
+        }
+    }
+    (a.generation, a.ordinal, a.key, a_side).cmp(&(b.generation, b.ordinal, b.key, b_side))
 }
 
 /// Run the periodic contract ticks for both join sides (the idle-path block
 /// shared by the unordered and canonical dispatchers).
 async fn run_live_contract_ticks<
-    H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
+    H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
 >(
     sup: &mut JoinSupervisor<H>,
     ctx: &mut JoinContext<H>,
@@ -736,54 +836,79 @@ async fn run_live_contract_ticks<
 ///
 /// Both subscriptions select their internal merge candidates; the cross-side
 /// choice applies the same rule to the two candidates with the side label as
-/// the final tiebreak component. Any quiet side blocks delivery (the Kahn
-/// discipline), reported through the heartbeat as idle-by-rule.
+/// the final tiebreak component. A blocking-quiet side (one whose silence is
+/// not proof) blocks delivery, reported through the heartbeat as
+/// idle-by-rule; in seq mode (FLOWIP-120n F18) an exempt-quiet side does not.
 async fn dispatch_live_canonical<
-    H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
+    H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
 >(
     sup: &mut JoinSupervisor<H>,
     ctx: &mut JoinContext<H>,
 ) -> Result<EventLoopDirective<JoinEvent<H>>, Box<dyn std::error::Error + Send + Sync>> {
-    use crate::messaging::upstream_subscription::MergeCandidateStatus;
-
-    let reference_status = match sup.reference_subscription.as_mut() {
-        Some(subscription) => {
+    // Seq mode repeats the two ensure rounds until neither side acquired a
+    // new head (FLOWIP-120n F18): every headless reader's last empty poll
+    // then postdates every held head's acquisition on either side, which is
+    // what makes cross-side silence proof. Bounded by total reader count;
+    // heads are only released at delivery, after this loop.
+    loop {
+        let held_before = (
+            sup.reference_subscription
+                .as_ref()
+                .map(|subscription| subscription.held_head_count()),
+            sup.stream_subscription
+                .as_ref()
+                .map(|subscription| subscription.held_head_count()),
+        );
+        if let Some(subscription) = sup.reference_subscription.as_mut() {
             let mut progress = Some(&mut ctx.reference_contract_state[..]);
-            match subscription
+            if let Err(e) = subscription
                 .ensure_merge_candidate("Live", &mut progress)
                 .await
             {
-                Ok(status) => status,
-                Err(e) => {
-                    return Ok(EventLoopDirective::Transition(JoinEvent::Error(format!(
-                        "Reference subscription error: {e}"
-                    ))))
-                }
+                return Ok(EventLoopDirective::Transition(JoinEvent::Error(format!(
+                    "Reference subscription error: {e}"
+                ))));
             }
         }
-        None => MergeCandidateStatus::AllExhausted,
-    };
-    let stream_status = match sup.stream_subscription.as_mut() {
-        Some(subscription) => {
+        if let Some(subscription) = sup.stream_subscription.as_mut() {
             let mut progress = Some(&mut ctx.stream_contract_state[..]);
-            match subscription
+            if let Err(e) = subscription
                 .ensure_merge_candidate("Live", &mut progress)
                 .await
             {
-                Ok(status) => status,
-                Err(e) => {
-                    return Ok(EventLoopDirective::Transition(JoinEvent::Error(format!(
-                        "Stream subscription error: {e}"
-                    ))))
-                }
+                return Ok(EventLoopDirective::Transition(JoinEvent::Error(format!(
+                    "Stream subscription error: {e}"
+                ))));
             }
         }
-        None => MergeCandidateStatus::AllExhausted,
-    };
+        let held_after = (
+            sup.reference_subscription
+                .as_ref()
+                .map(|subscription| subscription.held_head_count()),
+            sup.stream_subscription
+                .as_ref()
+                .map(|subscription| subscription.held_head_count()),
+        );
+        if !ctx.seq_ordered || held_after == held_before {
+            break;
+        }
+    }
 
-    if matches!(reference_status, MergeCandidateStatus::Quiet)
-        || matches!(stream_status, MergeCandidateStatus::Quiet)
-    {
+    // A side's ensure records a merge wait exactly when its quiet is
+    // blocking: every Kahn quiet, and a seq-mode reader still below the
+    // entered generation. Exempt-quiet seq readers record nothing and do not
+    // block the other side's candidate.
+    let blocking_wait = sup
+        .reference_subscription
+        .as_ref()
+        .and_then(|subscription| subscription.merge_wait())
+        .is_some()
+        || sup
+            .stream_subscription
+            .as_ref()
+            .and_then(|subscription| subscription.merge_wait())
+            .is_some();
+    if blocking_wait {
         let wait = sup
             .reference_subscription
             .as_ref()
@@ -891,7 +1016,7 @@ async fn dispatch_live_canonical<
     Ok(directive.unwrap_or(EventLoopDirective::Continue))
 }
 
-async fn write_stage_outputs_and_ack<H: JoinHandler>(
+async fn write_stage_outputs_and_ack<H: UnifiedJoinHandler>(
     subscription: &mut crate::messaging::UpstreamSubscription<ChainEvent>,
     ctx: &mut JoinContext<H>,
     source_id: obzenflow_core::StageId,
@@ -914,8 +1039,15 @@ async fn write_stage_outputs_and_ack<H: JoinHandler>(
         StageType::Join,
     );
 
-    // FLOWIP-120r: freeze the join's execution scope onto each deferred output.
-    let scope = ctx.runtime_execution.stage_scope(ctx.stage_id);
+    // FLOWIP-120n: freeze the position-derived execution scope onto each
+    // deferred output. The triggering side's delivered generation rides
+    // along so a recorded-prefix output flushed after handoff stays
+    // reconstruction-scoped (F9).
+    let scope = ctx.runtime_execution.dispatch_scope(
+        ctx.stage_id,
+        subscription.last_delivered_stage_input_position(),
+        subscription.last_delivered_generation(),
+    );
     let mut outputs: VecDeque<
         crate::stages::common::supervision::backpressure_drain::PendingOutput,
     > = outputs
@@ -1001,11 +1133,33 @@ mod tests {
         is_authored_eof: bool,
     ) -> MergeCandidateMeta<'a> {
         MergeCandidateMeta {
+            generation: obzenflow_core::ReaderGeneration(0),
             ordinal: DeliveredOrdinal(ordinal),
             key,
             vector_clock,
             is_authored_eof,
+            admission_seq: None,
         }
+    }
+
+    #[test]
+    fn recorded_generation_orders_ahead_of_live_cross_side() {
+        let empty = VectorClock::new();
+        let (key_a, key_z) = (key("a_stage"), key("z_stage"));
+        // The live head has the better ordinal and key; the recorded head
+        // still wins because generation is the coarsest axis (FLOWIP-120n).
+        let mut recorded = meta(9, &key_z, &empty, false);
+        recorded.generation = obzenflow_core::ReaderGeneration(0);
+        let mut live = meta(1, &key_a, &empty, false);
+        live.generation = obzenflow_core::ReaderGeneration(1);
+        assert_eq!(
+            select_between(&recorded, JoinSide::Stream, &live, JoinSide::Reference),
+            Ordering::Less
+        );
+        assert_eq!(
+            select_between(&live, JoinSide::Reference, &recorded, JoinSide::Stream),
+            Ordering::Greater
+        );
     }
 
     #[test]
@@ -1073,6 +1227,40 @@ mod tests {
         assert_eq!(
             select_between(&eof, JoinSide::Reference, &data, JoinSide::Stream),
             Ordering::Greater
+        );
+    }
+
+    #[test]
+    fn admission_seq_orders_ahead_of_ordinal_and_key_when_both_carry_it() {
+        // FLOWIP-120n F18: with both candidates sequenced, (generation,
+        // admission_seq) decides before ordinal and key.
+        let empty = VectorClock::new();
+        let (key_z, key_a) = (key("z_stage"), key("a_stage"));
+        let mut a = meta(9, &key_z, &empty, false);
+        a.admission_seq = Some(obzenflow_core::AdmissionSeq(1));
+        let mut b = meta(1, &key_a, &empty, false);
+        b.admission_seq = Some(obzenflow_core::AdmissionSeq(2));
+        assert_eq!(
+            select_between(&a, JoinSide::Stream, &b, JoinSide::Reference),
+            Ordering::Less
+        );
+        assert_eq!(
+            select_between(&b, JoinSide::Reference, &a, JoinSide::Stream),
+            Ordering::Greater
+        );
+    }
+
+    #[test]
+    fn missing_admission_seq_on_either_side_falls_back_to_ordinal_key() {
+        let empty = VectorClock::new();
+        let (key_z, key_a) = (key("z_stage"), key("a_stage"));
+        let mut a = meta(9, &key_z, &empty, false);
+        a.admission_seq = Some(obzenflow_core::AdmissionSeq(1));
+        let b = meta(1, &key_a, &empty, false);
+        assert_eq!(
+            select_between(&a, JoinSide::Stream, &b, JoinSide::Reference),
+            Ordering::Greater,
+            "one sequence-less side sends the decision to the existing tiebreak"
         );
     }
 }

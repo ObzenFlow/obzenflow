@@ -3,12 +3,13 @@
 // https://obzenflow.dev
 
 use crate::messaging::PollResult;
-use crate::stages::common::handlers::JoinHandler;
+use crate::stages::common::handlers::UnifiedJoinHandler;
 use crate::stages::common::heartbeat::HeartbeatProcessingGuard;
 use crate::stages::common::supervision::control_resolution::{
     resolve_control_event_awaiting_pauses, ControlAction,
 };
 use crate::supervised_base::EventLoopDirective;
+use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_fsm::StateVariant;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
@@ -18,7 +19,7 @@ use super::JoinSupervisor;
 use crate::stages::join::fsm::{JoinContext, JoinEvent, JoinState};
 
 pub(super) async fn dispatch_hydrating<
-    H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
+    H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
 >(
     sup: &mut JoinSupervisor<H>,
     state: &JoinState<H>,
@@ -62,6 +63,38 @@ pub(super) async fn dispatch_hydrating<
 
             let directive = match &envelope.event.content {
                 obzenflow_core::event::ChainEventContent::FlowControl(signal) => {
+                    // FLOWIP-120n: consume the catch-up watermark before the
+                    // generic control resolution; the join authors its own at
+                    // the flip.
+                    if let FlowControlPayload::CatchUpComplete {
+                        generation: announced,
+                        ..
+                    } = signal
+                    {
+                        return Ok(common::consume_join_catch_up_watermark(
+                            sup.reference_subscription.as_ref(),
+                            sup.stream_subscription.as_ref(),
+                            ctx,
+                            *announced,
+                        )
+                        .await);
+                    }
+
+                    // FLOWIP-120n F17: an authored EOF can be the delivery
+                    // that completes the caught-up frontier; no watermark
+                    // follows, so re-run the flip before normal EOF handling.
+                    if envelope.event.is_eof() {
+                        if let Some(directive) = common::flip_join_caught_up_on_eof(
+                            Some(&*subscription),
+                            sup.stream_subscription.as_ref(),
+                            ctx,
+                        )
+                        .await
+                        {
+                            return Ok(directive);
+                        }
+                    }
+
                     let contract_reader_count = ctx.reference_contract_state.len();
                     let upstream_stage = subscription.last_delivered_upstream_stage();
                     let last_eof_outcome = subscription.last_eof_outcome().cloned();
@@ -149,11 +182,19 @@ pub(super) async fn dispatch_hydrating<
                     let _processing = heartbeat_state.as_ref().map(|state| {
                         HeartbeatProcessingGuard::new(state.clone(), upstream_stage, event_id)
                     });
+                    // FLOWIP-120n: per-delivery execution scope, computed at
+                    // dispatch from the delivered position and generation.
+                    let scope = ctx.runtime_execution.dispatch_scope(
+                        ctx.stage_id,
+                        subscription.last_delivered_stage_input_position(),
+                        subscription.last_delivered_generation(),
+                    );
                     let result = ctx.handler.process_event(
                         &mut ctx.handler_state,
                         event,
                         reference_stage_id,
                         writer_id,
+                        scope,
                     );
                     if let Some(state) = &heartbeat_state {
                         state.record_last_consumed(event_id);

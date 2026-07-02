@@ -6,4 +6,4 @@
 
 mod traits;
 
-pub use traits::JoinHandler;
+pub use traits::{JoinHandler, UnifiedJoinHandler};

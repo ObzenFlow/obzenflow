@@ -241,6 +241,21 @@ pub enum FlowBuildError {
          path acyclic."
     )]
     OrderObserverFanInRequiresDeterministicOrder { stage_name: String },
+
+    #[error(
+        "Sink '{stage}' declares a non-idempotent external delivery path; resume re-delivers \
+         the recorded prefix during catch-up, which would duplicate those writes \
+         (FLOWIP-120n F16). Pass `allow_duplicate_sink_delivery` to accept duplication."
+    )]
+    ResumeRefusedNonIdempotentSink { stage: String },
+
+    #[error(
+        "Sink '{stage}' has no declared delivery safety; resume re-delivers the recorded \
+         prefix during catch-up and fails closed on undeclared sinks (FLOWIP-120n F16). \
+         Declare `delivery: idempotent` in the sink! macro (or `.idempotent()` / \
+         `.non_idempotent()` on the sink handler), or pass `allow_duplicate_sink_delivery`."
+    )]
+    ResumeRefusedUndeclaredSink { stage: String },
 }
 
 impl FlowBuildError {

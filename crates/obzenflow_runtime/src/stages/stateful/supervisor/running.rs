@@ -10,6 +10,9 @@ use crate::metrics::instrumentation::process_with_instrumentation_no_count;
 use crate::stages::common::handlers::{StatefulOutputContext, UnifiedStatefulHandler};
 use crate::stages::common::heartbeat::HeartbeatProcessingGuard;
 use crate::stages::common::supervision::backpressure_drain::{drain_one_pending, DrainOutcome};
+use crate::stages::common::supervision::catch_up::{
+    flip_on_authored_eof, maybe_flip_caught_up, CatchUpDisposition, CatchUpStage,
+};
 use crate::stages::common::supervision::control_resolution::{
     resolve_control_event_awaiting_pauses, ControlAction,
 };
@@ -128,6 +131,10 @@ pub(super) async fn dispatch_accumulating<
                 .subscription
                 .as_ref()
                 .and_then(|subscription| subscription.last_delivered_stage_input_position());
+            let delivered_generation = sup
+                .subscription
+                .as_ref()
+                .and_then(|subscription| subscription.last_delivered_generation());
             if envelope.event.is_data() {
                 ctx.last_input_position = stage_input_position;
             }
@@ -164,6 +171,76 @@ pub(super) async fn dispatch_accumulating<
 
             let directive = match &envelope.event.content {
                 obzenflow_core::event::ChainEventContent::FlowControl(signal) => {
+                    // FLOWIP-120n: consume the catch-up watermark before the
+                    // generic control resolution; each stage authors its own.
+                    if let obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload::CatchUpComplete {
+                        generation: announced,
+                        ..
+                    } = signal
+                    {
+                        let subscription = sup
+                            .subscription
+                            .as_ref()
+                            .expect("subscription checked above");
+                        let disposition = maybe_flip_caught_up(
+                            *announced,
+                            subscription.all_readers_caught_up(*announced),
+                            subscription.delivered_data_count(),
+                            CatchUpStage {
+                                stage_id: ctx.stage_id,
+                                stage_name: &ctx.stage_name,
+                                flow_name: &ctx.flow_name,
+                                flow_id: &flow_id,
+                                stage_type: StageType::Stateful,
+                                writer_id: ctx.writer_id,
+                                data_journal: &ctx.data_journal,
+                                instrumentation: &ctx.instrumentation,
+                            },
+                            /* author_marker */ true,
+                            &ctx.runtime_execution,
+                            &mut ctx.catch_up_flip,
+                        )
+                        .await;
+                        return Ok(match disposition {
+                            CatchUpDisposition::Consumed => EventLoopDirective::Continue,
+                            CatchUpDisposition::Failed(message) => {
+                                EventLoopDirective::Transition(StatefulEvent::Error(message))
+                            }
+                        });
+                    }
+
+                    // FLOWIP-120n F17: an authored EOF can be the delivery
+                    // that completes the caught-up frontier; no watermark
+                    // follows, so re-run the flip before normal EOF handling.
+                    if envelope.event.is_eof() {
+                        let subscription = sup
+                            .subscription
+                            .as_ref()
+                            .expect("subscription checked above");
+                        if let Some(message) = flip_on_authored_eof(
+                            subscription,
+                            CatchUpStage {
+                                stage_id: ctx.stage_id,
+                                stage_name: &ctx.stage_name,
+                                flow_name: &ctx.flow_name,
+                                flow_id: &flow_id,
+                                stage_type: StageType::Stateful,
+                                writer_id: ctx.writer_id,
+                                data_journal: &ctx.data_journal,
+                                instrumentation: &ctx.instrumentation,
+                            },
+                            /* author_marker */ true,
+                            &ctx.runtime_execution,
+                            &mut ctx.catch_up_flip,
+                        )
+                        .await
+                        {
+                            return Ok(EventLoopDirective::Transition(StatefulEvent::Error(
+                                message,
+                            )));
+                        }
+                    }
+
                     let contract_reader_count = ctx.contract_state.len();
                     let upstream_stage = sup
                         .subscription
@@ -295,9 +372,11 @@ pub(super) async fn dispatch_accumulating<
                     });
 
                     // FLOWIP-120c H3: per-event middleware execution scope.
-                    let scope = ctx
-                        .runtime_execution
-                        .dispatch_scope(ctx.stage_id, stage_input_position);
+                    let scope = ctx.runtime_execution.dispatch_scope(
+                        ctx.stage_id,
+                        stage_input_position,
+                        delivered_generation,
+                    );
                     let observer_ctx = StatefulObserverContext {
                         stage_id: ctx.stage_id,
                         stage_name: &ctx.stage_name,
@@ -581,9 +660,11 @@ pub(super) async fn dispatch_emitting<
         sup.stage_id,
         StageType::Stateful,
     );
-    let observer_scope = ctx
-        .runtime_execution
-        .dispatch_scope(ctx.stage_id, ctx.last_input_position);
+    // Generation None: emit is not a delivery, so the scope follows the
+    // stage frontier (FLOWIP-120n).
+    let observer_scope =
+        ctx.runtime_execution
+            .dispatch_scope(ctx.stage_id, ctx.last_input_position, None);
 
     if sup.subscription.is_none() {
         sup.subscription = ctx.subscription.take();

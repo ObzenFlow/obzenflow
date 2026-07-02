@@ -466,6 +466,7 @@ mod tests {
             flow_name: "test_flow".to_string(),
             created_at: obzenflow_core::chrono::Utc::now(),
             replay,
+            resume: None,
             stages: map,
             system_journal_file: "system.log".to_string(),
         }

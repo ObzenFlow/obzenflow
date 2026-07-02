@@ -342,6 +342,12 @@ impl<H: AsyncInfiniteSourceHandler> AsyncInfiniteSourceHandler
         self.inner.bind_writer_id(id);
     }
 
+    // Forwarded so the supervisor's resume-live flip reaches the hosted
+    // surface; the trait default is None and would swallow it (FLOWIP-120n F12).
+    fn hosted_ingress_slot(&self) -> Option<obzenflow_core::ingress::HostedIngressBindingSlot> {
+        self.inner.hosted_ingress_slot()
+    }
+
     async fn next(&mut self) -> Result<Vec<ChainEvent>, SourceError> {
         let synthetic_event = ChainEventFactory::data_event(
             self.writer_id,

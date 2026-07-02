@@ -738,6 +738,12 @@ macro_rules! build_typed_flow {
             &name_to_id,
             &deterministic_fan_in_stages,
         );
+        // FLOWIP-120n F18: source-fed ordered fan-ins compare by the recorded
+        // admission sequence and need no Kahn wait on a quiet input.
+        let seq_ordered_fan_ins = $crate::dsl::typing::derive_seq_ordered_fan_ins(
+            &topology,
+            &deterministic_fan_in_stages,
+        );
 
         $crate::dsl::typing::validate_order_observer_deterministic_input_order(
             &topology,
@@ -749,6 +755,34 @@ macro_rules! build_typed_flow {
 
         let feed_plan =
             $crate::dsl::typing::derive_feed_plan(&topology, &descriptors, &name_to_id);
+
+        // FLOWIP-120n F13: cyclic resume is a v1 non-goal; the
+        // condensation-frontier follow-on lifts it.
+        let resume_verb = obzenflow_runtime::bootstrap::replay_bootstrap()
+            .is_some_and(|replay| replay.verb == obzenflow_runtime::bootstrap::ReplayVerb::Resume);
+        if resume_verb {
+            let cycle_members: Vec<String> = topology
+                .stages()
+                .filter(|stage| topology.is_in_cycle(stage.id))
+                .map(|stage| stage.name.as_str().to_string())
+                .collect();
+            if !cycle_members.is_empty() {
+                return Err(FlowBuildError::UnsupportedCycleTopology(format!(
+                    "--resume-from does not support cyclic topologies (FLOWIP-120n F13); cycle members: {}",
+                    cycle_members.join(", ")
+                )));
+            }
+
+            // FLOWIP-120n F16: catch-up re-delivers the recorded prefix to
+            // sinks, so every sink must declare its delivery safety.
+            let allow_duplicate_sink_delivery =
+                obzenflow_runtime::bootstrap::replay_bootstrap()
+                    .is_some_and(|replay| replay.allow_duplicate_sink_delivery);
+            $crate::dsl::typing::validate_resume_sink_delivery_safety(
+                &descriptors,
+                allow_duplicate_sink_delivery,
+            )?;
+        }
 
         // FLOWIP-051l (P0): backflow cycles are currently only supported for transform stages.
         // Reject any topology where a cycle-member stage is not a transform so we do not silently
@@ -1092,6 +1126,13 @@ macro_rules! build_typed_flow {
             );
         }
 
+        // FLOWIP-120n: open the replay archive before the manifest is written,
+        // so a resume records the generation it enters (max recorded + 1).
+        let replay_archive =
+            obzenflow_runtime::journal::FlowJournalFactory::replay_archive(&mut journal_factory)
+                .await
+                .map_err(|e| FlowBuildError::StageResourcesFailed(format!("Failed to open replay archive: {e}")))?;
+
         // Write run manifest (disk journals persist; memory journals no-op) - FLOWIP-095a.
         let replay_manifest = obzenflow_runtime::bootstrap::replay_bootstrap().map(|replay| {
             obzenflow_core::journal::run_manifest::RunManifestReplayConfig {
@@ -1099,6 +1140,19 @@ macro_rules! build_typed_flow {
                 allow_incomplete_archive: replay.allow_incomplete_archive,
             }
         });
+
+        // FLOWIP-120n: a resume run records the archive it resumed from and the
+        // generation it enters; high-water marks are filled by the catch-up read (PR-D).
+        let resume_manifest = obzenflow_runtime::bootstrap::replay_bootstrap()
+            .filter(|replay| replay.verb == obzenflow_runtime::bootstrap::ReplayVerb::Resume)
+            .zip(replay_archive.as_ref())
+            .map(|(replay, archive)| {
+                obzenflow_core::journal::run_manifest::RunManifestResumeConfig {
+                    resumed_from: replay.archive_path,
+                    resume_generation: archive.max_recorded_generation().0 + 1,
+                    high_water_by_stage: std::collections::BTreeMap::new(),
+                }
+            });
 
         let run_manifest = obzenflow_core::journal::run_manifest::RunManifest {
             manifest_version: obzenflow_core::journal::run_manifest::RUN_MANIFEST_VERSION.to_string(),
@@ -1108,6 +1162,7 @@ macro_rules! build_typed_flow {
             flow_name: $flow_name.to_string(),
             created_at: obzenflow_core::chrono::Utc::now(),
             replay: replay_manifest,
+            resume: resume_manifest,
             stages: manifest_stages,
             system_journal_file: JournalName::System.to_filename(),
         };
@@ -1212,12 +1267,9 @@ macro_rules! build_typed_flow {
         .with_backpressure_plan(backpressure_plan)
         .with_feed_plan(feed_plan)
         .with_deterministic_fan_in_stages(deterministic_fan_in_stages)
+        .with_seq_ordered_fan_ins(seq_ordered_fan_ins)
         .with_effect_ports($effect_ports)
-        .with_replay_archive(
-            obzenflow_runtime::journal::FlowJournalFactory::replay_archive(&mut journal_factory)
-                .await
-                .map_err(|e| FlowBuildError::StageResourcesFailed(format!("Failed to open replay archive: {e}")))?,
-        );
+        .with_replay_archive(replay_archive);
 
         let stage_resources_set = resources_builder
             .build()

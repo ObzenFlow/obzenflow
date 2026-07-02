@@ -9,6 +9,7 @@ use csv::{Writer, WriterBuilder};
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
 use obzenflow_core::event::ChainEventContent;
 use obzenflow_core::{ChainEvent, EventId};
+use obzenflow_runtime::effects::SinkDeliverySafety;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
     CommitReceipt, SinkConsumeReport, SinkHandler, SinkLifecycleReport,
@@ -227,6 +228,11 @@ impl SinkHandler for CsvSink {
             .lock()
             .map_err(|_| HandlerError::Other("CsvSink mutex poisoned".to_string()))?;
         inner.flush_report()
+    }
+
+    // CSV re-writes the same rows deterministically on catch-up (FLOWIP-120n F16).
+    fn delivery_safety(&self) -> Option<SinkDeliverySafety> {
+        Some(SinkDeliverySafety::IdempotentProjection)
     }
 }
 
@@ -479,6 +485,16 @@ mod tests {
     use std::io::Read;
     use std::io::Write;
     use tempfile::NamedTempFile;
+
+    #[test]
+    fn csv_sink_declares_idempotent_delivery() {
+        let tmp = NamedTempFile::new().expect("temp file");
+        let sink = CsvSink::new(tmp.path()).unwrap();
+        assert_eq!(
+            SinkHandler::delivery_safety(&sink),
+            Some(SinkDeliverySafety::IdempotentProjection)
+        );
+    }
 
     #[tokio::test]
     async fn csv_sink_auto_detects_headers_and_writes_rows() {

@@ -6,7 +6,7 @@ use super::{ChainEvent, ChainEventContent};
 use crate::event::journal_event::{JournalEvent, Sealed};
 use crate::event::payloads::flow_control_payload::FlowControlPayload;
 use crate::event::payloads::observability_payload::{MetricsLifecycle, ObservabilityPayload};
-use crate::event::types::{EventId, WriterId};
+use crate::event::types::{AdmissionSeq, EventId, WriterId};
 
 impl Sealed for ChainEvent {}
 
@@ -19,6 +19,14 @@ impl JournalEvent for ChainEvent {
         &self.writer_id
     }
 
+    fn admission_seq(&self) -> Option<AdmissionSeq> {
+        self.admission_seq
+    }
+
+    fn set_admission_seq(&mut self, seq: AdmissionSeq) {
+        self.admission_seq = Some(seq);
+    }
+
     /// Zero-alloc category string for metrics & fast logs.
     /// Falls back to generic labels when the name is dynamic (e.g. custom metrics).
     fn event_type_name(&self) -> &'static str {
@@ -27,6 +35,7 @@ impl JournalEvent for ChainEvent {
             ChainEventContent::FlowControl(sig) => match sig {
                 FlowControlPayload::Eof { .. } => "control.eof",
                 FlowControlPayload::Watermark { .. } => "control.watermark",
+                FlowControlPayload::CatchUpComplete { .. } => "control.catch_up_complete",
                 FlowControlPayload::Checkpoint { .. } => "control.checkpoint",
                 FlowControlPayload::Drain => "control.drain",
                 FlowControlPayload::PipelineAbort { .. } => "control.pipeline_abort",

@@ -26,6 +26,9 @@ pub enum RunMode {
     Live,
     /// Strict replay of a recorded run (`--replay-from`).
     Replay(ReplayRunContext),
+    /// Resume of a recorded run (`--resume-from`): catch up on the archive,
+    /// then continue live from the recorded high-water mark (FLOWIP-120n).
+    Resume(ReplayRunContext),
 }
 
 /// The replay run's source archive, for user-facing copy.
@@ -45,6 +48,14 @@ impl RunMode {
     pub(crate) fn replay_from_archive(archive_path: PathBuf) -> Self {
         let archive_flow_id = peek_archive_flow_id(&archive_path);
         RunMode::Replay(ReplayRunContext {
+            archive_path,
+            archive_flow_id,
+        })
+    }
+
+    pub(crate) fn resume_from_archive(archive_path: PathBuf) -> Self {
+        let archive_flow_id = peek_archive_flow_id(&archive_path);
+        RunMode::Resume(ReplayRunContext {
             archive_path,
             archive_flow_id,
         })
@@ -86,6 +97,19 @@ mod tests {
                 assert_eq!(ctx.source_label(), temp.path().display().to_string());
             }
             other => panic!("expected replay mode, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resume_from_archive_carries_the_same_context_shape() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mode = RunMode::resume_from_archive(temp.path().to_path_buf());
+        match mode {
+            RunMode::Resume(ctx) => {
+                assert!(ctx.archive_flow_id.is_none());
+                assert_eq!(ctx.archive_path, temp.path());
+            }
+            other => panic!("expected resume mode, got {other:?}"),
         }
     }
 }

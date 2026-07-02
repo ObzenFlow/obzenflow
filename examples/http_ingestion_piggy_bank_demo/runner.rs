@@ -15,7 +15,7 @@
 use super::domain::{AccountOpened, LedgerEntry};
 use super::flow;
 use anyhow::Result;
-use obzenflow_infra::application::{FlowApplication, LogLevel};
+use obzenflow_infra::application::{Banner, FlowApplication, LogLevel, Presentation};
 use obzenflow_infra::web::endpoints::event_ingestion::{http_ingress, IngestionConfig};
 
 const ACCOUNTS_BASE_PATH: &str = "/api/bank/accounts";
@@ -41,9 +41,20 @@ pub fn run_example() -> Result<()> {
     // Same split here: source for `flow!`, bundle for the hosting shell.
     let tx_source = tx_ingress.source();
 
+    let presentation = Presentation::new(
+        Banner::new("Piggy Bank")
+            .description(
+                "Stream-table join over HTTP ingestion: accounts open a catalog, \
+                 transactions post against it, balances fold into a live checkbook.",
+            )
+            .config("accounts", format!("POST {ACCOUNTS_BASE_PATH}/events"))
+            .config("transactions", format!("POST {TX_BASE_PATH}/events")),
+    );
+
     FlowApplication::builder()
         .with_config_file(CONFIG_FILE)
         .with_log_level(LogLevel::Info)
+        .with_presentation(presentation)
         .with_http_ingress(accounts_ingress)
         .with_http_ingress(tx_ingress)
         // `build_flow(...)` intentionally takes only sources. It stays unaware of

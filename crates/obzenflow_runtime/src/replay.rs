@@ -102,6 +102,23 @@ pub trait ReplayArchive: Send + Sync {
     fn source_stage_keys(&self) -> Vec<String>;
 
     fn archive_path(&self) -> &Path;
+
+    /// Maximum recorded resume generation in this archive (FLOWIP-120n). A
+    /// resume run enters this plus one. The default answers for archives with
+    /// no recorded catch-up boundary; `DiskReplayArchive` overrides it
+    /// manifest-first with a source-journal scan fallback.
+    fn max_recorded_generation(&self) -> obzenflow_core::ReaderGeneration {
+        obzenflow_core::ReaderGeneration(0)
+    }
+
+    /// Maximum recorded admission sequence in this archive's source journals
+    /// (FLOWIP-120n F18). The run's flow sequencer is seeded above it so live
+    /// stamps order after every re-admitted sequence. The default answers for
+    /// archives predating the field; `DiskReplayArchive` overrides it from the
+    /// same single-pass source-journal scan as `max_recorded_generation`.
+    fn max_recorded_admission_seq(&self) -> obzenflow_core::AdmissionSeq {
+        obzenflow_core::AdmissionSeq(0)
+    }
 }
 
 #[derive(Debug, Clone)]

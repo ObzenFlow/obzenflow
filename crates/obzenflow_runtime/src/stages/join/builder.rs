@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use crate::metrics::instrumentation::StageInstrumentation;
-use crate::stages::common::handlers::JoinHandler;
+use crate::stages::common::handlers::UnifiedJoinHandler;
 use crate::stages::common::heartbeat::{spawn_heartbeat, HeartbeatConfig, HeartbeatState};
 use crate::stages::resources_builder::StageResources;
 use crate::supervised_base::{
@@ -31,7 +31,7 @@ pub enum JoinBuilderError {
 }
 
 /// Builder for creating join stages
-pub struct JoinBuilder<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> {
+pub struct JoinBuilder<H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> {
     handler: H,
     config: JoinConfig,
     resources: StageResources,
@@ -42,7 +42,7 @@ pub struct JoinBuilder<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 
     heartbeat_config: HeartbeatConfig,
 }
 
-impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> JoinBuilder<H> {
+impl<H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> JoinBuilder<H> {
     /// Create a new join builder with StageResources
     pub fn new(
         handler: H,
@@ -83,7 +83,7 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> JoinBuild
 }
 
 #[async_trait::async_trait]
-impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> SupervisorBuilder
+impl<H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> SupervisorBuilder
     for JoinBuilder<H>
 {
     type Handle = JoinHandle<H>;
@@ -122,6 +122,13 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Superviso
             stream_subscription_factory.reader_selection =
                 crate::messaging::upstream_subscription::ReaderSelectionPolicy::CanonicalMerge;
         }
+        // FLOWIP-120n F18: a source-fed ordered join runs the seq-ordered
+        // merge on both sides; the cross-side rule compares the same key.
+        let seq_ordered = self.resources.seq_ordered_fan_in;
+        if seq_ordered {
+            reference_subscription_factory.seq_ordered = true;
+            stream_subscription_factory.seq_ordered = true;
+        }
 
         let heartbeat_config = self.heartbeat_config.clone();
         let heartbeat = if self
@@ -141,7 +148,7 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Superviso
                 self.resources.liveness_snapshots.clone(),
                 heartbeat_state,
                 heartbeat_config,
-                /* is_replay */ false,
+                self.resources.runtime_execution.clone(),
             ))
         };
 
@@ -198,6 +205,8 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Superviso
                 ),
             heartbeat,
             deterministic_fan_in,
+            seq_ordered,
+            catch_up_flip: None,
         };
 
         // Create supervisor

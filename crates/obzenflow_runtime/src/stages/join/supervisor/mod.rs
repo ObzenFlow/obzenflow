@@ -11,7 +11,7 @@ mod hydrating;
 mod live;
 
 use crate::messaging::UpstreamSubscription;
-use crate::stages::common::handlers::JoinHandler;
+use crate::stages::common::handlers::UnifiedJoinHandler;
 use crate::supervised_base::base::Supervisor;
 use crate::supervised_base::{
     EventLoopDirective, ExternalEventMode, ExternalEventPolicy, HandlerSupervised,
@@ -23,7 +23,9 @@ use super::config::JoinReferenceMode;
 use super::fsm::{JoinAction, JoinContext, JoinEvent, JoinState};
 
 /// Supervisor for join stages.
-pub(crate) struct JoinSupervisor<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> {
+pub(crate) struct JoinSupervisor<
+    H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
+> {
     /// Supervisor name (for logging)
     pub(crate) name: String,
 
@@ -40,7 +42,7 @@ pub(crate) struct JoinSupervisor<H: JoinHandler + Clone + std::fmt::Debug + Send
     pub(crate) _marker: std::marker::PhantomData<H>,
 }
 
-impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Supervisor
+impl<H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Supervisor
     for JoinSupervisor<H>
 {
     type State = JoinState<H>;
@@ -412,7 +414,7 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Superviso
 }
 
 #[async_trait::async_trait]
-impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSupervised
+impl<H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSupervised
     for JoinSupervisor<H>
 {
     type Handler = H;
@@ -453,7 +455,7 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> HandlerSu
     }
 }
 
-impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> ExternalEventPolicy
+impl<H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> ExternalEventPolicy
     for JoinSupervisor<H>
 {
     fn external_event_mode(state: &Self::State) -> ExternalEventMode {

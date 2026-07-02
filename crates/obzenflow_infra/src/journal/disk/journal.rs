@@ -29,7 +29,7 @@ use std::fs::File as StdFile;
 use std::io::BufReader;
 use std::io::SeekFrom;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::OnceLock;
@@ -83,6 +83,10 @@ pub struct DiskJournal<T: JournalEvent> {
     /// Set when a failed append could not be rolled back, leaving the file in an
     /// unknown state. Further appends are rejected until the journal is reopened.
     poisoned: Arc<AtomicBool>,
+    /// Flow-shared admission sequencer (FLOWIP-120n F18). When present, appends
+    /// stamp sequence-less events under the write lock, so sequence order
+    /// equals append order. None outside factory-built flow journals.
+    admission_sequencer: Option<Arc<AtomicU64>>,
     _phantom: std::marker::PhantomData<T>,
 }
 
@@ -216,6 +220,7 @@ impl<T: JournalEvent> DiskJournal<T> {
             read_write_lock: shared_lock_for_path(&log_path),
             writer_clocks: Arc::new(RwLock::new(writer_clocks)),
             poisoned: Arc::new(AtomicBool::new(false)),
+            admission_sequencer: None,
             _phantom: std::marker::PhantomData,
         })
     }
@@ -255,8 +260,15 @@ impl<T: JournalEvent> DiskJournal<T> {
             read_write_lock: shared_lock_for_path(&log_path),
             writer_clocks: Arc::new(RwLock::new(writer_clocks)),
             poisoned: Arc::new(AtomicBool::new(false)),
+            admission_sequencer: None,
             _phantom: std::marker::PhantomData,
         })
+    }
+
+    /// Attach the flow-shared admission sequencer (FLOWIP-120n F18).
+    pub fn with_admission_sequencer(mut self, sequencer: Arc<AtomicU64>) -> Self {
+        self.admission_sequencer = Some(sequencer);
+        self
     }
 }
 
@@ -338,6 +350,7 @@ impl<T: JournalEvent> Clone for DiskJournal<T> {
             read_write_lock: self.read_write_lock.clone(),
             writer_clocks: self.writer_clocks.clone(),
             poisoned: self.poisoned.clone(),
+            admission_sequencer: self.admission_sequencer.clone(),
             _phantom: std::marker::PhantomData,
         }
     }
@@ -359,7 +372,7 @@ impl<T: JournalEvent + 'static> Journal<T> for DiskJournal<T> {
 
     async fn append(
         &self,
-        event: T,
+        mut event: T,
         parent: Option<&EventEnvelope<T>>,
     ) -> Result<EventEnvelope<T>, JournalError> {
         crate::journal::ensure_owned(self.owner.as_ref())?;
@@ -380,6 +393,16 @@ impl<T: JournalEvent + 'static> Journal<T> for DiskJournal<T> {
         // This serialises append operations and ensures concurrent appends
         // cannot compute the same `writer_seq` from a stale snapshot.
         let _lock = self.read_write_lock.write().await;
+
+        // FLOWIP-120n F18: stamp under the write lock so sequence order equals
+        // append order; re-admitted rows already carry theirs and keep it.
+        if let Some(sequencer) = &self.admission_sequencer {
+            if event.admission_seq().is_none() {
+                event.set_admission_seq(obzenflow_core::AdmissionSeq(
+                    sequencer.fetch_add(1, Ordering::Relaxed),
+                ));
+            }
+        }
 
         // Compute this writer's next clock under the write lock. The helper is
         // store-free, so the writer clock is committed only after the file write

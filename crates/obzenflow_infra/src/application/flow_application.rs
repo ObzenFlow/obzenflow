@@ -733,7 +733,14 @@ impl FlowApplication {
 
         // FLOWIP-120i: resolve the run mode once, for banner and footer copy.
         let run_mode = match &config.replay {
-            Some(replay) => super::run_mode::RunMode::replay_from_archive(replay.from.clone()),
+            Some(replay) => match replay.verb {
+                obzenflow_runtime::bootstrap::ReplayVerb::Replay => {
+                    super::run_mode::RunMode::replay_from_archive(replay.from.clone())
+                }
+                obzenflow_runtime::bootstrap::ReplayVerb::Resume => {
+                    super::run_mode::RunMode::resume_from_archive(replay.from.clone())
+                }
+            },
             None => super::run_mode::RunMode::Live,
         };
 

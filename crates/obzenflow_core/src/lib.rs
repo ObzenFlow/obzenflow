@@ -24,7 +24,7 @@ pub use event::context::runtime_context;
 pub use event::context::MiddlewareExecutionScope;
 pub use event::event_envelope::EventEnvelope;
 pub use event::EventId;
-pub use event::{EventType, JournalWriterId, WriterId};
+pub use event::{AdmissionSeq, EventType, JournalWriterId, ReaderGeneration, WriterId};
 pub use journal::journal_error::JournalError;
 pub use journal::journal_owner::JournalOwner;
 pub use journal::Journal;
