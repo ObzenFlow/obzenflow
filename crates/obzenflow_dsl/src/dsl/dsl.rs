@@ -718,11 +718,16 @@ macro_rules! build_typed_flow {
             });
         }
 
-        // FLOWIP-095d: mark every multi-inbound stage above an effectful stage
-        // as a deterministic fan-in orderer and wrap its descriptor, so the
-        // guard below accepts the effectful stages and the runtime enables the
-        // canonical merge on exactly those subscriptions. The guard stays as
-        // the safety net for cycles and externally constructed descriptors.
+        // FLOWIP-095m: an order observer (an effect, a stateful fold, or a
+        // live/symmetric join) below a multi-source fan-in needs the canonical
+        // merge for faithful reconstruction. Compute observers from the
+        // unwrapped descriptors, because the live-vs-hydrating join test reads
+        // is_deterministic_input_orderer(), which wrap_deterministic_orderers
+        // flips to true on every marked stage; then seed both the marking walk
+        // and the guard from the same set. The guard stays the safety net for
+        // cycles and externally constructed descriptors.
+        let order_observers =
+            $crate::dsl::typing::order_observer_stage_ids(&descriptors, &name_to_id);
         let deterministic_fan_in_stages = $crate::dsl::typing::derive_deterministic_fan_in_stages(
             &topology,
             &descriptors,
@@ -734,10 +739,11 @@ macro_rules! build_typed_flow {
             &deterministic_fan_in_stages,
         );
 
-        $crate::dsl::typing::validate_effectful_deterministic_input_order(
+        $crate::dsl::typing::validate_order_observer_deterministic_input_order(
             &topology,
             &descriptors,
             &name_to_id,
+            &order_observers,
         )
         .map_err(|err| *err)?;
 

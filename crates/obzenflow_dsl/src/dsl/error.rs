@@ -232,6 +232,17 @@ pub enum FlowBuildError {
     EffectfulFanInRequiresDeterministicOrder { stage_name: String },
 
     #[error(
+        "Order-observing stage '{stage_name}' is downstream of nondeterministic fan-in. \
+         FLOWIP-095m auto-enables the canonical deterministic merge on fan-ins above \
+         stateful stages and live joins, so this rejection means the order cannot be \
+         made stable. The usual cause is a cycle on the path, because a stateful or \
+         live-join stage below a cycle-fed fan-in cannot reconstruct a stable input \
+         order in v1. Move the stage off the cycle's output, or make the upstream \
+         path acyclic."
+    )]
+    OrderObserverFanInRequiresDeterministicOrder { stage_name: String },
+
+    #[error(
         "Sink '{stage}' declares a non-idempotent external delivery path; resume re-delivers \
          the recorded prefix during catch-up, which would duplicate those writes \
          (FLOWIP-120n F16). Pass `allow_duplicate_sink_delivery` to accept duplication."

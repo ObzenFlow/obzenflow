@@ -456,3 +456,66 @@ async fn live_join_canonical_merge_reproduces_under_replay() {
     replay_testkit::assert_same_delivered_order(&live_run, &replay_run, "joined", &["stream_src"])
         .await;
 }
+
+/// FLOWIP-095m: the same live join with NO effect below it. 095d would leave it
+/// availability-scheduled; 095m marks it because a live join observes its own
+/// interleaving, so it runs the canonical cross-side dispatch.
+fn build_live_flow_no_effect(journal_base: PathBuf) -> FlowDefinition {
+    flow! {
+        name: "join_phase_transition_live_no_effect",
+        journals: disk_journals(journal_base),
+        middleware: [],
+
+        stages: {
+            ref_src = source!(RefItem => RefSource::new());
+            stream_src = source!(StreamItem => StreamSource::new());
+            joined = join!(catalog ref_src: RefItem, StreamItem -> JoinedItem => joins::inner_live(
+                |r: &RefItem| r.key.clone(),
+                |s: &StreamItem| s.key.clone(),
+                join_fn
+            ));
+            collector = sink!(JoinedItem => DropSink);
+        },
+
+        topology: {
+            stream_src |> joined;
+            joined |> collector;
+        }
+    }
+}
+
+/// FLOWIP-095m: a live join with no effect below it is marked on its own and
+/// reaches `dispatch_live_canonical`, so its merged delivery order reproduces
+/// under replay. The classification and marking are pinned by the DSL unit test
+/// `live_join_fan_in_is_marked_without_effect`; this is the end-to-end witness.
+#[tokio::test]
+async fn live_join_without_effect_reproduces_under_replay() {
+    let _guard = JOIN_REPLAY_TEST_LOCK.lock().await;
+    let temp = tempfile::tempdir().expect("tempdir");
+    let journal_base = temp.path().join("journals");
+
+    run_live(build_live_flow_no_effect(journal_base.clone())).await;
+    let live_run = replay_testkit::latest_run_dir(&journal_base);
+    let live_signature =
+        replay_testkit::transport_row_signature(&live_run, "joined", &["ref_src", "stream_src"])
+            .await;
+    let live_projection =
+        replay_testkit::project_delivered_order(&live_run, "joined", &["stream_src"]).await;
+    assert!(
+        !live_projection.consumption_sequence().is_empty(),
+        "the live join must deliver stream rows"
+    );
+
+    run_replay(&live_run, build_live_flow_no_effect(journal_base.clone())).await;
+    let replay_run = replay_testkit::latest_run_dir(&journal_base);
+    assert_ne!(live_run, replay_run);
+    let replay_signature =
+        replay_testkit::transport_row_signature(&replay_run, "joined", &["ref_src", "stream_src"])
+            .await;
+    assert_eq!(
+        live_signature, replay_signature,
+        "a no-effect live join's merged delivery order must reproduce under replay"
+    );
+    replay_testkit::assert_same_delivered_order(&live_run, &replay_run, "joined", &["stream_src"])
+        .await;
+}

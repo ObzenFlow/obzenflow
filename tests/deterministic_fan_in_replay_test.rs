@@ -19,7 +19,7 @@ use obzenflow_core::{
     id::StageId,
     TypedPayload, WriterId,
 };
-use obzenflow_dsl::{effectful_transform, flow, sink, source, transform, FlowDefinition};
+use obzenflow_dsl::{effectful_transform, flow, sink, source, stateful, transform, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::effects::{
@@ -27,7 +27,7 @@ use obzenflow_runtime::effects::{
 };
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
-    EffectfulTransformHandler, FiniteSourceHandler, SinkHandler, TransformHandler,
+    EffectfulTransformHandler, FiniteSourceHandler, SinkHandler, StatefulHandler, TransformHandler,
 };
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
@@ -310,6 +310,59 @@ impl SinkHandler for DropSink {
     }
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct OrderedList {
+    items: Vec<String>,
+}
+
+impl TypedPayload for OrderedList {
+    const EVENT_TYPE: &'static str = "fan_in.ordered_list";
+}
+
+/// Non-effectful ORDER-DEPENDENT fold: it accumulates the arrival-ordered
+/// `channel:value` word and emits it at drain. Its durable output differs under
+/// a different fan-in interleaving, so reproducing it across live and replay
+/// witnesses that the canonical merge pinned the order (FLOWIP-095m). A
+/// commutative fold (e.g. a running sum) would emit the same output regardless
+/// of order and so could not witness this.
+#[derive(Clone, Debug)]
+struct OrderedListStateful {
+    writer_id: WriterId,
+}
+
+impl OrderedListStateful {
+    fn new() -> Self {
+        Self {
+            writer_id: WriterId::from(StageId::new()),
+        }
+    }
+}
+
+#[async_trait]
+impl StatefulHandler for OrderedListStateful {
+    type State = Vec<String>;
+
+    fn accumulate(&mut self, state: &mut Vec<String>, event: ChainEvent) {
+        if let Some(record) = MergedRecord::from_event(&event) {
+            state.push(format!("{}:{}", record.channel, record.value));
+        }
+    }
+
+    fn initial_state(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    fn create_events(&self, state: &Vec<String>) -> Result<Vec<ChainEvent>, HandlerError> {
+        Ok(vec![ChainEventFactory::data_event(
+            self.writer_id,
+            OrderedList::EVENT_TYPE,
+            json!(OrderedList {
+                items: state.clone()
+            }),
+        )])
+    }
+}
+
 /// Two channels of unequal length fan into the merge; the effectful tail
 /// triggers the FLOWIP-095d enablement walk, so `merge` runs the canonical
 /// deterministic merge.
@@ -383,6 +436,33 @@ fn build_skip_level_flow_with_delay(
             tap |> merge;
             merge |> effectful;
             effectful |> collector;
+        }
+    }
+}
+
+/// FLOWIP-095m: two channels fan into `merge`, whose only descendant is a
+/// NON-effectful stateful counter. 095d would leave this fan-in
+/// availability-scheduled; 095m marks it because the stateful stage observes
+/// order, so `merge` runs the canonical deterministic merge.
+fn build_two_channel_stateful_flow(journal_base: PathBuf) -> FlowDefinition {
+    flow! {
+        name: "stateful_fan_in",
+        journals: disk_journals(journal_base),
+        middleware: [],
+
+        stages: {
+            source_a = source!(FanInInput => ChannelSource::with_jitter("a", 4, 0));
+            source_b = source!(FanInInput => ChannelSource::with_jitter("b", 3, 0));
+            merge = transform!(FanInInput -> MergedRecord => MergeTransform::new());
+            counter = stateful!(MergedRecord -> OrderedList => OrderedListStateful::new());
+            collector = sink!(OrderedList => DropSink);
+        },
+
+        topology: {
+            source_a |> merge;
+            source_b |> merge;
+            merge |> counter;
+            counter |> collector;
         }
     }
 }
@@ -481,6 +561,85 @@ async fn fan_in_delivery_order_identical_across_live_replay_and_replay_of_replay
         &["source_a", "source_b"],
     )
     .await;
+}
+
+/// Read the `counter` fold's emitted `channel:value` word from a run's journal.
+async fn counter_ordered_word(run_dir: &std::path::Path) -> Vec<String> {
+    replay_testkit::read_stage_envelopes(run_dir, "counter")
+        .await
+        .iter()
+        .filter_map(|envelope| OrderedList::from_event(&envelope.event))
+        .flat_map(|list| list.items)
+        .collect()
+}
+
+/// FLOWIP-095m: a non-effectful stateful stage below the fan-in triggers the
+/// canonical merge (095d fired only for effects), and the delivered order at
+/// `merge` reproduces under `--replay-from`. Without the widening `merge` would
+/// be availability-scheduled and this canonical alternation would not hold. The
+/// fold is order-DEPENDENT, so its own durable output is a second witness.
+#[tokio::test]
+async fn stateful_fan_in_delivery_order_reproduces_under_replay() {
+    let _guard = FAN_IN_TEST_LOCK.lock().await;
+    let temp = tempfile::tempdir().expect("tempdir");
+    let journal_base = temp.path().join("journals");
+
+    run_live(
+        &journal_base,
+        build_two_channel_stateful_flow(journal_base.clone()),
+    )
+    .await;
+    let live_run = replay_testkit::latest_run_dir(&journal_base);
+
+    let live_projection =
+        replay_testkit::project_delivered_order(&live_run, "merge", &["source_a", "source_b"])
+            .await;
+    assert_eq!(
+        live_projection.consumption_sequence(),
+        vec![
+            ("source_a".to_string(), 1),
+            ("source_b".to_string(), 1),
+            ("source_a".to_string(), 2),
+            ("source_b".to_string(), 2),
+            ("source_a".to_string(), 3),
+            ("source_b".to_string(), 3),
+            ("source_a".to_string(), 4),
+        ],
+        "a stateful stage below the fan-in must trigger the canonical alternation"
+    );
+
+    run_replay(
+        &live_run,
+        build_two_channel_stateful_flow(journal_base.clone()),
+    )
+    .await;
+    let replay_run = replay_testkit::latest_run_dir(&journal_base);
+    assert_ne!(live_run, replay_run);
+    replay_testkit::assert_same_delivered_order(
+        &live_run,
+        &replay_run,
+        "merge",
+        &["source_a", "source_b"],
+    )
+    .await;
+
+    // FLOWIP-095m: the order-DEPENDENT fold's own durable output reproduces,
+    // which is the reconstruction property 120n's S_N relies on. A commutative
+    // fold could not witness this, since its output would not vary with order.
+    let expected_word: Vec<String> = ["a:1", "b:1", "a:2", "b:2", "a:3", "b:3", "a:4"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let live_word = counter_ordered_word(&live_run).await;
+    assert_eq!(
+        live_word, expected_word,
+        "the fold must record the canonical arrival order"
+    );
+    assert_eq!(
+        counter_ordered_word(&replay_run).await,
+        live_word,
+        "the fold's durable output must reproduce under replay"
+    );
 }
 
 /// Arrival-timing independence: two LIVE runs with different per-source
