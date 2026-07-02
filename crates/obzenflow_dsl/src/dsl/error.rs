@@ -61,6 +61,9 @@ pub enum FlowBuildError {
     #[error("Journal factory failed: {0}")]
     JournalFactoryFailed(String),
 
+    #[error("Runtime resource preflight failed: {0}")]
+    ResourcePreflightFailed(String),
+
     #[error("Stage resources build failed: {0}")]
     StageResourcesFailed(String),
 

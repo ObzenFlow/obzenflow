@@ -126,7 +126,7 @@ macro_rules! __obzenflow_effect_ports_or_default {
 /// | Section | Purpose |
 /// |---------|---------|
 /// | `name:` | String identifier used for journal directories and metrics. |
-/// | `journals:` | Journal factory (`disk_journals(path)` or `memory_journals()`). |
+/// | `journals:` | Journal factory (`disk_journals(path)` or `memory_journals()`). The factory declares its substrate via the required `run_state()`: durable with a run location, or ephemeral with none (FLOWIP-120u). |
 /// | `middleware:` | Flow-level middleware applied to every stage by default. |
 /// | `stages:` | Let-bindings producing stage descriptors via stage macros. |
 /// | `topology:` | Edges connecting stages (`a \|> b;` forward, `a <\| b;` backward). |
@@ -503,6 +503,12 @@ macro_rules! build_typed_flow {
         let connections = $connections;
         let create_flow_middleware = $create_flow_middleware;
         let lowering_artifacts = $lowering_artifacts;
+
+        // FLOWIP-120u F2: pair the build result with the substrate state known
+        // at the failure point. Set once at the factory seam; None means the
+        // build failed before substrate selection, so no run directory exists.
+        let mut __run_state: Option<obzenflow_runtime::journal::RunSubstrateState> = None;
+        let __build_result: Result<_, FlowBuildError> = async {
 
         // Build topology - Two-pass approach for join stages:
         // Pass 1: Create all stage IDs and build name_to_id mapping
@@ -1023,6 +1029,21 @@ macro_rules! build_typed_flow {
         let mut journal_factory = journal_factory_provider(flow_id.clone())
             .map_err(|e| FlowBuildError::JournalFactoryFailed(format!("{:?}", e)))?;
 
+        // FLOWIP-120u: capture the substrate declaration, then run the
+        // provider's resource preflight before any journal is created.
+        let __substrate =
+            obzenflow_runtime::journal::FlowJournalFactory::run_state(&journal_factory);
+        __run_state = Some(__substrate.clone());
+        obzenflow_runtime::journal::FlowJournalFactory::resource_preflight(
+            &journal_factory,
+            &obzenflow_runtime::journal::RunResourcePlan {
+                stage_count: topology.stages().count(),
+                edge_count: topology.edges().len(),
+                metrics_enabled: DefaultMetricsConfig::default().is_enabled(),
+            },
+        )
+        .map_err(|e| FlowBuildError::ResourcePreflightFailed(format!("{e}")))?;
+
         // Create all journals upfront with proper ownership
         use obzenflow_core::journal::journal_name::JournalName;
         use obzenflow_core::journal::journal_owner::JournalOwner;
@@ -1126,12 +1147,17 @@ macro_rules! build_typed_flow {
             );
         }
 
-        // FLOWIP-120n: open the replay archive before the manifest is written,
+        // FLOWIP-120n: take the replay archive before the manifest is written,
         // so a resume records the generation it enters (max recorded + 1).
-        let replay_archive =
-            obzenflow_runtime::journal::FlowJournalFactory::replay_archive(&mut journal_factory)
-                .await
-                .map_err(|e| FlowBuildError::StageResourcesFailed(format!("Failed to open replay archive: {e}")))?;
+        // FLOWIP-120u: the host opened it into the bootstrap snapshot; the
+        // factory only consumes it, to seed the F18 admission sequencer.
+        let replay_archive = obzenflow_runtime::bootstrap::replay_archive();
+        if let Some(archive) = replay_archive.as_ref() {
+            obzenflow_runtime::journal::FlowJournalFactory::seed_admission_from_archive(
+                &journal_factory,
+                archive.as_ref(),
+            );
+        }
 
         // Write run manifest (disk journals persist; memory journals no-op) - FLOWIP-095a.
         let replay_manifest = obzenflow_runtime::bootstrap::replay_bootstrap().map(|replay| {
@@ -1166,16 +1192,23 @@ macro_rules! build_typed_flow {
             stages: manifest_stages,
             system_journal_file: JournalName::System.to_filename(),
         };
-        obzenflow_runtime::journal::FlowJournalFactory::write_run_manifest(
-            &journal_factory,
-            &run_manifest,
-        )
-        .map_err(|e| {
-            FlowBuildError::JournalFactoryFailed(format!(
-                "Failed to write run_manifest.json: {:?}",
-                e
-            ))
-        })?;
+        // FLOWIP-120u: the manifest is a durable-run artifact; ephemeral runs
+        // have no location to persist it within.
+        if matches!(
+            __substrate,
+            obzenflow_runtime::journal::RunSubstrateState::Durable(_)
+        ) {
+            obzenflow_runtime::journal::FlowJournalFactory::write_run_manifest(
+                &journal_factory,
+                &run_manifest,
+            )
+            .map_err(|e| {
+                FlowBuildError::JournalFactoryFailed(format!(
+                    "Failed to write run_manifest.json: {:?}",
+                    e
+                ))
+            })?;
+        }
 
         // Backpressure is opt-in (FLOWIP-086k): extract per-stage windows from middleware configs.
         use obzenflow_runtime::backpressure::BackpressurePlan;
@@ -1627,7 +1660,8 @@ macro_rules! build_typed_flow {
             .with_error_journals(stage_resources_set.error_journals.clone())
             .with_backpressure_registry(stage_resources_set.backpressure_registry.clone())
             .with_feed_plan(stage_resources_set.feed_plan.clone())
-            .with_liveness_snapshots(stage_resources_set.liveness_snapshots.clone());
+            .with_liveness_snapshots(stage_resources_set.liveness_snapshots.clone())
+            .with_run_substrate(__substrate.clone());
 
         let builder = if let Some(exporter) = metrics_exporter {
             builder.with_metrics(exporter)
@@ -1642,5 +1676,11 @@ macro_rules! build_typed_flow {
 
         let stage_data_journals = stage_resources_set.stage_journals;
         $finish(handle, stage_data_journals)
+        }
+        .await;
+        __build_result.map_err(|error| $crate::FlowBuildFailure {
+            error,
+            run: __run_state,
+        })
     }};
 }

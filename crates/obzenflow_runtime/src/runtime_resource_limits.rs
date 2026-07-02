@@ -5,31 +5,33 @@
 use obzenflow_core::journal::JournalError;
 use std::io;
 
+// Public provider-author API (FLOWIP-120u): the disk provider runs its own
+// preflight from `FlowJournalFactory::resource_preflight`.
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct NofileLimit {
-    pub(crate) soft: u64,
-    pub(crate) hard: u64,
+pub struct NofileLimit {
+    pub soft: u64,
+    pub hard: u64,
 }
 
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct DiskJournalFdEstimate {
-    pub(crate) stages: usize,
-    pub(crate) edges: usize,
-    pub(crate) metrics_enabled: bool,
-    pub(crate) estimated_fds: u64,
-    pub(crate) breakdown: DiskJournalFdBreakdown,
+pub struct DiskJournalFdEstimate {
+    pub stages: usize,
+    pub edges: usize,
+    pub metrics_enabled: bool,
+    pub estimated_fds: u64,
+    pub breakdown: DiskJournalFdBreakdown,
 }
 
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct DiskJournalFdBreakdown {
-    pub(crate) writer_fds: u64,
-    pub(crate) stage_reader_fds: u64,
-    pub(crate) metrics_reader_fds: u64,
-    pub(crate) system_reader_fds: u64,
-    pub(crate) overhead_fds: u64,
+pub struct DiskJournalFdBreakdown {
+    pub writer_fds: u64,
+    pub stage_reader_fds: u64,
+    pub metrics_reader_fds: u64,
+    pub system_reader_fds: u64,
+    pub overhead_fds: u64,
 }
 
-pub(crate) fn estimate_disk_journal_fds(
+pub fn estimate_disk_journal_fds(
     stages: usize,
     edges: usize,
     metrics_enabled: bool,
@@ -105,7 +107,7 @@ pub(crate) fn io_error_is_too_many_open_files(err: &io::Error) -> bool {
     }
 }
 
-pub(crate) fn env_try_raise_nofile() -> bool {
+pub fn env_try_raise_nofile() -> bool {
     std::env::var("OBZENFLOW_TRY_RAISE_NOFILE")
         .ok()
         .and_then(|v| v.parse::<bool>().ok())
@@ -167,7 +169,7 @@ fn try_raise_nofile_soft_limit(_desired_soft: u64) -> io::Result<NofileLimit> {
     get_nofile_limit()
 }
 
-pub(crate) fn preflight_nofile_for_disk_journals(
+pub fn preflight_nofile_for_disk_journals(
     estimate: DiskJournalFdEstimate,
     try_raise: bool,
 ) -> Result<Option<NofileLimit>, String> {

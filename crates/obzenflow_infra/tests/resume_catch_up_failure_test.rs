@@ -438,15 +438,15 @@ async fn corrupted_source_archive_aborts_the_resume_before_any_live_admission() 
     let calls = Arc::new(AtomicUsize::new(0));
     let delivered = Arc::new(AtomicU64::new(0));
     let failure_reason = {
-        let _bootstrap = install_bootstrap_config(BootstrapConfig {
-            replay: Some(ReplayBootstrap {
+        let _bootstrap = install_bootstrap_config(
+            replay_testkit::bootstrap_with_archive(ReplayBootstrap {
                 archive_path: recorded_run.clone(),
                 allow_incomplete_archive: true,
                 allow_duplicate_sink_delivery: false,
                 verb: ReplayVerb::Resume,
-            }),
-            ..BootstrapConfig::default()
-        });
+            })
+            .await,
+        );
         let handle = build_flow(
             journal_base.clone(),
             &live_ranges,

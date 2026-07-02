@@ -7,11 +7,14 @@
 //! These values are resolved once by the hosting shell (typically `FlowApplication`)
 //! and then read by lower layers during flow build and execution.
 
+use std::fmt;
 use std::mem;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{OnceLock, RwLock};
+use std::sync::{Arc, OnceLock, RwLock};
 use std::time::Duration;
+
+use crate::replay::ReplayArchive;
 
 #[cfg(test)]
 use tokio::sync::{Mutex as TokioMutex, MutexGuard as TokioMutexGuard};
@@ -94,7 +97,7 @@ impl Default for MetricsBootstrap {
 ///
 /// These settings are resolved by the hosting shell (typically `FlowApplication`)
 /// and installed for the lifetime of a single run via [`install_bootstrap_config`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct BootstrapConfig {
     /// Graceful shutdown timeout for pipeline drain and stage teardown.
     pub shutdown_timeout: Duration,
@@ -102,6 +105,11 @@ pub struct BootstrapConfig {
     pub startup_mode: StartupMode,
     /// Optional replay bootstrap configuration.
     pub replay: Option<ReplayBootstrap>,
+    /// The opened replay/resume input archive, when `replay` is set (FLOWIP-120u).
+    ///
+    /// The host opens it at config resolution (the concrete opener lives in
+    /// infra, below the DSL in the dependency graph) and the build consumes it.
+    pub replay_archive: Option<Arc<dyn ReplayArchive>>,
     /// Metrics bootstrap configuration.
     pub metrics: MetricsBootstrap,
 }
@@ -112,8 +120,34 @@ impl Default for BootstrapConfig {
             shutdown_timeout: Duration::from_secs(30),
             startup_mode: StartupMode::Auto,
             replay: None,
+            replay_archive: None,
             metrics: MetricsBootstrap::default(),
         }
+    }
+}
+
+// Manual impls: the archive handle is a live resource, excluded from equality
+// and rendered by presence in Debug.
+impl PartialEq for BootstrapConfig {
+    fn eq(&self, other: &Self) -> bool {
+        self.shutdown_timeout == other.shutdown_timeout
+            && self.startup_mode == other.startup_mode
+            && self.replay == other.replay
+            && self.metrics == other.metrics
+    }
+}
+
+impl Eq for BootstrapConfig {}
+
+impl fmt::Debug for BootstrapConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("BootstrapConfig")
+            .field("shutdown_timeout", &self.shutdown_timeout)
+            .field("startup_mode", &self.startup_mode)
+            .field("replay", &self.replay)
+            .field("replay_archive", &self.replay_archive.is_some())
+            .field("metrics", &self.metrics)
+            .finish()
     }
 }
 
@@ -210,6 +244,11 @@ pub fn startup_mode_manual() -> bool {
 /// Optional replay bootstrap parameters.
 pub fn replay_bootstrap() -> Option<ReplayBootstrap> {
     bootstrap_config().replay
+}
+
+/// The opened replay/resume input archive, when the host installed one (FLOWIP-120u).
+pub fn replay_archive() -> Option<Arc<dyn ReplayArchive>> {
+    bootstrap_config().replay_archive
 }
 
 /// Metrics bootstrap settings.
@@ -312,6 +351,7 @@ mod tests {
             shutdown_timeout: Duration::from_secs(45),
             startup_mode: StartupMode::Auto,
             replay: None,
+            replay_archive: None,
             metrics: MetricsBootstrap {
                 enabled: true,
                 exporter: MetricsExporterKind::Console,
@@ -329,6 +369,7 @@ mod tests {
                     allow_duplicate_sink_delivery: false,
                     verb: ReplayVerb::Replay,
                 }),
+                replay_archive: None,
                 metrics: MetricsBootstrap {
                     enabled: false,
                     exporter: MetricsExporterKind::Noop,

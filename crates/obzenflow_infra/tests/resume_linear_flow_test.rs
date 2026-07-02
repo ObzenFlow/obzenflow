@@ -349,15 +349,15 @@ async fn resume_linear_flow_replays_prefix_then_continues_live() -> Result<()> {
     // Resume: same flow shape, live handler produces new events after archive
     // exhaustion. The bootstrap guard scopes the Resume verb to this run.
     {
-        let _bootstrap = install_bootstrap_config(BootstrapConfig {
-            replay: Some(ReplayBootstrap {
+        let _bootstrap = install_bootstrap_config(
+            replay_testkit::bootstrap_with_archive(ReplayBootstrap {
                 archive_path: recorded_run.clone(),
                 allow_incomplete_archive: true,
                 allow_duplicate_sink_delivery: false,
                 verb: ReplayVerb::Resume,
-            }),
-            ..BootstrapConfig::default()
-        });
+            })
+            .await,
+        );
         // The sink re-consumes the recorded prefix during catch-up (F14), so
         // the wait target is prefix + live; a live-only target is satisfied
         // mid-catch-up and races the stop into the reconstruction phase.

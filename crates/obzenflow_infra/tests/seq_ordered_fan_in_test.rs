@@ -388,15 +388,15 @@ async fn seq_fan_in_delivers_stream_while_reference_is_quiet_and_replays_exactly
     // keeps the wait and recomputes the identical order from the re-admitted
     // sequences alone.
     {
-        let _bootstrap = install_bootstrap_config(BootstrapConfig {
-            replay: Some(ReplayBootstrap {
+        let _bootstrap = install_bootstrap_config(
+            replay_testkit::bootstrap_with_archive(ReplayBootstrap {
                 archive_path: recorded_run.clone(),
                 allow_incomplete_archive: true,
                 allow_duplicate_sink_delivery: false,
                 verb: ReplayVerb::Replay,
-            }),
-            ..BootstrapConfig::default()
-        });
+            })
+            .await,
+        );
         let delivered = Arc::new(AtomicU64::new(0));
         let handle = build_flow(journal_base.clone(), 1, 1, TX_EVENTS, delivered)
             .await

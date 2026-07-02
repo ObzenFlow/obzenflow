@@ -344,15 +344,15 @@ async fn record_and_interrupt(journal_base: &Path) -> Result<(PathBuf, PathBuf)>
     // soon as the source's watermark lands while the transform (needing
     // RECORDED * SLOW_MS of work) is still re-processing the prefix.
     {
-        let _bootstrap = install_bootstrap_config(BootstrapConfig {
-            replay: Some(ReplayBootstrap {
+        let _bootstrap = install_bootstrap_config(
+            replay_testkit::bootstrap_with_archive(ReplayBootstrap {
                 archive_path: r0.clone(),
                 allow_incomplete_archive: true,
                 allow_duplicate_sink_delivery: false,
                 verb: ReplayVerb::Resume,
-            }),
-            ..BootstrapConfig::default()
-        });
+            })
+            .await,
+        );
         let delivered = Arc::new(AtomicU64::new(0));
         let handle = build_flow(
             journal_base.to_path_buf(),
@@ -405,15 +405,15 @@ async fn resuming_an_interrupted_resume_extends_the_same_prefix() -> Result<()> 
     // the slow transform, so R2's sink counter over-counts the catch-up gap
     // nondeterministically; completion is awaited from the journal instead.
     {
-        let _bootstrap = install_bootstrap_config(BootstrapConfig {
-            replay: Some(ReplayBootstrap {
+        let _bootstrap = install_bootstrap_config(
+            replay_testkit::bootstrap_with_archive(ReplayBootstrap {
                 archive_path: r1.clone(),
                 allow_incomplete_archive: true,
                 allow_duplicate_sink_delivery: false,
                 verb: ReplayVerb::Resume,
-            }),
-            ..BootstrapConfig::default()
-        });
+            })
+            .await,
+        );
         let delivered = Arc::new(AtomicU64::new(0));
         let handle = build_flow(
             journal_base.to_path_buf(),
@@ -530,15 +530,15 @@ async fn resuming_a_torn_catch_up_archive_stays_at_generation_one() -> Result<()
     // Resume the torn archive. No generation-1 boundary is recorded anywhere,
     // so the resume must enter generation 1 again and extend the prefix.
     {
-        let _bootstrap = install_bootstrap_config(BootstrapConfig {
-            replay: Some(ReplayBootstrap {
+        let _bootstrap = install_bootstrap_config(
+            replay_testkit::bootstrap_with_archive(ReplayBootstrap {
                 archive_path: r1.clone(),
                 allow_incomplete_archive: true,
                 allow_duplicate_sink_delivery: false,
                 verb: ReplayVerb::Resume,
-            }),
-            ..BootstrapConfig::default()
-        });
+            })
+            .await,
+        );
         let delivered = Arc::new(AtomicU64::new(0));
         let handle = build_flow(
             journal_base.to_path_buf(),

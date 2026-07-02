@@ -378,6 +378,7 @@ mod tests {
             contract_attachments: None,
             system_journal: Some(system_journal),
             liveness_snapshots: None,
+            run_substrate: crate::journal::RunSubstrateState::Ephemeral,
         };
 
         let handle = FlowHandle::new(standard_handle, None, extras);
@@ -404,6 +405,7 @@ mod tests {
             contract_attachments: None,
             system_journal: None,
             liveness_snapshots: None,
+            run_substrate: crate::journal::RunSubstrateState::Ephemeral,
         };
 
         let handle = FlowHandle::new(standard_handle, None, extras);

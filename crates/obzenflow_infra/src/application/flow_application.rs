@@ -25,6 +25,7 @@ use obzenflow_core::web::{CorsConfig, CorsMode, HttpEndpoint, ServerConfig};
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::FlowDefinition;
 use obzenflow_runtime::bootstrap::{install_bootstrap_config, try_install_bootstrap_config};
+use obzenflow_runtime::journal::{CurrentRunLocator, RunSubstrateState};
 use obzenflow_runtime::prelude::FlowHandle;
 use obzenflow_runtime::stages::LivenessSnapshots;
 use std::ffi::OsString;
@@ -757,9 +758,6 @@ impl FlowApplication {
 
         let presentation_enabled = presentation.is_some();
 
-        // Clear any stale run-dir hint from prior FlowApplication runs (OT-17).
-        let _ = crate::journal::factory::take_last_run_dir();
-
         let grace_timeout = config.runtime.shutdown_timeout;
         #[cfg(feature = "warp-server")]
         let surface_metrics_interval = config.runtime.surface_metrics_interval;
@@ -778,7 +776,7 @@ impl FlowApplication {
             print!("{}", rendered.text);
         }
 
-        let (result, flow_name, run_dir, stopped) = 'run: {
+        let (result, flow_name, run_state, stopped) = 'run: {
             if (!extra_endpoints.is_empty() || !web_surfaces.is_empty()) && !config.server.enabled {
                 break 'run (
                     Err(ApplicationError::InvalidConfiguration(
@@ -792,12 +790,35 @@ impl FlowApplication {
             }
 
             let control_plane_auth = config.server.control_plane_auth.clone();
+
+            // FLOWIP-120u: the host opens the replay/resume input archive and the
+            // bootstrap snapshot carries it; the build consumes it without the
+            // factory opening anything. A bad archive fails here, before any
+            // journal is created.
+            let bootstrap_config = {
+                let mut bootstrap_config = config.bootstrap_config();
+                if let Some(replay) = bootstrap_config.replay.clone() {
+                    let archive = crate::journal::disk::replay_archive::DiskReplayArchive::open(
+                        replay.archive_path,
+                        replay.allow_incomplete_archive,
+                    )
+                    .await
+                    .map_err(|e| {
+                        ApplicationError::InvalidConfiguration(format!(
+                            "Failed to open replay archive: {e}"
+                        ))
+                    })?;
+                    bootstrap_config.replay_archive = Some(Arc::new(archive));
+                }
+                bootstrap_config
+            };
+
             let _bootstrap_guard = if cfg!(debug_assertions) {
                 // In debug/test builds, allow Rust's parallel test runner to serialize installs
                 // rather than failing unrelated tests with an overlapping-run error.
-                install_bootstrap_config(config.bootstrap_config())
+                install_bootstrap_config(bootstrap_config)
             } else {
-                try_install_bootstrap_config(config.bootstrap_config()).map_err(|_| {
+                try_install_bootstrap_config(bootstrap_config).map_err(|_| {
                     ApplicationError::InvalidConfiguration(
                         "Overlapping FlowApplication runs in the same process are not supported"
                             .to_string(),
@@ -813,23 +834,37 @@ impl FlowApplication {
             // Build the flow (this executes the flow! macro)
             let flow_handle = match flow.await {
                 Ok(handle) => handle,
-                Err(e) => {
-                    let run_dir = crate::journal::factory::take_last_run_dir();
+                Err(failure) => {
+                    // FLOWIP-120u F2: the failure carrier holds substrate state; None
+                    // means the build failed before substrate selection, so no run
+                    // directory exists to point at.
                     break 'run (
-                        Err(ApplicationError::FlowBuildFailed(e.to_string())),
+                        Err(ApplicationError::FlowBuildFailed(failure.error.to_string())),
                         None,
-                        run_dir,
+                        failure.run,
                         false,
                     );
                 }
             };
 
-            // If disk journals were used, this is the on-disk run directory path (OT-17).
-            let run_dir = crate::journal::factory::take_last_run_dir();
+            // The selected run substrate (FLOWIP-120u): durable with its locator,
+            // or ephemeral with none.
+            let run_state = Some(flow_handle.run_substrate().clone());
 
-            let print_replay_hint = |run_dir: &std::path::Path| {
+            // FLOWIP-120u F5: an ephemeral resume continues live but records
+            // nothing addressable; say so once, up front.
+            if matches!(run_mode, super::run_mode::RunMode::Resume(_))
+                && matches!(flow_handle.run_substrate(), RunSubstrateState::Ephemeral)
+            {
+                tracing::warn!(
+                    "resumed run is ephemeral: this continuation records nothing durable; \
+                     the input archive remains the last durable record"
+                );
+            }
+
+            let print_replay_hint = |locator: &CurrentRunLocator| {
                 println!("FlowApplication complete!");
-                println!("To replay, add: --replay-from {}", run_dir.display());
+                println!("To replay, add: --replay-from {locator}");
                 println!("(Source config env vars are ignored during replay)");
             };
 
@@ -839,7 +874,7 @@ impl FlowApplication {
             for hook in &flow_handle_hooks {
                 match hook(&flow_handle) {
                     Ok(task) => managed_tasks.push(task),
-                    Err(err) => break 'run (Err(err), Some(flow_name.clone()), run_dir, false),
+                    Err(err) => break 'run (Err(err), Some(flow_name.clone()), run_state, false),
                 }
             }
 
@@ -893,7 +928,7 @@ impl FlowApplication {
                                 slot.ingress_key()
                             ))),
                             Some(flow_name.clone()),
-                            run_dir,
+                            run_state,
                             false,
                         );
                     }
@@ -910,7 +945,7 @@ impl FlowApplication {
                         system_journal: flow_handle.system_journal(),
                     }) {
                         Ok(wired) => managed_tasks.extend(wired.tasks),
-                        Err(err) => break 'run (Err(err), Some(flow_name.clone()), run_dir, false),
+                        Err(err) => break 'run (Err(err), Some(flow_name.clone()), run_state, false),
                     }
                 }
                 tracing::debug!(surface = %surface_name, "Web surface attached");
@@ -953,7 +988,7 @@ impl FlowApplication {
                 match start_result {
                     Ok(server_handle) => server_handle,
                     Err(err) => {
-                        break 'run (Err(err), Some(flow_name), run_dir, false);
+                        break 'run (Err(err), Some(flow_name), run_state, false);
                     }
                 }
             } else {
@@ -969,7 +1004,7 @@ impl FlowApplication {
                                     "warp-server".to_string(),
                                 )),
                                 Some(flow_name),
-                                run_dir,
+                                run_state,
                                 false,
                             );
                         }
@@ -985,7 +1020,7 @@ impl FlowApplication {
                                                 .to_string(),
                                         )),
                                         Some(flow_name),
-                                        run_dir,
+                                        run_state,
                                         false,
                                     );
                                 }
@@ -995,11 +1030,13 @@ impl FlowApplication {
                                 .await
                                 .map_err(|e| ApplicationError::FlowExecutionFailed(e.to_string()));
                             if result.is_ok() && !presentation_enabled {
-                                if let Some(run_dir_path) = run_dir.as_deref() {
-                                    print_replay_hint(run_dir_path);
+                                if let Some(locator) =
+                                    run_state.as_ref().and_then(|s| s.locator())
+                                {
+                                    print_replay_hint(locator);
                                 }
                             }
-                            break 'run (result, Some(flow_name), run_dir, false);
+                            break 'run (result, Some(flow_name), run_state, false);
                         }
                     }
                 }
@@ -1013,7 +1050,7 @@ impl FlowApplication {
                             .await
                             .map_err(|e| ApplicationError::FlowExecutionFailed(e.to_string()))
                         {
-                            break 'run (Err(err), Some(flow_name), run_dir, false);
+                            break 'run (Err(err), Some(flow_name), run_state, false);
                         }
                     }
                     StartupMode::Manual => {
@@ -1040,7 +1077,7 @@ impl FlowApplication {
                             break 'run (
                                 Err(ApplicationError::from(err)),
                                 Some(flow_name),
-                                run_dir,
+                                run_state,
                                 false,
                             );
                         }
@@ -1066,7 +1103,7 @@ impl FlowApplication {
                                 break 'run (
                                     Err(ApplicationError::from(err)),
                                     Some(flow_name),
-                                    run_dir,
+                                    run_state,
                                     false,
                                 );
                             }
@@ -1089,7 +1126,7 @@ impl FlowApplication {
                                 break 'run (
                                     Err(ApplicationError::from(err)),
                                     Some(flow_name),
-                                    run_dir,
+                                    run_state,
                                     false,
                                 );
                             }
@@ -1196,7 +1233,7 @@ impl FlowApplication {
                     }
                 }
 
-                break 'run (Ok(()), Some(flow_name), run_dir, true);
+                break 'run (Ok(()), Some(flow_name), run_state, true);
             }
 
             // Non-server mode: preserve existing behaviour (run to completion, no HTTP server)
@@ -1209,7 +1246,7 @@ impl FlowApplication {
                             "Failed to unwrap FlowHandle for non-server execution".to_string(),
                         )),
                         Some(flow_name),
-                        run_dir,
+                        run_state,
                         false,
                     );
                 }
@@ -1219,11 +1256,11 @@ impl FlowApplication {
                 .await
                 .map_err(|e| ApplicationError::FlowExecutionFailed(e.to_string()));
             if result.is_ok() && !presentation_enabled {
-                if let Some(run_dir_path) = run_dir.as_deref() {
-                    print_replay_hint(run_dir_path);
+                if let Some(locator) = run_state.as_ref().and_then(|s| s.locator()) {
+                    print_replay_hint(locator);
                 }
             }
-            break 'run (result, Some(flow_name), run_dir, false);
+            break 'run (result, Some(flow_name), run_state, false);
         };
 
         #[cfg(feature = "warp-server")]
@@ -1235,23 +1272,25 @@ impl FlowApplication {
         // lifetime, even if we exited early due to a startup failure or "no server" fallback.
         Self::cancel_and_join_tasks(managed_tasks, grace_timeout).await;
 
-        match (result, flow_name, run_dir, stopped) {
-            (Ok(()), flow_name, run_dir, stopped) => {
+        match (result, flow_name, run_state, stopped) {
+            (Ok(()), flow_name, run_state, stopped) => {
+                let location = run_state.as_ref().and_then(|s| s.locator()).cloned();
                 // FLOWIP-095j: keep the candidate run directory before the
-                // outcome takes ownership of it below.
-                let verify_candidate_dir = run_dir.clone();
+                // outcome takes ownership of the location below.
+                let verify_candidate_dir =
+                    location.as_ref().map(|locator| locator.path().to_path_buf());
                 if let Some(presentation) = &presentation {
                     let flow_name = flow_name.unwrap_or_else(|| "Flow".to_string());
                     let outcome = if stopped {
                         RunPresentationOutcome::Stopped {
                             flow_name,
-                            run_dir,
+                            location,
                             run_mode: run_mode.clone(),
                         }
                     } else {
                         RunPresentationOutcome::Completed {
                             flow_name,
-                            run_dir,
+                            location,
                             run_mode: run_mode.clone(),
                         }
                     };
@@ -1284,13 +1323,13 @@ impl FlowApplication {
                 }
                 Ok(())
             }
-            (Err(err), flow_name, run_dir, _) => {
+            (Err(err), flow_name, run_state, _) => {
                 if let Some(presentation) = &presentation {
                     let rendered_footer_banner = presentation.render_footer_banner();
                     let footer = presentation.render_footer(RunPresentationOutcome::Failed {
                         flow_name,
                         error: err.to_string(),
-                        run_dir,
+                        location: run_state.as_ref().and_then(|s| s.locator()).cloned(),
                         run_mode: run_mode.clone(),
                     });
                     if rendered_footer_banner.is_some() || !footer.trim().is_empty() {

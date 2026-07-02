@@ -361,15 +361,15 @@ async fn resume_suppresses_recorded_effects_and_executes_the_live_tail_once() ->
     // Resume with two live inputs. The counter is fresh, so any catch-up
     // re-execution would be visible in the final count.
     let resumed_calls = {
-        let _bootstrap = install_bootstrap_config(BootstrapConfig {
-            replay: Some(ReplayBootstrap {
+        let _bootstrap = install_bootstrap_config(
+            replay_testkit::bootstrap_with_archive(ReplayBootstrap {
                 archive_path: recorded_run.clone(),
                 allow_incomplete_archive: true,
                 allow_duplicate_sink_delivery: false,
                 verb: ReplayVerb::Resume,
-            }),
-            ..BootstrapConfig::default()
-        });
+            })
+            .await,
+        );
         // Wait for prefix re-deliveries + live (the sink re-consumes the
         // recorded prefix during catch-up, F14).
         run_until_delivered(&journal_base, RECORDED + 1, LIVE, RECORDED + LIVE).await?

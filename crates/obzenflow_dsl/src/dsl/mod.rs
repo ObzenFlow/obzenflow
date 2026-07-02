@@ -128,4 +128,4 @@ mod tests;
 
 // Re-export all public items
 pub use error::{FlowBuildError, StageCreationError, StageCreationResult};
-pub use flow_definition::FlowDefinition;
+pub use flow_definition::{FlowBuildFailure, FlowDefinition};
