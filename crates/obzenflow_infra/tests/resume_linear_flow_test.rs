@@ -30,7 +30,7 @@ use obzenflow_core::journal::run_manifest::RunManifest;
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{StageId, SystemId, TypedPayload, WriterId};
 use obzenflow_dsl::{flow, infinite_source, sink, transform, FlowDefinition};
-use obzenflow_infra::journal::{disk_journals, DiskJournal};
+use obzenflow_infra::journal::{disk_journals, memory_journals, DiskJournal};
 use obzenflow_runtime::bootstrap::{install_bootstrap_config, ReplayBootstrap, ReplayVerb};
 use obzenflow_runtime::effects::SinkDeliverySafety;
 use obzenflow_runtime::pipeline::{FlowHandle, PipelineState};
@@ -241,6 +241,143 @@ async fn run_until_delivered(
     tokio::time::timeout(Duration::from_secs(10), handle.wait_for_completion())
         .await
         .map_err(|_| anyhow!("timeout waiting for pipeline to terminate after stop"))??;
+    Ok(())
+}
+
+/// The same flow shape on memory journals (FLOWIP-120u: an unlocated run may
+/// consume a located archive as input).
+fn build_flow_memory(first_n: u64, count: u64, delivered: Arc<AtomicU64>) -> FlowDefinition {
+    flow! {
+        name: "resume_linear",
+        journals: memory_journals(),
+        middleware: [],
+
+        stages: {
+            src = infinite_source!(Tick => BoundedTicker::new(first_n, count));
+            xform = transform!(Tick -> Doubled => DoubleTransform::new());
+            snk = sink!(Doubled => CountingSink { delivered });
+        },
+
+        topology: {
+            src |> xform;
+            xform |> snk;
+        }
+    }
+}
+
+/// Run one memory-substrate flow instance until the sink consumed `expected`
+/// outputs, asserting the handle reports Ephemeral.
+async fn run_memory_until_delivered(first_n: u64, count: u64, expected: u64) -> Result<()> {
+    let delivered = Arc::new(AtomicU64::new(0));
+    let handle = build_flow_memory(first_n, count, delivered.clone())
+        .await
+        .map_err(|e| anyhow!("memory flow failed to build: {e:?}"))?;
+    assert!(
+        matches!(
+            handle.run_substrate(),
+            obzenflow_runtime::journal::RunSubstrateState::Ephemeral
+        ),
+        "a memory run must report Ephemeral"
+    );
+    wait_for_running(&handle).await?;
+    wait_for_count(&delivered, expected).await?;
+    handle.stop().await?;
+    tokio::time::timeout(Duration::from_secs(10), handle.wait_for_completion())
+        .await
+        .map_err(|_| anyhow!("timeout waiting for pipeline to terminate after stop"))??;
+    Ok(())
+}
+
+fn run_dir_count(journal_base: &Path) -> usize {
+    std::fs::read_dir(journal_base.join("flows"))
+        .map(|d| d.count())
+        .unwrap_or(0)
+}
+
+/// FLOWIP-120u acceptance: a memory-backed run replays from a disk archive
+/// input without claiming durability and without producing anything on disk.
+#[tokio::test(flavor = "multi_thread")]
+async fn memory_replay_from_disk_archive_is_ephemeral() -> Result<()> {
+    const RECORDED: u64 = 4;
+
+    let temp = tempfile::tempdir()?;
+    let journal_base = temp.path().join("journals");
+
+    run_until_delivered(&journal_base, 1, RECORDED, RECORDED).await?;
+    let recorded_run = replay_testkit::latest_run_dir(&journal_base);
+    let dirs_before = run_dir_count(&journal_base);
+
+    {
+        let _bootstrap = install_bootstrap_config(
+            replay_testkit::bootstrap_with_archive(ReplayBootstrap {
+                archive_path: recorded_run.clone(),
+                allow_incomplete_archive: true,
+                allow_duplicate_sink_delivery: false,
+                verb: ReplayVerb::Replay,
+            })
+            .await,
+        );
+        // The sink re-consumes the recorded prefix during deterministic
+        // replay (F14), so the memory run observably reconstructed it.
+        run_memory_until_delivered(1, RECORDED, RECORDED).await?;
+    }
+
+    assert_eq!(
+        run_dir_count(&journal_base),
+        dirs_before,
+        "an ephemeral replay must produce nothing addressable on disk"
+    );
+    Ok(())
+}
+
+/// FLOWIP-120u F13: resume requires a located current run. An ephemeral
+/// continuation is unreachable (nothing to name later) and its live effects
+/// would re-execute on the next resume of the original archive, so the build
+/// refuses the combination loudly.
+#[tokio::test(flavor = "multi_thread")]
+async fn memory_resume_from_disk_archive_is_refused_at_build() -> Result<()> {
+    const RECORDED: u64 = 4;
+
+    let temp = tempfile::tempdir()?;
+    let journal_base = temp.path().join("journals");
+
+    run_until_delivered(&journal_base, 1, RECORDED, RECORDED).await?;
+    let recorded_run = replay_testkit::latest_run_dir(&journal_base);
+    let dirs_before = run_dir_count(&journal_base);
+
+    {
+        let _bootstrap = install_bootstrap_config(
+            replay_testkit::bootstrap_with_archive(ReplayBootstrap {
+                archive_path: recorded_run.clone(),
+                allow_incomplete_archive: true,
+                allow_duplicate_sink_delivery: false,
+                verb: ReplayVerb::Resume,
+            })
+            .await,
+        );
+        let delivered = Arc::new(AtomicU64::new(0));
+        let failure = build_flow_memory(RECORDED + 1, 1, delivered)
+            .await
+            .err()
+            .expect("an ephemeral resume must be refused at build");
+        assert!(
+            matches!(
+                failure.error,
+                obzenflow_dsl::dsl::FlowBuildError::ResumeRefusedEphemeralRun
+            ),
+            "expected the F13 refusal, got: {failure}"
+        );
+        assert!(
+            failure.run.is_none() || failure.run.as_ref().is_some_and(|s| s.locator().is_none()),
+            "the refused build carries no location: {failure:?}"
+        );
+    }
+
+    assert_eq!(
+        run_dir_count(&journal_base),
+        dirs_before,
+        "the refused resume must produce nothing on disk"
+    );
     Ok(())
 }
 

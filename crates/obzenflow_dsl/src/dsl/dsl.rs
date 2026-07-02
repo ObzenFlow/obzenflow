@@ -1044,6 +1044,18 @@ macro_rules! build_typed_flow {
         )
         .map_err(|e| FlowBuildError::ResourcePreflightFailed(format!("{e}")))?;
 
+        // FLOWIP-120u F13: resume requires a located current run; an ephemeral
+        // continuation is unreachable and its live effects would re-execute on
+        // the next resume of the original archive.
+        if matches!(
+            __substrate,
+            obzenflow_runtime::journal::RunSubstrateState::Ephemeral
+        ) && obzenflow_runtime::bootstrap::replay_bootstrap()
+            .is_some_and(|replay| replay.verb == obzenflow_runtime::bootstrap::ReplayVerb::Resume)
+        {
+            return Err(FlowBuildError::ResumeRefusedEphemeralRun);
+        }
+
         // Create all journals upfront with proper ownership
         use obzenflow_core::journal::journal_name::JournalName;
         use obzenflow_core::journal::journal_owner::JournalOwner;

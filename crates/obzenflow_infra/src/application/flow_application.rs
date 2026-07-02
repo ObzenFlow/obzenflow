@@ -25,7 +25,7 @@ use obzenflow_core::web::{CorsConfig, CorsMode, HttpEndpoint, ServerConfig};
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::FlowDefinition;
 use obzenflow_runtime::bootstrap::{install_bootstrap_config, try_install_bootstrap_config};
-use obzenflow_runtime::journal::{CurrentRunLocator, RunSubstrateState};
+use obzenflow_runtime::journal::CurrentRunLocator;
 use obzenflow_runtime::prelude::FlowHandle;
 use obzenflow_runtime::stages::LivenessSnapshots;
 use std::ffi::OsString;
@@ -848,19 +848,9 @@ impl FlowApplication {
             };
 
             // The selected run substrate (FLOWIP-120u): durable with its locator,
-            // or ephemeral with none.
+            // or ephemeral with none. An ephemeral resume never reaches here;
+            // the build refuses it (F13).
             let run_state = Some(flow_handle.run_substrate().clone());
-
-            // FLOWIP-120u F5: an ephemeral resume continues live but records
-            // nothing addressable; say so once, up front.
-            if matches!(run_mode, super::run_mode::RunMode::Resume(_))
-                && matches!(flow_handle.run_substrate(), RunSubstrateState::Ephemeral)
-            {
-                tracing::warn!(
-                    "resumed run is ephemeral: this continuation records nothing durable; \
-                     the input archive remains the last durable record"
-                );
-            }
 
             let print_replay_hint = |locator: &CurrentRunLocator| {
                 println!("FlowApplication complete!");

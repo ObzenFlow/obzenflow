@@ -45,10 +45,10 @@ impl RunSubstrateState {
     }
 }
 
-/// Opaque locator for the current run's durable archive.
+/// Deliberate v1 disk-shaped locator for the current run's durable archive.
 ///
-/// The `PathBuf` inside is the disk provider's representation, not the concept;
-/// presentation renders it via `Display` without interpreting layout.
+/// `path()` is the disk representation for infra consumers (verify);
+/// presentation renders through `Display` without interpreting layout.
 #[derive(Clone, Debug)]
 pub struct CurrentRunLocator(PathBuf);
 
