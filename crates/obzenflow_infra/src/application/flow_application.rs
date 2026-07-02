@@ -945,7 +945,9 @@ impl FlowApplication {
                         system_journal: flow_handle.system_journal(),
                     }) {
                         Ok(wired) => managed_tasks.extend(wired.tasks),
-                        Err(err) => break 'run (Err(err), Some(flow_name.clone()), run_state, false),
+                        Err(err) => {
+                            break 'run (Err(err), Some(flow_name.clone()), run_state, false)
+                        }
                     }
                 }
                 tracing::debug!(surface = %surface_name, "Web surface attached");
@@ -1030,8 +1032,7 @@ impl FlowApplication {
                                 .await
                                 .map_err(|e| ApplicationError::FlowExecutionFailed(e.to_string()));
                             if result.is_ok() && !presentation_enabled {
-                                if let Some(locator) =
-                                    run_state.as_ref().and_then(|s| s.locator())
+                                if let Some(locator) = run_state.as_ref().and_then(|s| s.locator())
                                 {
                                     print_replay_hint(locator);
                                 }
@@ -1277,8 +1278,9 @@ impl FlowApplication {
                 let location = run_state.as_ref().and_then(|s| s.locator()).cloned();
                 // FLOWIP-095j: keep the candidate run directory before the
                 // outcome takes ownership of the location below.
-                let verify_candidate_dir =
-                    location.as_ref().map(|locator| locator.path().to_path_buf());
+                let verify_candidate_dir = location
+                    .as_ref()
+                    .map(|locator| locator.path().to_path_buf());
                 if let Some(presentation) = &presentation {
                     let flow_name = flow_name.unwrap_or_else(|| "Flow".to_string());
                     let outcome = if stopped {

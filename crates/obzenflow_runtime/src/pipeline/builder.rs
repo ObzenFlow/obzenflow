@@ -12,6 +12,7 @@ use super::{
     handle::{FlowHandle, FlowHandleExtras},
     supervisor::PipelineSupervisor,
 };
+use crate::journal::RunSubstrateState;
 use crate::{
     backpressure::BackpressureRegistry,
     feed_plan::{FeedKey, FeedPlan},
@@ -25,7 +26,6 @@ use crate::{
 };
 use obzenflow_core::event::{ChainEvent, SystemEvent};
 use obzenflow_core::id::{FlowId, SystemId};
-use crate::journal::RunSubstrateState;
 use obzenflow_core::journal::Journal;
 use obzenflow_core::metrics::MetricsExporter;
 use obzenflow_core::StageId;

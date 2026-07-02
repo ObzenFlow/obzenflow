@@ -465,8 +465,9 @@ impl RunPresentationOutcome {
                     _ => {}
                 }
                 match location {
-                    Some(location) => Footer::new()
-                        .paragraph(format!("{prefix}: {error}. Journal: {location}")),
+                    Some(location) => {
+                        Footer::new().paragraph(format!("{prefix}: {error}. Journal: {location}"))
+                    }
                     None => Footer::new().paragraph(format!("{prefix}: {error}")),
                 }
             }

@@ -41,7 +41,7 @@ impl TypedPayload for OtherEvent {
 fn factories_declare_their_substrate() {
     let base = tempfile::tempdir().expect("tempdir");
     let flow_id = FlowId::new();
-    let disk = DiskJournalFactory::new(base.path().to_path_buf(), flow_id.clone())
+    let disk = DiskJournalFactory::new(base.path().to_path_buf(), flow_id)
         .expect("disk factory should build");
     match disk.run_state() {
         RunSubstrateState::Durable(locator) => {
@@ -98,7 +98,9 @@ async fn pre_substrate_failure_carries_no_run_state() {
     }
     .await;
 
-    let failure = built.err().expect("edge typing mismatch must fail the build");
+    let failure = built
+        .err()
+        .expect("edge typing mismatch must fail the build");
     assert!(
         failure.run.is_none(),
         "pre-substrate failures carry no run state: {failure:?}"

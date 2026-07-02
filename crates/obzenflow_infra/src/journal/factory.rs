@@ -20,7 +20,7 @@ use obzenflow_runtime::journal::{
 };
 use obzenflow_runtime::replay::ReplayArchive;
 use obzenflow_runtime::runtime_resource_limits::{
-    estimate_disk_journal_fds, env_try_raise_nofile, preflight_nofile_for_disk_journals,
+    env_try_raise_nofile, estimate_disk_journal_fds, preflight_nofile_for_disk_journals,
 };
 use std::collections::HashMap;
 use std::path::PathBuf;
