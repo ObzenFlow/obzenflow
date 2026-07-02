@@ -881,15 +881,15 @@ mod tests {
             Some(SinkDeliverySafety::NonIdempotentExternal)
         );
 
-        let fallible = FallibleSinkTyped::new(|_value: TestPayload| async move { Ok(()) })
-            .non_idempotent();
+        let fallible =
+            FallibleSinkTyped::new(|_value: TestPayload| async move { Ok(()) }).non_idempotent();
         assert_eq!(
             SinkHandler::delivery_safety(&fallible),
             Some(SinkDeliverySafety::NonIdempotentExternal)
         );
 
-        let with_delivery = SinkTyped::with_delivery(|_value: TestPayload, _delivery| async move {})
-            .idempotent();
+        let with_delivery =
+            SinkTyped::with_delivery(|_value: TestPayload, _delivery| async move {}).idempotent();
         assert_eq!(
             SinkHandler::delivery_safety(&with_delivery),
             Some(SinkDeliverySafety::IdempotentProjection)

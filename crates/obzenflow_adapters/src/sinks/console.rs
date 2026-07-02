@@ -705,7 +705,7 @@ mod tests {
 
     #[test]
     fn console_sink_declares_idempotent_delivery() {
-        let sink = ConsoleSink::<TestEvent, _>::json();
+        let sink = ConsoleSink::<TestEvent>::json();
         assert_eq!(
             SinkHandler::delivery_safety(&sink),
             Some(SinkDeliverySafety::IdempotentProjection)
