@@ -523,18 +523,21 @@ async fn corrupted_source_archive_aborts_the_resume_before_any_live_admission() 
         "the corrupted source must not reach its live phase: {src_b_rows:#?}"
     );
 
-    // Nothing reached the effect boundary or the sink as live work: every
-    // delivered position lay inside the recorded prefix, so outcomes read
-    // from history and deliveries stayed suppressed.
+    // Nothing reached the effect boundary as live work: every delivered
+    // position lay inside the recorded prefix, so outcomes read from history.
     assert_eq!(
         calls.load(Ordering::SeqCst),
         0,
         "no effect executed during the failed catch-up"
     );
-    assert_eq!(
-        delivered.load(Ordering::SeqCst),
-        0,
-        "no sink delivery happened during the failed catch-up"
+    // The sink re-consumes the recorded prefix during catch-up (F14), so rows
+    // whose admission seq precedes the corrupt frame may reach it before
+    // teardown lands; how many is scheduling-dependent. The merge-row
+    // assertions above prove nothing outside the recorded prefix moved.
+    assert!(
+        delivered.load(Ordering::SeqCst) <= RECORDED_DELIVERED,
+        "only recorded-prefix re-consumption may reach the sink during a failed catch-up (saw {})",
+        delivered.load(Ordering::SeqCst)
     );
 
     Ok(())
