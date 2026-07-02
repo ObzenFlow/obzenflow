@@ -2389,7 +2389,7 @@ mod tests {
         );
 
         // Simulate what the sink supervisor does when creating a delivery event
-        let payload = DeliveryPayload::success("test_sink", DeliveryMethod::Noop, Some(1));
+        let payload = DeliveryPayload::success(DeliveryMethod::Noop, Some(1));
         let delivery_event =
             ChainEventFactory::delivery_event(writer_id, payload).with_correlation_from(&event);
 

@@ -10,5 +10,6 @@ pub mod journal_sink;
 pub mod typed;
 
 pub use typed::{
-    DeliveryContext, DeliveryProvenance, FallibleSinkTyped, SinkTyped, SinkTypedWithDelivery,
+    DeclareDeliverySafety, DeliveryContext, DeliveryProvenance, FallibleSinkTyped, SinkTyped,
+    SinkTypedWithDelivery,
 };

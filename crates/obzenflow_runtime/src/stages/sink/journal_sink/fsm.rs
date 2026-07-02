@@ -289,6 +289,11 @@ pub struct JournalSinkContext<H: UnifiedSinkHandler> {
     /// Human-readable stage name for logging
     pub stage_name: String,
 
+    /// Single-writer receipt identity (FLOWIP-120s): the handler's declared
+    /// destination family, else the stage name. Stamped on every journalled
+    /// `DeliveryPayload`.
+    pub receipt_destination: String,
+
     /// Flow name for flow context
     pub flow_name: String,
 
@@ -590,7 +595,7 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAct
                         };
                         if let Some(mut payload) = report.audit_payload.filter(|_| !suppress_audit)
                         {
-                            payload.destination = ctx.stage_name.clone();
+                            payload.destination = ctx.receipt_destination.clone();
                             tracing::trace!(
                                 target: "flowip-080o",
                                 stage_name = %ctx.stage_name,
@@ -718,7 +723,7 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAct
                     if let Some(mut payload) =
                         drain_result.audit_payload.filter(|_| !suppress_audit)
                     {
-                        payload.destination = stage_name.clone();
+                        payload.destination = ctx.receipt_destination.clone();
                         tracing::trace!(
                             target: "flowip-080o",
                             stage_name = %ctx.stage_name,

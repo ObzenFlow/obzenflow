@@ -94,7 +94,6 @@ struct Handoff;
 impl SinkHandler for Handoff {
     async fn consume(&mut self, _event: ChainEvent) -> Result<DeliveryPayload, HandlerError> {
         Ok(DeliveryPayload::success(
-            "handoff",
             DeliveryMethod::Custom("handoff".to_string()),
             None,
         ))
@@ -197,7 +196,7 @@ async fn observer_evidence_lands_in_journals_without_system_mirror() {
                         .indicator("process.latency")
                         .tag("dependency", "ledger")
                 ]);
-                handoff = sink!(Processed => Handoff, [
+                handoff = sink!(Processed => Handoff, middleware: [
                     log().prefix("handoff")
                 ]);
             },

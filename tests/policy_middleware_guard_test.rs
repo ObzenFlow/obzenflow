@@ -95,7 +95,6 @@ impl SinkHandler for NullSink {
     {
         Ok(
             obzenflow_core::event::payloads::delivery_payload::DeliveryPayload::success(
-                "null_sink",
                 obzenflow_core::event::payloads::delivery_payload::DeliveryMethod::Noop,
                 None,
             ),

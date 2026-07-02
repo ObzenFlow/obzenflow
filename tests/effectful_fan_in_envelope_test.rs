@@ -192,7 +192,6 @@ impl SinkHandler for DropSink {
     {
         Ok(
             obzenflow_core::event::payloads::delivery_payload::DeliveryPayload::success(
-                "drop",
                 obzenflow_core::event::payloads::delivery_payload::DeliveryMethod::Noop,
                 None,
             ),

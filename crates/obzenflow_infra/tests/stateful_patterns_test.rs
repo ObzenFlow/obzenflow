@@ -147,7 +147,6 @@ impl SinkHandler for CollectingSink {
         self.events.lock().unwrap().push(event);
         Ok(
             obzenflow_core::event::payloads::delivery_payload::DeliveryPayload::success(
-                "test",
                 obzenflow_core::event::payloads::delivery_payload::DeliveryMethod::Custom(
                     "collect".to_string(),
                 ),

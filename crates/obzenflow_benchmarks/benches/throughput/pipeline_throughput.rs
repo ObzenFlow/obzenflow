@@ -162,7 +162,7 @@ impl SinkHandler for TimestampedSink {
             }
         }
 
-        Ok(DeliveryPayload::success("noop", DeliveryMethod::Noop, None))
+        Ok(DeliveryPayload::success(DeliveryMethod::Noop, None))
     }
 }
 

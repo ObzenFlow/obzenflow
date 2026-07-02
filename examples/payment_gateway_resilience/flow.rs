@@ -40,6 +40,8 @@
 //! instead of hammering it. Unavailability deliberately does not cancel; no
 //! decision was reached, so those orders go to manual review. See `README.md`.
 
+use super::console;
+use super::deliveries::ShippingHandoff;
 use super::domain::{
     CustomerOrderPlaced, GatewayPaymentFallback, GatewayPaymentRejected, InvalidOrder,
     OrderCancelled, PaymentAuthorizationUnavailable, PaymentAuthorized, PaymentDeclined,
@@ -47,7 +49,6 @@ use super::domain::{
 };
 use super::fixtures;
 use super::gateway::{self, AuthorizePayment, GatewayTransform};
-use super::sinks;
 use super::validation;
 use obzenflow::typed::sources as typed_sources;
 use obzenflow_adapters::middleware::circuit_breaker::{HalfOpenPolicy, OpenPolicy};
@@ -55,7 +56,6 @@ use obzenflow_adapters::middleware::observability::{indicator, log, IndicatorKin
 use obzenflow_adapters::middleware::{backpressure, CircuitBreakerBuilder, RateLimiterBuilder};
 use obzenflow_dsl::{effectful_transform, flow, sink, source};
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime::stages::sink::SinkTyped;
 use std::num::NonZeroU32;
 
 const BACKPRESSURE_WINDOW: u64 = 1_000;
@@ -244,41 +244,46 @@ pub fn build_flow() -> obzenflow_dsl::FlowDefinition {
                 ]
             );
 
-            // Paid-order sink: in production this is the boundary a shipping
-            // system would subscribe to. The delivery context tells the
-            // console helper whether this outcome is fresh or an archived one
-            // re-emitted during replay (FLOWIP-120i).
-            paid_orders = sink!(PaymentAuthorized => SinkTyped::with_delivery(
-                |authorized: PaymentAuthorized, delivery| async move {
-                    sinks::send_to_shipping(authorized, delivery.provenance());
-                }
-            ));
+            // Paid-order sink, tier 3: a typed delivery. `ShippingHandoff`
+            // carries its destination identity, duplicate-safety, and
+            // behaviour on the type; the receipt's journalled destination is
+            // its DELIVERY_TYPE ("shipping.handoff"), and resume needs no
+            // operator flag because SAFETY is declared at compile time.
+            paid_orders = sink!(PaymentAuthorized => ShippingHandoff::new());
 
-            // Cancelled-order sink: the order's fate, converged from both
-            // producers (local validation failures and gateway declines).
-            // `InvalidOrder` and `PaymentDeclined` stay journal-recorded facts
-            // with no dedicated sink; this delivery carries the lifecycle
-            // consequence wherever it originated.
-            cancelled_orders = sink!(OrderCancelled => SinkTyped::with_delivery(
-                |cancelled: OrderCancelled, delivery| async move {
-                    sinks::record_cancelled_order(cancelled, delivery.provenance());
-                }
-            ));
+            // Cancelled-order sink, tier 2: a declared closure. The order's
+            // fate converges from both producers (local validation failures
+            // and gateway declines). `InvalidOrder` and `PaymentDeclined`
+            // stay journal-recorded facts with no dedicated sink; this
+            // delivery carries the lifecycle consequence wherever it
+            // originated. The second closure argument is the per-delivery
+            // provenance context (FLOWIP-120i): labelling only, never a
+            // reason to skip the write.
+            cancelled_orders = sink!(
+                OrderCancelled => |cancelled, delivery| {
+                    console::record_cancelled_order(cancelled, delivery.provenance());
+                },
+                delivery: idempotent
+            );
 
-            // Unavailable-authorization sink: failed gateway call or breaker
-            // fallback. No payment decision was reached, so the order is not
-            // cancelled; it goes to retry or manual review.
-            manual_review = sink!(PaymentAuthorizationUnavailable => SinkTyped::with_delivery(
-                |unavailable: PaymentAuthorizationUnavailable, delivery| async move {
-                    sinks::record_authorization_unavailable(unavailable, delivery.provenance());
-                }
-            ), [
-                // Publish journalled operator-handoff evidence for each
-                // unavailable-authorization delivery. Observe-only: it does not
-                // change routing or delivery. The stage data journal is the
-                // source of truth, with a tracing mirror for local visibility.
-                log().prefix("manual_review")
-            ]);
+            // Unavailable-authorization sink, tier 2 with middleware: failed
+            // gateway call or breaker fallback. No payment decision was
+            // reached, so the order is not cancelled; it goes to retry or
+            // manual review.
+            manual_review = sink!(
+                PaymentAuthorizationUnavailable => |unavailable, delivery| {
+                    console::record_authorization_unavailable(unavailable, delivery.provenance());
+                },
+                delivery: idempotent,
+                middleware: [
+                    // Publish journalled operator-handoff evidence for each
+                    // unavailable-authorization delivery. Observe-only: it does
+                    // not change routing or delivery. The stage data journal is
+                    // the source of truth, with a tracing mirror for local
+                    // visibility.
+                    log().prefix("manual_review")
+                ]
+            );
         },
 
         topology: {

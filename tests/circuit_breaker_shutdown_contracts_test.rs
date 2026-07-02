@@ -159,7 +159,6 @@ impl SinkHandler for CountingSink {
         }
 
         Ok(DeliveryPayload::success(
-            "counting_sink",
             DeliveryMethod::Custom("Count".to_string()),
             None,
         ))

@@ -323,7 +323,7 @@ mod tests {
     #[async_trait]
     impl SinkHandler for ExactSink {
         async fn consume(&mut self, _event: ChainEvent) -> Result<DeliveryPayload, HandlerError> {
-            Ok(DeliveryPayload::success("sink", DeliveryMethod::Noop, None))
+            Ok(DeliveryPayload::success(DeliveryMethod::Noop, None))
         }
     }
 

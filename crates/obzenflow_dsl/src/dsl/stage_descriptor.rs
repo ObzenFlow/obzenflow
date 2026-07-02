@@ -645,6 +645,20 @@ pub trait StageDescriptor: Send + Sync {
         None
     }
 
+    /// Snapshot of the sink handler's declared destination family
+    /// (FLOWIP-120s). `None` for non-sink stages and handlers with no
+    /// declared destination. Typed wrappers must forward.
+    fn sink_delivery_type(&self) -> Option<&'static str> {
+        None
+    }
+
+    /// Snapshot of the sink handler's declared destination instance
+    /// coordinates (FLOWIP-095g compatibility gate). Typed wrappers must
+    /// forward.
+    fn sink_canonical_destination(&self) -> Option<serde_json::Value> {
+        None
+    }
+
     fn effect_declarations(&self) -> Vec<EffectDeclaration> {
         Vec::new()
     }
@@ -1863,6 +1877,14 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
         self.handler.delivery_safety()
     }
 
+    fn sink_delivery_type(&self) -> Option<&'static str> {
+        self.handler.delivery_type()
+    }
+
+    fn sink_canonical_destination(&self) -> Option<serde_json::Value> {
+        self.handler.canonical_destination()
+    }
+
     fn stage_middleware_names(&self) -> Vec<String> {
         self.middleware
             .iter()
@@ -1997,6 +2019,11 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
             .map_err(|e| e.to_string())?;
         let instrumentation = Arc::new(instrumentation);
 
+        // Declarations are snapshotted from the raw handler before wrapping
+        // (FLOWIP-120s single-writer receipt identity): the runtime never
+        // queries the wrapped handler for declaration metadata.
+        let delivery_type = self.handler.delivery_type();
+
         // Apply all middleware. The middleware execution scope is computed
         // per event by the supervisor at dispatch (FLOWIP-120c H3).
         let mut builder = self.handler.middleware();
@@ -2016,6 +2043,7 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
             control_strategy: Some(control_strategy),
             sink_delivery_boundary,
             observers: observers.build(),
+            delivery_type,
         };
 
         // Use the builder to create the handle

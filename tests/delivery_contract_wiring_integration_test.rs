@@ -197,7 +197,6 @@ impl SinkHandler for CountingSink {
         }
 
         Ok(DeliveryPayload::success(
-            "counting_sink",
             DeliveryMethod::Custom("Count".to_string()),
             None,
         ))
@@ -247,7 +246,6 @@ impl SinkHandler for BufferedCountingSink {
 
         Ok(SinkConsumeReport {
             primary: DeliveryPayload::buffered(
-                "buffered_counting_sink",
                 DeliveryMethod::Custom("BufferedCount".to_string()),
                 None,
             ),
@@ -266,7 +264,6 @@ impl SinkHandler for BufferedCountingSink {
             .map(|parent_event_id| CommitReceipt {
                 parent_event_id,
                 payload: DeliveryPayload::success(
-                    "buffered_counting_sink",
                     DeliveryMethod::Custom("BufferedCount".to_string()),
                     None,
                 ),
@@ -275,7 +272,6 @@ impl SinkHandler for BufferedCountingSink {
 
         Ok(SinkLifecycleReport {
             audit_payload: Some(DeliveryPayload::success(
-                "buffered_counting_sink",
                 DeliveryMethod::Custom("BufferedCount".to_string()),
                 None,
             )),

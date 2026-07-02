@@ -181,7 +181,7 @@ mod tests {
     #[async_trait]
     impl SinkHandler for Sn {
         async fn consume(&mut self, _e: ChainEvent) -> Result<DeliveryPayload, HandlerError> {
-            Ok(DeliveryPayload::success("sink", DeliveryMethod::Noop, None))
+            Ok(DeliveryPayload::success(DeliveryMethod::Noop, None))
         }
     }
 
@@ -196,7 +196,7 @@ mod tests {
             _input: Out,
             _fx: &mut Effects,
         ) -> Result<DeliveryPayload, HandlerError> {
-            Ok(DeliveryPayload::success("sink", DeliveryMethod::Noop, None))
+            Ok(DeliveryPayload::success(DeliveryMethod::Noop, None))
         }
     }
 
@@ -411,7 +411,7 @@ mod tests {
     }
     #[test]
     fn sink_typed_mw() {
-        let _ = crate::sink!(Out => Sn, []);
+        let _ = crate::sink!(Out => Sn, middleware: []);
     }
     #[test]
     fn sink_typed_name() {
@@ -419,7 +419,32 @@ mod tests {
     }
     #[test]
     fn sink_typed_name_mw() {
-        let _ = crate::sink!(name: "s", Out => Sn, []);
+        let _ = crate::sink!(name: "s", Out => Sn, middleware: []);
+    }
+    #[test]
+    fn sink_typed_delivery_clause() {
+        // The clause rides the sealed closure-tier structs; a custom handler
+        // implements `SinkHandler::delivery_safety` directly instead.
+        let _ = crate::sink!(Out => |_out| {}, delivery: idempotent);
+        let _ = crate::sink!(Out => |_out| {}, delivery: non_idempotent, middleware: []);
+    }
+    #[test]
+    fn sink_exact_contract_one_arg_closure() {
+        let _ = crate::sink!(Out => |_out| {});
+        let _ = crate::sink!(Out => |_out| {}, delivery: idempotent);
+        let _ = crate::sink!(name: "s", Out => |_out| {}, middleware: []);
+    }
+    #[test]
+    fn sink_exact_contract_delivery_closure() {
+        let _ = crate::sink!(Out => |_out, _delivery| {});
+        let _ = crate::sink!(
+            name: "s",
+            Out => |out, delivery| {
+                let _ = (out, delivery.provenance());
+            },
+            delivery: idempotent,
+            middleware: []
+        );
     }
 
     // ── effectful_sink! ─────────────────────────────────────────────────────

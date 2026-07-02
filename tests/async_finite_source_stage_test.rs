@@ -115,7 +115,6 @@ impl SinkHandler for CollectSink {
     ) -> std::result::Result<DeliveryPayload, HandlerError> {
         self.events.lock().unwrap().push(event);
         Ok(DeliveryPayload::success(
-            "collect_sink",
             DeliveryMethod::Custom("Collect".to_string()),
             None,
         ))

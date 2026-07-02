@@ -166,7 +166,6 @@ impl SinkHandler for CompletionSink {
         _event: ChainEvent,
     ) -> std::result::Result<DeliveryPayload, HandlerError> {
         Ok(DeliveryPayload::success(
-            "completion_sink",
             DeliveryMethod::Custom("InMemory".to_string()),
             Some(1),
         ))

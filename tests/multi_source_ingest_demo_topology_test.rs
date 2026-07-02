@@ -140,7 +140,6 @@ struct NullSink;
 impl SinkHandler for NullSink {
     async fn consume(&mut self, _event: ChainEvent) -> Result<DeliveryPayload, HandlerError> {
         Ok(DeliveryPayload::success(
-            "null",
             DeliveryMethod::Custom("Noop".to_string()),
             None,
         ))

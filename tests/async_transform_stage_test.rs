@@ -116,7 +116,6 @@ impl SinkHandler for EventCounterSink {
             self.count.fetch_add(1, Ordering::Relaxed);
         }
         Ok(DeliveryPayload::success(
-            "counter_sink",
             DeliveryMethod::Custom("Count".to_string()),
             None,
         ))
@@ -148,7 +147,6 @@ impl SinkHandler for CollectSink {
     ) -> std::result::Result<DeliveryPayload, HandlerError> {
         self.events.lock().unwrap().push(event);
         Ok(DeliveryPayload::success(
-            "collect_sink",
             DeliveryMethod::Custom("Collect".to_string()),
             None,
         ))

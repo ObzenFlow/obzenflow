@@ -82,7 +82,7 @@ impl SinkHandler for CountingSink {
         if matches!(event.content, ChainEventContent::Data { .. }) {
             self.received.fetch_add(1, Ordering::Relaxed);
         }
-        Ok(DeliveryPayload::success("noop", DeliveryMethod::Noop, None))
+        Ok(DeliveryPayload::success(DeliveryMethod::Noop, None))
     }
 }
 

@@ -176,7 +176,7 @@ fn build_flow() -> obzenflow_dsl::FlowDefinition {
 
             per_order_printer = sink!(
                 EnrichedOrderWithPromo => per_order_printer(),
-                [RateLimiterBuilder::new(0.5).build()]
+                middleware: [RateLimiterBuilder::new(0.5).build()]
             );
 
             catalog_stats = stateful!(

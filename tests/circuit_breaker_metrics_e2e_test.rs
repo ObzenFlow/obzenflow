@@ -194,7 +194,6 @@ impl SinkHandler for MetricsSink {
             events.push(event);
         }
         Ok(DeliveryPayload::success(
-            "metrics_sink",
             DeliveryMethod::Custom("collect".to_string()),
             None,
         ))

@@ -751,7 +751,6 @@ mod tests {
             self.delivered.fetch_add(1, Ordering::AcqRel);
             self.notify.notify_waiters();
             Ok(DeliveryPayload::success(
-                "ingress_test_sink",
                 DeliveryMethod::Custom("Collect".to_string()),
                 None,
             ))

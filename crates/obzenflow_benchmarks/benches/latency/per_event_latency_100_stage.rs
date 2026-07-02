@@ -171,7 +171,7 @@ impl SinkHandler for LatencySink {
             }
         }
 
-        Ok(DeliveryPayload::success("noop", DeliveryMethod::Noop, None))
+        Ok(DeliveryPayload::success(DeliveryMethod::Noop, None))
     }
 }
 

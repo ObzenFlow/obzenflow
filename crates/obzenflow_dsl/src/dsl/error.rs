@@ -255,8 +255,10 @@ pub enum FlowBuildError {
     #[error(
         "Sink '{stage}' has no declared delivery safety; resume re-delivers the recorded \
          prefix during catch-up and fails closed on undeclared sinks (FLOWIP-120n F16). \
-         Declare `delivery: idempotent` in the sink! macro (or `.idempotent()` / \
-         `.non_idempotent()` on the sink handler), or pass `allow_duplicate_sink_delivery`."
+         Declare it where the handler lives: `delivery: idempotent` on a sink! closure, \
+         `.idempotent()` / `.non_idempotent()` on a typed sink handler expression, \
+         `SinkHandler::delivery_safety()` on a custom handler type, or `SAFETY` on a typed \
+         `Delivery`. Or pass `allow_duplicate_sink_delivery`."
     )]
     ResumeRefusedUndeclaredSink { stage: String },
 

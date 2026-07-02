@@ -270,7 +270,6 @@ impl SinkHandler for DoneCounterSink {
             }
         }
         Ok(DeliveryPayload::success(
-            "done_counter",
             DeliveryMethod::Custom("Count".to_string()),
             None,
         ))
