@@ -7,7 +7,7 @@ use crate::messaging::UpstreamSubscription;
 use crate::stages::common::handlers::UnifiedJoinHandler;
 use crate::stages::common::supervision::backpressure_drain::{drain_one_pending, DrainOutcome};
 use crate::stages::common::supervision::catch_up::{
-    consume_catch_up_watermark, CatchUpDisposition, CatchUpStage,
+    maybe_flip_caught_up, CatchUpDisposition, CatchUpStage,
 };
 use crate::stages::common::supervision::flow_context_factory::make_flow_context;
 use crate::stages::common::supervision::forward_control_event::forward_control_event;
@@ -45,18 +45,17 @@ pub(super) fn ensure_subscriptions<
     }
 }
 
-/// FLOWIP-120n: consume one side's delivered catch-up watermark. A one-sided
-/// arm reacts to either side's watermark; the flip requires BOTH sides caught
-/// up, so it happens when the second side crosses. A side whose subscription
-/// does not exist yet counts as not caught up (no premature flip).
-pub(super) async fn consume_join_catch_up_watermark<H: UnifiedJoinHandler>(
+/// FLOWIP-120n: the join's catch-up flip for `target`. The flip requires BOTH
+/// sides caught up; a side whose subscription does not exist yet counts as
+/// not caught up (no premature flip).
+async fn join_flip<H: UnifiedJoinHandler>(
     reference: Option<&UpstreamSubscription<ChainEvent>>,
     stream: Option<&UpstreamSubscription<ChainEvent>>,
-    ctx: &JoinContext<H>,
-    announced: obzenflow_core::ReaderGeneration,
-) -> crate::supervised_base::EventLoopDirective<JoinEvent<H>> {
+    ctx: &mut JoinContext<H>,
+    target: obzenflow_core::ReaderGeneration,
+) -> CatchUpDisposition {
     let side_caught_up = |side: Option<&UpstreamSubscription<ChainEvent>>| {
-        side.is_some_and(|subscription| subscription.all_readers_caught_up(announced))
+        side.is_some_and(|subscription| subscription.all_readers_caught_up(target))
     };
     let delivered = reference
         .map(|subscription| subscription.delivered_data_count())
@@ -65,8 +64,8 @@ pub(super) async fn consume_join_catch_up_watermark<H: UnifiedJoinHandler>(
             .map(|subscription| subscription.delivered_data_count())
             .unwrap_or(0);
     let flow_id = ctx.flow_id.to_string();
-    let disposition = consume_catch_up_watermark(
-        announced,
+    maybe_flip_caught_up(
+        target,
         side_caught_up(reference) && side_caught_up(stream),
         delivered,
         CatchUpStage {
@@ -81,13 +80,51 @@ pub(super) async fn consume_join_catch_up_watermark<H: UnifiedJoinHandler>(
         },
         /* author_marker */ true,
         &ctx.runtime_execution,
+        &mut ctx.catch_up_flip,
     )
-    .await;
-    match disposition {
+    .await
+}
+
+/// FLOWIP-120n: consume one side's delivered catch-up watermark. A one-sided
+/// arm reacts to either side's watermark; the flip happens when the second
+/// side crosses.
+pub(super) async fn consume_join_catch_up_watermark<H: UnifiedJoinHandler>(
+    reference: Option<&UpstreamSubscription<ChainEvent>>,
+    stream: Option<&UpstreamSubscription<ChainEvent>>,
+    ctx: &mut JoinContext<H>,
+    announced: obzenflow_core::ReaderGeneration,
+) -> crate::supervised_base::EventLoopDirective<JoinEvent<H>> {
+    match join_flip(reference, stream, ctx, announced).await {
         CatchUpDisposition::Consumed => crate::supervised_base::EventLoopDirective::Continue,
         CatchUpDisposition::Failed(message) => {
             crate::supervised_base::EventLoopDirective::Transition(JoinEvent::Error(message))
         }
+    }
+}
+
+/// FLOWIP-120n F17: re-run the join's flip when an authored EOF is the
+/// delivery that completes the frontier (no watermark follows an
+/// EOF-exhausted reader). `None` when nothing failed; the caller continues
+/// normal EOF processing. `Some` is the fail-closed error transition.
+pub(super) async fn flip_join_caught_up_on_eof<H: UnifiedJoinHandler>(
+    reference: Option<&UpstreamSubscription<ChainEvent>>,
+    stream: Option<&UpstreamSubscription<ChainEvent>>,
+    ctx: &mut JoinContext<H>,
+) -> Option<crate::supervised_base::EventLoopDirective<JoinEvent<H>>> {
+    let side_max = |side: Option<&UpstreamSubscription<ChainEvent>>| {
+        side.map(|subscription| subscription.max_reader_generation())
+            .unwrap_or_default()
+    };
+    let target = side_max(reference).max(side_max(stream));
+    // No watermark delivered yet on any input: nothing to cross.
+    if target == obzenflow_core::ReaderGeneration(0) {
+        return None;
+    }
+    match join_flip(reference, stream, ctx, target).await {
+        CatchUpDisposition::Consumed => None,
+        CatchUpDisposition::Failed(message) => Some(
+            crate::supervised_base::EventLoopDirective::Transition(JoinEvent::Error(message)),
+        ),
     }
 }
 

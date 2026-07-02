@@ -592,22 +592,6 @@ async fn mixed_sources_resume_flips_the_fan_in_across_a_vacuous_eof_crossing() -
 /// when the EOF arrives (the EOF-exhausted reader counts as vacuously
 /// crossed) and still author its watermark.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "FLOWIP-120n F17 gap: the caught-up flip predicate is evaluated only when a \
-CatchUpComplete watermark is delivered (consume_catch_up_watermark is called solely from the \
-CatchUpComplete arm, e.g. crates/obzenflow_runtime/src/stages/transform/supervisor/running.rs:262; \
-the non-flip path in crates/obzenflow_runtime/src/stages/common/supervision/catch_up.rs:64 \
-returns Consumed and is never re-run). When the input that completes the crossing is an authored \
-EOF delivered AFTER the watermark was consumed (reachable whenever the finite prefix is longer \
-than the infinite one, so the watermark takes a lower merge ordinal), the F17 vacuous-EOF \
-disjunction in UpstreamSubscription::all_readers_caught_up (messaging/upstream_subscription/\
-mod.rs:613) is never re-queried: the fan-in never authors its own watermark, its frontier never \
-reaches the resume generation, and every stage downstream of it stays reconstruction-scoped for \
-the rest of the run (dormant heartbeats, suppressed live policy middleware, replayed sink \
-labels). Data still flows because effect-miss and sink suppression are positional (F7/F15), \
-which this test's delivery waits prove. Fix shape: re-evaluate the flip when an EOF delivery \
-completes the crossing while a consumed watermark's announced generation is pending; that \
-touches the transform, stateful, sink, and join supervisors plus a subscription query, so it is \
-not a one-file mechanical fix and is left to the runtime slice."]
 async fn mixed_sources_resume_flips_when_the_eof_arrives_after_the_watermark() -> Result<()> {
     // Recorded: f emits 1..=5 then EOF, i emits 101..=103 then idles. The
     // merge tiebreak favours the i edge, so the recording delivers i:101,

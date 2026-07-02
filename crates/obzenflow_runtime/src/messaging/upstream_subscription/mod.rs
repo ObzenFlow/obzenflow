@@ -616,6 +616,17 @@ where
         })
     }
 
+    /// The highest generation any reader has crossed (FLOWIP-120n F17): the
+    /// flip target when an authored EOF, not a watermark, completes the
+    /// frontier. `ReaderGeneration(0)` when no watermark has delivered.
+    pub fn max_reader_generation(&self) -> ReaderGeneration {
+        self.generation_by_reader
+            .iter()
+            .copied()
+            .max()
+            .unwrap_or_default()
+    }
+
     /// Check if there are any upstream journals
     pub fn has_upstream(&self) -> bool {
         !self.readers.is_empty()

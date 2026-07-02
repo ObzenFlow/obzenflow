@@ -80,6 +80,21 @@ pub(super) async fn dispatch_hydrating<
                         .await);
                     }
 
+                    // FLOWIP-120n F17: an authored EOF can be the delivery
+                    // that completes the caught-up frontier; no watermark
+                    // follows, so re-run the flip before normal EOF handling.
+                    if envelope.event.is_eof() {
+                        if let Some(directive) = common::flip_join_caught_up_on_eof(
+                            Some(&*subscription),
+                            sup.stream_subscription.as_ref(),
+                            ctx,
+                        )
+                        .await
+                        {
+                            return Ok(directive);
+                        }
+                    }
+
                     let contract_reader_count = ctx.reference_contract_state.len();
                     let upstream_stage = subscription.last_delivered_upstream_stage();
                     let last_eof_outcome = subscription.last_eof_outcome().cloned();

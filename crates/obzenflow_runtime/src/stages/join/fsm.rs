@@ -417,6 +417,11 @@ pub struct JoinContext<H: UnifiedJoinHandler> {
     /// orderer (FLOWIP-095d). Ordered live joins run the canonical
     /// cross-subscription merge instead of preference polling.
     pub(crate) deterministic_fan_in: bool,
+
+    /// Catch-up flip latch (FLOWIP-120n): the last generation this stage
+    /// flipped at, making the flip idempotent per generation across both
+    /// triggers (watermark and authored EOF) and both sides.
+    pub(crate) catch_up_flip: Option<obzenflow_core::ReaderGeneration>,
 }
 
 impl<H: UnifiedJoinHandler + 'static> FsmContext for JoinContext<H> {}

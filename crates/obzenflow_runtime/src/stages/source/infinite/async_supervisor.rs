@@ -607,8 +607,18 @@ impl<H: AsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
                                     control.record_generation_boundary(self.stage_id, generation);
                                     // FLOWIP-120n F12: a hosted ingress surface admits
                                     // from here on.
-                                    if let Some(slot) = self.handler.hosted_ingress_slot() {
-                                        slot.mark_resume_live();
+                                    match self.handler.hosted_ingress_slot() {
+                                        Some(slot) => {
+                                            slot.mark_resume_live();
+                                            tracing::info!(
+                                                stage_name = %ctx.stage_name,
+                                                "resume handoff: hosted ingress marked live"
+                                            );
+                                        }
+                                        None => tracing::debug!(
+                                            stage_name = %ctx.stage_name,
+                                            "resume handoff: no hosted ingress slot on handler"
+                                        ),
                                     }
                                     self.replay_driver = None;
                                     Ok(EventLoopDirective::Continue)

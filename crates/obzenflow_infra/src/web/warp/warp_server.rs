@@ -2823,6 +2823,32 @@ fn map_system_event_to_sse(
                         .data(data.to_string()),
                 )
             }
+            obzenflow_core::event::ReplayLifecycleEvent::ResumedLive {
+                archive_flow_id,
+                replayed_count,
+                generation,
+            } => {
+                let mut data = json!({
+                    "system_event_type": "replay_lifecycle",
+                    "event_type": "resumed_live",
+                    "timestamp_ms": event.timestamp,
+                    "archive_flow_id": archive_flow_id,
+                    "replayed_count": replayed_count,
+                    "generation": generation,
+                });
+                if let Some(stage_id) = event.writer_id.as_stage() {
+                    data["stage_id"] = json!(stage_id.to_string());
+                }
+                if let Some(vc) = &vector_clock_value {
+                    data["vector_clock"] = vc.clone();
+                }
+                Some(
+                    SseEvent::default()
+                        .id(id_str)
+                        .event("replay_lifecycle")
+                        .data(data.to_string()),
+                )
+            }
         },
         SystemEventType::MiddlewareLifecycle {
             stage_id,

@@ -92,6 +92,20 @@ pub(super) async fn dispatch_enriching<
                     if envelope.event.is_eof() {
                         ctx.buffered_eof = Some(envelope.event.clone());
                         ctx.drain_parent = Some(envelope.clone());
+
+                        // FLOWIP-120n F17: an authored EOF can be the delivery
+                        // that completes the caught-up frontier; no watermark
+                        // follows, so re-run the flip before normal EOF
+                        // handling.
+                        if let Some(directive) = common::flip_join_caught_up_on_eof(
+                            sup.reference_subscription.as_ref(),
+                            Some(&*subscription),
+                            ctx,
+                        )
+                        .await
+                        {
+                            return Ok(directive);
+                        }
                     }
 
                     let contract_reader_count = ctx.stream_contract_state.len();

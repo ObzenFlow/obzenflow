@@ -303,6 +303,16 @@ impl IngestionState {
         self.ready.load(Ordering::Acquire) && self.ingress_slot.is_resume_live()
     }
 
+    /// The pipeline-running conjunct of readiness (health diagnostics).
+    pub fn pipeline_running(&self) -> bool {
+        self.ready.load(Ordering::Acquire)
+    }
+
+    /// The resume-live conjunct of readiness (health diagnostics).
+    pub fn resume_live(&self) -> bool {
+        self.ingress_slot.is_resume_live()
+    }
+
     /// Wire ready signal from `FlowHandle::state_receiver()`.
     ///
     /// Returns a join handle that must be kept alive.

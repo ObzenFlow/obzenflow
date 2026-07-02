@@ -161,6 +161,7 @@ impl<H: UnifiedStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static
                     std::time::Duration::from_millis(50),
                 ),
             heartbeat,
+            catch_up_flip: None,
         };
 
         // Create supervisor (private - not exposed)

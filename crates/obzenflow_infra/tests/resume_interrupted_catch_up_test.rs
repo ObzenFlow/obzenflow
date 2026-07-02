@@ -15,7 +15,7 @@
 //! the archive legitimately records resume generation 1, so R2 enters
 //! generation 2; the invariant asserted is monotonic prefix extension under
 //! one resume lineage. The torn-before-watermark case (no watermark authored
-//! at all) is the second, ignored test below.
+//! at all) is the second test below.
 
 #[path = "../../../tests/replay_testkit/mod.rs"]
 mod replay_testkit;
@@ -498,18 +498,6 @@ async fn resuming_an_interrupted_resume_extends_the_same_prefix() -> Result<()> 
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "FLOWIP-120n known deferral: resume of a torn-catch-up archive (cancelled before the \
-source authored its watermark, so no CatchUpComplete row exists) fails loud instead of resuming. \
-DiskReplayArchive::max_recorded_generation is manifest-first \
-(crates/obzenflow_infra/src/journal/disk/replay_archive.rs:344) and the manifest records the \
-generation the run ENTERED at bootstrap (dsl.rs writes resume_generation at build), not the \
-generation whose boundary is actually recorded in the journals; the source-journal scan fallback \
-is explicitly deferred to a later PR (comment at replay_archive.rs:341). Resuming such an \
-archive therefore enters generation 2 and authors a generation-2 watermark over journals that \
-contain no generation-1 boundary, and the downstream reader's F11 fail-closed advance check \
-(polling.rs:368, 'must advance by exactly one') aborts the flow. The fix is the deferred journal \
-scan: the resume generation must be (max generation with a recorded boundary) + 1, which for \
-this archive is 1. This test asserts the intended invariant and stays ignored until that PR."]
 async fn resuming_a_torn_catch_up_archive_stays_at_generation_one() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let journal_base = temp.path().join("journals");
@@ -573,11 +561,6 @@ async fn resuming_a_torn_catch_up_archive_stays_at_generation_one() -> Result<()
                 .count() as u64
                 == R2_LIVE
         };
-        // Verified failure mode as of 2026-07-01: this wait times out with
-        // the pipeline at Failed { reason: "Stage 'xform' failed:
-        // Subscription error: Implementation error: catch-up watermark on
-        // edge 'src' announces generation 2 from 0; the boundary must advance
-        // by exactly one (FLOWIP-120n F11)" }.
         wait_for_journal(&r2, "xform", "the live tail", live_tail_complete).await?;
         stop_and_wait(handle).await?;
     }

@@ -12,7 +12,7 @@ use crate::metrics::instrumentation::process_with_instrumentation;
 use crate::stages::common::handlers::UnifiedSinkHandler;
 use crate::stages::common::heartbeat::HeartbeatProcessingGuard;
 use crate::stages::common::supervision::catch_up::{
-    consume_catch_up_watermark, CatchUpDisposition, CatchUpStage,
+    flip_on_authored_eof, maybe_flip_caught_up, CatchUpDisposition, CatchUpStage,
 };
 use crate::stages::common::supervision::control_resolution::{
     resolve_control_event_awaiting_pauses, ControlAction,
@@ -298,7 +298,7 @@ async fn dispatch_control_event<
         ..
     } = signal
     {
-        let disposition = consume_catch_up_watermark(
+        let disposition = maybe_flip_caught_up(
             *announced,
             subscription.all_readers_caught_up(*announced),
             subscription.delivered_data_count(),
@@ -314,6 +314,7 @@ async fn dispatch_control_event<
             },
             /* author_marker */ false,
             &ctx.runtime_execution,
+            &mut ctx.catch_up_flip,
         )
         .await;
         return Ok(match disposition {
@@ -322,6 +323,34 @@ async fn dispatch_control_event<
                 EventLoopDirective::Transition(JournalSinkEvent::Error(message))
             }
         });
+    }
+
+    // FLOWIP-120n F17: an authored EOF can be the delivery that completes the
+    // caught-up frontier; no watermark follows, so re-run the flip before
+    // normal EOF handling.
+    if envelope.event.is_eof() {
+        if let Some(message) = flip_on_authored_eof(
+            subscription,
+            CatchUpStage {
+                stage_id: ctx.stage_id,
+                stage_name: &ctx.stage_name,
+                flow_name: &ctx.flow_name,
+                flow_id: &ctx.flow_id.to_string(),
+                stage_type: StageType::Sink,
+                writer_id: ctx.writer_id,
+                data_journal: &ctx.data_journal,
+                instrumentation: &ctx.instrumentation,
+            },
+            /* author_marker */ false,
+            &ctx.runtime_execution,
+            &mut ctx.catch_up_flip,
+        )
+        .await
+        {
+            return Ok(EventLoopDirective::Transition(JournalSinkEvent::Error(
+                message,
+            )));
+        }
     }
 
     let upstream_stage = subscription.last_delivered_upstream_stage();

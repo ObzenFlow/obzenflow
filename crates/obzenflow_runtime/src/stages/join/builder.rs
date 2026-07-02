@@ -198,6 +198,7 @@ impl<H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Su
                 ),
             heartbeat,
             deterministic_fan_in,
+            catch_up_flip: None,
         };
 
         // Create supervisor

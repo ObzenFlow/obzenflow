@@ -151,6 +151,7 @@ async fn build_cycle_entry_harness<
         drain_received: false,
         buffered_terminal_envelope: None,
         heartbeat: None,
+        catch_up_flip: None,
     };
 
     TransformAction::AllocateResources
@@ -425,6 +426,7 @@ async fn build_transform_harness<
         drain_received: false,
         buffered_terminal_envelope: None,
         heartbeat: None,
+        catch_up_flip: None,
     };
 
     TransformAction::AllocateResources

@@ -357,6 +357,11 @@ pub struct JournalSinkContext<H: UnifiedSinkHandler> {
 
     /// Optional per-stage heartbeat task (FLOWIP-063e).
     pub(crate) heartbeat: Option<HeartbeatHandle>,
+
+    /// Catch-up flip latch (FLOWIP-120n): the last generation this stage
+    /// flipped at, making the flip idempotent per generation across both
+    /// triggers (watermark and authored EOF).
+    pub(crate) catch_up_flip: Option<obzenflow_core::ReaderGeneration>,
 }
 
 impl<H: UnifiedSinkHandler + 'static> FsmContext for JournalSinkContext<H> {}
