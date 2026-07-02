@@ -39,7 +39,7 @@ use obzenflow_core::event::types::SeqNo;
 use obzenflow_core::event::vector_clock::VectorClock;
 use obzenflow_core::event::{ChainEvent, EventEnvelope, JournalEvent, JournalWriterId};
 use obzenflow_core::journal::journal_reader::JournalReader;
-use obzenflow_core::{EventId, EventType, ReaderGeneration, StageId};
+use obzenflow_core::{AdmissionSeq, EventId, EventType, ReaderGeneration, StageId};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use tokio::time::Instant;
@@ -75,6 +75,12 @@ pub(super) struct HeldHead<T: JournalEvent> {
     /// head sorts at the reader's current generation, and delivery advances
     /// the reader to this announced value.
     pub(super) catch_up: Option<ReaderGeneration>,
+    /// FLOWIP-120n F18: whether the seq comparator uses this row's own
+    /// `admission_seq`. True for re-admittable rows, whose sequence is
+    /// cross-run stable. Re-authored control rows (source contracts, EOFs)
+    /// carry per-run sequences, so they order by their journal position
+    /// instead: the reader's last positional sequence.
+    pub(super) orders_by_own_seq: bool,
 }
 
 /// Comparison metadata for the canonical merge's currently selected candidate.
@@ -94,6 +100,10 @@ pub struct MergeCandidateMeta<'a> {
     pub vector_clock: &'a VectorClock,
     /// Authored EOFs are exempt from causality and order by tiebreak alone.
     pub is_authored_eof: bool,
+    /// The head's flow-global admission sequence (FLOWIP-120n F18). When both
+    /// sides of a seq-ordered join carry one, the cross-side rule compares
+    /// `(generation, admission_seq)` ahead of the ordinal/key tiebreak.
+    pub admission_seq: Option<AdmissionSeq>,
 }
 
 impl FeedContractChain {
@@ -197,6 +207,18 @@ where
     /// round-robin; ordered stages get the canonical deterministic merge.
     reader_selection: types::ReaderSelectionPolicy,
 
+    /// FLOWIP-120n F18: this fan-in's inputs are all source journals, so the
+    /// canonical merge compares `(generation, admission_seq)` and a reader at
+    /// or past `entered_generation` is exempt from the quiet-input wait.
+    seq_ordered: bool,
+
+    /// The generation this run entered at (FLOWIP-120n): 0 live, archive max
+    /// recorded generation + 1 on replay/resume. In seq mode a reader below it
+    /// may still present re-admitted rows with recorded (smaller) sequences,
+    /// so its silence is not proof and it keeps the Kahn wait until the F17
+    /// crossing.
+    entered_generation: ReaderGeneration,
+
     /// One held head per reader, populated only under `CanonicalMerge`.
     held_heads: Vec<Option<HeldHead<T>>>,
 
@@ -217,6 +239,11 @@ where
     /// watermark is delivered in merge order, then the announced value.
     /// Never advanced while a watermark head is merely held.
     generation_by_reader: Vec<ReaderGeneration>,
+
+    /// Per-reader last delivered positional (re-admittable) sequence
+    /// (FLOWIP-120n F18): the inherited comparator key for re-authored
+    /// control heads, which have no cross-run-stable sequence of their own.
+    last_positional_seq: Vec<AdmissionSeq>,
 
     /// Generation of the last delivered event: the delivering reader's
     /// generation at delivery time (a watermark delivers at the generation it
@@ -273,6 +300,19 @@ where
     /// The reader-selection policy this subscription was built with.
     pub fn reader_selection(&self) -> types::ReaderSelectionPolicy {
         self.reader_selection
+    }
+
+    /// Whether this subscription runs the seq-ordered merge (FLOWIP-120n F18).
+    pub fn seq_ordered(&self) -> bool {
+        self.seq_ordered
+    }
+
+    /// Count of currently held heads. The join's seq-mode dispatch repeats its
+    /// ensure round until this is stable across both sides (FLOWIP-120n F18):
+    /// every headless reader's last empty poll then postdates every held
+    /// head's acquisition, which is what makes silence proof.
+    pub(crate) fn held_head_count(&self) -> usize {
+        self.held_heads.iter().filter(|head| head.is_some()).count()
     }
 
     fn uses_receipt_watermark(&self) -> bool {

@@ -3534,6 +3534,7 @@ mod tests {
             effect_declarations: Vec::new(),
             synthesized_outcomes: Vec::new(),
             deterministic_fan_in: false,
+            seq_ordered_fan_in: false,
         };
 
         let descriptor = FiniteSourceDescriptor {

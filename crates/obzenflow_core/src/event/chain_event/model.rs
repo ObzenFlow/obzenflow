@@ -16,7 +16,7 @@ use crate::event::payloads::observability_payload::{
     MetricsLifecycle, MiddlewareLifecycle, ObservabilityPayload, StageLifecycle,
 };
 use crate::event::status::processing_status::{ErrorKind, ProcessingStatus};
-use crate::event::types::{CorrelationId, EventId, WriterId};
+use crate::event::types::{AdmissionSeq, CorrelationId, EventId, WriterId};
 use crate::id::{CycleDepth, SccId};
 use crate::ingress::IngressContext;
 use serde::{Deserialize, Serialize};
@@ -137,6 +137,12 @@ pub struct ChainEvent {
     /// fields inside the domain payload.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub effect_provenance: Option<EffectProvenance>,
+
+    /// Flow-global append order (FLOWIP-120n F18): stamped at the journal
+    /// append when absent, preserved through re-admission. The within-
+    /// generation comparator at source-fed ordered fan-ins.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub admission_seq: Option<AdmissionSeq>,
 }
 
 /// The core event content - what kind of event this is

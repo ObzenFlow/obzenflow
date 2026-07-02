@@ -28,6 +28,15 @@ pub struct SeqNo(pub u64);
 #[serde(transparent)]
 pub struct ReaderGeneration(pub u64);
 
+/// Flow-global admission order (FLOWIP-120n F18): stamped from one per-run
+/// counter at the single-writer journal append, so sequence order equals
+/// append order. Re-admitted rows keep their recorded sequence; source-fed
+/// ordered fan-ins compare `(generation, admission_seq)` in place of the
+/// Kahn wait.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct AdmissionSeq(pub u64);
+
 /// Canonical event-type identity used when event types are map keys.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]

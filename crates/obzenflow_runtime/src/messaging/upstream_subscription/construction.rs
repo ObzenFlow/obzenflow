@@ -191,6 +191,7 @@ where
             held_heads: readers.iter().map(|_| None).collect(),
             delivered_count_by_reader: vec![DeliveredCount::default(); readers.len()],
             generation_by_reader: vec![obzenflow_core::ReaderGeneration::default(); readers.len()],
+            last_positional_seq: vec![obzenflow_core::AdmissionSeq(0); readers.len()],
             last_delivered_generation: None,
             reader_tiebreak_keys,
             readers,
@@ -207,6 +208,8 @@ where
             next_stage_input_position: 1,
             last_delivered_stage_input_position: None,
             reader_selection: ReaderSelectionPolicy::default(),
+            seq_ordered: false,
+            entered_generation: obzenflow_core::ReaderGeneration::default(),
             last_merge_wait: None,
             merge_candidate_index: None,
         })
@@ -235,6 +238,22 @@ where
             }
         }
         self.reader_selection = policy;
+        self
+    }
+
+    /// FLOWIP-120n F18: run the seq-ordered merge. Only meaningful under
+    /// `CanonicalMerge`; the flow build sets both together on marked
+    /// source-fed ordered fan-ins.
+    pub fn with_seq_ordered(mut self, seq_ordered: bool) -> Self {
+        self.seq_ordered = seq_ordered;
+        self
+    }
+
+    /// The generation this run entered at (FLOWIP-120n F18): 0 live, archive
+    /// max recorded generation + 1 on replay/resume. Gates the seq-mode
+    /// quiet-input wait exemption per reader.
+    pub fn with_entered_generation(mut self, entered: obzenflow_core::ReaderGeneration) -> Self {
+        self.entered_generation = entered;
         self
     }
 

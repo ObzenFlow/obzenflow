@@ -6,7 +6,7 @@ use super::{ChainEvent, ChainEventContent};
 use crate::event::journal_event::{JournalEvent, Sealed};
 use crate::event::payloads::flow_control_payload::FlowControlPayload;
 use crate::event::payloads::observability_payload::{MetricsLifecycle, ObservabilityPayload};
-use crate::event::types::{EventId, WriterId};
+use crate::event::types::{AdmissionSeq, EventId, WriterId};
 
 impl Sealed for ChainEvent {}
 
@@ -17,6 +17,14 @@ impl JournalEvent for ChainEvent {
 
     fn writer_id(&self) -> &WriterId {
         &self.writer_id
+    }
+
+    fn admission_seq(&self) -> Option<AdmissionSeq> {
+        self.admission_seq
+    }
+
+    fn set_admission_seq(&mut self, seq: AdmissionSeq) {
+        self.admission_seq = Some(seq);
     }
 
     /// Zero-alloc category string for metrics & fast logs.

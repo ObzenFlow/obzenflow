@@ -2112,6 +2112,40 @@ pub fn derive_deterministic_fan_in_stages(
     marked
 }
 
+/// FLOWIP-120n F18: ordered fan-ins whose every forward inbound edge comes
+/// from a source stage. Their inputs are re-admitted verbatim on replay, so
+/// the recorded `admission_seq` is a stable within-generation comparator and
+/// the merge needs no Kahn wait. Derived-fed ordered fan-ins stay Kahn: their
+/// inputs are re-authored on replay with fresh sequences.
+pub fn derive_seq_ordered_fan_ins(
+    topology: &Topology,
+    deterministic_fan_in_stages: &HashSet<StageId>,
+) -> HashSet<StageId> {
+    let mut inbound: HashMap<StageId, Vec<StageId>> = HashMap::new();
+    for edge in topology.edges() {
+        if edge.kind != EdgeKind::Forward {
+            continue;
+        }
+        inbound
+            .entry(StageId::from_ulid(edge.to.ulid()))
+            .or_default()
+            .push(StageId::from_ulid(edge.from.ulid()));
+    }
+
+    deterministic_fan_in_stages
+        .iter()
+        .copied()
+        .filter(|fan_in| {
+            inbound.get(fan_in).is_some_and(|upstreams| {
+                !upstreams.is_empty()
+                    && upstreams
+                        .iter()
+                        .all(|upstream| inbound.get(upstream).is_none_or(|edges| edges.is_empty()))
+            })
+        })
+        .collect()
+}
+
 /// FLOWIP-095j: per-stage delivery metadata recorded in the run manifest.
 ///
 /// For each stage: the upstream stage keys delivering into it over forward

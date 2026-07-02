@@ -187,6 +187,7 @@ fn test_direct_chain_event_construction() {
         runtime_context: None,
         observability: None,
         effect_provenance: None,
+        admission_seq: None,
     };
 
     assert!(event.is_control());

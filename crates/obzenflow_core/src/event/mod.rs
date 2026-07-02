@@ -43,6 +43,8 @@ pub use system_event::{
     EdgeLivenessState, MetricsCoordinationEvent, PipelineLifecycleEvent, ReplayLifecycleEvent,
     StageActivity, StageLifecycleEvent, SystemEvent, SystemEventFactory, SystemEventType,
 };
-pub use types::{CorrelationId, EventId, EventType, JournalWriterId, ReaderGeneration, WriterId};
+pub use types::{
+    AdmissionSeq, CorrelationId, EventId, EventType, JournalWriterId, ReaderGeneration, WriterId,
+};
 
 pub use utils::EventFilter;

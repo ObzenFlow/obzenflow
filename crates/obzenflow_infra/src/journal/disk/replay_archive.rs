@@ -37,8 +37,11 @@ pub struct DiskReplayArchive {
     allow_incomplete_archive: bool,
     read_write_lock: Arc<RwLock<()>>,
     /// Max generation with a recorded catch-up boundary in any source journal
-    /// (FLOWIP-120n), scanned once at open. See [`scan_max_recorded_generation`].
+    /// (FLOWIP-120n), scanned once at open. See [`scan_recorded_maxima`].
     max_recorded_generation: obzenflow_core::ReaderGeneration,
+    /// Max recorded admission sequence in any source journal (FLOWIP-120n
+    /// F18), from the same scan. Seeds the resuming run's flow sequencer.
+    max_recorded_admission_seq: obzenflow_core::AdmissionSeq,
 }
 
 impl DiskReplayArchive {
@@ -151,7 +154,7 @@ impl DiskReplayArchive {
             return Err(ReplayError::IncompleteArchive { status });
         }
 
-        let max_recorded_generation = scan_max_recorded_generation(
+        let (max_recorded_generation, max_recorded_admission_seq) = scan_recorded_maxima(
             &archive_path,
             &manifest,
             ReadPolicy::SealedScan {
@@ -181,6 +184,7 @@ impl DiskReplayArchive {
             allow_incomplete_archive,
             read_write_lock: Arc::new(RwLock::new(())),
             max_recorded_generation,
+            max_recorded_admission_seq,
         })
     }
 
@@ -371,24 +375,39 @@ impl ReplayArchive for DiskReplayArchive {
     fn max_recorded_generation(&self) -> obzenflow_core::ReaderGeneration {
         self.max_recorded_generation
     }
+
+    /// Max recorded admission sequence across the source journals (FLOWIP-120n
+    /// F18), 0 for archives predating the field. From the same open-time scan.
+    fn max_recorded_admission_seq(&self) -> obzenflow_core::AdmissionSeq {
+        self.max_recorded_admission_seq
+    }
 }
 
-/// Scan the archive's source journals for `CatchUpComplete` rows and return
-/// the max recorded generation, `0` when none exists (FLOWIP-120n). The scan
-/// is the authority for the resume generation: a torn catch-up (interrupted
-/// before a source authored its watermark) leaves the manifest's entered
-/// generation with no recorded boundary, and entering past it would trip the
-/// downstream F11 exactly-one advance check. Cost: one sequential read per
-/// source journal at bootstrap, journals resume re-reads anyway.
-fn scan_max_recorded_generation(
+/// Scan the archive's source journals once and return the max recorded
+/// generation and admission sequence, `0` each when none exists (FLOWIP-120n).
+/// The scan is the authority for the resume generation: a torn catch-up
+/// (interrupted before a source authored its watermark) leaves the manifest's
+/// entered generation with no recorded boundary, and entering past it would
+/// trip the downstream F11 exactly-one advance check. The admission-seq
+/// maximum (F18) seeds the resuming run's flow sequencer above every
+/// re-admitted sequence. Cost: one sequential read per source journal at
+/// bootstrap, journals resume re-reads anyway.
+fn scan_recorded_maxima(
     archive_path: &Path,
     manifest: &RunManifest,
     policy: ReadPolicy,
-) -> Result<obzenflow_core::ReaderGeneration, ReplayError> {
+) -> Result<
+    (
+        obzenflow_core::ReaderGeneration,
+        obzenflow_core::AdmissionSeq,
+    ),
+    ReplayError,
+> {
     use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
     use obzenflow_core::event::ChainEventContent;
 
     let mut max_generation = 0u64;
+    let mut max_admission_seq = 0u64;
     for stage_info in manifest.stages.values() {
         if !stage_info.stage_type.is_source() {
             continue;
@@ -428,6 +447,9 @@ fn scan_max_recorded_generation(
                     {
                         max_generation = max_generation.max(generation.0);
                     }
+                    if let Some(seq) = record.event.admission_seq {
+                        max_admission_seq = max_admission_seq.max(seq.0);
+                    }
                 }
                 Disposition::EndOfCommittedRecords | Disposition::Skip => break,
                 Disposition::Corrupt(problem) => {
@@ -446,7 +468,10 @@ fn scan_max_recorded_generation(
             }
         }
     }
-    Ok(obzenflow_core::ReaderGeneration(max_generation))
+    Ok((
+        obzenflow_core::ReaderGeneration(max_generation),
+        obzenflow_core::AdmissionSeq(max_admission_seq),
+    ))
 }
 
 pub(crate) fn derive_status_derivation_from_system_log(

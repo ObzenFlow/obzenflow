@@ -418,6 +418,11 @@ pub struct JoinContext<H: UnifiedJoinHandler> {
     /// cross-subscription merge instead of preference polling.
     pub(crate) deterministic_fan_in: bool,
 
+    /// FLOWIP-120n F18: this join's inputs are all source journals; both side
+    /// subscriptions run the seq-ordered merge and the cross-side dispatch
+    /// applies the seq-mode wait rule.
+    pub(crate) seq_ordered: bool,
+
     /// Catch-up flip latch (FLOWIP-120n): the last generation this stage
     /// flipped at, making the flip idempotent per generation across both
     /// triggers (watermark and authored EOF) and both sides.

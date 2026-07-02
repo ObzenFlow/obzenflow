@@ -34,6 +34,10 @@ use std::sync::Arc;
 pub struct SubscriptionFactory {
     /// Pre-computed stage names for all potential upstreams
     stage_names: HashMap<StageId, String>,
+    /// The generation this run entered at (FLOWIP-120n F18): 0 live, archive
+    /// max recorded generation + 1 on replay/resume. Copied into every bound
+    /// factory; seq-mode subscriptions gate the quiet-input wait on it.
+    pub entered_generation: obzenflow_core::ReaderGeneration,
 }
 
 /// A subscription factory that is already bound to a specific set of journals
@@ -49,12 +53,21 @@ pub struct BoundSubscriptionFactory {
     /// `CanonicalMerge` on stages the flow build marked as deterministic
     /// fan-in orderers; availability-driven round-robin otherwise.
     pub reader_selection: ReaderSelectionPolicy,
+    /// FLOWIP-120n F18: built subscriptions run the seq-ordered merge. Set
+    /// with `CanonicalMerge` on marked source-fed ordered fan-ins.
+    pub seq_ordered: bool,
+    /// The run's entered generation (FLOWIP-120n F18); see
+    /// [`SubscriptionFactory::entered_generation`].
+    pub entered_generation: obzenflow_core::ReaderGeneration,
 }
 
 impl SubscriptionFactory {
     /// Create a new factory with pre-computed metadata
     pub fn new(stage_names: HashMap<StageId, String>) -> Self {
-        Self { stage_names }
+        Self {
+            stage_names,
+            entered_generation: obzenflow_core::ReaderGeneration::default(),
+        }
     }
 
     /// Create a subscription for the given journals with pre-computed names
@@ -102,6 +115,8 @@ impl SubscriptionFactory {
             journals_with_names,
             selected_feeds_by_stage: HashMap::new(),
             reader_selection: ReaderSelectionPolicy::default(),
+            seq_ordered: false,
+            entered_generation: self.entered_generation,
         }
     }
 
@@ -125,6 +140,8 @@ impl BoundSubscriptionFactory {
             .map(|sub| {
                 sub.with_selected_feeds(self.selected_feeds_by_stage.clone())
                     .with_reader_selection(self.reader_selection)
+                    .with_seq_ordered(self.seq_ordered)
+                    .with_entered_generation(self.entered_generation)
                     .transport_only()
             })
             .map_err(|e| format!("Failed to create subscription: {e:?}"))
@@ -141,6 +158,8 @@ impl BoundSubscriptionFactory {
                 .map_err(|e| format!("Failed to create subscription: {e:?}"))?
                 .with_selected_feeds(self.selected_feeds_by_stage.clone())
                 .with_reader_selection(self.reader_selection)
+                .with_seq_ordered(self.seq_ordered)
+                .with_entered_generation(self.entered_generation)
                 .with_contracts(wiring)
                 .transport_only();
 
@@ -260,6 +279,11 @@ pub struct StageResources {
     /// descendant (an effect, a stateful fold, or a live join) whose input
     /// delivery runs the canonical merge.
     pub deterministic_fan_in: bool,
+
+    /// FLOWIP-120n F18: this ordered fan-in's inputs are all source journals,
+    /// so its subscription compares by the recorded admission sequence and
+    /// needs no Kahn wait on a quiet input.
+    pub seq_ordered_fan_in: bool,
 }
 
 /// Builder for creating all stage resources with proper wiring
@@ -275,6 +299,7 @@ pub struct StageResourcesBuilder {
     effect_ports: EffectPortRegistry,
     feed_plan: FeedPlan,
     deterministic_fan_in_stages: HashSet<StageId>,
+    seq_ordered_fan_ins: HashSet<StageId>,
 }
 
 impl StageResourcesBuilder {
@@ -299,6 +324,7 @@ impl StageResourcesBuilder {
             effect_ports: EffectPortRegistry::new(),
             feed_plan: FeedPlan::default(),
             deterministic_fan_in_stages: HashSet::new(),
+            seq_ordered_fan_ins: HashSet::new(),
         }
     }
 
@@ -333,6 +359,13 @@ impl StageResourcesBuilder {
         self
     }
 
+    /// FLOWIP-120n F18: ordered fan-ins whose inputs are all source journals;
+    /// their subscriptions compare by the recorded admission sequence.
+    pub fn with_seq_ordered_fan_ins(mut self, stages: HashSet<StageId>) -> Self {
+        self.seq_ordered_fan_ins = stages;
+        self
+    }
+
     /// Build all resources for all stages
     pub async fn build(self) -> Result<StageResourcesSet, String> {
         // Create shared message bus
@@ -364,6 +397,16 @@ impl StageResourcesBuilder {
 
         // Build stage resources for each stage
         let mut stage_resources = HashMap::new();
+
+        // FLOWIP-120n F18: the generation this run enters at. 0 live; archive
+        // max recorded generation + 1 for both replay and resume, so a reader
+        // still below it may present re-admitted rows and keeps the Kahn wait.
+        let entered_generation = match &self.replay_archive {
+            None => obzenflow_core::ReaderGeneration(0),
+            Some(archive) => {
+                obzenflow_core::ReaderGeneration(archive.max_recorded_generation().0 + 1)
+            }
+        };
 
         // Keep track of all stage journals for metrics aggregator
         let mut all_stage_journals: Vec<(StageId, Arc<dyn Journal<ChainEvent>>)> = Vec::new();
@@ -507,7 +550,8 @@ impl StageResourcesBuilder {
 
             // Keep a copy for logging before moving into the factory
             let all_stage_names_for_log = all_stage_names.clone();
-            let subscription_factory = SubscriptionFactory::new(all_stage_names);
+            let mut subscription_factory = SubscriptionFactory::new(all_stage_names);
+            subscription_factory.entered_generation = entered_generation;
             let output_contract = self
                 .feed_plan
                 .output_contract(stage_id)
@@ -516,12 +560,19 @@ impl StageResourcesBuilder {
             let input_feeds = self.feed_plan.input_feeds(stage_id);
             let selected_feeds_by_stage = selected_feeds_by_upstream(&input_feeds);
             let deterministic_fan_in = self.deterministic_fan_in_stages.contains(&stage_id);
+            let seq_ordered_fan_in = self.seq_ordered_fan_ins.contains(&stage_id);
             let mut upstream_subscription_factory = subscription_factory
                 .bind_with_selected_feeds(&upstream_journals, selected_feeds_by_stage);
             upstream_subscription_factory.owner_label = stage_info.name.clone();
             if deterministic_fan_in {
                 upstream_subscription_factory.reader_selection =
                     ReaderSelectionPolicy::CanonicalMerge;
+            }
+            if seq_ordered_fan_in {
+                // FLOWIP-120n F18: seq mode implies the canonical merge.
+                upstream_subscription_factory.reader_selection =
+                    ReaderSelectionPolicy::CanonicalMerge;
+                upstream_subscription_factory.seq_ordered = true;
             }
 
             let runtime_execution = flow_runtime_execution.clone();
@@ -552,6 +603,7 @@ impl StageResourcesBuilder {
                 effect_declarations: Vec::new(),
                 synthesized_outcomes: Vec::new(),
                 deterministic_fan_in,
+                seq_ordered_fan_in,
             };
 
             tracing::debug!(

@@ -503,24 +503,26 @@ async fn fan_in_delivery_order_identical_across_live_replay_and_replay_of_replay
     assert_eq!(live_calls.load(Ordering::SeqCst), 7);
     let live_run = replay_testkit::latest_run_dir(&journal_base);
 
-    // The canonical tiebreak alternates the two channels fairly and streams
-    // the longer channel's tail once the shorter one seals.
+    // This fan-in is source-fed, so it orders by admission sequence
+    // (FLOWIP-120n F18): the live order follows append order rather than the
+    // Kahn alternation, delivers every input, and preserves each channel's
+    // internal order. Exact reproduction under replay is asserted below.
     let live_projection =
         replay_testkit::project_delivered_order(&live_run, "merge", &["source_a", "source_b"])
             .await;
-    assert_eq!(
-        live_projection.consumption_sequence(),
-        vec![
-            ("source_a".to_string(), 1),
-            ("source_b".to_string(), 1),
-            ("source_a".to_string(), 2),
-            ("source_b".to_string(), 2),
-            ("source_a".to_string(), 3),
-            ("source_b".to_string(), 3),
-            ("source_a".to_string(), 4),
-        ],
-        "live fan-in delivery must follow the canonical alternation"
-    );
+    let sequence = live_projection.consumption_sequence();
+    assert_eq!(sequence.len(), 7, "every input delivers exactly once");
+    for upstream in ["source_a", "source_b"] {
+        let ordinals: Vec<u64> = sequence
+            .iter()
+            .filter(|(stage, _)| stage == upstream)
+            .map(|(_, ordinal)| *ordinal)
+            .collect();
+        assert!(
+            ordinals.windows(2).all(|pair| pair[0] < pair[1]),
+            "{upstream} must deliver in its journal order: {ordinals:?}"
+        );
+    }
 
     // Replay the live run.
     let replay_calls = Arc::new(AtomicUsize::new(0));
@@ -574,10 +576,10 @@ async fn counter_ordered_word(run_dir: &std::path::Path) -> Vec<String> {
 }
 
 /// FLOWIP-095m: a non-effectful stateful stage below the fan-in triggers the
-/// canonical merge (095d fired only for effects), and the delivered order at
-/// `merge` reproduces under `--replay-from`. Without the widening `merge` would
-/// be availability-scheduled and this canonical alternation would not hold. The
-/// fold is order-DEPENDENT, so its own durable output is a second witness.
+/// deterministic-orderer marking (095d fired only for effects); this fan-in
+/// is source-fed, so it runs the seq-ordered merge (FLOWIP-120n F18) and its
+/// delivered order reproduces under `--replay-from`. The fold is
+/// order-DEPENDENT, so its own durable output is a second witness.
 #[tokio::test]
 async fn stateful_fan_in_delivery_order_reproduces_under_replay() {
     let _guard = FAN_IN_TEST_LOCK.lock().await;
@@ -590,23 +592,6 @@ async fn stateful_fan_in_delivery_order_reproduces_under_replay() {
     )
     .await;
     let live_run = replay_testkit::latest_run_dir(&journal_base);
-
-    let live_projection =
-        replay_testkit::project_delivered_order(&live_run, "merge", &["source_a", "source_b"])
-            .await;
-    assert_eq!(
-        live_projection.consumption_sequence(),
-        vec![
-            ("source_a".to_string(), 1),
-            ("source_b".to_string(), 1),
-            ("source_a".to_string(), 2),
-            ("source_b".to_string(), 2),
-            ("source_a".to_string(), 3),
-            ("source_b".to_string(), 3),
-            ("source_a".to_string(), 4),
-        ],
-        "a stateful stage below the fan-in must trigger the canonical alternation"
-    );
 
     run_replay(
         &live_run,
@@ -626,15 +611,10 @@ async fn stateful_fan_in_delivery_order_reproduces_under_replay() {
     // FLOWIP-095m: the order-DEPENDENT fold's own durable output reproduces,
     // which is the reconstruction property 120n's S_N relies on. A commutative
     // fold could not witness this, since its output would not vary with order.
-    let expected_word: Vec<String> = ["a:1", "b:1", "a:2", "b:2", "a:3", "b:3", "a:4"]
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
+    // The word itself is admission order (arrival-dependent under F18), so the
+    // assertion is reproduction, not a fixed alternation.
     let live_word = counter_ordered_word(&live_run).await;
-    assert_eq!(
-        live_word, expected_word,
-        "the fold must record the canonical arrival order"
-    );
+    assert_eq!(live_word.len(), 7, "the fold saw every input exactly once");
     assert_eq!(
         counter_ordered_word(&replay_run).await,
         live_word,
@@ -642,10 +622,13 @@ async fn stateful_fan_in_delivery_order_reproduces_under_replay() {
     );
 }
 
-/// Arrival-timing independence: two LIVE runs with different per-source
-/// jitter must merge identically, because the canonical merge orders by
-/// stream content rather than arrival. This is the property the recorded
-/// arbitration alternative could never provide for live runs.
+/// Arrival-timing independence at a DERIVED-fed fan-in: two LIVE runs with
+/// different per-event delays must merge identically, because the Kahn merge
+/// orders by stream content rather than arrival. FLOWIP-120n F18 scopes this
+/// property: a source-fed fan-in orders by admission sequence, where the live
+/// order is arrival-dependent but exactly reproducible (asserted by the
+/// replay tests above); derived-fed fan-ins keep the Kahn merge and its
+/// timing independence, pinned here on the skip-level shape.
 #[tokio::test]
 async fn two_live_runs_with_different_arrival_timing_produce_identical_merged_order() {
     let _guard = FAN_IN_TEST_LOCK.lock().await;
@@ -655,7 +638,7 @@ async fn two_live_runs_with_different_arrival_timing_produce_identical_merged_or
     let first_calls = Arc::new(AtomicUsize::new(0));
     run_live(
         &journal_base,
-        build_two_channel_flow_with_jitter(journal_base.clone(), first_calls.clone(), 0),
+        build_skip_level_flow_with_delay(journal_base.clone(), first_calls.clone(), 0),
     )
     .await;
     let first_run = replay_testkit::latest_run_dir(&journal_base);
@@ -663,20 +646,18 @@ async fn two_live_runs_with_different_arrival_timing_produce_identical_merged_or
     let second_calls = Arc::new(AtomicUsize::new(0));
     run_live(
         &journal_base,
-        build_two_channel_flow_with_jitter(journal_base.clone(), second_calls.clone(), 25),
+        build_skip_level_flow_with_delay(journal_base.clone(), second_calls.clone(), 25),
     )
     .await;
     let second_run = replay_testkit::latest_run_dir(&journal_base);
     assert_ne!(first_run, second_run);
 
-    // Both runs executed their effects live; the merged order is identical.
-    assert_eq!(first_calls.load(Ordering::SeqCst), 7);
-    assert_eq!(second_calls.load(Ordering::SeqCst), 7);
+    // Different timing, identical merged order.
     replay_testkit::assert_same_delivered_order(
         &first_run,
         &second_run,
         "merge",
-        &["source_a", "source_b"],
+        &["source_a", "tap"],
     )
     .await;
 }

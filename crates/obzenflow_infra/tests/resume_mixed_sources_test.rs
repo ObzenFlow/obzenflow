@@ -454,8 +454,8 @@ fn payload_set(rows: &[MixedRow]) -> BTreeSet<String> {
 #[tokio::test(flavor = "multi_thread")]
 async fn mixed_sources_resume_flips_the_fan_in_across_a_vacuous_eof_crossing() -> Result<()> {
     // Recorded: f emits 1..=3 then EOF, i emits 101..=104 then idles. All 7
-    // recorded inputs deliver (an EOF-exhausted reader stops blocking the
-    // Kahn merge). Live: i emits 105..=106.
+    // recorded inputs deliver (seq-ordered fan-in, FLOWIP-120n F18). Live:
+    // i emits 105..=106.
     const RECORDED: u64 = 7;
     const LIVE: u64 = 2;
     let recorded_ranges = SourceRanges {
@@ -585,28 +585,22 @@ async fn mixed_sources_resume_flips_the_fan_in_across_a_vacuous_eof_crossing() -
     Ok(())
 }
 
-/// The same F17 crossing on the path where the watermark is delivered at the
-/// fan-in before the finite source's EOF: the finite channel is longer, so
-/// the watermark takes a lower merge ordinal and is consumed while the finite
-/// reader is still mid-prefix. The fan-in must then complete its crossing
-/// when the EOF arrives (the EOF-exhausted reader counts as vacuously
-/// crossed) and still author its watermark.
+/// The F17 crossing with the finite channel longer than the infinite one.
+///
+/// Under the seq-ordered merge (FLOWIP-120n F18) the recording no longer
+/// blocks on the shorter quiet input, so all 8 recorded inputs deliver, and
+/// on resume the fin EOF always precedes the inf watermark at the fan-in (a
+/// re-authored EOF orders by inherited journal position, at most the recorded
+/// maximum, while the watermark draws a seeded live sequence above it). The
+/// original arranged order, watermark consumed while the finite reader is
+/// still mid-prefix, is no longer constructible at a source-fed fan-in; this
+/// variant keeps the longer-finite shape and the F17 flip coverage.
 #[tokio::test(flavor = "multi_thread")]
 async fn mixed_sources_resume_flips_when_the_eof_arrives_after_the_watermark() -> Result<()> {
-    // Recorded: f emits 1..=5 then EOF, i emits 101..=103 then idles. The
-    // merge tiebreak favours the i edge, so the recording delivers i:101,
-    // f:1, i:102, f:2, i:103 and then blocks (f:3 needs a quiet-i head):
-    // f:3, f:4, f:5, and the EOF are in flight at the fan-in when the run is
-    // cancelled. Live: i emits 104..=105.
-    //
-    // On resume the infinite source's watermark takes merge ordinal 4 on its
-    // edge, so it is consumed while the finite reader is still mid-prefix
-    // (before f:4, f:5, and the EOF deliver). The fan-in's crossing therefore
-    // completes at EOF delivery, not at watermark delivery, and the F17
-    // vacuous-EOF disjunction must still author the fan-in's watermark.
-    const RECORDED_DELIVERED: u64 = 5;
+    // Recorded: f emits 1..=5 then EOF, i emits 101..=103 then idles; all 8
+    // deliver (no Kahn wait at a source-fed fan-in). Live: i emits 104..=105.
+    const RECORDED_DELIVERED: u64 = 8;
     const RECORDED_INPUTS: u64 = 8;
-    const IN_FLIGHT_GAPS: u64 = 3; // f:3, f:4, f:5 execute under the F7 rule
     const LIVE: u64 = 2;
     let recorded_ranges = SourceRanges {
         fin_first: 1,
@@ -639,19 +633,17 @@ async fn mixed_sources_resume_flips_when_the_eof_arrives_after_the_watermark() -
             }),
             ..BootstrapConfig::default()
         });
-        run_until_delivered(&journal_base, &live_ranges, IN_FLIGHT_GAPS + LIVE).await?
+        run_until_delivered(&journal_base, &live_ranges, LIVE).await?
     };
     assert_eq!(
-        resumed_calls,
-        (IN_FLIGHT_GAPS + LIVE) as usize,
-        "recorded outcomes are suppressed; the in-flight gaps and the live tail execute"
+        resumed_calls, LIVE as usize,
+        "recorded outcomes are suppressed; only the live tail executes"
     );
     let resumed_run = replay_testkit::latest_run_dir(&journal_base);
     assert_ne!(recorded_run, resumed_run);
 
-    // The fan-in must author its watermark: the EOF that completed the
-    // crossing arrived after the watermark was consumed, and the F17
-    // vacuous-EOF disjunction still has to fire.
+    // The fan-in must author its watermark: the finite input crossed
+    // vacuously at its EOF (F17), the infinite one at its watermark.
     let merge_rows =
         mixed_rows(&replay_testkit::read_stage_envelopes_appended(&resumed_run, "merge").await);
     let boundary = merge_rows

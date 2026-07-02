@@ -775,8 +775,10 @@ pub(crate) enum JoinSide {
 /// between non-EOF candidates first (authored EOFs are exempt and order by
 /// tiebreak alone), then generation as the coarsest axis (FLOWIP-120n; a
 /// recorded head orders ahead of a live head, and cross-generation causality
-/// never inverts, so the two rules cannot disagree), then the (ordinal,
-/// reader tiebreak key, join side) tiebreak.
+/// never inverts, so the two rules cannot disagree), then `(generation,
+/// admission_seq)` when both candidates carry sequences (FLOWIP-120n F18, the
+/// seq-ordered join), falling through to the (ordinal, reader tiebreak key,
+/// join side) tiebreak otherwise.
 pub(crate) fn select_between(
     a: &crate::messaging::upstream_subscription::MergeCandidateMeta<'_>,
     a_side: JoinSide,
@@ -789,6 +791,12 @@ pub(crate) fn select_between(
         }
         if CausalOrderingService::happened_before(b.vector_clock, a.vector_clock) {
             return std::cmp::Ordering::Greater;
+        }
+    }
+    if let (Some(a_seq), Some(b_seq)) = (a.admission_seq, b.admission_seq) {
+        let by_seq = (a.generation, a_seq).cmp(&(b.generation, b_seq));
+        if by_seq != std::cmp::Ordering::Equal {
+            return by_seq;
         }
     }
     (a.generation, a.ordinal, a.key, a_side).cmp(&(b.generation, b.ordinal, b.key, b_side))
@@ -828,54 +836,79 @@ async fn run_live_contract_ticks<
 ///
 /// Both subscriptions select their internal merge candidates; the cross-side
 /// choice applies the same rule to the two candidates with the side label as
-/// the final tiebreak component. Any quiet side blocks delivery (the Kahn
-/// discipline), reported through the heartbeat as idle-by-rule.
+/// the final tiebreak component. A blocking-quiet side (one whose silence is
+/// not proof) blocks delivery, reported through the heartbeat as
+/// idle-by-rule; in seq mode (FLOWIP-120n F18) an exempt-quiet side does not.
 async fn dispatch_live_canonical<
     H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
 >(
     sup: &mut JoinSupervisor<H>,
     ctx: &mut JoinContext<H>,
 ) -> Result<EventLoopDirective<JoinEvent<H>>, Box<dyn std::error::Error + Send + Sync>> {
-    use crate::messaging::upstream_subscription::MergeCandidateStatus;
-
-    let reference_status = match sup.reference_subscription.as_mut() {
-        Some(subscription) => {
+    // Seq mode repeats the two ensure rounds until neither side acquired a
+    // new head (FLOWIP-120n F18): every headless reader's last empty poll
+    // then postdates every held head's acquisition on either side, which is
+    // what makes cross-side silence proof. Bounded by total reader count;
+    // heads are only released at delivery, after this loop.
+    loop {
+        let held_before = (
+            sup.reference_subscription
+                .as_ref()
+                .map(|subscription| subscription.held_head_count()),
+            sup.stream_subscription
+                .as_ref()
+                .map(|subscription| subscription.held_head_count()),
+        );
+        if let Some(subscription) = sup.reference_subscription.as_mut() {
             let mut progress = Some(&mut ctx.reference_contract_state[..]);
-            match subscription
+            if let Err(e) = subscription
                 .ensure_merge_candidate("Live", &mut progress)
                 .await
             {
-                Ok(status) => status,
-                Err(e) => {
-                    return Ok(EventLoopDirective::Transition(JoinEvent::Error(format!(
-                        "Reference subscription error: {e}"
-                    ))))
-                }
+                return Ok(EventLoopDirective::Transition(JoinEvent::Error(format!(
+                    "Reference subscription error: {e}"
+                ))));
             }
         }
-        None => MergeCandidateStatus::AllExhausted,
-    };
-    let stream_status = match sup.stream_subscription.as_mut() {
-        Some(subscription) => {
+        if let Some(subscription) = sup.stream_subscription.as_mut() {
             let mut progress = Some(&mut ctx.stream_contract_state[..]);
-            match subscription
+            if let Err(e) = subscription
                 .ensure_merge_candidate("Live", &mut progress)
                 .await
             {
-                Ok(status) => status,
-                Err(e) => {
-                    return Ok(EventLoopDirective::Transition(JoinEvent::Error(format!(
-                        "Stream subscription error: {e}"
-                    ))))
-                }
+                return Ok(EventLoopDirective::Transition(JoinEvent::Error(format!(
+                    "Stream subscription error: {e}"
+                ))));
             }
         }
-        None => MergeCandidateStatus::AllExhausted,
-    };
+        let held_after = (
+            sup.reference_subscription
+                .as_ref()
+                .map(|subscription| subscription.held_head_count()),
+            sup.stream_subscription
+                .as_ref()
+                .map(|subscription| subscription.held_head_count()),
+        );
+        if !ctx.seq_ordered || held_after == held_before {
+            break;
+        }
+    }
 
-    if matches!(reference_status, MergeCandidateStatus::Quiet)
-        || matches!(stream_status, MergeCandidateStatus::Quiet)
-    {
+    // A side's ensure records a merge wait exactly when its quiet is
+    // blocking: every Kahn quiet, and a seq-mode reader still below the
+    // entered generation. Exempt-quiet seq readers record nothing and do not
+    // block the other side's candidate.
+    let blocking_wait = sup
+        .reference_subscription
+        .as_ref()
+        .and_then(|subscription| subscription.merge_wait())
+        .is_some()
+        || sup
+            .stream_subscription
+            .as_ref()
+            .and_then(|subscription| subscription.merge_wait())
+            .is_some();
+    if blocking_wait {
         let wait = sup
             .reference_subscription
             .as_ref()
@@ -1105,6 +1138,7 @@ mod tests {
             key,
             vector_clock,
             is_authored_eof,
+            admission_seq: None,
         }
     }
 
@@ -1193,6 +1227,40 @@ mod tests {
         assert_eq!(
             select_between(&eof, JoinSide::Reference, &data, JoinSide::Stream),
             Ordering::Greater
+        );
+    }
+
+    #[test]
+    fn admission_seq_orders_ahead_of_ordinal_and_key_when_both_carry_it() {
+        // FLOWIP-120n F18: with both candidates sequenced, (generation,
+        // admission_seq) decides before ordinal and key.
+        let empty = VectorClock::new();
+        let (key_z, key_a) = (key("z_stage"), key("a_stage"));
+        let mut a = meta(9, &key_z, &empty, false);
+        a.admission_seq = Some(obzenflow_core::AdmissionSeq(1));
+        let mut b = meta(1, &key_a, &empty, false);
+        b.admission_seq = Some(obzenflow_core::AdmissionSeq(2));
+        assert_eq!(
+            select_between(&a, JoinSide::Stream, &b, JoinSide::Reference),
+            Ordering::Less
+        );
+        assert_eq!(
+            select_between(&b, JoinSide::Reference, &a, JoinSide::Stream),
+            Ordering::Greater
+        );
+    }
+
+    #[test]
+    fn missing_admission_seq_on_either_side_falls_back_to_ordinal_key() {
+        let empty = VectorClock::new();
+        let (key_z, key_a) = (key("z_stage"), key("a_stage"));
+        let mut a = meta(9, &key_z, &empty, false);
+        a.admission_seq = Some(obzenflow_core::AdmissionSeq(1));
+        let b = meta(1, &key_a, &empty, false);
+        assert_eq!(
+            select_between(&a, JoinSide::Stream, &b, JoinSide::Reference),
+            Ordering::Greater,
+            "one sequence-less side sends the decision to the existing tiebreak"
         );
     }
 }

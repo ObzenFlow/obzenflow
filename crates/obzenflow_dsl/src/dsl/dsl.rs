@@ -738,6 +738,12 @@ macro_rules! build_typed_flow {
             &name_to_id,
             &deterministic_fan_in_stages,
         );
+        // FLOWIP-120n F18: source-fed ordered fan-ins compare by the recorded
+        // admission sequence and need no Kahn wait on a quiet input.
+        let seq_ordered_fan_ins = $crate::dsl::typing::derive_seq_ordered_fan_ins(
+            &topology,
+            &deterministic_fan_in_stages,
+        );
 
         $crate::dsl::typing::validate_order_observer_deterministic_input_order(
             &topology,
@@ -1261,6 +1267,7 @@ macro_rules! build_typed_flow {
         .with_backpressure_plan(backpressure_plan)
         .with_feed_plan(feed_plan)
         .with_deterministic_fan_in_stages(deterministic_fan_in_stages)
+        .with_seq_ordered_fan_ins(seq_ordered_fan_ins)
         .with_effect_ports($effect_ports)
         .with_replay_archive(replay_archive);
 

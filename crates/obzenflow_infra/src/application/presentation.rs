@@ -412,12 +412,12 @@ impl RunPresentationOutcome {
                 run_dir = run_dir.display(),
             ),
             RunMode::Resume(ctx) => format!(
-                "{flow_name} {verb} (resumed from {source}).\nRecorded facts were caught up with effects suppressed, then the run continued live from the recorded high-water mark.\nJournal: {run_dir}\nReplay this run with: --replay-from {run_dir}",
+                "{flow_name} {verb} (resumed from {source}).\nRecorded facts were caught up with effects suppressed, then the run continued live from the recorded high-water mark.\nJournal: {run_dir}\nReplay this run with: --replay-from {run_dir}\nResume it again with: --resume-from {run_dir}",
                 source = ctx.source_label(),
                 run_dir = run_dir.display(),
             ),
             _ => format!(
-                "{flow_name} {verb}. Journal: {run_dir}\nTo replay, add: --replay-from {run_dir}\n(Source config env vars are ignored during replay)",
+                "{flow_name} {verb}. Journal: {run_dir}\nTo verify with a bounded replay, add: --replay-from {run_dir}\nTo continue this run live from where it left off, add: --resume-from {run_dir}\n(Source config env vars are ignored during replay and catch-up)",
                 run_dir = run_dir.display(),
             ),
         }
@@ -803,8 +803,19 @@ mod tests {
         };
         assert_eq!(
             completed_with_journal.default_footer(),
-            "flow completed. Journal: tmp/run\nTo replay, add: --replay-from tmp/run\n(Source config env vars are ignored during replay)"
+            "flow completed. Journal: tmp/run\nTo verify with a bounded replay, add: --replay-from tmp/run\nTo continue this run live from where it left off, add: --resume-from tmp/run\n(Source config env vars are ignored during replay and catch-up)"
         );
+
+        // FLOWIP-120n: a stopped run's footer offers both verbs with the
+        // journal path, the operator's path back to replay or resume.
+        let stopped_with_journal = RunPresentationOutcome::Stopped {
+            flow_name: "flow".to_string(),
+            run_dir: Some(PathBuf::from("tmp/run")),
+            run_mode: RunMode::Live,
+        };
+        let stopped_footer = stopped_with_journal.default_footer();
+        assert!(stopped_footer.contains("--replay-from tmp/run"));
+        assert!(stopped_footer.contains("--resume-from tmp/run"));
 
         let stopped = RunPresentationOutcome::Stopped {
             flow_name: "flow".to_string(),
@@ -903,6 +914,10 @@ mod tests {
         assert!(
             footer.contains("--replay-from tmp/resume-run"),
             "resume footer must offer replay of the new journal: {footer}"
+        );
+        assert!(
+            footer.contains("--resume-from tmp/resume-run"),
+            "resume footer must offer resuming the resumed run (closure): {footer}"
         );
         assert!(
             !footer.contains("--verify"),

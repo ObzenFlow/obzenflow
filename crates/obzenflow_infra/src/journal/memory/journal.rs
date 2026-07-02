@@ -19,6 +19,7 @@ use obzenflow_core::journal::journal_owner::JournalOwner;
 use obzenflow_core::journal::journal_reader::JournalReader;
 use obzenflow_core::journal::Journal;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use super::reader::MemoryJournalReader;
@@ -34,6 +35,8 @@ pub struct MemoryJournal<T: JournalEvent> {
     owner: Option<JournalOwner>,
     journal_id: JournalId,
     state: Arc<Mutex<MemoryJournalState<T>>>,
+    /// Flow-shared admission sequencer (FLOWIP-120n F18); see `DiskJournal`.
+    admission_sequencer: Option<Arc<AtomicU64>>,
     _phantom: std::marker::PhantomData<T>,
 }
 
@@ -53,6 +56,7 @@ impl<T: JournalEvent> MemoryJournal<T> {
                 events: Vec::new(),
                 writer_clocks: HashMap::new(),
             })),
+            admission_sequencer: None,
             _phantom: std::marker::PhantomData,
         }
     }
@@ -66,8 +70,15 @@ impl<T: JournalEvent> MemoryJournal<T> {
                 events: Vec::new(),
                 writer_clocks: HashMap::new(),
             })),
+            admission_sequencer: None,
             _phantom: std::marker::PhantomData,
         }
+    }
+
+    /// Attach the flow-shared admission sequencer (FLOWIP-120n F18).
+    pub fn with_admission_sequencer(mut self, sequencer: Arc<AtomicU64>) -> Self {
+        self.admission_sequencer = Some(sequencer);
+        self
     }
 }
 
@@ -87,7 +98,7 @@ impl<T: JournalEvent + 'static> Journal<T> for MemoryJournal<T> {
 
     async fn append(
         &self, // Note: &self, not &mut self
-        event: T,
+        mut event: T,
         parent: Option<&EventEnvelope<T>>,
     ) -> Result<EventEnvelope<T>, JournalError> {
         crate::journal::ensure_owned(self.owner.as_ref())?;
@@ -95,6 +106,16 @@ impl<T: JournalEvent + 'static> Journal<T> for MemoryJournal<T> {
         let writer_id = *event.writer_id();
 
         let mut state = self.state.lock().unwrap();
+
+        // FLOWIP-120n F18: stamp under the state lock so sequence order equals
+        // append order; re-admitted rows already carry theirs and keep it.
+        if let Some(sequencer) = &self.admission_sequencer {
+            if event.admission_seq().is_none() {
+                event.set_admission_seq(obzenflow_core::AdmissionSeq(
+                    sequencer.fetch_add(1, Ordering::Relaxed),
+                ));
+            }
+        }
 
         // Compute and store this writer's next clock under the mutex.
         let current = state.writer_clocks.get(&writer_id).cloned();

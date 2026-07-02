@@ -7,7 +7,7 @@
 //! This trait ensures type safety by restricting what can be written to journals
 
 use crate::event::identity::WriterId;
-use crate::event::types::EventId;
+use crate::event::types::{AdmissionSeq, EventId};
 use serde::{Deserialize, Serialize};
 use std::fmt::Debug;
 
@@ -31,6 +31,16 @@ pub trait JournalEvent:
 
     /// Get a human-readable event type for logging/debugging
     fn event_type_name(&self) -> &str;
+
+    /// Flow-global admission order (FLOWIP-120n F18). The default answers for
+    /// event types that never enter a merge (system rows).
+    fn admission_seq(&self) -> Option<AdmissionSeq> {
+        None
+    }
+
+    /// Stamp the admission order at the journal append (FLOWIP-120n F18).
+    /// The default is a no-op for event types that carry no sequence.
+    fn set_admission_seq(&mut self, _seq: AdmissionSeq) {}
 }
 
 // Export Sealed trait so chain_event.rs and system_event.rs can implement it

@@ -404,18 +404,15 @@ fn merged_payload_set(channel: &str, values: std::ops::RangeInclusive<u64>) -> B
 async fn multi_source_resume_orders_every_recorded_input_before_any_live_input() -> Result<()> {
     // Recorded: a emits 1..=4, b emits 101..=104. Live: a 5..=7, b 105..=106.
     //
-    // The canonical merge is a Kahn network: it blocks on a quiet non-EOF
-    // input, and an idle infinite source is quiet. With both sources emitting
-    // 4 values the merge can deliver at most 7 of the 8 recorded inputs before
-    // it blocks waiting for a ninth head, so the recording is cancelled at 7
-    // delivered with the eighth (b:104) journalled at its source but still in
-    // flight at the fan-in. The resume must catch that tail up: all 8 recorded
-    // inputs deliver before the fan-in's boundary. In the live phase the same
-    // blocking rule holds, so the unequal live ranges leave a:7 in flight and
-    // the deliverable live tail is exactly a:5, b:105, a:6, b:106.
+    // This fan-in's inputs are all source journals, so it runs the seq-ordered
+    // merge (FLOWIP-120n F18): a quiet input at the entered generation no
+    // longer blocks delivery, so the recording delivers all 8 recorded inputs
+    // and the resumed live phase delivers the full unequal live ranges. The
+    // resume catch-up keeps the wait (readers below the entered generation)
+    // and recomputes the recorded order from the re-admitted sequences.
     const RECORDED_INPUTS: u64 = 8;
-    const RECORDED_DELIVERED: u64 = 7;
-    const LIVE_DELIVERED: u64 = 4;
+    const RECORDED_DELIVERED: u64 = 8;
+    const LIVE_DELIVERED: u64 = 5;
     let recorded_ranges = SourceRanges {
         a_first: 1,
         a_count: 4,
@@ -447,9 +444,8 @@ async fn multi_source_resume_orders_every_recorded_input_before_any_live_input()
         resume_rows(&replay_testkit::read_stage_envelopes_appended(&recorded_run, "merge").await);
     assert_eq!(recorded_merge.len() as u64, RECORDED_DELIVERED);
 
-    // Resume with both sources producing live. The sink consumes the four
-    // live outputs plus the in-flight b:104 output, whose position lies
-    // beyond the sink's recorded high water and is therefore not suppressed.
+    // Resume with both sources producing live. Every recorded input was
+    // delivered and recorded, so the sink consumes exactly the live outputs.
     let resumed_calls = {
         let _bootstrap = install_bootstrap_config(BootstrapConfig {
             replay: Some(ReplayBootstrap {
@@ -460,17 +456,11 @@ async fn multi_source_resume_orders_every_recorded_input_before_any_live_input()
             }),
             ..BootstrapConfig::default()
         });
-        run_until_delivered(&journal_base, &live_ranges, LIVE_DELIVERED + 1).await?
+        run_until_delivered(&journal_base, &live_ranges, LIVE_DELIVERED).await?
     };
-    // Catch-up re-executes zero recorded effects. The one in-flight input
-    // (b:104) never reached the effect boundary during the recording, so no
-    // outcome fact exists for it; the F7 positional rule (a cursor miss beyond
-    // the recorded high water is a live call) executes it once during
-    // catch-up. Live tail: 4 more.
     assert_eq!(
-        resumed_calls,
-        (LIVE_DELIVERED + 1) as usize,
-        "recorded outcomes are suppressed; only the in-flight gap and the live tail execute"
+        resumed_calls, LIVE_DELIVERED as usize,
+        "recorded outcomes are suppressed; only the live tail executes"
     );
     let resumed_run = replay_testkit::latest_run_dir(&journal_base);
     assert_ne!(recorded_run, resumed_run);
@@ -555,9 +545,8 @@ async fn multi_source_resume_orders_every_recorded_input_before_any_live_input()
         expected_recorded,
         "the pre-boundary outputs are exactly the recorded inputs"
     );
-    // a:7 stays in flight (the merge blocks on quiet b), so the delivered
-    // live tail is exactly a:5, b:105, a:6, b:106.
-    let mut expected_live = merged_payload_set("a", 5..=6);
+    // Seq mode delivers the full unequal live ranges: quiet b never blocks a.
+    let mut expected_live = merged_payload_set("a", 5..=7);
     expected_live.extend(merged_payload_set("b", 105..=106));
     assert_eq!(
         payload_set(&merge_rows[boundary + 1..]),

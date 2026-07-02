@@ -9,11 +9,17 @@
 //! Two independent live runs compare equal under the positional projection,
 //! which is 095d's arrival-timing-independence claim surfaced as a verb, and
 //! a replay verifies against its source with effect-lane identity asserted.
+//!
+//! One channel routes through a pass-through intake transform so the fan-in
+//! is derived-fed and keeps the Kahn merge: FLOWIP-120n F18 scopes
+//! arrival-timing independence to derived-fed orderers (a source-fed fan-in
+//! orders by admission sequence, reproducible under replay but
+//! arrival-dependent across independent live runs).
 
 use async_trait::async_trait;
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
 use obzenflow_core::{id::StageId, TypedPayload, WriterId};
-use obzenflow_dsl::{effectful_transform, flow, sink, source, FlowDefinition};
+use obzenflow_dsl::{effectful_transform, flow, sink, source, transform, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_infra::verify::{verify_run_dirs, VerifyOptions, VerifyOutcome};
@@ -21,7 +27,9 @@ use obzenflow_runtime::effects::{
     Effect, EffectContext, EffectError, EffectSafety, Effects, IdempotencyKey,
 };
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
-use obzenflow_runtime::stages::common::handlers::{EffectfulTransformHandler, FiniteSourceHandler};
+use obzenflow_runtime::stages::common::handlers::{
+    EffectfulTransformHandler, FiniteSourceHandler, TransformHandler,
+};
 use obzenflow_runtime::stages::sink::SinkTyped;
 use obzenflow_runtime::stages::SourceError;
 use serde::{Deserialize, Serialize};
@@ -116,6 +124,40 @@ impl Effect for ChargeEffect {
     }
 }
 
+/// Pass-through intake: re-emits each order so the fan-in has a derived
+/// input and keeps the Kahn merge (see the module doc).
+#[derive(Clone, Debug)]
+struct Intake {
+    writer_id: WriterId,
+}
+
+impl Intake {
+    fn new() -> Self {
+        Self {
+            writer_id: WriterId::from(StageId::new()),
+        }
+    }
+}
+
+#[async_trait]
+impl TransformHandler for Intake {
+    fn process(&self, event: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> {
+        let Some(order) = OrderPlaced::from_event(&event) else {
+            return Ok(Vec::new());
+        };
+        Ok(vec![ChainEventFactory::derived_data_event(
+            self.writer_id,
+            &event,
+            OrderPlaced::EVENT_TYPE,
+            json!(order),
+        )])
+    }
+
+    async fn drain(&mut self) -> Result<(), HandlerError> {
+        Ok(())
+    }
+}
+
 /// The effectful merge: charging sits directly at the fan-in, so the build
 /// marks the merge itself as a deterministic orderer (canonical merge).
 #[derive(Clone, Debug)]
@@ -162,6 +204,7 @@ fn build_flow(journal_base: PathBuf, calls: Arc<AtomicUsize>) -> FlowDefinition 
         stages: {
             web_orders = source!(OrderPlaced => Channel::new(vec![1, 3, 5]));
             store_orders = source!(OrderPlaced => Channel::new(vec![2, 4, 6]));
+            intake = transform!(OrderPlaced -> OrderPlaced => Intake::new());
             charge = effectful_transform!(
                 OrderPlaced -> { Charged } => ChargeOrders { calls },
                 effects: [ChargeEffect],
@@ -172,7 +215,8 @@ fn build_flow(journal_base: PathBuf, calls: Arc<AtomicUsize>) -> FlowDefinition 
 
         topology: {
             web_orders |> charge;
-            store_orders |> charge;
+            store_orders |> intake;
+            intake |> charge;
             charge |> receipts;
         }
     }
