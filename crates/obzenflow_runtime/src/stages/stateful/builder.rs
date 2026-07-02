@@ -141,6 +141,7 @@ impl<H: UnifiedStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static
             processing_context:
                 crate::stages::common::control_strategies::ProcessingContext::default(),
             buffered_eof: None,
+            terminal_eof_kind: None,
             last_consumed_envelope: None,
             instrumentation,
             upstream_subscription_factory: self.resources.upstream_subscription_factory,

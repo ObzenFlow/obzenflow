@@ -239,7 +239,13 @@ pub enum InfiniteSourceAction<H> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InfiniteSourceCompletionReason {
     ExternalDrain,
-    ArchiveExhausted,
+    /// The live handler finished or its boundary was rejected.
+    LiveEof,
+    /// Replay exhaustion reproduces the archive's recorded kind (FLOWIP-095k);
+    /// `None`: the archive committed no EOF.
+    ReplayExhausted {
+        recorded_kind: Option<EofKind>,
+    },
 }
 
 /// Context for infinite source handlers - contains everything actions need
@@ -420,24 +426,25 @@ impl<H: Send + Sync + 'static> FsmAction for InfiniteSourceAction<H> {
                     .events_processed_total
                     .load(std::sync::atomic::Ordering::Relaxed);
 
-                let decision = match ctx.completion_reason {
-                    InfiniteSourceCompletionReason::ArchiveExhausted => ctx
-                        .control_strategy
-                        .on_natural_completion(&mut ctx.control_context),
-                    InfiniteSourceCompletionReason::ExternalDrain => ctx
-                        .control_strategy
-                        .on_begin_drain(&mut ctx.control_context),
-                };
-
                 let writer_id = ctx.writer_id.ok_or_else(|| {
                     obzenflow_fsm::FsmError::HandlerError(
                         "No writer ID available to send EOF".to_string(),
                     )
                 })?;
 
+                // FLOWIP-095k: replay exhaustion reproduces the archive's
+                // recorded kind and never consults the live control strategy.
                 let eof_kind = match ctx.completion_reason {
-                    InfiniteSourceCompletionReason::ExternalDrain => EofKind::Poison,
-                    InfiniteSourceCompletionReason::ArchiveExhausted => {
+                    InfiniteSourceCompletionReason::ExternalDrain => {
+                        let _ = ctx
+                            .control_strategy
+                            .on_begin_drain(&mut ctx.control_context);
+                        EofKind::Poison
+                    }
+                    InfiniteSourceCompletionReason::LiveEof => {
+                        let decision = ctx
+                            .control_strategy
+                            .on_natural_completion(&mut ctx.control_context);
                         if matches!(
                             decision,
                             crate::stages::source::strategies::CompletionDecision::PoisonEof
@@ -446,6 +453,9 @@ impl<H: Send + Sync + 'static> FsmAction for InfiniteSourceAction<H> {
                         } else {
                             EofKind::Natural
                         }
+                    }
+                    InfiniteSourceCompletionReason::ReplayExhausted { recorded_kind } => {
+                        recorded_kind.unwrap_or(EofKind::Truncated)
                     }
                 };
 

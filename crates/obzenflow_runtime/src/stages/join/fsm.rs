@@ -343,6 +343,9 @@ pub struct JoinContext<H: UnifiedJoinHandler> {
     /// Buffered EOF event to forward when draining completes
     pub buffered_eof: Option<ChainEvent>,
 
+    /// Worst-wins join over both sides' terminal EOF kinds (FLOWIP-095k).
+    pub terminal_eof_kind: Option<EofKind>,
+
     /// Stream-side envelope template used to parent drain-time emissions.
     ///
     /// This should be the *stream EOF envelope* so that drain-time outputs can be
@@ -605,7 +608,10 @@ impl<H: UnifiedJoinHandler + Clone + Send + Sync + 'static> FsmAction for JoinAc
                 // Always emit an EOF authored by this stage, preserving upstream
                 // metadata when available.
                 let buffered = ctx.buffered_eof.take();
-                let mut eof_kind = EofKind::Natural;
+                // FLOWIP-095k: the authored kind is the worst-wins join over
+                // both sides' terminal kinds; Natural covers the
+                // drain-terminated path where no EOF was received.
+                let eof_kind = ctx.terminal_eof_kind.unwrap_or(EofKind::Natural);
                 let mut upstream_vector_clock = None;
                 let mut upstream_last_event = None;
                 let runtime_context = ctx.instrumentation.snapshot_with_control();
@@ -614,7 +620,6 @@ impl<H: UnifiedJoinHandler + Clone + Send + Sync + 'static> FsmAction for JoinAc
                 if let Some(buffered_event) = buffered {
                     if let obzenflow_core::event::ChainEventContent::FlowControl(
                         FlowControlPayload::Eof {
-                            kind,
                             writer_seq: _writer_seq,
                             vector_clock,
                             last_event_id,
@@ -622,7 +627,6 @@ impl<H: UnifiedJoinHandler + Clone + Send + Sync + 'static> FsmAction for JoinAc
                         },
                     ) = buffered_event.content.clone()
                     {
-                        eof_kind = kind;
                         upstream_vector_clock = vector_clock;
                         upstream_last_event = last_event_id;
                         // We intentionally ignore the upstream writer_seq and

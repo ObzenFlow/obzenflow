@@ -178,6 +178,66 @@ async fn replay_driver_treats_reader_none_as_clean_end() {
     assert!(result.is_none());
 }
 
+async fn drain_driver(driver: &mut ReplayDriver) {
+    // Pull until exhaustion so every skipped row is observed.
+    while driver
+        .next_replayed_event(WriterId::from(StageId::new()), "new_source", flow_context())
+        .await
+        .expect("clean archive")
+        .is_some()
+    {}
+}
+
+#[tokio::test]
+async fn replay_driver_captures_the_archived_eof_kind() {
+    // FLOWIP-095k: the recorded completion kind is captured while the archived
+    // EOF is skipped, so exhaustion can reproduce it.
+    use obzenflow_core::event::payloads::flow_control_payload::EofKind;
+
+    for (natural, expected) in [(true, EofKind::Natural), (false, EofKind::Poison)] {
+        let archived_writer = WriterId::from(StageId::new());
+        let data =
+            ChainEventFactory::data_event(archived_writer, "test.event", serde_json::json!({}));
+        let eof = ChainEventFactory::eof_event(archived_writer, natural);
+        let reader = Box::new(TestReader {
+            envelopes: vec![
+                EventEnvelope::new(JournalWriterId::new(), data),
+                EventEnvelope::new(JournalWriterId::new(), eof),
+            ],
+            pos: 0,
+            at_end_hint: true,
+            fail: false,
+        });
+
+        let mut driver = ReplayDriver::new(reader, PathBuf::from("/tmp/archive.log"), template());
+        assert_eq!(
+            driver.archived_eof_kind(),
+            None,
+            "nothing captured before reading"
+        );
+        drain_driver(&mut driver).await;
+        assert_eq!(driver.archived_eof_kind(), Some(expected));
+    }
+}
+
+#[tokio::test]
+async fn replay_driver_captures_no_kind_from_an_archive_with_no_committed_eof() {
+    // A killed run's journal ends at the last committed record; a torn final
+    // EOF is never parsed (FLOWIP-120q), so both shapes present as no-EOF here.
+    let archived_writer = WriterId::from(StageId::new());
+    let data = ChainEventFactory::data_event(archived_writer, "test.event", serde_json::json!({}));
+    let reader = Box::new(TestReader {
+        envelopes: vec![EventEnvelope::new(JournalWriterId::new(), data)],
+        pos: 0,
+        at_end_hint: false,
+        fail: false,
+    });
+
+    let mut driver = ReplayDriver::new(reader, PathBuf::from("/tmp/archive.log"), template());
+    drain_driver(&mut driver).await;
+    assert_eq!(driver.archived_eof_kind(), None);
+}
+
 #[tokio::test]
 async fn replay_driver_maps_reader_error_to_corrupted_archive() {
     // Corruption now surfaces as an `Err` from the reader (it owns finality and

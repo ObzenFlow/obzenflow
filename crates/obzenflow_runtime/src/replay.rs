@@ -10,6 +10,8 @@
 use async_trait::async_trait;
 use obzenflow_core::event::context::FlowContext;
 use obzenflow_core::event::context::StageType;
+use obzenflow_core::event::payloads::flow_control_payload::EofKind;
+use obzenflow_core::event::ChainEventContent;
 use obzenflow_core::journal::journal_reader::JournalReader;
 use obzenflow_core::journal::{ArchiveStatus, StatusDerivation};
 use obzenflow_core::WriterId;
@@ -134,6 +136,7 @@ pub struct ReplayDriver {
     replay_context: ReplayContextTemplate,
     replayed_events: u64,
     skipped_events: u64,
+    archived_eof_kind: Option<EofKind>,
 }
 
 impl ReplayDriver {
@@ -148,6 +151,7 @@ impl ReplayDriver {
             replay_context,
             replayed_events: 0,
             skipped_events: 0,
+            archived_eof_kind: None,
         }
     }
 
@@ -157,6 +161,12 @@ impl ReplayDriver {
 
     pub fn skipped_events(&self) -> u64 {
         self.skipped_events
+    }
+
+    /// The archive's recorded completion kind, captured while skipping the
+    /// archived EOF (FLOWIP-095k). `None`: the archive committed no EOF.
+    pub fn archived_eof_kind(&self) -> Option<EofKind> {
+        self.archived_eof_kind
     }
 
     pub async fn next_replayed_event(
@@ -187,6 +197,11 @@ impl ReplayDriver {
 
             let original_event = envelope.event;
             if !original_event.is_source_replayable() {
+                if let ChainEventContent::FlowControl(fc) = &original_event.content {
+                    if let Some(kind) = fc.eof_kind() {
+                        self.archived_eof_kind = Some(kind);
+                    }
+                }
                 self.skipped_events = self.skipped_events.saturating_add(1);
                 continue;
             }

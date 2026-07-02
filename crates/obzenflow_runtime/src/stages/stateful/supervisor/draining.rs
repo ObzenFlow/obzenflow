@@ -22,6 +22,7 @@ use crate::stages::observer::dispatch::{
 use crate::stages::observer::StatefulObserverContext;
 use crate::supervised_base::EventLoopDirective;
 use obzenflow_core::event::context::StageType;
+use obzenflow_core::event::payloads::flow_control_payload::EofKind;
 use obzenflow_core::event::vector_clock::CausalOrderingService;
 use obzenflow_fsm::StateVariant;
 use std::sync::atomic::Ordering;
@@ -537,6 +538,23 @@ pub(super) async fn dispatch_draining<
                 error = ?e,
                 "Failed to emit final stateful accumulator heartbeat before drain"
             );
+        }
+    }
+
+    // FLOWIP-095k finalizer gate: end-of-input finalization follows the
+    // completion kind. Truncated terminates without the final emission so a
+    // killed original is not given a completion it never had; Poison keeps
+    // today's finalize-and-complete behaviour (FLOWIP-075b owns the live
+    // question). Exhaustive: a new kind must decide its finalization here.
+    match ctx.terminal_eof_kind.unwrap_or(EofKind::Natural) {
+        EofKind::Natural | EofKind::Poison => {}
+        EofKind::Truncated => {
+            tracing::info!(
+                stage_name = %ctx.stage_name,
+                "terminal EOF is truncated; skipping end-of-input finalization"
+            );
+            ctx.pending_transition = Some(PendingTransition::DrainComplete);
+            return Ok(EventLoopDirective::Continue);
         }
     }
 

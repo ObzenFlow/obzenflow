@@ -3,6 +3,7 @@
 // https://obzenflow.dev
 
 use crate::control_plane::ControlPlaneProvider;
+use obzenflow_core::event::payloads::flow_control_payload::EofKind;
 use obzenflow_core::event::system_event::{SystemEvent, SystemFeedRole};
 use obzenflow_core::event::types::{
     Count, DurationMs, SeqNo, ViolationCause as EventViolationCause,
@@ -178,6 +179,11 @@ pub struct SubscriptionState {
     /// EOF tracking per reader (true terminal EOF observed via FlowControl::Eof)
     pub(super) eof_received: Vec<bool>,
 
+    /// Per-reader terminal EOF kind, folded worst-wins on duplicates
+    /// (FLOWIP-095k). Slots persist for the subscription's lifetime, so a
+    /// resumed run's terminal kind inherits catch-up-synthesized kinds.
+    pub(super) eof_kinds: Vec<Option<EofKind>>,
+
     /// True when a reader was created at the journal tail position.
     /// This is used for "logical EOF" checks where starting at tail
     /// should count as having no historical data to consume, while
@@ -195,6 +201,7 @@ impl SubscriptionState {
         Self {
             current_reader_index: 0,
             eof_received: vec![false; reader_count],
+            eof_kinds: vec![None; reader_count],
             baseline_at_tail: vec![false; reader_count],
             pending_events: VecDeque::new(),
         }
@@ -215,6 +222,24 @@ impl SubscriptionState {
         if let Some(eof) = self.eof_received.get_mut(index) {
             *eof = true;
         }
+    }
+
+    /// Record a reader's terminal EOF kind, folding worst-wins per slot so a
+    /// duplicate EOF on one input never downgrades an earlier kind.
+    pub fn mark_reader_eof_kind(&mut self, index: usize, kind: EofKind) {
+        if let Some(slot) = self.eof_kinds.get_mut(index) {
+            *slot = Some(slot.map_or(kind, |current| current.worst(kind)));
+        }
+    }
+
+    /// Worst-wins join over every input's terminal kind; `None` until any
+    /// EOF has arrived.
+    pub fn worst_eof_kind(&self) -> Option<EofKind> {
+        self.eof_kinds
+            .iter()
+            .flatten()
+            .copied()
+            .reduce(EofKind::worst)
     }
 
     /// Mark a reader as having started at tail (logical EOF baseline).
@@ -269,6 +294,8 @@ pub struct EofOutcome {
     pub eof_count: usize,
     pub total_readers: usize,
     pub is_final: bool,
+    /// Worst-wins join over the inputs' terminal kinds so far (FLOWIP-095k).
+    pub worst_kind: Option<EofKind>,
 }
 
 /// The variant order participates in `FeedIdentity`'s total order

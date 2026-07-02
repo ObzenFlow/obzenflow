@@ -189,6 +189,16 @@ async fn handle_reference_envelope<
             let contract_reader_count = ctx.reference_contract_state.len();
             let upstream_stage = subscription.last_delivered_upstream_stage();
             let last_eof_outcome = subscription.last_eof_outcome().cloned();
+            // FLOWIP-095k: fold the reference side's terminal kind; the join's
+            // authored kind is the worst across both sides.
+            if envelope.event.is_eof() {
+                if let Some(kind) = last_eof_outcome.as_ref().and_then(|o| o.worst_kind) {
+                    ctx.terminal_eof_kind = Some(
+                        ctx.terminal_eof_kind
+                            .map_or(kind, |current| current.worst(kind)),
+                    );
+                }
+            }
             if let Some(signal_snapshot) = common::signal_snapshot(
                 Some(crate::stages::observer::JoinSide::Reference),
                 &envelope.event,
@@ -506,6 +516,15 @@ async fn handle_stream_envelope<
             let contract_reader_count = ctx.stream_contract_state.len();
             let upstream_stage = subscription.last_delivered_upstream_stage();
             let last_eof_outcome = subscription.last_eof_outcome().cloned();
+            // FLOWIP-095k: fold the stream side's terminal kind.
+            if envelope.event.is_eof() {
+                if let Some(kind) = last_eof_outcome.as_ref().and_then(|o| o.worst_kind) {
+                    ctx.terminal_eof_kind = Some(
+                        ctx.terminal_eof_kind
+                            .map_or(kind, |current| current.worst(kind)),
+                    );
+                }
+            }
             if let Some(signal_snapshot) = common::signal_snapshot(
                 Some(crate::stages::observer::JoinSide::Stream),
                 &envelope.event,
