@@ -37,6 +37,7 @@ use obzenflow_core::{
 use obzenflow_dsl::{flow, sink, source, stateful, transform};
 use obzenflow_infra::application::{Banner, FlowApplication, Presentation};
 use obzenflow_infra::journal::disk_journals;
+use obzenflow_runtime::effects::SinkDeliverySafety;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{SinkHandler, StatefulHandler};
 // ✨ FLOWIP-080h: Import Map helper
@@ -318,6 +319,11 @@ impl SinkHandler for PrioritySink {
             DeliveryMethod::Custom("Processed".to_string()),
             Some(1),
         ))
+    }
+
+    // Console print plus local counters: re-delivery under either archive verb is safe.
+    fn delivery_safety(&self) -> Option<SinkDeliverySafety> {
+        Some(SinkDeliverySafety::IdempotentProjection)
     }
 }
 

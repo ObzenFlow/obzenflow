@@ -16,6 +16,7 @@ use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
 use obzenflow_core::id::StageId;
 use obzenflow_core::{TypedPayload, WriterId};
+use obzenflow_runtime::effects::SinkDeliverySafety;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::source::SourceError;
 use obzenflow_runtime::stages::common::handlers::{
@@ -182,5 +183,10 @@ impl SinkHandler for SummaryConsole {
             DeliveryMethod::Custom("Stdout".to_string()),
             None,
         ))
+    }
+
+    // Console print: re-delivery under either archive verb is safe.
+    fn delivery_safety(&self) -> Option<SinkDeliverySafety> {
+        Some(SinkDeliverySafety::IdempotentProjection)
     }
 }

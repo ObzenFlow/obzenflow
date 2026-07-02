@@ -2,8 +2,8 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
+use super::console;
 use super::domain::*;
-use super::sinks::{per_order_printer, summary_printer, CatalogAnalyticsSummary};
 use super::sources::*;
 use anyhow::Result;
 use obzenflow::typed::{joins, stateful as typed_stateful};
@@ -175,7 +175,8 @@ fn build_flow() -> obzenflow_dsl::FlowDefinition {
             );
 
             per_order_printer = sink!(
-                EnrichedOrderWithPromo => per_order_printer(),
+                EnrichedOrderWithPromo => |order| { console::print_order(&order); },
+                delivery: idempotent,
                 middleware: [RateLimiterBuilder::new(0.5).build()]
             );
 
@@ -196,7 +197,10 @@ fn build_flow() -> obzenflow_dsl::FlowDefinition {
                     .emit_on_eof()
             );
 
-            summary_printer = sink!(CatalogAnalyticsSummary => summary_printer());
+            summary_printer = sink!(
+                CatalogAnalyticsSummary => |summary| { console::print_summary(&summary); },
+                delivery: idempotent
+            );
         },
 
         topology: {
