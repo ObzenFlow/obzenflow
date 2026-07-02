@@ -98,6 +98,78 @@ fn test_legacy_eof_natural_bool_deserializes_to_kind() {
 }
 
 #[test]
+fn truncated_eof_kind_round_trips_through_serde() {
+    let payload: FlowControlPayload = serde_json::from_value(json!({
+        "flow_control_type": "eof",
+        "kind": "truncated",
+        "timestamp": 12345
+    }))
+    .expect("truncated EOF kind should deserialize");
+
+    match &payload {
+        FlowControlPayload::Eof { kind, .. } => assert_eq!(*kind, EofKind::Truncated),
+        _ => panic!("Expected EOF signal"),
+    }
+
+    let serialized = serde_json::to_value(payload).expect("EOF payload should serialize");
+    assert_eq!(serialized["kind"], "truncated");
+}
+
+#[test]
+fn legacy_eof_natural_bool_never_produces_truncated() {
+    // The bool path predates Truncated and can only express Natural/Poison.
+    for (natural, expected) in [(true, EofKind::Natural), (false, EofKind::Poison)] {
+        let payload: FlowControlPayload = serde_json::from_value(json!({
+            "flow_control_type": "eof",
+            "natural": natural,
+            "timestamp": 1
+        }))
+        .expect("legacy bool should deserialize");
+        match &payload {
+            FlowControlPayload::Eof { kind, .. } => assert_eq!(*kind, expected),
+            _ => panic!("Expected EOF signal"),
+        }
+    }
+}
+
+#[test]
+fn eof_kind_worst_is_a_join_over_the_severity_order() {
+    use EofKind::{Natural, Poison, Truncated};
+
+    // Exhaustive nine-pair table: worst wins, Natural < Truncated < Poison.
+    let table = [
+        (Natural, Natural, Natural),
+        (Natural, Truncated, Truncated),
+        (Natural, Poison, Poison),
+        (Truncated, Natural, Truncated),
+        (Truncated, Truncated, Truncated),
+        (Truncated, Poison, Poison),
+        (Poison, Natural, Poison),
+        (Poison, Truncated, Poison),
+        (Poison, Poison, Poison),
+    ];
+    for (a, b, expected) in table {
+        assert_eq!(a.worst(b), expected, "worst({a:?}, {b:?})");
+    }
+
+    let all = [Natural, Truncated, Poison];
+    for a in all {
+        // Idempotent, and Natural is the identity.
+        assert_eq!(a.worst(a), a);
+        assert_eq!(a.worst(Natural), a);
+        assert_eq!(Natural.worst(a), a);
+        for b in all {
+            // Commutative.
+            assert_eq!(a.worst(b), b.worst(a));
+            for c in all {
+                // Associative.
+                assert_eq!(a.worst(b).worst(c), a.worst(b.worst(c)));
+            }
+        }
+    }
+}
+
+#[test]
 fn test_control_event_backward_compatibility() {
     let writer_id = WriterId::from(StageId::new());
 

@@ -19,12 +19,14 @@ use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
 
-/// Whether an EOF represents normal source exhaustion or a poison/forced close.
+/// Whether an EOF represents normal source exhaustion, a poison/forced close,
+/// or replay exhaustion of an archive with no committed EOF (FLOWIP-095k).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EofKind {
     Natural,
     Poison,
+    Truncated,
 }
 
 impl EofKind {
@@ -43,6 +45,23 @@ impl EofKind {
     pub const fn is_poison(self) -> bool {
         matches!(self, Self::Poison)
     }
+
+    /// Fan-in join: worst wins, Natural < Truncated < Poison (FLOWIP-095k).
+    /// Commutative, associative, idempotent; Natural is the identity.
+    pub const fn worst(self, other: Self) -> Self {
+        const fn rank(kind: EofKind) -> u8 {
+            match kind {
+                EofKind::Natural => 0,
+                EofKind::Truncated => 1,
+                EofKind::Poison => 2,
+            }
+        }
+        if rank(other) > rank(self) {
+            other
+        } else {
+            self
+        }
+    }
 }
 
 impl<'de> Deserialize<'de> for EofKind {
@@ -56,7 +75,8 @@ impl<'de> Deserialize<'de> for EofKind {
             type Value = EofKind;
 
             fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-                formatter.write_str("`natural`, `poison`, or legacy EOF natural boolean")
+                formatter
+                    .write_str("`natural`, `poison`, `truncated`, or legacy EOF natural boolean")
             }
 
             fn visit_bool<E>(self, value: bool) -> Result<Self::Value, E>
@@ -73,7 +93,11 @@ impl<'de> Deserialize<'de> for EofKind {
                 match value {
                     "natural" => Ok(EofKind::Natural),
                     "poison" => Ok(EofKind::Poison),
-                    other => Err(E::unknown_variant(other, &["natural", "poison"])),
+                    "truncated" => Ok(EofKind::Truncated),
+                    other => Err(E::unknown_variant(
+                        other,
+                        &["natural", "poison", "truncated"],
+                    )),
                 }
             }
         }

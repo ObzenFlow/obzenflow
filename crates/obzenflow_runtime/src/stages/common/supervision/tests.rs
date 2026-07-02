@@ -303,6 +303,7 @@ fn resolve_forward_control_event_notes_cycle_eof_before_resolving() {
         eof_count: 1,
         total_readers: 2,
         is_final: false,
+        worst_kind: None,
     };
 
     let mut guard = CycleGuard::new(
@@ -385,6 +386,7 @@ fn resolve_control_event_strategy_skip_prevents_cycle_guard_note() {
         eof_count: 1,
         total_readers: 1,
         is_final: true,
+        worst_kind: None,
     };
 
     let mut guard = CycleGuard::new(

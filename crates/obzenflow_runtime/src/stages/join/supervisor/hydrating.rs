@@ -98,6 +98,15 @@ pub(super) async fn dispatch_hydrating<
                     let contract_reader_count = ctx.reference_contract_state.len();
                     let upstream_stage = subscription.last_delivered_upstream_stage();
                     let last_eof_outcome = subscription.last_eof_outcome().cloned();
+                    // FLOWIP-095k: fold the reference side's terminal kind.
+                    if envelope.event.is_eof() {
+                        if let Some(kind) = last_eof_outcome.as_ref().and_then(|o| o.worst_kind) {
+                            ctx.terminal_eof_kind = Some(
+                                ctx.terminal_eof_kind
+                                    .map_or(kind, |current| current.worst(kind)),
+                            );
+                        }
+                    }
 
                     let resolution = resolve_control_event_awaiting_pauses(
                         signal,

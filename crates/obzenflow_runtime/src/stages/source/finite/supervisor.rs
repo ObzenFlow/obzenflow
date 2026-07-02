@@ -22,6 +22,7 @@ use crate::supervised_base::{
     EventLoopDirective, ExternalEventMode, ExternalEventPolicy, HandlerSupervised,
 };
 use obzenflow_core::event::context::StageType;
+use obzenflow_core::event::payloads::flow_control_payload::EofKind;
 use obzenflow_core::event::{ReplayLifecycleEvent, SystemEvent, SystemEventType};
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{StageId, WriterId};
@@ -29,7 +30,10 @@ use obzenflow_fsm::{fsm, EventVariant, StateVariant, Transition};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use super::fsm::{FiniteSourceAction, FiniteSourceContext, FiniteSourceEvent, FiniteSourceState};
+use super::fsm::{
+    FiniteSourceAction, FiniteSourceContext, FiniteSourceEvent, FiniteSourceState,
+    SourceCompletionOrigin,
+};
 
 /// Supervisor for finite source stages
 pub(crate) struct FiniteSourceSupervisor<
@@ -512,6 +516,13 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> H
                         Ok(None) => {
                             match ctx.runtime_execution.source_replay_exhausted(self.stage_id) {
                                 crate::execution::SourceReplayExhaustion::Terminate => {
+                                    // FLOWIP-095k: reproduce the archive's recorded completion kind.
+                                    let recorded_kind = self
+                                        .replay_driver
+                                        .as_ref()
+                                        .and_then(|d| d.archived_eof_kind());
+                                    ctx.completion_origin =
+                                        SourceCompletionOrigin::ReplayExhausted { recorded_kind };
                                     let (replayed_count, skipped_count) =
                                         self.replay_driver.as_ref().map_or((0, 0), |d| {
                                             (d.replayed_events(), d.skipped_events())
@@ -522,8 +533,13 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> H
                                             &ctx.stage_name,
                                             &self.system_journal,
                                             self.replay_started_at,
-                                            replayed_count,
-                                            skipped_count,
+                                            crate::stages::source::replay_lifecycle::ReplayCompletionFacts {
+                                                replayed_count,
+                                                skipped_count,
+                                                synthesized_eof_kind: Some(
+                                                    recorded_kind.unwrap_or(EofKind::Truncated),
+                                                ),
+                                            },
                                         )
                                         .await;
 

@@ -22,6 +22,7 @@ use crate::supervised_base::{
     EventLoopDirective, ExternalEventMode, ExternalEventPolicy, HandlerSupervised,
 };
 use obzenflow_core::event::context::StageType;
+use obzenflow_core::event::payloads::flow_control_payload::EofKind;
 use obzenflow_core::event::{ReplayLifecycleEvent, SystemEvent, SystemEventType};
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{StageId, WriterId};
@@ -510,6 +511,11 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
                         Ok(None) => {
                             match ctx.runtime_execution.source_replay_exhausted(self.stage_id) {
                                 crate::execution::SourceReplayExhaustion::Terminate => {
+                                    // FLOWIP-095k: reproduce the archive's recorded completion kind.
+                                    let recorded_kind = self
+                                        .replay_driver
+                                        .as_ref()
+                                        .and_then(|d| d.archived_eof_kind());
                                     let (replayed_count, skipped_count) =
                                         self.replay_driver.as_ref().map_or((0, 0), |d| {
                                             (d.replayed_events(), d.skipped_events())
@@ -520,13 +526,20 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
                                             &ctx.stage_name,
                                             &self.system_journal,
                                             self.replay_started_at,
-                                            replayed_count,
-                                            skipped_count,
+                                            crate::stages::source::replay_lifecycle::ReplayCompletionFacts {
+                                                replayed_count,
+                                                skipped_count,
+                                                synthesized_eof_kind: Some(
+                                                    recorded_kind.unwrap_or(EofKind::Truncated),
+                                                ),
+                                            },
                                         )
                                         .await;
 
                                     ctx.completion_reason =
-                                        InfiniteSourceCompletionReason::ArchiveExhausted;
+                                        InfiniteSourceCompletionReason::ReplayExhausted {
+                                            recorded_kind,
+                                        };
                                     Ok(EventLoopDirective::Transition(
                                         InfiniteSourceEvent::BeginDrain,
                                     ))
@@ -568,8 +581,13 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
                                             &ctx.stage_name,
                                             &self.system_journal,
                                             self.replay_started_at,
-                                            replayed_count,
-                                            skipped_count,
+                                            crate::stages::source::replay_lifecycle::ReplayCompletionFacts {
+                                                replayed_count,
+                                                skipped_count,
+                                                // FLOWIP-095k: the resume handoff
+                                                // synthesizes no terminal EOF.
+                                                synthesized_eof_kind: None,
+                                            },
                                         )
                                         .await;
                                     let resumed_live = SystemEvent::new(
@@ -640,8 +658,7 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
                                 reason = %reason,
                                 "Infinite source boundary rejected; beginning completion"
                             );
-                            ctx.completion_reason =
-                                InfiniteSourceCompletionReason::ArchiveExhausted;
+                            ctx.completion_reason = InfiniteSourceCompletionReason::LiveEof;
                             let mut control_events = report.control_events;
                             observe_source_boundary_rejection(
                                 &source_poll_observation,
@@ -725,8 +742,7 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
                                 Ok(EventLoopDirective::Continue)
                             }
                             Ok(SourcePollCompletion::Eof) => {
-                                ctx.completion_reason =
-                                    InfiniteSourceCompletionReason::ArchiveExhausted;
+                                ctx.completion_reason = InfiniteSourceCompletionReason::LiveEof;
                                 if report.control_events.is_empty() {
                                     source_poll_observation
                                         .observe_empty(

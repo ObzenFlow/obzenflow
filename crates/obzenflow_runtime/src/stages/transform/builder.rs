@@ -143,6 +143,7 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
             processing_context:
                 crate::stages::common::control_strategies::ProcessingContext::default(),
             buffered_eof: None,
+            terminal_eof_kind: None,
             instrumentation,
             upstream_subscription_factory: self.resources.upstream_subscription_factory,
             backpressure_writer: self.resources.backpressure_writer.clone(),

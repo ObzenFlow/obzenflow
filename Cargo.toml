@@ -262,3 +262,8 @@ required-features = ["test-support"]
 name = "join_error_passthrough_identity_test"
 path = "tests/join_error_passthrough_identity_test.rs"
 required-features = ["test-support"]
+
+[[test]]
+name = "replay_truncated_eof_fidelity_test"
+path = "tests/replay_truncated_eof_fidelity_test.rs"
+required-features = ["test-support"]

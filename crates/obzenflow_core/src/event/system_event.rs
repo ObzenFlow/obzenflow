@@ -5,6 +5,7 @@
 //! System orchestration events (written to control journal)
 
 use crate::event::observability::HttpSurfaceMetricsSnapshot;
+use crate::event::payloads::flow_control_payload::EofKind;
 use crate::event::payloads::observability_payload::MiddlewareLifecycle;
 use crate::event::types::{Count, DurationMs, EventId, EventType, SeqNo, WriterId};
 use crate::event::vector_clock::VectorClock;
@@ -420,6 +421,10 @@ pub enum ReplayLifecycleEvent {
         replayed_count: Count,
         skipped_count: Count,
         duration_ms: DurationMs,
+        /// The terminal EOF kind synthesized at exhaustion (FLOWIP-095k).
+        /// `None` on the resume handoff, which synthesizes no terminal EOF.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        synthesized_eof_kind: Option<EofKind>,
     },
     /// Resume handoff (FLOWIP-120n): the source finished its catch-up and
     /// continues live at `generation`. The transition announcement the

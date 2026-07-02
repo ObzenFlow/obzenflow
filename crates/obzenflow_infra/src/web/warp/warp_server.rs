@@ -2801,6 +2801,7 @@ fn map_system_event_to_sse(
                 replayed_count,
                 skipped_count,
                 duration_ms,
+                synthesized_eof_kind,
             } => {
                 let mut data = json!({
                     "system_event_type": "replay_lifecycle",
@@ -2810,6 +2811,9 @@ fn map_system_event_to_sse(
                     "skipped_count": skipped_count,
                     "duration_ms": duration_ms,
                 });
+                if let Some(kind) = synthesized_eof_kind {
+                    data["synthesized_eof_kind"] = json!(kind);
+                }
                 if let Some(stage_id) = event.writer_id.as_stage() {
                     data["stage_id"] = json!(stage_id.to_string());
                 }

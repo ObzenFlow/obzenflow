@@ -177,6 +177,7 @@ impl<H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Su
             stream_contract_state: Vec::new(),
             stream_last_contract_check: None,
             buffered_eof: None,
+            terminal_eof_kind: None,
             drain_parent: None,
             reference_high_water_clock: VectorClock::new(),
             instrumentation: instrumentation.clone(),

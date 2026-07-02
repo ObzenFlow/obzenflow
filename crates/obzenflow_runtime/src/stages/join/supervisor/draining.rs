@@ -7,6 +7,7 @@ use crate::stages::common::handlers::UnifiedJoinHandler;
 use crate::stages::common::heartbeat::HeartbeatProcessingGuard;
 use crate::stages::common::supervision::error_routing::route_to_error_journal;
 use crate::supervised_base::EventLoopDirective;
+use obzenflow_core::event::payloads::flow_control_payload::EofKind;
 use obzenflow_core::event::vector_clock::CausalOrderingService;
 use obzenflow_fsm::StateVariant;
 use std::sync::atomic::Ordering;
@@ -350,19 +351,35 @@ pub(super) async fn dispatch_draining<
     }
 
     // Both sides are drained this iteration. Now call handler.drain() to emit any final state.
-    let handler = ctx.handler.clone();
-    let empty_state = handler.initial_state();
-    let final_state = std::mem::replace(&mut ctx.handler_state, empty_state);
-    let events = handler
-        .drain(&final_state)
-        .await
-        .map_err(|err| obzenflow_fsm::FsmError::HandlerError(err.to_string()))?;
-    ctx.handler_state = final_state;
+    // FLOWIP-095k finalizer gate: Truncated terminates without the final
+    // emission; Poison keeps today's behaviour (FLOWIP-075b owns the live
+    // question). The transition below stays unconditional.
+    match ctx.terminal_eof_kind.unwrap_or(EofKind::Natural) {
+        EofKind::Natural | EofKind::Poison => {
+            let handler = ctx.handler.clone();
+            let empty_state = handler.initial_state();
+            let final_state = std::mem::replace(&mut ctx.handler_state, empty_state);
+            let events = handler
+                .drain(&final_state)
+                .await
+                .map_err(|err| obzenflow_fsm::FsmError::HandlerError(err.to_string()))?;
+            ctx.handler_state = final_state;
 
-    let scope = ctx.runtime_execution.stage_scope(ctx.stage_id);
-    ctx.pending_outputs.extend(events.into_iter().map(|event| {
-        crate::stages::common::supervision::backpressure_drain::PendingOutput { event, scope }
-    }));
+            let scope = ctx.runtime_execution.stage_scope(ctx.stage_id);
+            ctx.pending_outputs.extend(events.into_iter().map(|event| {
+                crate::stages::common::supervision::backpressure_drain::PendingOutput {
+                    event,
+                    scope,
+                }
+            }));
+        }
+        EofKind::Truncated => {
+            tracing::info!(
+                stage_name = %ctx.stage_name,
+                "terminal EOF is truncated; skipping end-of-input finalization"
+            );
+        }
+    }
     if !ctx.pending_outputs.is_empty() {
         if let Some(mut frontier) = ctx.drain_parent.clone() {
             CausalOrderingService::update_with_parent(
@@ -398,50 +415,67 @@ async fn dispatch_draining_live<
     }
 
     if ctx.pending_transition.is_none() {
-        let handler = ctx.handler.clone();
-        let empty_state = handler.initial_state();
-        let mut final_state = std::mem::replace(&mut ctx.handler_state, empty_state);
+        // FLOWIP-095k finalizer gate: on_source_eof and drain are both
+        // end-of-input responses the killed original never ran, so Truncated
+        // suppresses both (locked 2026-07-02); Poison keeps today's behaviour
+        // (FLOWIP-075b owns the live question).
+        match ctx.terminal_eof_kind.unwrap_or(EofKind::Natural) {
+            EofKind::Natural | EofKind::Poison => {
+                let handler = ctx.handler.clone();
+                let empty_state = handler.initial_state();
+                let mut final_state = std::mem::replace(&mut ctx.handler_state, empty_state);
 
-        // Live-mode semantics: stream EOF is authoritative and drives completion.
-        if let Some(stream_source_id) = ctx
-            .buffered_eof
-            .as_ref()
-            .and_then(|eof| eof.writer_id.as_stage().copied())
-        {
-            let writer_id = ctx.writer_id.ok_or_else(|| {
-                obzenflow_fsm::FsmError::HandlerError("No writer ID available".to_string())
-            })?;
+                // Live-mode semantics: stream EOF is authoritative and drives completion.
+                if let Some(stream_source_id) = ctx
+                    .buffered_eof
+                    .as_ref()
+                    .and_then(|eof| eof.writer_id.as_stage().copied())
+                {
+                    let writer_id = ctx.writer_id.ok_or_else(|| {
+                        obzenflow_fsm::FsmError::HandlerError("No writer ID available".to_string())
+                    })?;
 
-            let eof_events = handler
-                .on_source_eof(&mut final_state, stream_source_id, writer_id)
-                .map_err(|err| obzenflow_fsm::FsmError::HandlerError(err.to_string()))?;
-            let scope = ctx.runtime_execution.stage_scope(ctx.stage_id);
-            ctx.pending_outputs
-                .extend(eof_events.into_iter().map(|event| {
+                    let eof_events = handler
+                        .on_source_eof(&mut final_state, stream_source_id, writer_id)
+                        .map_err(|err| obzenflow_fsm::FsmError::HandlerError(err.to_string()))?;
+                    let scope = ctx.runtime_execution.stage_scope(ctx.stage_id);
+                    ctx.pending_outputs
+                        .extend(eof_events.into_iter().map(|event| {
+                            crate::stages::common::supervision::backpressure_drain::PendingOutput {
+                                event,
+                                scope,
+                            }
+                        }));
+                }
+
+                let events = handler
+                    .drain(&final_state)
+                    .await
+                    .map_err(|err| obzenflow_fsm::FsmError::HandlerError(err.to_string()))?;
+                ctx.handler_state = final_state;
+
+                let scope = ctx.runtime_execution.stage_scope(ctx.stage_id);
+                ctx.pending_outputs.extend(events.into_iter().map(|event| {
                     crate::stages::common::supervision::backpressure_drain::PendingOutput {
                         event,
                         scope,
                     }
                 }));
-        }
-
-        let events = handler
-            .drain(&final_state)
-            .await
-            .map_err(|err| obzenflow_fsm::FsmError::HandlerError(err.to_string()))?;
-        ctx.handler_state = final_state;
-
-        let scope = ctx.runtime_execution.stage_scope(ctx.stage_id);
-        ctx.pending_outputs.extend(events.into_iter().map(|event| {
-            crate::stages::common::supervision::backpressure_drain::PendingOutput { event, scope }
-        }));
-        if !ctx.pending_outputs.is_empty() {
-            if let Some(mut frontier) = ctx.drain_parent.clone() {
-                CausalOrderingService::update_with_parent(
-                    &mut frontier.vector_clock,
-                    &ctx.reference_high_water_clock,
+                if !ctx.pending_outputs.is_empty() {
+                    if let Some(mut frontier) = ctx.drain_parent.clone() {
+                        CausalOrderingService::update_with_parent(
+                            &mut frontier.vector_clock,
+                            &ctx.reference_high_water_clock,
+                        );
+                        ctx.pending_parent = Some(frontier);
+                    }
+                }
+            }
+            EofKind::Truncated => {
+                tracing::info!(
+                    stage_name = %ctx.stage_name,
+                    "terminal EOF is truncated; skipping end-of-input finalization"
                 );
-                ctx.pending_parent = Some(frontier);
             }
         }
         ctx.pending_transition = Some(PendingTransition::DrainComplete);

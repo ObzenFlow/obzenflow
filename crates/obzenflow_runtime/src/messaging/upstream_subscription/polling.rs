@@ -10,6 +10,7 @@ use super::{
     StageInputPosition, UpstreamSubscription,
 };
 use obzenflow_core::event::payloads::effect_payload::is_framework_effect_event_type;
+use obzenflow_core::event::payloads::flow_control_payload::EofKind;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::types::SeqNo;
 use obzenflow_core::event::vector_clock::CausalOrderingService;
@@ -445,7 +446,12 @@ where
         );
 
         if is_eof {
-            self.record_eof_exhaustion(reader_index, stage_id, &stage_key);
+            // FLOWIP-095k: the authored EOF's kind feeds the worst-wins fold.
+            let eof_kind = original_chain_event.and_then(|event| match &event.content {
+                ChainEventContent::FlowControl(fc) => fc.eof_kind(),
+                _ => None,
+            });
+            self.record_eof_exhaustion(reader_index, stage_id, &stage_key, eof_kind);
         } else if is_drain {
             tracing::debug!(
                 target: "flowip-080o",
@@ -729,8 +735,12 @@ where
         reader_index: usize,
         stage_id: StageId,
         stage_key: &StageKey,
+        eof_kind: Option<EofKind>,
     ) {
         self.state.mark_reader_eof(reader_index);
+        if let Some(kind) = eof_kind {
+            self.state.mark_reader_eof_kind(reader_index, kind);
+        }
         let total_readers = self.readers.len();
         let eof_count = self.state.eof_count();
         let is_final = eof_count == total_readers;
@@ -741,6 +751,7 @@ where
             eof_count,
             total_readers,
             is_final,
+            worst_kind: self.state.worst_eof_kind(),
         });
         tracing::debug!(
             target: "flowip-080o",

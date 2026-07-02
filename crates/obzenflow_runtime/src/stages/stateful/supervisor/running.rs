@@ -251,6 +251,16 @@ pub(super) async fn dispatch_accumulating<
                         .as_ref()
                         .and_then(|subscription| subscription.last_eof_outcome().cloned());
 
+                    // FLOWIP-095k: fold the joined terminal kind before resolution.
+                    if envelope.event.is_eof() {
+                        if let Some(kind) = last_eof_outcome.as_ref().and_then(|o| o.worst_kind) {
+                            ctx.terminal_eof_kind = Some(
+                                ctx.terminal_eof_kind
+                                    .map_or(kind, |current| current.worst(kind)),
+                            );
+                        }
+                    }
+
                     let resolution = resolve_control_event_awaiting_pauses(
                         signal,
                         &envelope,

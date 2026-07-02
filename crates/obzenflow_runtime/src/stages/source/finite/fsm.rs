@@ -238,6 +238,18 @@ pub enum FiniteSourceAction<H> {
 // FSM Context
 // ============================================================================
 
+/// Why the source is completing (FLOWIP-095k). Replay exhaustion reproduces
+/// the archive's recorded kind; live completion consults the control strategy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SourceCompletionOrigin {
+    #[default]
+    Live,
+    ReplayExhausted {
+        /// The archive's recorded completion kind; `None`: no committed EOF.
+        recorded_kind: Option<EofKind>,
+    },
+}
+
 /// Context for finite source handlers - contains everything actions need
 #[derive(Clone)]
 pub struct FiniteSourceContext<H> {
@@ -282,6 +294,9 @@ pub struct FiniteSourceContext<H> {
 
     /// Mutable context for the source control strategy
     pub control_context: CompletionContext,
+
+    /// Why the source is completing (affects EOF kind, FLOWIP-095k).
+    pub completion_origin: SourceCompletionOrigin,
 
     /// Backpressure writer handle for this stage's journal (FLOWIP-086k).
     pub backpressure_writer: BackpressureWriter,
@@ -337,6 +352,7 @@ impl<H> FiniteSourceContext<H> {
             instrumentation: init.instrumentation,
             control_strategy: init.control_strategy,
             control_context: CompletionContext::new(),
+            completion_origin: SourceCompletionOrigin::Live,
             backpressure_writer: init.backpressure_writer,
             output_contract: init.output_contract,
             pending_outputs: VecDeque::new(),
@@ -407,11 +423,6 @@ impl<H: Send + Sync + 'static> FsmAction for FiniteSourceAction<H> {
             }
 
             FiniteSourceAction::SendEOF => {
-                // Consult the source control strategy (FLOWIP-081a / 051b).
-                let decision = ctx
-                    .control_strategy
-                    .on_natural_completion(&mut ctx.control_context);
-
                 let writer_id = ctx.writer_id.ok_or_else(|| {
                     obzenflow_fsm::FsmError::HandlerError(
                         "No writer ID available to send EOF".to_string(),
@@ -424,14 +435,26 @@ impl<H: Send + Sync + 'static> FsmAction for FiniteSourceAction<H> {
                     .events_processed_total
                     .load(std::sync::atomic::Ordering::Relaxed);
 
-                // Determine whether EOF should be natural or poison.
-                let eof_kind = if matches!(
-                    decision,
-                    crate::stages::source::strategies::CompletionDecision::PoisonEof
-                ) {
-                    EofKind::Poison
-                } else {
-                    EofKind::Natural
+                // FLOWIP-095k: replay exhaustion reproduces the archive's
+                // recorded kind and never consults the live control strategy.
+                let eof_kind = match ctx.completion_origin {
+                    SourceCompletionOrigin::Live => {
+                        // Consult the source control strategy (FLOWIP-081a / 051b).
+                        let decision = ctx
+                            .control_strategy
+                            .on_natural_completion(&mut ctx.control_context);
+                        if matches!(
+                            decision,
+                            crate::stages::source::strategies::CompletionDecision::PoisonEof
+                        ) {
+                            EofKind::Poison
+                        } else {
+                            EofKind::Natural
+                        }
+                    }
+                    SourceCompletionOrigin::ReplayExhausted { recorded_kind } => {
+                        recorded_kind.unwrap_or(EofKind::Truncated)
+                    }
                 };
 
                 // Take a final runtime snapshot for wide-event semantics
@@ -1042,5 +1065,73 @@ mod tests {
             eof_poison,
             "Expected poison EOF (natural = false) when breaker is open"
         );
+    }
+
+    #[tokio::test]
+    async fn send_eof_replay_exhaustion_reproduces_recorded_kind_without_strategy_consult() {
+        // FLOWIP-095k: the strategy flag is held open (PoisonEof) throughout;
+        // a ReplayExhausted origin must ignore it and reproduce the recorded
+        // kind, or Truncated when the archive committed no EOF.
+        let cases = [
+            (Some(EofKind::Natural), EofKind::Natural),
+            (Some(EofKind::Poison), EofKind::Poison),
+            (None, EofKind::Truncated),
+        ];
+
+        for (recorded_kind, expected) in cases {
+            let stage_id = CoreStageId::new();
+            let data_journal: Arc<dyn Journal<ChainEvent>> =
+                Arc::new(TestJournal::new(JournalOwner::stage(stage_id)));
+            let mut ctx = FiniteSourceContext::<DummySource>::new(FiniteSourceContextInit {
+                stage_id,
+                stage_name: "finite_source".to_string(),
+                observers: crate::stages::observer::StageObserverBundle::default(),
+                flow_name: "test_flow".to_string(),
+                flow_id: FlowId::new(),
+                data_journal: data_journal.clone(),
+                error_journal: Arc::new(TestJournal::new(JournalOwner::stage(stage_id))),
+                system_journal: Arc::new(TestJournal::new(JournalOwner::stage(stage_id))),
+                runtime_execution: crate::execution::RuntimeExecution::new(
+                    crate::execution::RuntimeMode::Live,
+                    None,
+                ),
+                bus: Arc::new(FsmMessageBus::new()),
+                instrumentation: Arc::new(StageInstrumentation::new()),
+                control_strategy: Arc::new(FlagPoisonStrategy {
+                    state: Arc::new(AtomicU8::new(1)), // open: would poison if consulted
+                }),
+                backpressure_writer: crate::backpressure::BackpressureWriter::disabled(),
+                output_contract: StageOutputContract::empty(),
+            });
+
+            FiniteSourceAction::<DummySource>::AllocateResources
+                .execute(&mut ctx)
+                .await
+                .unwrap();
+            ctx.completion_origin = SourceCompletionOrigin::ReplayExhausted { recorded_kind };
+
+            FiniteSourceAction::<DummySource>::SendEOF
+                .execute(&mut ctx)
+                .await
+                .unwrap();
+
+            let kinds: Vec<EofKind> = data_journal
+                .read_causally_ordered()
+                .await
+                .unwrap()
+                .iter()
+                .filter_map(|env| match &env.event.content {
+                    ChainEventContent::FlowControl(FlowControlPayload::Eof { kind, .. }) => {
+                        Some(*kind)
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                kinds,
+                vec![expected],
+                "recorded {recorded_kind:?} must synthesize {expected:?}"
+            );
+        }
     }
 }

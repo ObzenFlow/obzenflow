@@ -2497,6 +2497,116 @@ async fn canonical_merge_authored_eof_orders_by_tiebreak_and_exhausts_reader() {
     assert_eq!(outcome.stage_id, stage_b);
 }
 
+fn merge_authored_eof_with_kind(
+    writer: StageId,
+    kind: obzenflow_core::event::payloads::flow_control_payload::EofKind,
+) -> ChainEvent {
+    ChainEventFactory::eof_event_with_kind(WriterId::Stage(writer), kind)
+}
+
+#[tokio::test]
+async fn eof_kind_fold_is_worst_wins_under_both_arrival_orders() {
+    // FLOWIP-095k: the outcome's worst_kind is a pure function of the set of
+    // per-input kinds, independent of which EOF the merge delivers last.
+    use obzenflow_core::event::payloads::flow_control_payload::EofKind;
+
+    for (kind_a, kind_b) in [
+        (EofKind::Natural, EofKind::Truncated),
+        (EofKind::Truncated, EofKind::Natural),
+        (EofKind::Natural, EofKind::Poison),
+        (EofKind::Truncated, EofKind::Poison),
+        (EofKind::Poison, EofKind::Truncated),
+        (EofKind::Natural, EofKind::Natural),
+    ] {
+        let (mut subscription, (stage_a, journal_a), (stage_b, journal_b)) =
+            canonical_pair("upstream_a", "upstream_b").await;
+
+        journal_a.append_with_clock(
+            merge_authored_eof_with_kind(stage_a, kind_a),
+            VectorClock::new(),
+        );
+        journal_b.append_with_clock(merge_data(stage_b, "b1"), VectorClock::new());
+        journal_b.append_with_clock(
+            merge_authored_eof_with_kind(stage_b, kind_b),
+            VectorClock::new(),
+        );
+
+        loop {
+            match subscription.poll_next_with_state("test_fsm", None).await {
+                PollResult::Event(_) => {}
+                PollResult::NoEvents => break,
+                PollResult::Error(e) => panic!("unexpected poll error: {e:?}"),
+            }
+        }
+
+        assert!(subscription.all_readers_eof());
+        let outcome = subscription
+            .take_last_eof_outcome()
+            .expect("final EOF outcome recorded");
+        assert!(outcome.is_final);
+        assert_eq!(
+            outcome.worst_kind,
+            Some(kind_a.worst(kind_b)),
+            "fold of {kind_a:?} and {kind_b:?} must be the worst-wins join"
+        );
+    }
+}
+
+#[tokio::test]
+async fn eof_kind_fold_single_input_is_the_identity() {
+    use obzenflow_core::event::payloads::flow_control_payload::EofKind;
+
+    let (mut subscription, stage, journal) = canonical_single("upstream").await;
+    journal.append_with_clock(merge_data(stage, "a1"), VectorClock::new());
+    journal.append_with_clock(
+        merge_authored_eof_with_kind(stage, EofKind::Truncated),
+        VectorClock::new(),
+    );
+
+    loop {
+        match subscription.poll_next_with_state("test_fsm", None).await {
+            PollResult::Event(_) => {}
+            PollResult::NoEvents => break,
+            PollResult::Error(e) => panic!("unexpected poll error: {e:?}"),
+        }
+    }
+
+    let outcome = subscription
+        .take_last_eof_outcome()
+        .expect("final EOF outcome recorded");
+    assert_eq!(outcome.worst_kind, Some(EofKind::Truncated));
+}
+
+#[tokio::test]
+async fn eof_kind_fold_keeps_the_worst_on_duplicate_eofs_from_one_input() {
+    // The strict-join shape: a mid-stream Poison EOF precedes the join's own
+    // drain EOF in the same journal; the worst kind must survive (FLOWIP-095k).
+    use obzenflow_core::event::payloads::flow_control_payload::EofKind;
+
+    let (mut subscription, stage, journal) = canonical_single("upstream").await;
+    journal.append_with_clock(
+        merge_authored_eof_with_kind(stage, EofKind::Poison),
+        VectorClock::new(),
+    );
+    journal.append_with_clock(
+        merge_authored_eof_with_kind(stage, EofKind::Natural),
+        VectorClock::new(),
+    );
+
+    loop {
+        match subscription.poll_next_with_state("test_fsm", None).await {
+            PollResult::Event(_) => {}
+            PollResult::NoEvents => break,
+            PollResult::Error(e) => panic!("unexpected poll error: {e:?}"),
+        }
+    }
+
+    let outcome = subscription
+        .take_last_eof_outcome()
+        .expect("EOF outcome recorded");
+    assert_eq!(outcome.worst_kind, Some(EofKind::Poison));
+}
+
 #[tokio::test]
 async fn canonical_merge_forwarded_control_takes_ordinal_without_exhausting() {
     let (mut subscription, (stage_a, journal_a), (stage_b, journal_b)) =

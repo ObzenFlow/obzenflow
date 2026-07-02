@@ -23,6 +23,7 @@ use crate::stages::resources_builder::BoundSubscriptionFactory;
 use obzenflow_core::event::context::causality_context::CausalityContext;
 use obzenflow_core::event::context::{FlowContext, StageType};
 use obzenflow_core::event::payloads::delivery_payload::DeliveryPayload;
+use obzenflow_core::event::payloads::flow_control_payload::EofKind;
 use obzenflow_core::event::{ChainEventFactory, EventEnvelope, SystemEvent};
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{ChainEvent, FlowId, StageId, WriterId};
@@ -327,6 +328,9 @@ pub struct JournalSinkContext<H: UnifiedSinkHandler> {
     /// FSM-owned contract state for each upstream reader (aligned with subscription readers)
     pub contract_state: Vec<ReaderProgress>,
 
+    /// Worst-wins join over the inputs' terminal EOF kinds (FLOWIP-095k).
+    pub terminal_eof_kind: Option<EofKind>,
+
     /// Last supervisor-driven contract check instant (FLOWIP-080r).
     pub(crate) last_contract_check: Option<tokio::time::Instant>,
 
@@ -576,7 +580,16 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAct
                 );
                 match handler.flush_report().await {
                     Ok(report) => {
-                        if let Some(mut payload) = report.audit_payload {
+                        // FLOWIP-095k finalizer gate: the audit payload is an
+                        // end-of-input completion statement; Truncated discards
+                        // it while flush and receipt effects run for every kind.
+                        let suppress_audit = match ctx.terminal_eof_kind.unwrap_or(EofKind::Natural)
+                        {
+                            EofKind::Natural | EofKind::Poison => false,
+                            EofKind::Truncated => true,
+                        };
+                        if let Some(mut payload) = report.audit_payload.filter(|_| !suppress_audit)
+                        {
                             payload.destination = ctx.stage_name.clone();
                             tracing::trace!(
                                 target: "flowip-080o",
@@ -695,7 +708,16 @@ impl<H: UnifiedSinkHandler + Send + Sync + 'static> FsmAction for JournalSinkAct
                         ))
                     })?;
 
-                    if let Some(mut payload) = drain_result.audit_payload {
+                    // FLOWIP-095k finalizer gate: the drain audit payload is an
+                    // end-of-input completion statement; Truncated discards it
+                    // while the drain call and receipt effects run for every kind.
+                    let suppress_audit = match ctx.terminal_eof_kind.unwrap_or(EofKind::Natural) {
+                        EofKind::Natural | EofKind::Poison => false,
+                        EofKind::Truncated => true,
+                    };
+                    if let Some(mut payload) =
+                        drain_result.audit_payload.filter(|_| !suppress_audit)
+                    {
                         payload.destination = stage_name.clone();
                         tracing::trace!(
                             target: "flowip-080o",
