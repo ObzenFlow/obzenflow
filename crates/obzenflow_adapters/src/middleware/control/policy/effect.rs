@@ -466,6 +466,7 @@ mod tests {
             flow_name: "kind_agreement_flow".to_string(),
             cycle_guard: None,
             lineage: obzenflow_core::config::LineagePolicy::default(),
+            resolved_policies: Default::default(),
         };
 
         let factories: Vec<(Box<dyn MiddlewareFactory>, MiddlewareKind, bool)> = vec![

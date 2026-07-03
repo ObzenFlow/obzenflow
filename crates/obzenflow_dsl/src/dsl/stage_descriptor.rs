@@ -3111,6 +3111,7 @@ mod tests {
             flow_name: "test_flow".to_string(),
             cycle_guard: None,
             lineage: obzenflow_core::config::LineagePolicy::default(),
+            resolved_policies: Default::default(),
         };
         let control = Arc::new(ControlMiddlewareAggregator::new());
         let slot = HostedIngressBindingSlot::new("bank.accounts");
@@ -3287,6 +3288,7 @@ mod tests {
             flow_name: "test_flow".to_string(),
             cycle_guard: None,
             lineage: obzenflow_core::config::LineagePolicy::default(),
+            resolved_policies: Default::default(),
         };
         let control = Arc::new(ControlMiddlewareAggregator::new());
         let slot = HostedIngressBindingSlot::new("bank.accounts");
@@ -3346,6 +3348,7 @@ mod tests {
             flow_name: "test_flow".to_string(),
             cycle_guard: None,
             lineage: obzenflow_core::config::LineagePolicy::default(),
+            resolved_policies: Default::default(),
         };
 
         // Minimal StageResources: journals are never actually written in this unit test.
@@ -3477,6 +3480,7 @@ mod tests {
         let resources = StageResources {
             flow_id: FlowId::new(),
             lineage_policy: obzenflow_core::config::LineagePolicy::default(),
+            heartbeat_interval: 1000,
             data_journal,
             error_journal,
             system_journal,
@@ -3707,6 +3711,7 @@ mod observer_placement_negative_tests {
                 flow_name: "observer_placement_negative".to_string(),
                 cycle_guard: None,
                 lineage: obzenflow_core::config::LineagePolicy::default(),
+                resolved_policies: Default::default(),
             };
             let control = Arc::new(ControlMiddlewareAggregator::new());
             let resolved = crate::middleware_resolution::resolve_middleware(

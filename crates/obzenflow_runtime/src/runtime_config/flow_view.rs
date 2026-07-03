@@ -9,7 +9,9 @@
 use super::candidates::{ConfigValue, DslCandidates};
 use super::model::{doc_for, Resolved};
 use super::schema::knob;
-use obzenflow_core::config::{ConfigScope, EffectiveConfigEvidence, LineagePolicy};
+use obzenflow_core::config::{
+    ConfigScope, EffectiveConfigEvidence, LineagePolicy, ResolvedValueDoc,
+};
 use obzenflow_core::StageKey;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -179,6 +181,55 @@ impl FlowEffectiveConfig {
         });
         docs.dedup();
         EffectiveConfigEvidence::new(docs)
+    }
+
+    /// Per-stage docs: every knob resolved AT this stage's point address
+    /// (the winning scope in the meta may be coarser). Serves the HTTP
+    /// stage route and the CLI from one projection.
+    pub fn stage_docs(&self, stage: &StageKey) -> Vec<ResolvedValueDoc> {
+        let point = ConfigScope::Stage {
+            stage: stage.clone(),
+        };
+        let mut docs: Vec<_> = self
+            .values
+            .iter()
+            .filter_map(|(key_path, points)| {
+                let spec = knob(key_path).expect("only registered knobs are materialized");
+                points.get(&point).map(|resolved| doc_for(spec, resolved))
+            })
+            .collect();
+        docs.sort_by(|a, b| a.key_path.cmp(&b.key_path));
+        docs
+    }
+
+    /// Per-edge docs for this stage's outgoing edges, keyed by the §4c
+    /// display spelling `up|>down`.
+    pub fn edge_docs_for_upstream(
+        &self,
+        stage: &StageKey,
+    ) -> BTreeMap<String, Vec<ResolvedValueDoc>> {
+        let mut edges: BTreeMap<String, Vec<ResolvedValueDoc>> = BTreeMap::new();
+        for (key_path, points) in &self.values {
+            let spec = knob(key_path).expect("only registered knobs are materialized");
+            for (point, resolved) in points {
+                if let ConfigScope::Edge {
+                    upstream,
+                    downstream,
+                } = point
+                {
+                    if upstream == stage {
+                        edges
+                            .entry(format!("{upstream}|>{downstream}"))
+                            .or_default()
+                            .push(doc_for(spec, resolved));
+                    }
+                }
+            }
+        }
+        for docs in edges.values_mut() {
+            docs.sort_by(|a, b| a.key_path.cmp(&b.key_path));
+        }
+        edges
     }
 }
 

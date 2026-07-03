@@ -1337,6 +1337,7 @@ mod tests {
             flow_name: "test".to_string(),
             cycle_guard: None,
             lineage: obzenflow_core::config::LineagePolicy::default(),
+            resolved_policies: Default::default(),
         };
         let control = Arc::new(ControlMiddlewareAggregator::new());
         let cb = factory
@@ -1391,6 +1392,7 @@ mod tests {
             flow_name: "test".to_string(),
             cycle_guard: None,
             lineage: obzenflow_core::config::LineagePolicy::default(),
+            resolved_policies: Default::default(),
         };
         let control = Arc::new(ControlMiddlewareAggregator::new());
         let cb = factory

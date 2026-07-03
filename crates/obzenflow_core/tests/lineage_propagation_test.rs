@@ -13,32 +13,29 @@ fn test_full_lineage_propagation() {
     // Create chain: A -> B -> C -> D
     let event_a = ChainEventFactory::data_event(writer_id, "test", json!({"level": "A"}));
 
-    let event_b =
-        ChainEventFactory::derived_data_event(
-            writer_id,
-            &event_a,
-            "test",
-            json!({"level": "B"}),
-            LineagePolicy::default(),
-        );
+    let event_b = ChainEventFactory::derived_data_event(
+        writer_id,
+        &event_a,
+        "test",
+        json!({"level": "B"}),
+        LineagePolicy::default(),
+    );
 
-    let event_c =
-        ChainEventFactory::derived_data_event(
-            writer_id,
-            &event_b,
-            "test",
-            json!({"level": "C"}),
-            LineagePolicy::default(),
-        );
+    let event_c = ChainEventFactory::derived_data_event(
+        writer_id,
+        &event_b,
+        "test",
+        json!({"level": "C"}),
+        LineagePolicy::default(),
+    );
 
-    let event_d =
-        ChainEventFactory::derived_data_event(
-            writer_id,
-            &event_c,
-            "test",
-            json!({"level": "D"}),
-            LineagePolicy::default(),
-        );
+    let event_d = ChainEventFactory::derived_data_event(
+        writer_id,
+        &event_c,
+        "test",
+        json!({"level": "D"}),
+        LineagePolicy::default(),
+    );
 
     // Event A should have no parents (root)
     assert_eq!(event_a.causality.parent_ids.len(), 0);
@@ -129,14 +126,13 @@ fn test_cycle_detection() {
     // Create a simple chain
     let event_a = ChainEventFactory::data_event(writer_id, "test", json!({"name": "A"}));
 
-    let event_b =
-        ChainEventFactory::derived_data_event(
-            writer_id,
-            &event_a,
-            "test",
-            json!({"name": "B"}),
-            LineagePolicy::default(),
-        );
+    let event_b = ChainEventFactory::derived_data_event(
+        writer_id,
+        &event_a,
+        "test",
+        json!({"name": "B"}),
+        LineagePolicy::default(),
+    );
 
     // B should not contain a cycle with itself
     assert!(!event_b.causality.contains_cycle(&event_b.id));
@@ -163,23 +159,21 @@ fn test_full_lineage_helper() {
 
     let event_a = ChainEventFactory::data_event(writer_id, "test", json!({"name": "A"}));
 
-    let event_b =
-        ChainEventFactory::derived_data_event(
-            writer_id,
-            &event_a,
-            "test",
-            json!({"name": "B"}),
-            LineagePolicy::default(),
-        );
+    let event_b = ChainEventFactory::derived_data_event(
+        writer_id,
+        &event_a,
+        "test",
+        json!({"name": "B"}),
+        LineagePolicy::default(),
+    );
 
-    let event_c =
-        ChainEventFactory::derived_data_event(
-            writer_id,
-            &event_b,
-            "test",
-            json!({"name": "C"}),
-            LineagePolicy::default(),
-        );
+    let event_c = ChainEventFactory::derived_data_event(
+        writer_id,
+        &event_b,
+        "test",
+        json!({"name": "C"}),
+        LineagePolicy::default(),
+    );
 
     // Get full lineage of C
     let lineage = event_c.causality.full_lineage(event_c.id);

@@ -150,6 +150,7 @@ impl<H: UnifiedStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static
             instrumentation,
             upstream_subscription_factory: self.resources.upstream_subscription_factory,
             events_since_last_heartbeat: 0,
+            heartbeat_interval: self.resources.heartbeat_interval,
             last_data_event_time: None,
             emit_interval,
             backpressure_writer: self.resources.backpressure_writer.clone(),

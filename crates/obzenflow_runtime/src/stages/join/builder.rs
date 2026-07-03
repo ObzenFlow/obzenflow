@@ -193,6 +193,7 @@ impl<H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Su
             reference_batch_cap: self.config.reference_batch_cap,
             reference_since_last_stream: 0,
             events_since_last_heartbeat: 0,
+            heartbeat_interval: self.resources.heartbeat_interval,
             backpressure_writer: self.resources.backpressure_writer.clone(),
             output_contract: self.resources.output_contract.clone(),
             backpressure_readers: self.resources.backpressure_readers.clone(),

@@ -374,7 +374,7 @@ pub(super) async fn emit_join_heartbeat_if_due<H: UnifiedJoinHandler + Send + Sy
     ctx: &mut JoinContext<H>,
     stage_id: StageId,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let interval = crate::metrics::instrumentation::heartbeat_interval();
+    let interval = ctx.heartbeat_interval;
     if interval == 0 || ctx.events_since_last_heartbeat < interval {
         return Ok(());
     }

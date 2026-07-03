@@ -56,8 +56,9 @@ use retry::RetryState;
 use state::CircuitState;
 use window::{CallSample, FailureWindow, FailureWindowState};
 
-type FallbackFn =
-    Arc<dyn Fn(&ChainEvent, obzenflow_core::config::LineagePolicy) -> Vec<ChainEvent> + Send + Sync>;
+type FallbackFn = Arc<
+    dyn Fn(&ChainEvent, obzenflow_core::config::LineagePolicy) -> Vec<ChainEvent> + Send + Sync,
+>;
 type RejectionFn = Arc<
     dyn Fn(
             &ChainEvent,
@@ -1473,6 +1474,7 @@ mod tests {
             flow_name: "test_flow".to_string(),
             cycle_guard: None,
             lineage: obzenflow_core::config::LineagePolicy::default(),
+            resolved_policies: Default::default(),
         };
         let factory = CircuitBreakerFactory::new(3);
         assert!(

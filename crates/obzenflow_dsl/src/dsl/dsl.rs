@@ -858,6 +858,8 @@ macro_rules! build_typed_flow {
 
             let mut __dsl_candidates = DslCandidates::default();
             let mut __flow_window: Option<u64> = None;
+            let mut __flow_breaker_threshold: Option<u64> = None;
+            let mut __flow_limiter: Option<(f64, Option<f64>)> = None;
             for (name, descriptor) in descriptors.iter() {
                 let flow_middleware = create_flow_middleware();
                 for factory in &flow_middleware {
@@ -920,11 +922,10 @@ macro_rules! build_typed_flow {
                             | PolicyGuardSurface::Sink => {}
                         }
                     }
-                    if let obzenflow_adapters::middleware::MiddlewarePlanContribution::Backpressure {
-                        window,
-                    } = factory.plan_contribution()
-                    {
-                        match scope {
+                    match factory.plan_contribution() {
+                        obzenflow_adapters::middleware::MiddlewarePlanContribution::Backpressure {
+                            window,
+                        } => match scope {
                             // One flow-scoped candidate per knob: the flow
                             // middleware closure yields the same factories
                             // for every stage.
@@ -938,7 +939,44 @@ macro_rules! build_typed_flow {
                                     ConfigValue::U64(window.get()),
                                 );
                             }
-                        }
+                        },
+                        obzenflow_adapters::middleware::MiddlewarePlanContribution::CircuitBreaker {
+                            threshold,
+                        } => match scope {
+                            MiddlewareSourceScope::Flow => {
+                                __flow_breaker_threshold = Some(threshold);
+                            }
+                            MiddlewareSourceScope::Stage => {
+                                __dsl_candidates.declare(
+                                    "effects.circuit_breaker.threshold",
+                                    ConfigScope::stage(descriptor.name()),
+                                    ConfigValue::U64(threshold),
+                                );
+                            }
+                        },
+                        obzenflow_adapters::middleware::MiddlewarePlanContribution::RateLimiter {
+                            events_per_second,
+                            burst_capacity,
+                        } => match scope {
+                            MiddlewareSourceScope::Flow => {
+                                __flow_limiter = Some((events_per_second, burst_capacity));
+                            }
+                            MiddlewareSourceScope::Stage => {
+                                __dsl_candidates.declare(
+                                    "effects.rate_limiter.events_per_second",
+                                    ConfigScope::stage(descriptor.name()),
+                                    ConfigValue::F64(events_per_second),
+                                );
+                                if let Some(burst) = burst_capacity {
+                                    __dsl_candidates.declare(
+                                        "effects.rate_limiter.burst_capacity",
+                                        ConfigScope::stage(descriptor.name()),
+                                        ConfigValue::F64(burst),
+                                    );
+                                }
+                            }
+                        },
+                        obzenflow_adapters::middleware::MiddlewarePlanContribution::None => {}
                     }
                 }
             }
@@ -948,6 +986,27 @@ macro_rules! build_typed_flow {
                     ConfigScope::Flow,
                     ConfigValue::U64(window),
                 );
+            }
+            if let Some(threshold) = __flow_breaker_threshold {
+                __dsl_candidates.declare(
+                    "effects.circuit_breaker.threshold",
+                    ConfigScope::Flow,
+                    ConfigValue::U64(threshold),
+                );
+            }
+            if let Some((events_per_second, burst_capacity)) = __flow_limiter {
+                __dsl_candidates.declare(
+                    "effects.rate_limiter.events_per_second",
+                    ConfigScope::Flow,
+                    ConfigValue::F64(events_per_second),
+                );
+                if let Some(burst) = burst_capacity {
+                    __dsl_candidates.declare(
+                        "effects.rate_limiter.burst_capacity",
+                        ConfigScope::Flow,
+                        ConfigValue::F64(burst),
+                    );
+                }
             }
 
             let __resolution_ctx = obzenflow_runtime::runtime_config::FlowResolutionContext {
@@ -984,40 +1043,12 @@ macro_rules! build_typed_flow {
             )
         };
 
+        // FLOWIP-010: `runtime.cycle_max_iterations` is build-resolved; the
+        // registry range check (1..=65535) replaced the old env warn/clamp.
         use obzenflow_runtime::pipeline::MaxIterations;
-        let cycle_max_iterations: MaxIterations = match std::env::var("OBZENFLOW_CYCLE_MAX_ITERATIONS") {
-            Ok(raw) => match raw.parse::<usize>() {
-                Ok(0) => {
-                    tracing::warn!(
-                        value = %raw,
-                        "OBZENFLOW_CYCLE_MAX_ITERATIONS must be > 0; using default of {}",
-                        MaxIterations::DEFAULT,
-                    );
-                    MaxIterations::DEFAULT
-                }
-                Ok(value) => {
-                    if value > u16::MAX as usize {
-                        tracing::warn!(
-                            value = value,
-                            clamped = u16::MAX,
-                            "OBZENFLOW_CYCLE_MAX_ITERATIONS exceeds u16::MAX; clamping (FLOWIP-051p)"
-                        );
-                    }
-                    // try_from_usize clamps to u16::MAX; None case (0) already handled above.
-                    MaxIterations::try_from_usize(value).unwrap_or(MaxIterations::DEFAULT)
-                }
-                Err(err) => {
-                    tracing::warn!(
-                        value = %raw,
-                        error = %err,
-                        "Invalid OBZENFLOW_CYCLE_MAX_ITERATIONS; using default of {}",
-                        MaxIterations::DEFAULT,
-                    );
-                    MaxIterations::DEFAULT
-                }
-            },
-            Err(_) => MaxIterations::DEFAULT,
-        };
+        let cycle_max_iterations: MaxIterations =
+            MaxIterations::try_from_usize(__flow_effective.cycle_max_iterations() as usize)
+                .unwrap_or(MaxIterations::DEFAULT);
 
         // Collect join metadata per stage (FLOWIP-082a). The canonical
         // `JoinMetadataInfo` lives in `obzenflow-topology` and uses topology
@@ -1408,8 +1439,9 @@ macro_rules! build_typed_flow {
         // Use StageResourcesBuilder to handle all the complex wiring
         use obzenflow_runtime::stages::resources_builder::StageResourcesBuilder;
 
-        // FLOWIP-010 §7: per-stage build-resolved lineage policies ride
-        // stage resources into the builders (never a global read).
+        // FLOWIP-010 §7: per-stage build-resolved lineage policies and
+        // heartbeat intervals ride stage resources into the builders
+        // (never a global read).
         let lineage_policies: HashMap<StageId, obzenflow_core::config::LineagePolicy> = name_to_id
             .iter()
             .map(|(name, id)| {
@@ -1417,6 +1449,16 @@ macro_rules! build_typed_flow {
                     *id,
                     __flow_effective
                         .lineage_policy_for(&obzenflow_core::StageKey(name.clone())),
+                )
+            })
+            .collect();
+        let heartbeat_intervals: HashMap<StageId, u64> = name_to_id
+            .iter()
+            .map(|(name, id)| {
+                (
+                    *id,
+                    __flow_effective
+                        .heartbeat_interval_for(&obzenflow_core::StageKey(name.clone())),
                 )
             })
             .collect();
@@ -1434,6 +1476,7 @@ macro_rules! build_typed_flow {
         .with_deterministic_fan_in_stages(deterministic_fan_in_stages)
         .with_seq_ordered_fan_ins(seq_ordered_fan_ins)
         .with_lineage_policies(lineage_policies)
+        .with_heartbeat_intervals(heartbeat_intervals)
         .with_effect_ports($effect_ports)
         .with_replay_archive(replay_archive);
 
@@ -1481,6 +1524,20 @@ macro_rules! build_typed_flow {
                     flow_name: $flow_name.to_string(),
                     lineage: __flow_effective
                         .lineage_policy_for(&obzenflow_core::StageKey(name.clone())),
+                    resolved_policies: {
+                        let __stage_key = obzenflow_core::StageKey(name.clone());
+                        obzenflow_runtime::pipeline::config::ResolvedStagePolicies {
+                            breaker_threshold: __flow_effective
+                                .breaker_threshold_for(&__stage_key)
+                                .and_then(|r| r.value.as_u64()),
+                            limiter_events_per_second: __flow_effective
+                                .limiter_events_per_second_for(&__stage_key)
+                                .and_then(|r| r.value.as_f64()),
+                            limiter_burst_capacity: __flow_effective
+                                .limiter_burst_capacity_for(&__stage_key)
+                                .and_then(|r| r.value.as_f64()),
+                        }
+                    },
                     cycle_guard: if is_in_cycle
                         && matches!(
                             descriptor.stage_type(),

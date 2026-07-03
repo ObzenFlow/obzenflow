@@ -12,7 +12,6 @@ mod draining;
 mod running;
 
 use crate::messaging::UpstreamSubscription;
-use crate::metrics::instrumentation::heartbeat_interval;
 use crate::stages::common::handlers::UnifiedStatefulHandler;
 use crate::stages::common::supervision::flow_context_factory::make_flow_context;
 use crate::stages::common::supervision::forward_control_event::forward_control_event as forward_control_event_helper;
@@ -443,7 +442,7 @@ impl<H: UnifiedStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static
         ctx: &mut StatefulContext<H>,
         force: bool,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let interval = heartbeat_interval();
+        let interval = ctx.heartbeat_interval;
         if interval == 0 {
             return Ok(());
         }

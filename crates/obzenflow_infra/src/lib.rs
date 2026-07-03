@@ -13,6 +13,7 @@
 
 pub mod ai;
 pub mod application;
+pub mod config_cli;
 pub mod env;
 pub mod http_client;
 pub mod journal;

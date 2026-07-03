@@ -26,9 +26,10 @@ use super::{AuthConfig, ValidationConfig};
 #[derive(Debug, Clone)]
 pub struct IngestionConfig {
     /// Protocol-neutral ingress identity used in accepted-event provenance,
-    /// refusal facts, and metrics. Empty means "derive from `base_path`" for
-    /// the optional hosted HTTP wrapper.
-    pub ingress_key: String,
+    /// refusal facts, and metrics. `None` means "derive from `base_path`"
+    /// for the optional hosted HTTP wrapper (FLOWIP-010 §4b: typed key, no
+    /// empty-string sentinel).
+    pub ingress_key: Option<obzenflow_core::ingress::IngressKey>,
 
     /// Base path for endpoints (default: `/api/ingest`).
     ///
@@ -66,7 +67,7 @@ impl Default for IngestionConfig {
     fn default() -> Self {
         Self {
             base_path: "/api/ingest".to_string(),
-            ingress_key: String::new(),
+            ingress_key: None,
             max_batch_size: 1000,
             max_body_size: 1024 * 1024,
             buffer_capacity: 10_000,
@@ -133,6 +134,9 @@ pub struct IngestionState {
     pub ready: Arc<AtomicBool>,
     pub buffer_capacity: usize,
     pub config: IngestionConfig,
+    /// The resolved ingress identity: the configured key, or derived from
+    /// the normalised `base_path` when the config carries `None`.
+    ingress_key: obzenflow_core::ingress::IngressKey,
     /// FLOWIP-115d: the hosted-ingress binding slot, shared with this surface's
     /// source half. The DSL fills it during source-stage materialization; the
     /// endpoints read the composed admission boundary from it at request time.
@@ -150,16 +154,17 @@ pub struct IngestionState {
 impl IngestionState {
     pub fn new(mut config: IngestionConfig) -> (Self, mpsc::Receiver<EventSubmission>) {
         config.base_path = normalize_base_path(&config.base_path);
-        config.ingress_key = normalize_ingress_key(&config.ingress_key, &config.base_path);
+        let ingress_key = resolve_ingress_key(config.ingress_key.clone(), &config.base_path);
 
         let buffer_capacity = config.buffer_capacity;
         let (tx, rx) = mpsc::channel(buffer_capacity);
-        let ingress_slot = HostedIngressBindingSlot::new(config.ingress_key.clone());
+        let ingress_slot = HostedIngressBindingSlot::new(ingress_key.clone());
         let state = Self {
             tx,
             ready: Arc::new(AtomicBool::new(false)),
             buffer_capacity,
             config,
+            ingress_key,
             ingress_slot,
             attempt_seq: Arc::new(AtomicU64::new(0)),
             refusal_writer: Arc::new(OnceLock::new()),
@@ -170,6 +175,12 @@ impl IngestionState {
     /// FLOWIP-115d: the hosted-ingress binding slot, shared with the source half.
     pub fn ingress_slot(&self) -> HostedIngressBindingSlot {
         self.ingress_slot.clone()
+    }
+
+    /// The resolved protocol-neutral ingress identity (configured or
+    /// derived from the base path).
+    pub fn ingress_key(&self) -> &obzenflow_core::ingress::IngressKey {
+        &self.ingress_key
     }
 
     /// The composed ingress admission boundary, once the DSL has filled the slot.
@@ -220,19 +231,19 @@ impl IngestionState {
         let Some(writer) = self.refusal_writer.get() else {
             return Err(IngressRefusalRecordError::new(format!(
                 "ingress refusal recording is enabled for '{}' but no system-journal writer is installed",
-                self.config.ingress_key
+                self.ingress_key
             )));
         };
         let Some(filled) = self.ingress_slot.filled() else {
             return Err(IngressRefusalRecordError::new(format!(
                 "ingress refusal recording is enabled for '{}' but the hosted ingress slot is not filled",
-                self.config.ingress_key
+                self.ingress_key
             )));
         };
         let event = SystemEvent::new(
             writer.writer_id,
             SystemEventType::IngressRefusal {
-                ingress_key: self.config.ingress_key.clone().into(),
+                ingress_key: self.ingress_key.clone(),
                 stage_id: filled.stage_id,
                 stage_key: filled.stage_key.clone(),
                 reason,
@@ -254,7 +265,7 @@ impl IngestionState {
             .map_err(|e| {
                 IngressRefusalRecordError::new(format!(
                     "failed to append ingress refusal fact for '{}': {e}",
-                    self.config.ingress_key
+                    self.ingress_key
                 ))
             })
     }
@@ -456,7 +467,7 @@ impl IngestionState {
 
         submission.ingress_handoff = Some(SubmissionIngressContext {
             accepted_at_ns: unix_now_nanos(),
-            ingress_key: self.config.ingress_key.clone().into(),
+            ingress_key: self.ingress_key.clone(),
             batch_index,
             attempt_seq: attempt.attempt_seq,
         });
@@ -527,12 +538,15 @@ fn normalize_base_path(base_path: &str) -> String {
     out
 }
 
-fn normalize_ingress_key(ingress_key: &str, fallback_base_path: &str) -> String {
-    let trimmed = ingress_key.trim();
-    if trimmed.is_empty() {
-        fallback_base_path.to_string()
-    } else {
-        trimmed.to_string()
+fn resolve_ingress_key(
+    ingress_key: Option<obzenflow_core::ingress::IngressKey>,
+    fallback_base_path: &str,
+) -> obzenflow_core::ingress::IngressKey {
+    match ingress_key {
+        Some(key) if !key.as_str().trim().is_empty() => {
+            obzenflow_core::ingress::IngressKey(key.as_str().trim().to_string())
+        }
+        _ => obzenflow_core::ingress::IngressKey(fallback_base_path.to_string()),
     }
 }
 

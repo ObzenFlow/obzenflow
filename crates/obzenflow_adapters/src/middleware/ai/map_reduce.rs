@@ -668,6 +668,7 @@ mod tests {
             flow_name: "flow".to_string(),
             cycle_guard: None,
             lineage: obzenflow_core::config::LineagePolicy::default(),
+            resolved_policies: Default::default(),
         }
     }
 
@@ -1088,8 +1089,7 @@ mod tests {
             MiddlewareAction::Continue
         ));
 
-        let other_output =
-            ChainEventFactory::derived_data_event(
+        let other_output = ChainEventFactory::derived_data_event(
             writer_id(),
             &chunk_event,
             "other",
@@ -1239,8 +1239,7 @@ mod tests {
             MiddlewareAction::Continue
         ));
 
-        let mut other =
-            ChainEventFactory::derived_data_event(
+        let mut other = ChainEventFactory::derived_data_event(
             writer_id(),
             &chunk_event,
             "other",

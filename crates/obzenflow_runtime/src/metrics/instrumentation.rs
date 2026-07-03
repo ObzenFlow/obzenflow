@@ -21,7 +21,7 @@ use obzenflow_core::StageId;
 use obzenflow_core::WriterId;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use std::sync::{OnceLock, RwLock};
+use std::sync::RwLock;
 use std::time::{Duration, Instant};
 
 use super::constants::{
@@ -680,21 +680,6 @@ pub fn snapshot_stage_metrics(instrumentation: &StageInstrumentation) -> StageMe
         event_loops_total: ctx.event_loops_total,
         event_loops_with_work_total: ctx.event_loops_with_work_total,
     }
-}
-
-/// Heartbeat interval for stateful/join observability events.
-///
-/// Controlled via `OBZENFLOW_HEARTBEAT_INTERVAL` with a sensible default:
-/// - If the env var is unset or invalid, defaults to 1000 events.
-pub fn heartbeat_interval() -> u64 {
-    static INTERVAL: OnceLock<u64> = OnceLock::new();
-
-    *INTERVAL.get_or_init(|| {
-        std::env::var("OBZENFLOW_HEARTBEAT_INTERVAL")
-            .ok()
-            .and_then(|s| s.parse::<u64>().ok())
-            .unwrap_or(1000)
-    })
 }
 
 #[cfg(test)]

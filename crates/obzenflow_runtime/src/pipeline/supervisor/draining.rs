@@ -119,7 +119,7 @@ pub(super) async fn dispatch_draining(
 
                     if !pass {
                         let is_source = context.expected_sources.contains(&upstream.clone());
-                        let mode = super::source_contract_mode();
+                        let mode = context.source_contract_strict;
 
                         let should_abort =
                             !is_source || matches!(mode, SourceContractStrictMode::Abort);

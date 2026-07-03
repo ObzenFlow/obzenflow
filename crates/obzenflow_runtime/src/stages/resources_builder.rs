@@ -28,6 +28,10 @@ use obzenflow_topology::Topology;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+/// Registry default for `runtime.heartbeat_interval` (FLOWIP-010): events
+/// between stateful/join heartbeats when the build supplies no value.
+pub const DEFAULT_HEARTBEAT_INTERVAL: u64 = 1000;
+
 /// Factory for creating subscriptions with pre-computed metadata
 /// This allows deferred subscription creation with the correct journal subsets
 #[derive(Clone)]
@@ -288,6 +292,10 @@ pub struct StageResources {
     /// FLOWIP-010 §7: build-resolved lineage policy for this stage, consumed
     /// as data by the event factories (no global read on the data path).
     pub lineage_policy: obzenflow_core::config::LineagePolicy,
+
+    /// FLOWIP-010: build-resolved `runtime.heartbeat_interval` for this
+    /// stage (events between heartbeats; 0 disables).
+    pub heartbeat_interval: u64,
 }
 
 /// Builder for creating all stage resources with proper wiring
@@ -307,6 +315,8 @@ pub struct StageResourcesBuilder {
     /// FLOWIP-010 §7: build-resolved per-stage lineage policy, threaded into
     /// stage resources so the event factories consume it as data.
     lineage_policies: HashMap<StageId, obzenflow_core::config::LineagePolicy>,
+    /// FLOWIP-010: build-resolved per-stage heartbeat interval.
+    heartbeat_intervals: HashMap<StageId, u64>,
 }
 
 impl StageResourcesBuilder {
@@ -333,6 +343,7 @@ impl StageResourcesBuilder {
             deterministic_fan_in_stages: HashSet::new(),
             seq_ordered_fan_ins: HashSet::new(),
             lineage_policies: HashMap::new(),
+            heartbeat_intervals: HashMap::new(),
         }
     }
 
@@ -349,6 +360,13 @@ impl StageResourcesBuilder {
         policies: HashMap<StageId, obzenflow_core::config::LineagePolicy>,
     ) -> Self {
         self.lineage_policies = policies;
+        self
+    }
+
+    /// Thread the build-resolved per-stage heartbeat intervals (FLOWIP-010).
+    /// Stages absent from the map fall back to the built-in default.
+    pub fn with_heartbeat_intervals(mut self, intervals: HashMap<StageId, u64>) -> Self {
+        self.heartbeat_intervals = intervals;
         self
     }
 
@@ -638,6 +656,11 @@ impl StageResourcesBuilder {
                     .get(&stage_id)
                     .copied()
                     .unwrap_or_default(),
+                heartbeat_interval: self
+                    .heartbeat_intervals
+                    .get(&stage_id)
+                    .copied()
+                    .unwrap_or(DEFAULT_HEARTBEAT_INTERVAL),
             };
 
             tracing::debug!(

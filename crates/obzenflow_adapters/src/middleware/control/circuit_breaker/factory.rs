@@ -594,15 +594,6 @@ impl CircuitBreakerFactory {
         }
     }
 
-    fn validated_threshold(&self) -> Result<NonZeroU32, CircuitBreakerThresholdError> {
-        u32::try_from(self.threshold)
-            .ok()
-            .and_then(NonZeroU32::new)
-            .ok_or(CircuitBreakerThresholdError::InvalidThreshold {
-                threshold: self.threshold,
-            })
-    }
-
     /// Set the cooldown duration before attempting to close the circuit
     pub fn with_cooldown(mut self, duration: Duration) -> Self {
         self.cooldown = duration;
@@ -794,9 +785,23 @@ impl CircuitBreakerFactory {
         control_middleware: std::sync::Arc<ControlMiddlewareAggregator>,
         effect_type: Option<EffectTypeKey>,
     ) -> crate::middleware::MiddlewareFactoryResult<CircuitBreakerMiddleware> {
-        let validated_threshold = self.validated_threshold().map_err(|err| {
-            MiddlewareFactoryError::invalid_configuration(self.label(), &config.name, err)
-        })?;
+        // FLOWIP-010: the build-resolved `effects.circuit_breaker.threshold`
+        // winner overrides the DSL-declared parameter (the ladder already
+        // ranked the sources; absence means the DSL value stands).
+        let effective_threshold = config
+            .resolved_policies
+            .breaker_threshold
+            .map(|t| t as usize)
+            .unwrap_or(self.threshold);
+        let validated_threshold = u32::try_from(effective_threshold)
+            .ok()
+            .and_then(std::num::NonZeroU32::new)
+            .ok_or(CircuitBreakerThresholdError::InvalidThreshold {
+                threshold: effective_threshold,
+            })
+            .map_err(|err| {
+                MiddlewareFactoryError::invalid_configuration(self.label(), &config.name, err)
+            })?;
 
         // Determine failure mode; default to a consecutive-failure threshold
         // equal to `threshold` when not explicitly configured.
@@ -831,7 +836,7 @@ impl CircuitBreakerFactory {
         let unknown_error_kind_policy = self.unknown_error_kind_policy;
 
         let mut middleware = CircuitBreakerMiddleware::with_cooldown_and_fallback(
-            self.threshold,
+            effective_threshold,
             self.cooldown,
             self.fallback.clone(),
             self.failure_classifier.clone(),
@@ -960,7 +965,9 @@ impl MiddlewareFactory for CircuitBreakerFactory {
     }
 
     fn plan_contribution(&self) -> MiddlewarePlanContribution {
-        MiddlewarePlanContribution::None
+        MiddlewarePlanContribution::CircuitBreaker {
+            threshold: self.threshold as u64,
+        }
     }
 
     fn topology_config_slot(&self) -> Option<TopologyMiddlewareConfigSlot> {

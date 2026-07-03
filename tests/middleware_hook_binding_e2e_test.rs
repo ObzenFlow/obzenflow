@@ -585,6 +585,7 @@ fn hook_proof_factory_validates_surface_and_protected_unit_identity() {
         flow_name: "middleware_hook_binding_e2e".to_string(),
         cycle_guard: None,
         lineage: obzenflow_core::config::LineagePolicy::default(),
+        resolved_policies: Default::default(),
     };
     let surface = MiddlewareSurface::Effect(EffectSurface {
         stage_id: config.stage_id,

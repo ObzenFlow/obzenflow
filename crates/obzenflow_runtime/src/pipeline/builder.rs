@@ -341,6 +341,22 @@ impl SupervisorBuilder for PipelineBuilder {
             flow_start_time: None,
             last_system_event_id_seen: None,
             stop_intent: Default::default(),
+            // FLOWIP-010: global knobs from the build-resolved effective
+            // config; registry defaults when no snapshot is threaded (tests).
+            source_contract_strict: self
+                .flow_effective_config
+                .as_ref()
+                .map(|cfg| {
+                    crate::pipeline::supervisor::SourceContractStrictMode::from_token(
+                        cfg.source_contract_strict_mode(),
+                    )
+                })
+                .unwrap_or_default(),
+            metrics_drain_timeout_ms: self
+                .flow_effective_config
+                .as_ref()
+                .map(|cfg| cfg.metrics_drain_timeout_ms())
+                .unwrap_or(5_000),
         };
 
         // Create channels using the common infrastructure

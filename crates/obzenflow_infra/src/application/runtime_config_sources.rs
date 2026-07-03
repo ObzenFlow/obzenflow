@@ -578,4 +578,111 @@ mod tests {
         assert_eq!(from.source, "cli");
         assert_eq!(from.value, serde_json::json!("/tmp/run"));
     }
+
+    /// Regression for the legacy-kill decision: the retired scattered
+    /// spellings have no effect on the resolved snapshot. Only the
+    /// canonical `OBZENFLOW_<KEY_PATH>` names feed the env tier.
+    #[test]
+    fn killed_legacy_env_spellings_have_no_effect() {
+        let _lock = env_lock();
+        let guard = EnvGuard::new(&[
+            "OBZENFLOW_HEARTBEAT_INTERVAL",
+            "OBZENFLOW_METRICS_DRAIN_TIMEOUT_MS",
+            "OBZENFLOW_SOURCE_CONTRACT_STRICT_MODE",
+            "OBZENFLOW_CYCLE_MAX_ITERATIONS",
+            "OBZENFLOW_AI_PROVIDER",
+            "OBZENFLOW_RUNTIME_HEARTBEAT_INTERVAL",
+            "OBZENFLOW_RUNTIME_METRICS_DRAIN_TIMEOUT_MS",
+            "OBZENFLOW_CONTRACTS_SOURCE_CONTRACT_STRICT_MODE",
+            "OBZENFLOW_RUNTIME_CYCLE_MAX_ITERATIONS",
+            "OBZENFLOW_AI_MODELS_PROVIDER",
+        ]);
+        guard.set("OBZENFLOW_HEARTBEAT_INTERVAL", "1");
+        guard.set("OBZENFLOW_METRICS_DRAIN_TIMEOUT_MS", "1");
+        guard.set("OBZENFLOW_SOURCE_CONTRACT_STRICT_MODE", "warn");
+        guard.set("OBZENFLOW_CYCLE_MAX_ITERATIONS", "1");
+        guard.set("OBZENFLOW_AI_PROVIDER", "openai");
+
+        let snapshot = snapshot("", &[]);
+        let docs = snapshot.global_view();
+        let expect_default = |key: &str| {
+            let doc = docs.iter().find(|d| d.key_path == key).unwrap();
+            assert_eq!(
+                doc.source, "default",
+                "{key} must ignore the killed legacy spelling"
+            );
+        };
+        expect_default("runtime.heartbeat_interval");
+        expect_default("runtime.metrics_drain_timeout_ms");
+        expect_default("contracts.source_contract_strict_mode");
+        expect_default("runtime.cycle_max_iterations");
+        expect_default("ai.models.provider");
+    }
+
+    /// Source-tree assertion for the legacy kill: the retired spellings may
+    /// appear only in the regression tests that assert they are dead.
+    #[test]
+    fn killed_legacy_env_spellings_absent_from_source() {
+        let killed = [
+            "OBZENFLOW_HEARTBEAT_INTERVAL",
+            "OBZENFLOW_METRICS_DRAIN_TIMEOUT_MS",
+            "OBZENFLOW_SOURCE_CONTRACT_STRICT_MODE",
+            "OBZENFLOW_CYCLE_MAX_ITERATIONS",
+            "OBZENFLOW_AI_PROVIDER",
+            "OBZENFLOW_AI_MODEL\"",
+            "OBZENFLOW_MAX_LINEAGE_DEPTH",
+        ];
+        let allowed_files = ["runtime_config_sources.rs", "lineage_propagation_test.rs"];
+
+        let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(|p| p.parent())
+            .expect("workspace root")
+            .to_path_buf();
+
+        let mut offenders = Vec::new();
+        let mut stack = vec![
+            workspace_root.join("crates"),
+            workspace_root.join("src"),
+            workspace_root.join("tests"),
+            workspace_root.join("examples"),
+        ];
+        while let Some(dir) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    if path.file_name().is_some_and(|n| n == "target") {
+                        continue;
+                    }
+                    stack.push(path);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    let file_name = path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    if allowed_files.contains(&file_name.as_str()) {
+                        continue;
+                    }
+                    let Ok(content) = std::fs::read_to_string(&path) else {
+                        continue;
+                    };
+                    for spelling in killed {
+                        if content.contains(spelling) {
+                            offenders.push(format!("{}: {spelling}", path.display()));
+                        }
+                    }
+                }
+            }
+        }
+
+        assert!(
+            offenders.is_empty(),
+            "killed legacy env spellings found in source:\n{}",
+            offenders.join("\n")
+        );
+    }
 }

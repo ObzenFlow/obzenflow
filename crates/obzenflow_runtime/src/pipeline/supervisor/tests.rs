@@ -198,6 +198,8 @@ fn test_context(
         flow_start_time: None,
         last_system_event_id_seen: None,
         stop_intent: Default::default(),
+        source_contract_strict: Default::default(),
+        metrics_drain_timeout_ms: 5_000,
     }
 }
 

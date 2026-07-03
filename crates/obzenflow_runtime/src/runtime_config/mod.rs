@@ -22,9 +22,12 @@ pub mod schema;
 pub use candidates::{CandidateSet, ConfigValue, DslCandidates, ScopedCandidate};
 pub use error::ConfigResolveError;
 pub use flow_view::{FlowEffectiveConfig, FlowResolutionContext};
-pub use model::{AiModelsConfig, Resolved, ResolvedRuntimeConfig, RuntimeConfigOverlay};
+pub use model::{
+    diff, doc_for, AiModelsConfig, ConfigDiffEntry, Resolved, ResolvedRuntimeConfig,
+    RuntimeConfigOverlay,
+};
 pub use resolve::{materialize_flow_config, ResolutionPoint};
 pub use schema::{
-    canonical_env_name, knob_registry, EdgeEndpoint, EnvBinding, KnobDefault, KnobSpec, KnobTarget,
-    KnobType, Mutability, Redaction,
+    canonical_env_name, knob, knob_registry, schema_view, EdgeEndpoint, EnvBinding, KnobDefault,
+    KnobSchemaDoc, KnobSpec, KnobTarget, KnobType, Mutability, Redaction,
 };

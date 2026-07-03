@@ -404,6 +404,10 @@ pub struct StatefulContext<H: UnifiedStatefulHandler> {
     /// (FLOWIP-059 Phase 6.4 - accumulator heartbeats).
     pub events_since_last_heartbeat: u64,
 
+    /// FLOWIP-010: build-resolved `runtime.heartbeat_interval` (events
+    /// between heartbeats; 0 disables), from stage resources.
+    pub heartbeat_interval: u64,
+
     /// Baseline for supervisor-driven `emit_interval` timing (FLOWIP-086h).
     ///
     /// FLOWIP-114o: reads `tokio::time::Instant` (matching the sibling

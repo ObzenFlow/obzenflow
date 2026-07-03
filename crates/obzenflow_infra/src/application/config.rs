@@ -848,7 +848,7 @@ impl FlowConfig {
     }
 }
 
-fn autodiscover_config(enabled: bool) -> Option<PathBuf> {
+pub(crate) fn autodiscover_config(enabled: bool) -> Option<PathBuf> {
     if !enabled {
         return None;
     }
@@ -857,7 +857,7 @@ fn autodiscover_config(enabled: bool) -> Option<PathBuf> {
     path.is_file().then_some(path)
 }
 
-fn load_file_config(path: Option<&Path>) -> Result<RawFileStartupConfig, ConfigError> {
+pub(crate) fn load_file_config(path: Option<&Path>) -> Result<RawFileStartupConfig, ConfigError> {
     let Some(path) = path else {
         return Ok(RawFileStartupConfig::default());
     };

@@ -373,6 +373,63 @@ pub fn knob(key_path: &str) -> Option<&'static KnobSpec> {
         .find(|spec| spec.key_path == key_path)
 }
 
+/// Serializable §10 schema projection (gap 13 string forms): one doc per
+/// registered knob, serving the HTTP schema route and the CLI from one
+/// projection.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct KnobSchemaDoc {
+    pub key_path: String,
+    pub value_type: String,
+    /// The §4c resolution target: the most specific admissible scope.
+    pub target: String,
+    pub default: Option<serde_json::Value>,
+    pub required: bool,
+    pub mutability: String,
+    pub redaction: String,
+    pub env: Option<String>,
+}
+
+pub fn schema_view() -> Vec<KnobSchemaDoc> {
+    knob_registry()
+        .iter()
+        .map(|spec| KnobSchemaDoc {
+            key_path: spec.key_path.to_string(),
+            value_type: match spec.value_type {
+                KnobType::Bool => "bool".to_string(),
+                KnobType::U64 { min, max } => format!("u64 ({min}..={max})"),
+                KnobType::F64 { min_exclusive } => format!("f64 (> {min_exclusive})"),
+                KnobType::Text => "text".to_string(),
+                KnobType::Token { allowed } => format!("token ({})", allowed.join(" | ")),
+                KnobType::Path => "path".to_string(),
+            },
+            target: match spec.target {
+                KnobTarget::Global => "global".to_string(),
+                KnobTarget::Flow => "flow".to_string(),
+                KnobTarget::Stage => "stage".to_string(),
+                KnobTarget::Edge { stage_binding } => match stage_binding {
+                    EdgeEndpoint::Upstream => "edge (binds upstream)".to_string(),
+                    EdgeEndpoint::Downstream => "edge (binds downstream)".to_string(),
+                },
+            },
+            default: match &spec.default {
+                KnobDefault::Value(value) => Some(value.to_json()),
+                KnobDefault::OptionalAbsent | KnobDefault::Required => None,
+            },
+            required: matches!(spec.default, KnobDefault::Required),
+            mutability: match spec.mutability {
+                Mutability::Live => "live".to_string(),
+                Mutability::Restartful => "restartful".to_string(),
+                Mutability::Immutable => "immutable".to_string(),
+            },
+            redaction: match spec.redaction {
+                Redaction::Plain => "plain".to_string(),
+                Redaction::SecretValue => "secret-value".to_string(),
+            },
+            env: spec.env_name(),
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

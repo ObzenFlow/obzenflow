@@ -1197,9 +1197,10 @@ impl ChatTransformBuilder {
         let mut transform = ChatTransform::new(client, request_builder);
 
         if let Some(output_mapper) = output_mapper {
-            transform = transform.with_lineage_aware_output_mapper(
-                move |event, response, lineage| (output_mapper)(event, response, lineage),
-            );
+            transform =
+                transform.with_lineage_aware_output_mapper(move |event, response, lineage| {
+                    (output_mapper)(event, response, lineage)
+                });
         }
 
         Ok(transform)

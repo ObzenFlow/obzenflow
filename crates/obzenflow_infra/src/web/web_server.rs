@@ -36,6 +36,9 @@ pub struct WebServerResources {
     pub flow_handle: Option<Arc<FlowHandle>>,
     pub extra_endpoints: Vec<Box<dyn HttpEndpoint>>,
     pub surface_metrics: Option<Arc<HttpSurfaceMetricsCollector>>,
+    /// FLOWIP-010: the owned resolved snapshot; presence turns on the seven
+    /// read-only `/api/config/*` routes.
+    pub runtime_config: Option<Arc<obzenflow_runtime::runtime_config::ResolvedRuntimeConfig>>,
 }
 
 fn is_reserved_built_in_path(path: &str) -> bool {
@@ -49,6 +52,8 @@ fn is_reserved_built_in_path(path: &str) -> bool {
         "/metrics" | "/health" | "/ready" | "/api/topology" | "/api/flow/events"
     ) || path == "/api/flow"
         || path.starts_with("/api/flow/")
+        || path == "/api/config"
+        || path.starts_with("/api/config/")
 }
 
 fn validate_extra_endpoints(extra_endpoints: &[Box<dyn HttpEndpoint>]) -> Result<(), WebError> {
@@ -142,6 +147,7 @@ fn validate_extra_endpoints(extra_endpoints: &[Box<dyn HttpEndpoint>]) -> Result
 ///     flow_handle: None,
 ///     extra_endpoints: vec![],
 ///     surface_metrics: None,
+///     runtime_config: None,
 /// }, 9090).await?;
 /// ```
 #[cfg(feature = "warp-server")]
@@ -168,6 +174,7 @@ pub async fn start_web_server_with_config(
         flow_handle,
         extra_endpoints,
         surface_metrics,
+        runtime_config,
     } = resources;
 
     validate_extra_endpoints(&extra_endpoints)?;
@@ -212,6 +219,41 @@ pub async fn start_web_server_with_config(
         Arc::new(stages_metadata),
         contract_attachments,
     )))?;
+
+    // FLOWIP-010: the seven read-only config introspection routes, gated on
+    // the owned snapshot being threaded (control-plane auth applies).
+    if let Some(snapshot) = runtime_config {
+        use super::endpoints::{ConfigHttpEndpoint, ConfigReadModel, ConfigRoute};
+
+        let flow_name = flow_handle
+            .as_ref()
+            .map(|handle| handle.flow_name().to_string())
+            .unwrap_or_else(|| "unnamed_flow".to_string());
+        let flow_id = flow_handle
+            .as_ref()
+            .and_then(|handle| handle.run_substrate().locator())
+            .and_then(|locator| {
+                locator
+                    .path()
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+            })
+            .unwrap_or_else(|| flow_name.clone());
+        let flow_effective = flow_handle
+            .as_ref()
+            .and_then(|handle| handle.flow_effective_config().cloned());
+
+        let model = Arc::new(ConfigReadModel::new(
+            snapshot,
+            flow_effective,
+            topology.clone(),
+            flow_name,
+            flow_id,
+        ));
+        for route in ConfigRoute::ALL {
+            server.register_endpoint(Box::new(ConfigHttpEndpoint::new(model.clone(), route)))?;
+        }
+    }
 
     let has_metrics_endpoint = metrics_exporter.is_some();
     if let Some(exporter) = metrics_exporter {
@@ -433,6 +475,53 @@ mod tests {
                 );
             }
             other => panic!("Unexpected error: {other:?}"),
+        }
+    }
+
+    /// FLOWIP-010 gap 10: the auth gate (`is_control_plane_path`) and the
+    /// reservation gate (`is_reserved_built_in_path`) must agree on every
+    /// framework-owned route, or a route could be reachable without
+    /// credentials while still reserved (or vice versa).
+    #[cfg(feature = "warp-server")]
+    #[test]
+    fn control_plane_and_reservation_matchers_stay_in_sync() {
+        use crate::web::warp::warp_server::is_control_plane_path;
+
+        let control_plane_probes = [
+            "/api/topology",
+            "/metrics",
+            "/api/flow",
+            "/api/flow/control",
+            "/api/flow/events",
+            "/api/config",
+            "/api/config/overlay",
+            "/api/config/effective",
+            "/api/config/schema",
+            "/api/config/diff",
+            "/api/config/flows/f1",
+            "/api/config/flows/f1/stages/s1",
+        ];
+        for path in control_plane_probes {
+            assert!(
+                is_control_plane_path(path),
+                "{path} must be behind control-plane auth"
+            );
+            assert!(
+                is_reserved_built_in_path(path),
+                "{path} must be reserved against attached surfaces"
+            );
+        }
+
+        // Liveness endpoints are reserved but auth-exempt by design.
+        for path in ["/health", "/ready"] {
+            assert!(is_reserved_built_in_path(path));
+            assert!(!is_control_plane_path(path));
+        }
+
+        // Attached-surface routes are neither reserved nor gated.
+        for path in ["/api/ingest/events", "/custom"] {
+            assert!(!is_reserved_built_in_path(path));
+            assert!(!is_control_plane_path(path));
         }
     }
 }

@@ -488,10 +488,23 @@ pub enum MiddlewareKind {
     Structural,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum MiddlewarePlanContribution {
     None,
-    Backpressure { window: std::num::NonZeroU64 },
+    Backpressure {
+        window: std::num::NonZeroU64,
+    },
+    /// FLOWIP-010: DSL-declared breaker threshold, collected as a config
+    /// candidate at the declaration site's scope.
+    CircuitBreaker {
+        threshold: u64,
+    },
+    /// FLOWIP-010: DSL-declared limiter tunables, collected as config
+    /// candidates at the declaration site's scope.
+    RateLimiter {
+        events_per_second: f64,
+        burst_capacity: Option<f64>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

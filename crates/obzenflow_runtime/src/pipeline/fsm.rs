@@ -316,6 +316,12 @@ pub(crate) struct PipelineContext {
     pub(crate) last_system_event_id_seen: Option<obzenflow_core::EventId>,
 
     pub(crate) stop_intent: StopIntent,
+
+    /// FLOWIP-010: build-resolved `contracts.source_contract_strict_mode`.
+    pub(crate) source_contract_strict: crate::pipeline::supervisor::SourceContractStrictMode,
+
+    /// FLOWIP-010: build-resolved `runtime.metrics_drain_timeout_ms`.
+    pub(crate) metrics_drain_timeout_ms: u64,
 }
 
 impl PipelineContext {
@@ -1107,10 +1113,7 @@ impl FsmAction for PipelineAction {
                 //
                 // Use a tail-scan instead of `reader()` (which starts at the beginning) so we
                 // don't spend the drain timeout parsing unrelated system history.
-                let timeout_ms = std::env::var("OBZENFLOW_METRICS_DRAIN_TIMEOUT_MS")
-                    .ok()
-                    .and_then(|s| s.parse::<u64>().ok())
-                    .unwrap_or(5_000);
+                let timeout_ms = context.metrics_drain_timeout_ms;
                 let deadline =
                     tokio::time::Instant::now() + tokio::time::Duration::from_millis(timeout_ms);
 
