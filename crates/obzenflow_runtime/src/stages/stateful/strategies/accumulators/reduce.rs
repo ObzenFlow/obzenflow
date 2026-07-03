@@ -56,6 +56,7 @@ where
     reduce_fn: F,
     initial: S,
     writer_id: WriterId,
+    lineage: obzenflow_core::config::LineagePolicy,
 }
 
 #[derive(Clone, Debug)]
@@ -96,6 +97,7 @@ where
             reduce_fn,
             initial,
             writer_id: WriterId::from(StageId::new()),
+            lineage: obzenflow_core::config::LineagePolicy::default(),
         }
     }
 
@@ -113,9 +115,13 @@ where
 {
     type State = ReduceState<S>;
 
+    fn install_lineage_policy(&mut self, policy: obzenflow_core::config::LineagePolicy) {
+        self.lineage = policy;
+    }
+
     fn accumulate(&self, state: &mut Self::State, event: ChainEvent) {
         (self.reduce_fn)(&mut state.value, &event);
-        state.trace.record_event(&event);
+        state.trace.record_event(&event, self.lineage);
     }
 
     fn initial_state(&self) -> Self::State {
@@ -390,6 +396,7 @@ where
     reduce_fn: F,
     initial: S,
     writer_id: WriterId,
+    lineage: obzenflow_core::config::LineagePolicy,
     _phantom: PhantomData<T>,
 }
 
@@ -429,6 +436,7 @@ where
             reduce_fn,
             initial,
             writer_id: WriterId::from(StageId::new()),
+            lineage: obzenflow_core::config::LineagePolicy::default(),
             _phantom: PhantomData,
         }
     }
@@ -458,6 +466,10 @@ where
 {
     type State = ReduceState<S>;
 
+    fn install_lineage_policy(&mut self, policy: obzenflow_core::config::LineagePolicy) {
+        self.lineage = policy;
+    }
+
     fn accumulate(&self, state: &mut Self::State, event: ChainEvent) {
         // Step 1: Deserialize ChainEvent → T
         let input: T = match serde_json::from_value(event.payload().clone()) {
@@ -470,7 +482,7 @@ where
 
         // Step 2: Apply reduce function with typed input
         (self.reduce_fn)(&mut state.value, &input);
-        state.trace.record_event(&event);
+        state.trace.record_event(&event, self.lineage);
     }
 
     fn initial_state(&self) -> Self::State {

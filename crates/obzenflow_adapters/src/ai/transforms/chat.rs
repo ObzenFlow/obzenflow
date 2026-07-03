@@ -20,7 +20,11 @@ use std::time::Instant;
 
 type ChatRequestBuilder =
     dyn Fn(&ChainEvent) -> Result<ChatRequest, HandlerError> + Send + Sync + 'static;
-type ChatOutputMapper = dyn Fn(&ChainEvent, ChatResponse) -> Result<Vec<ChainEvent>, HandlerError>
+type ChatOutputMapper = dyn Fn(
+        &ChainEvent,
+        ChatResponse,
+        obzenflow_core::config::LineagePolicy,
+    ) -> Result<Vec<ChainEvent>, HandlerError>
     + Send
     + Sync
     + 'static;
@@ -33,6 +37,9 @@ pub struct ChatTransform {
     estimator_resolution: Option<TokenEstimatorResolutionInfo>,
     request_builder: Arc<ChatRequestBuilder>,
     output_mapper: Arc<ChatOutputMapper>,
+    /// FLOWIP-010 §7: build-resolved, installed by the stage builder; passed
+    /// to the output mapper so derived outputs obey the configured cap.
+    lineage: obzenflow_core::config::LineagePolicy,
 }
 
 impl fmt::Debug for ChatTransform {
@@ -52,6 +59,7 @@ impl ChatTransform {
             estimator_resolution: None,
             request_builder: Arc::new(request_builder),
             output_mapper: Arc::new(default_chat_output_mapper),
+            lineage: obzenflow_core::config::LineagePolicy::default(),
         }
     }
 
@@ -75,6 +83,31 @@ impl ChatTransform {
             + Sync
             + 'static,
     {
+        // User mappers build their own events; the lineage policy applies to
+        // the lineage-aware internal mappers only.
+        self.output_mapper = Arc::new(
+            move |event: &ChainEvent,
+                  response: ChatResponse,
+                  _lineage: obzenflow_core::config::LineagePolicy| {
+                output_mapper(event, response)
+            },
+        );
+        self
+    }
+
+    /// FLOWIP-010 §7: mapper variant receiving the build-resolved lineage
+    /// policy, for mappers that derive their outputs from the input event.
+    pub fn with_lineage_aware_output_mapper<F>(mut self, output_mapper: F) -> Self
+    where
+        F: Fn(
+                &ChainEvent,
+                ChatResponse,
+                obzenflow_core::config::LineagePolicy,
+            ) -> Result<Vec<ChainEvent>, HandlerError>
+            + Send
+            + Sync
+            + 'static,
+    {
         self.output_mapper = Arc::new(output_mapper);
         self
     }
@@ -82,6 +115,10 @@ impl ChatTransform {
 
 #[async_trait]
 impl AsyncTransformHandler for ChatTransform {
+    fn install_lineage_policy(&mut self, policy: obzenflow_core::config::LineagePolicy) {
+        self.lineage = policy;
+    }
+
     async fn process(&self, event: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> {
         let request = (self.request_builder)(&event)?;
         let input_event_id = event.id;
@@ -161,7 +198,7 @@ impl AsyncTransformHandler for ChatTransform {
         let usage = response.usage.clone();
         let response_text_bytes = response.text.len();
         let tool_call_count = response.tool_calls.len();
-        let mut outputs = (self.output_mapper)(&event, response)?;
+        let mut outputs = (self.output_mapper)(&event, response, self.lineage)?;
 
         let mut hashes = LlmHashes::new(prompt_hash, params_hash);
         hashes.schema_hash = schema_hash;
@@ -204,6 +241,7 @@ impl AsyncTransformHandler for ChatTransform {
 fn default_chat_output_mapper(
     input: &ChainEvent,
     response: ChatResponse,
+    _lineage: obzenflow_core::config::LineagePolicy,
 ) -> Result<Vec<ChainEvent>, HandlerError> {
     let mut out = input.clone();
 

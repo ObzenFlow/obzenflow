@@ -140,6 +140,10 @@ where
 {
     type State = H::State;
 
+    fn install_lineage_policy(&mut self, policy: obzenflow_core::config::LineagePolicy) {
+        JoinHandler::install_lineage_policy(&mut self.inner, policy)
+    }
+
     fn initial_state(&self) -> Self::State {
         self.inner.initial_state()
     }

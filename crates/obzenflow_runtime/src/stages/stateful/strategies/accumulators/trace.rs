@@ -9,16 +9,9 @@ use obzenflow_core::ChainEvent;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, VecDeque};
 
-fn max_lineage_depth() -> usize {
-    // Match `ChainEventFactory::derived_event` defaults.
-    const DEFAULT_MAX_LINEAGE_DEPTH: usize = 100;
-    std::env::var("OBZENFLOW_MAX_LINEAGE_DEPTH")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(DEFAULT_MAX_LINEAGE_DEPTH)
-        .max(1)
-}
-
+// FLOWIP-010 §7: the lineage policy is a PARAMETER to `record_event`, never a
+// `TraceState` field. TraceState is serialized accumulator state; build
+// configuration must not leak into persisted state snapshots.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub(crate) struct TraceState {
     parent_ids: VecDeque<EventId>,
@@ -42,12 +35,16 @@ impl TraceState {
         }
     }
 
-    pub(crate) fn record_event(&mut self, event: &ChainEvent) {
+    pub(crate) fn record_event(
+        &mut self,
+        event: &ChainEvent,
+        lineage: obzenflow_core::config::LineagePolicy,
+    ) {
         if event.is_lifecycle() || event.is_control() {
             return;
         }
 
-        let max_depth = max_lineage_depth();
+        let max_depth = lineage.max_lineage_depth.max(1);
 
         self.parent_ids.push_back(event.id);
         while self.parent_ids.len() > max_depth {
@@ -188,7 +185,10 @@ mod tests {
         ];
 
         for id in &ids {
-            trace.record_event(&event_with_correlation(*id));
+            trace.record_event(
+                &event_with_correlation(*id),
+                obzenflow_core::config::LineagePolicy::default(),
+            );
         }
 
         assert_eq!(
@@ -211,7 +211,10 @@ mod tests {
             .collect();
 
         for id in &ids {
-            trace.record_event(&event_with_correlation(*id));
+            trace.record_event(
+                &event_with_correlation(*id),
+                obzenflow_core::config::LineagePolicy::default(),
+            );
         }
 
         let recorded = trace
@@ -233,7 +236,7 @@ mod tests {
         event.set_correlation_sample(vec![deterministic_correlation_id(1)], true);
 
         let mut trace = TraceState::default();
-        trace.record_event(&event);
+        trace.record_event(&event, obzenflow_core::config::LineagePolicy::default());
 
         assert_eq!(
             trace.mixed_correlation_ids(),

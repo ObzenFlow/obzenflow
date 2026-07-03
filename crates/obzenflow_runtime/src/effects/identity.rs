@@ -153,6 +153,7 @@ pub fn deterministic_effect_record_event_time(cursor: &EffectCursor) -> u64 {
         .saturating_add(u64::from(cursor.effect_ordinal.get()))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn deterministic_typed_output_event<Out>(
     writer_id: WriterId,
     parent: &ChainEvent,

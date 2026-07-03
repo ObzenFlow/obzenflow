@@ -194,6 +194,7 @@ async fn async_source_rate_limit_wait_is_interrupted_by_stop() -> Result<()> {
             src |> snk;
         }
     }
+    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
     .await
     .map_err(|e| anyhow!("failed to create interruption flow: {e:?}"))?;
 

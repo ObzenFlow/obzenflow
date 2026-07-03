@@ -81,6 +81,7 @@ pub struct TopNBy<K, S> {
     key_extractor: K,
     score_extractor: S,
     writer_id: WriterId,
+    lineage: obzenflow_core::config::LineagePolicy,
 }
 
 // Field-based constructor (the simple API)
@@ -99,6 +100,7 @@ impl TopNBy<FieldExtractor, FieldExtractor> {
             key_extractor: FieldExtractor::new(key_field, true),
             score_extractor: FieldExtractor::new(value_field, false),
             writer_id: WriterId::from(StageId::new()),
+            lineage: obzenflow_core::config::LineagePolicy::default(),
         }
     }
 }
@@ -115,6 +117,7 @@ impl<K, S> TopNBy<K, S> {
             key_extractor,
             score_extractor,
             writer_id: WriterId::from(StageId::new()),
+            lineage: obzenflow_core::config::LineagePolicy::default(),
         }
     }
 }
@@ -185,6 +188,7 @@ where
             key_extractor: self.key_extractor.clone(),
             score_extractor: self.score_extractor.clone(),
             writer_id: self.writer_id,
+            lineage: self.lineage,
         }
     }
 }
@@ -202,6 +206,10 @@ pub struct TopNByState {
 // Implementation for FieldExtractor (simple string-based API)
 impl Accumulator for TopNBy<FieldExtractor, FieldExtractor> {
     type State = TopNByState;
+
+    fn install_lineage_policy(&mut self, policy: obzenflow_core::config::LineagePolicy) {
+        self.lineage = policy;
+    }
 
     fn accumulate(&self, state: &mut Self::State, event: ChainEvent) {
         // Extract key from event using field path
@@ -225,7 +233,7 @@ impl Accumulator for TopNBy<FieldExtractor, FieldExtractor> {
                     metadata: event.payload().clone(),
                 });
 
-            state.trace.record_event(&event);
+            state.trace.record_event(&event, self.lineage);
         }
     }
 
@@ -255,6 +263,10 @@ where
 {
     type State = TopNByState;
 
+    fn install_lineage_policy(&mut self, policy: obzenflow_core::config::LineagePolicy) {
+        self.lineage = policy;
+    }
+
     fn accumulate(&self, state: &mut Self::State, event: ChainEvent) {
         // Extract key from event
         if let Some(key) = (self.key_extractor)(&event) {
@@ -277,7 +289,7 @@ where
                     metadata: event.payload().clone(),
                 });
 
-            state.trace.record_event(&event);
+            state.trace.record_event(&event, self.lineage);
         }
     }
 
@@ -588,6 +600,7 @@ where
     key_fn: FKey,
     score_fn: FScore,
     writer_id: WriterId,
+    lineage: obzenflow_core::config::LineagePolicy,
     _phantom: PhantomData<(T, K)>,
 }
 
@@ -615,6 +628,7 @@ where
             key_fn,
             score_fn,
             writer_id: WriterId::from(StageId::new()),
+            lineage: obzenflow_core::config::LineagePolicy::default(),
             _phantom: PhantomData,
         }
     }
@@ -714,6 +728,10 @@ where
 {
     type State = TopNByTypedState;
 
+    fn install_lineage_policy(&mut self, policy: obzenflow_core::config::LineagePolicy) {
+        self.lineage = policy;
+    }
+
     fn accumulate(&self, state: &mut Self::State, event: ChainEvent) {
         // Step 1: Deserialize ChainEvent → T
         let input: T = match serde_json::from_value(event.payload().clone()) {
@@ -754,7 +772,7 @@ where
                 metadata: serialized,
             });
 
-        state.trace.record_event(&event);
+        state.trace.record_event(&event, self.lineage);
     }
 
     fn initial_state(&self) -> Self::State {
