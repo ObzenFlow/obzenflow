@@ -96,6 +96,7 @@ async fn pre_substrate_failure_carries_no_run_state() {
             src |> snk;
         }
     }
+    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
     .await;
 
     let failure = built
@@ -216,6 +217,7 @@ fn colliding_flow(name: &'static str, base: std::path::PathBuf) -> obzenflow_dsl
 async fn post_substrate_failure_carries_the_durable_locator() {
     let base = tempfile::tempdir().expect("tempdir");
     let failure = colliding_flow("slot.a", base.path().to_path_buf())
+        .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
         .await
         .err()
         .expect("slot collision must fail the build");
@@ -244,8 +246,10 @@ async fn concurrent_failing_builds_carry_independent_run_state() {
     let base_b = tempfile::tempdir().expect("tempdir b");
 
     let (a, b) = tokio::join!(
-        colliding_flow("slot.a", base_a.path().to_path_buf()),
-        colliding_flow("slot.a", base_b.path().to_path_buf()),
+        colliding_flow("slot.a", base_a.path().to_path_buf())
+            .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests()),
+        colliding_flow("slot.a", base_b.path().to_path_buf())
+            .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests()),
     );
 
     let locator_a = a
@@ -281,6 +285,7 @@ async fn successful_disk_flow_reports_durable_and_persists_the_manifest() {
             src |> snk;
         }
     }
+    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
     .await
     .expect("flow must build");
 
@@ -316,6 +321,7 @@ async fn successful_memory_flow_reports_ephemeral() {
             src |> snk;
         }
     }
+    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
     .await
     .expect("flow must build");
 

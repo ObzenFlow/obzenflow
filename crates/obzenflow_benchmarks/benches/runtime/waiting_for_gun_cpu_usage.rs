@@ -106,6 +106,7 @@ async fn measure_waiting_for_gun_cpu() -> anyhow::Result<f64> {
             src |> snk;
         }
     }
+    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
     .await
     .map_err(|e| anyhow::anyhow!("Failed to create flow: {e:?}"))?;
 

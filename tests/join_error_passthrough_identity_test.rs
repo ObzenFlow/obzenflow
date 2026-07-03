@@ -170,6 +170,7 @@ impl TransformHandler for Validator {
             &event,
             StreamItem::EVENT_TYPE,
             json!(item),
+            obzenflow_core::config::LineagePolicy::default(),
         )])
     }
 

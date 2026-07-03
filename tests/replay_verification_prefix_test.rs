@@ -132,6 +132,7 @@ async fn cancelled_baseline_verifies_under_prefix_semantics() {
     let baseline_base = journal_base.clone();
     let baseline_counter = delivered.clone();
     let handle = prefix_flow!(baseline_base, baseline_counter)
+        .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
         .await
         .expect("baseline flow should build");
     let deadline = std::time::Instant::now() + Duration::from_secs(10);

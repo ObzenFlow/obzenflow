@@ -802,10 +802,12 @@ fn resolve_effective_auth(managed: &ManagedRouteInfo) -> Option<AuthPolicy> {
         .and_then(|policy| policy.auth.clone())
 }
 
-fn is_control_plane_path(path: &str) -> bool {
+pub(crate) fn is_control_plane_path(path: &str) -> bool {
     matches!(path, "/api/topology" | "/metrics")
         || path == "/api/flow"
         || path.starts_with("/api/flow/")
+        || path == "/api/config"
+        || path.starts_with("/api/config/")
 }
 
 fn is_control_plane_exempt_path(path: &str) -> bool {
@@ -2396,6 +2398,84 @@ mod tests {
             .await;
         assert_eq!(response.status(), 200);
         assert_eq!(response.body(), "control");
+    }
+
+    /// FLOWIP-010 gap 10: every `/api/config/*` route (static and
+    /// parameterised) rejects without control-plane credentials and admits
+    /// with them, exactly like `/api/topology`.
+    #[tokio::test]
+    async fn control_plane_auth_enforces_config_endpoints() {
+        std::env::set_var("OBZENFLOW_TEST_CONTROL_PLANE_API_KEY", "Bearer sekret");
+
+        struct RawConfigEndpoint(&'static str);
+
+        #[async_trait]
+        impl HttpEndpoint for RawConfigEndpoint {
+            fn path(&self) -> &str {
+                self.0
+            }
+
+            fn methods(&self) -> &[HttpMethod] {
+                &[HttpMethod::Get]
+            }
+
+            async fn handle(&self, _request: Request) -> Result<ManagedResponse, WebError> {
+                Ok(Response::ok().with_text("config").into())
+            }
+        }
+
+        let templates = [
+            "/api/config",
+            "/api/config/overlay",
+            "/api/config/effective",
+            "/api/config/schema",
+            "/api/config/diff",
+            "/api/config/flows/:flow_id",
+            "/api/config/flows/:flow_id/stages/:stage_key",
+        ];
+        let mut server = WarpServer::new();
+        for template in templates {
+            server
+                .register_endpoint(Box::new(RawConfigEndpoint(template)))
+                .unwrap();
+        }
+        let filter = server
+            .build_filter(HostPolicy {
+                max_body_size_bytes: 10,
+                request_timeout: None,
+                control_plane_auth: Some(AuthPolicy::ApiKey {
+                    header: "Authorization".to_string(),
+                    value_env: "OBZENFLOW_TEST_CONTROL_PLANE_API_KEY".to_string(),
+                }),
+            })
+            .unwrap();
+
+        let probes = [
+            "/api/config",
+            "/api/config/overlay",
+            "/api/config/effective",
+            "/api/config/schema",
+            "/api/config/diff",
+            "/api/config/flows/f1",
+            "/api/config/flows/f1/stages/s1",
+        ];
+        for probe in probes {
+            let response = warp::test::request()
+                .method("GET")
+                .path(probe)
+                .reply(&filter)
+                .await;
+            assert_eq!(response.status(), 401, "{probe} must reject without auth");
+
+            let response = warp::test::request()
+                .method("GET")
+                .path(probe)
+                .header("authorization", "Bearer sekret")
+                .reply(&filter)
+                .await;
+            assert_eq!(response.status(), 200, "{probe} must admit with auth");
+            assert_eq!(response.body(), "config");
+        }
     }
 
     #[tokio::test]

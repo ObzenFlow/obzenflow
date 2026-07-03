@@ -689,6 +689,10 @@ where
     Out: Send + Sync + 'static,
     H: TransformHandler + Send + Sync,
 {
+    fn install_lineage_policy(&mut self, policy: obzenflow_core::config::LineagePolicy) {
+        self.inner.install_lineage_policy(policy)
+    }
+
     fn process(&self, event: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> {
         self.inner.process(event)
     }
@@ -742,6 +746,10 @@ where
     Out: Send + Sync + 'static,
     H: AsyncTransformHandler + Send + Sync,
 {
+    fn install_lineage_policy(&mut self, policy: obzenflow_core::config::LineagePolicy) {
+        self.inner.install_lineage_policy(policy)
+    }
+
     async fn process(&self, event: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> {
         self.inner.process(event).await
     }

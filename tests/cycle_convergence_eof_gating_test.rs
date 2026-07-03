@@ -173,6 +173,7 @@ impl TransformHandler for EntryConvergeTransform {
                 &event,
                 SeedEvent::versioned_event_type(),
                 json!({ "kind": KIND_DONE, "depth": depth, "target": target }),
+                obzenflow_core::config::LineagePolicy::default(),
             )])
         } else if kind == KIND_SEED || kind == KIND_ITER {
             Ok(vec![ChainEventFactory::derived_data_event(
@@ -180,6 +181,7 @@ impl TransformHandler for EntryConvergeTransform {
                 &event,
                 SeedEvent::versioned_event_type(),
                 json!({ "kind": KIND_ITER, "depth": depth, "target": target }),
+                obzenflow_core::config::LineagePolicy::default(),
             )])
         } else {
             Ok(Vec::new())
@@ -233,6 +235,7 @@ impl AsyncTransformHandler for IterationTransform {
             &event,
             SeedEvent::versioned_event_type(),
             json!({ "kind": KIND_ITER, "depth": depth.saturating_add(1), "target": target }),
+            obzenflow_core::config::LineagePolicy::default(),
         )])
     }
 
@@ -603,6 +606,7 @@ async fn cycle_max_iterations_exceeded_routes_to_error_journal() -> Result<()> {
             entry |> snk;
         }
     }
+    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
     .await
     .map_err(|e| anyhow::anyhow!("failed to create flow: {e}"))?;
 
@@ -659,6 +663,7 @@ async fn cycle_rejects_sccs_with_multiple_entry_points() {
             b |> snk;
         }
     }
+    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
     .await;
 
     let err = match result {

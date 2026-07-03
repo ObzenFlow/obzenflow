@@ -340,6 +340,7 @@ async fn seq_fan_in_delivers_stream_while_reference_is_quiet_and_replays_exactly
     {
         let delivered = Arc::new(AtomicU64::new(0));
         let handle = build_flow(journal_base.clone(), 1, 1, TX_EVENTS, delivered.clone())
+            .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
             .await
             .map_err(|e| anyhow!("flow failed to build: {e:?}"))?;
         wait_for_running(&handle).await?;
@@ -393,6 +394,7 @@ async fn seq_fan_in_delivers_stream_while_reference_is_quiet_and_replays_exactly
         );
         let delivered = Arc::new(AtomicU64::new(0));
         let handle = build_flow(journal_base.clone(), 1, 1, TX_EVENTS, delivered)
+            .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
             .await
             .map_err(|e| anyhow!("replay flow failed to build: {e:?}"))?;
         wait_for_running(&handle).await?;

@@ -6,6 +6,7 @@
 
 pub mod ai;
 pub mod build_info;
+pub mod config;
 pub mod contracts;
 pub mod error;
 pub mod event;

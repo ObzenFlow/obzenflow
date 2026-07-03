@@ -107,6 +107,7 @@ async fn memory_journals_flow_runs_to_completion() {
                 src |> snk;
             }
         }
+        .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
         .await
     })
     .await

@@ -100,6 +100,7 @@ use super::try_map_with::ErrorStrategy;
 pub struct TryMap<T> {
     _phantom: PhantomData<T>,
     error_strategy: ErrorStrategy,
+    lineage: obzenflow_core::config::LineagePolicy,
 }
 
 impl<T> TryMap<T> {
@@ -119,6 +120,7 @@ impl<T> TryMap<T> {
         Self {
             _phantom: PhantomData,
             error_strategy: ErrorStrategy::ToErrorJournal, // Default
+            lineage: obzenflow_core::config::LineagePolicy::default(),
         }
     }
 
@@ -263,6 +265,7 @@ where
                             &event,
                             event_type,
                             payload,
+                            self.lineage,
                         )]
                     }
                     ErrorStrategy::ToEventTypeWith(event_type, payload_fn) => {
@@ -284,6 +287,7 @@ where
                             &event,
                             event_type,
                             payload,
+                            self.lineage,
                         )]
                     }
                     ErrorStrategy::Custom(handler) => {
@@ -298,6 +302,10 @@ where
 
     async fn drain(&mut self) -> Result<(), HandlerError> {
         Ok(())
+    }
+
+    fn install_lineage_policy(&mut self, policy: obzenflow_core::config::LineagePolicy) {
+        self.lineage = policy;
     }
 }
 

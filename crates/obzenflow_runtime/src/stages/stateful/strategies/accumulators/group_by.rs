@@ -76,6 +76,7 @@ where
     key_field: String,
     reduce_fn: F,
     writer_id: WriterId,
+    lineage: obzenflow_core::config::LineagePolicy,
     _phantom: std::marker::PhantomData<S>,
 }
 
@@ -108,6 +109,7 @@ where
             key_field: key_field.into(),
             reduce_fn,
             writer_id: WriterId::from(StageId::new()),
+            lineage: obzenflow_core::config::LineagePolicy::default(),
             _phantom: std::marker::PhantomData,
         }
     }
@@ -126,6 +128,10 @@ where
 {
     type State = HashMap<String, GroupBucket<S>>;
 
+    fn install_lineage_policy(&mut self, policy: obzenflow_core::config::LineagePolicy) {
+        self.lineage = policy;
+    }
+
     fn accumulate(&self, state: &mut Self::State, event: ChainEvent) {
         // Extract key from event
         if let Some(key_value) = event.payload().get(&self.key_field) {
@@ -136,7 +142,7 @@ where
                     .or_insert_with(GroupBucket::new);
                 // Apply reduce function
                 (self.reduce_fn)(&event, &mut bucket.value);
-                bucket.trace.record_event(&event);
+                bucket.trace.record_event(&event, self.lineage);
             }
             // If key is not a string, we could support other types in the future
             // For now, we silently skip non-string keys
@@ -458,6 +464,7 @@ where
     key_fn: FKey,
     update_fn: FUpdate,
     writer_id: WriterId,
+    lineage: obzenflow_core::config::LineagePolicy,
     _phantom: PhantomData<(T, K, S)>,
 }
 
@@ -501,6 +508,7 @@ where
             key_fn,
             update_fn,
             writer_id: WriterId::from(StageId::new()),
+            lineage: obzenflow_core::config::LineagePolicy::default(),
             _phantom: PhantomData,
         }
     }
@@ -522,6 +530,10 @@ where
 {
     type State = HashMap<K, GroupBucket<S>>;
 
+    fn install_lineage_policy(&mut self, policy: obzenflow_core::config::LineagePolicy) {
+        self.lineage = policy;
+    }
+
     fn accumulate(&self, state: &mut Self::State, event: ChainEvent) {
         // Step 1: Deserialize ChainEvent → T
         let input: T = match serde_json::from_value(event.payload().clone()) {
@@ -538,7 +550,7 @@ where
         // Step 3: Update state using typed function (CORRECTED: state first, value second)
         let bucket = state.entry(key).or_insert_with(GroupBucket::new);
         (self.update_fn)(&mut bucket.value, &input);
-        bucket.trace.record_event(&event);
+        bucket.trace.record_event(&event, self.lineage);
     }
 
     fn initial_state(&self) -> Self::State {

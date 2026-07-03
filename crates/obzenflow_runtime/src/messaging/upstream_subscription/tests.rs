@@ -1910,6 +1910,7 @@ async fn transport_only_skips_framework_effect_data_without_stage_input_position
                 &ChainEventFactory::data_event(writer_id, "test.parent", json!({})),
                 EFFECT_RECORD_EVENT_TYPE,
                 serde_json::to_value(&effect_record).expect("serialize effect record"),
+                obzenflow_core::config::LineagePolicy::default(),
             )
             .with_effect_provenance(EffectProvenance::from_record(
                 &effect_record,

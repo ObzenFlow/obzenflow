@@ -299,6 +299,7 @@ fn deterministic_typed_output_events_preserve_ordinals() {
         "stage-a",
         StageInputPosition(4),
         2,
+        obzenflow_core::config::LineagePolicy::default(),
     )
     .expect("first output event");
     let second = deterministic_typed_output_event(
@@ -311,6 +312,7 @@ fn deterministic_typed_output_events_preserve_ordinals() {
         "stage-a",
         StageInputPosition(4),
         3,
+        obzenflow_core::config::LineagePolicy::default(),
     )
     .expect("second output event");
     let events = [first, second];
@@ -482,6 +484,7 @@ fn invocation_context_with_mode(
         stage_key: "effect_stage".to_string(),
         writer_id: WriterId::from(stage_id),
         input_seq: StageInputPosition(1),
+        lineage: obzenflow_core::config::LineagePolicy::default(),
         stage_logic_version: "test-v1".to_string(),
         data_journal: journal,
         flow_context: None,
@@ -2781,6 +2784,7 @@ async fn transactional_boundary_abort_restores_output_ordinal() {
         stage_key: "effect_stage".to_string(),
         writer_id,
         input_seq: StageInputPosition(1),
+        lineage: obzenflow_core::config::LineagePolicy::default(),
         stage_logic_version: "test-v1".to_string(),
         data_journal: journal,
         flow_context: None,

@@ -123,6 +123,7 @@ impl TransformHandler for DoubleTransform {
                 n: tick.n,
                 doubled: tick.n * 2,
             }),
+            obzenflow_core::config::LineagePolicy::default(),
         )])
     }
 
@@ -223,6 +224,7 @@ async fn run_until_delivered(
         count,
         delivered.clone(),
     )
+    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
     .await
     .map_err(|e| anyhow!("flow failed to build: {e:?}"))?;
     wait_for_running(&handle).await?;
@@ -239,6 +241,7 @@ async fn run_until_delivered(
 async fn run_replay_to_completion(journal_base: &Path) -> Result<()> {
     let delivered = Arc::new(AtomicU64::new(0));
     let handle = build_flow(journal_base.to_path_buf(), 1, 0, delivered)
+        .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
         .await
         .map_err(|e| anyhow!("replay flow failed to build: {e:?}"))?;
     wait_for_running(&handle).await?;

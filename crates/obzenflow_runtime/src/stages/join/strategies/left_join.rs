@@ -152,6 +152,7 @@ where
             stream_key_fn: self.stream_key_fn,
             reference_mode: self.reference_mode,
             reference_batch_cap: self.reference_batch_cap,
+            lineage: obzenflow_core::config::LineagePolicy::default(),
             _phantom: PhantomData,
         }
     }
@@ -267,6 +268,7 @@ where
                 stream_key_fn: self.stream_key_fn,
                 reference_mode: self.reference_mode,
                 reference_batch_cap: self.reference_batch_cap,
+                lineage: obzenflow_core::config::LineagePolicy::default(),
                 _phantom: PhantomData,
             },
         )

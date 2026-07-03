@@ -330,11 +330,11 @@ impl HttpEndpoint for BatchEventEndpoint {
         }
 
         let accepted_at_ns = unix_now_nanos();
-        let ingress_key = self.state.config.ingress_key.clone();
+        let ingress_key = self.state.ingress_key().clone();
         for (permit, (batch_index, mut event)) in permits.into_iter().zip(accepted_events) {
             event.ingress_handoff = Some(SubmissionIngressContext {
                 accepted_at_ns,
-                ingress_key: ingress_key.clone().into(),
+                ingress_key: ingress_key.clone(),
                 batch_index: Some(batch_index),
                 attempt_seq,
             });

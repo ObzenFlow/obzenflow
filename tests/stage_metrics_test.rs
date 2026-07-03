@@ -164,6 +164,7 @@ async fn test_stage_level_metrics_automatic() -> Result<()> {
             uppercase_transform |> collector_sink;
         }
     }
+    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
     .await
     .map_err(|e| anyhow::anyhow!("Flow creation failed: {e:?}"))?;
 

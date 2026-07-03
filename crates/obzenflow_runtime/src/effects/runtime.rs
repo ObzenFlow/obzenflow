@@ -230,6 +230,7 @@ impl Effects {
             &self.ctx.stage_key,
             self.ctx.input_seq,
             output_ordinal,
+            self.ctx.lineage,
         )?;
         let committed_event = event.clone();
         let committer = OutputCommitter {
@@ -417,6 +418,7 @@ impl Effects {
             let slot = outcome_slot.clone();
             let writer_id = self.ctx.writer_id;
             let parent_event = self.ctx.parent.event.clone();
+            let lineage = self.ctx.lineage;
             let mut effect_ctx = self.live_effect_context();
             Box::pin(async move {
                 let (output, facts) = Self::execute_into_facts(effect, &mut effect_ctx).await?;
@@ -428,6 +430,7 @@ impl Effects {
                             &parent_event,
                             fact.event_type.as_str(),
                             fact.payload.clone(),
+                            lineage,
                         )
                     })
                     .collect();
@@ -870,6 +873,7 @@ impl Effects {
             descriptor_hash: descriptor_hash.clone(),
             descriptor: descriptor.clone(),
             output_ordinal,
+            lineage: self.ctx.lineage,
         });
         let commit_observer = commit.clone();
 
@@ -1107,6 +1111,7 @@ impl Effects {
             self.ctx.writer_id,
             &self.ctx.parent,
             record,
+            self.ctx.lineage,
         )
         .await
     }
@@ -1142,6 +1147,7 @@ impl Effects {
             facts,
             output_ordinal,
             origin,
+            self.ctx.lineage,
         )
         .await?;
         self.routed_output_fact_count = self

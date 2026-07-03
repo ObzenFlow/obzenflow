@@ -830,8 +830,13 @@ impl FlowApplication {
 
             tracing::info!("🚀 Starting FlowApplication");
 
-            // Build the flow (this executes the flow! macro)
-            let flow_handle = match flow.await {
+            // Build the flow (this executes the flow! macro) against the
+            // explicit per-run context (FLOWIP-010 §7): the host owns the
+            // resolved snapshot; the build consumes it as an input.
+            let build_context = obzenflow_runtime::run_context::FlowBuildContext::new(
+                config.runtime_config.clone(),
+            );
+            let flow_handle = match flow.build(build_context).await {
                 Ok(handle) => handle,
                 Err(failure) => {
                     // FLOWIP-120u F2: the failure carrier holds substrate state; None
@@ -966,6 +971,7 @@ impl FlowApplication {
                             server_config,
                             all_extra_endpoints,
                             surface_metrics_collector,
+                            config.runtime_config.clone(),
                         )
                         .await
                     }
@@ -1490,6 +1496,7 @@ impl FlowApplication {
         _server_config: ServerConfig,
         extra_endpoints: Vec<Box<dyn HttpEndpoint>>,
         surface_metrics: Option<Arc<HttpSurfaceMetricsCollector>>,
+        runtime_config: Arc<obzenflow_runtime::runtime_config::ResolvedRuntimeConfig>,
     ) -> Result<Option<JoinHandle<()>>, ApplicationError> {
         use crate::web::start_web_server_with_config;
         use crate::web::web_server::WebServerResources;
@@ -1517,6 +1524,7 @@ impl FlowApplication {
                 flow_handle: Some(_flow_handle.clone()),
                 extra_endpoints,
                 surface_metrics,
+                runtime_config: Some(runtime_config),
             },
             _server_config,
         )
@@ -1525,6 +1533,7 @@ impl FlowApplication {
 
         tracing::info!("📊 Web server started on http://{}", addr);
         tracing::info!("   /api/topology  - Flow structure");
+        tracing::info!("   /api/config    - Resolved configuration (read-only)");
         if has_metrics {
             tracing::info!("   /metrics       - Prometheus metrics");
         }

@@ -28,7 +28,11 @@ use std::collections::BTreeMap;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::{Arc, OnceLock};
 
-type ChatOutputMapper = dyn Fn(&ChainEvent, ChatResponse) -> Result<Vec<ChainEvent>, HandlerError>
+type ChatOutputMapper = dyn Fn(
+        &ChainEvent,
+        ChatResponse,
+        obzenflow_core::config::LineagePolicy,
+    ) -> Result<Vec<ChainEvent>, HandlerError>
     + Send
     + Sync
     + 'static;
@@ -369,7 +373,15 @@ impl ChatTransformBuilder {
             + Sync
             + 'static,
     {
-        self.output_mapper = Some(Arc::new(mapper));
+        // User mappers build their own events; only the lineage-aware
+        // internal mappers (build_typed family) consume the policy.
+        self.output_mapper = Some(Arc::new(
+            move |event: &ChainEvent,
+                  response: ChatResponse,
+                  _lineage: obzenflow_core::config::LineagePolicy| {
+                mapper(event, response)
+            },
+        ));
         self
     }
 
@@ -518,7 +530,7 @@ impl ChatTransformBuilder {
     /// performs deserialization and derived-event construction internally so
     /// user code does not need to touch JSON or `ChainEventFactory`.
     pub async fn build_typed<In, Out>(
-        self,
+        mut self,
         prompt_extractor: impl Fn(&In) -> Result<String, HandlerError> + Send + Sync + 'static,
         output_mapper: impl Fn(In, ChatResponse) -> Result<Out, HandlerError> + Send + Sync + 'static,
     ) -> Result<ChatTransform, HandlerError>
@@ -535,9 +547,15 @@ impl ChatTransformBuilder {
         let prompt_extractor = Arc::new(prompt_extractor);
         let output_mapper = Arc::new(output_mapper);
 
-        self.output_mapper({
+        // Set the mapper directly: this internal mapper derives its output,
+        // so it needs the lineage-aware form (FLOWIP-010 §7); the public
+        // `output_mapper()` method wraps user closures that build their own
+        // events.
+        self.output_mapper = Some(Arc::new({
             let output_mapper = output_mapper.clone();
-            move |event: &ChainEvent, response: ChatResponse| {
+            move |event: &ChainEvent,
+                  response: ChatResponse,
+                  lineage: obzenflow_core::config::LineagePolicy| {
                 if !event.is_data() {
                     return Err(HandlerError::Validation(format!(
                         "build_typed output mapper expects data events (got {})",
@@ -567,10 +585,11 @@ impl ChatTransformBuilder {
                     event,
                     Out::versioned_event_type(),
                     payload,
+                    lineage,
                 )])
             }
-        })
-        .build({
+        }));
+        self.build({
             let prompt_extractor = prompt_extractor.clone();
             move |event: &ChainEvent| {
                 if !event.is_data() {
@@ -596,7 +615,7 @@ impl ChatTransformBuilder {
 
     /// Lazy counterpart of [`Self::build_typed`] (no provider/model preflight).
     pub fn build_typed_lazy<In, Out>(
-        self,
+        mut self,
         prompt_extractor: impl Fn(&In) -> Result<String, HandlerError> + Send + Sync + 'static,
         output_mapper: impl Fn(In, ChatResponse) -> Result<Out, HandlerError> + Send + Sync + 'static,
     ) -> Result<ChatTransform, HandlerError>
@@ -613,9 +632,15 @@ impl ChatTransformBuilder {
         let prompt_extractor = Arc::new(prompt_extractor);
         let output_mapper = Arc::new(output_mapper);
 
-        self.output_mapper({
+        // Set the mapper directly: this internal mapper derives its output,
+        // so it needs the lineage-aware form (FLOWIP-010 §7); the public
+        // `output_mapper()` method wraps user closures that build their own
+        // events.
+        self.output_mapper = Some(Arc::new({
             let output_mapper = output_mapper.clone();
-            move |event: &ChainEvent, response: ChatResponse| {
+            move |event: &ChainEvent,
+                  response: ChatResponse,
+                  lineage: obzenflow_core::config::LineagePolicy| {
                 if !event.is_data() {
                     return Err(HandlerError::Validation(format!(
                         "build_typed_lazy output mapper expects data events (got {})",
@@ -645,10 +670,11 @@ impl ChatTransformBuilder {
                     event,
                     Out::versioned_event_type(),
                     payload,
+                    lineage,
                 )])
             }
-        })
-        .build_lazy({
+        }));
+        self.build_lazy({
             let prompt_extractor = prompt_extractor.clone();
             move |event: &ChainEvent| {
                 if !event.is_data() {
@@ -1171,8 +1197,10 @@ impl ChatTransformBuilder {
         let mut transform = ChatTransform::new(client, request_builder);
 
         if let Some(output_mapper) = output_mapper {
-            transform = transform
-                .with_output_mapper(move |event, response| (output_mapper)(event, response));
+            transform =
+                transform.with_lineage_aware_output_mapper(move |event, response, lineage| {
+                    (output_mapper)(event, response, lineage)
+                });
         }
 
         Ok(transform)

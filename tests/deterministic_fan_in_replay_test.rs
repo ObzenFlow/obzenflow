@@ -179,6 +179,7 @@ impl TransformHandler for MergeTransform {
                 channel: input.channel,
                 value: input.value,
             }),
+            obzenflow_core::config::LineagePolicy::default(),
         )])
     }
 
@@ -216,6 +217,7 @@ impl TransformHandler for TapTransform {
                 channel: format!("tap:{}", input.channel),
                 value: input.value,
             }),
+            obzenflow_core::config::LineagePolicy::default(),
         )])
     }
 

@@ -45,6 +45,7 @@ fn test_derived_event() {
         &parent,
         "child.event",
         json!({"data": "child"}),
+        crate::config::LineagePolicy::default(),
     );
 
     assert_eq!(child.correlation, parent.correlation);

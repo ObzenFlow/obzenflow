@@ -252,6 +252,7 @@ async fn record_cancelled_linear(journal_base: &Path) -> std::path::PathBuf {
     let base = journal_base.to_path_buf();
     let counter = delivered.clone();
     let handle = linear_flow!(base, counter, Ticks::stalling(4))
+        .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
         .await
         .expect("baseline flow should build");
     let run_dir = replay_testkit::latest_run_dir(journal_base);
@@ -479,6 +480,7 @@ async fn mixed_kind_fan_in_authors_the_worst_and_suppresses_finalization() {
     let base = journal_base.clone();
     let counter = delivered.clone();
     let handle = fan_in_flow!(base, counter)
+        .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
         .await
         .expect("fan-in flow should build");
     let baseline = replay_testkit::latest_run_dir(&journal_base);
@@ -614,6 +616,7 @@ impl obzenflow_runtime::stages::common::handlers::TransformHandler for CycleEntr
             &event,
             Tick::EVENT_TYPE,
             json!({ "n": payload["n"], "depth": depth, "kind": next_kind }),
+            obzenflow_core::config::LineagePolicy::default(),
         )])
     }
 
@@ -643,6 +646,7 @@ impl obzenflow_runtime::stages::common::handlers::TransformHandler for CycleIter
             &event,
             Tick::EVENT_TYPE,
             json!({ "n": payload["n"], "depth": depth + 1, "kind": "iter" }),
+            obzenflow_core::config::LineagePolicy::default(),
         )])
     }
 
@@ -687,6 +691,7 @@ async fn cycle_flow_truncated_replay_terminates_without_error() {
     let base = journal_base.clone();
     let counter = delivered.clone();
     let handle = cycle_flow!(base, counter)
+        .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
         .await
         .expect("cycle flow should build");
     let baseline = replay_testkit::latest_run_dir(&journal_base);

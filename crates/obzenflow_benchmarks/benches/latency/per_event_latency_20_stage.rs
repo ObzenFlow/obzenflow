@@ -227,6 +227,7 @@ async fn run_20_stage_pipeline() -> anyhow::Result<Duration> {
             s19 |> snk;
         }
     }
+    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
     .await
     .map_err(|e| anyhow::anyhow!("Failed to create flow: {e:?}"))?;
 

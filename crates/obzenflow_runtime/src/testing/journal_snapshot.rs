@@ -855,12 +855,14 @@ mod tests {
             &parent_env.event,
             "child.a",
             serde_json::json!({ "i": 1 }),
+            obzenflow_core::config::LineagePolicy::default(),
         );
         let child_b = ChainEventFactory::derived_data_event(
             writer,
             &parent_env.event,
             "child.b",
             serde_json::json!({ "i": 2 }),
+            obzenflow_core::config::LineagePolicy::default(),
         );
 
         let child_a_env = journal

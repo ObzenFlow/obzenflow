@@ -158,6 +158,7 @@ impl StatefulHandler for MultiSourceAggregator {
                 &event,
                 "data.aggregated",
                 enriched,
+                obzenflow_core::config::LineagePolicy::default(),
             );
 
             // Demo-local accounting: track outputs emitted so we can ensure
@@ -272,7 +273,13 @@ fn smart_router() -> Map<impl Fn(ChainEvent) -> ChainEvent + Send + Sync + Clone
         enriched["route_source"] = json!(source);
         enriched["route_value"] = json!(value);
 
-        ChainEventFactory::derived_data_event(event.writer_id, &event, "data.routed", enriched)
+        ChainEventFactory::derived_data_event(
+            event.writer_id,
+            &event,
+            "data.routed",
+            enriched,
+            obzenflow_core::config::LineagePolicy::default(),
+        )
     })
 }
 

@@ -158,7 +158,10 @@ impl MiddlewareFactory for RateLimiterFactory {
     }
 
     fn plan_contribution(&self) -> MiddlewarePlanContribution {
-        MiddlewarePlanContribution::None
+        MiddlewarePlanContribution::RateLimiter {
+            events_per_second: self.events_per_second,
+            burst_capacity: self.burst_capacity,
+        }
     }
 
     fn topology_config_slot(&self) -> Option<TopologyMiddlewareConfigSlot> {
@@ -196,7 +199,18 @@ impl MiddlewareFactory for RateLimiterFactory {
                 )
             })?;
 
-        let validated = self.validated_config().map_err(|err| {
+        // FLOWIP-010: build-resolved `effects.rate_limiter.*` winners
+        // override the DSL-declared parameters (the ladder already ranked
+        // the sources; absence means the DSL values stand).
+        let policies = context.config.resolved_policies;
+        let validated = validated_rate_limiter_config(
+            policies
+                .limiter_events_per_second
+                .unwrap_or(self.events_per_second),
+            policies.limiter_burst_capacity.or(self.burst_capacity),
+            self.cost_per_event,
+        )
+        .map_err(|err| {
             MiddlewareFactoryError::invalid_configuration(self.label(), &context.config.name, err)
         })?;
 
@@ -383,6 +397,8 @@ mod tests {
             name: name.to_string(),
             flow_name: "test_flow".to_string(),
             cycle_guard: None,
+            lineage: obzenflow_core::config::LineagePolicy::default(),
+            resolved_policies: Default::default(),
         }
     }
 

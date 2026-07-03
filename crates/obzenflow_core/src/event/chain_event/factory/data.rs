@@ -3,6 +3,7 @@
 // https://obzenflow.dev
 
 use super::ChainEventFactory;
+use crate::config::LineagePolicy;
 use crate::event::context::causality_context::CausalityContext;
 use crate::event::types::WriterId;
 use crate::event::{ChainEvent, ChainEventContent};
@@ -34,11 +35,15 @@ impl ChainEventFactory {
         Ok(Self::data_event(writer_id, event_type, payload))
     }
 
-    /// Create a derived event from a parent event (propagates correlation)
+    /// Create a derived event from a parent event (propagates correlation).
+    ///
+    /// FLOWIP-010 §7: the lineage policy is build-resolved data threaded by
+    /// the caller; the data path performs no global config read.
     pub fn derived_event(
         writer_id: WriterId,
         parent: &ChainEvent,
         content: ChainEventContent,
+        lineage: LineagePolicy,
     ) -> ChainEvent {
         let mut event = Self::create_event(writer_id, content);
 
@@ -48,20 +53,13 @@ impl ChainEventFactory {
         event.cycle_depth = parent.cycle_depth;
         event.cycle_scc_id = parent.cycle_scc_id;
 
-        const DEFAULT_MAX_LINEAGE_DEPTH: usize = 100;
-
         event.causality = CausalityContext::with_parent(parent.id);
-
-        let max_depth = std::env::var("OBZENFLOW_MAX_LINEAGE_DEPTH")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(DEFAULT_MAX_LINEAGE_DEPTH);
 
         let ancestors_to_add = parent
             .causality
             .parent_ids
             .iter()
-            .take(max_depth.saturating_sub(1));
+            .take(lineage.max_lineage_depth.saturating_sub(1));
 
         for ancestor in ancestors_to_add {
             event.causality = event.causality.add_parent(*ancestor);
@@ -76,6 +74,7 @@ impl ChainEventFactory {
         parent: &ChainEvent,
         event_type: impl Into<String>,
         payload: Value,
+        lineage: LineagePolicy,
     ) -> ChainEvent {
         Self::derived_event(
             writer_id,
@@ -84,6 +83,7 @@ impl ChainEventFactory {
                 event_type: event_type.into(),
                 payload,
             },
+            lineage,
         )
     }
 
@@ -132,8 +132,13 @@ mod tests {
                 attempt_seq: crate::ingress::IngressAttemptSeq(0),
             });
 
-        let child =
-            ChainEventFactory::derived_data_event(writer_id, &parent, "child.event", json!({}));
+        let child = ChainEventFactory::derived_data_event(
+            writer_id,
+            &parent,
+            "child.event",
+            json!({}),
+            LineagePolicy::default(),
+        );
 
         assert_eq!(child.ingress_context, parent.ingress_context);
     }
@@ -144,8 +149,13 @@ mod tests {
         let mut parent = ChainEventFactory::data_event(writer_id, "parent.event", json!({"id": 1}));
         parent.set_correlation_sample(vec![CorrelationId::new()], true);
 
-        let child =
-            ChainEventFactory::derived_data_event(writer_id, &parent, "child.event", json!({}));
+        let child = ChainEventFactory::derived_data_event(
+            writer_id,
+            &parent,
+            "child.event",
+            json!({}),
+            LineagePolicy::default(),
+        );
 
         assert_eq!(child.correlation, parent.correlation);
         assert!(child.correlation_ids_truncated());

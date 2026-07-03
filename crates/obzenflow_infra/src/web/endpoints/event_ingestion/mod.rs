@@ -90,7 +90,7 @@ where
 
     /// Protocol-neutral ingress key used in provenance, refusal facts, and metrics.
     pub fn ingress_key(&self) -> &str {
-        &self.state.config.ingress_key
+        self.state.ingress_key().as_str()
     }
 
     pub(crate) fn state(&self) -> IngestionState {
@@ -118,7 +118,7 @@ where
                         "hosted ingress handle '{}' has refusal recording enabled but no \
                          system journal is available; disable record_ingress_refusals or run \
                          with a system journal",
-                        self.state.config.ingress_key
+                        self.state.ingress_key()
                     )));
                 }
             }
@@ -279,7 +279,7 @@ fn create_ingestion_surface_from_state(state: IngestionState) -> WebSurfaceAttac
                             "hosted ingress surface '{}' has refusal recording enabled but no \
                              system journal is available; disable record_ingress_refusals or run \
                              with a system journal",
-                            state_for_wiring.config.ingress_key
+                            state_for_wiring.ingress_key()
                         )));
                     }
                 }
@@ -529,7 +529,7 @@ mod tests {
         }
 
         let ingress = ingress_source::<HandlePayload>(IngestionConfig {
-            ingress_key: "orders".to_string(),
+            ingress_key: Some("orders".into()),
             record_ingress_refusals: true,
             ..Default::default()
         });
@@ -1512,6 +1512,7 @@ mod tests {
                 source |> sink;
             }
         }
+        .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
         .await
         .expect("build flow");
 
@@ -1624,6 +1625,7 @@ mod tests {
                 source |> sink;
             }
         }
+        .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
         .await
         .expect("build flow");
 

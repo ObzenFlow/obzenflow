@@ -100,6 +100,7 @@ impl EffectInvocationContextBuilder {
             stage_key: self.stage_key,
             writer_id: self.writer_id,
             input_seq: self.input_seq,
+            lineage: obzenflow_core::config::LineagePolicy::default(),
             stage_logic_version: self.stage_logic_version,
             data_journal: self.data_journal,
             flow_context: None,

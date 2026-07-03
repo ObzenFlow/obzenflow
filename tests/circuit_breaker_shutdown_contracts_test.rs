@@ -197,6 +197,7 @@ async fn breaker_driven_shutdown_emits_poison_eof_and_contract() -> Result<()> {
             failing_transform |> sink;
         }
     }
+    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
     .await
     .map_err(|e| anyhow::anyhow!("Failed to create flow: {e:?}"))?;
 

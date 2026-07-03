@@ -76,6 +76,7 @@ pub struct PipelineBuilder {
     liveness_snapshots: Option<LivenessSnapshots>,
     feed_plan: FeedPlan,
     run_substrate: Option<RunSubstrateState>,
+    flow_effective_config: Option<Arc<crate::runtime_config::FlowEffectiveConfig>>,
 }
 
 impl PipelineBuilder {
@@ -100,6 +101,7 @@ impl PipelineBuilder {
             liveness_snapshots: None,
             feed_plan: FeedPlan::default(),
             run_substrate: None,
+            flow_effective_config: None,
         }
     }
 
@@ -107,6 +109,16 @@ impl PipelineBuilder {
     /// this; a builder used directly defaults to `Ephemeral` at build.
     pub fn with_run_substrate(mut self, run_substrate: RunSubstrateState) -> Self {
         self.run_substrate = Some(run_substrate);
+        self
+    }
+
+    /// Attach the build-resolved effective config (FLOWIP-010), carried out
+    /// through the flow handle for the host's read surface.
+    pub fn with_flow_effective_config(
+        mut self,
+        config: Arc<crate::runtime_config::FlowEffectiveConfig>,
+    ) -> Self {
+        self.flow_effective_config = Some(config);
         self
     }
 
@@ -329,6 +341,22 @@ impl SupervisorBuilder for PipelineBuilder {
             flow_start_time: None,
             last_system_event_id_seen: None,
             stop_intent: Default::default(),
+            // FLOWIP-010: global knobs from the build-resolved effective
+            // config; registry defaults when no snapshot is threaded (tests).
+            source_contract_strict: self
+                .flow_effective_config
+                .as_ref()
+                .map(|cfg| {
+                    crate::pipeline::supervisor::SourceContractStrictMode::from_token(
+                        cfg.source_contract_strict_mode(),
+                    )
+                })
+                .unwrap_or_default(),
+            metrics_drain_timeout_ms: self
+                .flow_effective_config
+                .as_ref()
+                .map(|cfg| cfg.metrics_drain_timeout_ms())
+                .unwrap_or(5_000),
         };
 
         // Create channels using the common infrastructure
@@ -427,6 +455,7 @@ impl SupervisorBuilder for PipelineBuilder {
                     .run_substrate
                     .clone()
                     .unwrap_or(RunSubstrateState::Ephemeral),
+                flow_effective_config: self.flow_effective_config.clone(),
             },
         ))
     }

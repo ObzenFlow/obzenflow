@@ -157,6 +157,7 @@ impl TransformHandler for FanOutTransform {
                 &event,
                 FanOutTestEvent::versioned_event_type(),
                 json!({ "fan_out_index": index }),
+                obzenflow_core::config::LineagePolicy::default(),
             ));
         }
 
@@ -365,6 +366,7 @@ async fn sink_edge_emits_passed_delivery_contract_result() -> Result<()> {
             source |> sink;
         }
     }
+    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
     .await
     .map_err(|e| anyhow::anyhow!("Failed to create flow: {e:?}"))?;
 
@@ -402,6 +404,7 @@ async fn buffered_sink_edge_emits_passed_delivery_contract_result_after_flush() 
             source |> sink;
         }
     }
+    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
     .await
     .map_err(|e| anyhow::anyhow!("Failed to create flow: {e:?}"))?;
 
@@ -446,6 +449,7 @@ async fn fan_out_before_buffered_sink_emits_passed_delivery_contract_result() ->
             transform |> sink;
         }
     }
+    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
     .await
     .map_err(|e| anyhow::anyhow!("Failed to create flow: {e:?}"))?;
 

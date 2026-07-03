@@ -385,6 +385,10 @@ pub struct JoinContext<H: UnifiedJoinHandler> {
     /// (used during Hydrating for observability snapshots).
     pub events_since_last_heartbeat: u64,
 
+    /// FLOWIP-010: build-resolved `runtime.heartbeat_interval` (events
+    /// between heartbeats; 0 disables), from stage resources.
+    pub heartbeat_interval: u64,
+
     /// Backpressure writer handle for this stage's journal (FLOWIP-086k).
     pub backpressure_writer: BackpressureWriter,
 

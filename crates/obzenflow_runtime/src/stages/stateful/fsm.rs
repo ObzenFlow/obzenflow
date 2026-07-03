@@ -359,6 +359,9 @@ pub struct StatefulContext<H: UnifiedStatefulHandler> {
     /// Writer ID for this stateful stage (initialized during setup)
     pub writer_id: Option<WriterId>,
 
+    /// FLOWIP-010 §7: build-resolved lineage policy from stage resources.
+    pub lineage_policy: obzenflow_core::config::LineagePolicy,
+
     /// Subscription to upstream events
     pub subscription: Option<UpstreamSubscription<ChainEvent>>,
 
@@ -400,6 +403,10 @@ pub struct StatefulContext<H: UnifiedStatefulHandler> {
     /// Counter of accumulated events since the last observability heartbeat
     /// (FLOWIP-059 Phase 6.4 - accumulator heartbeats).
     pub events_since_last_heartbeat: u64,
+
+    /// FLOWIP-010: build-resolved `runtime.heartbeat_interval` (events
+    /// between heartbeats; 0 disables), from stage resources.
+    pub heartbeat_interval: u64,
 
     /// Baseline for supervisor-driven `emit_interval` timing (FLOWIP-086h).
     ///

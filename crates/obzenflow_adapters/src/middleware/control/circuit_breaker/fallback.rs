@@ -8,7 +8,11 @@ use obzenflow_core::{ChainEvent, TypedPayload};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 
-pub(super) fn build_typed_fallback_event<In, Out, F>(f: &F, event: &ChainEvent) -> Vec<ChainEvent>
+pub(super) fn build_typed_fallback_event<In, Out, F>(
+    f: &F,
+    event: &ChainEvent,
+    lineage: obzenflow_core::config::LineagePolicy,
+) -> Vec<ChainEvent>
 where
     In: TypedPayload + DeserializeOwned,
     Out: TypedPayload + Serialize,
@@ -40,7 +44,13 @@ where
     };
 
     let event_type = Out::versioned_event_type();
-    let ev = ChainEventFactory::derived_data_event(event.writer_id, event, &event_type, out_value);
+    let ev = ChainEventFactory::derived_data_event(
+        event.writer_id,
+        event,
+        &event_type,
+        out_value,
+        lineage,
+    );
 
     vec![ev]
 }
@@ -48,7 +58,11 @@ where
 /// Build the outcome-shaped fallback events (FLOWIP-120m): the closure's
 /// `E::Outcome` carrier lowers through `into_facts`, one derived data event
 /// per fact, each parented on the protected input.
-pub(super) fn build_outcome_fallback_events<E, In, F>(f: &F, event: &ChainEvent) -> Vec<ChainEvent>
+pub(super) fn build_outcome_fallback_events<E, In, F>(
+    f: &F,
+    event: &ChainEvent,
+    lineage: obzenflow_core::config::LineagePolicy,
+) -> Vec<ChainEvent>
 where
     E: obzenflow_runtime::effects::Effect,
     In: TypedPayload + DeserializeOwned,
@@ -87,6 +101,7 @@ where
                 event,
                 fact.event_type.as_str(),
                 fact.payload,
+                lineage,
             )
         })
         .collect()
@@ -98,6 +113,7 @@ pub(super) fn build_typed_rejection_event<In, R, F>(
     f: &F,
     event: &ChainEvent,
     reason: CircuitBreakerRejectionReason,
+    lineage: obzenflow_core::config::LineagePolicy,
 ) -> Vec<ChainEvent>
 where
     In: TypedPayload + DeserializeOwned,
@@ -130,8 +146,13 @@ where
     };
 
     let event_type = R::versioned_event_type();
-    let ev =
-        ChainEventFactory::derived_data_event(event.writer_id, event, &event_type, rejection_value);
+    let ev = ChainEventFactory::derived_data_event(
+        event.writer_id,
+        event,
+        &event_type,
+        rejection_value,
+        lineage,
+    );
 
     vec![ev]
 }

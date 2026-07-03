@@ -56,9 +56,18 @@ use retry::RetryState;
 use state::CircuitState;
 use window::{CallSample, FailureWindow, FailureWindowState};
 
-type FallbackFn = Arc<dyn Fn(&ChainEvent) -> Vec<ChainEvent> + Send + Sync>;
-type RejectionFn =
-    Arc<dyn Fn(&ChainEvent, CircuitBreakerRejectionReason) -> Vec<ChainEvent> + Send + Sync>;
+type FallbackFn = Arc<
+    dyn Fn(&ChainEvent, obzenflow_core::config::LineagePolicy) -> Vec<ChainEvent> + Send + Sync,
+>;
+type RejectionFn = Arc<
+    dyn Fn(
+            &ChainEvent,
+            CircuitBreakerRejectionReason,
+            obzenflow_core::config::LineagePolicy,
+        ) -> Vec<ChainEvent>
+        + Send
+        + Sync,
+>;
 
 const CIRCUIT_BREAKER_ABORT_SOURCE: &str = "circuit_breaker";
 
@@ -173,6 +182,9 @@ pub struct CircuitBreakerMiddleware {
     /// Typed-outcome mode (FLOWIP-120h): rejection branch synthesis for
     /// stages that perform the guarded wrapper.
     typed_outcome: Option<TypedOutcomeConfig>,
+    /// FLOWIP-010 §7: build-resolved lineage policy, set by the factory from
+    /// `StageConfig.lineage`; consumed by the typed fallback builders.
+    lineage: obzenflow_core::config::LineagePolicy,
     /// Optional classifier that decides whether a given call should be counted
     /// as a failure for breaker purposes based on the input event and the
     /// outputs produced by the handler.
@@ -280,6 +292,7 @@ impl CircuitBreakerMiddleware {
                 .unwrap_or_else(|| WriterId::from(StageId::new())),
             fallback,
             typed_outcome: None,
+            lineage: obzenflow_core::config::LineagePolicy::default(),
             failure_classifier,
             failure_classification_classifier: None,
             open_policy: OpenPolicy::default(),
@@ -907,7 +920,7 @@ impl CircuitBreakerMiddleware {
             self.typed_outcome
                 .as_ref()
                 .map(|typed| MiddlewareAction::Skip {
-                    results: (typed.build_rejection)(event, reason),
+                    results: (typed.build_rejection)(event, reason, self.lineage),
                     cause: None,
                 })
         };
@@ -915,7 +928,7 @@ impl CircuitBreakerMiddleware {
         let action = match policy {
             OpenPolicy::EmitFallback => {
                 if let Some(fallback) = &self.fallback {
-                    let results = (fallback)(event);
+                    let results = (fallback)(event, self.lineage);
                     MiddlewareAction::Skip {
                         results,
                         cause: None,
@@ -1260,6 +1273,7 @@ mod tests {
         let events = build_outcome_fallback_events::<DemoOutcomeEffect, OutcomeInput, _>(
             &closure,
             &input_event,
+            obzenflow_core::config::LineagePolicy::default(),
         );
 
         assert_eq!(events.len(), 2, "one derived event per carrier fact");
@@ -1459,6 +1473,8 @@ mod tests {
             name: "test".to_string(),
             flow_name: "test_flow".to_string(),
             cycle_guard: None,
+            lineage: obzenflow_core::config::LineagePolicy::default(),
+            resolved_policies: Default::default(),
         };
         let factory = CircuitBreakerFactory::new(3);
         assert!(
@@ -2230,7 +2246,11 @@ mod tests {
         );
         let f = |input: &FallbackIn| FallbackOut { n: input.n };
 
-        let events = build_typed_fallback_event::<FallbackIn, FallbackOut, _>(&f, &input_event);
+        let events = build_typed_fallback_event::<FallbackIn, FallbackOut, _>(
+            &f,
+            &input_event,
+            obzenflow_core::config::LineagePolicy::default(),
+        );
         assert_eq!(events.len(), 1);
         let fallback = &events[0];
         assert_eq!(

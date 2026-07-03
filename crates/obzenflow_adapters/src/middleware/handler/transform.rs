@@ -173,6 +173,10 @@ impl<H: TransformHandler> MiddlewareTransform<H> {
 
 #[async_trait]
 impl<H: TransformHandler> UnifiedTransformHandler for MiddlewareTransform<H> {
+    fn install_lineage_policy(&mut self, policy: obzenflow_core::config::LineagePolicy) {
+        TransformHandler::install_lineage_policy(&mut self.inner, policy)
+    }
+
     async fn process(
         &self,
         event: ChainEvent,
@@ -422,6 +426,10 @@ impl<H: AsyncTransformHandler> AsyncMiddlewareTransform<H> {
 
 #[async_trait]
 impl<H: AsyncTransformHandler> UnifiedTransformHandler for AsyncMiddlewareTransform<H> {
+    fn install_lineage_policy(&mut self, policy: obzenflow_core::config::LineagePolicy) {
+        self.inner.install_lineage_policy(policy)
+    }
+
     async fn process(
         &self,
         event: ChainEvent,
@@ -705,6 +713,10 @@ impl<H> UnifiedTransformHandler for UnifiedMiddlewareTransform<H>
 where
     H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
 {
+    fn install_lineage_policy(&mut self, policy: obzenflow_core::config::LineagePolicy) {
+        self.inner.install_lineage_policy(policy)
+    }
+
     async fn process(
         &self,
         event: ChainEvent,
@@ -1324,6 +1336,8 @@ mod tests {
             name: "test".to_string(),
             flow_name: "test".to_string(),
             cycle_guard: None,
+            lineage: obzenflow_core::config::LineagePolicy::default(),
+            resolved_policies: Default::default(),
         };
         let control = Arc::new(ControlMiddlewareAggregator::new());
         let cb = factory
@@ -1377,6 +1391,8 @@ mod tests {
             name: "test".to_string(),
             flow_name: "test".to_string(),
             cycle_guard: None,
+            lineage: obzenflow_core::config::LineagePolicy::default(),
+            resolved_policies: Default::default(),
         };
         let control = Arc::new(ControlMiddlewareAggregator::new());
         let cb = factory

@@ -613,6 +613,7 @@ mod tests {
             system_journal: None,
             liveness_snapshots: None,
             run_substrate: crate::journal::RunSubstrateState::Ephemeral,
+            flow_effective_config: None,
         };
 
         let handle = FlowHandle::new(standard_handle, None, extras);
@@ -938,12 +939,14 @@ mod tests {
             &parent,
             "child.1",
             serde_json::json!({"k": 2}),
+            obzenflow_core::config::LineagePolicy::default(),
         );
         let child_2 = ChainEventFactory::derived_data_event(
             writer_id,
             &parent,
             "child.2",
             serde_json::json!({"k": 3}),
+            obzenflow_core::config::LineagePolicy::default(),
         );
 
         stage_journal

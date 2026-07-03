@@ -187,7 +187,7 @@ pub(super) async fn dispatch_running(
 
                     if !pass {
                         let is_source = context.expected_sources.contains(upstream);
-                        let mode = super::source_contract_mode();
+                        let mode = context.source_contract_strict;
 
                         let should_abort = super::is_gating_edge_for_contract(is_source, mode);
 

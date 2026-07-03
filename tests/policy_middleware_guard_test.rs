@@ -127,6 +127,7 @@ async fn flow_level_policy_middleware_is_rejected_at_build() {
             guarded |> guard_sink;
         }
     }
+    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
     .await;
 
     let err = match result {
@@ -164,6 +165,7 @@ async fn policy_middleware_on_pure_sync_stage_is_rejected_at_build() {
             guarded |> guard_sink;
         }
     }
+    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
     .await;
 
     let err = match result {
@@ -203,6 +205,7 @@ async fn policy_middleware_on_async_surface_still_builds() {
             guarded |> guard_sink;
         }
     }
+    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
     .await
     .expect("the deprecated async surface must keep building under H1");
 

@@ -7,11 +7,12 @@
 //! Provides Spring Boot-style lifecycle management for flows with automatic
 //! CLI parsing, server management, and graceful shutdown handling.
 
-mod config;
+pub(crate) mod config;
 mod error;
 mod flow_application;
 mod presentation;
 mod run_mode;
+pub(crate) mod runtime_config_sources;
 mod web_surface;
 
 pub use config::FlowConfig;

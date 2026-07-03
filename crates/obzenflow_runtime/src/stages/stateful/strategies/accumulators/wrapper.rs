@@ -120,6 +120,10 @@ where
 {
     accumulator: A,
     initial_emission: E,
+    /// FLOWIP-010 §7: build-resolved, installed by the stage builder;
+    /// default until then. Passed to `TraceState::record_event` as data
+    /// (never stored in the serialized state).
+    lineage: obzenflow_core::config::LineagePolicy,
 }
 
 impl<A, E> StatefulWithEmission<A, E>
@@ -137,6 +141,7 @@ where
         Self {
             accumulator,
             initial_emission: emission,
+            lineage: obzenflow_core::config::LineagePolicy::default(),
         }
     }
 }
@@ -159,6 +164,11 @@ where
 {
     type State = WrapperState<A::State, E>;
 
+    fn install_lineage_policy(&mut self, policy: obzenflow_core::config::LineagePolicy) {
+        self.lineage = policy;
+        self.accumulator.install_lineage_policy(policy);
+    }
+
     fn accumulate(&mut self, state: &mut Self::State, event: ChainEvent) {
         // Check for EOF control event
         let is_eof = match &event.content {
@@ -176,7 +186,7 @@ where
 
         // Record the input into the whole-batch fallback trace before handing it to
         // the accumulator. `record_event` skips lifecycle/control events itself.
-        state.trace.record_event(&event);
+        state.trace.record_event(&event, self.lineage);
 
         // Accumulate the event
         self.accumulator.accumulate(&mut state.inner, event);
@@ -251,6 +261,7 @@ where
         Self {
             accumulator: self.accumulator.clone(),
             initial_emission: self.initial_emission.clone(),
+            lineage: self.lineage,
         }
     }
 }

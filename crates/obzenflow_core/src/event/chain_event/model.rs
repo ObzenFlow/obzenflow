@@ -328,9 +328,10 @@ impl ChainEvent {
         payload: Value,
         reason: impl Into<String>,
         kind: ErrorKind,
+        lineage: crate::config::LineagePolicy,
     ) -> ChainEvent {
         let reason_str = reason.into();
-        ChainEventFactory::derived_data_event(self.writer_id, self, event_type, payload)
+        ChainEventFactory::derived_data_event(self.writer_id, self, event_type, payload, lineage)
             .mark_as_error(reason_str, kind)
     }
 

@@ -153,6 +153,7 @@ pub fn deterministic_effect_record_event_time(cursor: &EffectCursor) -> u64 {
         .saturating_add(u64::from(cursor.effect_ordinal.get()))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn deterministic_typed_output_event<Out>(
     writer_id: WriterId,
     parent: &ChainEvent,
@@ -161,6 +162,7 @@ pub fn deterministic_typed_output_event<Out>(
     stage_key: impl AsRef<str>,
     input_seq: StageInputPosition,
     output_ordinal: impl Into<EffectOutputOrdinal>,
+    lineage: obzenflow_core::config::LineagePolicy,
 ) -> Result<ChainEvent, EffectError>
 where
     Out: TypedPayload,
@@ -173,6 +175,7 @@ where
         parent,
         Out::versioned_event_type(),
         payload,
+        lineage,
     );
     event.id = deterministic_event_id(recorded_flow_id, stage_key, input_seq, output_ordinal);
     event.processing_info.event_time = deterministic_event_time(input_seq, output_ordinal);

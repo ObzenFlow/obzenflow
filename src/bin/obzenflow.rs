@@ -16,6 +16,9 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Args, Parser, Subcommand};
+use obzenflow_infra::config_cli::{
+    live_route, offline_docs, parse_live_values, render_live, render_table, schema_json, ConfigView,
+};
 use obzenflow_infra::journal::disk::inspect::{export_jsonl, inspect};
 use obzenflow_infra::verify::{render_verdict, verify_run_dirs, VerifyOptions};
 
@@ -35,6 +38,62 @@ enum Command {
     /// Inspect a run's durable journals through the supported JSONL projection
     /// (FLOWIP-120q). The raw `.log` files are internal framed storage.
     Journal(JournalArgs),
+
+    /// Read resolved runtime configuration (FLOWIP-010).
+    Config(ConfigArgs),
+}
+
+#[derive(Args)]
+struct ConfigArgs {
+    #[command(subcommand)]
+    command: ConfigCommand,
+}
+
+#[derive(Subcommand)]
+enum ConfigCommand {
+    /// Print the resolved configuration with provenance (source and scope).
+    ///
+    /// OFFLINE (the default) resolves the file, environment, and default
+    /// tiers at GLOBAL scope only; the DSL tier and flow, stage, and edge
+    /// scopes exist only in a running flow, so `--effective` and `--base`
+    /// are identical offline and `--overlay`/`--diff` refuse. LIVE
+    /// (`--url`) queries a running runtime's `/api/config/*` routes and can
+    /// additionally show dsl-sourced and scoped entries.
+    Get {
+        /// The effective projection (default).
+        #[arg(long, conflicts_with_all = ["base", "overlay", "diff", "schema"])]
+        effective: bool,
+        /// The base projection (file + env + CLI + defaults).
+        #[arg(long, conflicts_with_all = ["overlay", "diff", "schema"])]
+        base: bool,
+        /// The runtime overlay (live-only; truthfully empty until FLOWIP-010b).
+        #[arg(long, conflicts_with_all = ["diff", "schema"])]
+        overlay: bool,
+        /// Base-versus-effective differences (live-only).
+        #[arg(long, conflicts_with = "schema")]
+        diff: bool,
+        /// The knob registry metadata (types, targets, defaults, env names).
+        #[arg(long)]
+        schema: bool,
+        /// Narrow to one flow (requires --url).
+        #[arg(long, requires = "url")]
+        flow: Option<String>,
+        /// Narrow to one stage within --flow (requires --url).
+        #[arg(long, requires = "flow")]
+        stage: Option<String>,
+        /// Query a running runtime (e.g. http://127.0.0.1:9090) instead of
+        /// resolving offline.
+        #[arg(long)]
+        url: Option<String>,
+        /// Full Authorization header value for control-plane api-key auth
+        /// (e.g. "Bearer <token>"). HMAC-signed auth is not supported here.
+        #[arg(long)]
+        auth_header: Option<String>,
+        /// Config file path (offline mode; defaults to ./obzenflow.toml
+        /// autodiscovery).
+        #[arg(long)]
+        config: Option<PathBuf>,
+    },
 }
 
 #[derive(Args)]
@@ -130,5 +189,115 @@ fn main() -> ExitCode {
                 }
             },
         },
+        Command::Config(args) => match args.command {
+            ConfigCommand::Get {
+                effective: _,
+                base,
+                overlay,
+                diff,
+                schema,
+                flow,
+                stage,
+                url,
+                auth_header,
+                config,
+            } => {
+                let view = if schema {
+                    ConfigView::Schema
+                } else if overlay {
+                    ConfigView::Overlay
+                } else if diff {
+                    ConfigView::Diff
+                } else if base {
+                    ConfigView::Base
+                } else {
+                    ConfigView::Effective
+                };
+
+                if matches!(view, ConfigView::Schema) {
+                    match serde_json::to_string_pretty(&schema_json()) {
+                        Ok(body) => {
+                            println!("{body}");
+                            return ExitCode::SUCCESS;
+                        }
+                        Err(err) => {
+                            eprintln!("config get failed: {err}");
+                            return ExitCode::from(4);
+                        }
+                    }
+                }
+
+                match url {
+                    Some(url) => {
+                        let route = live_route(view, flow.as_deref(), stage.as_deref());
+                        let target = format!("{}{route}", url.trim_end_matches('/'));
+                        let client = match live_http_client() {
+                            Ok(client) => client,
+                            Err(err) => {
+                                eprintln!("config get failed: {err}");
+                                return ExitCode::from(4);
+                            }
+                        };
+                        let mut request = client.get(&target);
+                        if let Some(header) = &auth_header {
+                            request = request.header(reqwest::header::AUTHORIZATION, header);
+                        }
+                        let response = match request.send() {
+                            Ok(response) => response,
+                            Err(err) => {
+                                eprintln!("config get failed calling {target}: {err}");
+                                return ExitCode::from(4);
+                            }
+                        };
+                        let status = response.status();
+                        if !status.is_success() {
+                            let body = response.text().unwrap_or_default();
+                            eprintln!(
+                                "config get failed: {target} returned {}: {body}",
+                                status.as_u16()
+                            );
+                            return ExitCode::from(4);
+                        }
+                        let body = match response.text() {
+                            Ok(body) => body,
+                            Err(err) => {
+                                eprintln!("config get failed reading {target}: {err}");
+                                return ExitCode::from(4);
+                            }
+                        };
+                        match parse_live_values(&body) {
+                            Ok(live) => {
+                                print!("{}", render_live(&live));
+                                ExitCode::SUCCESS
+                            }
+                            Err(err) => {
+                                eprintln!("config get failed parsing {target}: {err}");
+                                ExitCode::from(4)
+                            }
+                        }
+                    }
+                    None => match offline_docs(view, config.as_deref()) {
+                        Ok(docs) => {
+                            print!("{}", render_table(&docs));
+                            ExitCode::SUCCESS
+                        }
+                        Err(err) => {
+                            eprintln!("config get failed: {err}");
+                            ExitCode::from(4)
+                        }
+                    },
+                }
+            }
+        },
+    }
+}
+
+fn live_http_client() -> Result<reqwest::blocking::Client, String> {
+    match std::panic::catch_unwind(reqwest::blocking::Client::new) {
+        Ok(client) => Ok(client),
+        Err(_) => reqwest::blocking::Client::builder()
+            .no_proxy()
+            .build()
+            .map_err(|err| format!("building HTTP client failed: {err}")),
     }
 }

@@ -133,6 +133,9 @@ pub struct EffectInvocationContext {
     pub emit_enabled: bool,
     pub effect_boundary: Option<Arc<dyn EffectBoundary>>,
     pub boundary_control_events: Arc<Mutex<Vec<ChainEvent>>>,
+    /// FLOWIP-010 §7: build-resolved lineage policy from stage resources,
+    /// consumed as data when effect facts derive from the parent event.
+    pub lineage: obzenflow_core::config::LineagePolicy,
 }
 
 impl EffectInvocationContext {

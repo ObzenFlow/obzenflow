@@ -95,16 +95,19 @@ pub enum MiddlewareResolutionError {
     },
 }
 
-/// Resolve a stage's effective middleware list without taking ownership.
+/// Resolve a stage's effective middleware list without taking ownership,
+/// preserving each winner's declaration-site scope.
 ///
-/// This is used by topology/plan extraction code paths that need the resolved
-/// view but do not (and cannot) move the factories out of their owning
-/// stage descriptors.
-pub fn resolve_middleware_view<'a>(
+/// FLOWIP-010 §4a: a DSL-declared tunable enters the config ladder at the
+/// scope of its declaration site, so plan-contribution extraction needs the
+/// winning declaration's scope, which `resolve_middleware_view` discards.
+/// Attachment shadowing stays structural: the returned view carries exactly
+/// one winner per family.
+pub fn resolve_middleware_view_with_scope<'a>(
     flow_middleware: &'a [Box<dyn MiddlewareFactory>],
     stage_middleware: &'a [Box<dyn MiddlewareFactory>],
     stage_name: &str,
-) -> Result<Vec<&'a dyn MiddlewareFactory>, MiddlewareResolutionError> {
+) -> Result<Vec<(MiddlewareSourceScope, &'a dyn MiddlewareFactory)>, MiddlewareResolutionError> {
     let mut resolved: IndexMap<
         MiddlewareOverrideKey,
         (MiddlewareSourceScope, &'a dyn MiddlewareFactory),
@@ -141,7 +144,25 @@ pub fn resolve_middleware_view<'a>(
         resolved.insert(key, (MiddlewareSourceScope::Stage, factory.as_ref()));
     }
 
-    Ok(resolved.into_values().map(|(_, factory)| factory).collect())
+    Ok(resolved.into_values().collect())
+}
+
+/// Resolve a stage's effective middleware list without taking ownership.
+///
+/// This is used by topology/plan extraction code paths that need the resolved
+/// view but do not (and cannot) move the factories out of their owning
+/// stage descriptors.
+pub fn resolve_middleware_view<'a>(
+    flow_middleware: &'a [Box<dyn MiddlewareFactory>],
+    stage_middleware: &'a [Box<dyn MiddlewareFactory>],
+    stage_name: &str,
+) -> Result<Vec<&'a dyn MiddlewareFactory>, MiddlewareResolutionError> {
+    Ok(
+        resolve_middleware_view_with_scope(flow_middleware, stage_middleware, stage_name)?
+            .into_iter()
+            .map(|(_, factory)| factory)
+            .collect(),
+    )
 }
 
 /// Pure function that resolves middleware with full tracking

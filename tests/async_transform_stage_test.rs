@@ -326,6 +326,7 @@ async fn async_transform_routes_error_kinds_to_correct_journal() -> Result<()> {
             async_errors |> sink;
         }
     }
+    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
     .await
     .map_err(|e| anyhow::anyhow!("Failed to create flow: {e:?}"))?;
 
@@ -483,6 +484,7 @@ async fn async_transform_applies_stage_middleware() -> Result<()> {
             mw_transform |> sink;
         }
     }
+    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
     .await
     .map_err(|e| anyhow::anyhow!("Failed to create flow: {e:?}"))?;
 
@@ -535,6 +537,7 @@ async fn async_transform_drain_failure_is_stage_level_failure() -> Result<()> {
             drain_fail_transform |> sink;
         }
     }
+    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
     .await
     .map_err(|e| anyhow::anyhow!("Failed to create flow: {e:?}"))?;
 

@@ -91,6 +91,11 @@ pub trait Accumulator: Send + Sync + Debug {
     /// The accumulated state type
     type State: Clone + Send + Sync + Debug;
 
+    /// FLOWIP-010 §7: forwarded once at stage build via the emission
+    /// wrapper. Accumulators with per-bucket trace state store it; the
+    /// default ignores it.
+    fn install_lineage_policy(&mut self, _policy: obzenflow_core::config::LineagePolicy) {}
+
     /// Accumulate an event into the state.
     ///
     /// This method mutates the provided state with information from the event.

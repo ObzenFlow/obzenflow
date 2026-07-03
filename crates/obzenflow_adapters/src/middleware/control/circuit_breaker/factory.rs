@@ -158,7 +158,11 @@ impl CircuitBreakerBuilder {
     where
         F: Fn(&ChainEvent) -> Vec<ChainEvent> + Send + Sync + 'static,
     {
-        self.fallback = Some(Arc::new(f));
+        // Raw fallbacks build their own events; only the typed builders
+        // consume the build-resolved lineage policy.
+        self.fallback = Some(Arc::new(
+            move |event: &ChainEvent, _lineage: obzenflow_core::config::LineagePolicy| f(event),
+        ));
         self
     }
 
@@ -188,8 +192,10 @@ impl CircuitBreakerBuilder {
         Out: TypedPayload + Serialize + 'static,
         F: Fn(&In) -> Out + Send + Sync + 'static,
     {
-        let adapter = move |event: &ChainEvent| -> Vec<ChainEvent> {
-            build_typed_fallback_event::<In, Out, F>(&f, event)
+        let adapter = move |event: &ChainEvent,
+                            lineage: obzenflow_core::config::LineagePolicy|
+              -> Vec<ChainEvent> {
+            build_typed_fallback_event::<In, Out, F>(&f, event, lineage)
         };
 
         self.fallback = Some(Arc::new(adapter));
@@ -209,10 +215,12 @@ impl CircuitBreakerBuilder {
         R: TypedPayload + Serialize + 'static,
         F: Fn(&In, CircuitBreakerRejectionReason) -> R + Send + Sync + 'static,
     {
-        let adapter =
-            move |event: &ChainEvent, reason: CircuitBreakerRejectionReason| -> Vec<ChainEvent> {
-                build_typed_rejection_event::<In, R, F>(&f, event, reason)
-            };
+        let adapter = move |event: &ChainEvent,
+                            reason: CircuitBreakerRejectionReason,
+                            lineage: obzenflow_core::config::LineagePolicy|
+              -> Vec<ChainEvent> {
+            build_typed_rejection_event::<In, R, F>(&f, event, reason, lineage)
+        };
 
         self.typed_outcome = Some(TypedOutcomeConfig {
             build_rejection: Arc::new(adapter),
@@ -239,8 +247,10 @@ impl CircuitBreakerBuilder {
         In: TypedPayload + DeserializeOwned,
         F: Fn(&In) -> E::Outcome + Send + Sync + 'static,
     {
-        let adapter = move |event: &ChainEvent| -> Vec<ChainEvent> {
-            build_outcome_fallback_events::<E, In, F>(&f, event)
+        let adapter = move |event: &ChainEvent,
+                            lineage: obzenflow_core::config::LineagePolicy|
+              -> Vec<ChainEvent> {
+            build_outcome_fallback_events::<E, In, F>(&f, event, lineage)
         };
 
         self.fallback = Some(Arc::new(adapter));
@@ -584,15 +594,6 @@ impl CircuitBreakerFactory {
         }
     }
 
-    fn validated_threshold(&self) -> Result<NonZeroU32, CircuitBreakerThresholdError> {
-        u32::try_from(self.threshold)
-            .ok()
-            .and_then(NonZeroU32::new)
-            .ok_or(CircuitBreakerThresholdError::InvalidThreshold {
-                threshold: self.threshold,
-            })
-    }
-
     /// Set the cooldown duration before attempting to close the circuit
     pub fn with_cooldown(mut self, duration: Duration) -> Self {
         self.cooldown = duration;
@@ -604,7 +605,11 @@ impl CircuitBreakerFactory {
     where
         F: Fn(&ChainEvent) -> Vec<ChainEvent> + Send + Sync + 'static,
     {
-        self.fallback = Some(Arc::new(f));
+        // Raw fallbacks build their own events; only the typed builders
+        // consume the build-resolved lineage policy.
+        self.fallback = Some(Arc::new(
+            move |event: &ChainEvent, _lineage: obzenflow_core::config::LineagePolicy| f(event),
+        ));
         self
     }
 
@@ -780,9 +785,23 @@ impl CircuitBreakerFactory {
         control_middleware: std::sync::Arc<ControlMiddlewareAggregator>,
         effect_type: Option<EffectTypeKey>,
     ) -> crate::middleware::MiddlewareFactoryResult<CircuitBreakerMiddleware> {
-        let validated_threshold = self.validated_threshold().map_err(|err| {
-            MiddlewareFactoryError::invalid_configuration(self.label(), &config.name, err)
-        })?;
+        // FLOWIP-010: the build-resolved `effects.circuit_breaker.threshold`
+        // winner overrides the DSL-declared parameter (the ladder already
+        // ranked the sources; absence means the DSL value stands).
+        let effective_threshold = config
+            .resolved_policies
+            .breaker_threshold
+            .map(|t| t as usize)
+            .unwrap_or(self.threshold);
+        let validated_threshold = u32::try_from(effective_threshold)
+            .ok()
+            .and_then(std::num::NonZeroU32::new)
+            .ok_or(CircuitBreakerThresholdError::InvalidThreshold {
+                threshold: effective_threshold,
+            })
+            .map_err(|err| {
+                MiddlewareFactoryError::invalid_configuration(self.label(), &config.name, err)
+            })?;
 
         // Determine failure mode; default to a consecutive-failure threshold
         // equal to `threshold` when not explicitly configured.
@@ -817,7 +836,7 @@ impl CircuitBreakerFactory {
         let unknown_error_kind_policy = self.unknown_error_kind_policy;
 
         let mut middleware = CircuitBreakerMiddleware::with_cooldown_and_fallback(
-            self.threshold,
+            effective_threshold,
             self.cooldown,
             self.fallback.clone(),
             self.failure_classifier.clone(),
@@ -827,6 +846,7 @@ impl CircuitBreakerFactory {
         middleware.failure_mode = failure_mode;
         middleware.rate_window = rate_window;
         middleware.typed_outcome = self.typed_outcome.clone();
+        middleware.lineage = config.lineage;
         middleware.open_policy = open_policy;
         middleware.half_open_policy = half_open_policy;
         middleware.unknown_error_kind_policy = unknown_error_kind_policy;
@@ -945,7 +965,9 @@ impl MiddlewareFactory for CircuitBreakerFactory {
     }
 
     fn plan_contribution(&self) -> MiddlewarePlanContribution {
-        MiddlewarePlanContribution::None
+        MiddlewarePlanContribution::CircuitBreaker {
+            threshold: self.threshold as u64,
+        }
     }
 
     fn topology_config_slot(&self) -> Option<TopologyMiddlewareConfigSlot> {

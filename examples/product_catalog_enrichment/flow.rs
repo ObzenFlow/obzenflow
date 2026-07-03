@@ -254,7 +254,9 @@ fn run_flow_in_tests(
         .map_err(|e| anyhow::anyhow!("Failed to create runtime: {e:?}"))?;
 
     runtime.block_on(async move {
-        let handle = flow.await?;
+        let handle = flow
+            .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+            .await?;
         handle
             .run()
             .await

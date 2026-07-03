@@ -309,6 +309,9 @@ pub(crate) struct TransformContext<H: UnifiedTransformHandler> {
     /// Writer ID for this transform (initialized during setup)
     pub writer_id: Option<WriterId>,
 
+    /// FLOWIP-010 §7: build-resolved lineage policy from stage resources.
+    pub lineage_policy: obzenflow_core::config::LineagePolicy,
+
     /// Subscription to upstream events
     pub subscription: Option<UpstreamSubscription<ChainEvent>>,
 

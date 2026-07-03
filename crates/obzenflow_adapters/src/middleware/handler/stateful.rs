@@ -60,6 +60,10 @@ where
 {
     type State = H::State;
 
+    fn install_lineage_policy(&mut self, policy: obzenflow_core::config::LineagePolicy) {
+        StatefulHandler::install_lineage_policy(&mut self.inner, policy)
+    }
+
     async fn accumulate(
         &mut self,
         state: &mut Self::State,

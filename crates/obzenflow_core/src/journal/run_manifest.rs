@@ -39,6 +39,10 @@ pub struct RunManifest {
     pub resume: Option<RunManifestResumeConfig>,
     pub stages: HashMap<String, RunManifestStage>,
     pub system_journal_file: String,
+    /// FLOWIP-010 §6a: redacted effective config with provenance, recorded
+    /// at flow build. Optional + default so pre-010 archives deserialize.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effective_config: Option<crate::config::EffectiveConfigEvidence>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

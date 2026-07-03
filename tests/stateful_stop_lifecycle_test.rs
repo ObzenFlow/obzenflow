@@ -229,6 +229,7 @@ async fn stop_infinite_source_reports_cancelled() -> Result<()> {
             src |> snk;
         }
     }
+    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
     .await
     .map_err(|e| anyhow!("Failed to create flow: {e:?}"))?;
 
@@ -283,6 +284,7 @@ async fn stop_finite_source_reports_cancelled() -> Result<()> {
             src |> snk;
         }
     }
+    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
     .await
     .map_err(|e| anyhow!("Failed to create flow: {e:?}"))?;
 
@@ -336,6 +338,7 @@ async fn stop_cancel_timeout_overrides_cancel_reason() -> Result<()> {
             src |> snk;
         }
     }
+    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
     .await
     .map_err(|e| anyhow!("Failed to create flow: {e:?}"))?;
 

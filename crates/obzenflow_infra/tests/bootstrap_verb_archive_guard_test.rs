@@ -61,6 +61,7 @@ async fn installed_replay_verb_without_opened_archive_fails_the_build() {
             src |> snk;
         }
     }
+    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
     .await
     .err()
     .expect("an installed verb without an opened archive must fail the build");

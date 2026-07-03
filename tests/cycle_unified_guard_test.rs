@@ -254,6 +254,7 @@ async fn cycle_guard_rejects_cycles_with_non_transform_members() {
             tr |> snk;
         }
     }
+    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
     .await;
 
     let err = match result {
@@ -297,6 +298,7 @@ async fn cycle_guard_rejects_stateful_emit_within_cycle() {
             tr |> snk;
         }
     }
+    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
     .await;
 
     let err = match result {
@@ -334,6 +336,7 @@ async fn cycle_guard_bounds_flow_signal_backflow() -> Result<()> {
             b |> snk;
         }
     }
+    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
     .await
     .map_err(|e| anyhow::anyhow!("failed to create flow: {e}"))?;
 

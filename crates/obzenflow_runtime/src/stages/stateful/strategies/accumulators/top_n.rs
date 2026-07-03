@@ -80,6 +80,7 @@ pub struct TopN<F> {
     n: usize,
     extractor: F,
     writer_id: WriterId,
+    lineage: obzenflow_core::config::LineagePolicy,
 }
 
 impl<F> TopN<F> {
@@ -96,6 +97,7 @@ impl<F> TopN<F> {
             n,
             extractor,
             writer_id: WriterId::from(StageId::new()),
+            lineage: obzenflow_core::config::LineagePolicy::default(),
         }
     }
 }
@@ -118,6 +120,7 @@ where
             n: self.n,
             extractor: self.extractor.clone(),
             writer_id: self.writer_id,
+            lineage: self.lineage,
         }
     }
 }
@@ -138,6 +141,10 @@ where
 {
     type State = TopNState;
 
+    fn install_lineage_policy(&mut self, policy: obzenflow_core::config::LineagePolicy) {
+        self.lineage = policy;
+    }
+
     fn accumulate(&self, state: &mut Self::State, event: ChainEvent) {
         // Extract key, score, and metadata from the event
         if let Some((key, score, metadata)) = (self.extractor)(&event) {
@@ -149,7 +156,7 @@ where
 
             // Add to heap
             state.items.push(Reverse(item));
-            state.trace.record_event(&event);
+            state.trace.record_event(&event, self.lineage);
 
             // If we exceed capacity, remove the lowest score item
             if state.items.len() > state.capacity {
@@ -415,6 +422,7 @@ where
     key_fn: FKey,
     score_fn: FScore,
     writer_id: WriterId,
+    lineage: obzenflow_core::config::LineagePolicy,
     _phantom: PhantomData<(T, K)>,
 }
 
@@ -442,6 +450,7 @@ where
             key_fn,
             score_fn,
             writer_id: WriterId::from(StageId::new()),
+            lineage: obzenflow_core::config::LineagePolicy::default(),
             _phantom: PhantomData,
         }
     }
@@ -533,6 +542,10 @@ where
 {
     type State = TopNTypedState;
 
+    fn install_lineage_policy(&mut self, policy: obzenflow_core::config::LineagePolicy) {
+        self.lineage = policy;
+    }
+
     fn accumulate(&self, state: &mut Self::State, event: ChainEvent) {
         // Step 1: Deserialize ChainEvent → T
         let input: T = match serde_json::from_value(event.payload().clone()) {
@@ -558,7 +571,7 @@ where
 
         // Step 4: Insert/replace in the map (deduplication)
         state.items.insert(key_str, (score, key_value, serialized));
-        state.trace.record_event(&event);
+        state.trace.record_event(&event, self.lineage);
 
         // Step 5: If we exceed capacity, remove the item with lowest score
         if state.items.len() > state.capacity {

@@ -17,8 +17,13 @@ fn derived_event_propagates_cycle_state() {
     parent.cycle_depth = Some(CycleDepth::new(7));
     parent.cycle_scc_id = Some(test_scc_id(42));
 
-    let child =
-        ChainEventFactory::derived_data_event(writer_id, &parent, "test.child", json!({"x": 2}));
+    let child = ChainEventFactory::derived_data_event(
+        writer_id,
+        &parent,
+        "test.child",
+        json!({"x": 2}),
+        obzenflow_core::config::LineagePolicy::default(),
+    );
 
     assert_eq!(child.cycle_depth, Some(CycleDepth::new(7)));
     assert_eq!(child.cycle_scc_id, Some(test_scc_id(42)));

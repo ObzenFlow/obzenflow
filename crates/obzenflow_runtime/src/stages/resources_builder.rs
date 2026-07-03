@@ -28,6 +28,10 @@ use obzenflow_topology::Topology;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+/// Registry default for `runtime.heartbeat_interval` (FLOWIP-010): events
+/// between stateful/join heartbeats when the build supplies no value.
+pub const DEFAULT_HEARTBEAT_INTERVAL: u64 = 1000;
+
 /// Factory for creating subscriptions with pre-computed metadata
 /// This allows deferred subscription creation with the correct journal subsets
 #[derive(Clone)]
@@ -284,6 +288,14 @@ pub struct StageResources {
     /// so its subscription compares by the recorded admission sequence and
     /// needs no Kahn wait on a quiet input.
     pub seq_ordered_fan_in: bool,
+
+    /// FLOWIP-010 §7: build-resolved lineage policy for this stage, consumed
+    /// as data by the event factories (no global read on the data path).
+    pub lineage_policy: obzenflow_core::config::LineagePolicy,
+
+    /// FLOWIP-010: build-resolved `runtime.heartbeat_interval` for this
+    /// stage (events between heartbeats; 0 disables).
+    pub heartbeat_interval: u64,
 }
 
 /// Builder for creating all stage resources with proper wiring
@@ -300,6 +312,11 @@ pub struct StageResourcesBuilder {
     feed_plan: FeedPlan,
     deterministic_fan_in_stages: HashSet<StageId>,
     seq_ordered_fan_ins: HashSet<StageId>,
+    /// FLOWIP-010 §7: build-resolved per-stage lineage policy, threaded into
+    /// stage resources so the event factories consume it as data.
+    lineage_policies: HashMap<StageId, obzenflow_core::config::LineagePolicy>,
+    /// FLOWIP-010: build-resolved per-stage heartbeat interval.
+    heartbeat_intervals: HashMap<StageId, u64>,
 }
 
 impl StageResourcesBuilder {
@@ -325,12 +342,31 @@ impl StageResourcesBuilder {
             feed_plan: FeedPlan::default(),
             deterministic_fan_in_stages: HashSet::new(),
             seq_ordered_fan_ins: HashSet::new(),
+            lineage_policies: HashMap::new(),
+            heartbeat_intervals: HashMap::new(),
         }
     }
 
     /// Configure a flow-scoped backpressure plan (FLOWIP-086k).
     pub fn with_backpressure_plan(mut self, plan: BackpressurePlan) -> Self {
         self.backpressure_plan = plan;
+        self
+    }
+
+    /// Thread the build-resolved per-stage lineage policies (FLOWIP-010 §7).
+    /// Stages absent from the map fall back to the built-in default.
+    pub fn with_lineage_policies(
+        mut self,
+        policies: HashMap<StageId, obzenflow_core::config::LineagePolicy>,
+    ) -> Self {
+        self.lineage_policies = policies;
+        self
+    }
+
+    /// Thread the build-resolved per-stage heartbeat intervals (FLOWIP-010).
+    /// Stages absent from the map fall back to the built-in default.
+    pub fn with_heartbeat_intervals(mut self, intervals: HashMap<StageId, u64>) -> Self {
+        self.heartbeat_intervals = intervals;
         self
     }
 
@@ -615,6 +651,16 @@ impl StageResourcesBuilder {
                 synthesized_outcomes: Vec::new(),
                 deterministic_fan_in,
                 seq_ordered_fan_in,
+                lineage_policy: self
+                    .lineage_policies
+                    .get(&stage_id)
+                    .copied()
+                    .unwrap_or_default(),
+                heartbeat_interval: self
+                    .heartbeat_intervals
+                    .get(&stage_id)
+                    .copied()
+                    .unwrap_or(DEFAULT_HEARTBEAT_INTERVAL),
             };
 
             tracing::debug!(

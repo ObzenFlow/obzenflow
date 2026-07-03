@@ -21,9 +21,6 @@ use serde::{de::DeserializeOwned, Serialize};
 use serde_json::Value;
 use std::sync::Arc;
 
-const ENV_PROVIDER: &str = "OBZENFLOW_AI_PROVIDER";
-const ENV_MODEL: &str = "OBZENFLOW_AI_MODEL";
-
 const ENV_OPENAI_API_KEY: &str = "OPENAI_API_KEY";
 const ENV_OPENAI_BASE_URL: &str = "OPENAI_BASE_URL";
 const ENV_OLLAMA_BASE_URL: &str = "OLLAMA_BASE_URL";
@@ -108,30 +105,87 @@ impl ModelConfig {
         }
     }
 
-    pub fn from_env() -> anyhow::Result<Self> {
-        Self::from_env_inner(None)
+    /// Build from the resolved `ai.models.*` section (FLOWIP-010). The
+    /// provider token is registry-validated; the API key resolves through
+    /// the visible `SecretRef` name at this point of use only.
+    pub fn from_config(
+        config: &obzenflow_runtime::runtime_config::AiModelsConfig,
+    ) -> anyhow::Result<Self> {
+        let provider_raw = config.provider.value.as_str();
+        let provider_kind = parse_provider(provider_raw).ok_or_else(|| {
+            anyhow!("unsupported ai.models.provider='{provider_raw}' (expected 'ollama', 'openai', or 'openai_compatible')")
+        })?;
+
+        let model = config
+            .model
+            .as_ref()
+            .map(|resolved| resolved.value.clone())
+            .unwrap_or_else(|| provider_kind.default_model().to_string());
+        let profile = resolve_chat_model_profile(model.as_str());
+
+        let base_url = config
+            .base_url
+            .as_ref()
+            .map(|resolved| resolved.value.clone());
+        let resolve_api_key = || -> anyhow::Result<String> {
+            let secret = config.api_key_env.value.resolve().map_err(|err| {
+                anyhow!(
+                    "ai.models.api_key_env: {err} (required when ai.models.provider={})",
+                    provider_kind.as_str()
+                )
+            })?;
+            Ok(secret.expose().to_string())
+        };
+
+        let provider = match provider_kind {
+            ProviderKind::Ollama => {
+                if let Some(url) = &base_url {
+                    Url::parse(url.as_str())
+                        .map_err(|err| anyhow!("invalid ai.models.base_url: {err}"))?;
+                }
+                ProviderConfig::Ollama { base_url }
+            }
+            ProviderKind::OpenAi => ProviderConfig::OpenAi {
+                api_key: resolve_api_key()?,
+            },
+            ProviderKind::OpenAiCompatible => {
+                let base_url = base_url.ok_or_else(|| {
+                    anyhow!(
+                        "ai.models.base_url is required when ai.models.provider={}",
+                        provider_kind.as_str()
+                    )
+                })?;
+                Url::parse(base_url.as_str())
+                    .map_err(|err| anyhow!("invalid ai.models.base_url: {err}"))?;
+
+                ProviderConfig::OpenAiCompatible {
+                    api_key: resolve_api_key()?,
+                    base_url,
+                }
+            }
+        };
+
+        Ok(Self { profile, provider })
     }
 
+    /// Build from example-local environment names (`<PREFIX>PROVIDER`,
+    /// `<PREFIX>MODEL`, plus the standard `OPENAI_API_KEY` /
+    /// `OPENAI_BASE_URL` / `OLLAMA_BASE_URL` value variables). Framework
+    /// configuration goes through `from_config`; the killed
+    /// `OBZENFLOW_AI_*` fallbacks are gone.
     pub fn from_env_with_prefix(prefix: &str) -> anyhow::Result<Self> {
-        Self::from_env_inner(Some(prefix))
-    }
-
-    fn from_env_inner(prefix: Option<&str>) -> anyhow::Result<Self> {
-        let provider_var = prefixed_env_name(prefix, "PROVIDER");
-        let model_var = prefixed_env_name(prefix, "MODEL");
+        let provider_var = prefixed_env_name(Some(prefix), "PROVIDER");
+        let model_var = prefixed_env_name(Some(prefix), "MODEL");
 
         let (provider_var_name, provider_raw) =
-            resolve_provider_value(provider_var.as_deref(), ENV_PROVIDER, DEFAULT_PROVIDER);
+            resolve_named_value(provider_var.as_deref(), DEFAULT_PROVIDER);
 
         let provider_kind = parse_provider(provider_raw.as_str()).ok_or_else(|| {
             anyhow!("unsupported {provider_var_name}='{provider_raw}' (expected 'ollama', 'openai', or 'openai_compatible')")
         })?;
 
-        let (_model_var_name, model) = resolve_value(
-            model_var.as_deref(),
-            ENV_MODEL,
-            provider_kind.default_model(),
-        );
+        let (_model_var_name, model) =
+            resolve_named_value(model_var.as_deref(), provider_kind.default_model());
 
         let profile = resolve_chat_model_profile(model.as_str());
 
@@ -704,89 +758,121 @@ fn env_value(name: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-fn resolve_value(primary: Option<&str>, fallback: &str, default: &str) -> (String, String) {
-    if let Some(name) = primary {
+fn resolve_named_value(name: Option<&str>, default: &str) -> (String, String) {
+    if let Some(name) = name {
         if let Some(value) = env_value(name) {
             return (name.to_string(), value);
         }
+        return (name.to_string(), default.to_string());
     }
-
-    if let Some(value) = env_value(fallback) {
-        return (fallback.to_string(), value);
-    }
-
-    (fallback.to_string(), default.to_string())
-}
-
-fn resolve_provider_value(
-    primary: Option<&str>,
-    fallback: &str,
-    default: &str,
-) -> (String, String) {
-    resolve_value(primary, fallback, default)
+    ("<unset>".to_string(), default.to_string())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_support::{env_lock, EnvGuard};
+    use obzenflow_core::config::{ConfigScope, ConfigSource, ConfigValueMeta, SecretRef};
+    use obzenflow_runtime::runtime_config::{AiModelsConfig, Resolved};
+
+    fn resolved<T>(value: T) -> Resolved<T> {
+        Resolved {
+            value,
+            meta: ConfigValueMeta {
+                key_path: "ai.models.test".to_string(),
+                source: ConfigSource::Default,
+                scope: ConfigScope::Global,
+            },
+        }
+    }
+
+    fn ai_config(
+        provider: &str,
+        model: Option<&str>,
+        base_url: Option<&str>,
+        api_key_env: &str,
+    ) -> AiModelsConfig {
+        AiModelsConfig {
+            provider: resolved(provider.to_string()),
+            model: model.map(|m| resolved(m.to_string())),
+            base_url: base_url.map(|b| resolved(b.to_string())),
+            api_key_env: resolved(SecretRef::new(api_key_env)),
+        }
+    }
 
     #[test]
-    fn from_env_defaults_to_ollama() {
-        let _lock = env_lock();
-        let guard = EnvGuard::new(&[
-            ENV_PROVIDER,
-            ENV_MODEL,
-            ENV_OPENAI_API_KEY,
-            ENV_OPENAI_BASE_URL,
-            ENV_OLLAMA_BASE_URL,
-        ]);
-        guard.remove(ENV_PROVIDER);
-        guard.remove(ENV_MODEL);
-        guard.remove(ENV_OPENAI_API_KEY);
-        guard.remove(ENV_OPENAI_BASE_URL);
-        guard.remove(ENV_OLLAMA_BASE_URL);
-
-        let ai = ModelConfig::from_env().expect("should construct defaults");
+    fn from_config_defaults_to_provider_default_model() {
+        let ai = ModelConfig::from_config(&ai_config("ollama", None, None, "OPENAI_API_KEY"))
+            .expect("should construct defaults");
         assert_eq!(ai.provider_label(), "ollama");
         assert_eq!(ai.model_label(), DEFAULT_MODEL_OLLAMA);
     }
 
     #[test]
-    fn from_env_openai_requires_openai_api_key() {
+    fn from_config_openai_requires_resolvable_api_key() {
         let _lock = env_lock();
-        let guard = EnvGuard::new(&[
-            ENV_PROVIDER,
-            ENV_OPENAI_API_KEY,
-            ENV_OPENAI_BASE_URL,
-            ENV_OLLAMA_BASE_URL,
-        ]);
-        guard.set(ENV_PROVIDER, "openai");
-        guard.remove(ENV_OPENAI_API_KEY);
-        guard.remove(ENV_OPENAI_BASE_URL);
-        guard.remove(ENV_OLLAMA_BASE_URL);
+        let guard = EnvGuard::new(&["OBZENFLOW_TEST_MISSING_KEY"]);
+        guard.remove("OBZENFLOW_TEST_MISSING_KEY");
 
-        let err = ModelConfig::from_env().expect_err("should reject missing api key");
+        let err = ModelConfig::from_config(&ai_config(
+            "openai",
+            None,
+            None,
+            "OBZENFLOW_TEST_MISSING_KEY",
+        ))
+        .expect_err("should reject missing api key");
         let message = err.to_string();
-        assert!(message.contains("OPENAI_API_KEY is required when OBZENFLOW_AI_PROVIDER=openai"));
+        assert!(message.contains("ai.models.api_key_env"));
+        assert!(message.contains("OBZENFLOW_TEST_MISSING_KEY"));
     }
 
     #[test]
-    fn from_env_with_prefix_prefers_prefixed_provider_and_model() {
+    fn from_config_openai_compatible_requires_base_url() {
+        let _lock = env_lock();
+        let guard = EnvGuard::new(&["OBZENFLOW_TEST_PRESENT_KEY"]);
+        guard.set("OBZENFLOW_TEST_PRESENT_KEY", "sk-test");
+
+        let err = ModelConfig::from_config(&ai_config(
+            "openai_compatible",
+            None,
+            None,
+            "OBZENFLOW_TEST_PRESENT_KEY",
+        ))
+        .expect_err("should require base url");
+        assert!(err
+            .to_string()
+            .contains("ai.models.base_url is required when ai.models.provider=openai_compatible"));
+    }
+
+    #[test]
+    fn from_config_resolves_secret_at_point_of_use() {
+        let _lock = env_lock();
+        let guard = EnvGuard::new(&["OBZENFLOW_TEST_COMPAT_KEY"]);
+        guard.set("OBZENFLOW_TEST_COMPAT_KEY", "sk-compat");
+
+        let ai = ModelConfig::from_config(&ai_config(
+            "openai_compatible",
+            Some("llama3.1:8b"),
+            Some("http://localhost:11434/v1"),
+            "OBZENFLOW_TEST_COMPAT_KEY",
+        ))
+        .expect("should construct");
+        assert_eq!(ai.provider_label(), "openai_compatible");
+        assert_eq!(ai.model_label(), "llama3.1:8b");
+    }
+
+    #[test]
+    fn from_env_with_prefix_reads_prefixed_provider_and_model() {
         let _lock = env_lock();
         let guard = EnvGuard::new(&[
             "TEST_AI_PROVIDER",
             "TEST_AI_MODEL",
-            ENV_PROVIDER,
-            ENV_MODEL,
             ENV_OPENAI_API_KEY,
             ENV_OPENAI_BASE_URL,
             ENV_OLLAMA_BASE_URL,
         ]);
         guard.set("TEST_AI_PROVIDER", "ollama");
         guard.set("TEST_AI_MODEL", "llama3.1:8b");
-        guard.remove(ENV_PROVIDER);
-        guard.remove(ENV_MODEL);
         guard.remove(ENV_OPENAI_API_KEY);
         guard.remove(ENV_OPENAI_BASE_URL);
         guard.remove(ENV_OLLAMA_BASE_URL);
@@ -803,14 +889,12 @@ mod tests {
         let guard = EnvGuard::new(&[
             "TEST_AI_PROVIDER",
             "TEST_AI_OPENAI_API_KEY",
-            ENV_PROVIDER,
             ENV_OPENAI_API_KEY,
             ENV_OPENAI_BASE_URL,
             ENV_OLLAMA_BASE_URL,
         ]);
         guard.set("TEST_AI_PROVIDER", "openai");
         guard.set("TEST_AI_OPENAI_API_KEY", "sk-prefixed");
-        guard.remove(ENV_PROVIDER);
         guard.remove(ENV_OPENAI_API_KEY);
         guard.remove(ENV_OPENAI_BASE_URL);
         guard.remove(ENV_OLLAMA_BASE_URL);
@@ -819,25 +903,5 @@ mod tests {
             .expect_err("should still require OPENAI_API_KEY");
         let message = err.to_string();
         assert!(message.contains("OPENAI_API_KEY is required when TEST_AI_PROVIDER=openai"));
-    }
-
-    #[test]
-    fn from_env_openai_compatible_requires_openai_base_url() {
-        let _lock = env_lock();
-        let guard = EnvGuard::new(&[
-            ENV_PROVIDER,
-            ENV_OPENAI_API_KEY,
-            ENV_OPENAI_BASE_URL,
-            ENV_OLLAMA_BASE_URL,
-        ]);
-        guard.set(ENV_PROVIDER, "openai_compatible");
-        guard.set(ENV_OPENAI_API_KEY, "sk-test");
-        guard.remove(ENV_OPENAI_BASE_URL);
-        guard.remove(ENV_OLLAMA_BASE_URL);
-
-        let err = ModelConfig::from_env().expect_err("should require base url");
-        let message = err.to_string();
-        assert!(message
-            .contains("OPENAI_BASE_URL is required when OBZENFLOW_AI_PROVIDER=openai_compatible"));
     }
 }

@@ -126,6 +126,7 @@ pub struct CollectByInput<Partial, Collected> {
     manifest_hook: Option<ManifestHook<Collected>>,
     job_ttl: Duration,
     max_open_jobs: usize,
+    lineage: obzenflow_core::config::LineagePolicy,
     _phantom: PhantomData<Partial>,
 }
 
@@ -153,6 +154,7 @@ impl<Partial, Collected> CollectByInput<Partial, Collected> {
             manifest_hook: None,
             job_ttl: DEFAULT_JOB_TTL,
             max_open_jobs: DEFAULT_MAX_OPEN_JOBS,
+            lineage: obzenflow_core::config::LineagePolicy::default(),
             _phantom: PhantomData,
         }
     }
@@ -194,6 +196,7 @@ impl<Partial, Collected> CollectByInput<Partial, Collected> {
             manifest_hook: _,
             job_ttl,
             max_open_jobs,
+            lineage,
             _phantom: _,
         } = self;
 
@@ -236,6 +239,7 @@ impl<Partial, Collected> CollectByInput<Partial, Collected> {
 
         out.job_ttl = job_ttl;
         out.max_open_jobs = max_open_jobs;
+        out.lineage = lineage;
         out
     }
 
@@ -287,9 +291,14 @@ impl<Partial, Collected> CollectByInput<Partial, Collected> {
 
         let payload =
             serde_json::to_value(payload).unwrap_or_else(|_| json!({ "job_key": job_key }));
-        let error_event =
-            ChainEventFactory::derived_data_event(parent.writer_id, parent, event_type, payload)
-                .mark_as_error(reason, kind);
+        let error_event = ChainEventFactory::derived_data_event(
+            parent.writer_id,
+            parent,
+            event_type,
+            payload,
+            self.lineage,
+        )
+        .mark_as_error(reason, kind);
         state.pending_errors.push_back(error_event);
 
         state.jobs.remove(&job_key);
@@ -391,6 +400,10 @@ where
     Collected: Clone + Serialize + TypedPayload + Send + Sync + 'static,
 {
     type State = CollectByInputState<Partial, Collected>;
+
+    fn install_lineage_policy(&mut self, policy: obzenflow_core::config::LineagePolicy) {
+        self.lineage = policy;
+    }
 
     fn accumulate(&mut self, state: &mut Self::State, event: ChainEvent) {
         let ChainEventContent::Data { event_type, .. } = &event.content else {
@@ -682,6 +695,7 @@ where
                 &job.lineage_parent,
                 event_type,
                 payload,
+                self.lineage,
             );
 
             return Ok(vec![out]);
@@ -740,6 +754,7 @@ where
                         &job.lineage_parent,
                         event_type,
                         payload,
+                        self.lineage,
                     ));
                     continue;
                 }
@@ -764,6 +779,7 @@ where
                     &job.lineage_parent,
                     JOB_FAILED_EVENT_TYPE,
                     payload,
+                    self.lineage,
                 )
                 .mark_as_error(
                     "ai_map_reduce: job incomplete at drain",

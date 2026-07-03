@@ -176,7 +176,9 @@ macro_rules! flow {
             )*
         }
     } => {{
-        $crate::FlowDefinition::new(async move {
+        // FLOWIP-010 §7: the build receives the resolved config snapshot as
+        // an explicit input; a context-less build no longer exists.
+        $crate::FlowDefinition::new(move |__build_ctx: obzenflow_runtime::run_context::FlowBuildContext| async move {
             use $crate::prelude::*;
             use $crate::dsl::stage_descriptor::*;
             use std::collections::HashMap;
@@ -230,7 +232,8 @@ macro_rules! flow {
                 connections,
                 create_flow_middleware,
                 lowering_artifacts,
-                effect_ports = effect_ports
+                effect_ports = effect_ports,
+                context = __build_ctx
             )
         })
     }};
@@ -251,7 +254,9 @@ macro_rules! flow {
             )*
         }
     } => {{
-        $crate::FlowDefinition::new(async move {
+        // FLOWIP-010 §7: the build receives the resolved config snapshot as
+        // an explicit input; a context-less build no longer exists.
+        $crate::FlowDefinition::new(move |__build_ctx: obzenflow_runtime::run_context::FlowBuildContext| async move {
             use $crate::prelude::*;
             use $crate::dsl::stage_descriptor::*;
             use std::collections::HashMap;
@@ -305,7 +310,8 @@ macro_rules! flow {
                 connections,
                 create_flow_middleware,
                 lowering_artifacts,
-                effect_ports = effect_ports
+                effect_ports = effect_ports,
+                context = __build_ctx
             )
         })
     }};
@@ -369,6 +375,10 @@ macro_rules! test_flow {
                     ]
                 };
 
+            // Explicit built-in-defaults context: test_flow! builds without
+            // a host (FLOWIP-010 §7).
+            let __build_ctx = obzenflow_runtime::run_context::FlowBuildContext::for_tests();
+
             $crate::build_typed_flow!(
                 $flow_name,
                 journals,
@@ -377,6 +387,7 @@ macro_rules! test_flow {
                 create_flow_middleware,
                 lowering_artifacts,
                 effect_ports = effect_ports,
+                context = __build_ctx,
                 finish: |handle, stage_data_journals| {
                     obzenflow_runtime::testing::FlowTestHarness::from_parts(handle, stage_data_journals)
                         .map_err(|e| $crate::dsl::FlowBuildError::StageResourcesFailed(format!(
@@ -425,30 +436,7 @@ macro_rules! test_flow {
 /// Build the actual flow from collected stages and connections
 #[macro_export]
 macro_rules! build_typed_flow {
-    ($flow_name:expr, $journals:expr, $stages:expr, $connections:expr, $create_flow_middleware:expr) => {{
-        $crate::build_typed_flow!(
-            $flow_name,
-            $journals,
-            $stages,
-            $connections,
-            $create_flow_middleware,
-            $crate::dsl::composites::LoweringArtifacts::default()
-        )
-    }};
-
-    ($flow_name:expr, $journals:expr, $stages:expr, $connections:expr, $create_flow_middleware:expr, $lowering_artifacts:expr) => {{
-        $crate::build_typed_flow!(
-            $flow_name,
-            $journals,
-            $stages,
-            $connections,
-            $create_flow_middleware,
-            $lowering_artifacts,
-            effect_ports = ::obzenflow_runtime::effects::EffectPortRegistry::new()
-        )
-    }};
-
-    ($flow_name:expr, $journals:expr, $stages:expr, $connections:expr, $create_flow_middleware:expr, $lowering_artifacts:expr, effect_ports = $effect_ports:expr) => {{
+    ($flow_name:expr, $journals:expr, $stages:expr, $connections:expr, $create_flow_middleware:expr, $lowering_artifacts:expr, effect_ports = $effect_ports:expr, context = $build_ctx:expr) => {{
         $crate::build_typed_flow!(
             $flow_name,
             $journals,
@@ -457,11 +445,12 @@ macro_rules! build_typed_flow {
             $create_flow_middleware,
             $lowering_artifacts,
             effect_ports = $effect_ports,
+            context = $build_ctx,
             finish: |handle, _stage_data_journals| Ok::<FlowHandle, FlowBuildError>(handle)
         )
     }};
 
-    ($flow_name:expr, $journals:expr, $stages:expr, $connections:expr, $create_flow_middleware:expr, $lowering_artifacts:expr, effect_ports = $effect_ports:expr, finish: $finish:expr) => {{
+    ($flow_name:expr, $journals:expr, $stages:expr, $connections:expr, $create_flow_middleware:expr, $lowering_artifacts:expr, effect_ports = $effect_ports:expr, context = $build_ctx:expr, finish: $finish:expr) => {{
         use $crate::prelude::*;
         use $crate::dsl::FlowBuildError;
         use std::collections::{HashMap, HashSet};
@@ -503,6 +492,8 @@ macro_rules! build_typed_flow {
         let connections = $connections;
         let create_flow_middleware = $create_flow_middleware;
         let lowering_artifacts = $lowering_artifacts;
+        // FLOWIP-010 §7: the resolved snapshot arrives as build input.
+        let __runtime_config = $build_ctx.runtime_config().clone();
 
         // FLOWIP-120u F2: pair the build result with the substrate state known
         // at the failure point. Set once at the factory seam; None means the
@@ -641,14 +632,16 @@ macro_rules! build_typed_flow {
             }
         }
 
-        // Add connections from the DSL (|> and <|) with correct EdgeKind
-        for (from, to, kind) in connections {
+        // Add connections from the DSL (|> and <|) with correct EdgeKind.
+        // Borrowed: `connections` is consumed again by the FLOWIP-010 config
+        // phase and the backpressure materialization below.
+        for (from, to, kind) in &connections {
             if let (Some(&from_id), Some(&to_id)) =
-                (name_to_id.get(&from), name_to_id.get(&to)) {
+                (name_to_id.get(from), name_to_id.get(to)) {
                 topology_edges.push(DirectedEdge::new(
                     to_topology_id(from_id),
                     to_topology_id(to_id),
-                    kind,
+                    *kind,
                 ));
             }
         }
@@ -853,40 +846,209 @@ macro_rules! build_typed_flow {
             scc_entry_points.insert(*scc_id, entry_points[0]);
         }
 
-        use obzenflow_runtime::pipeline::MaxIterations;
-        let cycle_max_iterations: MaxIterations = match std::env::var("OBZENFLOW_CYCLE_MAX_ITERATIONS") {
-            Ok(raw) => match raw.parse::<usize>() {
-                Ok(0) => {
-                    tracing::warn!(
-                        value = %raw,
-                        "OBZENFLOW_CYCLE_MAX_ITERATIONS must be > 0; using default of {}",
-                        MaxIterations::DEFAULT,
-                    );
-                    MaxIterations::DEFAULT
-                }
-                Ok(value) => {
-                    if value > u16::MAX as usize {
-                        tracing::warn!(
-                            value = value,
-                            clamped = u16::MAX,
-                            "OBZENFLOW_CYCLE_MAX_ITERATIONS exceeds u16::MAX; clamping (FLOWIP-051p)"
-                        );
+        // FLOWIP-010 Phase B: collect DSL-declared candidates at their
+        // declaration sites (§4a), then run the full scope ladder against
+        // the topology (§4c). Policy-attachment guards ride this walk (they
+        // previously ran during plan extraction, after journal creation;
+        // failing before substrate selection is strictly earlier).
+        let __flow_effective = {
+            use obzenflow_core::config::ConfigScope;
+            use obzenflow_runtime::runtime_config::{ConfigValue, DslCandidates};
+            use $crate::middleware_resolution::MiddlewareSourceScope;
+
+            let mut __dsl_candidates = DslCandidates::default();
+            let mut __flow_window: Option<u64> = None;
+            let mut __flow_breaker_threshold: Option<u64> = None;
+            let mut __flow_limiter: Option<(f64, Option<f64>)> = None;
+            for (name, descriptor) in descriptors.iter() {
+                let flow_middleware = create_flow_middleware();
+                for factory in &flow_middleware {
+                    if factory.kind() == obzenflow_adapters::middleware::MiddlewareKind::Policy {
+                        return Err(FlowBuildError::PolicyMiddlewareOnFlowScope {
+                            middleware: factory.label().to_string(),
+                        }
+                        .into());
                     }
-                    // try_from_usize clamps to u16::MAX; None case (0) already handled above.
-                    MaxIterations::try_from_usize(value).unwrap_or(MaxIterations::DEFAULT)
                 }
-                Err(err) => {
-                    tracing::warn!(
-                        value = %raw,
-                        error = %err,
-                        "Invalid OBZENFLOW_CYCLE_MAX_ITERATIONS; using default of {}",
-                        MaxIterations::DEFAULT,
+                let resolved_view = $crate::middleware_resolution::resolve_middleware_view_with_scope(
+                    &flow_middleware,
+                    descriptor.stage_middleware_factories(),
+                    name,
+                )
+                .map_err(|e| {
+                    FlowBuildError::StageResourcesFailed(format!(
+                        "Failed to resolve middleware for stage '{name}' while collecting config candidates: {e}"
+                    ))
+                })?;
+
+                for (scope, factory) in resolved_view {
+                    // FLOWIP-120c H1: policy middleware attaches to live I/O
+                    // units only. Flow-level broadcast policy rejects above,
+                    // pure sync surfaces hard-reject, effectful-stateful rejects
+                    // until FLOWIP-120l installs its boundary, and the deprecated
+                    // async-non-effectful surface warns until FLOWIP-120f deletes
+                    // it (FLOWIP-120p migrates its AI legs to effects).
+                    if factory.kind() == obzenflow_adapters::middleware::MiddlewareKind::Policy {
+                        use $crate::dsl::stage_descriptor::PolicyGuardSurface;
+                        match descriptor.policy_guard_surface() {
+                            PolicyGuardSurface::PureSync => {
+                                return Err(FlowBuildError::PolicyMiddlewareOnPureStage {
+                                    stage_name: name.clone(),
+                                    middleware: factory.label().to_string(),
+                                }
+                                .into());
+                            }
+                            PolicyGuardSurface::EffectfulStatefulPendingBoundary => {
+                                return Err(
+                                    FlowBuildError::PolicyMiddlewareOnPendingEffectfulStateful {
+                                        stage_name: name.clone(),
+                                        middleware: factory.label().to_string(),
+                                    }
+                                    .into(),
+                                );
+                            }
+                            PolicyGuardSurface::AsyncNonEffectful => {
+                                tracing::warn!(
+                                    stage = %name,
+                                    middleware = factory.label(),
+                                    "policy middleware on the async non-effectful surface is \
+                                     deprecated: FLOWIP-120p moves these handlers onto effects and \
+                                     FLOWIP-120f removes this surface; the policy then attaches at \
+                                     the effect boundary (FLOWIP-120c H1)"
+                                );
+                            }
+                            PolicyGuardSurface::Effectful
+                            | PolicyGuardSurface::Source
+                            | PolicyGuardSurface::Sink => {}
+                        }
+                    }
+                    match factory.plan_contribution() {
+                        obzenflow_adapters::middleware::MiddlewarePlanContribution::Backpressure {
+                            window,
+                        } => match scope {
+                            // One flow-scoped candidate per knob: the flow
+                            // middleware closure yields the same factories
+                            // for every stage.
+                            MiddlewareSourceScope::Flow => {
+                                __flow_window = Some(window.get());
+                            }
+                            MiddlewareSourceScope::Stage => {
+                                __dsl_candidates.declare(
+                                    "runtime.backpressure.window",
+                                    ConfigScope::stage(descriptor.name()),
+                                    ConfigValue::U64(window.get()),
+                                );
+                            }
+                        },
+                        obzenflow_adapters::middleware::MiddlewarePlanContribution::CircuitBreaker {
+                            threshold,
+                        } => match scope {
+                            MiddlewareSourceScope::Flow => {
+                                __flow_breaker_threshold = Some(threshold);
+                            }
+                            MiddlewareSourceScope::Stage => {
+                                __dsl_candidates.declare(
+                                    "effects.circuit_breaker.threshold",
+                                    ConfigScope::stage(descriptor.name()),
+                                    ConfigValue::U64(threshold),
+                                );
+                            }
+                        },
+                        obzenflow_adapters::middleware::MiddlewarePlanContribution::RateLimiter {
+                            events_per_second,
+                            burst_capacity,
+                        } => match scope {
+                            MiddlewareSourceScope::Flow => {
+                                __flow_limiter = Some((events_per_second, burst_capacity));
+                            }
+                            MiddlewareSourceScope::Stage => {
+                                __dsl_candidates.declare(
+                                    "effects.rate_limiter.events_per_second",
+                                    ConfigScope::stage(descriptor.name()),
+                                    ConfigValue::F64(events_per_second),
+                                );
+                                if let Some(burst) = burst_capacity {
+                                    __dsl_candidates.declare(
+                                        "effects.rate_limiter.burst_capacity",
+                                        ConfigScope::stage(descriptor.name()),
+                                        ConfigValue::F64(burst),
+                                    );
+                                }
+                            }
+                        },
+                        obzenflow_adapters::middleware::MiddlewarePlanContribution::None => {}
+                    }
+                }
+            }
+            if let Some(window) = __flow_window {
+                __dsl_candidates.declare(
+                    "runtime.backpressure.window",
+                    ConfigScope::Flow,
+                    ConfigValue::U64(window),
+                );
+            }
+            if let Some(threshold) = __flow_breaker_threshold {
+                __dsl_candidates.declare(
+                    "effects.circuit_breaker.threshold",
+                    ConfigScope::Flow,
+                    ConfigValue::U64(threshold),
+                );
+            }
+            if let Some((events_per_second, burst_capacity)) = __flow_limiter {
+                __dsl_candidates.declare(
+                    "effects.rate_limiter.events_per_second",
+                    ConfigScope::Flow,
+                    ConfigValue::F64(events_per_second),
+                );
+                if let Some(burst) = burst_capacity {
+                    __dsl_candidates.declare(
+                        "effects.rate_limiter.burst_capacity",
+                        ConfigScope::Flow,
+                        ConfigValue::F64(burst),
                     );
-                    MaxIterations::DEFAULT
                 }
-            },
-            Err(_) => MaxIterations::DEFAULT,
+            }
+
+            let __resolution_ctx = obzenflow_runtime::runtime_config::FlowResolutionContext {
+                flow_name: $flow_name.to_string(),
+                stages: descriptors
+                    .values()
+                    .map(|d| obzenflow_core::StageKey::from(d.name()))
+                    .collect(),
+                edges: connections
+                    .iter()
+                    .map(|(from_var, to_var, _kind)| {
+                        let from = descriptors
+                            .get(from_var)
+                            .expect("connections reference known stages")
+                            .name();
+                        let to = descriptors
+                            .get(to_var)
+                            .expect("connections reference known stages")
+                            .name();
+                        (
+                            obzenflow_core::StageKey::from(from),
+                            obzenflow_core::StageKey::from(to),
+                        )
+                    })
+                    .collect(),
+                dsl: __dsl_candidates,
+            };
+            std::sync::Arc::new(
+                obzenflow_runtime::runtime_config::materialize_flow_config(
+                    &__runtime_config,
+                    __resolution_ctx,
+                )
+                .map_err(FlowBuildError::ConfigResolution)?,
+            )
         };
+
+        // FLOWIP-010: `runtime.cycle_max_iterations` is build-resolved; the
+        // registry range check (1..=65535) replaced the old env warn/clamp.
+        use obzenflow_runtime::pipeline::MaxIterations;
+        let cycle_max_iterations: MaxIterations =
+            MaxIterations::try_from_usize(__flow_effective.cycle_max_iterations() as usize)
+                .unwrap_or(MaxIterations::DEFAULT);
 
         // Collect join metadata per stage (FLOWIP-082a). The canonical
         // `JoinMetadataInfo` lives in `obzenflow-topology` and uses topology
@@ -1202,6 +1364,8 @@ macro_rules! build_typed_flow {
             resume: resume_manifest,
             stages: manifest_stages,
             system_journal_file: JournalName::System.to_filename(),
+            // FLOWIP-010 §6a: the redacted effective config is run evidence.
+            effective_config: Some(__flow_effective.manifest_evidence()),
         };
         // FLOWIP-120u: the manifest is a durable-run artifact; ephemeral runs
         // have no location to persist it within.
@@ -1221,84 +1385,83 @@ macro_rules! build_typed_flow {
             })?;
         }
 
-        // Backpressure is opt-in (FLOWIP-086k): extract per-stage windows from middleware configs.
+        // Backpressure materialization (FLOWIP-010 §4c): the resolved
+        // effective config lands on the plan's existing rungs. An
+        // edge-scoped winner becomes an edge override; a coarser winner
+        // folds to the upstream stage's default (identical semantics via
+        // `mode_for_edge`). Absence keeps edges Disabled, and explicit
+        // entries survive the SCC auto-enable exactly as before. Policy
+        // guards and DSL candidate collection ran earlier, before substrate
+        // selection.
         use obzenflow_runtime::backpressure::BackpressurePlan;
 
         let mut backpressure_plan = BackpressurePlan::disabled();
-        for (name, descriptor) in descriptors.iter() {
-            let stage_id = *name_to_id.get(name).expect("name_to_id should contain stage ids");
-            let flow_middleware = create_flow_middleware();
-            for factory in &flow_middleware {
-                if factory.kind() == obzenflow_adapters::middleware::MiddlewareKind::Policy {
-                    return Err(FlowBuildError::PolicyMiddlewareOnFlowScope {
-                        middleware: factory.label().to_string(),
-                    }
-                    .into());
-                }
-            }
-            let resolved_middleware_view = $crate::middleware_resolution::resolve_middleware_view(
-                &flow_middleware,
-                descriptor.stage_middleware_factories(),
-                name,
-            )
-            .map_err(|e| {
-                FlowBuildError::StageResourcesFailed(format!(
-                    "Failed to resolve middleware for stage '{name}' while extracting backpressure: {e}"
-                ))
-            })?;
-
-            for factory in resolved_middleware_view {
-                // FLOWIP-120c H1: policy middleware attaches to live I/O
-                // units only. Flow-level broadcast policy rejects above,
-                // pure sync surfaces hard-reject, effectful-stateful rejects
-                // until FLOWIP-120l installs its boundary, and the deprecated
-                // async-non-effectful surface warns until FLOWIP-120f deletes
-                // it (FLOWIP-120p migrates its AI legs to effects).
-                if factory.kind() == obzenflow_adapters::middleware::MiddlewareKind::Policy {
-                    use $crate::dsl::stage_descriptor::PolicyGuardSurface;
-                    match descriptor.policy_guard_surface() {
-                        PolicyGuardSurface::PureSync => {
-                            return Err(FlowBuildError::PolicyMiddlewareOnPureStage {
-                                stage_name: name.clone(),
-                                middleware: factory.label().to_string(),
-                            }
-                            .into());
-                        }
-                        PolicyGuardSurface::EffectfulStatefulPendingBoundary => {
-                            return Err(
-                                FlowBuildError::PolicyMiddlewareOnPendingEffectfulStateful {
-                                    stage_name: name.clone(),
-                                    middleware: factory.label().to_string(),
-                                }
-                                .into(),
-                            );
-                        }
-                        PolicyGuardSurface::AsyncNonEffectful => {
-                            tracing::warn!(
-                                stage = %name,
-                                middleware = factory.label(),
-                                "policy middleware on the async non-effectful surface is \
-                                 deprecated: FLOWIP-120p moves these handlers onto effects and \
-                                 FLOWIP-120f removes this surface; the policy then attaches at \
-                                 the effect boundary (FLOWIP-120c H1)"
-                            );
-                        }
-                        PolicyGuardSurface::Effectful
-                        | PolicyGuardSurface::Source
-                        | PolicyGuardSurface::Sink => {}
-                    }
-                }
-                if let obzenflow_adapters::middleware::MiddlewarePlanContribution::Backpressure {
-                    window,
-                } = factory.plan_contribution()
-                {
-                    backpressure_plan = backpressure_plan.with_stage_window(stage_id, window);
+        {
+            use obzenflow_core::config::ConfigScope;
+            let mut stage_defaults_applied: HashSet<StageId> = HashSet::new();
+            for (from_var, to_var, _kind) in &connections {
+                let from_key = obzenflow_core::StageKey::from(
+                    descriptors
+                        .get(from_var)
+                        .expect("connections reference known stages")
+                        .name(),
+                );
+                let to_key = obzenflow_core::StageKey::from(
+                    descriptors
+                        .get(to_var)
+                        .expect("connections reference known stages")
+                        .name(),
+                );
+                let Some(resolved) = __flow_effective.backpressure_window_for(&from_key, &to_key)
+                else {
+                    continue;
+                };
+                let window = resolved
+                    .value
+                    .as_u64()
+                    .and_then(std::num::NonZeroU64::new)
+                    .expect("window validated as u64 >= 1 at admission");
+                let up_id = *name_to_id
+                    .get(from_var)
+                    .expect("name_to_id should contain stage ids");
+                if matches!(resolved.meta.scope, ConfigScope::Edge { .. }) {
+                    let down_id = *name_to_id
+                        .get(to_var)
+                        .expect("name_to_id should contain stage ids");
+                    backpressure_plan =
+                        backpressure_plan.with_edge_window(up_id, down_id, window);
+                } else if stage_defaults_applied.insert(up_id) {
+                    backpressure_plan = backpressure_plan.with_stage_window(up_id, window);
                 }
             }
         }
 
         // Use StageResourcesBuilder to handle all the complex wiring
         use obzenflow_runtime::stages::resources_builder::StageResourcesBuilder;
+
+        // FLOWIP-010 §7: per-stage build-resolved lineage policies and
+        // heartbeat intervals ride stage resources into the builders
+        // (never a global read).
+        let lineage_policies: HashMap<StageId, obzenflow_core::config::LineagePolicy> = name_to_id
+            .iter()
+            .map(|(name, id)| {
+                (
+                    *id,
+                    __flow_effective
+                        .lineage_policy_for(&obzenflow_core::StageKey(name.clone())),
+                )
+            })
+            .collect();
+        let heartbeat_intervals: HashMap<StageId, u64> = name_to_id
+            .iter()
+            .map(|(name, id)| {
+                (
+                    *id,
+                    __flow_effective
+                        .heartbeat_interval_for(&obzenflow_core::StageKey(name.clone())),
+                )
+            })
+            .collect();
 
         let resources_builder = StageResourcesBuilder::new(
             flow_id.clone(),
@@ -1312,6 +1475,8 @@ macro_rules! build_typed_flow {
         .with_feed_plan(feed_plan)
         .with_deterministic_fan_in_stages(deterministic_fan_in_stages)
         .with_seq_ordered_fan_ins(seq_ordered_fan_ins)
+        .with_lineage_policies(lineage_policies)
+        .with_heartbeat_intervals(heartbeat_intervals)
         .with_effect_ports($effect_ports)
         .with_replay_archive(replay_archive);
 
@@ -1357,6 +1522,22 @@ macro_rules! build_typed_flow {
                     stage_id: *id,
                     name: descriptor.name().to_string(),
                     flow_name: $flow_name.to_string(),
+                    lineage: __flow_effective
+                        .lineage_policy_for(&obzenflow_core::StageKey(name.clone())),
+                    resolved_policies: {
+                        let __stage_key = obzenflow_core::StageKey(name.clone());
+                        obzenflow_runtime::pipeline::config::ResolvedStagePolicies {
+                            breaker_threshold: __flow_effective
+                                .breaker_threshold_for(&__stage_key)
+                                .and_then(|r| r.value.as_u64()),
+                            limiter_events_per_second: __flow_effective
+                                .limiter_events_per_second_for(&__stage_key)
+                                .and_then(|r| r.value.as_f64()),
+                            limiter_burst_capacity: __flow_effective
+                                .limiter_burst_capacity_for(&__stage_key)
+                                .and_then(|r| r.value.as_f64()),
+                        }
+                    },
                     cycle_guard: if is_in_cycle
                         && matches!(
                             descriptor.stage_type(),
@@ -1672,7 +1853,8 @@ macro_rules! build_typed_flow {
             .with_backpressure_registry(stage_resources_set.backpressure_registry.clone())
             .with_feed_plan(stage_resources_set.feed_plan.clone())
             .with_liveness_snapshots(stage_resources_set.liveness_snapshots.clone())
-            .with_run_substrate(__substrate.clone());
+            .with_run_substrate(__substrate.clone())
+            .with_flow_effective_config(__flow_effective.clone());
 
         let builder = if let Some(exporter) = metrics_exporter {
             builder.with_metrics(exporter)

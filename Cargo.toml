@@ -125,6 +125,8 @@ serde_json = { workspace = true }
 async-trait = { workspace = true }
 # CLI surface for the `obzenflow` binary (FLOWIP-095j)
 clap = { workspace = true }
+# Live-mode HTTP client for `obzenflow config get --url` (FLOWIP-010).
+reqwest = { workspace = true, features = ["blocking"] }
 
 [dev-dependencies]
 # Used by examples/tests/benchmarks in this crate
@@ -266,4 +268,9 @@ required-features = ["test-support"]
 [[test]]
 name = "replay_truncated_eof_fidelity_test"
 path = "tests/replay_truncated_eof_fidelity_test.rs"
+required-features = ["test-support"]
+
+[[test]]
+name = "lineage_policy_flow_test"
+path = "tests/lineage_policy_flow_test.rs"
 required-features = ["test-support"]

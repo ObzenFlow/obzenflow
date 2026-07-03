@@ -202,6 +202,7 @@ async fn build_pipeline(
                 src |> snk;
             }
         }
+        .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
         .await
         .map_err(|e| anyhow::anyhow!("Failed to create 1-stage flow: {e:?}"))?,
         3 => flow! {
@@ -221,6 +222,7 @@ async fn build_pipeline(
                 s2 |> snk;
             }
         }
+        .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
         .await
         .map_err(|e| anyhow::anyhow!("Failed to create 3-stage flow: {e:?}"))?,
         5 => flow! {
@@ -244,6 +246,7 @@ async fn build_pipeline(
                 s4 |> snk;
             }
         }
+        .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
         .await
         .map_err(|e| anyhow::anyhow!("Failed to create 5-stage flow: {e:?}"))?,
         10 => {
@@ -279,6 +282,7 @@ async fn build_pipeline(
                     s9 |> snk;
                 }
             }
+            .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
             .await
             .map_err(|e| anyhow::anyhow!("Failed to create 10-stage flow: {e:?}"))?;
             handle

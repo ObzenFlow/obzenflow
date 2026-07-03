@@ -71,27 +71,25 @@ pub(crate) struct PipelineSupervisor {
 /// - `Warn`: failures are logged and surfaced via contract events, but
 ///   do not cause a pipeline abort. This is intended as a transitional
 ///   mode until full contract strictness plumbing lands in 090d.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum SourceContractStrictMode {
+///
+/// FLOWIP-010: build-resolved from `contracts.source_contract_strict_mode`
+/// and carried on `PipelineContext`; the registry rejects unknown tokens at
+/// startup (the old env coercion is gone).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum SourceContractStrictMode {
+    #[default]
     Abort,
     Warn,
 }
 
-fn source_contract_mode() -> SourceContractStrictMode {
-    use std::sync::OnceLock;
-
-    static MODE: OnceLock<SourceContractStrictMode> = OnceLock::new();
-
-    *MODE.get_or_init(|| {
-        match std::env::var("OBZENFLOW_SOURCE_CONTRACT_STRICT_MODE") {
-            Ok(val) => match val.to_ascii_lowercase().as_str() {
-                "warn" => SourceContractStrictMode::Warn,
-                // Treat any other explicit value as Abort to avoid surprises.
-                _ => SourceContractStrictMode::Abort,
-            },
-            Err(_) => SourceContractStrictMode::Abort,
+impl SourceContractStrictMode {
+    /// Parse the registry-validated token (`abort` or `warn`).
+    pub(crate) fn from_token(token: &str) -> Self {
+        match token {
+            "warn" => SourceContractStrictMode::Warn,
+            _ => SourceContractStrictMode::Abort,
         }
-    })
+    }
 }
 
 /// Helper used to decide whether a given edge should be treated as
@@ -273,7 +271,7 @@ impl PipelineSupervisor {
         // Find any edge with an explicit failure (contract violated).
         if let Some((key, status)) = seen.iter().find(|(key, status)| {
             let is_source = context.expected_sources.contains(&key.upstream_stage);
-            let mode = source_contract_mode();
+            let mode = context.source_contract_strict;
             let is_gating = is_gating_edge_for_contract(is_source, mode);
             is_gating && !status.is_passed()
         }) {
@@ -331,7 +329,7 @@ impl PipelineSupervisor {
         // for this check.
         context.expected_contract_pairs.iter().all(|key| {
             let is_source = context.expected_sources.contains(&key.upstream_stage);
-            let mode = source_contract_mode();
+            let mode = context.source_contract_strict;
             let is_gating = is_gating_edge_for_contract(is_source, mode);
             if !is_gating {
                 return true;
@@ -375,7 +373,7 @@ impl PipelineSupervisor {
             .iter()
             .filter(|key| {
                 let is_source = context.expected_sources.contains(&key.upstream_stage);
-                let mode = source_contract_mode();
+                let mode = context.source_contract_strict;
                 let is_gating = is_gating_edge_for_contract(is_source, mode);
                 if !is_gating {
                     return false;
@@ -390,7 +388,7 @@ impl PipelineSupervisor {
             .iter()
             .filter(|key| {
                 let is_source = context.expected_sources.contains(&key.upstream_stage);
-                let mode = source_contract_mode();
+                let mode = context.source_contract_strict;
                 let is_gating = is_gating_edge_for_contract(is_source, mode);
                 if !is_gating {
                     return false;
