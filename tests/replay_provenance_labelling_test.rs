@@ -349,9 +349,9 @@ fn build_flow(journal_base: PathBuf, calls: Arc<AtomicUsize>, probes: &Probes) -
                 effects: [AuthorizeEffect],
                 middleware: []
             );
-            paid_orders = sink!(OrderAuthorized => SinkTyped::with_delivery(paid));
-            cancelled_orders = sink!(OrderCancelled => SinkTyped::with_delivery(cancelled));
-            manual_review = sink!(AuthorizationUnavailable => SinkTyped::with_delivery(review));
+            paid_orders = sink!(OrderAuthorized => SinkTyped::with_delivery(paid).idempotent());
+            cancelled_orders = sink!(OrderCancelled => SinkTyped::with_delivery(cancelled).idempotent());
+            manual_review = sink!(AuthorizationUnavailable => SinkTyped::with_delivery(review).idempotent());
         },
 
         topology: {

@@ -218,7 +218,7 @@ macro_rules! linear_flow {
             stages: {
                 ticks = source!(Tick => $source);
                 summer = stateful!(Tick -> SumResult => SumHandler::new());
-                out = sink!(SumResult => SinkTyped::with_delivery(counting::<SumResult>($delivered)));
+                out = sink!(SumResult => SinkTyped::with_delivery(counting::<SumResult>($delivered)).idempotent());
             },
 
             topology: {
@@ -463,7 +463,7 @@ async fn mixed_kind_fan_in_authors_the_worst_and_suppresses_finalization() {
                     fast = source!(Tick => Ticks::sealing(3));
                     slow = source!(Tick => Ticks::stalling(4));
                     summer = stateful!(Tick -> SumResult => SumHandler::new());
-                    out = sink!(SumResult => SinkTyped::with_delivery(counting::<SumResult>($delivered)));
+                    out = sink!(SumResult => SinkTyped::with_delivery(counting::<SumResult>($delivered)).idempotent());
                 },
 
                 topology: {
@@ -670,7 +670,7 @@ async fn cycle_flow_truncated_replay_terminates_without_error() {
                     seeds = source!(Tick => Ticks::stalling(2));
                     entry = transform!(Tick -> Tick => CycleEntry { writer_id: WriterId::from(StageId::new()) });
                     iter = transform!(Tick -> Tick => CycleIter { writer_id: WriterId::from(StageId::new()) });
-                    out = sink!(Tick => SinkTyped::with_delivery(counting::<Tick>($delivered)));
+                    out = sink!(Tick => SinkTyped::with_delivery(counting::<Tick>($delivered)).idempotent());
                 },
 
                 topology: {

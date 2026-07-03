@@ -31,6 +31,7 @@ use obzenflow_core::{event::chain_event::ChainEvent, TypedPayload};
 use obzenflow_dsl::{flow, sink, source, stateful, transform};
 use obzenflow_infra::application::{Banner, FlowApplication, LogLevel, Presentation};
 use obzenflow_infra::journal::disk_journals;
+use obzenflow_runtime::effects::SinkDeliverySafety;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::SinkHandler;
 use obzenflow_runtime::stages::transform::TryMapWithTyped;
@@ -144,6 +145,11 @@ impl SinkHandler for CompletionSink {
             Some(1),
         ))
     }
+
+    // Receipt-only completion probe: re-delivery under either archive verb is safe.
+    fn delivery_safety(&self) -> Option<SinkDeliverySafety> {
+        Some(SinkDeliverySafety::IdempotentProjection)
+    }
 }
 
 fn main() -> Result<()> {
@@ -251,7 +257,7 @@ fn main() -> Result<()> {
                     println!("   2. Visit http://localhost:9090/metrics");
                     println!("   3. See detailed per-stage metrics, errors, latencies, etc.");
                     println!("=====================================");
-                });
+                }, delivery: idempotent);
 
                 // Fan-out branch 2: Completion sink (typed input contract).
                 completion_sink = sink!(ProcessedEvent => CompletionSink::new());

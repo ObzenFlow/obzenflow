@@ -92,7 +92,7 @@ fn main() -> Result<()> {
 
                 out = sink!(|update: UserCountUpdate| {
                     println!("window update: user={} count={}", update.key, update.result.count);
-                });
+                }, delivery: idempotent);
             },
 
             topology: {

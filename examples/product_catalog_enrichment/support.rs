@@ -11,8 +11,8 @@ pub mod fixtures;
 #[path = "sources.rs"]
 pub mod sources;
 
-#[path = "sinks.rs"]
-pub mod sinks;
+#[path = "console.rs"]
+pub mod console;
 
 #[path = "flow.rs"]
 pub mod flow;

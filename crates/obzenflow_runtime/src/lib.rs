@@ -97,9 +97,9 @@ pub mod prelude {
 
     // Handlers
     pub use crate::stages::{
-        EffectfulSinkHandler, EffectfulStatefulHandler, EffectfulTransformHandler,
-        FiniteSourceHandler, InfiniteSourceHandler, ObserverHandler, ResourceManaged, SinkHandler,
-        SourceError, StatefulHandler, TransformHandler,
+        EffectfulStatefulHandler, EffectfulTransformHandler, FiniteSourceHandler,
+        InfiniteSourceHandler, ObserverHandler, ResourceManaged, SinkHandler, SourceError,
+        StatefulHandler, TransformHandler,
     };
     pub use crate::typing::{
         JoinTyping, SinkTyping, SourceTyping, StatefulTyping, TransformTyping,

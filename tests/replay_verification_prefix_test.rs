@@ -98,7 +98,7 @@ macro_rules! prefix_flow {
 
             stages: {
                 ticks = source!(Tick => StallingTicks::new());
-                out = sink!(Tick => SinkTyped::with_delivery(counting::<Tick>($delivered)));
+                out = sink!(Tick => SinkTyped::with_delivery(counting::<Tick>($delivered)).idempotent());
             },
 
             topology: {

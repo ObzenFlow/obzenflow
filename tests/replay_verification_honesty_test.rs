@@ -112,7 +112,7 @@ fn build_flow(journal_base: PathBuf) -> FlowDefinition {
             channel_a = source!(Reading => Channel::new("a"));
             channel_b = source!(Reading => Channel::new("b"));
             merge = transform!(Reading -> Reading => PassthroughMerge);
-            out = sink!(Reading => SinkTyped::with_delivery(discard::<Reading>()));
+            out = sink!(Reading => SinkTyped::with_delivery(discard::<Reading>()).idempotent());
         },
 
         topology: {

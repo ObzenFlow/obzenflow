@@ -147,11 +147,12 @@ pub struct FlowConfig {
     #[arg(long, action = ArgAction::SetTrue)]
     pub allow_incomplete_archive: bool,
 
-    /// Allow `--resume-from` to proceed past sinks whose delivery path is
-    /// non-idempotent or undeclared (FLOWIP-120n F16).
+    /// Allow `--replay-from` or `--resume-from` to proceed past sinks whose
+    /// delivery path is non-idempotent or undeclared (FLOWIP-120n F16,
+    /// FLOWIP-120v).
     ///
-    /// Catch-up re-delivers the recorded prefix, so those sinks may duplicate
-    /// their external writes. Requires `--resume-from`.
+    /// Both archive verbs re-execute recorded work at sinks, so those sinks
+    /// may duplicate their external writes. Requires an archive verb.
     #[arg(long, action = ArgAction::SetTrue)]
     pub allow_duplicate_sink_delivery: bool,
 
@@ -550,10 +551,10 @@ impl FlowConfig {
                 "requires replay.from; a resume continues live and cannot be verified as a bounded replay",
             ));
         }
-        if allow_duplicate_sink_delivery && resume_from.is_none() {
+        if allow_duplicate_sink_delivery && replay_from.is_none() && resume_from.is_none() {
             return Err(ConfigError::at(
                 "replay.allow_duplicate_sink_delivery",
-                "requires replay.resume_from; only a resume re-delivers the recorded prefix to sinks",
+                "requires replay.from or replay.resume_from; both archive verbs re-deliver recorded work to sinks",
             ));
         }
 
@@ -1114,7 +1115,7 @@ resume_from = "/tmp/recorded"
     }
 
     #[test]
-    fn allow_duplicate_sink_delivery_without_resume_from_errors_at_resolve() {
+    fn allow_duplicate_sink_delivery_resolves_with_replay_from() {
         let tempdir = tempfile::tempdir().unwrap();
         let archive = fake_archive_dir(&tempdir, "archive");
 
@@ -1125,10 +1126,31 @@ resume_from = "/tmp/recorded"
             "--allow-duplicate-sink-delivery",
         ])
         .unwrap();
+        let resolved = cli.resolve(None, false).unwrap();
+        let replay = resolved
+            .replay
+            .as_ref()
+            .expect("replay resolves a replay config");
+        assert!(replay.allow_duplicate_sink_delivery);
+
+        let bootstrap = resolved.bootstrap_config();
+        assert!(
+            bootstrap
+                .replay
+                .expect("bootstrap carries the replay config")
+                .allow_duplicate_sink_delivery,
+            "the opt-in must ride ReplayBootstrap to the replay sink gate"
+        );
+    }
+
+    #[test]
+    fn allow_duplicate_sink_delivery_without_archive_verb_errors_at_resolve() {
+        let cli =
+            FlowConfig::try_parse_from(["obzenflow", "--allow-duplicate-sink-delivery"]).unwrap();
         let err = cli.resolve(None, false).unwrap_err();
         assert_eq!(
             err.to_string(),
-            "config error at replay.allow_duplicate_sink_delivery: requires replay.resume_from; only a resume re-delivers the recorded prefix to sinks"
+            "config error at replay.allow_duplicate_sink_delivery: requires replay.from or replay.resume_from; both archive verbs re-deliver recorded work to sinks"
         );
     }
 

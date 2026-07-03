@@ -17,8 +17,8 @@ pub use join::{JoinHandler, UnifiedJoinHandler};
 pub use observer::ObserverHandler;
 pub use resource_managed::ResourceManaged;
 pub use sink::{
-    CommitReceipt, Delivered, Delivery, EffectfulSinkHandler, EffectfulSinkHandlerAdapter,
-    SinkConsumeReport, SinkHandler, SinkLifecycleReport, UnifiedSinkHandler,
+    CommitReceipt, Delivered, Delivery, SinkConsumeReport, SinkHandler, SinkLifecycleReport,
+    UnifiedSinkHandler,
 };
 pub use source::{
     AsyncFiniteSourceHandler, AsyncInfiniteSourceHandler, FiniteSourceHandler,

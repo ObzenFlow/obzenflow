@@ -133,7 +133,7 @@ fn build_flow(journal_base: PathBuf) -> FlowDefinition {
                 effects: [],
                 middleware: []
             );
-            out = sink!(Accepted => SinkTyped::with_delivery(discard::<Accepted>()));
+            out = sink!(Accepted => SinkTyped::with_delivery(discard::<Accepted>()).idempotent());
         },
 
         topology: {

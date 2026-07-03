@@ -335,7 +335,7 @@ fn main() -> Result<()> {
                     println!("   - Pages: {}", update.result.pages_viewed.len());
                     println!("   - Clicks: {}", update.result.clicks);
                     println!("   - Duration: {}ms", update.result.total_duration_ms);
-                });
+                }, delivery: idempotent);
 
                 funnel = sink!(|funnel: FunnelState| {
                     println!("\n🎯 [Funnel] Funnel Progress:");
@@ -366,14 +366,14 @@ fn main() -> Result<()> {
                         );
                     }
                     println!("   Revenue: ${total_revenue:.2}");
-                });
+                }, delivery: idempotent);
 
                 metrics_printer = sink!(|metrics: MetricsState| {
                     println!("\n📈 [Metrics] Daily Summary:");
                     println!("   Total events: {}", metrics.total_events);
                     println!("   Total revenue: ${:.2}", metrics.total_revenue);
                     println!("   Event types: {} unique", metrics.events_by_type.len());
-                });
+                }, delivery: idempotent);
             },
 
             topology: {

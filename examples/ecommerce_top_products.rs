@@ -305,7 +305,7 @@ fn main() -> Result<()> {
                     println!("------------------------------------");
                     println!("Top 5 Products Revenue: ${total_revenue:.2}");
                     println!("====================================\n");
-                });
+                }, delivery: idempotent);
             },
 
             topology: {

@@ -215,3 +215,17 @@ impl TypedPayload for EnrichedOrderWithPromo {
     const EVENT_TYPE: &'static str = "order.final";
     const SCHEMA_VERSION: u32 = 1;
 }
+
+/// Rolled-up analytics fact authored by the summary fold.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct CatalogAnalyticsSummary {
+    pub order_count: usize,
+    pub total_revenue: f64,
+    pub total_margin: f64,
+    pub promo_orders: usize,
+}
+
+impl TypedPayload for CatalogAnalyticsSummary {
+    const EVENT_TYPE: &'static str = "catalog.analytics_summary";
+    const SCHEMA_VERSION: u32 = 1;
+}

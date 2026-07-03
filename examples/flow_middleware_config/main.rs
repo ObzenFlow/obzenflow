@@ -36,6 +36,7 @@ use obzenflow_core::{event::chain_event::ChainEvent, TypedPayload};
 use obzenflow_dsl::{flow, sink, source, transform};
 use obzenflow_infra::application::{Banner, FlowApplication, Presentation};
 use obzenflow_infra::journal::disk_journals;
+use obzenflow_runtime::effects::SinkDeliverySafety;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{SinkHandler, TransformHandler};
 use serde::{Deserialize, Serialize};
@@ -105,6 +106,11 @@ impl SinkHandler for CountingSink {
             DeliveryMethod::Custom("InMemory".to_string()),
             Some(1),
         ))
+    }
+
+    // Local counter plus progress prints: re-delivery under either archive verb is safe.
+    fn delivery_safety(&self) -> Option<SinkDeliverySafety> {
+        Some(SinkDeliverySafety::IdempotentProjection)
     }
 }
 

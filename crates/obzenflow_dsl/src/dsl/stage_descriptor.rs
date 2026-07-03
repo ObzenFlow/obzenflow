@@ -39,7 +39,7 @@ use obzenflow_runtime::{
             control_strategies::{JonestownSignalStrategy, SignalGate},
             handlers::{
                 AsyncFiniteSourceHandler, AsyncInfiniteSourceHandler, AsyncTransformHandler,
-                EffectfulSinkHandler, EffectfulStatefulHandler, EffectfulStatefulHandlerAdapter,
+                EffectfulStatefulHandler, EffectfulStatefulHandlerAdapter,
                 EffectfulTransformHandler, EffectfulTransformHandlerAdapter, FiniteSourceHandler,
                 InfiniteSourceHandler, JoinHandler, SinkHandler, StatefulHandler, TransformHandler,
                 UnifiedJoinHandler,
@@ -2064,68 +2064,6 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
         );
 
         Ok(Box::new(adapter) as BoxedStageHandle)
-    }
-}
-
-/// Descriptor for replay-safe effectful sink stages.
-pub struct EffectfulSinkDescriptor<H: EffectfulSinkHandler + 'static> {
-    pub name: String,
-    pub handler: H,
-    pub effects: Vec<EffectDeclaration>,
-    pub middleware: Vec<Box<dyn MiddlewareFactory>>,
-}
-
-#[async_trait]
-impl<H: EffectfulSinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDescriptor
-    for EffectfulSinkDescriptor<H>
-{
-    fn name(&self) -> &str {
-        &self.name
-    }
-
-    fn set_name(&mut self, name: String) {
-        self.name = name;
-    }
-
-    fn stage_type(&self) -> StageType {
-        StageType::Sink
-    }
-
-    fn is_effectful(&self) -> bool {
-        true
-    }
-
-    fn stage_logic_version(&self) -> String {
-        self.handler.stage_logic_version().to_string()
-    }
-
-    fn effect_declarations(&self) -> Vec<EffectDeclaration> {
-        self.effects.clone()
-    }
-
-    fn stage_middleware_names(&self) -> Vec<String> {
-        self.middleware
-            .iter()
-            .map(|f| f.label().to_string())
-            .collect()
-    }
-
-    fn stage_middleware_factories(&self) -> &[Box<dyn MiddlewareFactory>] {
-        &self.middleware
-    }
-
-    async fn create_handle_with_flow_middleware(
-        self: Box<Self>,
-        config: StageConfig,
-        _resources: StageResources,
-        _flow_middleware: Vec<Box<dyn MiddlewareFactory>>,
-        _control_middleware: Arc<ControlMiddlewareAggregator>,
-    ) -> StageCreationResult<BoxedStageHandle> {
-        Err(format!(
-            "effectful sink stage `{}` is retired by FLOWIP-120b; use an effectful transform or effectful stateful stage to author facts, then consume them with a non-effectful sink",
-            config.name
-        )
-        .into())
     }
 }
 

@@ -204,6 +204,22 @@
 //! // The adverb has no home on the typed tier.
 //! let _ = sink!(Out => Typed, delivery: idempotent);
 //! ```
+//!
+//! ## Retired effectful sink surface (FLOWIP-120v)
+//!
+//! Sinks are delivery-only; a non-idempotent external write belongs behind
+//! the effect boundary as an effectful transform authoring named outcome
+//! facts, consumed by a plain sink. The `effectful_sink!` macro is removed
+//! and must not return.
+//!
+//! ```compile_fail
+//! use obzenflow_dsl::effectful_sink;
+//!
+//! struct Out;
+//! struct Handler;
+//!
+//! let _ = effectful_sink!(Out => Handler, effects: [], middleware: []);
+//! ```
 
 mod binder;
 pub mod composites;
