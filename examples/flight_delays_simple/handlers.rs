@@ -89,6 +89,7 @@ impl TransformHandler for DelayCalculator {
                     &event,
                     FlightRecord::versioned_event_type(),
                     payload,
+                    obzenflow_core::config::LineagePolicy::default(),
                 )]);
             }
         }

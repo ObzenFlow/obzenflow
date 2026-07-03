@@ -36,6 +36,7 @@ where
 {
     converter: F,
     error_strategy: ErrorStrategy,
+    lineage: obzenflow_core::config::LineagePolicy,
     _phantom: PhantomData<fn() -> Fut>,
 }
 
@@ -48,6 +49,7 @@ where
         Self {
             converter,
             error_strategy: ErrorStrategy::ToErrorJournal,
+            lineage: obzenflow_core::config::LineagePolicy::default(),
             _phantom: PhantomData,
         }
     }
@@ -101,6 +103,7 @@ where
                     &event,
                     event_type,
                     payload,
+                    self.lineage,
                 )]
             }
             ErrorStrategy::ToEventTypeWith(event_type, payload_fn) => {
@@ -116,6 +119,7 @@ where
                     &event,
                     event_type,
                     payload,
+                    self.lineage,
                 )]
             }
             ErrorStrategy::Custom(handler) => handler(event, error_msg).into_iter().collect(),
@@ -153,6 +157,10 @@ where
     async fn drain(&mut self) -> Result<(), HandlerError> {
         Ok(())
     }
+
+    fn install_lineage_policy(&mut self, policy: obzenflow_core::config::LineagePolicy) {
+        self.lineage = policy;
+    }
 }
 
 /// Typed async TryMapWith helper.
@@ -169,6 +177,7 @@ where
 {
     converter: F,
     error_strategy: ErrorStrategy,
+    lineage: obzenflow_core::config::LineagePolicy,
     _phantom: AsyncTryMapWithTypedPhantom<T, O, Fut>,
 }
 
@@ -183,6 +192,7 @@ where
         Self {
             converter,
             error_strategy: ErrorStrategy::ToErrorJournal,
+            lineage: obzenflow_core::config::LineagePolicy::default(),
             _phantom: PhantomData,
         }
     }
@@ -235,6 +245,7 @@ where
                     &event,
                     event_type,
                     payload,
+                    self.lineage,
                 )]
             }
             ErrorStrategy::ToEventTypeWith(event_type, payload_fn) => {
@@ -250,6 +261,7 @@ where
                     &event,
                     event_type,
                     payload,
+                    self.lineage,
                 )]
             }
             ErrorStrategy::Custom(handler) => handler(event, error_msg).into_iter().collect(),
@@ -314,6 +326,7 @@ where
                         &event,
                         &event_type,
                         payload,
+                        self.lineage,
                     )])
                 }
                 Err(e) => {
@@ -331,5 +344,9 @@ where
 
     async fn drain(&mut self) -> Result<(), HandlerError> {
         Ok(())
+    }
+
+    fn install_lineage_policy(&mut self, policy: obzenflow_core::config::LineagePolicy) {
+        self.lineage = policy;
     }
 }

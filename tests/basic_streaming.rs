@@ -8,6 +8,7 @@ use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, Delivery
 use obzenflow_core::{StageId, WriterId};
 use obzenflow_dsl::{flow, sink, source, transform};
 use obzenflow_infra::journal::disk_journals;
+use obzenflow_runtime::run_context::FlowBuildContext;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
     FiniteSourceHandler, SinkHandler, TransformHandler,
@@ -134,6 +135,7 @@ async fn test_basic_flow() -> Result<()> {
             source |> sink;
         }
     }
+    .build(FlowBuildContext::for_tests())
     .await
     .map_err(|e| anyhow::anyhow!("Failed to create flow: {e:?}"))?;
 
@@ -192,6 +194,7 @@ async fn test_multi_stage_flow() -> Result<()> {
             doubler |> sink;
         }
     }
+    .build(FlowBuildContext::for_tests())
     .await
     .map_err(|e| anyhow::anyhow!("Failed to create flow: {e:?}"))?;
 
@@ -331,6 +334,7 @@ async fn test_pipeline_topology() -> Result<()> {
             doubler |> sink;
         }
     }
+    .build(FlowBuildContext::for_tests())
     .await
     .map_err(|e| anyhow::anyhow!("Failed to create flow: {e:?}"))?;
 

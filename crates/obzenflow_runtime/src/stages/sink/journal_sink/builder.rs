@@ -129,6 +129,7 @@ impl<H: UnifiedSinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Su
             system_journal: self.resources.system_journal.clone(),
             bus: self.resources.message_bus.clone(),
             writer_id: None,
+            lineage_policy: self.resources.lineage_policy,
             subscription: None,
             contract_state: Vec::new(),
             terminal_eof_kind: None,

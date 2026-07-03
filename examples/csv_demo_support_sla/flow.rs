@@ -87,6 +87,7 @@ impl TransformHandler for TicketTriage {
             &event,
             TriagedTicket::versioned_event_type(),
             payload,
+            obzenflow_core::config::LineagePolicy::default(),
         )])
     }
 

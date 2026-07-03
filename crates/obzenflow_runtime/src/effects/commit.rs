@@ -29,6 +29,7 @@ struct EffectCommitHandleInner<T> {
     descriptor_hash: EffectDescriptorHash,
     descriptor: EffectDescriptor,
     output_ordinal: EffectOutputOrdinal,
+    lineage: obzenflow_core::config::LineagePolicy,
     committed: Mutex<Option<CommittedEffectOutcome<T>>>,
     _marker: PhantomData<T>,
 }
@@ -46,6 +47,7 @@ pub(super) struct EffectCommitHandleParams {
     pub(super) descriptor_hash: EffectDescriptorHash,
     pub(super) descriptor: EffectDescriptor,
     pub(super) output_ordinal: EffectOutputOrdinal,
+    pub(super) lineage: obzenflow_core::config::LineagePolicy,
 }
 
 #[derive(Clone)]
@@ -77,6 +79,7 @@ where
                 descriptor_hash: params.descriptor_hash,
                 descriptor: params.descriptor,
                 output_ordinal: params.output_ordinal,
+                lineage: params.lineage,
                 committed: Mutex::new(None),
                 _marker: PhantomData,
             }),
@@ -119,6 +122,7 @@ where
             facts,
             self.inner.output_ordinal,
             Some(EffectFactOrigin::Effect),
+            self.inner.lineage,
         )
         .await?;
 
@@ -190,6 +194,7 @@ where
             self.inner.writer_id,
             &self.inner.parent,
             record,
+            self.inner.lineage,
         )
         .await;
 
@@ -234,6 +239,7 @@ pub(super) async fn append_domain_effect_success_facts(
     facts: Vec<TypedFact>,
     base_output_ordinal: EffectOutputOrdinal,
     origin: Option<EffectFactOrigin>,
+    lineage: obzenflow_core::config::LineagePolicy,
 ) -> Result<Vec<ChainEvent>, EffectError> {
     if facts.is_empty() {
         return Err(EffectError::Execution(
@@ -284,6 +290,7 @@ pub(super) async fn append_domain_effect_success_facts(
             &parent.event,
             fact.event_type.as_str(),
             fact.payload,
+            lineage,
         );
         event.id = deterministic_event_id(
             record.cursor.recorded_flow_id.as_str(),
@@ -338,14 +345,20 @@ pub(super) async fn append_effect_record(
     writer_id: WriterId,
     parent: &EventEnvelope<ChainEvent>,
     record: EffectRecord,
+    lineage: obzenflow_core::config::LineagePolicy,
 ) -> Result<(), EffectError> {
     let event_type = framework_effect_event_type(&record.descriptor.effect_type);
     let provenance = EffectProvenance::from_record(&record, EffectFactOwner::Framework);
     let payload =
         serde_json::to_value(&record).map_err(|e| EffectError::Serialization(e.to_string()))?;
-    let mut event =
-        ChainEventFactory::derived_data_event(writer_id, &parent.event, event_type, payload)
-            .with_effect_provenance(provenance);
+    let mut event = ChainEventFactory::derived_data_event(
+        writer_id,
+        &parent.event,
+        event_type,
+        payload,
+        lineage,
+    )
+    .with_effect_provenance(provenance);
     event.id = deterministic_effect_record_event_id(&record.cursor, event_type);
     event.processing_info.event_time = deterministic_effect_record_event_time(&record.cursor);
     if let EffectOutcomePayload::Failed { error_message, .. } = &record.outcome {

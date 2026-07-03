@@ -109,6 +109,9 @@ where
     pub(crate) stream_key_fn: StreamKeyFn,
     pub(crate) reference_mode: JoinReferenceMode,
     pub(crate) reference_batch_cap: Option<usize>,
+    /// FLOWIP-010 §7: build-resolved, installed by the stage builder;
+    /// default until then so direct construction keeps working.
+    pub(crate) lineage: obzenflow_core::config::LineagePolicy,
     pub(crate) _phantom: PhantomData<S>,
 }
 
@@ -125,6 +128,7 @@ where
             stream_key_fn: self.stream_key_fn.clone(),
             reference_mode: self.reference_mode,
             reference_batch_cap: self.reference_batch_cap,
+            lineage: self.lineage,
             _phantom: PhantomData,
         }
     }
@@ -166,6 +170,10 @@ where
 {
     type State = TypedJoinState<S::CatalogType, S::StreamType, S::Key>;
 
+    fn install_lineage_policy(&mut self, policy: obzenflow_core::config::LineagePolicy) {
+        self.lineage = policy;
+    }
+
     fn initial_state(&self) -> Self::State {
         TypedJoinState {
             reference_catalog: HashMap::new(),
@@ -206,7 +214,7 @@ where
                 key,
                 writer_id,
             );
-            propagate_stream_lineage(&event, &mut events);
+            propagate_stream_lineage(&event, &mut events, self.lineage);
             return Ok(events);
         }
 
@@ -283,17 +291,18 @@ where
     }
 }
 
-fn propagate_stream_lineage(parent: &ChainEvent, outputs: &mut [ChainEvent]) {
+fn propagate_stream_lineage(
+    parent: &ChainEvent,
+    outputs: &mut [ChainEvent],
+    lineage: obzenflow_core::config::LineagePolicy,
+) {
     // The join strategies typically materialize new events via `TypedPayload::to_event`,
     // which does not preserve correlation/lineage. Since joins conceptually enrich a
     // stream event, we propagate correlation + causality from the stream parent.
 
-    // Match `ChainEventFactory::derived_event` defaults.
-    const DEFAULT_MAX_LINEAGE_DEPTH: usize = 100;
-    let max_depth = std::env::var("OBZENFLOW_MAX_LINEAGE_DEPTH")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(DEFAULT_MAX_LINEAGE_DEPTH);
+    // Match `ChainEventFactory::derived_event`: the same build-resolved
+    // policy, threaded as data (FLOWIP-010 §7).
+    let max_depth = lineage.max_lineage_depth;
 
     for event in outputs.iter_mut() {
         if event.is_lifecycle() || event.is_control() {
@@ -400,6 +409,7 @@ mod tests {
             stream_key_fn: |s: &StreamRow| s.key.clone(),
             reference_mode: JoinReferenceMode::FiniteEof,
             reference_batch_cap: Some(DEFAULT_REFERENCE_BATCH_CAP),
+            lineage: obzenflow_core::config::LineagePolicy::default(),
             _phantom: PhantomData,
         }
     }

@@ -169,6 +169,7 @@ async fn test_dsl_pipeline() -> Result<()> {
             doubler |> summer;
         }
     }
+    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
     .await
     .map_err(|e| anyhow::anyhow!("Failed to create flow: {e:?}"))?;
 

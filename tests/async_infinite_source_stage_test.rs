@@ -260,6 +260,7 @@ async fn async_infinite_source_stop_interrupts_blocked_next_and_calls_drain() ->
             source |> sink;
         }
     }
+    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
     .await
     .map_err(|e| anyhow!("Failed to create flow: {e:?}"))?;
 
@@ -316,6 +317,7 @@ async fn async_infinite_source_emits_events_and_applies_stage_middleware() -> Re
             source |> sink;
         }
     }
+    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
     .await
     .map_err(|e| anyhow!("Failed to create flow: {e:?}"))?;
 

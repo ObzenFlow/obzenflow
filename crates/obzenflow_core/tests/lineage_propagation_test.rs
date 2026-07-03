@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
+use obzenflow_core::config::LineagePolicy;
 use obzenflow_core::{event::chain_event::ChainEventFactory, StageId, WriterId};
 use serde_json::json;
 
@@ -13,13 +14,31 @@ fn test_full_lineage_propagation() {
     let event_a = ChainEventFactory::data_event(writer_id, "test", json!({"level": "A"}));
 
     let event_b =
-        ChainEventFactory::derived_data_event(writer_id, &event_a, "test", json!({"level": "B"}));
+        ChainEventFactory::derived_data_event(
+            writer_id,
+            &event_a,
+            "test",
+            json!({"level": "B"}),
+            LineagePolicy::default(),
+        );
 
     let event_c =
-        ChainEventFactory::derived_data_event(writer_id, &event_b, "test", json!({"level": "C"}));
+        ChainEventFactory::derived_data_event(
+            writer_id,
+            &event_b,
+            "test",
+            json!({"level": "C"}),
+            LineagePolicy::default(),
+        );
 
     let event_d =
-        ChainEventFactory::derived_data_event(writer_id, &event_c, "test", json!({"level": "D"}));
+        ChainEventFactory::derived_data_event(
+            writer_id,
+            &event_c,
+            "test",
+            json!({"level": "D"}),
+            LineagePolicy::default(),
+        );
 
     // Event A should have no parents (root)
     assert_eq!(event_a.causality.parent_ids.len(), 0);
@@ -51,8 +70,13 @@ fn test_full_lineage_propagation() {
 fn test_lineage_depth_limit() {
     let writer_id = WriterId::from(StageId::new());
 
-    // Set a small limit for testing
-    std::env::set_var("OBZENFLOW_MAX_LINEAGE_DEPTH", "5");
+    // FLOWIP-010 §7: the depth is build-resolved policy threaded as data.
+    // The retired env spelling must have no effect (the mid-run-env-change
+    // defect regression); set it to a conflicting value to prove it.
+    std::env::set_var("OBZENFLOW_MAX_LINEAGE_DEPTH", "2");
+    let policy = LineagePolicy {
+        max_lineage_depth: 5,
+    };
 
     let mut events = vec![];
 
@@ -71,12 +95,17 @@ fn test_lineage_depth_limit() {
             parent,
             "test",
             json!({"index": i}),
+            policy,
         ));
     }
 
     // Last event should have at most 5 parents (due to limit)
     let last_event = &events[10];
     assert!(last_event.causality.parent_ids.len() <= 5);
+    assert!(
+        last_event.causality.parent_ids.len() > 2,
+        "the retired env spelling must not cap the depth"
+    );
 
     // It should have the most recent 5 ancestors
     assert!(last_event.causality.parent_ids.contains(&events[9].id)); // immediate parent
@@ -101,7 +130,13 @@ fn test_cycle_detection() {
     let event_a = ChainEventFactory::data_event(writer_id, "test", json!({"name": "A"}));
 
     let event_b =
-        ChainEventFactory::derived_data_event(writer_id, &event_a, "test", json!({"name": "B"}));
+        ChainEventFactory::derived_data_event(
+            writer_id,
+            &event_a,
+            "test",
+            json!({"name": "B"}),
+            LineagePolicy::default(),
+        );
 
     // B should not contain a cycle with itself
     assert!(!event_b.causality.contains_cycle(&event_b.id));
@@ -129,10 +164,22 @@ fn test_full_lineage_helper() {
     let event_a = ChainEventFactory::data_event(writer_id, "test", json!({"name": "A"}));
 
     let event_b =
-        ChainEventFactory::derived_data_event(writer_id, &event_a, "test", json!({"name": "B"}));
+        ChainEventFactory::derived_data_event(
+            writer_id,
+            &event_a,
+            "test",
+            json!({"name": "B"}),
+            LineagePolicy::default(),
+        );
 
     let event_c =
-        ChainEventFactory::derived_data_event(writer_id, &event_b, "test", json!({"name": "C"}));
+        ChainEventFactory::derived_data_event(
+            writer_id,
+            &event_b,
+            "test",
+            json!({"name": "C"}),
+            LineagePolicy::default(),
+        );
 
     // Get full lineage of C
     let lineage = event_c.causality.full_lineage(event_c.id);

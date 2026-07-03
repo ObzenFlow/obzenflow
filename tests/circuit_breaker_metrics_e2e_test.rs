@@ -239,6 +239,7 @@ async fn test_circuit_breaker_metrics_end_to_end() -> Result<()> {
             cb_transform |> cb_sink;
         }
     }
+    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
     .await
     .map_err(|e| anyhow::anyhow!("Flow creation failed: {e:?}"))?;
 
@@ -435,6 +436,7 @@ async fn test_circuit_breaker_summary_events() -> Result<()> {
             cb_summary_transform |> null_sink;
         }
     }
+    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
     .await
     .map_err(|e| anyhow::anyhow!("Flow creation failed: {e:?}"))?;
 

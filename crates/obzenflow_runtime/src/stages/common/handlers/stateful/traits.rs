@@ -107,6 +107,11 @@ pub trait StatefulHandler: Send + Sync {
     /// The internal state type
     type State: Clone + Send + Sync;
 
+    /// FLOWIP-010 §7: called once at stage build with the build-resolved
+    /// lineage policy. Handlers that create derived events store it; the
+    /// default ignores it.
+    fn install_lineage_policy(&mut self, _policy: obzenflow_core::config::LineagePolicy) {}
+
     /// Accumulate an event into the state (called in Accumulating state)
     ///
     /// This method updates the state with the new event but does NOT
@@ -174,6 +179,9 @@ pub trait StatefulHandler: Send + Sync {
 pub trait UnifiedStatefulHandler: Send + Sync {
     type State: Clone + Send + Sync;
 
+    /// FLOWIP-010 §7: forwarded to the wrapped handler at stage build.
+    fn install_lineage_policy(&mut self, _policy: obzenflow_core::config::LineagePolicy) {}
+
     /// Accumulate one event. `scope` is the per-event middleware execution
     /// scope computed by the supervisor at dispatch (FLOWIP-120c H3);
     /// handlers without middleware ignore it.
@@ -235,6 +243,10 @@ pub trait UnifiedStatefulHandler: Send + Sync {
 #[async_trait]
 impl<T: StatefulHandler + Send + Sync> UnifiedStatefulHandler for T {
     type State = T::State;
+
+    fn install_lineage_policy(&mut self, policy: obzenflow_core::config::LineagePolicy) {
+        StatefulHandler::install_lineage_policy(self, policy)
+    }
 
     async fn accumulate(
         &mut self,

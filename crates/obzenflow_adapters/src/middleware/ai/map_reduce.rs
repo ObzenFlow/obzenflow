@@ -144,14 +144,23 @@ fn update_chunk_failed_reason(
 
 #[derive(Debug, Clone)]
 pub struct AiMapReduceChunkManifestMiddleware<Chunk> {
+    lineage: obzenflow_core::config::LineagePolicy,
     _phantom: PhantomData<Chunk>,
 }
 
 impl<Chunk> AiMapReduceChunkManifestMiddleware<Chunk> {
     pub fn new() -> Self {
         Self {
+            lineage: obzenflow_core::config::LineagePolicy::default(),
             _phantom: PhantomData,
         }
+    }
+
+    /// FLOWIP-010 §7: build-resolved policy, set by the factory from
+    /// `StageConfig.lineage`.
+    pub fn with_lineage(mut self, lineage: obzenflow_core::config::LineagePolicy) -> Self {
+        self.lineage = lineage;
+        self
     }
 }
 
@@ -273,6 +282,7 @@ where
             event,
             AiMapReducePlanningManifest::versioned_event_type(),
             payload,
+            self.lineage,
         );
 
         ctx.write_control_event(manifest_event);
@@ -332,10 +342,12 @@ where
 
     fn create(
         &self,
-        _config: &StageConfig,
+        config: &StageConfig,
         _control_middleware: Arc<crate::middleware::control::ControlMiddlewareAggregator>,
     ) -> crate::middleware::MiddlewareFactoryResult<Box<dyn Middleware>> {
-        Ok(Box::new(AiMapReduceChunkManifestMiddleware::<Chunk>::new()))
+        Ok(Box::new(
+            AiMapReduceChunkManifestMiddleware::<Chunk>::new().with_lineage(config.lineage),
+        ))
     }
 }
 
@@ -345,14 +357,23 @@ where
 
 #[derive(Debug, Clone)]
 pub struct AiMapReduceMapMiddleware<Chunk, Partial> {
+    lineage: obzenflow_core::config::LineagePolicy,
     _phantom: PhantomData<(Chunk, Partial)>,
 }
 
 impl<Chunk, Partial> AiMapReduceMapMiddleware<Chunk, Partial> {
     pub fn new() -> Self {
         Self {
+            lineage: obzenflow_core::config::LineagePolicy::default(),
             _phantom: PhantomData,
         }
+    }
+
+    /// FLOWIP-010 §7: build-resolved policy, set by the factory from
+    /// `StageConfig.lineage`.
+    pub fn with_lineage(mut self, lineage: obzenflow_core::config::LineagePolicy) -> Self {
+        self.lineage = lineage;
+        self
     }
 }
 
@@ -445,6 +466,7 @@ where
                 event,
                 AiMapReduceChunkFailed::versioned_event_type(),
                 payload,
+                self.lineage,
             );
             ctx.write_control_event(event);
         }
@@ -465,6 +487,7 @@ where
                 event,
                 MAP_FAILURE_EVENT_TYPE,
                 payload,
+                self.lineage,
             )
             .mark_as_error(default_reason, ErrorKind::PermanentFailure);
             ctx.write_control_event(event);
@@ -590,10 +613,12 @@ where
 
     fn create(
         &self,
-        _config: &StageConfig,
+        config: &StageConfig,
         _control_middleware: Arc<crate::middleware::control::ControlMiddlewareAggregator>,
     ) -> crate::middleware::MiddlewareFactoryResult<Box<dyn Middleware>> {
-        Ok(Box::new(AiMapReduceMapMiddleware::<Chunk, Partial>::new()))
+        Ok(Box::new(
+            AiMapReduceMapMiddleware::<Chunk, Partial>::new().with_lineage(config.lineage),
+        ))
     }
 }
 
@@ -642,6 +667,7 @@ mod tests {
             name: "stage".to_string(),
             flow_name: "flow".to_string(),
             cycle_guard: None,
+            lineage: obzenflow_core::config::LineagePolicy::default(),
         }
     }
 
@@ -698,6 +724,7 @@ mod tests {
             &input,
             TestChunkEnvelope::versioned_event_type(),
             serde_json::to_value(chunk_payload).expect("chunk should serialize"),
+            obzenflow_core::config::LineagePolicy::default(),
         );
 
         let snapshot = AiChunkingSnapshot {
@@ -766,6 +793,7 @@ mod tests {
                     &input,
                     TestChunkEnvelope::versioned_event_type(),
                     serde_json::to_value(chunk).expect("chunk should serialize"),
+                    obzenflow_core::config::LineagePolicy::default(),
                 )
             })
             .collect();
@@ -795,6 +823,7 @@ mod tests {
                 "chunk_index": 0,
                 "chunk_count": 1,
             }),
+            obzenflow_core::config::LineagePolicy::default(),
         );
 
         middleware.post_handle(&input, &[chunk_event], &mut ctx);
@@ -909,6 +938,7 @@ mod tests {
             &parent,
             TestChunkEnvelope::versioned_event_type(),
             serde_json::to_value(chunk_payload).expect("chunk should serialize"),
+            obzenflow_core::config::LineagePolicy::default(),
         );
 
         let action = middleware.pre_handle(&chunk_event, &mut ctx);
@@ -974,6 +1004,7 @@ mod tests {
             &parent,
             TestChunkEnvelope::versioned_event_type(),
             serde_json::to_value(chunk_payload).expect("chunk should serialize"),
+            obzenflow_core::config::LineagePolicy::default(),
         );
 
         assert!(matches!(
@@ -1008,6 +1039,7 @@ mod tests {
             &parent,
             TestChunkEnvelope::versioned_event_type(),
             serde_json::to_value(chunk_payload).expect("chunk should serialize"),
+            obzenflow_core::config::LineagePolicy::default(),
         );
 
         assert!(matches!(
@@ -1021,6 +1053,7 @@ mod tests {
             &chunk_event,
             TestPartial::versioned_event_type(),
             json!({ "value": 1 }),
+            obzenflow_core::config::LineagePolicy::default(),
         );
         middleware.post_handle(&chunk_event, &[partial_event], &mut ctx);
         assert!(ctx.control_events().is_empty());
@@ -1047,6 +1080,7 @@ mod tests {
             &parent,
             TestChunkEnvelope::versioned_event_type(),
             serde_json::to_value(chunk_payload).expect("chunk should serialize"),
+            obzenflow_core::config::LineagePolicy::default(),
         );
 
         assert!(matches!(
@@ -1055,7 +1089,13 @@ mod tests {
         ));
 
         let other_output =
-            ChainEventFactory::derived_data_event(writer_id(), &chunk_event, "other", json!({}));
+            ChainEventFactory::derived_data_event(
+            writer_id(),
+            &chunk_event,
+            "other",
+            json!({}),
+            obzenflow_core::config::LineagePolicy::default(),
+        );
 
         middleware.post_handle(&chunk_event, &[other_output], &mut ctx);
         assert_eq!(ctx.control_events().len(), 2);
@@ -1088,6 +1128,7 @@ mod tests {
             &parent,
             TestChunkEnvelope::versioned_event_type(),
             serde_json::to_value(chunk_payload).expect("chunk should serialize"),
+            obzenflow_core::config::LineagePolicy::default(),
         );
 
         assert!(matches!(
@@ -1100,6 +1141,7 @@ mod tests {
             &chunk_event,
             TestPartial::versioned_event_type(),
             json!({ "value": 7 }),
+            obzenflow_core::config::LineagePolicy::default(),
         );
 
         middleware.pre_write(&mut partial_event, &ctx);
@@ -1134,6 +1176,7 @@ mod tests {
             &parent,
             TestChunkEnvelope::versioned_event_type(),
             serde_json::to_value(chunk_payload).expect("chunk should serialize"),
+            obzenflow_core::config::LineagePolicy::default(),
         );
 
         assert!(matches!(
@@ -1188,6 +1231,7 @@ mod tests {
             &parent,
             TestChunkEnvelope::versioned_event_type(),
             serde_json::to_value(chunk_payload).expect("chunk should serialize"),
+            obzenflow_core::config::LineagePolicy::default(),
         );
 
         assert!(matches!(
@@ -1196,7 +1240,13 @@ mod tests {
         ));
 
         let mut other =
-            ChainEventFactory::derived_data_event(writer_id(), &chunk_event, "other", json!({}));
+            ChainEventFactory::derived_data_event(
+            writer_id(),
+            &chunk_event,
+            "other",
+            json!({}),
+            obzenflow_core::config::LineagePolicy::default(),
+        );
         middleware.pre_write(&mut other, &ctx);
         assert_eq!(other.event_type(), "other");
     }

@@ -134,6 +134,7 @@ fn error_prone_transform() -> Map<impl Fn(ChainEvent) -> ChainEvent + Send + Syn
                 payload,
                 "Simulated processing error",
                 ErrorKind::Domain,
+                obzenflow_core::config::LineagePolicy::default(),
             )
         } else {
             payload["processed"] = json!(true);
@@ -144,6 +145,7 @@ fn error_prone_transform() -> Map<impl Fn(ChainEvent) -> ChainEvent + Send + Syn
                 &event,
                 ProcessedEvent::versioned_event_type(),
                 payload,
+                obzenflow_core::config::LineagePolicy::default(),
             )
         }
     })
@@ -199,6 +201,7 @@ async fn prometheus_100k_error_processor_error_kinds_are_domain_only() -> Result
             error_processor |> completion_sink;
         }
     }
+    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
     .await
     .map_err(|e| anyhow::anyhow!("Flow creation failed: {e:?}"))?;
 

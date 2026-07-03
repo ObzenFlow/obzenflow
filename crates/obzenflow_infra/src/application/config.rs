@@ -10,6 +10,7 @@ use obzenflow_runtime::bootstrap::{
     BootstrapConfig, MetricsBootstrap, MetricsExporterKind, ReplayVerb,
 };
 use serde::Deserialize;
+use std::collections::BTreeMap;
 use std::fmt::{Display, Formatter};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -167,9 +168,12 @@ pub struct FlowConfig {
 #[derive(Debug, Clone)]
 pub(crate) struct ResolvedStartupConfig {
     pub server: ResolvedServerConfig,
-    pub runtime: ResolvedRuntimeConfig,
+    pub runtime: ResolvedStartupRuntimeConfig,
     pub metrics: ResolvedMetricsConfig,
     pub replay: Option<ResolvedReplayConfig>,
+    /// FLOWIP-010 §7: the immutable runtime config snapshot, host-owned for
+    /// the run and handed to the flow build as `FlowBuildContext`.
+    pub runtime_config: std::sync::Arc<obzenflow_runtime::runtime_config::ResolvedRuntimeConfig>,
 }
 
 #[derive(Debug, Clone)]
@@ -186,7 +190,7 @@ pub(crate) struct ResolvedServerConfig {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct ResolvedRuntimeConfig {
+pub(crate) struct ResolvedStartupRuntimeConfig {
     pub shutdown_timeout: Duration,
     #[cfg_attr(not(feature = "warp-server"), allow(dead_code))]
     pub surface_metrics_interval: Duration,
@@ -256,7 +260,7 @@ pub(crate) struct ConfigError {
 }
 
 impl ConfigError {
-    fn at(path: impl Into<String>, message: impl Into<String>) -> Self {
+    pub(crate) fn at(path: impl Into<String>, message: impl Into<String>) -> Self {
         Self {
             path: Some(path.into()),
             message: message.into(),
@@ -284,11 +288,17 @@ impl std::error::Error for ConfigError {}
 
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(default, deny_unknown_fields)]
-struct RawFileStartupConfig {
+pub(crate) struct RawFileStartupConfig {
     server: RawFileServerConfig,
-    runtime: RawFileRuntimeConfig,
+    pub(crate) runtime: RawFileRuntimeConfig,
     metrics: RawFileMetricsConfig,
-    replay: RawFileReplayConfig,
+    pub(crate) replay: RawFileReplayConfig,
+    /// FLOWIP-010: runtime-owned knob namespaces below. Scope legality is
+    /// encoded in the struct shapes (§4c layout), so `deny_unknown_fields`
+    /// rejects wrong-scope entries at parse.
+    pub(crate) contracts: RawFileContractsConfig,
+    pub(crate) effects: RawFileEffectsConfig,
+    pub(crate) ai: RawFileAiConfig,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -325,9 +335,111 @@ struct RawFileControlPlaneAuthConfig {
 
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(default, deny_unknown_fields)]
-struct RawFileRuntimeConfig {
+pub(crate) struct RawFileRuntimeConfig {
     shutdown_timeout_secs: Option<i64>,
     surface_metrics_interval_secs: Option<i64>,
+    // FLOWIP-010 runtime knobs (global scope at bare keys).
+    pub(crate) max_lineage_depth: Option<i64>,
+    pub(crate) cycle_max_iterations: Option<i64>,
+    pub(crate) heartbeat_interval: Option<i64>,
+    pub(crate) metrics_drain_timeout_ms: Option<i64>,
+    pub(crate) flow: RawRuntimeFlowScope,
+    pub(crate) stages: BTreeMap<String, RawRuntimeStageScope>,
+    pub(crate) backpressure: RawBackpressureConfig,
+}
+
+/// `[runtime.flow]`: flow-scoped entries for Flow-or-finer-target knobs.
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+pub(crate) struct RawRuntimeFlowScope {
+    pub(crate) max_lineage_depth: Option<i64>,
+    pub(crate) cycle_max_iterations: Option<i64>,
+    pub(crate) heartbeat_interval: Option<i64>,
+}
+
+/// `[runtime.stages.<key>]`: stage-scoped entries for Stage-target knobs
+/// only (no `cycle_max_iterations` here: it is Flow-target).
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+pub(crate) struct RawRuntimeStageScope {
+    pub(crate) max_lineage_depth: Option<i64>,
+    pub(crate) heartbeat_interval: Option<i64>,
+}
+
+/// `[runtime.backpressure]` with the §4c nested edge layout.
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+pub(crate) struct RawBackpressureConfig {
+    pub(crate) window: Option<i64>,
+    pub(crate) flow: RawBackpressureFields,
+    pub(crate) stages: BTreeMap<String, RawBackpressureStageScope>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+pub(crate) struct RawBackpressureFields {
+    pub(crate) window: Option<i64>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+pub(crate) struct RawBackpressureStageScope {
+    pub(crate) window: Option<i64>,
+    pub(crate) edges: BTreeMap<String, RawBackpressureFields>,
+}
+
+/// `[contracts]` (Global-target knobs only; no scope sub-tables).
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+pub(crate) struct RawFileContractsConfig {
+    pub(crate) source_contract_strict_mode: Option<String>,
+}
+
+/// `[effects]` (FLOWIP-120c absorption; Stage-target, so no edge tables).
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+pub(crate) struct RawFileEffectsConfig {
+    pub(crate) circuit_breaker: RawBreakerFields,
+    pub(crate) rate_limiter: RawLimiterFields,
+    pub(crate) flow: RawEffectsScopeFields,
+    pub(crate) stages: BTreeMap<String, RawEffectsScopeFields>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+pub(crate) struct RawEffectsScopeFields {
+    pub(crate) circuit_breaker: RawBreakerFields,
+    pub(crate) rate_limiter: RawLimiterFields,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+pub(crate) struct RawBreakerFields {
+    pub(crate) threshold: Option<i64>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+pub(crate) struct RawLimiterFields {
+    pub(crate) events_per_second: Option<f64>,
+    pub(crate) burst_capacity: Option<f64>,
+}
+
+/// `[ai]` with the `[ai.models]` namespace (absorbs `ModelConfig`'s env
+/// surface; `api_key_env` is the visible secret reference, §13).
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+pub(crate) struct RawFileAiConfig {
+    pub(crate) models: RawFileAiModelsConfig,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+pub(crate) struct RawFileAiModelsConfig {
+    pub(crate) provider: Option<String>,
+    pub(crate) model: Option<String>,
+    pub(crate) base_url: Option<String>,
+    pub(crate) api_key_env: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -339,12 +451,12 @@ struct RawFileMetricsConfig {
 
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(default, deny_unknown_fields)]
-struct RawFileReplayConfig {
-    from: Option<PathBuf>,
-    resume_from: Option<PathBuf>,
-    allow_incomplete_archive: Option<bool>,
-    allow_duplicate_sink_delivery: Option<bool>,
-    verify: Option<bool>,
+pub(crate) struct RawFileReplayConfig {
+    pub(crate) from: Option<PathBuf>,
+    pub(crate) resume_from: Option<PathBuf>,
+    pub(crate) allow_incomplete_archive: Option<bool>,
+    pub(crate) allow_duplicate_sink_delivery: Option<bool>,
+    pub(crate) verify: Option<bool>,
 }
 
 impl FlowConfig {
@@ -380,6 +492,12 @@ impl FlowConfig {
             .or(builder_config_file)
             .or_else(|| autodiscover_config(enable_autodiscovery));
         let file = load_file_config(file_path.as_deref())?;
+        // FLOWIP-010 Phase A: the runtime config snapshot resolves from the
+        // same raw inputs, once, and rides the resolved startup config so
+        // the host owns it for the run (§7 carrier).
+        let runtime_config = std::sync::Arc::new(
+            super::runtime_config_sources::build_runtime_config_snapshot(&self, &file)?,
+        );
         let control_plane_auth = self.resolve_control_plane_auth(&file)?;
 
         let server_enabled = if self.server {
@@ -461,7 +579,7 @@ impl FlowConfig {
             ));
         }
 
-        let runtime = ResolvedRuntimeConfig {
+        let runtime = ResolvedStartupRuntimeConfig {
             shutdown_timeout: Duration::from_secs(resolve_scalar(
                 None,
                 parse_non_negative_u64(
@@ -603,6 +721,7 @@ impl FlowConfig {
             runtime,
             metrics,
             replay,
+            runtime_config,
         })
     }
 

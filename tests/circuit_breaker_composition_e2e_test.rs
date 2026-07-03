@@ -139,6 +139,7 @@ impl TransformHandler for FanOutTransform {
                 json!(CompInput {
                     value: input.value * 10 + 1
                 }),
+                obzenflow_core::config::LineagePolicy::default(),
             ),
             ChainEventFactory::derived_data_event(
                 self.writer_id,
@@ -147,6 +148,7 @@ impl TransformHandler for FanOutTransform {
                 json!(CompInput {
                     value: input.value * 10 + 2
                 }),
+                obzenflow_core::config::LineagePolicy::default(),
             ),
         ])
     }

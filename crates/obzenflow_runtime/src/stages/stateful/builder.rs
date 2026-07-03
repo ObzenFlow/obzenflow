@@ -109,8 +109,11 @@ impl<H: UnifiedStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static
             ))
         };
 
-        // Create context with subscription factory from resources
-        let handler = self.handler;
+        // Create context with subscription factory from resources.
+        // FLOWIP-010 §7: handler meets resources here; install the
+        // build-resolved lineage policy before the handler is shared.
+        let mut handler = self.handler;
+        handler.install_lineage_policy(self.resources.lineage_policy);
         let emit_interval = self
             .config
             .emit_interval
@@ -134,6 +137,7 @@ impl<H: UnifiedStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static
             system_journal: self.resources.system_journal.clone(),
             bus: self.resources.message_bus.clone(),
             writer_id: None,
+            lineage_policy: self.resources.lineage_policy,
             subscription: None,
             contract_state: Vec::new(),
             last_contract_check: None,

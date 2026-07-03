@@ -95,6 +95,13 @@ pub enum FlowBuildError {
     #[error("Topology validation failed: {0}")]
     TopologyValidationFailed(#[source] TopologyError),
 
+    /// FLOWIP-010: flow-build config resolution failed (required knob
+    /// unresolved, scoped entry naming an unknown stage/edge, or a DSL
+    /// candidate conflict). The message carries the full `config error at
+    /// <path>` diagnostic including the scopes that may supply the knob.
+    #[error("{0}")]
+    ConfigResolution(#[source] obzenflow_runtime::runtime_config::ConfigResolveError),
+
     #[error("Unsupported cycle topology: {0}")]
     UnsupportedCycleTopology(String),
 

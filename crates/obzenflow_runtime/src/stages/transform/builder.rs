@@ -119,9 +119,13 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
             ))
         };
 
-        // Create context with bound subscription factory from resources
+        // Create context with bound subscription factory from resources.
+        // FLOWIP-010 §7: handler meets resources here; install the
+        // build-resolved lineage policy before the handler is boxed away.
+        let mut handler = self.handler;
+        handler.install_lineage_policy(self.resources.lineage_policy);
         let context = TransformContext {
-            handler: self.handler,
+            handler,
             stage_id: self.config.stage_id,
             stage_name: self.config.stage_name.clone(),
             observers: self.config.observers.clone(),
@@ -136,6 +140,7 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
             error_journal: self.resources.error_journal.clone(),
             system_journal: self.resources.system_journal.clone(),
             writer_id: None,
+            lineage_policy: self.resources.lineage_policy,
             subscription: None,
             contract_state: Vec::new(),
             last_contract_check: None,

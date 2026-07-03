@@ -152,8 +152,11 @@ impl<H: UnifiedJoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Su
             ))
         };
 
-        // Create context with subscription factory from resources
-        let handler = self.handler;
+        // Create context with subscription factory from resources.
+        // FLOWIP-010 §7: handler meets resources here; install the
+        // build-resolved lineage policy before the handler is shared.
+        let mut handler = self.handler;
+        handler.install_lineage_policy(self.resources.lineage_policy);
         let handler_state = handler.initial_state();
         let context = JoinContext {
             handler: Arc::new(handler),

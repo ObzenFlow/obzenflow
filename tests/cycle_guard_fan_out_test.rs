@@ -179,6 +179,7 @@ impl TransformHandler for FanOutEntryTransform {
                     &event,
                     SeedEvent::EVENT_TYPE,
                     json!({ "kind": "iter", "item": item, "iter": 0u64, "target": target }),
+                    obzenflow_core::config::LineagePolicy::default(),
                 ));
             }
             return Ok(outputs);
@@ -195,6 +196,7 @@ impl TransformHandler for FanOutEntryTransform {
                     &event,
                     SeedEvent::EVENT_TYPE,
                     json!({ "kind": "done", "item": item, "iter": iter, "target": target }),
+                    obzenflow_core::config::LineagePolicy::default(),
                 )]);
             }
 
@@ -203,6 +205,7 @@ impl TransformHandler for FanOutEntryTransform {
                 &event,
                 SeedEvent::EVENT_TYPE,
                 json!({ "kind": "iter", "item": item, "iter": iter, "target": target }),
+                obzenflow_core::config::LineagePolicy::default(),
             )]);
         }
 
@@ -271,6 +274,7 @@ impl TransformHandler for IterationTransform {
             &event,
             SeedEvent::EVENT_TYPE,
             json!({ "kind": "iter", "item": item, "iter": iter.saturating_add(1), "target": target }),
+            obzenflow_core::config::LineagePolicy::default(),
         )])
     }
 
@@ -368,6 +372,7 @@ async fn cycle_guard_fan_out_siblings_converge_without_spurious_abort() -> Resul
             entry |> snk;
         }
     }
+    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
     .await
     .map_err(|e| anyhow::anyhow!("failed to create flow: {e}"))?;
 

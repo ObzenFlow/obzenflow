@@ -341,6 +341,7 @@ pub(super) async fn dispatch_accumulating<
                             stage_key: ctx.stage_name.clone(),
                             writer_id,
                             input_seq,
+                            lineage: ctx.lineage_policy,
                             stage_logic_version: handler.stage_logic_version().to_string(),
                             data_journal: ctx.data_journal.clone(),
                             flow_context: Some(flow_context.clone()),

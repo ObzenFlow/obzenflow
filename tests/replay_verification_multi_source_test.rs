@@ -150,6 +150,7 @@ impl TransformHandler for Intake {
             &event,
             OrderPlaced::EVENT_TYPE,
             json!(order),
+            obzenflow_core::config::LineagePolicy::default(),
         )])
     }
 

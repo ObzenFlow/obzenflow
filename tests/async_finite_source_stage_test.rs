@@ -196,6 +196,7 @@ async fn async_finite_source_emits_events_and_calls_drain() -> Result<()> {
             source |> sink;
         }
     }
+    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
     .await
     .map_err(|e| anyhow::anyhow!("Failed to create flow: {e:?}"))?;
 
@@ -245,6 +246,7 @@ async fn async_finite_source_applies_stage_middleware() -> Result<()> {
             source |> sink;
         }
     }
+    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
     .await
     .map_err(|e| anyhow::anyhow!("Failed to create flow: {e:?}"))?;
 

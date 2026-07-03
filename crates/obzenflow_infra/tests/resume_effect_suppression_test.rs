@@ -262,6 +262,7 @@ async fn run_until_delivered(
         calls.clone(),
         delivered.clone(),
     )
+    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
     .await
     .map_err(|e| anyhow!("flow failed to build: {e:?}"))?;
     wait_for_running(&handle).await?;

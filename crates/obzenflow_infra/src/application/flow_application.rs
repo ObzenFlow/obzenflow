@@ -830,8 +830,13 @@ impl FlowApplication {
 
             tracing::info!("🚀 Starting FlowApplication");
 
-            // Build the flow (this executes the flow! macro)
-            let flow_handle = match flow.await {
+            // Build the flow (this executes the flow! macro) against the
+            // explicit per-run context (FLOWIP-010 §7): the host owns the
+            // resolved snapshot; the build consumes it as an input.
+            let build_context = obzenflow_runtime::run_context::FlowBuildContext::new(
+                config.runtime_config.clone(),
+            );
+            let flow_handle = match flow.build(build_context).await {
                 Ok(handle) => handle,
                 Err(failure) => {
                     // FLOWIP-120u F2: the failure carrier holds substrate state; None

@@ -130,6 +130,7 @@ impl<In, Item> ChunkByBudgetBuilder<In, Item> {
             oversize_policy: self.oversize_policy,
             budget_overhead_tokens: self.budget_overhead_tokens,
             snapshot_excluded_items_limit: self.snapshot_excluded_items_limit,
+            lineage: obzenflow_core::config::LineagePolicy::default(),
         }
     }
 }
@@ -150,6 +151,7 @@ pub struct ChunkByBudgetTyped<In, Item> {
     oversize_policy: OversizePolicy,
     budget_overhead_tokens: TokenCount,
     snapshot_excluded_items_limit: usize,
+    lineage: obzenflow_core::config::LineagePolicy,
 }
 
 impl<In, Item> fmt::Debug for ChunkByBudgetTyped<In, Item> {
@@ -261,6 +263,7 @@ where
                     tags: None,
                 },
             )),
+            self.lineage,
         );
 
         let mut out = Vec::with_capacity(plan.chunks.len() + 1);
@@ -275,6 +278,7 @@ where
                 &event,
                 ChunkEnvelope::<Item>::versioned_event_type(),
                 payload,
+                self.lineage,
             ));
         }
 
@@ -283,5 +287,9 @@ where
 
     async fn drain(&mut self) -> Result<(), HandlerError> {
         Ok(())
+    }
+
+    fn install_lineage_policy(&mut self, policy: obzenflow_core::config::LineagePolicy) {
+        self.lineage = policy;
     }
 }

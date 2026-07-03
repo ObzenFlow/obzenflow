@@ -76,6 +76,11 @@ pub trait TransformHandler: Send + Sync {
     /// For stateless transforms, this is typically a no-op.
     /// For stateful transforms, this might flush caches or close connections.
     async fn drain(&mut self) -> std::result::Result<(), HandlerError>;
+
+    /// FLOWIP-010 §7: called once at stage build with the build-resolved
+    /// lineage policy. Handlers that create derived events store it; the
+    /// default ignores it.
+    fn install_lineage_policy(&mut self, _policy: obzenflow_core::config::LineagePolicy) {}
 }
 
 /// Async handler for stateless transform stages.
@@ -91,6 +96,11 @@ pub trait AsyncTransformHandler: Send + Sync {
 
     /// Perform any cleanup during shutdown.
     async fn drain(&mut self) -> std::result::Result<(), HandlerError>;
+
+    /// FLOWIP-010 §7: called once at stage build with the build-resolved
+    /// lineage policy. Handlers that create derived events store it; the
+    /// default ignores it.
+    fn install_lineage_policy(&mut self, _policy: obzenflow_core::config::LineagePolicy) {}
 }
 
 /// Unified async handler surface used by the transform stage supervisor.
@@ -116,6 +126,9 @@ pub trait UnifiedTransformHandler: Send + Sync {
     fn stage_logic_version(&self) -> &str {
         "1"
     }
+
+    /// FLOWIP-010 §7: forwarded to the wrapped handler at stage build.
+    fn install_lineage_policy(&mut self, _policy: obzenflow_core::config::LineagePolicy) {}
 }
 
 #[async_trait]
@@ -131,6 +144,10 @@ impl<T: TransformHandler + Send + Sync> UnifiedTransformHandler for T {
 
     async fn drain(&mut self) -> std::result::Result<(), HandlerError> {
         TransformHandler::drain(self).await
+    }
+
+    fn install_lineage_policy(&mut self, policy: obzenflow_core::config::LineagePolicy) {
+        TransformHandler::install_lineage_policy(self, policy)
     }
 }
 
@@ -154,6 +171,10 @@ impl<T: AsyncTransformHandler + Send + Sync> UnifiedTransformHandler
 
     async fn drain(&mut self) -> std::result::Result<(), HandlerError> {
         AsyncTransformHandler::drain(&mut self.0).await
+    }
+
+    fn install_lineage_policy(&mut self, policy: obzenflow_core::config::LineagePolicy) {
+        self.0.install_lineage_policy(policy)
     }
 }
 

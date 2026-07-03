@@ -158,7 +158,11 @@ impl CircuitBreakerBuilder {
     where
         F: Fn(&ChainEvent) -> Vec<ChainEvent> + Send + Sync + 'static,
     {
-        self.fallback = Some(Arc::new(f));
+        // Raw fallbacks build their own events; only the typed builders
+        // consume the build-resolved lineage policy.
+        self.fallback = Some(Arc::new(
+            move |event: &ChainEvent, _lineage: obzenflow_core::config::LineagePolicy| f(event),
+        ));
         self
     }
 
@@ -188,8 +192,10 @@ impl CircuitBreakerBuilder {
         Out: TypedPayload + Serialize + 'static,
         F: Fn(&In) -> Out + Send + Sync + 'static,
     {
-        let adapter = move |event: &ChainEvent| -> Vec<ChainEvent> {
-            build_typed_fallback_event::<In, Out, F>(&f, event)
+        let adapter = move |event: &ChainEvent,
+                            lineage: obzenflow_core::config::LineagePolicy|
+              -> Vec<ChainEvent> {
+            build_typed_fallback_event::<In, Out, F>(&f, event, lineage)
         };
 
         self.fallback = Some(Arc::new(adapter));
@@ -209,10 +215,12 @@ impl CircuitBreakerBuilder {
         R: TypedPayload + Serialize + 'static,
         F: Fn(&In, CircuitBreakerRejectionReason) -> R + Send + Sync + 'static,
     {
-        let adapter =
-            move |event: &ChainEvent, reason: CircuitBreakerRejectionReason| -> Vec<ChainEvent> {
-                build_typed_rejection_event::<In, R, F>(&f, event, reason)
-            };
+        let adapter = move |event: &ChainEvent,
+                            reason: CircuitBreakerRejectionReason,
+                            lineage: obzenflow_core::config::LineagePolicy|
+              -> Vec<ChainEvent> {
+            build_typed_rejection_event::<In, R, F>(&f, event, reason, lineage)
+        };
 
         self.typed_outcome = Some(TypedOutcomeConfig {
             build_rejection: Arc::new(adapter),
@@ -239,8 +247,10 @@ impl CircuitBreakerBuilder {
         In: TypedPayload + DeserializeOwned,
         F: Fn(&In) -> E::Outcome + Send + Sync + 'static,
     {
-        let adapter = move |event: &ChainEvent| -> Vec<ChainEvent> {
-            build_outcome_fallback_events::<E, In, F>(&f, event)
+        let adapter = move |event: &ChainEvent,
+                            lineage: obzenflow_core::config::LineagePolicy|
+              -> Vec<ChainEvent> {
+            build_outcome_fallback_events::<E, In, F>(&f, event, lineage)
         };
 
         self.fallback = Some(Arc::new(adapter));
@@ -604,7 +614,11 @@ impl CircuitBreakerFactory {
     where
         F: Fn(&ChainEvent) -> Vec<ChainEvent> + Send + Sync + 'static,
     {
-        self.fallback = Some(Arc::new(f));
+        // Raw fallbacks build their own events; only the typed builders
+        // consume the build-resolved lineage policy.
+        self.fallback = Some(Arc::new(
+            move |event: &ChainEvent, _lineage: obzenflow_core::config::LineagePolicy| f(event),
+        ));
         self
     }
 
@@ -827,6 +841,7 @@ impl CircuitBreakerFactory {
         middleware.failure_mode = failure_mode;
         middleware.rate_window = rate_window;
         middleware.typed_outcome = self.typed_outcome.clone();
+        middleware.lineage = config.lineage;
         middleware.open_policy = open_policy;
         middleware.half_open_policy = half_open_policy;
         middleware.unknown_error_kind_policy = unknown_error_kind_policy;

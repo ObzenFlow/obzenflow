@@ -171,6 +171,7 @@ async fn build_pipeline(
                 src |> snk;
             }
         }
+        .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
         .await
         .map_err(|e| anyhow::anyhow!("Failed to create flow: {e:?}"))?,
         10 => flow! {
@@ -204,6 +205,7 @@ async fn build_pipeline(
                 s9 |> snk;
             }
         }
+        .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
         .await
         .map_err(|e| anyhow::anyhow!("Failed to create flow: {e:?}"))?,
         20 => flow! {
@@ -257,6 +259,7 @@ async fn build_pipeline(
                 s19 |> snk;
             }
         }
+        .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
         .await
         .map_err(|e| anyhow::anyhow!("Failed to create flow: {e:?}"))?,
         100 => {
@@ -292,6 +295,7 @@ async fn build_pipeline(
                     s9 |> snk;
                 }
             }
+            .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
             .await
             .map_err(|e| anyhow::anyhow!("Failed to create flow: {e:?}"))?
         }
@@ -322,6 +326,7 @@ async fn measure_idle_cpu() -> anyhow::Result<f64> {
             src |> snk;
         }
     }
+    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
     .await
     .map_err(|e| anyhow::anyhow!("Failed to create flow: {e:?}"))?;
 

@@ -183,6 +183,7 @@ async fn test_dropped_events_detection() -> Result<()> {
             dropping_transform |> collector_sink;
         }
     }
+    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
     .await
     .map_err(|e| anyhow::anyhow!("Flow creation failed: {e:?}"))?;
 

@@ -128,6 +128,7 @@ impl TransformHandler for SlowDouble {
                 n: tick.n,
                 doubled: tick.n * 2,
             }),
+            obzenflow_core::config::LineagePolicy::default(),
         )])
     }
 
@@ -326,6 +327,7 @@ async fn record_and_interrupt(journal_base: &Path) -> Result<(PathBuf, PathBuf)>
             0,
             delivered.clone(),
         )
+        .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
         .await
         .map_err(|e| anyhow!("flow failed to build: {e:?}"))?;
         wait_for_running(&handle).await?;
@@ -355,6 +357,7 @@ async fn record_and_interrupt(journal_base: &Path) -> Result<(PathBuf, PathBuf)>
             SLOW_MS,
             delivered.clone(),
         )
+        .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
         .await
         .map_err(|e| anyhow!("resume flow failed to build: {e:?}"))?;
         wait_for_running(&handle).await?;
@@ -416,6 +419,7 @@ async fn resuming_an_interrupted_resume_extends_the_same_prefix() -> Result<()> 
             0,
             delivered.clone(),
         )
+        .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
         .await
         .map_err(|e| anyhow!("second resume failed to build: {e:?}"))?;
         wait_for_running(&handle).await?;
@@ -541,6 +545,7 @@ async fn resuming_a_torn_catch_up_archive_stays_at_generation_one() -> Result<()
             0,
             delivered.clone(),
         )
+        .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
         .await
         .map_err(|e| anyhow!("resume of the torn archive failed to build: {e:?}"))?;
         wait_for_running(&handle).await?;

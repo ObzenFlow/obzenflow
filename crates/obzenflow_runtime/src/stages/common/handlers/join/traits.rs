@@ -33,6 +33,11 @@ pub trait JoinHandler: Send + Sync + Clone {
     /// Get initial state
     fn initial_state(&self) -> Self::State;
 
+    /// FLOWIP-010 §7: called once at stage build with the build-resolved
+    /// lineage policy. Handlers that create derived events store it; the
+    /// default ignores it.
+    fn install_lineage_policy(&mut self, _policy: obzenflow_core::config::LineagePolicy) {}
+
     /// Process an event from a specific upstream source
     ///
     /// # Arguments
@@ -124,6 +129,9 @@ pub trait JoinHandler: Send + Sync + Clone {
 pub trait UnifiedJoinHandler: Send + Sync {
     type State: Clone + Send + Sync;
 
+    /// FLOWIP-010 §7: forwarded to the wrapped handler at stage build.
+    fn install_lineage_policy(&mut self, _policy: obzenflow_core::config::LineagePolicy) {}
+
     fn initial_state(&self) -> Self::State;
 
     fn process_event(
@@ -159,6 +167,10 @@ pub trait UnifiedJoinHandler: Send + Sync {
 #[async_trait]
 impl<T: JoinHandler> UnifiedJoinHandler for T {
     type State = T::State;
+
+    fn install_lineage_policy(&mut self, policy: obzenflow_core::config::LineagePolicy) {
+        JoinHandler::install_lineage_policy(self, policy)
+    }
 
     fn initial_state(&self) -> Self::State {
         JoinHandler::initial_state(self)

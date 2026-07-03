@@ -127,6 +127,7 @@ mod tests {
             resume: None,
             stages: map,
             system_journal_file: "system.log".to_string(),
+            effective_config: None,
         }
     }
 

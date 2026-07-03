@@ -28,6 +28,9 @@ pub(crate) struct FlowHandleExtras {
     pub liveness_snapshots: Option<LivenessSnapshots>,
     /// The selected run substrate (FLOWIP-120u): durable with its locator, or ephemeral.
     pub run_substrate: RunSubstrateState,
+    /// FLOWIP-010: the build-resolved effective config, carried out of the
+    /// build so the host can serve the per-flow/per-stage read surface.
+    pub flow_effective_config: Option<Arc<crate::runtime_config::FlowEffectiveConfig>>,
 }
 
 /// Structural middleware configuration for a stage (FLOWIP-059).
@@ -113,6 +116,9 @@ pub struct FlowHandle {
 
     /// The selected run substrate (FLOWIP-120u).
     run_substrate: RunSubstrateState,
+
+    /// FLOWIP-010: the build-resolved effective config with provenance.
+    flow_effective_config: Option<Arc<crate::runtime_config::FlowEffectiveConfig>>,
 }
 
 impl FlowHandle {
@@ -129,6 +135,7 @@ impl FlowHandle {
             system_journal,
             liveness_snapshots,
             run_substrate,
+            flow_effective_config,
         } = extras;
 
         Self {
@@ -140,6 +147,7 @@ impl FlowHandle {
             system_journal,
             liveness_snapshots,
             run_substrate,
+            flow_effective_config,
         }
     }
 
@@ -147,6 +155,14 @@ impl FlowHandle {
     /// locator, or ephemeral with none (FLOWIP-120u).
     pub fn run_substrate(&self) -> &RunSubstrateState {
         &self.run_substrate
+    }
+
+    /// The build-resolved effective config (FLOWIP-010), when the flow was
+    /// built through the DSL path that materializes it.
+    pub fn flow_effective_config(
+        &self,
+    ) -> Option<&Arc<crate::runtime_config::FlowEffectiveConfig>> {
+        self.flow_effective_config.as_ref()
     }
 
     /// Try to start the pipeline using only the currently observed state.
@@ -603,6 +619,7 @@ mod tests {
             flow_name: "test_flow".to_string(),
             contract_attachments: None,
             system_journal: None,
+            flow_effective_config: None,
             liveness_snapshots: None,
             run_substrate: RunSubstrateState::Ephemeral,
         }

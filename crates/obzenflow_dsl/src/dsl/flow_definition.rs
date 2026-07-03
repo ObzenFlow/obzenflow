@@ -5,10 +5,10 @@
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
-use std::task::{Context, Poll};
 
 use obzenflow_runtime::journal::RunSubstrateState;
 use obzenflow_runtime::prelude::FlowHandle;
+use obzenflow_runtime::run_context::FlowBuildContext;
 
 use super::FlowBuildError;
 
@@ -44,30 +44,36 @@ impl From<FlowBuildError> for FlowBuildFailure {
     }
 }
 
+type BuildFuture =
+    Pin<Box<dyn Future<Output = Result<FlowHandle, FlowBuildFailure>> + Send + 'static>>;
+
 /// A declarative flow definition produced by the `flow!` macro.
 ///
 /// This is intentionally a distinct type (not a generic `Future`) so application runners
 /// can be opinionated about accepting flows from the DSL rather than arbitrary async code.
+///
+/// FLOWIP-010 §7: the build is deferred until a [`FlowBuildContext`] is
+/// supplied, so a flow cannot be built without the resolved config snapshot.
+/// Hosts call [`FlowDefinition::build`]; tests without a host use
+/// `FlowBuildContext::for_tests()`.
 pub struct FlowDefinition {
-    inner: Pin<Box<dyn Future<Output = Result<FlowHandle, FlowBuildFailure>> + Send + 'static>>,
+    build: Box<dyn FnOnce(FlowBuildContext) -> BuildFuture + Send + 'static>,
 }
 
 impl FlowDefinition {
     #[doc(hidden)]
-    pub fn new<F>(future: F) -> Self
+    pub fn new<F, Fut>(build: F) -> Self
     where
-        F: Future<Output = Result<FlowHandle, FlowBuildFailure>> + Send + 'static,
+        F: FnOnce(FlowBuildContext) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<FlowHandle, FlowBuildFailure>> + Send + 'static,
     {
         Self {
-            inner: Box::pin(future),
+            build: Box::new(move |ctx| Box::pin(build(ctx))),
         }
     }
-}
 
-impl Future for FlowDefinition {
-    type Output = Result<FlowHandle, FlowBuildFailure>;
-
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        self.inner.as_mut().poll(cx)
+    /// Build the flow against an explicit per-run context.
+    pub fn build(self, ctx: FlowBuildContext) -> BuildFuture {
+        (self.build)(ctx)
     }
 }

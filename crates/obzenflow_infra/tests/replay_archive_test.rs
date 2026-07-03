@@ -53,6 +53,7 @@ fn write_manifest(dir: &Path) {
         resume: None,
         stages,
         system_journal_file: "system.log".to_string(),
+        effective_config: None,
     };
 
     let body = serde_json::to_string_pretty(&manifest).unwrap();
@@ -189,6 +190,7 @@ fn write_manifest_with_version(dir: &Path, version: &str) {
         resume: None,
         stages,
         system_journal_file: "system.log".to_string(),
+        effective_config: None,
     };
 
     let body = serde_json::to_string_pretty(&manifest).unwrap();

@@ -122,6 +122,7 @@ async fn circuit_breaker_on_sink_opens_and_rejects_delivery() -> Result<()> {
             cb_source |> cb_sink;
         }
     }
+    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
     .await
     .map_err(|e| anyhow::anyhow!("Flow creation failed: {e:?}"))?;
 

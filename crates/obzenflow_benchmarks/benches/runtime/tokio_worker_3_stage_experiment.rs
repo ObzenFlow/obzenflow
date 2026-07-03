@@ -199,6 +199,7 @@ async fn run_3_stage_pipeline_with_runtime(
                     s2 |> snk;
                 }
             }
+            .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
             .await
             .unwrap();
 
@@ -393,6 +394,7 @@ fn bench_5_stage_control(c: &mut Criterion) {
                         s4 |> snk;
                     }
                 }
+                .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
                 .await
                 .unwrap();
 

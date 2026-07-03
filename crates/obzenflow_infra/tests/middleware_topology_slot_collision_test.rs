@@ -119,6 +119,7 @@ async fn topology_config_slot_collisions_are_configuration_errors() {
             src |> snk;
         }
     }
+    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
     .await;
 
     let err = built.err().expect("expected flow build to fail");

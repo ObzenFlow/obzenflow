@@ -1512,6 +1512,7 @@ mod tests {
                 source |> sink;
             }
         }
+        .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
         .await
         .expect("build flow");
 
@@ -1624,6 +1625,7 @@ mod tests {
                 source |> sink;
             }
         }
+        .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
         .await
         .expect("build flow");
 

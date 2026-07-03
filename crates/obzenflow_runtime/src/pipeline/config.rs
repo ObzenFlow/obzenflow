@@ -60,6 +60,9 @@ pub struct StageConfig {
     pub name: String,
     pub flow_name: String,
     pub cycle_guard: Option<CycleGuardConfig>,
+    /// FLOWIP-010 §7: build-resolved lineage policy; the existing path into
+    /// middleware construction (`MiddlewareFactory::create` receives this).
+    pub lineage: obzenflow_core::config::LineagePolicy,
 }
 
 // TODO: Observers need redesign for FLOWIP-084

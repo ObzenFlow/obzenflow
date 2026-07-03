@@ -128,6 +128,7 @@ impl TransformHandler for DoubleTransform {
                 n: tick.n,
                 doubled: tick.n * 2,
             }),
+            obzenflow_core::config::LineagePolicy::default(),
         )])
     }
 
@@ -229,6 +230,7 @@ async fn run_until_delivered(
         count,
         delivered.clone(),
     )
+    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
     .await
     .map_err(|e| anyhow!("flow failed to build: {e:?}"))?;
     wait_for_running(&handle).await?;
@@ -266,6 +268,7 @@ fn build_flow_memory(first_n: u64, count: u64, delivered: Arc<AtomicU64>) -> Flo
 async fn run_memory_until_delivered(first_n: u64, count: u64, expected: u64) -> Result<()> {
     let delivered = Arc::new(AtomicU64::new(0));
     let handle = build_flow_memory(first_n, count, delivered.clone())
+        .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
         .await
         .map_err(|e| anyhow!("memory flow failed to build: {e:?}"))?;
     assert!(
@@ -353,6 +356,7 @@ async fn memory_resume_from_disk_archive_is_refused_at_build() -> Result<()> {
         );
         let delivered = Arc::new(AtomicU64::new(0));
         let failure = build_flow_memory(RECORDED + 1, 1, delivered)
+            .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
             .await
             .err()
             .expect("an ephemeral resume must be refused at build");

@@ -254,6 +254,7 @@ impl TransformHandler for RuntimeChunker {
                     chunk_count,
                     value: (chunk_index as u64) + 1,
                 }),
+                obzenflow_core::config::LineagePolicy::default(),
             ));
         }
         Ok(out)
@@ -281,6 +282,7 @@ impl AsyncTransformHandler for RuntimeMap {
             &event,
             BuildOnlyPartial::EVENT_TYPE,
             json!(BuildOnlyPartial { value: chunk.value }),
+            obzenflow_core::config::LineagePolicy::default(),
         )])
     }
 
@@ -308,6 +310,7 @@ impl AsyncTransformHandler for RuntimeFinalize {
             &event,
             BuildOnlyOut::EVENT_TYPE,
             json!(BuildOnlyOut { total }),
+            obzenflow_core::config::LineagePolicy::default(),
         )])
     }
 
@@ -351,6 +354,7 @@ async fn build_typed_flow_accepts_ai_map_reduce_with_subgraph_attached() {
             digest |> sink_stage;
         }
     }
+    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
     .await;
 
     let _handle = result.unwrap_or_else(|err| {
@@ -395,6 +399,7 @@ async fn ai_map_reduce_runtime_commits_framework_internal_transport_events() {
             digest |> sink_stage;
         }
     }
+    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
     .await
     .expect("ai_map_reduce runtime flow should build");
 

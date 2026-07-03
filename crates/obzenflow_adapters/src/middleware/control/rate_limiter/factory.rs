@@ -383,6 +383,7 @@ mod tests {
             name: name.to_string(),
             flow_name: "test_flow".to_string(),
             cycle_guard: None,
+            lineage: obzenflow_core::config::LineagePolicy::default(),
         }
     }
 
