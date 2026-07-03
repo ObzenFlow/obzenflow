@@ -126,8 +126,7 @@ async-trait = { workspace = true }
 # CLI surface for the `obzenflow` binary (FLOWIP-095j)
 clap = { workspace = true }
 # Live-mode HTTP client for `obzenflow config get --url` (FLOWIP-010).
-# Blocking and small by design; rustls via the `tls` feature, no native-tls.
-ureq = { version = "2.10", default-features = false, features = ["tls"] }
+reqwest = { workspace = true, features = ["blocking"] }
 
 [dev-dependencies]
 # Used by examples/tests/benchmarks in this crate

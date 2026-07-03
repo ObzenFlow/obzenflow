@@ -231,25 +231,37 @@ fn main() -> ExitCode {
                     Some(url) => {
                         let route = live_route(view, flow.as_deref(), stage.as_deref());
                         let target = format!("{}{route}", url.trim_end_matches('/'));
-                        let mut request = ureq::get(&target);
-                        if let Some(header) = &auth_header {
-                            request = request.set("Authorization", header);
-                        }
-                        let body = match request.call() {
-                            Ok(response) => match response.into_string() {
-                                Ok(body) => body,
-                                Err(err) => {
-                                    eprintln!("config get failed reading {target}: {err}");
-                                    return ExitCode::from(4);
-                                }
-                            },
-                            Err(ureq::Error::Status(status, response)) => {
-                                let body = response.into_string().unwrap_or_default();
-                                eprintln!("config get failed: {target} returned {status}: {body}");
+                        let client = match live_http_client() {
+                            Ok(client) => client,
+                            Err(err) => {
+                                eprintln!("config get failed: {err}");
                                 return ExitCode::from(4);
                             }
+                        };
+                        let mut request = client.get(&target);
+                        if let Some(header) = &auth_header {
+                            request = request.header(reqwest::header::AUTHORIZATION, header);
+                        }
+                        let response = match request.send() {
+                            Ok(response) => response,
                             Err(err) => {
                                 eprintln!("config get failed calling {target}: {err}");
+                                return ExitCode::from(4);
+                            }
+                        };
+                        let status = response.status();
+                        if !status.is_success() {
+                            let body = response.text().unwrap_or_default();
+                            eprintln!(
+                                "config get failed: {target} returned {}: {body}",
+                                status.as_u16()
+                            );
+                            return ExitCode::from(4);
+                        }
+                        let body = match response.text() {
+                            Ok(body) => body,
+                            Err(err) => {
+                                eprintln!("config get failed reading {target}: {err}");
                                 return ExitCode::from(4);
                             }
                         };
@@ -277,5 +289,15 @@ fn main() -> ExitCode {
                 }
             }
         },
+    }
+}
+
+fn live_http_client() -> Result<reqwest::blocking::Client, String> {
+    match std::panic::catch_unwind(reqwest::blocking::Client::new) {
+        Ok(client) => Ok(client),
+        Err(_) => reqwest::blocking::Client::builder()
+            .no_proxy()
+            .build()
+            .map_err(|err| format!("building HTTP client failed: {err}")),
     }
 }
