@@ -22,7 +22,6 @@ use crate::stages::observer::{
 use crate::stages::source::boundary::{
     SourceBoundary, SourceBoundaryOutcome, SourceBoundaryReport, SourcePollExecution,
 };
-use crate::supervised_base::idle_backoff::IdleBackoff;
 use crate::supervised_base::{EventLoopDirective, EventReceiver};
 use obzenflow_core::event::context::{FlowContext, MiddlewareExecutionScope};
 use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
@@ -240,7 +239,7 @@ pub(crate) async fn drain_pending_outputs_sync(
     instrumentation: &Arc<StageInstrumentation>,
     backpressure_writer: &BackpressureWriter,
     backpressure_pulse: &mut BackpressureActivityPulse,
-    backpressure_backoff: &mut IdleBackoff,
+    backpressure_stall: &mut Option<tokio::time::Instant>,
     output_contract: Option<&StageOutputContract>,
     observers: Option<&crate::stages::observer::StageObserverBundle>,
 ) -> Result<bool, BoxError> {
@@ -270,7 +269,7 @@ pub(crate) async fn drain_pending_outputs_sync(
             instrumentation,
             backpressure_writer,
             backpressure_pulse,
-            backpressure_backoff,
+            backpressure_stall,
             output_contract,
             observers,
             pending_outputs,
@@ -299,7 +298,7 @@ pub(crate) async fn drain_pending_outputs_async<E>(
     instrumentation: &Arc<StageInstrumentation>,
     backpressure_writer: &BackpressureWriter,
     backpressure_pulse: &mut BackpressureActivityPulse,
-    backpressure_backoff: &mut IdleBackoff,
+    backpressure_stall: &mut Option<tokio::time::Instant>,
     output_contract: Option<&StageOutputContract>,
     observers: Option<&crate::stages::observer::StageObserverBundle>,
     external_events: &mut EventReceiver<E>,
@@ -336,7 +335,7 @@ where
             instrumentation,
             backpressure_writer,
             backpressure_pulse,
-            backpressure_backoff,
+            backpressure_stall,
             output_contract,
             observers,
             pending_outputs,
@@ -344,8 +343,15 @@ where
         .await?
         {
             DrainAttempt::Committed { .. } => {}
-            DrainAttempt::BackedOff { delay } => {
-                tokio::select! {
+            DrainAttempt::BackedOff { bound, waker } => {
+                // Sources keep their out-of-band arm: the credit wait races
+                // the external-events channel, so drain, EOF, cancellation,
+                // and shutdown interrupt the wait directly. The chunk bound
+                // still applies; the anchored stall episode in
+                // `backpressure_stall` decides the stall on re-entry.
+                let wait_started = tokio::time::Instant::now();
+                let wake = crate::stages::common::control_strategies::WakeOn::Notify(waker);
+                let waited = tokio::select! {
                     biased;
                     maybe_event = external_events.recv() => {
                         match maybe_event {
@@ -356,7 +362,18 @@ where
                             }
                         }
                     }
-                    _ = tokio::time::sleep(delay) => {}
+                    _ = crate::stages::common::supervision::suspension::suspend_until(
+                        &wake,
+                        Some(bound),
+                    ) => wait_started.elapsed(),
+                };
+                backpressure_writer.record_wait(waited);
+                if let Some((min_credit, limiting)) =
+                    backpressure_writer.min_downstream_credit_detail()
+                {
+                    backpressure_pulse.record_delay(waited, Some(min_credit), Some(limiting));
+                } else {
+                    backpressure_pulse.record_delay(waited, None, None);
                 }
                 return Ok(Some(EventLoopDirective::Continue));
             }
@@ -526,7 +543,7 @@ mod tests {
         let _d = StageId::from_topology_id(d_top);
 
         let plan =
-            BackpressurePlan::disabled().with_stage_window(s, NonZeroU64::new(1).expect("window"));
+            BackpressurePlan::disabled().with_stage_enforced(s, NonZeroU64::new(1).expect("window"), std::time::Duration::from_secs(30));
         let registry = BackpressureRegistry::new(&topology, &plan);
         let writer = registry.writer(s);
         writer.reserve(1).expect("reserve").commit(1);
@@ -558,10 +575,7 @@ mod tests {
         );
 
         let mut backpressure_pulse = BackpressureActivityPulse::new();
-        let mut backpressure_backoff = IdleBackoff::exponential_with_cap(
-            Duration::from_millis(200),
-            Duration::from_millis(200),
-        );
+        let mut backpressure_stall: Option<tokio::time::Instant> = None;
 
         let (sender, mut receiver, _watcher) = ChannelBuilder::<TestEvent, ()>::new()
             .with_event_buffer(1)
@@ -580,7 +594,7 @@ mod tests {
                 &instrumentation,
                 &writer,
                 &mut backpressure_pulse,
-                &mut backpressure_backoff,
+                &mut backpressure_stall,
                 None,
                 None,
                 &mut receiver,
@@ -589,7 +603,7 @@ mod tests {
             .await
         });
 
-        // Give the drain task a moment to enter the backoff select.
+        // Give the drain task a moment to enter the credit-wait select.
         tokio::time::sleep(Duration::from_millis(10)).await;
         sender.send(TestEvent::BeginDrain).await.expect("send");
 

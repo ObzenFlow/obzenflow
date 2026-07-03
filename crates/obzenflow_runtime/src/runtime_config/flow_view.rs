@@ -10,10 +10,29 @@ use super::candidates::{ConfigValue, DslCandidates};
 use super::model::{doc_for, Resolved};
 use super::schema::knob;
 use obzenflow_core::config::{
-    ConfigScope, EffectiveConfigEvidence, LineagePolicy, ResolvedValueDoc,
+    ConfigScope, ConfigSource, EffectiveConfigEvidence, LineagePolicy, ResolvedValueDoc,
 };
 use obzenflow_core::StageKey;
 use std::collections::{BTreeMap, BTreeSet};
+
+/// Resolved backpressure enforcement for one directed edge (FLOWIP-115e).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackpressureMode {
+    Off,
+    Track,
+    Enforce,
+}
+
+impl BackpressureMode {
+    fn from_token(token: &str) -> Self {
+        match token {
+            "off" => Self::Off,
+            "track" => Self::Track,
+            "enforce" => Self::Enforce,
+            other => unreachable!("mode token validated at admission: {other}"),
+        }
+    }
+}
 
 /// Structural facts the flow build hands to `materialize_flow_config`:
 /// identity, the stage-key set, the directed-edge set, and the DSL-declared
@@ -115,7 +134,8 @@ impl FlowEffectiveConfig {
     }
 
     /// The backpressure window resolved for one directed edge, when any
-    /// rung supplied one (`OptionalAbsent` until FLOWIP-115e).
+    /// rung supplied one. Required where the edge's mode resolves to
+    /// `enforce`, via the materialization pass.
     pub fn backpressure_window_for(
         &self,
         upstream: &StageKey,
@@ -123,6 +143,53 @@ impl FlowEffectiveConfig {
     ) -> Option<&Resolved<ConfigValue>> {
         self.get(
             "runtime.backpressure.window",
+            &ConfigScope::Edge {
+                upstream: upstream.clone(),
+                downstream: downstream.clone(),
+            },
+        )
+    }
+
+    /// The enforcement mode and its winning source for one directed edge.
+    /// Always resolves, since the registry default is `off`; the source
+    /// lets the SCC auto-enable distinguish the built-in default from an
+    /// explicit `off` (FLOWIP-115e).
+    pub fn backpressure_mode_for(
+        &self,
+        upstream: &StageKey,
+        downstream: &StageKey,
+    ) -> (BackpressureMode, ConfigSource) {
+        self.get(
+            "runtime.backpressure.mode",
+            &ConfigScope::Edge {
+                upstream: upstream.clone(),
+                downstream: downstream.clone(),
+            },
+        )
+        .and_then(|resolved| {
+            resolved
+                .value
+                .as_text()
+                .map(|token| {
+                    (
+                        BackpressureMode::from_token(token),
+                        resolved.meta.source.clone(),
+                    )
+                })
+        })
+        .unwrap_or((BackpressureMode::Off, ConfigSource::Default))
+    }
+
+    /// The stall timeout resolved for one directed edge, in milliseconds.
+    /// Required where the edge's mode resolves to `enforce`, via the
+    /// materialization pass.
+    pub fn backpressure_stall_timeout_for(
+        &self,
+        upstream: &StageKey,
+        downstream: &StageKey,
+    ) -> Option<u64> {
+        self.u64_at(
+            "runtime.backpressure.stall_timeout_ms",
             &ConfigScope::Edge {
                 upstream: upstream.clone(),
                 downstream: downstream.clone(),

@@ -18,7 +18,7 @@ fn backpressure_blocks_after_window_until_downstream_acks() {
     let d = obzenflow_core::StageId::from_topology_id(d_top);
 
     let plan =
-        BackpressurePlan::disabled().with_stage_window(s, NonZeroU64::new(2).expect("window"));
+        BackpressurePlan::disabled().with_stage_enforced(s, NonZeroU64::new(2).expect("window"), std::time::Duration::from_secs(30));
     let registry = BackpressureRegistry::new(&topology, &plan);
 
     let writer = registry.writer(s);
@@ -61,7 +61,7 @@ fn backpressure_fan_out_is_barrier_slowest_wins() {
     let b = obzenflow_core::StageId::from_topology_id(b_top);
 
     let plan =
-        BackpressurePlan::disabled().with_stage_window(s, NonZeroU64::new(2).expect("window"));
+        BackpressurePlan::disabled().with_stage_enforced(s, NonZeroU64::new(2).expect("window"), std::time::Duration::from_secs(30));
     let registry = BackpressureRegistry::new(&topology, &plan);
 
     let writer = registry.writer(s);

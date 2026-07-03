@@ -221,6 +221,7 @@
 //! let _ = effectful_sink!(Out => Handler, effects: [], middleware: []);
 //! ```
 
+pub mod backpressure_clause;
 mod binder;
 pub mod composites;
 #[path = "dsl.rs"]

@@ -17,7 +17,6 @@ use crate::pipeline::MaxIterations;
 use crate::stages::common::backpressure_activity_pulse::BackpressureActivityPulse;
 use crate::stages::common::control_strategies::{ProcessingContext, SignalDecision, SignalGate};
 use crate::stages::common::cycle_guard::CycleGuard;
-use crate::supervised_base::idle_backoff::IdleBackoff;
 use async_trait::async_trait;
 use obzenflow_core::event::identity::JournalWriterId;
 use obzenflow_core::event::ChainEventFactory;
@@ -34,7 +33,6 @@ use serde_json::json;
 use std::collections::VecDeque;
 use std::num::NonZeroU64;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 use ulid::Ulid;
 
 #[derive(Debug)]
@@ -686,13 +684,120 @@ fn make_writer_with_window(window: NonZeroU64) -> (StageId, BackpressureWriter) 
     let s = StageId::from_topology_id(s_top);
     let d = StageId::from_topology_id(_d_top);
 
-    let plan = BackpressurePlan::disabled().with_stage_window(s, window);
+    let plan = BackpressurePlan::disabled().with_stage_enforced(s, window, std::time::Duration::from_secs(30));
     let registry = BackpressureRegistry::new(&topology, &plan);
 
     let writer = registry.writer(s);
     let _reader = registry.reader(s, d);
 
     (s, writer)
+}
+
+#[tokio::test(start_paused = true)]
+async fn fan_out_trickle_acks_never_reset_the_stall_deadline() {
+    // One healthy downstream trickling acks, one wedged: the spurious wakes
+    // from the healthy edge must not extend the stall episode, and the fact
+    // fires at the configured ceiling naming the wedged (limiting) edge.
+    let mut builder = TopologyBuilder::new();
+    let t_top = builder.add_stage(Some("t".to_string()));
+    let k1_top = builder.add_stage(Some("k1".to_string()));
+    builder.set_current(t_top);
+    let k2_top = builder.add_stage(Some("k2".to_string()));
+    let topology = builder.build_unchecked().expect("topology");
+
+    let t = StageId::from_topology_id(t_top);
+    let k1 = StageId::from_topology_id(k1_top);
+    let k2 = StageId::from_topology_id(k2_top);
+
+    let stall_timeout = std::time::Duration::from_secs(30);
+    let window = NonZeroU64::new(1).expect("window");
+    let plan = BackpressurePlan::disabled()
+        .with_edge_enforced(t, k1, window, stall_timeout)
+        .with_edge_enforced(t, k2, window, stall_timeout);
+    let registry = BackpressureRegistry::new(&topology, &plan);
+    let writer = registry.writer(t);
+    let healthy_reader = registry.reader(t, k1);
+
+    // Exhaust credit on both edges.
+    writer.reserve(1).expect("seed reserve").commit(1);
+
+    let flow_context = make_flow_context(
+        "flow",
+        "flow_id",
+        "t",
+        t,
+        obzenflow_core::event::context::StageType::Transform,
+    );
+    let data_journal: Arc<dyn Journal<ChainEvent>> =
+        Arc::new(NoopJournal::new(JournalOwner::stage(t)));
+    let system_journal: Arc<dyn Journal<SystemEvent>> =
+        Arc::new(NoopJournal::new(JournalOwner::stage(t)));
+    let instrumentation = Arc::new(StageInstrumentation::new());
+    let mut pulse = BackpressureActivityPulse::new();
+    let mut stall: Option<tokio::time::Instant> = None;
+    let mut pending_outputs = VecDeque::new();
+    let output_contract = output_contract_for_event_type("x");
+    pending_outputs.push_back(
+        crate::stages::common::supervision::backpressure_drain::PendingOutput {
+            event: ChainEventFactory::data_event(WriterId::from(t), "x", json!({"n": 1})),
+            scope: obzenflow_core::MiddlewareExecutionScope::LiveHandler,
+        },
+    );
+
+    let started = tokio::time::Instant::now();
+    let mut iterations = 0u32;
+    let error = loop {
+        iterations += 1;
+        assert!(
+            iterations < 400,
+            "stall never fired: spurious wakes must not reset the anchored deadline"
+        );
+        if iterations % 4 == 0 {
+            // Healthy-edge ack: a spurious wake, since k2 stays at zero credit.
+            healthy_reader.ack_consumed(1);
+        }
+        let pending = pending_outputs.pop_front().expect("requeued pending");
+        match drain_one_pending(
+            pending,
+            &flow_context,
+            t,
+            None,
+            &data_journal,
+            &system_journal,
+            None,
+            &instrumentation,
+            &writer,
+            &mut pulse,
+            &mut stall,
+            Some(&output_contract),
+            None,
+            &mut pending_outputs,
+        )
+        .await
+        {
+            Ok(DrainOutcome::BackedOff) => continue,
+            Ok(DrainOutcome::Committed { .. }) => panic!("the wedged edge never frees credit"),
+            Err(error) => break error,
+        }
+    };
+
+    let message = error.to_string();
+    assert!(
+        message.contains("backpressure.stalled"),
+        "unexpected error: {message}"
+    );
+    assert!(
+        message.contains(&k2.to_string()),
+        "the fact names the wedged limiting edge: {message}"
+    );
+
+    // The episode ran exactly one ceiling: healthy-edge acks neither reset
+    // nor extended the anchored deadline.
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed >= stall_timeout && elapsed < stall_timeout + std::time::Duration::from_secs(2),
+        "continuous stall measured against the anchor, got {elapsed:?}"
+    );
 }
 
 fn output_contract_for_event_type(event_type: &str) -> StageOutputContract {
@@ -728,7 +833,7 @@ async fn drain_one_pending_reserves_before_journal_append_and_records_output_for
 
     let instrumentation = Arc::new(StageInstrumentation::new());
     let mut pulse = BackpressureActivityPulse::new();
-    let mut backoff = IdleBackoff::exponential_with_cap(Duration::ZERO, Duration::ZERO);
+    let mut stall: Option<tokio::time::Instant> = None;
     let mut pending_outputs = VecDeque::new();
     let output_contract = output_contract_for_event_type("x");
 
@@ -748,7 +853,7 @@ async fn drain_one_pending_reserves_before_journal_append_and_records_output_for
         &instrumentation,
         &writer,
         &mut pulse,
-        &mut backoff,
+        &mut stall,
         Some(&output_contract),
         None,
         &mut pending_outputs,
@@ -787,7 +892,7 @@ async fn drain_one_pending_accepts_semantic_event_for_versioned_output_contract(
 
     let instrumentation = Arc::new(StageInstrumentation::new());
     let mut pulse = BackpressureActivityPulse::new();
-    let mut backoff = IdleBackoff::exponential_with_cap(Duration::ZERO, Duration::ZERO);
+    let mut stall: Option<tokio::time::Instant> = None;
     let mut pending_outputs = VecDeque::new();
     let output_contract = output_contract_for_event_type("semantic.test.v1");
 
@@ -808,7 +913,7 @@ async fn drain_one_pending_accepts_semantic_event_for_versioned_output_contract(
         &instrumentation,
         &writer,
         &mut pulse,
-        &mut backoff,
+        &mut stall,
         Some(&output_contract),
         None,
         &mut pending_outputs,
@@ -844,7 +949,7 @@ async fn drain_one_pending_rejects_undeclared_data_output() {
 
     let instrumentation = Arc::new(StageInstrumentation::new());
     let mut pulse = BackpressureActivityPulse::new();
-    let mut backoff = IdleBackoff::exponential_with_cap(Duration::ZERO, Duration::ZERO);
+    let mut stall: Option<tokio::time::Instant> = None;
     let mut pending_outputs = VecDeque::new();
     let output_contract = output_contract_for_event_type("declared.v1");
 
@@ -865,7 +970,7 @@ async fn drain_one_pending_rejects_undeclared_data_output() {
         &instrumentation,
         &writer,
         &mut pulse,
-        &mut backoff,
+        &mut stall,
         Some(&output_contract),
         None,
         &mut pending_outputs,
@@ -908,7 +1013,7 @@ async fn drain_one_pending_does_not_reserve_for_non_data() {
 
     let instrumentation = Arc::new(StageInstrumentation::new());
     let mut pulse = BackpressureActivityPulse::new();
-    let mut backoff = IdleBackoff::exponential_with_cap(Duration::ZERO, Duration::ZERO);
+    let mut stall: Option<tokio::time::Instant> = None;
     let mut pending_outputs = VecDeque::new();
 
     let event = ChainEventFactory::drain_event(WriterId::from(stage_id));
@@ -927,7 +1032,7 @@ async fn drain_one_pending_does_not_reserve_for_non_data() {
         &instrumentation,
         &writer,
         &mut pulse,
-        &mut backoff,
+        &mut stall,
         None,
         None,
         &mut pending_outputs,
@@ -969,7 +1074,7 @@ async fn drain_one_pending_requeues_and_returns_backed_off_when_reserve_fails() 
 
     let instrumentation = Arc::new(StageInstrumentation::new());
     let mut pulse = BackpressureActivityPulse::new();
-    let mut backoff = IdleBackoff::exponential_with_cap(Duration::ZERO, Duration::ZERO);
+    let mut stall: Option<tokio::time::Instant> = None;
     let mut pending_outputs = VecDeque::new();
 
     let event = ChainEventFactory::data_event(WriterId::from(stage_id), "x", json!({"n": 1}));
@@ -989,7 +1094,7 @@ async fn drain_one_pending_requeues_and_returns_backed_off_when_reserve_fails() 
         &instrumentation,
         &writer,
         &mut pulse,
-        &mut backoff,
+        &mut stall,
         None,
         None,
         &mut pending_outputs,

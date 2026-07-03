@@ -148,6 +148,7 @@ pub fn canonical_env_name(key_path: &str) -> String {
 
 const TOKENS_STRICT_MODE: &[&str] = &["abort", "warn"];
 const TOKENS_AI_PROVIDER: &[&str] = &["ollama", "openai", "openai_compatible"];
+pub const TOKENS_BACKPRESSURE_MODE: &[&str] = &["off", "track", "enforce"];
 
 /// The first-pass registry: consumers-only namespaces (FLOWIP-010
 /// implementation shape). Sorted by key path; a unit test enforces it.
@@ -244,6 +245,41 @@ pub fn knob_registry() -> &'static [KnobSpec] {
                 env: EnvBinding::Canonical,
             },
             KnobSpec {
+                key_path: "runtime.backpressure.mode",
+                file_path: None,
+                value_type: KnobType::Token {
+                    allowed: TOKENS_BACKPRESSURE_MODE,
+                },
+                target: KnobTarget::Edge {
+                    stage_binding: EdgeEndpoint::Upstream,
+                },
+                // Enforcement is opt-in: the built-in default is `off`, and
+                // window + stall timeout are required where `enforce` resolves
+                // (the FLOWIP-115e materialization pass, not a registry
+                // Required).
+                default: KnobDefault::Value(ConfigValue::Text("off".to_string())),
+                mutability: Mutability::Restartful,
+                redaction: Redaction::Plain,
+                env: EnvBinding::Canonical,
+            },
+            KnobSpec {
+                key_path: "runtime.backpressure.stall_timeout_ms",
+                file_path: None,
+                value_type: KnobType::U64 {
+                    min: 1,
+                    max: u64::MAX,
+                },
+                target: KnobTarget::Edge {
+                    stage_binding: EdgeEndpoint::Upstream,
+                },
+                // Required where mode resolves to `enforce`, via the
+                // materialization pass.
+                default: KnobDefault::OptionalAbsent,
+                mutability: Mutability::Restartful,
+                redaction: Redaction::Plain,
+                env: EnvBinding::Canonical,
+            },
+            KnobSpec {
                 key_path: "runtime.backpressure.window",
                 file_path: None,
                 value_type: KnobType::U64 {
@@ -253,8 +289,8 @@ pub fn knob_registry() -> &'static [KnobSpec] {
                 target: KnobTarget::Edge {
                     stage_binding: EdgeEndpoint::Upstream,
                 },
-                // OptionalAbsent preserves today's opt-in behaviour; flips
-                // to Required in FLOWIP-115e.
+                // Required where mode resolves to `enforce`, via the
+                // materialization pass.
                 default: KnobDefault::OptionalAbsent,
                 mutability: Mutability::Restartful,
                 redaction: Redaction::Plain,

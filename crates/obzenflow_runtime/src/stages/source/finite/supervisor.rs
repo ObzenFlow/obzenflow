@@ -392,7 +392,7 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> H
                     &ctx.instrumentation,
                     &ctx.backpressure_writer,
                     &mut ctx.backpressure_pulse,
-                    &mut ctx.backpressure_backoff,
+                    &mut ctx.backpressure_stall,
                     Some(&ctx.output_contract),
                     Some(&ctx.observers),
                 )

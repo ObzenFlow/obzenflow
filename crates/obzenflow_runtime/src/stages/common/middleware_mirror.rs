@@ -48,7 +48,10 @@ pub async fn mirror_middleware_event_to_system_journal(
             )
         }
         MiddlewareLifecycle::Backpressure(bp) => {
-            matches!(bp, BackpressureEvent::ActivityPulse { .. })
+            matches!(
+                bp,
+                BackpressureEvent::ActivityPulse { .. } | BackpressureEvent::Stalled { .. }
+            )
         }
         _ => false,
     };

@@ -22,7 +22,7 @@ fn backpressure_bypass_env_var_allows_progress_while_credits_are_exhausted() {
     let d = obzenflow_core::StageId::from_topology_id(d_top);
 
     let plan =
-        BackpressurePlan::disabled().with_stage_window(s, NonZeroU64::new(1).expect("window"));
+        BackpressurePlan::disabled().with_stage_enforced(s, NonZeroU64::new(1).expect("window"), std::time::Duration::from_secs(30));
     let registry = BackpressureRegistry::new(&topology, &plan);
 
     let writer = registry.writer(s);

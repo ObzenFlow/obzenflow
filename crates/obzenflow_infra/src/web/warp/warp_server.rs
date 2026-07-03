@@ -3705,6 +3705,23 @@ impl MiddlewareSseState {
                     }
                     Some(payload)
                 }
+                BackpressureEvent::Stalled {
+                    upstream,
+                    downstream,
+                    window,
+                    stall_timeout_ms,
+                    elapsed_ms,
+                    in_flight,
+                } => Some(json!({
+                    "middleware": "backpressure",
+                    "event_type": "stalled",
+                    "upstream": upstream.to_string(),
+                    "downstream": downstream.to_string(),
+                    "window": window,
+                    "stall_timeout_ms": stall_timeout_ms,
+                    "elapsed_ms": elapsed_ms,
+                    "in_flight": in_flight,
+                })),
             },
             _ => None,
         }

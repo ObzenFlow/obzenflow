@@ -851,6 +851,7 @@ mod tests {
             name: "transform".to_string(),
             handler: ExactTransform,
             middleware: vec![],
+            backpressure: None,
         });
         let transform_metadata = StageTypingMetadata::transform(
             TypeHint::exact::<InputEvent>(),
@@ -2439,6 +2440,7 @@ mod tests {
             name: "untyped_transform".to_string(),
             handler: ExactTransform,
             middleware: vec![],
+            backpressure: None,
         });
         // Sanity: the bare TransformDescriptor returns None.
         assert!(descriptor.typing_metadata().is_none());
@@ -2469,6 +2471,7 @@ mod tests {
             name: "synthetic".to_string(),
             handler: ExactTransform,
             middleware: vec![],
+            backpressure: None,
         });
         let bad_metadata = StageTypingMetadata::transform(
             TypeHint::Unspecified,
@@ -2501,6 +2504,7 @@ mod tests {
             name: "synthetic".to_string(),
             handler: ExactTransform,
             middleware: vec![],
+            backpressure: None,
         });
         let bad_metadata = StageTypingMetadata::transform(
             TypeHint::exact::<InputEvent>(),

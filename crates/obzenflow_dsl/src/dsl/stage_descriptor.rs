@@ -7,6 +7,7 @@
 //! This is the core of the let bindings approach - each stage macro creates a
 //! descriptor that encapsulates both the handler and how to create its supervisor.
 
+use crate::dsl::backpressure_clause::BackpressureClause;
 use crate::dsl::typing::StageTypingMetadata;
 use crate::dsl::StageCreationResult;
 use crate::stage_handle_adapter::StageHandleAdapter;
@@ -527,6 +528,12 @@ pub trait StageDescriptor: Send + Sync {
     /// Get the stage name
     fn name(&self) -> &str;
 
+    /// The stage's `backpressure:` clause, when declared (FLOWIP-115e).
+    /// Pure DSL-tier candidate sugar; enforcement is the resolved mode.
+    fn backpressure_clause(&self) -> Option<&crate::dsl::backpressure_clause::BackpressureClause> {
+        None
+    }
+
     /// Update the stage's runtime name.
     ///
     /// Implementations that carry an internal name field should override this.
@@ -748,6 +755,7 @@ pub struct FiniteSourceDescriptor<H: FiniteSourceHandler + 'static> {
     pub name: String,
     pub handler: H,
     pub middleware: Vec<Box<dyn MiddlewareFactory>>,
+    pub backpressure: Option<BackpressureClause>,
 }
 
 #[async_trait]
@@ -756,6 +764,10 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> S
 {
     fn name(&self) -> &str {
         &self.name
+    }
+
+    fn backpressure_clause(&self) -> Option<&BackpressureClause> {
+        self.backpressure.as_ref()
     }
 
     fn set_name(&mut self, name: String) {
@@ -869,6 +881,7 @@ pub struct AsyncFiniteSourceDescriptor<H: AsyncFiniteSourceHandler + 'static> {
     pub handler: H,
     pub poll_timeout: Option<Duration>,
     pub middleware: Vec<Box<dyn MiddlewareFactory>>,
+    pub backpressure: Option<BackpressureClause>,
 }
 
 impl<H: AsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
@@ -884,6 +897,7 @@ impl<H: AsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
             handler,
             poll_timeout,
             middleware: Vec::new(),
+            backpressure: None,
         }
     }
 
@@ -911,6 +925,10 @@ impl<H: AsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
 {
     fn name(&self) -> &str {
         &self.name
+    }
+
+    fn backpressure_clause(&self) -> Option<&BackpressureClause> {
+        self.backpressure.as_ref()
     }
 
     fn set_name(&mut self, name: String) {
@@ -1025,6 +1043,7 @@ pub struct InfiniteSourceDescriptor<H: InfiniteSourceHandler + 'static> {
     pub name: String,
     pub handler: H,
     pub middleware: Vec<Box<dyn MiddlewareFactory>>,
+    pub backpressure: Option<BackpressureClause>,
 }
 
 #[async_trait]
@@ -1033,6 +1052,10 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
 {
     fn name(&self) -> &str {
         &self.name
+    }
+
+    fn backpressure_clause(&self) -> Option<&BackpressureClause> {
+        self.backpressure.as_ref()
     }
 
     fn set_name(&mut self, name: String) {
@@ -1146,6 +1169,7 @@ pub struct AsyncInfiniteSourceDescriptor<H: AsyncInfiniteSourceHandler + 'static
     pub handler: H,
     pub poll_timeout: Option<Duration>,
     pub middleware: Vec<Box<dyn MiddlewareFactory>>,
+    pub backpressure: Option<BackpressureClause>,
 }
 
 impl<H: AsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
@@ -1161,6 +1185,7 @@ impl<H: AsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
             handler,
             poll_timeout,
             middleware: Vec::new(),
+            backpressure: None,
         }
     }
 
@@ -1188,6 +1213,10 @@ impl<H: AsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
 {
     fn name(&self) -> &str {
         &self.name
+    }
+
+    fn backpressure_clause(&self) -> Option<&BackpressureClause> {
+        self.backpressure.as_ref()
     }
 
     fn set_name(&mut self, name: String) {
@@ -1303,6 +1332,7 @@ pub struct TransformDescriptor<H: TransformHandler + 'static> {
     pub name: String,
     pub handler: H,
     pub middleware: Vec<Box<dyn MiddlewareFactory>>,
+    pub backpressure: Option<BackpressureClause>,
 }
 
 #[async_trait]
@@ -1311,6 +1341,10 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Stag
 {
     fn name(&self) -> &str {
         &self.name
+    }
+
+    fn backpressure_clause(&self) -> Option<&BackpressureClause> {
+        self.backpressure.as_ref()
     }
 
     fn set_name(&mut self, name: String) {
@@ -1435,6 +1469,7 @@ pub struct AsyncTransformDescriptor<H: AsyncTransformHandler + 'static> {
     pub name: String,
     pub handler: H,
     pub middleware: Vec<Box<dyn MiddlewareFactory>>,
+    pub backpressure: Option<BackpressureClause>,
 }
 
 #[async_trait]
@@ -1443,6 +1478,10 @@ impl<H: AsyncTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
 {
     fn name(&self) -> &str {
         &self.name
+    }
+
+    fn backpressure_clause(&self) -> Option<&BackpressureClause> {
+        self.backpressure.as_ref()
     }
 
     fn set_name(&mut self, name: String) {
@@ -1591,6 +1630,7 @@ pub struct EffectfulTransformDescriptor<H: EffectfulTransformHandler + 'static> 
     /// Configuration errors detected by the lane while branch types were
     /// nameable; surfaced as flow build failures.
     pub type_shaping_errors: Vec<String>,
+    pub backpressure: Option<BackpressureClause>,
 }
 
 #[async_trait]
@@ -1599,6 +1639,10 @@ impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
 {
     fn name(&self) -> &str {
         &self.name
+    }
+
+    fn backpressure_clause(&self) -> Option<&BackpressureClause> {
+        self.backpressure.as_ref()
     }
 
     fn set_name(&mut self, name: String) {
@@ -2191,6 +2235,7 @@ pub struct StatefulDescriptor<H: StatefulHandler + 'static> {
     pub handler: H,
     pub emit_interval: Option<Duration>,
     pub middleware: Vec<Box<dyn MiddlewareFactory>>,
+    pub backpressure: Option<BackpressureClause>,
 }
 
 impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StatefulDescriptor<H> {
@@ -2201,6 +2246,7 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> State
             handler,
             emit_interval: None,
             middleware: Vec::new(),
+            backpressure: None,
         }
     }
 
@@ -2228,6 +2274,10 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Stage
 {
     fn name(&self) -> &str {
         &self.name
+    }
+
+    fn backpressure_clause(&self) -> Option<&BackpressureClause> {
+        self.backpressure.as_ref()
     }
 
     fn set_name(&mut self, name: String) {
@@ -2353,6 +2403,7 @@ pub struct EffectfulStatefulDescriptor<H: EffectfulStatefulHandler + 'static> {
     pub emit_interval: Option<Duration>,
     pub effects: Vec<EffectDeclaration>,
     pub middleware: Vec<Box<dyn MiddlewareFactory>>,
+    pub backpressure: Option<BackpressureClause>,
 }
 
 impl<H: EffectfulStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
@@ -2365,6 +2416,7 @@ impl<H: EffectfulStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
             emit_interval: None,
             effects: Vec::new(),
             middleware: Vec::new(),
+            backpressure: None,
         }
     }
 
@@ -2394,6 +2446,10 @@ impl<H: EffectfulStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
 {
     fn name(&self) -> &str {
         &self.name
+    }
+
+    fn backpressure_clause(&self) -> Option<&BackpressureClause> {
+        self.backpressure.as_ref()
     }
 
     fn set_name(&mut self, name: String) {
@@ -3515,6 +3571,7 @@ mod tests {
             name: "cb_source".to_string(),
             handler: DummyFiniteSource,
             middleware: vec![circuit_breaker(1)],
+            backpressure: None,
         };
 
         let control_middleware = Arc::new(ControlMiddlewareAggregator::new());

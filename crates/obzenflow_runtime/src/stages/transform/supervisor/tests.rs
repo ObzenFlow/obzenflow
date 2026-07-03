@@ -142,11 +142,7 @@ async fn build_cycle_entry_harness<
         pending_ack_upstream: None,
         backpressure_pulse:
             crate::stages::common::backpressure_activity_pulse::BackpressureActivityPulse::new(),
-        backpressure_backoff:
-            crate::supervised_base::idle_backoff::IdleBackoff::exponential_with_cap(
-                std::time::Duration::from_millis(1),
-                std::time::Duration::from_millis(50),
-            ),
+        backpressure_stall: None,
         backpressure_registry: std::sync::Arc::new(registry.clone()),
         cycle_guard_config: Some(cycle_guard_config),
         external_eofs_received: std::collections::HashSet::new(),
@@ -346,13 +342,15 @@ async fn build_transform_harness<
     let k = StageId::from_topology_id(k_top);
 
     let plan = BackpressurePlan::disabled()
-        .with_stage_window(
+        .with_stage_enforced(
             s,
             NonZeroU64::new(upstream_window).expect("upstream_window"),
+            std::time::Duration::from_secs(30),
         )
-        .with_stage_window(
+        .with_stage_enforced(
             t,
             NonZeroU64::new(transform_window).expect("transform_window"),
+            std::time::Duration::from_secs(30),
         );
     let registry = BackpressureRegistry::new(&topology, &plan);
 
@@ -419,11 +417,7 @@ async fn build_transform_harness<
         pending_ack_upstream: None,
         backpressure_pulse:
             crate::stages::common::backpressure_activity_pulse::BackpressureActivityPulse::new(),
-        backpressure_backoff:
-            crate::supervised_base::idle_backoff::IdleBackoff::exponential_with_cap(
-                std::time::Duration::from_millis(1),
-                std::time::Duration::from_millis(50),
-            ),
+        backpressure_stall: None,
         backpressure_registry: std::sync::Arc::new(registry.clone()),
         cycle_guard_config: None,
         external_eofs_received: std::collections::HashSet::new(),
@@ -587,10 +581,10 @@ async fn backpressure_ack_uses_subscription_upstream_stage_not_event_writer_id()
 }
 
 #[tokio::test]
-async fn downstream_stall_blocks_with_sleep_no_hot_loop() {
+async fn downstream_stall_parks_on_credit_wait_no_hot_loop() {
     tokio::time::pause();
 
-    let (mut supervisor, mut ctx, registry, _s, t, _k, _upstream_journal, _data_journal) =
+    let (mut supervisor, mut ctx, registry, _s, t, k, _upstream_journal, _data_journal) =
         build_transform_harness(
             |t| ExpandHandler {
                 writer_id: WriterId::from(t),
@@ -616,35 +610,224 @@ async fn downstream_stall_blocks_with_sleep_no_hot_loop() {
     let mut task =
         tokio_test::task::spawn(async { supervisor.dispatch_state(&state, &mut ctx).await });
 
+    // Parked on the credit notify: pending across polls, no hot loop, and no
+    // timer needed for the wake.
+    assert_pending!(task.poll());
     assert_pending!(task.poll());
 
-    let waited = registry
-        .metrics_snapshot()
-        .stage_wait_nanos_total
-        .get(&t)
-        .copied()
-        .unwrap_or(0);
-    assert_eq!(waited, 1_000_000, "1ms initial backoff expected");
-
-    assert_pending!(task.poll());
-
-    // Complete the 1ms sleep and ensure the supervisor returns (no hot loop).
-    tokio::time::advance(std::time::Duration::from_millis(2)).await;
+    // The downstream ack fires the writer's waker; the chunk ends and the
+    // loop returns to dispatch_state with no clock advance at all.
+    registry.reader(t, k).ack_consumed(1);
     let result = assert_ready!(task.poll());
     assert!(result.is_ok());
     drop(task);
 
-    // Still blocked on the same pending output: the next dispatch should back off to 2ms.
+    // The re-entered dispatch flushes the pending output, still with no
+    // clock advance: the unblock is ack-driven, never timer-driven.
     let mut task =
         tokio_test::task::spawn(async { supervisor.dispatch_state(&state, &mut ctx).await });
     assert_pending!(task.poll());
+    drop(task);
+    assert!(
+        ctx.pending_outputs.is_empty(),
+        "ack-driven wake flushed the pending output"
+    );
+
+    // Block again: with no ack, one chunk of the credit wait elapses and the
+    // loop returns to dispatch_state with the measured wait recorded.
+    ctx.pending_outputs.push_back(
+        crate::stages::common::supervision::backpressure_drain::PendingOutput {
+            event: ChainEventFactory::data_event(WriterId::from(t), "bp_test.pending2", json!({})),
+            scope: obzenflow_core::MiddlewareExecutionScope::LiveHandler,
+        },
+    );
+    let mut task =
+        tokio_test::task::spawn(async { supervisor.dispatch_state(&state, &mut ctx).await });
+    assert_pending!(task.poll());
+    tokio::time::advance(
+        crate::stages::common::supervision::backpressure_drain::CONTROL_RESPONSIVENESS_CAP
+            + std::time::Duration::from_millis(1),
+    )
+    .await;
+    let result = assert_ready!(task.poll());
+    assert!(result.is_ok());
     let waited = registry
         .metrics_snapshot()
         .stage_wait_nanos_total
         .get(&t)
         .copied()
         .unwrap_or(0);
-    assert_eq!(waited, 3_000_000, "1ms + 2ms backoff expected");
+    assert!(
+        (250_000_000..300_000_000).contains(&waited),
+        "one control-cap chunk of the credit wait recorded, got {waited}"
+    );
+}
+
+#[tokio::test]
+async fn queued_external_event_is_observed_within_one_cap_while_wedged() {
+    tokio::time::pause();
+
+    let (supervisor, mut ctx, _registry, _s, t, _k, _upstream_journal, _data_journal) =
+        build_transform_harness(
+            |t| ExpandHandler {
+                writer_id: WriterId::from(t),
+            },
+            1,
+            1,
+        )
+        .await;
+
+    ctx.backpressure_writer
+        .reserve(1)
+        .expect("seed reserve")
+        .commit(1);
+    ctx.pending_outputs.push_back(
+        crate::stages::common::supervision::backpressure_drain::PendingOutput {
+            event: ChainEventFactory::data_event(WriterId::from(t), "bp_test.pending", json!({})),
+            scope: obzenflow_core::MiddlewareExecutionScope::LiveHandler,
+        },
+    );
+
+    // Wrap the supervisor exactly as the builders do: queued control is
+    // delivered by the wrapper at dispatch entry (Poll mode in Running).
+    let (sender, receiver, watcher) = crate::supervised_base::ChannelBuilder::<
+        TransformEvent<ExpandHandler>,
+        TransformState<ExpandHandler>,
+    >::new()
+    .build(TransformState::Running);
+    let mut wrapped =
+        crate::supervised_base::HandlerSupervisedWithExternalEvents::new(supervisor, receiver, watcher);
+
+    let state = TransformState::<ExpandHandler>::Running;
+    let mut task =
+        tokio_test::task::spawn(async { wrapped.dispatch_state(&state, &mut ctx).await });
+    assert_pending!(task.poll());
+
+    // A control event arrives mid-wait. The chunk boundary returns the loop
+    // to dispatch_state, and the next entry delivers the queued event, so
+    // observation latency is at most one control cap plus one dispatch.
+    sender
+        .send(TransformEvent::BeginDrain)
+        .await
+        .expect("send external event");
+    tokio::time::advance(
+        crate::stages::common::supervision::backpressure_drain::CONTROL_RESPONSIVENESS_CAP
+            + std::time::Duration::from_millis(1),
+    )
+    .await;
+    let result = assert_ready!(task.poll());
+    assert!(matches!(result, Ok(EventLoopDirective::Continue)));
+    drop(task);
+
+    let mut task =
+        tokio_test::task::spawn(async { wrapped.dispatch_state(&state, &mut ctx).await });
+    let result = assert_ready!(task.poll());
+    assert!(
+        matches!(
+            result,
+            Ok(EventLoopDirective::Transition(TransformEvent::BeginDrain))
+        ),
+        "queued control delivered at the next dispatch entry"
+    );
+}
+
+#[tokio::test]
+async fn wedged_downstream_authors_stalled_fact_and_fails_stage() {
+    tokio::time::pause();
+
+    let (mut supervisor, mut ctx, _registry, _s, t, k, _upstream_journal, data_journal) =
+        build_transform_harness(
+            |t| ExpandHandler {
+                writer_id: WriterId::from(t),
+            },
+            1,
+            1,
+        )
+        .await;
+
+    ctx.backpressure_writer
+        .reserve(1)
+        .expect("seed reserve")
+        .commit(1);
+    ctx.pending_outputs.push_back(
+        crate::stages::common::supervision::backpressure_drain::PendingOutput {
+            event: ChainEventFactory::data_event(WriterId::from(t), "bp_test.pending", json!({})),
+            scope: obzenflow_core::MiddlewareExecutionScope::LiveHandler,
+        },
+    );
+
+    let state = TransformState::<ExpandHandler>::Running;
+
+    // Never ack: each chunk returns the loop to dispatch_state until the
+    // continuous stall exhausts the 30s ceiling and the dispatch fails.
+    let mut stall_error = None;
+    for _ in 0..250 {
+        let mut task =
+            tokio_test::task::spawn(async { supervisor.dispatch_state(&state, &mut ctx).await });
+        let result = match task.poll() {
+            std::task::Poll::Ready(result) => result,
+            std::task::Poll::Pending => {
+                tokio::time::advance(std::time::Duration::from_millis(251)).await;
+                assert_ready!(task.poll())
+            }
+        };
+        drop(task);
+        match result {
+            Ok(_) => continue,
+            Err(error) => {
+                stall_error = Some(error.to_string());
+                break;
+            }
+        }
+    }
+    let message = stall_error.expect("the ceiling fails the dispatch");
+    assert!(
+        message.contains("backpressure.stalled"),
+        "unexpected error: {message}"
+    );
+
+    // The named fact is in the data journal with the limiting edge, window,
+    // ceiling, elapsed wait, and in-flight count.
+    let events = data_journal
+        .read_all_unordered()
+        .await
+        .expect("read data journal");
+    let stalled = events
+        .iter()
+        .find_map(|envelope| {
+            use obzenflow_core::event::payloads::observability_payload::{
+                BackpressureEvent, MiddlewareLifecycle, ObservabilityPayload,
+            };
+            match &envelope.event.content {
+                obzenflow_core::event::ChainEventContent::Observability(
+                    ObservabilityPayload::Middleware(MiddlewareLifecycle::Backpressure(
+                        BackpressureEvent::Stalled {
+                            upstream,
+                            downstream,
+                            window,
+                            stall_timeout_ms,
+                            elapsed_ms,
+                            in_flight,
+                        },
+                    )),
+                ) => Some((
+                    *upstream,
+                    *downstream,
+                    *window,
+                    *stall_timeout_ms,
+                    *elapsed_ms,
+                    *in_flight,
+                )),
+                _ => None,
+            }
+        })
+        .expect("backpressure.stalled fact authored");
+    assert_eq!(stalled.0, t);
+    assert_eq!(stalled.1, k, "the limiting edge names the wedged downstream");
+    assert_eq!(stalled.2, 1, "window");
+    assert_eq!(stalled.3, 30_000, "configured ceiling in ms");
+    assert!(stalled.4 >= 30_000, "elapsed covers the ceiling");
+    assert_eq!(stalled.5, 1, "one event in flight at expiry");
 }
 
 #[tokio::test]

@@ -370,7 +370,9 @@ pub(crate) struct RawRuntimeStageScope {
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct RawBackpressureConfig {
+    pub(crate) mode: Option<String>,
     pub(crate) window: Option<i64>,
+    pub(crate) stall_timeout_ms: Option<i64>,
     pub(crate) flow: RawBackpressureFields,
     pub(crate) stages: BTreeMap<String, RawBackpressureStageScope>,
 }
@@ -378,13 +380,17 @@ pub(crate) struct RawBackpressureConfig {
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct RawBackpressureFields {
+    pub(crate) mode: Option<String>,
     pub(crate) window: Option<i64>,
+    pub(crate) stall_timeout_ms: Option<i64>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct RawBackpressureStageScope {
+    pub(crate) mode: Option<String>,
     pub(crate) window: Option<i64>,
+    pub(crate) stall_timeout_ms: Option<i64>,
     pub(crate) edges: BTreeMap<String, RawBackpressureFields>,
 }
 

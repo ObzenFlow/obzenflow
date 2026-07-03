@@ -35,7 +35,6 @@ use crate::stages::common::heartbeat::HeartbeatHandle;
 use crate::stages::common::supervision::lifecycle_actions;
 use crate::stages::observer::dispatch::run_stage_lifecycle_observers;
 use crate::stages::resources_builder::BoundSubscriptionFactory;
-use crate::supervised_base::idle_backoff::IdleBackoff;
 
 // ============================================================================
 // FSM States
@@ -414,8 +413,9 @@ pub struct JoinContext<H: UnifiedJoinHandler> {
     /// Backpressure activity pulse accumulator (Hz UI animation driver).
     pub(crate) backpressure_pulse: BackpressureActivityPulse,
 
-    /// Backoff for blocked output writes (1ms → … → 50ms cap).
-    pub(crate) backpressure_backoff: IdleBackoff,
+    /// Start of the current backpressure stall episode; anchored at the
+    /// first credit miss, cleared on successful reserve (FLOWIP-115e).
+    pub(crate) backpressure_stall: Option<tokio::time::Instant>,
 
     /// Optional per-stage heartbeat task (FLOWIP-063e).
     pub(crate) heartbeat: Option<HeartbeatHandle>,

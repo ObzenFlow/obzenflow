@@ -159,11 +159,7 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
             pending_ack_upstream: None,
             backpressure_pulse:
                 crate::stages::common::backpressure_activity_pulse::BackpressureActivityPulse::new(),
-            backpressure_backoff:
-                crate::supervised_base::idle_backoff::IdleBackoff::exponential_with_cap(
-                    std::time::Duration::from_millis(1),
-                    std::time::Duration::from_millis(50),
-                ),
+            backpressure_stall: None,
             backpressure_registry: self.resources.backpressure_registry.clone(),
             cycle_guard_config: cycle_guard_config.clone(),
             external_eofs_received: HashSet::new(),

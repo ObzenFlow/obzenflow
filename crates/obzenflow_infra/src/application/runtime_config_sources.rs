@@ -70,6 +70,23 @@ macro_rules! file_u64 {
     };
 }
 
+/// One optional text file field -> one candidate; Token knobs validate the
+/// allowed set at admission.
+macro_rules! file_text {
+    ($set:expr, $key:expr, $scope:expr, $field:expr, $at:expr) => {
+        if let Some(raw) = $field {
+            admit(
+                $set,
+                $key,
+                $scope,
+                ConfigSource::File,
+                ConfigValue::Text(raw.clone()),
+                $at,
+            )?;
+        }
+    };
+}
+
 fn admit_file_candidates(
     set: &mut CandidateSet,
     file: &RawFileStartupConfig,
@@ -147,8 +164,16 @@ fn admit_file_candidates(
         );
     }
 
-    // [runtime.backpressure] with the §4c nested edge layout.
+    // [runtime.backpressure] with the §4c nested edge layout. Mode, window,
+    // and stall timeout ride every rung (FLOWIP-115e).
     let backpressure = &runtime.backpressure;
+    file_text!(
+        set,
+        "runtime.backpressure.mode",
+        ConfigScope::Global,
+        &backpressure.mode,
+        "runtime.backpressure.mode"
+    );
     file_u64!(
         set,
         "runtime.backpressure.window",
@@ -158,12 +183,40 @@ fn admit_file_candidates(
     );
     file_u64!(
         set,
+        "runtime.backpressure.stall_timeout_ms",
+        ConfigScope::Global,
+        backpressure.stall_timeout_ms,
+        "runtime.backpressure.stall_timeout_ms"
+    );
+    file_text!(
+        set,
+        "runtime.backpressure.mode",
+        ConfigScope::Flow,
+        &backpressure.flow.mode,
+        "runtime.backpressure.flow.mode"
+    );
+    file_u64!(
+        set,
         "runtime.backpressure.window",
         ConfigScope::Flow,
         backpressure.flow.window,
         "runtime.backpressure.flow.window"
     );
+    file_u64!(
+        set,
+        "runtime.backpressure.stall_timeout_ms",
+        ConfigScope::Flow,
+        backpressure.flow.stall_timeout_ms,
+        "runtime.backpressure.flow.stall_timeout_ms"
+    );
     for (stage, entry) in &backpressure.stages {
+        file_text!(
+            set,
+            "runtime.backpressure.mode",
+            ConfigScope::stage(stage.as_str()),
+            &entry.mode,
+            &format!("runtime.backpressure.stages.{stage}.mode")
+        );
         file_u64!(
             set,
             "runtime.backpressure.window",
@@ -171,13 +224,36 @@ fn admit_file_candidates(
             entry.window,
             &format!("runtime.backpressure.stages.{stage}.window")
         );
+        file_u64!(
+            set,
+            "runtime.backpressure.stall_timeout_ms",
+            ConfigScope::stage(stage.as_str()),
+            entry.stall_timeout_ms,
+            &format!("runtime.backpressure.stages.{stage}.stall_timeout_ms")
+        );
         for (downstream, edge) in &entry.edges {
+            file_text!(
+                set,
+                "runtime.backpressure.mode",
+                ConfigScope::edge(stage.as_str(), downstream.as_str()),
+                &edge.mode,
+                &format!("runtime.backpressure.stages.{stage}.edges.{downstream}.mode")
+            );
             file_u64!(
                 set,
                 "runtime.backpressure.window",
                 ConfigScope::edge(stage.as_str(), downstream.as_str()),
                 edge.window,
                 &format!("runtime.backpressure.stages.{stage}.edges.{downstream}.window")
+            );
+            file_u64!(
+                set,
+                "runtime.backpressure.stall_timeout_ms",
+                ConfigScope::edge(stage.as_str(), downstream.as_str()),
+                edge.stall_timeout_ms,
+                &format!(
+                    "runtime.backpressure.stages.{stage}.edges.{downstream}.stall_timeout_ms"
+                )
             );
         }
     }

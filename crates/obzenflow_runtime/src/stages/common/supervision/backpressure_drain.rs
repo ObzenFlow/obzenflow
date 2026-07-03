@@ -9,17 +9,18 @@
 //! this in a `while let` loop to flush their `pending_outputs` queue.
 
 use crate::stages::common::backpressure_activity_pulse::BackpressureActivityPulse;
-use crate::supervised_base::idle_backoff::IdleBackoff;
+use crate::stages::common::control_strategies::{CreditWaker, WakeOn};
+use crate::stages::common::supervision::suspension::suspend_until;
 use obzenflow_core::event::context::FlowContext;
 use obzenflow_core::event::payloads::observability_payload::{
-    MiddlewareLifecycle, ObservabilityPayload,
+    BackpressureEvent, MiddlewareLifecycle, ObservabilityPayload,
 };
 use obzenflow_core::event::{ChainEventFactory, EventEnvelope};
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{ChainEvent, StageId, WriterId};
 use std::sync::Arc;
 
-use crate::backpressure::BackpressureWriter;
+use crate::backpressure::{BackpressureWriter, LimitingEdgeDetail};
 use crate::feed_plan::StageOutputContract;
 use crate::metrics::instrumentation::StageInstrumentation;
 use crate::stages::common::heartbeat::HeartbeatState;
@@ -34,17 +35,24 @@ pub(crate) enum DrainOutcome {
         /// `subscription.track_output_event()`).
         was_data: bool,
     },
-    /// Backpressure prevented writing; the event has been pushed back to the
-    /// front of the queue and the caller should return early (after sleeping).
+    /// Backpressure prevented writing; one chunk of the credit wait ran and
+    /// the event is back at the front of the queue. The caller returns early
+    /// so the loop re-enters dispatch_state (queued control is observed).
     BackedOff,
 }
 
-/// Outcome of a single drain attempt without sleeping.
+/// Runtime-owned bound on one blocked suspend: the loop re-enters
+/// `dispatch_state` at least this often so queued control is observed, while
+/// the anchored stall deadline alone decides the stall (FLOWIP-115e).
+pub(crate) const CONTROL_RESPONSIVENESS_CAP: std::time::Duration =
+    std::time::Duration::from_millis(250);
+
+/// Outcome of a single drain attempt without waiting.
 ///
-/// This is used by supervisors that need to integrate backoff sleeps into a
+/// This is used by supervisors that need to integrate the credit wait into a
 /// larger `tokio::select!` (for example, async source supervisors that must
 /// remain responsive to external control events while blocked).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub(crate) enum DrainAttempt {
     /// The event was successfully written to the journal.
     Committed {
@@ -53,8 +61,13 @@ pub(crate) enum DrainAttempt {
         was_data: bool,
     },
     /// Backpressure prevented writing; the event has been pushed back to the
-    /// front of the queue. The caller is responsible for sleeping for `delay`.
-    BackedOff { delay: std::time::Duration },
+    /// front of the queue. The caller owns one chunked credit wait:
+    /// `suspend_until(&WakeOn::Notify(waker), Some(bound))`, where `bound` is
+    /// already clamped to the remaining stall budget and the control cap.
+    BackedOff {
+        bound: std::time::Duration,
+        waker: CreditWaker,
+    },
 }
 
 /// Attempt to drain a single pending output event through the backpressure
@@ -84,7 +97,7 @@ pub(crate) async fn drain_one_pending(
     instrumentation: &Arc<StageInstrumentation>,
     backpressure_writer: &BackpressureWriter,
     backpressure_pulse: &mut BackpressureActivityPulse,
-    backpressure_backoff: &mut IdleBackoff,
+    backpressure_stall: &mut Option<tokio::time::Instant>,
     output_contract: Option<&StageOutputContract>,
     observers: Option<&crate::stages::observer::StageObserverBundle>,
     pending_outputs: &mut std::collections::VecDeque<PendingOutput>,
@@ -100,7 +113,7 @@ pub(crate) async fn drain_one_pending(
         instrumentation,
         backpressure_writer,
         backpressure_pulse,
-        backpressure_backoff,
+        backpressure_stall,
         output_contract,
         observers,
         pending_outputs,
@@ -108,8 +121,26 @@ pub(crate) async fn drain_one_pending(
     .await?
     {
         DrainAttempt::Committed { was_data } => Ok(DrainOutcome::Committed { was_data }),
-        DrainAttempt::BackedOff { delay } => {
-            tokio::time::sleep(delay).await;
+        DrainAttempt::BackedOff { bound, waker } => {
+            // One chunk of the credit wait: wake on the downstream ack or at
+            // the chunk boundary, then return to dispatch_state either way.
+            // Only the anchored deadline in `backpressure_stall` can author
+            // the stall fact, so intermediate wakes never extend the episode.
+            let wait_started = tokio::time::Instant::now();
+            let _ = suspend_until(&WakeOn::Notify(waker), Some(bound)).await;
+            let measured = wait_started.elapsed();
+            backpressure_writer.record_wait(measured);
+            emit_blocked_pulse(
+                stage_id,
+                flow_context,
+                measured,
+                data_journal,
+                system_journal,
+                instrumentation,
+                backpressure_writer,
+                backpressure_pulse,
+            )
+            .await;
             Ok(DrainOutcome::BackedOff)
         }
     }
@@ -118,10 +149,10 @@ pub(crate) async fn drain_one_pending(
 /// Attempt to drain a single pending output event through the backpressure
 /// gate, writing it to the data journal if credit is available.
 ///
-/// Unlike `drain_one_pending`, this function never sleeps. If backpressure
-/// blocks the write, it returns `DrainAttempt::BackedOff { delay }` and the
-/// caller is responsible for deciding how to wait (for example, using
-/// `tokio::select!` to remain responsive to external events).
+/// Unlike `drain_one_pending`, this function never waits. If backpressure
+/// blocks the write, it returns `DrainAttempt::BackedOff { bound, waker }`
+/// and the caller owns the chunked wait (for example inside a
+/// `tokio::select!` that stays responsive to external events).
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn drain_one_pending_resolve(
     pending: PendingOutput,
@@ -134,7 +165,7 @@ pub(crate) async fn drain_one_pending_resolve(
     instrumentation: &Arc<StageInstrumentation>,
     backpressure_writer: &BackpressureWriter,
     backpressure_pulse: &mut BackpressureActivityPulse,
-    backpressure_backoff: &mut IdleBackoff,
+    backpressure_stall: &mut Option<tokio::time::Instant>,
     output_contract: Option<&StageOutputContract>,
     observers: Option<&crate::stages::observer::StageObserverBundle>,
     pending_outputs: &mut std::collections::VecDeque<PendingOutput>,
@@ -166,6 +197,28 @@ pub(crate) async fn drain_one_pending_resolve(
             },
         )?;
 
+        // Reconstruction never blocks (FLOWIP-115e): a reconstruction-scoped
+        // output reserves in track mode, so the accounting stays true for the
+        // resume handoff while no wait, ceiling, stall fact, or pulse exists
+        // on this path. The scope is the one frozen at production time.
+        if pending.scope.is_deterministic_replay() {
+            let reservation = backpressure_writer.reserve_tracked(1);
+            committer
+                .commit_prebuilt(
+                    pending.event,
+                    pending_parent,
+                    CommitOptions {
+                        count_output: true,
+                        validate_output_contract: false,
+                    },
+                )
+                .await
+                .map_err(|e| format!("Failed to write pending output: {e}"))?;
+            reservation.commit(1);
+            *backpressure_stall = None;
+            return Ok(DrainAttempt::Committed { was_data: true });
+        }
+
         // Debug-only: emit activity pulses even when bypass is enabled, so
         // operators can see what *would* have blocked (FLOWIP-086k).
         emit_bypass_pulse_if_needed(
@@ -181,22 +234,45 @@ pub(crate) async fn drain_one_pending_resolve(
 
         let Some(reservation) = backpressure_writer.reserve(1) else {
             pending_outputs.push_front(pending);
-            let delay = backpressure_backoff.next_delay();
-            backpressure_writer.record_wait(delay);
 
-            emit_backoff_pulse(
-                stage_id,
-                flow_context,
-                delay,
-                data_journal,
-                system_journal,
-                instrumentation,
-                backpressure_writer,
-                backpressure_pulse,
-            )
-            .await;
+            // The stall episode anchors at the first credit miss and only
+            // its exhaustion against the CURRENT limiting edge's ceiling
+            // authors the stall fact; wakes and chunk boundaries never
+            // reset it.
+            let started = *backpressure_stall.get_or_insert_with(tokio::time::Instant::now);
+            let detail = backpressure_writer
+                .limiting_detail()
+                .expect("a blocked writer has enforced downstream edges");
+            let elapsed = started.elapsed();
 
-            return Ok(DrainAttempt::BackedOff { delay });
+            if elapsed >= detail.stall_timeout {
+                emit_stalled_fact(
+                    stage_id,
+                    flow_context,
+                    &detail,
+                    elapsed,
+                    data_journal,
+                    system_journal,
+                    instrumentation,
+                )
+                .await;
+                return Err(format!(
+                    "backpressure.stalled: edge {stage_id}|>{} exceeded its stall ceiling \
+                     ({} ms elapsed, timeout {} ms, window {}, in flight {})",
+                    detail.downstream,
+                    elapsed.as_millis(),
+                    detail.stall_timeout.as_millis(),
+                    detail.window,
+                    detail.in_flight,
+                )
+                .into());
+            }
+
+            let bound = (detail.stall_timeout - elapsed).min(CONTROL_RESPONSIVENESS_CAP);
+            let waker = backpressure_writer
+                .credit_waker()
+                .expect("a blocked writer has backpressure state");
+            return Ok(DrainAttempt::BackedOff { bound, waker });
         };
 
         committer
@@ -212,7 +288,7 @@ pub(crate) async fn drain_one_pending_resolve(
             .map_err(|e| format!("Failed to write pending output: {e}"))?;
 
         reservation.commit(1);
-        backpressure_backoff.reset();
+        *backpressure_stall = None;
 
         Ok(DrainAttempt::Committed { was_data: true })
     } else {
@@ -281,12 +357,57 @@ async fn emit_bypass_pulse_if_needed(
     }
 }
 
-/// Emit an activity pulse when backing off due to insufficient credit.
-#[allow(clippy::too_many_arguments)]
-async fn emit_backoff_pulse(
+/// Author the `backpressure.stalled` fact (FLOWIP-115e): the continuous
+/// stall exceeded the limiting edge's ceiling. Live-scoped only; the caller
+/// then fails the stage through the dispatch error path.
+async fn emit_stalled_fact(
     stage_id: StageId,
     flow_context: &FlowContext,
-    delay: std::time::Duration,
+    detail: &LimitingEdgeDetail,
+    elapsed: std::time::Duration,
+    data_journal: &Arc<dyn Journal<ChainEvent>>,
+    system_journal: &Arc<dyn Journal<obzenflow_core::event::SystemEvent>>,
+    instrumentation: &Arc<StageInstrumentation>,
+) {
+    let event = ChainEventFactory::observability_event(
+        WriterId::from(stage_id),
+        ObservabilityPayload::Middleware(MiddlewareLifecycle::Backpressure(
+            BackpressureEvent::Stalled {
+                upstream: stage_id,
+                downstream: detail.downstream,
+                window: detail.window,
+                stall_timeout_ms: detail.stall_timeout.as_millis().min(u64::MAX as u128) as u64,
+                elapsed_ms: elapsed.as_millis().min(u64::MAX as u128) as u64,
+                in_flight: detail.in_flight,
+            },
+        )),
+    )
+    .with_flow_context(flow_context.clone())
+    .with_runtime_context(instrumentation.snapshot_with_control());
+
+    match data_journal.append(event, None).await {
+        Ok(written) => {
+            crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
+                &written,
+                system_journal,
+            )
+            .await;
+        }
+        Err(e) => tracing::warn!(
+            journal_error = %e,
+            "Failed to append backpressure.stalled fact"
+        ),
+    }
+}
+
+/// Feed the blocked-state pulse after one chunk of the credit wait, with the
+/// measured blocked time (a wake can cut the bound short). The coalescer
+/// still emits at most one pulse per second.
+#[allow(clippy::too_many_arguments)]
+async fn emit_blocked_pulse(
+    stage_id: StageId,
+    flow_context: &FlowContext,
+    measured: std::time::Duration,
     data_journal: &Arc<dyn Journal<ChainEvent>>,
     system_journal: &Arc<dyn Journal<obzenflow_core::event::SystemEvent>>,
     instrumentation: &Arc<StageInstrumentation>,
@@ -294,9 +415,9 @@ async fn emit_backoff_pulse(
     backpressure_pulse: &mut BackpressureActivityPulse,
 ) {
     if let Some((min_credit, limiting)) = backpressure_writer.min_downstream_credit_detail() {
-        backpressure_pulse.record_delay(delay, Some(min_credit), Some(limiting));
+        backpressure_pulse.record_delay(measured, Some(min_credit), Some(limiting));
     } else {
-        backpressure_pulse.record_delay(delay, None, None);
+        backpressure_pulse.record_delay(measured, None, None);
     }
 
     if let Some(pulse) = backpressure_pulse.maybe_emit() {

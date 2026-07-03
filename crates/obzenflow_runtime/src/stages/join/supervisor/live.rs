@@ -1091,7 +1091,7 @@ async fn write_stage_outputs_and_ack<H: UnifiedJoinHandler>(
             &ctx.instrumentation,
             &ctx.backpressure_writer,
             &mut ctx.backpressure_pulse,
-            &mut ctx.backpressure_backoff,
+            &mut ctx.backpressure_stall,
             Some(&ctx.output_contract),
             Some(&ctx.observers),
             &mut outputs,

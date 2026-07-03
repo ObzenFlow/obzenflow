@@ -175,7 +175,7 @@ pub(super) async fn flush_pending_outputs<
             &ctx.instrumentation,
             &ctx.backpressure_writer,
             &mut ctx.backpressure_pulse,
-            &mut ctx.backpressure_backoff,
+            &mut ctx.backpressure_stall,
             Some(&ctx.output_contract),
             Some(&ctx.observers),
             &mut ctx.pending_outputs,

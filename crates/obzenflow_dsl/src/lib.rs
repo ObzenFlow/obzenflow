@@ -9,5 +9,13 @@ pub mod middleware_resolution;
 pub mod prelude;
 pub mod stage_handle_adapter;
 
+/// The `backpressure:` clause constructors (FLOWIP-115e): `enforced`,
+/// `enforced_from_config`, `track_only`, `off`.
+pub mod backpressure {
+    pub use crate::dsl::backpressure_clause::{
+        enforced, enforced_from_config, off, track_only, BackpressureClause,
+    };
+}
+
 // Re-export modules
 pub use dsl::*;
