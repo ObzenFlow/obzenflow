@@ -26,6 +26,12 @@ pub enum ObservabilityPayload {
     Stage(StageLifecycle),
     Metrics(MetricsLifecycle),
     Middleware(MiddlewareLifecycle),
+    /// Runtime flow-control observability (FLOWIP-115e). Backpressure is not
+    /// middleware, so its pulses and stall facts are a sibling of
+    /// `Middleware`, never nested under it: the middleware machinery
+    /// (system-journal mirror, framework-middleware classifier) matches only
+    /// `Middleware(..)` and structurally never sees these rows.
+    Backpressure(BackpressureEvent),
 }
 
 // =============================================================================
@@ -111,7 +117,6 @@ pub enum MetricsLifecycle {
 pub enum MiddlewareLifecycle {
     CircuitBreaker(CircuitBreakerEvent),
     RateLimiter(RateLimiterEvent),
-    Backpressure(BackpressureEvent),
     Retry(RetryEvent),
     /// One per-execution service-level-indicator sample (FLOWIP-115f).
     ///
@@ -240,6 +245,20 @@ pub enum BackpressureEvent {
         /// Optional debug context: downstream stage ID that currently limits the writer.
         #[serde(skip_serializing_if = "Option::is_none")]
         limiting_downstream_stage_id: Option<StageId>,
+    },
+
+    /// `backpressure.stalled` (FLOWIP-115e): a continuous credit stall
+    /// exceeded the limiting edge's ceiling. Authored live only, immediately
+    /// before the stage's terminal transition; replays as any recorded fact.
+    Stalled {
+        upstream: StageId,
+        /// The limiting edge's downstream (minimum credit at expiry, ties by
+        /// lowest downstream stage id).
+        downstream: StageId,
+        window: u64,
+        stall_timeout_ms: u64,
+        elapsed_ms: u64,
+        in_flight: u64,
     },
 }
 

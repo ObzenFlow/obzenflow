@@ -22,7 +22,6 @@ use crate::stages::observer::{
 use crate::stages::source::boundary::{
     SourceBoundary, SourceBoundaryOutcome, SourceBoundaryReport, SourcePollExecution,
 };
-use crate::supervised_base::idle_backoff::IdleBackoff;
 use crate::supervised_base::{EventLoopDirective, EventReceiver};
 use obzenflow_core::event::context::{FlowContext, MiddlewareExecutionScope};
 use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
@@ -240,7 +239,7 @@ pub(crate) async fn drain_pending_outputs_sync(
     instrumentation: &Arc<StageInstrumentation>,
     backpressure_writer: &BackpressureWriter,
     backpressure_pulse: &mut BackpressureActivityPulse,
-    backpressure_backoff: &mut IdleBackoff,
+    backpressure_stall: &mut Option<tokio::time::Instant>,
     output_contract: Option<&StageOutputContract>,
     observers: Option<&crate::stages::observer::StageObserverBundle>,
 ) -> Result<bool, BoxError> {
@@ -270,7 +269,7 @@ pub(crate) async fn drain_pending_outputs_sync(
             instrumentation,
             backpressure_writer,
             backpressure_pulse,
-            backpressure_backoff,
+            backpressure_stall,
             output_contract,
             observers,
             pending_outputs,
@@ -299,7 +298,7 @@ pub(crate) async fn drain_pending_outputs_async<E>(
     instrumentation: &Arc<StageInstrumentation>,
     backpressure_writer: &BackpressureWriter,
     backpressure_pulse: &mut BackpressureActivityPulse,
-    backpressure_backoff: &mut IdleBackoff,
+    backpressure_stall: &mut Option<tokio::time::Instant>,
     output_contract: Option<&StageOutputContract>,
     observers: Option<&crate::stages::observer::StageObserverBundle>,
     external_events: &mut EventReceiver<E>,
@@ -336,7 +335,7 @@ where
             instrumentation,
             backpressure_writer,
             backpressure_pulse,
-            backpressure_backoff,
+            backpressure_stall,
             output_contract,
             observers,
             pending_outputs,
@@ -344,8 +343,15 @@ where
         .await?
         {
             DrainAttempt::Committed { .. } => {}
-            DrainAttempt::BackedOff { delay } => {
-                tokio::select! {
+            DrainAttempt::BackedOff { bound, waker } => {
+                // Sources keep their out-of-band arm: the credit wait races
+                // the external-events channel, so drain, EOF, cancellation,
+                // and shutdown interrupt the wait directly. The chunk bound
+                // still applies; the anchored stall episode in
+                // `backpressure_stall` decides the stall on re-entry.
+                let wait_started = tokio::time::Instant::now();
+                let wake = crate::stages::common::control_strategies::WakeOn::Notify(waker);
+                let waited = tokio::select! {
                     biased;
                     maybe_event = external_events.recv() => {
                         match maybe_event {
@@ -356,8 +362,27 @@ where
                             }
                         }
                     }
-                    _ = tokio::time::sleep(delay) => {}
-                }
+                    _ = crate::stages::common::supervision::suspension::suspend_until(
+                        &wake,
+                        Some(bound),
+                    ) => wait_started.elapsed(),
+                };
+                // The chunk elapsed (the external-event arm returns early
+                // above, so this only runs on a real wait): record the wait
+                // and feed the blocked pulse through the same append/mirror
+                // path the sync drain uses, so async-source pulses are not
+                // silently dropped.
+                backpressure_writer.record_wait(waited);
+                crate::stages::common::supervision::backpressure_drain::emit_blocked_pulse(
+                    stage_id,
+                    stage_flow_context,
+                    waited,
+                    data_journal,
+                    instrumentation,
+                    backpressure_writer,
+                    backpressure_pulse,
+                )
+                .await;
                 return Ok(Some(EventLoopDirective::Continue));
             }
         }
@@ -462,6 +487,81 @@ mod tests {
         }
     }
 
+    // Test-local double for the `Journal<T>` port: retains appended events so
+    // a test can read them back through the trait. Not an infra adapter, not
+    // exported. Consolidating these doubles codebase-wide is FLOWIP-114t.
+    struct RecordingJournal<T: obzenflow_core::event::JournalEvent> {
+        id: JournalId,
+        events: std::sync::Mutex<Vec<EventEnvelope<T>>>,
+        _phantom: PhantomData<T>,
+    }
+
+    impl<T: obzenflow_core::event::JournalEvent> RecordingJournal<T> {
+        fn new() -> Self {
+            Self {
+                id: JournalId::new(),
+                events: std::sync::Mutex::new(Vec::new()),
+                _phantom: PhantomData,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl<T> Journal<T> for RecordingJournal<T>
+    where
+        T: obzenflow_core::event::JournalEvent + Clone + 'static,
+    {
+        fn id(&self) -> &JournalId {
+            &self.id
+        }
+
+        fn owner(&self) -> Option<&obzenflow_core::JournalOwner> {
+            None
+        }
+
+        async fn append(
+            &self,
+            event: T,
+            _parent: Option<&EventEnvelope<T>>,
+        ) -> Result<EventEnvelope<T>, JournalError> {
+            let envelope = EventEnvelope::new(JournalWriterId::new(), event);
+            self.events
+                .lock()
+                .expect("RecordingJournal: poisoned lock")
+                .push(envelope.clone());
+            Ok(envelope)
+        }
+
+        async fn read_all_unordered(&self) -> Result<Vec<EventEnvelope<T>>, JournalError> {
+            Ok(self
+                .events
+                .lock()
+                .expect("RecordingJournal: poisoned lock")
+                .clone())
+        }
+
+        async fn read_event(
+            &self,
+            _event_id: &EventId,
+        ) -> Result<Option<EventEnvelope<T>>, JournalError> {
+            Ok(None)
+        }
+
+        async fn reader_from(
+            &self,
+            position: u64,
+        ) -> Result<Box<dyn JournalReader<T>>, JournalError> {
+            Ok(Box::new(EmptyReader {
+                position,
+                _phantom: PhantomData,
+            }))
+        }
+
+        async fn read_last_n(&self, _count: usize) -> Result<Vec<EventEnvelope<T>>, JournalError> {
+            Ok(Vec::new())
+        }
+    }
+
     #[derive(Debug)]
     enum TestEvent {
         BeginDrain,
@@ -525,8 +625,11 @@ mod tests {
         let s = StageId::from_topology_id(s_top);
         let _d = StageId::from_topology_id(d_top);
 
-        let plan =
-            BackpressurePlan::disabled().with_stage_window(s, NonZeroU64::new(1).expect("window"));
+        let plan = BackpressurePlan::disabled().with_stage_enforced(
+            s,
+            NonZeroU64::new(1).expect("window"),
+            std::time::Duration::from_secs(30),
+        );
         let registry = BackpressureRegistry::new(&topology, &plan);
         let writer = registry.writer(s);
         writer.reserve(1).expect("reserve").commit(1);
@@ -558,10 +661,7 @@ mod tests {
         );
 
         let mut backpressure_pulse = BackpressureActivityPulse::new();
-        let mut backpressure_backoff = IdleBackoff::exponential_with_cap(
-            Duration::from_millis(200),
-            Duration::from_millis(200),
-        );
+        let mut backpressure_stall: Option<tokio::time::Instant> = None;
 
         let (sender, mut receiver, _watcher) = ChannelBuilder::<TestEvent, ()>::new()
             .with_event_buffer(1)
@@ -580,7 +680,7 @@ mod tests {
                 &instrumentation,
                 &writer,
                 &mut backpressure_pulse,
-                &mut backpressure_backoff,
+                &mut backpressure_stall,
                 None,
                 None,
                 &mut receiver,
@@ -589,7 +689,7 @@ mod tests {
             .await
         });
 
-        // Give the drain task a moment to enter the backoff select.
+        // Give the drain task a moment to enter the credit-wait select.
         tokio::time::sleep(Duration::from_millis(10)).await;
         sender.send(TestEvent::BeginDrain).await.expect("send");
 
@@ -603,5 +703,116 @@ mod tests {
             EventLoopDirective::Transition(TestEvent::BeginDrain) => {}
             other => panic!("expected Transition(BeginDrain), got {other:?}"),
         }
+    }
+
+    // Regression guard: the async-source blocked wait must flush its activity
+    // pulse to the journal, not just accumulate it in the coalescer. The
+    // credit wait races the external-events channel; when the wait wins (no
+    // event delivered), the pulse feeds through the shared append/mirror path.
+    #[tokio::test(start_paused = true)]
+    async fn async_source_blocked_wait_flushes_activity_pulse_to_journal() {
+        use obzenflow_core::event::payloads::observability_payload::{
+            BackpressureEvent, ObservabilityPayload,
+        };
+
+        if BackpressureWriter::is_bypass_enabled() {
+            return;
+        }
+
+        let mut builder = TopologyBuilder::new();
+        let s_top = builder.add_stage(Some("s".to_string()));
+        // Downstream stage: gives `s` an outgoing edge to gate; its id is unused.
+        builder.add_stage(Some("d".to_string()));
+        let topology = builder.build_unchecked().expect("topology");
+        let s = StageId::from_topology_id(s_top);
+
+        let plan = BackpressurePlan::disabled().with_stage_enforced(
+            s,
+            NonZeroU64::new(1).expect("window"),
+            std::time::Duration::from_secs(30),
+        );
+        let registry = BackpressureRegistry::new(&topology, &plan);
+        let writer = registry.writer(s);
+        writer.reserve(1).expect("reserve").commit(1);
+        assert!(writer.reserve(1).is_none(), "credit should be 0");
+
+        let data_journal: Arc<dyn Journal<ChainEvent>> = Arc::new(RecordingJournal::new());
+        let error_journal: Arc<dyn Journal<ChainEvent>> = Arc::new(NoopJournal::new());
+        let system_journal: Arc<dyn Journal<SystemEvent>> = Arc::new(NoopJournal::new());
+        let instrumentation = Arc::new(StageInstrumentation::new());
+        let stage_flow_context = FlowContext {
+            flow_name: "flow".to_string(),
+            flow_id: "flow_id".to_string(),
+            stage_name: "s".to_string(),
+            stage_id: s,
+            stage_type: obzenflow_core::event::context::StageType::FiniteSource,
+        };
+
+        let mut backpressure_pulse = BackpressureActivityPulse::new();
+        let mut backpressure_stall: Option<tokio::time::Instant> = None;
+
+        // Keep the sender alive and never send: recv() pends, so the biased
+        // select always resolves through the credit wait, which auto-advances
+        // the paused clock one control cap per call.
+        let (_sender, mut receiver, _watcher) = ChannelBuilder::<TestEvent, ()>::new()
+            .with_event_buffer(1)
+            .build(());
+
+        let mut pending_outputs = VecDeque::new();
+        pending_outputs.push_back(
+            crate::stages::common::supervision::backpressure_drain::PendingOutput {
+                event: ChainEventFactory::data_event(
+                    WriterId::from(s),
+                    "test.event",
+                    serde_json::json!({"x": 1}),
+                ),
+                scope: obzenflow_core::MiddlewareExecutionScope::LiveHandler,
+            },
+        );
+
+        // Each call waits one control cap and requeues; after the coalescer's
+        // one-second window elapses the pulse is appended.
+        for _ in 0..6 {
+            let directive = drain_pending_outputs_async(
+                &mut pending_outputs,
+                &stage_flow_context,
+                s,
+                None,
+                &data_journal,
+                &error_journal,
+                &system_journal,
+                &instrumentation,
+                &writer,
+                &mut backpressure_pulse,
+                &mut backpressure_stall,
+                None,
+                None,
+                &mut receiver,
+                || TestEvent::ChannelClosed,
+            )
+            .await
+            .expect("drain");
+            assert!(
+                matches!(directive, Some(EventLoopDirective::Continue)),
+                "credit is exhausted, so each pass backs off"
+            );
+        }
+
+        let appended = data_journal
+            .read_all_unordered()
+            .await
+            .expect("read data journal");
+        let has_pulse = appended.iter().any(|envelope| {
+            matches!(
+                &envelope.event.content,
+                obzenflow_core::event::ChainEventContent::Observability(
+                    ObservabilityPayload::Backpressure(BackpressureEvent::ActivityPulse { .. })
+                )
+            )
+        });
+        assert!(
+            has_pulse,
+            "async-source blocked wait must flush a backpressure activity pulse to the journal"
+        );
     }
 }

@@ -171,6 +171,7 @@ mod tests {
             name: name.to_string(),
             handler: NoopTransform,
             middleware: vec![],
+            backpressure: None,
         })
     }
 
@@ -742,6 +743,7 @@ mod tests {
                 name: "digest__chunk".to_string(),
                 handler: NoopTransform,
                 middleware: vec![],
+                backpressure: None,
             }),
         );
 

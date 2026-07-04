@@ -53,12 +53,11 @@ use super::validation;
 use obzenflow::typed::sources as typed_sources;
 use obzenflow_adapters::middleware::circuit_breaker::{HalfOpenPolicy, OpenPolicy};
 use obzenflow_adapters::middleware::observability::{indicator, log, IndicatorKind};
-use obzenflow_adapters::middleware::{backpressure, CircuitBreakerBuilder, RateLimiterBuilder};
+use obzenflow_adapters::middleware::{CircuitBreakerBuilder, RateLimiterBuilder};
 use obzenflow_dsl::{effectful_transform, flow, sink, source};
 use obzenflow_infra::journal::disk_journals;
 use std::num::NonZeroU32;
 
-const BACKPRESSURE_WINDOW: u64 = 1_000;
 const SOURCE_RATE_LIMIT_EVENTS_PER_SECOND: f64 = 20.0;
 const SOURCE_RATE_LIMIT_BURST: f64 = 1.0;
 
@@ -161,8 +160,7 @@ pub fn build_flow() -> obzenflow_dsl::FlowDefinition {
             }), [
                 RateLimiterBuilder::new(SOURCE_RATE_LIMIT_EVENTS_PER_SECOND)
                     .with_burst(SOURCE_RATE_LIMIT_BURST)
-                    .build(),
-                backpressure(BACKPRESSURE_WINDOW)
+                    .build()
             ]);
             store_orders = source!(CustomerOrderPlaced => typed_sources::finite_from_fn(move |index| {
                 let order = scripted_store_orders.get(index).cloned();
@@ -173,8 +171,7 @@ pub fn build_flow() -> obzenflow_dsl::FlowDefinition {
             }), [
                 RateLimiterBuilder::new(SOURCE_RATE_LIMIT_EVENTS_PER_SECOND)
                     .with_burst(SOURCE_RATE_LIMIT_BURST)
-                    .build(),
-                backpressure(BACKPRESSURE_WINDOW)
+                    .build()
             ]);
 
             // Local validation: deterministic checks with no external I/O,
@@ -192,9 +189,7 @@ pub fn build_flow() -> obzenflow_dsl::FlowDefinition {
                     OrderCancelled
                 } => validation::ValidateOrder,
                 effects: [],
-                middleware: [
-                    backpressure(BACKPRESSURE_WINDOW)
-                ]
+                middleware: []
             );
 
             // Payment authorization: the only stage that touches the outside

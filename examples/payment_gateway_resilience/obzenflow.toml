@@ -1,0 +1,27 @@
+# FLOWIP-115e: backpressure is operator-owned runtime configuration, resolved
+# from this file, never baked into flow.rs. Config declares policy; the topology
+# stays in Rust. You do not restate the topology here.
+#
+# Authoring posture (FLOWIP-010 scope ladder, most specific wins):
+#   - This flow's default:   [runtime.backpressure.flow]          <- the common case
+#   - Wider app default:     [runtime.backpressure]               <- governs every flow in the process
+#   - Per-stage override:    [runtime.backpressure.stages.<upstream>]
+#   - Per-edge override:     [runtime.backpressure.stages.<upstream>.edges.<downstream>]
+#
+# One flow-wide policy applies to every edge; add a narrower table only for an
+# exception. Scoped keys are validated against the topology, so a stage or edge
+# name that does not exist fails the build (UnknownStage / UnknownEdge) rather
+# than being silently ignored. Delete this section and backpressure defaults to
+# off on every edge.
+
+[runtime.backpressure.flow]
+mode = "enforce"
+window = 1000
+stall_timeout_ms = 30000
+
+# Exception: authorize_payment calls the slow external gateway, so its outgoing
+# edge gets a longer stall ceiling before a stuck downstream fails into a
+# backpressure.stalled fact. Mode and window still resolve from the flow-wide
+# policy above; only the stall timeout is overridden here.
+[runtime.backpressure.stages.authorize_payment]
+stall_timeout_ms = 120000

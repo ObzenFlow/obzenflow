@@ -21,7 +21,7 @@ pub mod schema;
 
 pub use candidates::{CandidateSet, ConfigValue, DslCandidates, ScopedCandidate};
 pub use error::ConfigResolveError;
-pub use flow_view::{FlowEffectiveConfig, FlowResolutionContext};
+pub use flow_view::{BackpressureMode, FlowEffectiveConfig, FlowResolutionContext};
 pub use model::{
     diff, doc_for, AiModelsConfig, ConfigDiffEntry, Resolved, ResolvedRuntimeConfig,
     RuntimeConfigOverlay,

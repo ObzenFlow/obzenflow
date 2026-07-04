@@ -8,7 +8,7 @@
 
 use super::candidates::{CandidateSet, ConfigValue};
 use super::error::ConfigResolveError;
-use super::flow_view::{FlowEffectiveConfig, FlowResolutionContext};
+use super::flow_view::{BackpressureMode, FlowEffectiveConfig, FlowResolutionContext};
 use super::model::{Resolved, ResolvedRuntimeConfig};
 use super::schema::{knob_registry, EdgeEndpoint, KnobDefault, KnobSpec, KnobTarget};
 use obzenflow_core::config::{ConfigScope, ConfigSource, ConfigValueMeta};
@@ -58,6 +58,18 @@ impl ResolutionPoint {
                 downstream,
             } => format!("edge {}|>{}", upstream.as_str(), downstream.as_str()),
         }
+    }
+}
+
+/// Specificity rank of a resolved value's winning scope, coarsest first. Used
+/// to tell an inherited default (broader) from an override (more specific)
+/// when deciding whether a shadowed value is stray config or intentional.
+fn scope_rank(scope: &ConfigScope) -> u8 {
+    match scope {
+        ConfigScope::Global => 0,
+        ConfigScope::Flow => 1,
+        ConfigScope::Stage { .. } => 2,
+        ConfigScope::Edge { .. } => 3,
     }
 }
 
@@ -231,6 +243,7 @@ pub fn materialize_flow_config(
                         return Err(ConfigResolveError::UnknownStage {
                             key_path: spec.key_path.to_string(),
                             stage: stage.as_str().to_string(),
+                            known: ctx.stages.iter().map(|s| s.as_str().to_string()).collect(),
                         });
                     }
                     // §4c fan-in footgun: the stage rung of an edge-target
@@ -258,6 +271,11 @@ pub fn materialize_flow_config(
                             key_path: spec.key_path.to_string(),
                             upstream: upstream.as_str().to_string(),
                             downstream: downstream.as_str().to_string(),
+                            known: ctx
+                                .edges
+                                .iter()
+                                .map(|(up, down)| format!("{}|>{}", up.as_str(), down.as_str()))
+                                .collect(),
                         });
                     }
                 }
@@ -295,6 +313,72 @@ pub fn materialize_flow_config(
                     .entry(spec.key_path.to_string())
                     .or_default()
                     .insert(point.address(), resolved);
+            }
+        }
+    }
+
+    // FLOWIP-115e required-where-enforce: an edge whose mode resolves to
+    // `enforce` must resolve a window and a stall timeout, or the build
+    // fails naming the edge and the scopes that may supply them. A window
+    // resolved where the mode stays off or track governs nothing and draws
+    // a diagnostic.
+    for (upstream, downstream) in &ctx.edges {
+        let address = ConfigScope::Edge {
+            upstream: upstream.clone(),
+            downstream: downstream.clone(),
+        };
+        let mode_resolved = values
+            .get("runtime.backpressure.mode")
+            .and_then(|per_scope| per_scope.get(&address));
+        let mode = mode_resolved
+            .and_then(|resolved| resolved.value.as_text())
+            .and_then(BackpressureMode::from_token)
+            .unwrap_or(BackpressureMode::Off);
+        if mode == BackpressureMode::Enforce {
+            let point = ResolutionPoint::Edge {
+                upstream: upstream.clone(),
+                downstream: downstream.clone(),
+            };
+            for key in [
+                "runtime.backpressure.window",
+                "runtime.backpressure.stall_timeout_ms",
+            ] {
+                let resolved = values
+                    .get(key)
+                    .and_then(|per_scope| per_scope.get(&address));
+                if resolved.is_none() {
+                    let spec = crate::runtime_config::schema::knob(key)
+                        .expect("backpressure knobs are registered");
+                    return Err(ConfigResolveError::RequiredKnobUnresolved {
+                        key_path: key.to_string(),
+                        point: point.display(),
+                        supply_help: supply_help(spec, &point),
+                    });
+                }
+            }
+        } else if let Some(window_resolved) = values
+            .get("runtime.backpressure.window")
+            .and_then(|per_scope| per_scope.get(&address))
+        {
+            // A window resolved on a non-enforce edge governs nothing, but that
+            // is only a mistake worth flagging for stray config authored at or
+            // below the mode's scope. A flow- or global-wide window that a
+            // more-specific override turned off or track is intentional
+            // layering, so suppress the warning there.
+            let window_rank = scope_rank(&window_resolved.meta.scope);
+            let mode_rank = mode_resolved.map_or(0, |resolved| scope_rank(&resolved.meta.scope));
+            if window_rank >= mode_rank {
+                let warning = format!(
+                    "config warning at runtime.backpressure.window: a window resolved for \
+                     edge {}|>{} whose mode is '{}'; it has no effect until the mode \
+                     resolves to '{}'",
+                    upstream.as_str(),
+                    downstream.as_str(),
+                    mode.as_token(),
+                    BackpressureMode::Enforce.as_token()
+                );
+                tracing::warn!("{warning}");
+                warnings.push(warning);
             }
         }
     }
@@ -393,8 +477,9 @@ mod tests {
 
     #[test]
     fn the_4a_worked_example_resolves_verbatim() {
-        // Flow declares backpressure(1000); `enricher` declares a deliberate
-        // backpressure(200) exception; a global file entry sets 500.
+        // The flow's `backpressure:` clause declares a DSL-tier window of
+        // 1000; `enricher` declares a deliberate 200 exception; a global
+        // file entry sets 500.
         let mut set = CandidateSet::default();
         admit(
             &mut set,
@@ -616,5 +701,260 @@ mod tests {
         assert!(err
             .to_string()
             .contains("configured stage does not exist: 'ghost'"));
+    }
+
+    fn one_edge_ctx() -> FlowResolutionContext {
+        FlowResolutionContext {
+            flow_name: "f".to_string(),
+            stages: BTreeSet::from([StageKey::from("src"), StageKey::from("sink")]),
+            edges: BTreeSet::from([(StageKey::from("src"), StageKey::from("sink"))]),
+            dsl: Default::default(),
+        }
+    }
+
+    #[test]
+    fn enforce_without_window_or_stall_timeout_fails_the_build() {
+        // mode=enforce with nothing else: the window is required-where-enforce.
+        let mut set = CandidateSet::default();
+        admit(
+            &mut set,
+            "runtime.backpressure.mode",
+            ConfigScope::Flow,
+            ConfigSource::File,
+            ConfigValue::Text("enforce".to_string()),
+        );
+        let snapshot = ResolvedRuntimeConfig::new(set);
+        let err = materialize_flow_config(&snapshot, one_edge_ctx()).unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains("runtime.backpressure.window") && message.contains("edge src|>sink"),
+            "window required where enforce resolves: {message}"
+        );
+
+        // A window alone still fails: the stall timeout is equally required.
+        let mut set = CandidateSet::default();
+        admit(
+            &mut set,
+            "runtime.backpressure.mode",
+            ConfigScope::Flow,
+            ConfigSource::File,
+            ConfigValue::Text("enforce".to_string()),
+        );
+        admit(
+            &mut set,
+            "runtime.backpressure.window",
+            ConfigScope::Flow,
+            ConfigSource::File,
+            ConfigValue::U64(1000),
+        );
+        let snapshot = ResolvedRuntimeConfig::new(set);
+        let err = materialize_flow_config(&snapshot, one_edge_ctx()).unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains("runtime.backpressure.stall_timeout_ms")
+                && message.contains("edge src|>sink"),
+            "stall timeout required where enforce resolves: {message}"
+        );
+
+        // Both values present: the build succeeds and the edge resolves.
+        let mut set = CandidateSet::default();
+        admit(
+            &mut set,
+            "runtime.backpressure.mode",
+            ConfigScope::Flow,
+            ConfigSource::File,
+            ConfigValue::Text("enforce".to_string()),
+        );
+        admit(
+            &mut set,
+            "runtime.backpressure.window",
+            ConfigScope::Flow,
+            ConfigSource::File,
+            ConfigValue::U64(1000),
+        );
+        admit(
+            &mut set,
+            "runtime.backpressure.stall_timeout_ms",
+            ConfigScope::Flow,
+            ConfigSource::File,
+            ConfigValue::U64(30_000),
+        );
+        let snapshot = ResolvedRuntimeConfig::new(set);
+        let effective = materialize_flow_config(&snapshot, one_edge_ctx()).unwrap();
+        let (mode, source) =
+            effective.backpressure_mode_for(&StageKey::from("src"), &StageKey::from("sink"));
+        assert_eq!(mode, crate::runtime_config::BackpressureMode::Enforce);
+        assert_eq!(source, ConfigSource::File);
+        assert_eq!(
+            effective
+                .backpressure_stall_timeout_for(&StageKey::from("src"), &StageKey::from("sink")),
+            Some(30_000)
+        );
+        assert!(effective.warnings().is_empty());
+    }
+
+    #[test]
+    fn track_needs_no_window_and_an_off_window_draws_the_diagnostic() {
+        // mode=track builds with no window at all.
+        let mut set = CandidateSet::default();
+        admit(
+            &mut set,
+            "runtime.backpressure.mode",
+            ConfigScope::edge("src", "sink"),
+            ConfigSource::File,
+            ConfigValue::Text("track".to_string()),
+        );
+        let snapshot = ResolvedRuntimeConfig::new(set);
+        let effective = materialize_flow_config(&snapshot, one_edge_ctx()).unwrap();
+        let (mode, _) =
+            effective.backpressure_mode_for(&StageKey::from("src"), &StageKey::from("sink"));
+        assert_eq!(mode, crate::runtime_config::BackpressureMode::Track);
+        assert!(effective.warnings().is_empty());
+
+        // A window resolved where the mode stays off governs nothing.
+        let mut set = CandidateSet::default();
+        admit(
+            &mut set,
+            "runtime.backpressure.window",
+            ConfigScope::edge("src", "sink"),
+            ConfigSource::File,
+            ConfigValue::U64(1000),
+        );
+        let snapshot = ResolvedRuntimeConfig::new(set);
+        let effective = materialize_flow_config(&snapshot, one_edge_ctx()).unwrap();
+        assert!(
+            effective
+                .warnings()
+                .iter()
+                .any(|warning| warning.contains("has no effect") && warning.contains("src|>sink")),
+            "off-with-window diagnostic expected: {:?}",
+            effective.warnings()
+        );
+    }
+
+    #[test]
+    fn an_inherited_window_shadowed_by_a_more_specific_off_draws_no_warning() {
+        // A flow-wide enforce policy with a stage that overrides mode=off. The
+        // inherited window governs nothing on that stage's edges, but the
+        // override is intentional layering, not stray config, so no warning
+        // fires. This is the common authoring shape: one flow default, sparse
+        // per-stage exceptions.
+        let mut set = CandidateSet::default();
+        admit(
+            &mut set,
+            "runtime.backpressure.mode",
+            ConfigScope::Flow,
+            ConfigSource::File,
+            ConfigValue::Text("enforce".to_string()),
+        );
+        admit(
+            &mut set,
+            "runtime.backpressure.window",
+            ConfigScope::Flow,
+            ConfigSource::File,
+            ConfigValue::U64(1000),
+        );
+        admit(
+            &mut set,
+            "runtime.backpressure.stall_timeout_ms",
+            ConfigScope::Flow,
+            ConfigSource::File,
+            ConfigValue::U64(30_000),
+        );
+        // `src` (the writing endpoint of the only edge) turns its outgoing
+        // edges off; the flow window is inherited but shadowed.
+        admit(
+            &mut set,
+            "runtime.backpressure.mode",
+            ConfigScope::stage("src"),
+            ConfigSource::File,
+            ConfigValue::Text("off".to_string()),
+        );
+        let snapshot = ResolvedRuntimeConfig::new(set);
+        let effective = materialize_flow_config(&snapshot, one_edge_ctx()).unwrap();
+        let (mode, _) =
+            effective.backpressure_mode_for(&StageKey::from("src"), &StageKey::from("sink"));
+        assert_eq!(mode, crate::runtime_config::BackpressureMode::Off);
+        assert!(
+            effective.warnings().is_empty(),
+            "an inherited window shadowed by a more-specific off must not warn: {:?}",
+            effective.warnings()
+        );
+    }
+
+    #[test]
+    fn a_window_authored_at_the_same_scope_as_off_still_warns() {
+        // Contrast to the inherited case: a window and an off mode authored at
+        // the same stage scope is stray config, so the diagnostic still fires.
+        let mut set = CandidateSet::default();
+        admit(
+            &mut set,
+            "runtime.backpressure.mode",
+            ConfigScope::stage("src"),
+            ConfigSource::File,
+            ConfigValue::Text("off".to_string()),
+        );
+        admit(
+            &mut set,
+            "runtime.backpressure.window",
+            ConfigScope::stage("src"),
+            ConfigSource::File,
+            ConfigValue::U64(500),
+        );
+        let snapshot = ResolvedRuntimeConfig::new(set);
+        let effective = materialize_flow_config(&snapshot, one_edge_ctx()).unwrap();
+        assert!(
+            effective
+                .warnings()
+                .iter()
+                .any(|warning| warning.contains("has no effect") && warning.contains("src|>sink")),
+            "same-scope window+off is stray config and must warn: {:?}",
+            effective.warnings()
+        );
+    }
+
+    #[test]
+    fn a_file_entry_unsets_a_dsl_declared_enforce_at_the_same_scope() {
+        // The clause desugar: DSL declares enforce + window + stall at stage
+        // scope. An environment file sets mode=off at the same scope, which
+        // outranks the DSL tier: enforcement is off with no build error, and
+        // the now-inert window draws the diagnostic.
+        let mut dsl = crate::runtime_config::DslCandidates::default();
+        dsl.declare(
+            "runtime.backpressure.mode",
+            ConfigScope::stage("src"),
+            ConfigValue::Text("enforce".to_string()),
+        );
+        dsl.declare(
+            "runtime.backpressure.window",
+            ConfigScope::stage("src"),
+            ConfigValue::U64(1000),
+        );
+        dsl.declare(
+            "runtime.backpressure.stall_timeout_ms",
+            ConfigScope::stage("src"),
+            ConfigValue::U64(30_000),
+        );
+
+        let mut set = CandidateSet::default();
+        admit(
+            &mut set,
+            "runtime.backpressure.mode",
+            ConfigScope::stage("src"),
+            ConfigSource::File,
+            ConfigValue::Text("off".to_string()),
+        );
+        let snapshot = ResolvedRuntimeConfig::new(set);
+        let mut ctx = one_edge_ctx();
+        ctx.dsl = dsl;
+        let effective = materialize_flow_config(&snapshot, ctx).unwrap();
+        let (mode, source) =
+            effective.backpressure_mode_for(&StageKey::from("src"), &StageKey::from("sink"));
+        assert_eq!(mode, crate::runtime_config::BackpressureMode::Off);
+        assert_eq!(source, ConfigSource::File, "operators override code");
+        assert!(effective
+            .warnings()
+            .iter()
+            .any(|warning| warning.contains("has no effect")));
     }
 }

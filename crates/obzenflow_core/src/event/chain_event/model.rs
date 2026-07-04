@@ -384,13 +384,13 @@ impl ChainEvent {
                     MiddlewareLifecycle::RateLimiter(_) => {
                         "lifecycle.middleware.rate_limiter".into()
                     }
-                    MiddlewareLifecycle::Backpressure(_) => {
-                        "lifecycle.middleware.backpressure".into()
-                    }
                     MiddlewareLifecycle::Retry(_) => "lifecycle.middleware.retry".into(),
                     MiddlewareLifecycle::Indicator(_) => "lifecycle.middleware.indicator".into(),
                     MiddlewareLifecycle::User(_) => "lifecycle.middleware.user".into(),
                 },
+                // FLOWIP-115e: backpressure is runtime flow control, not
+                // middleware, so its label is not under `middleware`.
+                ObservabilityPayload::Backpressure(_) => "lifecycle.backpressure".into(),
             },
         }
     }

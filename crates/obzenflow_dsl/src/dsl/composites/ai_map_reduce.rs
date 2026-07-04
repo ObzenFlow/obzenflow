@@ -442,6 +442,7 @@ where
             name: chunk_stage.clone(),
             handler: chunk_handler,
             middleware: chunk_middleware,
+            backpressure: None,
         };
         let chunk_descriptor = wrap_typed_descriptor(
             Box::new(chunk_descriptor),
@@ -468,6 +469,7 @@ where
             name: map_stage.clone(),
             handler: map_handler,
             middleware: map_middleware,
+            backpressure: None,
         };
         let map_descriptor = wrap_typed_descriptor(
             Box::new(map_descriptor),
@@ -491,6 +493,7 @@ where
             handler: self.collect,
             emit_interval: None,
             middleware: self.collect_middleware,
+            backpressure: None,
         };
         let collect_descriptor = wrap_typed_descriptor(
             Box::new(collect_descriptor),
@@ -510,6 +513,7 @@ where
             name: finalize_stage.clone(),
             handler: finalize_handler,
             middleware: self.finalize_middleware,
+            backpressure: None,
         };
         let finalize_descriptor = wrap_typed_descriptor(
             Box::new(finalize_descriptor),

@@ -56,6 +56,7 @@ impl JournalEvent for ChainEvent {
                     _ => "lifecycle.metrics",
                 },
                 ObservabilityPayload::Middleware(_) => "lifecycle.middleware",
+                ObservabilityPayload::Backpressure(_) => "lifecycle.backpressure",
             },
         }
     }

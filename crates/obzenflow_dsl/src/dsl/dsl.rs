@@ -164,6 +164,7 @@ macro_rules! flow {
         name: $flow_name:literal,
         journals: $journals:expr,
         middleware: [$($flow_mw:expr),*],
+        $(backpressure: $flow_bp:expr,)?
         $(effect_ports: $effect_ports:expr,)?
 
         stages: {
@@ -234,6 +235,7 @@ macro_rules! flow {
                 lowering_artifacts,
                 effect_ports = effect_ports,
                 context = __build_ctx
+                $(, backpressure = $flow_bp)?
             )
         })
     }};
@@ -242,6 +244,7 @@ macro_rules! flow {
     {
         journals: $journals:expr,
         middleware: [$($flow_mw:expr),*],
+        $(backpressure: $flow_bp:expr,)?
         $(effect_ports: $effect_ports:expr,)?
 
         stages: {
@@ -312,6 +315,7 @@ macro_rules! flow {
                 lowering_artifacts,
                 effect_ports = effect_ports,
                 context = __build_ctx
+                $(, backpressure = $flow_bp)?
             )
         })
     }};
@@ -330,6 +334,7 @@ macro_rules! test_flow {
         name: $flow_name:literal,
         journals: $journals:expr,
         middleware: [$($flow_mw:expr),*],
+        $(backpressure: $flow_bp:expr,)?
         $(effect_ports: $effect_ports:expr,)?
 
         stages: {
@@ -394,6 +399,7 @@ macro_rules! test_flow {
                             "Failed to build FlowTestHarness: {e}"
                         )))
                 }
+                $(, backpressure = $flow_bp)?
             )
         }
     }};
@@ -402,6 +408,7 @@ macro_rules! test_flow {
     {
         journals: $journals:expr,
         middleware: [$($flow_mw:expr),*],
+        $(backpressure: $flow_bp:expr,)?
         $(effect_ports: $effect_ports:expr,)?
 
         stages: {
@@ -418,6 +425,7 @@ macro_rules! test_flow {
             name: "default",
             journals: $journals,
             middleware: [$($flow_mw),*],
+            $(backpressure: $flow_bp,)?
             $(
                 effect_ports: $effect_ports,
             )?
@@ -436,7 +444,7 @@ macro_rules! test_flow {
 /// Build the actual flow from collected stages and connections
 #[macro_export]
 macro_rules! build_typed_flow {
-    ($flow_name:expr, $journals:expr, $stages:expr, $connections:expr, $create_flow_middleware:expr, $lowering_artifacts:expr, effect_ports = $effect_ports:expr, context = $build_ctx:expr) => {{
+    ($flow_name:expr, $journals:expr, $stages:expr, $connections:expr, $create_flow_middleware:expr, $lowering_artifacts:expr, effect_ports = $effect_ports:expr, context = $build_ctx:expr $(, backpressure = $flow_bp:expr)?) => {{
         $crate::build_typed_flow!(
             $flow_name,
             $journals,
@@ -447,10 +455,11 @@ macro_rules! build_typed_flow {
             effect_ports = $effect_ports,
             context = $build_ctx,
             finish: |handle, _stage_data_journals| Ok::<FlowHandle, FlowBuildError>(handle)
+            $(, backpressure = $flow_bp)?
         )
     }};
 
-    ($flow_name:expr, $journals:expr, $stages:expr, $connections:expr, $create_flow_middleware:expr, $lowering_artifacts:expr, effect_ports = $effect_ports:expr, context = $build_ctx:expr, finish: $finish:expr) => {{
+    ($flow_name:expr, $journals:expr, $stages:expr, $connections:expr, $create_flow_middleware:expr, $lowering_artifacts:expr, effect_ports = $effect_ports:expr, context = $build_ctx:expr, finish: $finish:expr $(, backpressure = $flow_bp:expr)?) => {{
         use $crate::prelude::*;
         use $crate::dsl::FlowBuildError;
         use std::collections::{HashMap, HashSet};
@@ -851,13 +860,19 @@ macro_rules! build_typed_flow {
         // the topology (§4c). Policy-attachment guards ride this walk (they
         // previously ran during plan extraction, after journal creation;
         // failing before substrate selection is strictly earlier).
+        // FLOWIP-115e: the flow-level `backpressure:` clause, when declared.
+        #[allow(unused_mut)]
+        let mut __flow_backpressure_clause: Option<
+            $crate::dsl::backpressure_clause::BackpressureClause,
+        > = None;
+        $( __flow_backpressure_clause = Some($flow_bp); )?
+
         let __flow_effective = {
             use obzenflow_core::config::ConfigScope;
             use obzenflow_runtime::runtime_config::{ConfigValue, DslCandidates};
             use $crate::middleware_resolution::MiddlewareSourceScope;
 
             let mut __dsl_candidates = DslCandidates::default();
-            let mut __flow_window: Option<u64> = None;
             let mut __flow_breaker_threshold: Option<u64> = None;
             let mut __flow_limiter: Option<(f64, Option<f64>)> = None;
             for (name, descriptor) in descriptors.iter() {
@@ -923,23 +938,6 @@ macro_rules! build_typed_flow {
                         }
                     }
                     match factory.plan_contribution() {
-                        obzenflow_adapters::middleware::MiddlewarePlanContribution::Backpressure {
-                            window,
-                        } => match scope {
-                            // One flow-scoped candidate per knob: the flow
-                            // middleware closure yields the same factories
-                            // for every stage.
-                            MiddlewareSourceScope::Flow => {
-                                __flow_window = Some(window.get());
-                            }
-                            MiddlewareSourceScope::Stage => {
-                                __dsl_candidates.declare(
-                                    "runtime.backpressure.window",
-                                    ConfigScope::stage(descriptor.name()),
-                                    ConfigValue::U64(window.get()),
-                                );
-                            }
-                        },
                         obzenflow_adapters::middleware::MiddlewarePlanContribution::CircuitBreaker {
                             threshold,
                         } => match scope {
@@ -979,13 +977,15 @@ macro_rules! build_typed_flow {
                         obzenflow_adapters::middleware::MiddlewarePlanContribution::None => {}
                     }
                 }
+
+                // FLOWIP-115e: the stage's `backpressure:` clause is pure
+                // DSL-tier candidate sugar at the declaring scope.
+                if let Some(clause) = descriptor.backpressure_clause() {
+                    clause.declare(&mut __dsl_candidates, ConfigScope::stage(descriptor.name()));
+                }
             }
-            if let Some(window) = __flow_window {
-                __dsl_candidates.declare(
-                    "runtime.backpressure.window",
-                    ConfigScope::Flow,
-                    ConfigValue::U64(window),
-                );
+            if let Some(clause) = &__flow_backpressure_clause {
+                clause.declare(&mut __dsl_candidates, ConfigScope::Flow);
             }
             if let Some(threshold) = __flow_breaker_threshold {
                 __dsl_candidates.declare(
@@ -1385,20 +1385,18 @@ macro_rules! build_typed_flow {
             })?;
         }
 
-        // Backpressure materialization (FLOWIP-010 §4c): the resolved
-        // effective config lands on the plan's existing rungs. An
-        // edge-scoped winner becomes an edge override; a coarser winner
-        // folds to the upstream stage's default (identical semantics via
-        // `mode_for_edge`). Absence keeps edges Disabled, and explicit
-        // entries survive the SCC auto-enable exactly as before. Policy
-        // guards and DSL candidate collection ran earlier, before substrate
-        // selection.
+        // Backpressure materialization (FLOWIP-115e): the resolved mode
+        // decides each edge exactly. `enforce` lands an edge override with
+        // the resolved window and stall ceiling, `track` lands TrackOnly,
+        // and `off` lands nothing, with one exception: a cycle-internal
+        // edge whose `off` is only the built-in default upgrades to
+        // TrackOnly (provenance-aware SCC auto-enable), so an explicit
+        // `off` from any tier is respected.
         use obzenflow_runtime::backpressure::BackpressurePlan;
 
         let mut backpressure_plan = BackpressurePlan::disabled();
         {
-            use obzenflow_core::config::ConfigScope;
-            let mut stage_defaults_applied: HashSet<StageId> = HashSet::new();
+            use obzenflow_runtime::runtime_config::BackpressureMode;
             for (from_var, to_var, _kind) in &connections {
                 let from_key = obzenflow_core::StageKey::from(
                     descriptors
@@ -1412,26 +1410,48 @@ macro_rules! build_typed_flow {
                         .expect("connections reference known stages")
                         .name(),
                 );
-                let Some(resolved) = __flow_effective.backpressure_window_for(&from_key, &to_key)
-                else {
-                    continue;
-                };
-                let window = resolved
-                    .value
-                    .as_u64()
-                    .and_then(std::num::NonZeroU64::new)
-                    .expect("window validated as u64 >= 1 at admission");
                 let up_id = *name_to_id
                     .get(from_var)
                     .expect("name_to_id should contain stage ids");
-                if matches!(resolved.meta.scope, ConfigScope::Edge { .. }) {
-                    let down_id = *name_to_id
-                        .get(to_var)
-                        .expect("name_to_id should contain stage ids");
-                    backpressure_plan =
-                        backpressure_plan.with_edge_window(up_id, down_id, window);
-                } else if stage_defaults_applied.insert(up_id) {
-                    backpressure_plan = backpressure_plan.with_stage_window(up_id, window);
+                let down_id = *name_to_id
+                    .get(to_var)
+                    .expect("name_to_id should contain stage ids");
+                let (mode, mode_source) =
+                    __flow_effective.backpressure_mode_for(&from_key, &to_key);
+                let up_scc = topology.scc_id(to_topology_id(up_id));
+                let cycle_internal =
+                    up_scc.is_some() && up_scc == topology.scc_id(to_topology_id(down_id));
+                use $crate::dsl::backpressure_clause::{
+                    resolve_edge_backpressure, EdgeBackpressure,
+                };
+                match resolve_edge_backpressure(mode, mode_source, cycle_internal) {
+                    EdgeBackpressure::Enforce => {
+                        let window = __flow_effective
+                            .backpressure_window_for(&from_key, &to_key)
+                            .and_then(|resolved| resolved.value.as_u64())
+                            .and_then(std::num::NonZeroU64::new)
+                            .expect(
+                                "required-where-enforce validated the window at materialization",
+                            );
+                        let stall_timeout = std::time::Duration::from_millis(
+                            __flow_effective
+                                .backpressure_stall_timeout_for(&from_key, &to_key)
+                                .expect(
+                                    "required-where-enforce validated the stall timeout at \
+                                     materialization",
+                                ),
+                        );
+                        backpressure_plan = backpressure_plan.with_edge_enforced(
+                            up_id,
+                            down_id,
+                            window,
+                            stall_timeout,
+                        );
+                    }
+                    EdgeBackpressure::Track => {
+                        backpressure_plan = backpressure_plan.track_only_edge(up_id, down_id);
+                    }
+                    EdgeBackpressure::Disabled => {}
                 }
             }
         }

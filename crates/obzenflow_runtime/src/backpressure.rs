@@ -12,6 +12,7 @@
 //!   control/lifecycle/observability events by not calling `reserve`/`ack_consumed`.
 
 use crate::id_conversions::StageIdExt;
+use crate::stages::common::control_strategies::CreditWaker;
 use obzenflow_core::StageId;
 use obzenflow_topology::Topology;
 use std::collections::HashMap;
@@ -25,13 +26,16 @@ pub enum BackpressureEdgeMode {
     Disabled,
     /// State allocated and atomics maintained, but reserve() never blocks.
     TrackOnly,
-    /// Full backpressure with a credit window.
-    Enforced(NonZeroU64),
+    /// Full backpressure with a credit window and a stall ceiling.
+    Enforced {
+        window: NonZeroU64,
+        stall_timeout: Duration,
+    },
 }
 
 #[derive(Clone, Debug, Default)]
 pub struct BackpressurePlan {
-    stage_defaults: HashMap<StageId, NonZeroU64>,
+    stage_defaults: HashMap<StageId, (NonZeroU64, Duration)>,
     edge_overrides: HashMap<(StageId, StageId), BackpressureEdgeMode>,
 }
 
@@ -40,20 +44,30 @@ impl BackpressurePlan {
         Self::default()
     }
 
-    pub fn with_stage_window(mut self, stage_id: StageId, window: NonZeroU64) -> Self {
-        self.stage_defaults.insert(stage_id, window);
+    pub fn with_stage_enforced(
+        mut self,
+        stage_id: StageId,
+        window: NonZeroU64,
+        stall_timeout: Duration,
+    ) -> Self {
+        self.stage_defaults
+            .insert(stage_id, (window, stall_timeout));
         self
     }
 
-    pub fn with_edge_window(
+    pub fn with_edge_enforced(
         mut self,
         upstream: StageId,
         downstream: StageId,
         window: NonZeroU64,
+        stall_timeout: Duration,
     ) -> Self {
         self.edge_overrides.insert(
             (upstream, downstream),
-            BackpressureEdgeMode::Enforced(window),
+            BackpressureEdgeMode::Enforced {
+                window,
+                stall_timeout,
+            },
         );
         self
     }
@@ -77,7 +91,10 @@ impl BackpressurePlan {
                 .stage_defaults
                 .get(&upstream)
                 .copied()
-                .map(BackpressureEdgeMode::Enforced)
+                .map(|(window, stall_timeout)| BackpressureEdgeMode::Enforced {
+                    window,
+                    stall_timeout,
+                })
                 .unwrap_or(BackpressureEdgeMode::Disabled),
         }
     }
@@ -107,7 +124,11 @@ struct EdgeState {
     upstream: StageId,
     downstream: StageId,
     window: u64,
+    stall_timeout: Duration,
     reader_seq: AtomicU64,
+    /// The upstream writer's waker; fired by `ack_consumed` after credit is
+    /// published, so a blocked writer wakes on the ack rather than a timer.
+    upstream_waker: CreditWaker,
 }
 
 #[derive(Debug)]
@@ -115,6 +136,7 @@ struct StageState {
     writer_seq: AtomicU64,
     reserved: AtomicU64,
     wait_nanos_total: AtomicU64,
+    credit_waker: CreditWaker,
     downstream_edges: Vec<Arc<EdgeState>>,
 }
 
@@ -142,6 +164,13 @@ impl BackpressureRegistry {
             .map(|stage| StageId::from_topology_id(stage.id))
             .collect();
 
+        // Wakers exist before the edge pass so every EdgeState can hold its
+        // upstream writer's waker (edges are built before stage states).
+        let wakers: HashMap<StageId, CreditWaker> = stage_ids
+            .iter()
+            .map(|id| (*id, CreditWaker::new()))
+            .collect();
+
         let mut outgoing: HashMap<StageId, Vec<Arc<EdgeState>>> = HashMap::new();
         let mut edges: HashMap<(StageId, StageId), Arc<EdgeState>> = HashMap::new();
 
@@ -149,17 +178,27 @@ impl BackpressureRegistry {
             let upstream = StageId::from_topology_id(edge.from);
             let downstream = StageId::from_topology_id(edge.to);
 
-            let window = match plan.mode_for_edge(upstream, downstream) {
+            let (window, stall_timeout) = match plan.mode_for_edge(upstream, downstream) {
                 BackpressureEdgeMode::Disabled => continue,
-                BackpressureEdgeMode::TrackOnly => u64::MAX,
-                BackpressureEdgeMode::Enforced(window) => window.get(),
+                // TrackOnly never blocks, so it can never be the limiting
+                // edge of a stall episode; the ceiling here is unreachable.
+                BackpressureEdgeMode::TrackOnly => (u64::MAX, Duration::MAX),
+                BackpressureEdgeMode::Enforced {
+                    window,
+                    stall_timeout,
+                } => (window.get(), stall_timeout),
             };
 
             let edge_state = Arc::new(EdgeState {
                 upstream,
                 downstream,
                 window,
+                stall_timeout,
                 reader_seq: AtomicU64::new(0),
+                upstream_waker: wakers
+                    .get(&upstream)
+                    .cloned()
+                    .expect("edge upstream is a topology stage"),
             });
 
             edges.insert((upstream, downstream), edge_state.clone());
@@ -169,12 +208,17 @@ impl BackpressureRegistry {
         let mut stages: HashMap<StageId, Arc<StageState>> = HashMap::new();
         for stage_id in stage_ids {
             let downstream_edges = outgoing.remove(&stage_id).unwrap_or_default();
+            let credit_waker = wakers
+                .get(&stage_id)
+                .cloned()
+                .expect("waker created for every stage");
             stages.insert(
                 stage_id,
                 Arc::new(StageState {
                     writer_seq: AtomicU64::new(0),
                     reserved: AtomicU64::new(0),
                     wait_nanos_total: AtomicU64::new(0),
+                    credit_waker,
                     downstream_edges,
                 }),
             );
@@ -299,6 +343,43 @@ impl BackpressureWriter {
             .unwrap_or(u64::MAX)
     }
 
+    /// The writer's credit waker, for the blocked-wait select. Present iff
+    /// the writer has backpressure state.
+    pub fn credit_waker(&self) -> Option<CreditWaker> {
+        self.state.as_ref().map(|s| s.credit_waker.clone())
+    }
+
+    /// The limiting downstream edge of the current credit computation:
+    /// minimum credit, ties broken by lowest downstream stage id so the
+    /// stall record is deterministic.
+    pub fn limiting_detail(&self) -> Option<LimitingEdgeDetail> {
+        let state = self.state.as_ref()?;
+        if state.downstream_edges.is_empty() {
+            return None;
+        }
+
+        let effective_writer = state
+            .writer_seq
+            .load(Ordering::Acquire)
+            .saturating_add(state.reserved.load(Ordering::Acquire));
+
+        state
+            .downstream_edges
+            .iter()
+            .map(|edge| {
+                let reader_seq = edge.reader_seq.load(Ordering::Acquire);
+                let allowed = reader_seq.saturating_add(edge.window);
+                LimitingEdgeDetail {
+                    credit: allowed.saturating_sub(effective_writer),
+                    downstream: edge.downstream,
+                    window: edge.window,
+                    stall_timeout: edge.stall_timeout,
+                    in_flight: effective_writer.saturating_sub(reader_seq),
+                }
+            })
+            .min_by_key(|detail| (detail.credit, detail.downstream))
+    }
+
     pub fn min_downstream_credit_detail(&self) -> Option<(u64, StageId)> {
         let state = self.state.as_ref()?;
         if state.downstream_edges.is_empty() {
@@ -349,30 +430,37 @@ impl BackpressureWriter {
         bypass_enabled()
     }
 
-    pub fn reserve(&self, n: u64) -> Option<BackpressureReservation> {
+    /// Track-mode reservation: accounting advances, never blocks.
+    /// Reconstruction-scoped commits use this so the resume handoff computes
+    /// true lag from catch-up-era sequences (FLOWIP-115e).
+    pub fn reserve_tracked(&self, n: u64) -> BackpressureReservation {
         let Some(state) = &self.state else {
-            return Some(BackpressureReservation {
-                state: None,
-                reserved: 0,
-                committed_or_released: true,
-            });
+            return BackpressureReservation::noop();
         };
 
         if state.downstream_edges.is_empty() {
-            return Some(BackpressureReservation {
-                state: None,
-                reserved: 0,
-                committed_or_released: true,
-            });
+            return BackpressureReservation::noop();
+        }
+
+        state.reserved.fetch_add(n, Ordering::AcqRel);
+        BackpressureReservation {
+            state: Some(state.clone()),
+            reserved: n,
+            committed_or_released: false,
+        }
+    }
+
+    pub fn reserve(&self, n: u64) -> Option<BackpressureReservation> {
+        let Some(state) = &self.state else {
+            return Some(BackpressureReservation::noop());
+        };
+
+        if state.downstream_edges.is_empty() {
+            return Some(BackpressureReservation::noop());
         }
 
         if bypass_enabled() {
-            state.reserved.fetch_add(n, Ordering::AcqRel);
-            return Some(BackpressureReservation {
-                state: Some(state.clone()),
-                reserved: n,
-                committed_or_released: false,
-            });
+            return Some(self.reserve_tracked(n));
         }
 
         loop {
@@ -416,6 +504,18 @@ impl Default for BackpressureWriter {
     }
 }
 
+/// The limiting edge of a writer's credit computation (FLOWIP-115e): the
+/// stall ceiling reads its timeout and the `backpressure.stalled` fact
+/// carries its identity, window, and in-flight count.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LimitingEdgeDetail {
+    pub credit: u64,
+    pub downstream: StageId,
+    pub window: u64,
+    pub stall_timeout: Duration,
+    pub in_flight: u64,
+}
+
 #[derive(Debug)]
 pub struct BackpressureReservation {
     state: Option<Arc<StageState>>,
@@ -424,6 +524,15 @@ pub struct BackpressureReservation {
 }
 
 impl BackpressureReservation {
+    /// A settled reservation for the no-backpressure cases.
+    fn noop() -> Self {
+        Self {
+            state: None,
+            reserved: 0,
+            committed_or_released: true,
+        }
+    }
+
     pub fn commit(mut self, used: u64) {
         let Some(state) = &self.state else {
             self.committed_or_released = true;
@@ -482,7 +591,9 @@ impl BackpressureReader {
         let Some(state) = &self.state else {
             return;
         };
+        // Publish credit first; the wake is a prompt to re-check, never a grant.
         state.reader_seq.fetch_add(n, Ordering::AcqRel);
+        state.upstream_waker.notify();
     }
 
     pub fn edge_ids(&self) -> Option<(StageId, StageId)> {

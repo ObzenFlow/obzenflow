@@ -603,13 +603,15 @@ mod tests {
     use obzenflow_core::StageId;
     use std::sync::{Arc, Mutex};
 
-    struct MemoryJournal<T: JournalEvent> {
+    // Test-local double for the `Journal<T>` port, not an infra adapter and
+    // not exported. Consolidating these doubles codebase-wide is FLOWIP-114t.
+    struct RecordingJournal<T: JournalEvent> {
         id: JournalId,
         owner: Option<JournalOwner>,
         events: Arc<Mutex<Vec<EventEnvelope<T>>>>,
     }
 
-    impl<T: JournalEvent> Default for MemoryJournal<T> {
+    impl<T: JournalEvent> Default for RecordingJournal<T> {
         fn default() -> Self {
             Self {
                 id: JournalId::new(),
@@ -619,13 +621,13 @@ mod tests {
         }
     }
 
-    struct MemoryJournalReader<T: JournalEvent> {
+    struct RecordingJournalReader<T: JournalEvent> {
         events: Arc<Mutex<Vec<EventEnvelope<T>>>>,
         pos: usize,
     }
 
     #[async_trait::async_trait]
-    impl<T> JournalReader<T> for MemoryJournalReader<T>
+    impl<T> JournalReader<T> for RecordingJournalReader<T>
     where
         T: JournalEvent,
     {
@@ -633,7 +635,7 @@ mod tests {
             let guard = self
                 .events
                 .lock()
-                .expect("MemoryJournalReader: poisoned lock");
+                .expect("RecordingJournalReader: poisoned lock");
             if self.pos >= guard.len() {
                 return Ok(None);
             }
@@ -649,7 +651,7 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl<T> Journal<T> for MemoryJournal<T>
+    impl<T> Journal<T> for RecordingJournal<T>
     where
         T: JournalEvent + 'static,
     {
@@ -668,13 +670,13 @@ mod tests {
         ) -> Result<EventEnvelope<T>, JournalError> {
             let envelope =
                 EventEnvelope::new(obzenflow_core::event::JournalWriterId::from(self.id), event);
-            let mut guard = self.events.lock().expect("MemoryJournal: poisoned lock");
+            let mut guard = self.events.lock().expect("RecordingJournal: poisoned lock");
             guard.push(envelope.clone());
             Ok(envelope)
         }
 
         async fn read_all_unordered(&self) -> Result<Vec<EventEnvelope<T>>, JournalError> {
-            let guard = self.events.lock().expect("MemoryJournal: poisoned lock");
+            let guard = self.events.lock().expect("RecordingJournal: poisoned lock");
             Ok(guard.clone())
         }
 
@@ -682,7 +684,7 @@ mod tests {
             &self,
             event_id: &obzenflow_core::event::types::EventId,
         ) -> Result<Option<EventEnvelope<T>>, JournalError> {
-            let guard = self.events.lock().expect("MemoryJournal: poisoned lock");
+            let guard = self.events.lock().expect("RecordingJournal: poisoned lock");
             Ok(guard.iter().find(|e| e.event.id() == event_id).cloned())
         }
 
@@ -690,14 +692,14 @@ mod tests {
             &self,
             position: u64,
         ) -> Result<Box<dyn JournalReader<T>>, JournalError> {
-            Ok(Box::new(MemoryJournalReader {
+            Ok(Box::new(RecordingJournalReader {
                 events: Arc::clone(&self.events),
                 pos: position as usize,
             }))
         }
 
         async fn read_last_n(&self, count: usize) -> Result<Vec<EventEnvelope<T>>, JournalError> {
-            let guard = self.events.lock().expect("MemoryJournal: poisoned lock");
+            let guard = self.events.lock().expect("RecordingJournal: poisoned lock");
             let len = guard.len();
             let start = len.saturating_sub(count);
             Ok(guard[start..].iter().rev().cloned().collect())
@@ -708,7 +710,7 @@ mod tests {
     async fn snapshot_capture_is_eager_and_does_not_observe_late_appends() {
         let stage = StageId::new();
         let owner = JournalOwner::stage(stage);
-        let journal = MemoryJournal::<ChainEvent> {
+        let journal = RecordingJournal::<ChainEvent> {
             owner: Some(owner),
             ..Default::default()
         };
@@ -838,7 +840,7 @@ mod tests {
         let writer = WriterId::from(stage);
 
         let owner = JournalOwner::stage(stage);
-        let journal = MemoryJournal::<ChainEvent> {
+        let journal = RecordingJournal::<ChainEvent> {
             owner: Some(owner),
             ..Default::default()
         };

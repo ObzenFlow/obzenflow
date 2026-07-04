@@ -23,7 +23,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::marker::PhantomData;
 use std::sync::Arc;
-use std::time::Duration;
 
 use crate::backpressure::BackpressureWriter;
 use crate::feed_plan::StageOutputContract;
@@ -35,7 +34,6 @@ use crate::stages::common::stage_handle::{
 };
 use crate::stages::observer::dispatch::run_stage_lifecycle_observers;
 use crate::stages::source::strategies::{CompletionContext, CompletionGate};
-use crate::supervised_base::idle_backoff::IdleBackoff;
 
 // ============================================================================
 // FSM States
@@ -311,8 +309,9 @@ pub struct FiniteSourceContext<H> {
     /// Backpressure activity pulse accumulator (Hz UI animation driver).
     pub(crate) backpressure_pulse: BackpressureActivityPulse,
 
-    /// Backoff for blocked output writes (1ms → … → 50ms cap).
-    pub(crate) backpressure_backoff: IdleBackoff,
+    /// Start of the current backpressure stall episode; anchored at the
+    /// first credit miss, cleared on successful reserve (FLOWIP-115e).
+    pub(crate) backpressure_stall: Option<tokio::time::Instant>,
 
     /// Phantom to keep the handler type in the context's type parameters
     _marker: PhantomData<H>,
@@ -357,10 +356,7 @@ impl<H> FiniteSourceContext<H> {
             output_contract: init.output_contract,
             pending_outputs: VecDeque::new(),
             backpressure_pulse: BackpressureActivityPulse::new(),
-            backpressure_backoff: IdleBackoff::exponential_with_cap(
-                Duration::from_millis(1),
-                Duration::from_millis(50),
-            ),
+            backpressure_stall: None,
             _marker: PhantomData,
         }
     }

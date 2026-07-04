@@ -408,8 +408,10 @@ impl StageResourcesBuilder {
         let message_bus = Arc::new(FsmMessageBus::new());
 
         // Build backpressure registry once per flow (Phase 1: in-process).
-        let mut backpressure_plan = self.backpressure_plan;
-        backpressure_plan.auto_enable_scc_internal_edges(self.topology.as_ref());
+        // The SCC auto-enable runs provenance-aware in the DSL's plan
+        // feeding (FLOWIP-115e), where the winning mode source is visible;
+        // the plan arrives here carrying final modes.
+        let backpressure_plan = self.backpressure_plan;
         let backpressure_registry = Arc::new(BackpressureRegistry::new(
             self.topology.as_ref(),
             &backpressure_plan,
