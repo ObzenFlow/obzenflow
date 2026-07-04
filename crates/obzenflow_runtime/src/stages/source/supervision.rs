@@ -367,14 +367,23 @@ where
                         Some(bound),
                     ) => wait_started.elapsed(),
                 };
+                // The chunk elapsed (the external-event arm returns early
+                // above, so this only runs on a real wait): record the wait
+                // and feed the blocked pulse through the same append/mirror
+                // path the sync drain uses, so async-source pulses are not
+                // silently dropped.
                 backpressure_writer.record_wait(waited);
-                if let Some((min_credit, limiting)) =
-                    backpressure_writer.min_downstream_credit_detail()
-                {
-                    backpressure_pulse.record_delay(waited, Some(min_credit), Some(limiting));
-                } else {
-                    backpressure_pulse.record_delay(waited, None, None);
-                }
+                crate::stages::common::supervision::backpressure_drain::emit_blocked_pulse(
+                    stage_id,
+                    stage_flow_context,
+                    waited,
+                    data_journal,
+                    system_journal,
+                    instrumentation,
+                    backpressure_writer,
+                    backpressure_pulse,
+                )
+                .await;
                 return Ok(Some(EventLoopDirective::Continue));
             }
         }
@@ -450,6 +459,79 @@ mod tests {
             event: T,
             _parent: Option<&EventEnvelope<T>>,
         ) -> Result<EventEnvelope<T>, JournalError> {
+            Ok(EventEnvelope::new(JournalWriterId::new(), event))
+        }
+
+        async fn read_all_unordered(&self) -> Result<Vec<EventEnvelope<T>>, JournalError> {
+            Ok(Vec::new())
+        }
+
+        async fn read_event(
+            &self,
+            _event_id: &EventId,
+        ) -> Result<Option<EventEnvelope<T>>, JournalError> {
+            Ok(None)
+        }
+
+        async fn reader_from(
+            &self,
+            position: u64,
+        ) -> Result<Box<dyn JournalReader<T>>, JournalError> {
+            Ok(Box::new(EmptyReader {
+                position,
+                _phantom: PhantomData,
+            }))
+        }
+
+        async fn read_last_n(&self, _count: usize) -> Result<Vec<EventEnvelope<T>>, JournalError> {
+            Ok(Vec::new())
+        }
+    }
+
+    /// A journal that records appended events so a test can inspect what the
+    /// drain authored (the blocked pulse, in particular).
+    struct RecordingJournal<T> {
+        id: JournalId,
+        appended: std::sync::Mutex<Vec<T>>,
+        _phantom: PhantomData<T>,
+    }
+
+    impl<T: Clone> RecordingJournal<T> {
+        fn new() -> Self {
+            Self {
+                id: JournalId::new(),
+                appended: std::sync::Mutex::new(Vec::new()),
+                _phantom: PhantomData,
+            }
+        }
+
+        fn appended(&self) -> Vec<T> {
+            self.appended.lock().expect("recording journal lock").clone()
+        }
+    }
+
+    #[async_trait]
+    impl<T> Journal<T> for RecordingJournal<T>
+    where
+        T: obzenflow_core::event::JournalEvent + Clone + 'static,
+    {
+        fn id(&self) -> &JournalId {
+            &self.id
+        }
+
+        fn owner(&self) -> Option<&obzenflow_core::JournalOwner> {
+            None
+        }
+
+        async fn append(
+            &self,
+            event: T,
+            _parent: Option<&EventEnvelope<T>>,
+        ) -> Result<EventEnvelope<T>, JournalError> {
+            self.appended
+                .lock()
+                .expect("recording journal lock")
+                .push(event.clone());
             Ok(EventEnvelope::new(JournalWriterId::new(), event))
         }
 
@@ -620,5 +702,115 @@ mod tests {
             EventLoopDirective::Transition(TestEvent::BeginDrain) => {}
             other => panic!("expected Transition(BeginDrain), got {other:?}"),
         }
+    }
+
+    // Regression guard: the async-source blocked wait must flush its activity
+    // pulse to the journal, not just accumulate it in the coalescer. The
+    // credit wait races the external-events channel; when the wait wins (no
+    // event delivered), the pulse feeds through the shared append/mirror path.
+    #[tokio::test(start_paused = true)]
+    async fn async_source_blocked_wait_flushes_activity_pulse_to_journal() {
+        use obzenflow_core::event::payloads::observability_payload::{
+            BackpressureEvent, MiddlewareLifecycle, ObservabilityPayload,
+        };
+
+        if BackpressureWriter::is_bypass_enabled() {
+            return;
+        }
+
+        let mut builder = TopologyBuilder::new();
+        let s_top = builder.add_stage(Some("s".to_string()));
+        let d_top = builder.add_stage(Some("d".to_string()));
+        let topology = builder.build_unchecked().expect("topology");
+        let s = StageId::from_topology_id(s_top);
+        let _d = StageId::from_topology_id(d_top);
+
+        let plan = BackpressurePlan::disabled().with_stage_enforced(
+            s,
+            NonZeroU64::new(1).expect("window"),
+            std::time::Duration::from_secs(30),
+        );
+        let registry = BackpressureRegistry::new(&topology, &plan);
+        let writer = registry.writer(s);
+        writer.reserve(1).expect("reserve").commit(1);
+        assert!(writer.reserve(1).is_none(), "credit should be 0");
+
+        let data_journal: Arc<RecordingJournal<ChainEvent>> = Arc::new(RecordingJournal::new());
+        let data_journal_dyn: Arc<dyn Journal<ChainEvent>> = data_journal.clone();
+        let error_journal: Arc<dyn Journal<ChainEvent>> = Arc::new(NoopJournal::new());
+        let system_journal: Arc<dyn Journal<SystemEvent>> = Arc::new(NoopJournal::new());
+        let instrumentation = Arc::new(StageInstrumentation::new());
+        let stage_flow_context = FlowContext {
+            flow_name: "flow".to_string(),
+            flow_id: "flow_id".to_string(),
+            stage_name: "s".to_string(),
+            stage_id: s,
+            stage_type: obzenflow_core::event::context::StageType::FiniteSource,
+        };
+
+        let mut backpressure_pulse = BackpressureActivityPulse::new();
+        let mut backpressure_stall: Option<tokio::time::Instant> = None;
+
+        // Keep the sender alive and never send: recv() pends, so the biased
+        // select always resolves through the credit wait, which auto-advances
+        // the paused clock one control cap per call.
+        let (_sender, mut receiver, _watcher) = ChannelBuilder::<TestEvent, ()>::new()
+            .with_event_buffer(1)
+            .build(());
+
+        let mut pending_outputs = VecDeque::new();
+        pending_outputs.push_back(
+            crate::stages::common::supervision::backpressure_drain::PendingOutput {
+                event: ChainEventFactory::data_event(
+                    WriterId::from(s),
+                    "test.event",
+                    serde_json::json!({"x": 1}),
+                ),
+                scope: obzenflow_core::MiddlewareExecutionScope::LiveHandler,
+            },
+        );
+
+        // Each call waits one control cap and requeues; after the coalescer's
+        // one-second window elapses the pulse is appended.
+        for _ in 0..6 {
+            let directive = drain_pending_outputs_async(
+                &mut pending_outputs,
+                &stage_flow_context,
+                s,
+                None,
+                &data_journal_dyn,
+                &error_journal,
+                &system_journal,
+                &instrumentation,
+                &writer,
+                &mut backpressure_pulse,
+                &mut backpressure_stall,
+                None,
+                None,
+                &mut receiver,
+                || TestEvent::ChannelClosed,
+            )
+            .await
+            .expect("drain");
+            assert!(
+                matches!(directive, Some(EventLoopDirective::Continue)),
+                "credit is exhausted, so each pass backs off"
+            );
+        }
+
+        let has_pulse = data_journal.appended().iter().any(|event| {
+            matches!(
+                &event.content,
+                obzenflow_core::event::ChainEventContent::Observability(
+                    ObservabilityPayload::Middleware(MiddlewareLifecycle::Backpressure(
+                        BackpressureEvent::ActivityPulse { .. }
+                    ))
+                )
+            )
+        });
+        assert!(
+            has_pulse,
+            "async-source blocked wait must flush a backpressure activity pulse to the journal"
+        );
     }
 }

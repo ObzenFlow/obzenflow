@@ -443,9 +443,10 @@ async fn emit_poison_eof(
 
 /// Feed the blocked-state pulse after one chunk of the credit wait, with the
 /// measured blocked time (a wake can cut the bound short). The coalescer
-/// still emits at most one pulse per second.
+/// still emits at most one pulse per second. Shared by the sync drain and the
+/// async-source wait so both paths append and mirror identically.
 #[allow(clippy::too_many_arguments)]
-async fn emit_blocked_pulse(
+pub(crate) async fn emit_blocked_pulse(
     stage_id: StageId,
     flow_context: &FlowContext,
     measured: std::time::Duration,

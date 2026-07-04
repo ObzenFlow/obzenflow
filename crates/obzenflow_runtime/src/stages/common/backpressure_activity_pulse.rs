@@ -4,7 +4,8 @@
 
 use obzenflow_core::event::payloads::observability_payload::BackpressureEvent;
 use obzenflow_core::StageId;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use tokio::time::Instant;
 
 pub(crate) const BACKPRESSURE_ACTIVITY_PULSE_WINDOW_MS: u64 = 1000;
 const BACKPRESSURE_ACTIVITY_PULSE_WINDOW: Duration = Duration::from_secs(1);
