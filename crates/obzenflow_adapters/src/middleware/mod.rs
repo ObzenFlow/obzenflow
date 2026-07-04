@@ -107,9 +107,6 @@ pub(crate) fn strict_replay_active() -> bool {
     obzenflow_runtime::bootstrap::replay_bootstrap().is_some()
 }
 
-// Handler-specific middleware adapters and legacy middleware wrappers
-mod backpressure;
-
 // Common middleware utilities
 mod carrier;
 mod context;
@@ -186,9 +183,6 @@ pub use control::{
     circuit_breaker, rate_limit, rate_limit_with_burst, CircuitBreakerBuilder,
     CircuitBreakerMiddleware, RateLimiterBuilder, RateLimiterFactory, RateLimiterMiddleware,
 };
-
-// Backpressure (config + topology observability; FLOWIP-086k)
-pub use backpressure::{backpressure, BackpressureMiddlewareFactory};
 
 pub use observability::{log, LoggingMiddleware, LoggingMiddlewareFactory};
 

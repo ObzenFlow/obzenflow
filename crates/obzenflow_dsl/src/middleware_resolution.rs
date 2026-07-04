@@ -262,7 +262,6 @@ mod view_tests {
     use obzenflow_core::event::context::StageType;
     use obzenflow_core::ChainEvent;
     use obzenflow_runtime::pipeline::config::StageConfig;
-    use std::num::NonZeroU64;
     use std::sync::Arc;
 
     struct DummyMiddleware;
@@ -286,7 +285,7 @@ mod view_tests {
 
     struct FamilyA;
     struct FamilyB;
-    struct BackpressureFamily;
+    struct BreakerFamily;
 
     struct MockFactory {
         label: &'static str,
@@ -344,14 +343,12 @@ mod view_tests {
         }
     }
 
-    fn backpressure_factory(label: &'static str, window: u64) -> Box<dyn MiddlewareFactory> {
+    fn breaker_factory(label: &'static str, threshold: u64) -> Box<dyn MiddlewareFactory> {
         Box::new(MockFactory {
             label,
-            key: MiddlewareOverrideKey::of::<BackpressureFamily>("backpressure"),
+            key: MiddlewareOverrideKey::of::<BreakerFamily>("circuit_breaker"),
             control_role: ControlMiddlewareRole::None,
-            plan: MiddlewarePlanContribution::Backpressure {
-                window: NonZeroU64::new(window).expect("window > 0"),
-            },
+            plan: MiddlewarePlanContribution::CircuitBreaker { threshold },
         })
     }
 
@@ -407,62 +404,63 @@ mod view_tests {
     }
 
     #[test]
-    fn backpressure_plan_contribution_is_extracted_from_resolved_view() {
-        // Label intentionally does NOT contain "backpressure" so this would fail under string dispatch.
-        let flow = vec![backpressure_factory("opaque.bp", 10)];
+    fn plan_contribution_is_extracted_from_resolved_view() {
+        // Label intentionally does NOT contain the family name so this would
+        // fail under string dispatch.
+        let flow = vec![breaker_factory("opaque.cb", 10)];
         let resolved = resolve_middleware_view(&flow, &[], "stage").expect("resolve view");
 
-        let windows: Vec<_> = resolved
+        let thresholds: Vec<_> = resolved
             .iter()
             .filter_map(|f| match f.plan_contribution() {
-                MiddlewarePlanContribution::Backpressure { window } => Some(window.get()),
+                MiddlewarePlanContribution::CircuitBreaker { threshold } => Some(threshold),
                 _ => None,
             })
             .collect();
 
-        assert_eq!(windows, vec![10]);
+        assert_eq!(thresholds, vec![10]);
     }
 
     #[test]
-    fn backpressure_stage_override_wins_over_flow_level() {
-        let flow = vec![backpressure_factory("flow.bp", 10)];
-        let stage = vec![backpressure_factory("stage.renamed", 5)];
+    fn plan_contribution_stage_override_wins_over_flow_level() {
+        let flow = vec![breaker_factory("flow.cb", 10)];
+        let stage = vec![breaker_factory("stage.renamed", 5)];
 
         let resolved = resolve_middleware_view(&flow, &stage, "stage").expect("resolve view");
         assert_eq!(resolved.len(), 1);
         assert_eq!(resolved[0].label(), "stage.renamed");
 
         match resolved[0].plan_contribution() {
-            MiddlewarePlanContribution::Backpressure { window } => assert_eq!(window.get(), 5),
-            other => panic!("expected Backpressure plan contribution, got {other:?}"),
+            MiddlewarePlanContribution::CircuitBreaker { threshold } => assert_eq!(threshold, 5),
+            other => panic!("expected CircuitBreaker plan contribution, got {other:?}"),
         }
     }
 
     #[test]
     fn stage_override_affects_only_its_own_stage() {
-        // A flow-level backpressure family resolves onto every stage independently.
-        let flow = vec![backpressure_factory("flow.bp", 10)];
+        // A flow-level family resolves onto every stage independently.
+        let flow = vec![breaker_factory("flow.cb", 10)];
 
         // Stage A overrides the same typed family; stage B declares no stage middleware.
-        let stage_a = vec![backpressure_factory("stage_a.bp", 5)];
+        let stage_a = vec![breaker_factory("stage_a.cb", 5)];
 
         let resolved_a = resolve_middleware_view(&flow, &stage_a, "stage_a").expect("resolve A");
         let resolved_b = resolve_middleware_view(&flow, &[], "stage_b").expect("resolve B");
 
         // Stage A sees its override.
         assert_eq!(resolved_a.len(), 1);
-        assert_eq!(resolved_a[0].label(), "stage_a.bp");
+        assert_eq!(resolved_a[0].label(), "stage_a.cb");
         match resolved_a[0].plan_contribution() {
-            MiddlewarePlanContribution::Backpressure { window } => assert_eq!(window.get(), 5),
-            other => panic!("expected Backpressure plan contribution, got {other:?}"),
+            MiddlewarePlanContribution::CircuitBreaker { threshold } => assert_eq!(threshold, 5),
+            other => panic!("expected CircuitBreaker plan contribution, got {other:?}"),
         }
 
         // Stage B is untouched: the flow-level contributor resolves independently for it.
         assert_eq!(resolved_b.len(), 1);
-        assert_eq!(resolved_b[0].label(), "flow.bp");
+        assert_eq!(resolved_b[0].label(), "flow.cb");
         match resolved_b[0].plan_contribution() {
-            MiddlewarePlanContribution::Backpressure { window } => assert_eq!(window.get(), 10),
-            other => panic!("expected Backpressure plan contribution, got {other:?}"),
+            MiddlewarePlanContribution::CircuitBreaker { threshold } => assert_eq!(threshold, 10),
+            other => panic!("expected CircuitBreaker plan contribution, got {other:?}"),
         }
     }
 

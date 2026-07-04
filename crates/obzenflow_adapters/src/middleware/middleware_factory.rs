@@ -491,9 +491,6 @@ pub enum MiddlewareKind {
 #[derive(Debug, Clone, PartialEq)]
 pub enum MiddlewarePlanContribution {
     None,
-    Backpressure {
-        window: std::num::NonZeroU64,
-    },
     /// FLOWIP-010: DSL-declared breaker threshold, collected as a config
     /// candidate at the declaration site's scope.
     CircuitBreaker {

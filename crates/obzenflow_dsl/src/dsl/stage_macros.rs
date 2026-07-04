@@ -88,7 +88,7 @@ macro_rules! placeholder {
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __obzenflow_source_typed {
-    (output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = placeholder!(), middleware = [$($mw:expr),*]) => {{
+    (output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = placeholder!(), middleware = [$($mw:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
         let __metadata = $crate::dsl::typing::StageTypingMetadata::source(
             $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
             true,
@@ -99,10 +99,11 @@ macro_rules! __obzenflow_source_typed {
             name = $name,
             handler = $crate::dsl::typing::PlaceholderFiniteSource::<$out>::new(None),
             middleware = [$($mw),*]
+            $(, backpressure = [$($bp)?])?
         );
         $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
     }};
-    (output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = placeholder!($msg:expr), middleware = [$($mw:expr),*]) => {{
+    (output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = placeholder!($msg:expr), middleware = [$($mw:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
         let __metadata = $crate::dsl::typing::StageTypingMetadata::source(
             $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
             true,
@@ -113,10 +114,11 @@ macro_rules! __obzenflow_source_typed {
             name = $name,
             handler = $crate::dsl::typing::PlaceholderFiniteSource::<$out>::new(Some($msg)),
             middleware = [$($mw),*]
+            $(, backpressure = [$($bp)?])?
         );
         $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
     }};
-    (output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = $handler:expr, middleware = [$($mw:expr),*]) => {{
+    (output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = $handler:expr, middleware = [$($mw:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
         let __handler = $handler;
         // FLOWIP-114c PR D: assert_source_output dropped, see sink rationale.
         let __metadata = $crate::dsl::typing::StageTypingMetadata::source(
@@ -129,10 +131,11 @@ macro_rules! __obzenflow_source_typed {
             name = $name,
             handler = __handler,
             middleware = [$($mw),*]
+            $(, backpressure = [$($bp)?])?
         );
         $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
     }};
-    (output = $out:ty, name = $name:literal, handler = placeholder!(), middleware = [$($mw:expr),*]) => {{
+    (output = $out:ty, name = $name:literal, handler = placeholder!(), middleware = [$($mw:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
         let __metadata = $crate::dsl::typing::StageTypingMetadata::source(
             $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
             true,
@@ -142,10 +145,11 @@ macro_rules! __obzenflow_source_typed {
             name = $name,
             handler = $crate::dsl::typing::PlaceholderFiniteSource::<$out>::new(None),
             middleware = [$($mw),*]
+            $(, backpressure = [$($bp)?])?
         );
         $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
     }};
-    (output = $out:ty, name = $name:literal, handler = placeholder!($msg:expr), middleware = [$($mw:expr),*]) => {{
+    (output = $out:ty, name = $name:literal, handler = placeholder!($msg:expr), middleware = [$($mw:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
         let __metadata = $crate::dsl::typing::StageTypingMetadata::source(
             $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
             true,
@@ -155,10 +159,11 @@ macro_rules! __obzenflow_source_typed {
             name = $name,
             handler = $crate::dsl::typing::PlaceholderFiniteSource::<$out>::new(Some($msg)),
             middleware = [$($mw),*]
+            $(, backpressure = [$($bp)?])?
         );
         $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
     }};
-    (output = $out:ty, name = $name:literal, handler = $handler:expr, middleware = [$($mw:expr),*]) => {{
+    (output = $out:ty, name = $name:literal, handler = $handler:expr, middleware = [$($mw:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
         let __handler = $handler;
         // FLOWIP-114c PR D: assert_source_output dropped, see sink rationale.
         let __metadata = $crate::dsl::typing::StageTypingMetadata::source(
@@ -170,6 +175,7 @@ macro_rules! __obzenflow_source_typed {
             name = $name,
             handler = __handler,
             middleware = [$($mw),*]
+            $(, backpressure = [$($bp)?])?
         );
         $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
     }};
@@ -178,12 +184,18 @@ macro_rules! __obzenflow_source_typed {
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __obzenflow_source_untyped {
-    (name = $name:literal, handler = $handler:expr, middleware = [$($mw:expr),*]) => {{
+    (name = $name:literal, handler = $handler:expr, middleware = [$($mw:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
         use $crate::dsl::stage_descriptor::{FiniteSourceDescriptor, StageDescriptor};
         Box::new(FiniteSourceDescriptor {
             name: $name.to_string(),
             handler: $handler,
             middleware: vec![$(Box::new($mw)),*],
+            backpressure: {
+                #[allow(unused_mut)]
+                let mut __bp: Option<$crate::dsl::backpressure_clause::BackpressureClause> = None;
+                $($( __bp = Some($bp); )?)?
+                __bp
+            },
         }) as Box<dyn StageDescriptor>
     }};
 }
@@ -192,145 +204,157 @@ macro_rules! __obzenflow_source_untyped {
 #[macro_export]
 macro_rules! source {
     // ── typed (binding-derived name) ──
-    ({ $first:ty $(, $member:ty)* $(,)? } => placeholder!()) => {
+    ({ $first:ty $(, $member:ty)* $(,)? } => placeholder!() $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_source_typed!(
             output = $first,
             output_contract = [$first $(, $member)*],
             name = "__obzenflow_binding_derived_name__",
             handler = placeholder!(),
             middleware = []
+            $(, backpressure = [$bp])?
         )
     };
-    ({ $first:ty $(, $member:ty)* $(,)? } => placeholder!($msg:expr)) => {
+    ({ $first:ty $(, $member:ty)* $(,)? } => placeholder!($msg:expr) $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_source_typed!(
             output = $first,
             output_contract = [$first $(, $member)*],
             name = "__obzenflow_binding_derived_name__",
             handler = placeholder!($msg),
             middleware = []
+            $(, backpressure = [$bp])?
         )
     };
-    ({ $first:ty $(, $member:ty)* $(,)? } => placeholder!(), [$($mw:expr),*]) => {
+    ({ $first:ty $(, $member:ty)* $(,)? } => placeholder!(), [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_source_typed!(
             output = $first,
             output_contract = [$first $(, $member)*],
             name = "__obzenflow_binding_derived_name__",
             handler = placeholder!(),
             middleware = [$($mw),*]
+            $(, backpressure = [$bp])?
         )
     };
-    ({ $first:ty $(, $member:ty)* $(,)? } => placeholder!($msg:expr), [$($mw:expr),*]) => {
+    ({ $first:ty $(, $member:ty)* $(,)? } => placeholder!($msg:expr), [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_source_typed!(
             output = $first,
             output_contract = [$first $(, $member)*],
             name = "__obzenflow_binding_derived_name__",
             handler = placeholder!($msg),
             middleware = [$($mw),*]
+            $(, backpressure = [$bp])?
         )
     };
-    ({ $first:ty $(, $member:ty)* $(,)? } => $handler:expr) => {
+    ({ $first:ty $(, $member:ty)* $(,)? } => $handler:expr $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_source_typed!(
             output = $first,
             output_contract = [$first $(, $member)*],
             name = "__obzenflow_binding_derived_name__",
             handler = $handler,
             middleware = []
+            $(, backpressure = [$bp])?
         )
     };
-    ({ $first:ty $(, $member:ty)* $(,)? } => $handler:expr, [$($mw:expr),*]) => {
+    ({ $first:ty $(, $member:ty)* $(,)? } => $handler:expr, [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_source_typed!(
             output = $first,
             output_contract = [$first $(, $member)*],
             name = "__obzenflow_binding_derived_name__",
             handler = $handler,
             middleware = [$($mw),*]
+            $(, backpressure = [$bp])?
         )
     };
-    ($out:ty => placeholder!()) => {
+    ($out:ty => placeholder!() $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_source_typed!(
             output = $out,
             name = "__obzenflow_binding_derived_name__",
             handler = placeholder!(),
             middleware = []
+            $(, backpressure = [$bp])?
         )
     };
-    ($out:ty => placeholder!($msg:expr)) => {
+    ($out:ty => placeholder!($msg:expr) $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_source_typed!(
             output = $out,
             name = "__obzenflow_binding_derived_name__",
             handler = placeholder!($msg),
             middleware = []
+            $(, backpressure = [$bp])?
         )
     };
-    ($out:ty => placeholder!(), [$($mw:expr),*]) => {
+    ($out:ty => placeholder!(), [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_source_typed!(
             output = $out,
             name = "__obzenflow_binding_derived_name__",
             handler = placeholder!(),
             middleware = [$($mw),*]
+            $(, backpressure = [$bp])?
         )
     };
-    ($out:ty => placeholder!($msg:expr), [$($mw:expr),*]) => {
+    ($out:ty => placeholder!($msg:expr), [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_source_typed!(
             output = $out,
             name = "__obzenflow_binding_derived_name__",
             handler = placeholder!($msg),
             middleware = [$($mw),*]
+            $(, backpressure = [$bp])?
         )
     };
-    ($out:ty => $handler:expr) => {
+    ($out:ty => $handler:expr $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_source_typed!(
             output = $out,
             name = "__obzenflow_binding_derived_name__",
             handler = $handler,
             middleware = []
+            $(, backpressure = [$bp])?
         )
     };
-    ($out:ty => $handler:expr, [$($mw:expr),*]) => {
+    ($out:ty => $handler:expr, [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_source_typed!(
             output = $out,
             name = "__obzenflow_binding_derived_name__",
             handler = $handler,
             middleware = [$($mw),*]
+            $(, backpressure = [$bp])?
         )
     };
 
     // ── typed (explicit name override) ──
-    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => placeholder!()) => {
-        $crate::__obzenflow_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = $name, handler = placeholder!(), middleware = [])
+    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => placeholder!() $(, backpressure: $bp:expr)?) => {
+        $crate::__obzenflow_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = $name, handler = placeholder!(), middleware = [] $(, backpressure = [$bp])?)
     };
-    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => placeholder!($msg:expr)) => {
-        $crate::__obzenflow_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = $name, handler = placeholder!($msg), middleware = [])
+    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => placeholder!($msg:expr) $(, backpressure: $bp:expr)?) => {
+        $crate::__obzenflow_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = $name, handler = placeholder!($msg), middleware = [] $(, backpressure = [$bp])?)
     };
-    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => placeholder!(), [$($mw:expr),*]) => {
-        $crate::__obzenflow_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = $name, handler = placeholder!(), middleware = [$($mw),*])
+    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => placeholder!(), [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
+        $crate::__obzenflow_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = $name, handler = placeholder!(), middleware = [$($mw),*] $(, backpressure = [$bp])?)
     };
-    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => placeholder!($msg:expr), [$($mw:expr),*]) => {
-        $crate::__obzenflow_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = $name, handler = placeholder!($msg), middleware = [$($mw),*])
+    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => placeholder!($msg:expr), [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
+        $crate::__obzenflow_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = $name, handler = placeholder!($msg), middleware = [$($mw),*] $(, backpressure = [$bp])?)
     };
-    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => $handler:expr) => {
-        $crate::__obzenflow_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = $name, handler = $handler, middleware = [])
+    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => $handler:expr $(, backpressure: $bp:expr)?) => {
+        $crate::__obzenflow_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = $name, handler = $handler, middleware = [] $(, backpressure = [$bp])?)
     };
-    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => $handler:expr, [$($mw:expr),*]) => {
-        $crate::__obzenflow_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = $name, handler = $handler, middleware = [$($mw),*])
+    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => $handler:expr, [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
+        $crate::__obzenflow_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = $name, handler = $handler, middleware = [$($mw),*] $(, backpressure = [$bp])?)
     };
-    (name: $name:literal, $out:ty => placeholder!()) => {
-        $crate::__obzenflow_source_typed!(output = $out, name = $name, handler = placeholder!(), middleware = [])
+    (name: $name:literal, $out:ty => placeholder!() $(, backpressure: $bp:expr)?) => {
+        $crate::__obzenflow_source_typed!(output = $out, name = $name, handler = placeholder!(), middleware = [] $(, backpressure = [$bp])?)
     };
-    (name: $name:literal, $out:ty => placeholder!($msg:expr)) => {
-        $crate::__obzenflow_source_typed!(output = $out, name = $name, handler = placeholder!($msg), middleware = [])
+    (name: $name:literal, $out:ty => placeholder!($msg:expr) $(, backpressure: $bp:expr)?) => {
+        $crate::__obzenflow_source_typed!(output = $out, name = $name, handler = placeholder!($msg), middleware = [] $(, backpressure = [$bp])?)
     };
-    (name: $name:literal, $out:ty => placeholder!(), [$($mw:expr),*]) => {
-        $crate::__obzenflow_source_typed!(output = $out, name = $name, handler = placeholder!(), middleware = [$($mw),*])
+    (name: $name:literal, $out:ty => placeholder!(), [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
+        $crate::__obzenflow_source_typed!(output = $out, name = $name, handler = placeholder!(), middleware = [$($mw),*] $(, backpressure = [$bp])?)
     };
-    (name: $name:literal, $out:ty => placeholder!($msg:expr), [$($mw:expr),*]) => {
-        $crate::__obzenflow_source_typed!(output = $out, name = $name, handler = placeholder!($msg), middleware = [$($mw),*])
+    (name: $name:literal, $out:ty => placeholder!($msg:expr), [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
+        $crate::__obzenflow_source_typed!(output = $out, name = $name, handler = placeholder!($msg), middleware = [$($mw),*] $(, backpressure = [$bp])?)
     };
-    (name: $name:literal, $out:ty => $handler:expr) => {
-        $crate::__obzenflow_source_typed!(output = $out, name = $name, handler = $handler, middleware = [])
+    (name: $name:literal, $out:ty => $handler:expr $(, backpressure: $bp:expr)?) => {
+        $crate::__obzenflow_source_typed!(output = $out, name = $name, handler = $handler, middleware = [] $(, backpressure = [$bp])?)
     };
-    (name: $name:literal, $out:ty => $handler:expr, [$($mw:expr),*]) => {
-        $crate::__obzenflow_source_typed!(output = $out, name = $name, handler = $handler, middleware = [$($mw),*])
+    (name: $name:literal, $out:ty => $handler:expr, [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
+        $crate::__obzenflow_source_typed!(output = $out, name = $name, handler = $handler, middleware = [$($mw),*] $(, backpressure = [$bp])?)
     };
 }
 
@@ -341,23 +365,35 @@ macro_rules! source {
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __obzenflow_async_source_untyped {
-    (name = $name:literal, handler = ($handler:expr, $poll_timeout:expr), middleware = [$($mw:expr),*]) => {{
-        $crate::dsl::stage_descriptor::AsyncFiniteSourceDescriptor::new($name, $handler)
+    (name = $name:literal, handler = ($handler:expr, $poll_timeout:expr), middleware = [$($mw:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
+        let mut __desc = $crate::dsl::stage_descriptor::AsyncFiniteSourceDescriptor::new($name, $handler)
             .with_poll_timeout($poll_timeout)
-            $(.with_middleware($mw))*
-            .build()
+            $(.with_middleware($mw))*;
+        {
+            #[allow(unused_mut)]
+            let mut __bp: Option<$crate::dsl::backpressure_clause::BackpressureClause> = None;
+            $($( __bp = Some($bp); )?)?
+            __desc.backpressure = __bp;
+        }
+        __desc.build()
     }};
-    (name = $name:literal, handler = $handler:expr, middleware = [$($mw:expr),*]) => {{
-        $crate::dsl::stage_descriptor::AsyncFiniteSourceDescriptor::new($name, $handler)
-            $(.with_middleware($mw))*
-            .build()
+    (name = $name:literal, handler = $handler:expr, middleware = [$($mw:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
+        let mut __desc = $crate::dsl::stage_descriptor::AsyncFiniteSourceDescriptor::new($name, $handler)
+            $(.with_middleware($mw))*;
+        {
+            #[allow(unused_mut)]
+            let mut __bp: Option<$crate::dsl::backpressure_clause::BackpressureClause> = None;
+            $($( __bp = Some($bp); )?)?
+            __desc.backpressure = __bp;
+        }
+        __desc.build()
     }};
 }
 
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __obzenflow_async_source_typed {
-    (output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = placeholder!(), middleware = [$($mw:expr),*]) => {{
+    (output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = placeholder!(), middleware = [$($mw:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
         let __metadata = $crate::dsl::typing::StageTypingMetadata::source(
             $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
             true,
@@ -368,10 +404,11 @@ macro_rules! __obzenflow_async_source_typed {
             name = $name,
             handler = $crate::dsl::typing::PlaceholderAsyncSource::<$out>::new(None),
             middleware = [$($mw),*]
+            $(, backpressure = [$($bp)?])?
         );
         $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
     }};
-    (output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = placeholder!($msg:expr), middleware = [$($mw:expr),*]) => {{
+    (output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = placeholder!($msg:expr), middleware = [$($mw:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
         let __metadata = $crate::dsl::typing::StageTypingMetadata::source(
             $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
             true,
@@ -382,10 +419,11 @@ macro_rules! __obzenflow_async_source_typed {
             name = $name,
             handler = $crate::dsl::typing::PlaceholderAsyncSource::<$out>::new(Some($msg)),
             middleware = [$($mw),*]
+            $(, backpressure = [$($bp)?])?
         );
         $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
     }};
-    (output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = ($handler:expr, $poll_timeout:expr), middleware = [$($mw:expr),*]) => {{
+    (output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = ($handler:expr, $poll_timeout:expr), middleware = [$($mw:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
         let __handler = $handler;
         // FLOWIP-114c PR D: assert_source_output dropped, see sink rationale.
         let __metadata = $crate::dsl::typing::StageTypingMetadata::source(
@@ -398,10 +436,11 @@ macro_rules! __obzenflow_async_source_typed {
             name = $name,
             handler = (__handler, $poll_timeout),
             middleware = [$($mw),*]
+            $(, backpressure = [$($bp)?])?
         );
         $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
     }};
-    (output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = $handler:expr, middleware = [$($mw:expr),*]) => {{
+    (output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = $handler:expr, middleware = [$($mw:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
         let __handler = $handler;
         // FLOWIP-114c PR D: assert_source_output dropped, see sink rationale.
         let __metadata = $crate::dsl::typing::StageTypingMetadata::source(
@@ -414,10 +453,11 @@ macro_rules! __obzenflow_async_source_typed {
             name = $name,
             handler = __handler,
             middleware = [$($mw),*]
+            $(, backpressure = [$($bp)?])?
         );
         $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
     }};
-    (output = $out:ty, name = $name:literal, handler = placeholder!(), middleware = [$($mw:expr),*]) => {{
+    (output = $out:ty, name = $name:literal, handler = placeholder!(), middleware = [$($mw:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
         let __metadata = $crate::dsl::typing::StageTypingMetadata::source(
             $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
             true,
@@ -427,10 +467,11 @@ macro_rules! __obzenflow_async_source_typed {
             name = $name,
             handler = $crate::dsl::typing::PlaceholderAsyncSource::<$out>::new(None),
             middleware = [$($mw),*]
+            $(, backpressure = [$($bp)?])?
         );
         $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
     }};
-    (output = $out:ty, name = $name:literal, handler = placeholder!($msg:expr), middleware = [$($mw:expr),*]) => {{
+    (output = $out:ty, name = $name:literal, handler = placeholder!($msg:expr), middleware = [$($mw:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
         let __metadata = $crate::dsl::typing::StageTypingMetadata::source(
             $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
             true,
@@ -440,10 +481,11 @@ macro_rules! __obzenflow_async_source_typed {
             name = $name,
             handler = $crate::dsl::typing::PlaceholderAsyncSource::<$out>::new(Some($msg)),
             middleware = [$($mw),*]
+            $(, backpressure = [$($bp)?])?
         );
         $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
     }};
-    (output = $out:ty, name = $name:literal, handler = ($handler:expr, $poll_timeout:expr), middleware = [$($mw:expr),*]) => {{
+    (output = $out:ty, name = $name:literal, handler = ($handler:expr, $poll_timeout:expr), middleware = [$($mw:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
         let __handler = $handler;
         // FLOWIP-114c PR D: assert_source_output dropped, see sink rationale.
         let __metadata = $crate::dsl::typing::StageTypingMetadata::source(
@@ -455,10 +497,11 @@ macro_rules! __obzenflow_async_source_typed {
             name = $name,
             handler = (__handler, $poll_timeout),
             middleware = [$($mw),*]
+            $(, backpressure = [$($bp)?])?
         );
         $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
     }};
-    (output = $out:ty, name = $name:literal, handler = $handler:expr, middleware = [$($mw:expr),*]) => {{
+    (output = $out:ty, name = $name:literal, handler = $handler:expr, middleware = [$($mw:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
         let __handler = $handler;
         // FLOWIP-114c PR D: assert_source_output dropped, see sink rationale.
         let __metadata = $crate::dsl::typing::StageTypingMetadata::source(
@@ -470,6 +513,7 @@ macro_rules! __obzenflow_async_source_typed {
             name = $name,
             handler = __handler,
             middleware = [$($mw),*]
+            $(, backpressure = [$($bp)?])?
         );
         $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
     }};
@@ -479,103 +523,103 @@ macro_rules! __obzenflow_async_source_typed {
 #[macro_export]
 macro_rules! async_source {
     // ── typed (binding-derived name) ──
-    ({ $first:ty $(, $member:ty)* $(,)? } => placeholder!()) => {
-        $crate::__obzenflow_async_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = "__obzenflow_binding_derived_name__", handler = placeholder!(), middleware = [])
+    ({ $first:ty $(, $member:ty)* $(,)? } => placeholder!() $(, backpressure: $bp:expr)?) => {
+        $crate::__obzenflow_async_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = "__obzenflow_binding_derived_name__", handler = placeholder!(), middleware = [] $(, backpressure = [$bp])?)
     };
-    ({ $first:ty $(, $member:ty)* $(,)? } => placeholder!($msg:expr)) => {
-        $crate::__obzenflow_async_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = "__obzenflow_binding_derived_name__", handler = placeholder!($msg), middleware = [])
+    ({ $first:ty $(, $member:ty)* $(,)? } => placeholder!($msg:expr) $(, backpressure: $bp:expr)?) => {
+        $crate::__obzenflow_async_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = "__obzenflow_binding_derived_name__", handler = placeholder!($msg), middleware = [] $(, backpressure = [$bp])?)
     };
-    ({ $first:ty $(, $member:ty)* $(,)? } => placeholder!(), [$($mw:expr),*]) => {
-        $crate::__obzenflow_async_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = "__obzenflow_binding_derived_name__", handler = placeholder!(), middleware = [$($mw),*])
+    ({ $first:ty $(, $member:ty)* $(,)? } => placeholder!(), [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
+        $crate::__obzenflow_async_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = "__obzenflow_binding_derived_name__", handler = placeholder!(), middleware = [$($mw),*] $(, backpressure = [$bp])?)
     };
-    ({ $first:ty $(, $member:ty)* $(,)? } => placeholder!($msg:expr), [$($mw:expr),*]) => {
-        $crate::__obzenflow_async_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = "__obzenflow_binding_derived_name__", handler = placeholder!($msg), middleware = [$($mw),*])
+    ({ $first:ty $(, $member:ty)* $(,)? } => placeholder!($msg:expr), [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
+        $crate::__obzenflow_async_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = "__obzenflow_binding_derived_name__", handler = placeholder!($msg), middleware = [$($mw),*] $(, backpressure = [$bp])?)
     };
-    ({ $first:ty $(, $member:ty)* $(,)? } => ($handler:expr, $poll_timeout:expr)) => {
-        $crate::__obzenflow_async_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = "__obzenflow_binding_derived_name__", handler = ($handler, $poll_timeout), middleware = [])
+    ({ $first:ty $(, $member:ty)* $(,)? } => ($handler:expr, $poll_timeout:expr) $(, backpressure: $bp:expr)?) => {
+        $crate::__obzenflow_async_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = "__obzenflow_binding_derived_name__", handler = ($handler, $poll_timeout), middleware = [] $(, backpressure = [$bp])?)
     };
-    ({ $first:ty $(, $member:ty)* $(,)? } => ($handler:expr, $poll_timeout:expr), [$($mw:expr),*]) => {
-        $crate::__obzenflow_async_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = "__obzenflow_binding_derived_name__", handler = ($handler, $poll_timeout), middleware = [$($mw),*])
+    ({ $first:ty $(, $member:ty)* $(,)? } => ($handler:expr, $poll_timeout:expr), [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
+        $crate::__obzenflow_async_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = "__obzenflow_binding_derived_name__", handler = ($handler, $poll_timeout), middleware = [$($mw),*] $(, backpressure = [$bp])?)
     };
-    ({ $first:ty $(, $member:ty)* $(,)? } => $handler:expr) => {
-        $crate::__obzenflow_async_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = "__obzenflow_binding_derived_name__", handler = $handler, middleware = [])
+    ({ $first:ty $(, $member:ty)* $(,)? } => $handler:expr $(, backpressure: $bp:expr)?) => {
+        $crate::__obzenflow_async_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = "__obzenflow_binding_derived_name__", handler = $handler, middleware = [] $(, backpressure = [$bp])?)
     };
-    ({ $first:ty $(, $member:ty)* $(,)? } => $handler:expr, [$($mw:expr),*]) => {
-        $crate::__obzenflow_async_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = "__obzenflow_binding_derived_name__", handler = $handler, middleware = [$($mw),*])
+    ({ $first:ty $(, $member:ty)* $(,)? } => $handler:expr, [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
+        $crate::__obzenflow_async_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = "__obzenflow_binding_derived_name__", handler = $handler, middleware = [$($mw),*] $(, backpressure = [$bp])?)
     };
-    ($out:ty => placeholder!()) => {
-        $crate::__obzenflow_async_source_typed!(output = $out, name = "__obzenflow_binding_derived_name__", handler = placeholder!(), middleware = [])
+    ($out:ty => placeholder!() $(, backpressure: $bp:expr)?) => {
+        $crate::__obzenflow_async_source_typed!(output = $out, name = "__obzenflow_binding_derived_name__", handler = placeholder!(), middleware = [] $(, backpressure = [$bp])?)
     };
-    ($out:ty => placeholder!($msg:expr)) => {
-        $crate::__obzenflow_async_source_typed!(output = $out, name = "__obzenflow_binding_derived_name__", handler = placeholder!($msg), middleware = [])
+    ($out:ty => placeholder!($msg:expr) $(, backpressure: $bp:expr)?) => {
+        $crate::__obzenflow_async_source_typed!(output = $out, name = "__obzenflow_binding_derived_name__", handler = placeholder!($msg), middleware = [] $(, backpressure = [$bp])?)
     };
-    ($out:ty => placeholder!(), [$($mw:expr),*]) => {
-        $crate::__obzenflow_async_source_typed!(output = $out, name = "__obzenflow_binding_derived_name__", handler = placeholder!(), middleware = [$($mw),*])
+    ($out:ty => placeholder!(), [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
+        $crate::__obzenflow_async_source_typed!(output = $out, name = "__obzenflow_binding_derived_name__", handler = placeholder!(), middleware = [$($mw),*] $(, backpressure = [$bp])?)
     };
-    ($out:ty => placeholder!($msg:expr), [$($mw:expr),*]) => {
-        $crate::__obzenflow_async_source_typed!(output = $out, name = "__obzenflow_binding_derived_name__", handler = placeholder!($msg), middleware = [$($mw),*])
+    ($out:ty => placeholder!($msg:expr), [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
+        $crate::__obzenflow_async_source_typed!(output = $out, name = "__obzenflow_binding_derived_name__", handler = placeholder!($msg), middleware = [$($mw),*] $(, backpressure = [$bp])?)
     };
-    ($out:ty => ($handler:expr, $poll_timeout:expr)) => {
-        $crate::__obzenflow_async_source_typed!(output = $out, name = "__obzenflow_binding_derived_name__", handler = ($handler, $poll_timeout), middleware = [])
+    ($out:ty => ($handler:expr, $poll_timeout:expr) $(, backpressure: $bp:expr)?) => {
+        $crate::__obzenflow_async_source_typed!(output = $out, name = "__obzenflow_binding_derived_name__", handler = ($handler, $poll_timeout), middleware = [] $(, backpressure = [$bp])?)
     };
-    ($out:ty => ($handler:expr, $poll_timeout:expr), [$($mw:expr),*]) => {
-        $crate::__obzenflow_async_source_typed!(output = $out, name = "__obzenflow_binding_derived_name__", handler = ($handler, $poll_timeout), middleware = [$($mw),*])
+    ($out:ty => ($handler:expr, $poll_timeout:expr), [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
+        $crate::__obzenflow_async_source_typed!(output = $out, name = "__obzenflow_binding_derived_name__", handler = ($handler, $poll_timeout), middleware = [$($mw),*] $(, backpressure = [$bp])?)
     };
-    ($out:ty => $handler:expr) => {
-        $crate::__obzenflow_async_source_typed!(output = $out, name = "__obzenflow_binding_derived_name__", handler = $handler, middleware = [])
+    ($out:ty => $handler:expr $(, backpressure: $bp:expr)?) => {
+        $crate::__obzenflow_async_source_typed!(output = $out, name = "__obzenflow_binding_derived_name__", handler = $handler, middleware = [] $(, backpressure = [$bp])?)
     };
-    ($out:ty => $handler:expr, [$($mw:expr),*]) => {
-        $crate::__obzenflow_async_source_typed!(output = $out, name = "__obzenflow_binding_derived_name__", handler = $handler, middleware = [$($mw),*])
+    ($out:ty => $handler:expr, [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
+        $crate::__obzenflow_async_source_typed!(output = $out, name = "__obzenflow_binding_derived_name__", handler = $handler, middleware = [$($mw),*] $(, backpressure = [$bp])?)
     };
 
     // ── typed (explicit name override) ──
-    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => placeholder!()) => {
-        $crate::__obzenflow_async_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = $name, handler = placeholder!(), middleware = [])
+    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => placeholder!() $(, backpressure: $bp:expr)?) => {
+        $crate::__obzenflow_async_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = $name, handler = placeholder!(), middleware = [] $(, backpressure = [$bp])?)
     };
-    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => placeholder!($msg:expr)) => {
-        $crate::__obzenflow_async_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = $name, handler = placeholder!($msg), middleware = [])
+    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => placeholder!($msg:expr) $(, backpressure: $bp:expr)?) => {
+        $crate::__obzenflow_async_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = $name, handler = placeholder!($msg), middleware = [] $(, backpressure = [$bp])?)
     };
-    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => placeholder!(), [$($mw:expr),*]) => {
-        $crate::__obzenflow_async_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = $name, handler = placeholder!(), middleware = [$($mw),*])
+    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => placeholder!(), [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
+        $crate::__obzenflow_async_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = $name, handler = placeholder!(), middleware = [$($mw),*] $(, backpressure = [$bp])?)
     };
-    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => placeholder!($msg:expr), [$($mw:expr),*]) => {
-        $crate::__obzenflow_async_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = $name, handler = placeholder!($msg), middleware = [$($mw),*])
+    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => placeholder!($msg:expr), [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
+        $crate::__obzenflow_async_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = $name, handler = placeholder!($msg), middleware = [$($mw),*] $(, backpressure = [$bp])?)
     };
-    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => ($handler:expr, $poll_timeout:expr)) => {
-        $crate::__obzenflow_async_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = $name, handler = ($handler, $poll_timeout), middleware = [])
+    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => ($handler:expr, $poll_timeout:expr) $(, backpressure: $bp:expr)?) => {
+        $crate::__obzenflow_async_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = $name, handler = ($handler, $poll_timeout), middleware = [] $(, backpressure = [$bp])?)
     };
-    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => ($handler:expr, $poll_timeout:expr), [$($mw:expr),*]) => {
-        $crate::__obzenflow_async_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = $name, handler = ($handler, $poll_timeout), middleware = [$($mw),*])
+    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => ($handler:expr, $poll_timeout:expr), [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
+        $crate::__obzenflow_async_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = $name, handler = ($handler, $poll_timeout), middleware = [$($mw),*] $(, backpressure = [$bp])?)
     };
-    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => $handler:expr) => {
-        $crate::__obzenflow_async_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = $name, handler = $handler, middleware = [])
+    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => $handler:expr $(, backpressure: $bp:expr)?) => {
+        $crate::__obzenflow_async_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = $name, handler = $handler, middleware = [] $(, backpressure = [$bp])?)
     };
-    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => $handler:expr, [$($mw:expr),*]) => {
-        $crate::__obzenflow_async_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = $name, handler = $handler, middleware = [$($mw),*])
+    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => $handler:expr, [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
+        $crate::__obzenflow_async_source_typed!(output = $first, output_contract = [$first $(, $member)*], name = $name, handler = $handler, middleware = [$($mw),*] $(, backpressure = [$bp])?)
     };
-    (name: $name:literal, $out:ty => placeholder!()) => {
-        $crate::__obzenflow_async_source_typed!(output = $out, name = $name, handler = placeholder!(), middleware = [])
+    (name: $name:literal, $out:ty => placeholder!() $(, backpressure: $bp:expr)?) => {
+        $crate::__obzenflow_async_source_typed!(output = $out, name = $name, handler = placeholder!(), middleware = [] $(, backpressure = [$bp])?)
     };
-    (name: $name:literal, $out:ty => placeholder!($msg:expr)) => {
-        $crate::__obzenflow_async_source_typed!(output = $out, name = $name, handler = placeholder!($msg), middleware = [])
+    (name: $name:literal, $out:ty => placeholder!($msg:expr) $(, backpressure: $bp:expr)?) => {
+        $crate::__obzenflow_async_source_typed!(output = $out, name = $name, handler = placeholder!($msg), middleware = [] $(, backpressure = [$bp])?)
     };
-    (name: $name:literal, $out:ty => placeholder!(), [$($mw:expr),*]) => {
-        $crate::__obzenflow_async_source_typed!(output = $out, name = $name, handler = placeholder!(), middleware = [$($mw),*])
+    (name: $name:literal, $out:ty => placeholder!(), [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
+        $crate::__obzenflow_async_source_typed!(output = $out, name = $name, handler = placeholder!(), middleware = [$($mw),*] $(, backpressure = [$bp])?)
     };
-    (name: $name:literal, $out:ty => placeholder!($msg:expr), [$($mw:expr),*]) => {
-        $crate::__obzenflow_async_source_typed!(output = $out, name = $name, handler = placeholder!($msg), middleware = [$($mw),*])
+    (name: $name:literal, $out:ty => placeholder!($msg:expr), [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
+        $crate::__obzenflow_async_source_typed!(output = $out, name = $name, handler = placeholder!($msg), middleware = [$($mw),*] $(, backpressure = [$bp])?)
     };
-    (name: $name:literal, $out:ty => ($handler:expr, $poll_timeout:expr)) => {
-        $crate::__obzenflow_async_source_typed!(output = $out, name = $name, handler = ($handler, $poll_timeout), middleware = [])
+    (name: $name:literal, $out:ty => ($handler:expr, $poll_timeout:expr) $(, backpressure: $bp:expr)?) => {
+        $crate::__obzenflow_async_source_typed!(output = $out, name = $name, handler = ($handler, $poll_timeout), middleware = [] $(, backpressure = [$bp])?)
     };
-    (name: $name:literal, $out:ty => ($handler:expr, $poll_timeout:expr), [$($mw:expr),*]) => {
-        $crate::__obzenflow_async_source_typed!(output = $out, name = $name, handler = ($handler, $poll_timeout), middleware = [$($mw),*])
+    (name: $name:literal, $out:ty => ($handler:expr, $poll_timeout:expr), [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
+        $crate::__obzenflow_async_source_typed!(output = $out, name = $name, handler = ($handler, $poll_timeout), middleware = [$($mw),*] $(, backpressure = [$bp])?)
     };
-    (name: $name:literal, $out:ty => $handler:expr) => {
-        $crate::__obzenflow_async_source_typed!(output = $out, name = $name, handler = $handler, middleware = [])
+    (name: $name:literal, $out:ty => $handler:expr $(, backpressure: $bp:expr)?) => {
+        $crate::__obzenflow_async_source_typed!(output = $out, name = $name, handler = $handler, middleware = [] $(, backpressure = [$bp])?)
     };
-    (name: $name:literal, $out:ty => $handler:expr, [$($mw:expr),*]) => {
-        $crate::__obzenflow_async_source_typed!(output = $out, name = $name, handler = $handler, middleware = [$($mw),*])
+    (name: $name:literal, $out:ty => $handler:expr, [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
+        $crate::__obzenflow_async_source_typed!(output = $out, name = $name, handler = $handler, middleware = [$($mw),*] $(, backpressure = [$bp])?)
     };
 }
 
@@ -586,12 +630,18 @@ macro_rules! async_source {
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __obzenflow_infinite_source_untyped {
-    (name = $name:literal, handler = $handler:expr, middleware = [$($mw:expr),*]) => {{
+    (name = $name:literal, handler = $handler:expr, middleware = [$($mw:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
         use $crate::dsl::stage_descriptor::{InfiniteSourceDescriptor, StageDescriptor};
         Box::new(InfiniteSourceDescriptor {
             name: $name.to_string(),
             handler: $handler,
             middleware: vec![$(Box::new($mw)),*],
+            backpressure: {
+                #[allow(unused_mut)]
+                let mut __bp: Option<$crate::dsl::backpressure_clause::BackpressureClause> = None;
+                $($( __bp = Some($bp); )?)?
+                __bp
+            },
         }) as Box<dyn StageDescriptor>
     }};
 }
@@ -599,7 +649,7 @@ macro_rules! __obzenflow_infinite_source_untyped {
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __obzenflow_infinite_source_typed {
-    (output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = placeholder!(), middleware = [$($mw:expr),*]) => {{
+    (output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = placeholder!(), middleware = [$($mw:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
         let __metadata = $crate::dsl::typing::StageTypingMetadata::source(
             $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
             true,
@@ -610,10 +660,11 @@ macro_rules! __obzenflow_infinite_source_typed {
             name = $name,
             handler = $crate::dsl::typing::PlaceholderInfiniteSource::<$out>::new(None),
             middleware = [$($mw),*]
+            $(, backpressure = [$($bp)?])?
         );
         $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
     }};
-    (output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = placeholder!($msg:expr), middleware = [$($mw:expr),*]) => {{
+    (output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = placeholder!($msg:expr), middleware = [$($mw:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
         let __metadata = $crate::dsl::typing::StageTypingMetadata::source(
             $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
             true,
@@ -624,10 +675,11 @@ macro_rules! __obzenflow_infinite_source_typed {
             name = $name,
             handler = $crate::dsl::typing::PlaceholderInfiniteSource::<$out>::new(Some($msg)),
             middleware = [$($mw),*]
+            $(, backpressure = [$($bp)?])?
         );
         $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
     }};
-    (output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = $handler:expr, middleware = [$($mw:expr),*]) => {{
+    (output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = $handler:expr, middleware = [$($mw:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
         let __handler = $handler;
         // FLOWIP-114c PR D: assert_source_output dropped, see sink rationale.
         let __metadata = $crate::dsl::typing::StageTypingMetadata::source(
@@ -640,10 +692,11 @@ macro_rules! __obzenflow_infinite_source_typed {
             name = $name,
             handler = __handler,
             middleware = [$($mw),*]
+            $(, backpressure = [$($bp)?])?
         );
         $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
     }};
-    (output = $out:ty, name = $name:literal, handler = placeholder!(), middleware = [$($mw:expr),*]) => {{
+    (output = $out:ty, name = $name:literal, handler = placeholder!(), middleware = [$($mw:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
         let __metadata = $crate::dsl::typing::StageTypingMetadata::source(
             $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
             true,
@@ -653,10 +706,11 @@ macro_rules! __obzenflow_infinite_source_typed {
             name = $name,
             handler = $crate::dsl::typing::PlaceholderInfiniteSource::<$out>::new(None),
             middleware = [$($mw),*]
+            $(, backpressure = [$($bp)?])?
         );
         $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
     }};
-    (output = $out:ty, name = $name:literal, handler = placeholder!($msg:expr), middleware = [$($mw:expr),*]) => {{
+    (output = $out:ty, name = $name:literal, handler = placeholder!($msg:expr), middleware = [$($mw:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
         let __metadata = $crate::dsl::typing::StageTypingMetadata::source(
             $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
             true,
@@ -666,10 +720,11 @@ macro_rules! __obzenflow_infinite_source_typed {
             name = $name,
             handler = $crate::dsl::typing::PlaceholderInfiniteSource::<$out>::new(Some($msg)),
             middleware = [$($mw),*]
+            $(, backpressure = [$($bp)?])?
         );
         $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
     }};
-    (output = $out:ty, name = $name:literal, handler = $handler:expr, middleware = [$($mw:expr),*]) => {{
+    (output = $out:ty, name = $name:literal, handler = $handler:expr, middleware = [$($mw:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
         let __handler = $handler;
         // FLOWIP-114c PR D: assert_source_output dropped, see sink rationale.
         let __metadata = $crate::dsl::typing::StageTypingMetadata::source(
@@ -681,6 +736,7 @@ macro_rules! __obzenflow_infinite_source_typed {
             name = $name,
             handler = __handler,
             middleware = [$($mw),*]
+            $(, backpressure = [$($bp)?])?
         );
         $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
     }};
@@ -690,210 +746,234 @@ macro_rules! __obzenflow_infinite_source_typed {
 #[macro_export]
 macro_rules! infinite_source {
     // ── typed (binding-derived name) ──
-    ({ $first:ty $(, $member:ty)* $(,)? } => placeholder!()) => {
+    ({ $first:ty $(, $member:ty)* $(,)? } => placeholder!() $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_infinite_source_typed!(
             output = $first,
             output_contract = [$first $(, $member)*],
             name = "__obzenflow_binding_derived_name__",
             handler = placeholder!(),
             middleware = []
+            $(, backpressure = [$bp])?
         )
     };
-    ({ $first:ty $(, $member:ty)* $(,)? } => placeholder!($msg:expr)) => {
+    ({ $first:ty $(, $member:ty)* $(,)? } => placeholder!($msg:expr) $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_infinite_source_typed!(
             output = $first,
             output_contract = [$first $(, $member)*],
             name = "__obzenflow_binding_derived_name__",
             handler = placeholder!($msg),
             middleware = []
+            $(, backpressure = [$bp])?
         )
     };
-    ({ $first:ty $(, $member:ty)* $(,)? } => placeholder!(), [$($mw:expr),*]) => {
+    ({ $first:ty $(, $member:ty)* $(,)? } => placeholder!(), [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_infinite_source_typed!(
             output = $first,
             output_contract = [$first $(, $member)*],
             name = "__obzenflow_binding_derived_name__",
             handler = placeholder!(),
             middleware = [$($mw),*]
+            $(, backpressure = [$bp])?
         )
     };
-    ({ $first:ty $(, $member:ty)* $(,)? } => placeholder!($msg:expr), [$($mw:expr),*]) => {
+    ({ $first:ty $(, $member:ty)* $(,)? } => placeholder!($msg:expr), [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_infinite_source_typed!(
             output = $first,
             output_contract = [$first $(, $member)*],
             name = "__obzenflow_binding_derived_name__",
             handler = placeholder!($msg),
             middleware = [$($mw),*]
+            $(, backpressure = [$bp])?
         )
     };
-    ({ $first:ty $(, $member:ty)* $(,)? } => $handler:expr) => {
+    ({ $first:ty $(, $member:ty)* $(,)? } => $handler:expr $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_infinite_source_typed!(
             output = $first,
             output_contract = [$first $(, $member)*],
             name = "__obzenflow_binding_derived_name__",
             handler = $handler,
             middleware = []
+            $(, backpressure = [$bp])?
         )
     };
-    ({ $first:ty $(, $member:ty)* $(,)? } => $handler:expr, [$($mw:expr),*]) => {
+    ({ $first:ty $(, $member:ty)* $(,)? } => $handler:expr, [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_infinite_source_typed!(
             output = $first,
             output_contract = [$first $(, $member)*],
             name = "__obzenflow_binding_derived_name__",
             handler = $handler,
             middleware = [$($mw),*]
+            $(, backpressure = [$bp])?
         )
     };
-    ($out:ty => placeholder!()) => {
+    ($out:ty => placeholder!() $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_infinite_source_typed!(
             output = $out,
             name = "__obzenflow_binding_derived_name__",
             handler = placeholder!(),
             middleware = []
+            $(, backpressure = [$bp])?
         )
     };
-    ($out:ty => placeholder!($msg:expr)) => {
+    ($out:ty => placeholder!($msg:expr) $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_infinite_source_typed!(
             output = $out,
             name = "__obzenflow_binding_derived_name__",
             handler = placeholder!($msg),
             middleware = []
+            $(, backpressure = [$bp])?
         )
     };
-    ($out:ty => placeholder!(), [$($mw:expr),*]) => {
+    ($out:ty => placeholder!(), [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_infinite_source_typed!(
             output = $out,
             name = "__obzenflow_binding_derived_name__",
             handler = placeholder!(),
             middleware = [$($mw),*]
+            $(, backpressure = [$bp])?
         )
     };
-    ($out:ty => placeholder!($msg:expr), [$($mw:expr),*]) => {
+    ($out:ty => placeholder!($msg:expr), [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_infinite_source_typed!(
             output = $out,
             name = "__obzenflow_binding_derived_name__",
             handler = placeholder!($msg),
             middleware = [$($mw),*]
+            $(, backpressure = [$bp])?
         )
     };
-    ($out:ty => $handler:expr) => {
+    ($out:ty => $handler:expr $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_infinite_source_typed!(
             output = $out,
             name = "__obzenflow_binding_derived_name__",
             handler = $handler,
             middleware = []
+            $(, backpressure = [$bp])?
         )
     };
-    ($out:ty => $handler:expr, [$($mw:expr),*]) => {
+    ($out:ty => $handler:expr, [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_infinite_source_typed!(
             output = $out,
             name = "__obzenflow_binding_derived_name__",
             handler = $handler,
             middleware = [$($mw),*]
+            $(, backpressure = [$bp])?
         )
     };
 
     // ── typed (explicit name override) ──
-    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => placeholder!()) => {
+    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => placeholder!() $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_infinite_source_typed!(
             output = $first,
             output_contract = [$first $(, $member)*],
             name = $name,
             handler = placeholder!(),
             middleware = []
+            $(, backpressure = [$bp])?
         )
     };
-    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => placeholder!($msg:expr)) => {
+    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => placeholder!($msg:expr) $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_infinite_source_typed!(
             output = $first,
             output_contract = [$first $(, $member)*],
             name = $name,
             handler = placeholder!($msg),
             middleware = []
+            $(, backpressure = [$bp])?
         )
     };
-    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => placeholder!(), [$($mw:expr),*]) => {
+    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => placeholder!(), [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_infinite_source_typed!(
             output = $first,
             output_contract = [$first $(, $member)*],
             name = $name,
             handler = placeholder!(),
             middleware = [$($mw),*]
+            $(, backpressure = [$bp])?
         )
     };
-    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => placeholder!($msg:expr), [$($mw:expr),*]) => {
+    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => placeholder!($msg:expr), [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_infinite_source_typed!(
             output = $first,
             output_contract = [$first $(, $member)*],
             name = $name,
             handler = placeholder!($msg),
             middleware = [$($mw),*]
+            $(, backpressure = [$bp])?
         )
     };
-    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => $handler:expr) => {
+    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => $handler:expr $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_infinite_source_typed!(
             output = $first,
             output_contract = [$first $(, $member)*],
             name = $name,
             handler = $handler,
             middleware = []
+            $(, backpressure = [$bp])?
         )
     };
-    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => $handler:expr, [$($mw:expr),*]) => {
+    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => $handler:expr, [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_infinite_source_typed!(
             output = $first,
             output_contract = [$first $(, $member)*],
             name = $name,
             handler = $handler,
             middleware = [$($mw),*]
+            $(, backpressure = [$bp])?
         )
     };
-    (name: $name:literal, $out:ty => placeholder!()) => {
+    (name: $name:literal, $out:ty => placeholder!() $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_infinite_source_typed!(
             output = $out,
             name = $name,
             handler = placeholder!(),
             middleware = []
+            $(, backpressure = [$bp])?
         )
     };
-    (name: $name:literal, $out:ty => placeholder!($msg:expr)) => {
+    (name: $name:literal, $out:ty => placeholder!($msg:expr) $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_infinite_source_typed!(
             output = $out,
             name = $name,
             handler = placeholder!($msg),
             middleware = []
+            $(, backpressure = [$bp])?
         )
     };
-    (name: $name:literal, $out:ty => placeholder!(), [$($mw:expr),*]) => {
+    (name: $name:literal, $out:ty => placeholder!(), [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_infinite_source_typed!(
             output = $out,
             name = $name,
             handler = placeholder!(),
             middleware = [$($mw),*]
+            $(, backpressure = [$bp])?
         )
     };
-    (name: $name:literal, $out:ty => placeholder!($msg:expr), [$($mw:expr),*]) => {
+    (name: $name:literal, $out:ty => placeholder!($msg:expr), [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_infinite_source_typed!(
             output = $out,
             name = $name,
             handler = placeholder!($msg),
             middleware = [$($mw),*]
+            $(, backpressure = [$bp])?
         )
     };
-    (name: $name:literal, $out:ty => $handler:expr) => {
+    (name: $name:literal, $out:ty => $handler:expr $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_infinite_source_typed!(
             output = $out,
             name = $name,
             handler = $handler,
             middleware = []
+            $(, backpressure = [$bp])?
         )
     };
-    (name: $name:literal, $out:ty => $handler:expr, [$($mw:expr),*]) => {
+    (name: $name:literal, $out:ty => $handler:expr, [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_infinite_source_typed!(
             output = $out,
             name = $name,
             handler = $handler,
             middleware = [$($mw),*]
+            $(, backpressure = [$bp])?
         )
     };
 }
@@ -905,23 +985,35 @@ macro_rules! infinite_source {
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __obzenflow_async_infinite_source_untyped {
-    (name = $name:literal, handler = ($handler:expr, $poll_timeout:expr), middleware = [$($mw:expr),*]) => {{
-        $crate::dsl::stage_descriptor::AsyncInfiniteSourceDescriptor::new($name, $handler)
+    (name = $name:literal, handler = ($handler:expr, $poll_timeout:expr), middleware = [$($mw:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
+        let mut __desc = $crate::dsl::stage_descriptor::AsyncInfiniteSourceDescriptor::new($name, $handler)
             .with_poll_timeout($poll_timeout)
-            $(.with_middleware($mw))*
-            .build()
+            $(.with_middleware($mw))*;
+        {
+            #[allow(unused_mut)]
+            let mut __bp: Option<$crate::dsl::backpressure_clause::BackpressureClause> = None;
+            $($( __bp = Some($bp); )?)?
+            __desc.backpressure = __bp;
+        }
+        __desc.build()
     }};
-    (name = $name:literal, handler = $handler:expr, middleware = [$($mw:expr),*]) => {{
-        $crate::dsl::stage_descriptor::AsyncInfiniteSourceDescriptor::new($name, $handler)
-            $(.with_middleware($mw))*
-            .build()
+    (name = $name:literal, handler = $handler:expr, middleware = [$($mw:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
+        let mut __desc = $crate::dsl::stage_descriptor::AsyncInfiniteSourceDescriptor::new($name, $handler)
+            $(.with_middleware($mw))*;
+        {
+            #[allow(unused_mut)]
+            let mut __bp: Option<$crate::dsl::backpressure_clause::BackpressureClause> = None;
+            $($( __bp = Some($bp); )?)?
+            __desc.backpressure = __bp;
+        }
+        __desc.build()
     }};
 }
 
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __obzenflow_async_infinite_source_typed {
-    (output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = placeholder!(), middleware = [$($mw:expr),*]) => {{
+    (output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = placeholder!(), middleware = [$($mw:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
         let __metadata = $crate::dsl::typing::StageTypingMetadata::source(
             $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
             true,
@@ -932,10 +1024,11 @@ macro_rules! __obzenflow_async_infinite_source_typed {
             name = $name,
             handler = $crate::dsl::typing::PlaceholderAsyncSource::<$out>::new(None),
             middleware = [$($mw),*]
+            $(, backpressure = [$($bp)?])?
         );
         $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
     }};
-    (output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = placeholder!($msg:expr), middleware = [$($mw:expr),*]) => {{
+    (output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = placeholder!($msg:expr), middleware = [$($mw:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
         let __metadata = $crate::dsl::typing::StageTypingMetadata::source(
             $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
             true,
@@ -946,10 +1039,11 @@ macro_rules! __obzenflow_async_infinite_source_typed {
             name = $name,
             handler = $crate::dsl::typing::PlaceholderAsyncSource::<$out>::new(Some($msg)),
             middleware = [$($mw),*]
+            $(, backpressure = [$($bp)?])?
         );
         $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
     }};
-    (output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = ($handler:expr, $poll_timeout:expr), middleware = [$($mw:expr),*]) => {{
+    (output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = ($handler:expr, $poll_timeout:expr), middleware = [$($mw:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
         let __handler = $handler;
         // FLOWIP-114c PR D: assert_source_output dropped, see sink rationale.
         let __metadata = $crate::dsl::typing::StageTypingMetadata::source(
@@ -962,10 +1056,11 @@ macro_rules! __obzenflow_async_infinite_source_typed {
             name = $name,
             handler = (__handler, $poll_timeout),
             middleware = [$($mw),*]
+            $(, backpressure = [$($bp)?])?
         );
         $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
     }};
-    (output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = $handler:expr, middleware = [$($mw:expr),*]) => {{
+    (output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = $handler:expr, middleware = [$($mw:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
         let __handler = $handler;
         // FLOWIP-114c PR D: assert_source_output dropped, see sink rationale.
         let __metadata = $crate::dsl::typing::StageTypingMetadata::source(
@@ -978,10 +1073,11 @@ macro_rules! __obzenflow_async_infinite_source_typed {
             name = $name,
             handler = __handler,
             middleware = [$($mw),*]
+            $(, backpressure = [$($bp)?])?
         );
         $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
     }};
-    (output = $out:ty, name = $name:literal, handler = placeholder!(), middleware = [$($mw:expr),*]) => {{
+    (output = $out:ty, name = $name:literal, handler = placeholder!(), middleware = [$($mw:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
         let __metadata = $crate::dsl::typing::StageTypingMetadata::source(
             $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
             true,
@@ -991,10 +1087,11 @@ macro_rules! __obzenflow_async_infinite_source_typed {
             name = $name,
             handler = $crate::dsl::typing::PlaceholderAsyncSource::<$out>::new(None),
             middleware = [$($mw),*]
+            $(, backpressure = [$($bp)?])?
         );
         $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
     }};
-    (output = $out:ty, name = $name:literal, handler = placeholder!($msg:expr), middleware = [$($mw:expr),*]) => {{
+    (output = $out:ty, name = $name:literal, handler = placeholder!($msg:expr), middleware = [$($mw:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
         let __metadata = $crate::dsl::typing::StageTypingMetadata::source(
             $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
             true,
@@ -1004,10 +1101,11 @@ macro_rules! __obzenflow_async_infinite_source_typed {
             name = $name,
             handler = $crate::dsl::typing::PlaceholderAsyncSource::<$out>::new(Some($msg)),
             middleware = [$($mw),*]
+            $(, backpressure = [$($bp)?])?
         );
         $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
     }};
-    (output = $out:ty, name = $name:literal, handler = ($handler:expr, $poll_timeout:expr), middleware = [$($mw:expr),*]) => {{
+    (output = $out:ty, name = $name:literal, handler = ($handler:expr, $poll_timeout:expr), middleware = [$($mw:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
         let __handler = $handler;
         // FLOWIP-114c PR D: assert_source_output dropped, see sink rationale.
         let __metadata = $crate::dsl::typing::StageTypingMetadata::source(
@@ -1019,10 +1117,11 @@ macro_rules! __obzenflow_async_infinite_source_typed {
             name = $name,
             handler = (__handler, $poll_timeout),
             middleware = [$($mw),*]
+            $(, backpressure = [$($bp)?])?
         );
         $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
     }};
-    (output = $out:ty, name = $name:literal, handler = $handler:expr, middleware = [$($mw:expr),*]) => {{
+    (output = $out:ty, name = $name:literal, handler = $handler:expr, middleware = [$($mw:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
         let __handler = $handler;
         // FLOWIP-114c PR D: assert_source_output dropped, see sink rationale.
         let __metadata = $crate::dsl::typing::StageTypingMetadata::source(
@@ -1034,6 +1133,7 @@ macro_rules! __obzenflow_async_infinite_source_typed {
             name = $name,
             handler = __handler,
             middleware = [$($mw),*]
+            $(, backpressure = [$($bp)?])?
         );
         $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
     }};
@@ -1043,278 +1143,310 @@ macro_rules! __obzenflow_async_infinite_source_typed {
 #[macro_export]
 macro_rules! async_infinite_source {
     // ── typed (binding-derived name) ──
-    ({ $first:ty $(, $member:ty)* $(,)? } => placeholder!()) => {
+    ({ $first:ty $(, $member:ty)* $(,)? } => placeholder!() $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_async_infinite_source_typed!(
             output = $first,
             output_contract = [$first $(, $member)*],
             name = "__obzenflow_binding_derived_name__",
             handler = placeholder!(),
             middleware = []
+            $(, backpressure = [$bp])?
         )
     };
-    ({ $first:ty $(, $member:ty)* $(,)? } => placeholder!($msg:expr)) => {
+    ({ $first:ty $(, $member:ty)* $(,)? } => placeholder!($msg:expr) $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_async_infinite_source_typed!(
             output = $first,
             output_contract = [$first $(, $member)*],
             name = "__obzenflow_binding_derived_name__",
             handler = placeholder!($msg),
             middleware = []
+            $(, backpressure = [$bp])?
         )
     };
-    ({ $first:ty $(, $member:ty)* $(,)? } => placeholder!(), [$($mw:expr),*]) => {
+    ({ $first:ty $(, $member:ty)* $(,)? } => placeholder!(), [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_async_infinite_source_typed!(
             output = $first,
             output_contract = [$first $(, $member)*],
             name = "__obzenflow_binding_derived_name__",
             handler = placeholder!(),
             middleware = [$($mw),*]
+            $(, backpressure = [$bp])?
         )
     };
-    ({ $first:ty $(, $member:ty)* $(,)? } => placeholder!($msg:expr), [$($mw:expr),*]) => {
+    ({ $first:ty $(, $member:ty)* $(,)? } => placeholder!($msg:expr), [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_async_infinite_source_typed!(
             output = $first,
             output_contract = [$first $(, $member)*],
             name = "__obzenflow_binding_derived_name__",
             handler = placeholder!($msg),
             middleware = [$($mw),*]
+            $(, backpressure = [$bp])?
         )
     };
-    ({ $first:ty $(, $member:ty)* $(,)? } => ($handler:expr, $poll_timeout:expr)) => {
+    ({ $first:ty $(, $member:ty)* $(,)? } => ($handler:expr, $poll_timeout:expr) $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_async_infinite_source_typed!(
             output = $first,
             output_contract = [$first $(, $member)*],
             name = "__obzenflow_binding_derived_name__",
             handler = ($handler, $poll_timeout),
             middleware = []
+            $(, backpressure = [$bp])?
         )
     };
-    ({ $first:ty $(, $member:ty)* $(,)? } => ($handler:expr, $poll_timeout:expr), [$($mw:expr),*]) => {
+    ({ $first:ty $(, $member:ty)* $(,)? } => ($handler:expr, $poll_timeout:expr), [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_async_infinite_source_typed!(
             output = $first,
             output_contract = [$first $(, $member)*],
             name = "__obzenflow_binding_derived_name__",
             handler = ($handler, $poll_timeout),
             middleware = [$($mw),*]
+            $(, backpressure = [$bp])?
         )
     };
-    ({ $first:ty $(, $member:ty)* $(,)? } => $handler:expr) => {
+    ({ $first:ty $(, $member:ty)* $(,)? } => $handler:expr $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_async_infinite_source_typed!(
             output = $first,
             output_contract = [$first $(, $member)*],
             name = "__obzenflow_binding_derived_name__",
             handler = $handler,
             middleware = []
+            $(, backpressure = [$bp])?
         )
     };
-    ({ $first:ty $(, $member:ty)* $(,)? } => $handler:expr, [$($mw:expr),*]) => {
+    ({ $first:ty $(, $member:ty)* $(,)? } => $handler:expr, [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_async_infinite_source_typed!(
             output = $first,
             output_contract = [$first $(, $member)*],
             name = "__obzenflow_binding_derived_name__",
             handler = $handler,
             middleware = [$($mw),*]
+            $(, backpressure = [$bp])?
         )
     };
-    ($out:ty => placeholder!()) => {
+    ($out:ty => placeholder!() $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_async_infinite_source_typed!(
             output = $out,
             name = "__obzenflow_binding_derived_name__",
             handler = placeholder!(),
             middleware = []
+            $(, backpressure = [$bp])?
         )
     };
-    ($out:ty => placeholder!($msg:expr)) => {
+    ($out:ty => placeholder!($msg:expr) $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_async_infinite_source_typed!(
             output = $out,
             name = "__obzenflow_binding_derived_name__",
             handler = placeholder!($msg),
             middleware = []
+            $(, backpressure = [$bp])?
         )
     };
-    ($out:ty => placeholder!(), [$($mw:expr),*]) => {
+    ($out:ty => placeholder!(), [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_async_infinite_source_typed!(
             output = $out,
             name = "__obzenflow_binding_derived_name__",
             handler = placeholder!(),
             middleware = [$($mw),*]
+            $(, backpressure = [$bp])?
         )
     };
-    ($out:ty => placeholder!($msg:expr), [$($mw:expr),*]) => {
+    ($out:ty => placeholder!($msg:expr), [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_async_infinite_source_typed!(
             output = $out,
             name = "__obzenflow_binding_derived_name__",
             handler = placeholder!($msg),
             middleware = [$($mw),*]
+            $(, backpressure = [$bp])?
         )
     };
-    ($out:ty => ($handler:expr, $poll_timeout:expr)) => {
+    ($out:ty => ($handler:expr, $poll_timeout:expr) $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_async_infinite_source_typed!(
             output = $out,
             name = "__obzenflow_binding_derived_name__",
             handler = ($handler, $poll_timeout),
             middleware = []
+            $(, backpressure = [$bp])?
         )
     };
-    ($out:ty => ($handler:expr, $poll_timeout:expr), [$($mw:expr),*]) => {
+    ($out:ty => ($handler:expr, $poll_timeout:expr), [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_async_infinite_source_typed!(
             output = $out,
             name = "__obzenflow_binding_derived_name__",
             handler = ($handler, $poll_timeout),
             middleware = [$($mw),*]
+            $(, backpressure = [$bp])?
         )
     };
-    ($out:ty => $handler:expr) => {
+    ($out:ty => $handler:expr $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_async_infinite_source_typed!(
             output = $out,
             name = "__obzenflow_binding_derived_name__",
             handler = $handler,
             middleware = []
+            $(, backpressure = [$bp])?
         )
     };
-    ($out:ty => $handler:expr, [$($mw:expr),*]) => {
+    ($out:ty => $handler:expr, [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_async_infinite_source_typed!(
             output = $out,
             name = "__obzenflow_binding_derived_name__",
             handler = $handler,
             middleware = [$($mw),*]
+            $(, backpressure = [$bp])?
         )
     };
 
     // ── typed (explicit name override) ──
-    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => placeholder!()) => {
+    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => placeholder!() $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_async_infinite_source_typed!(
             output = $first,
             output_contract = [$first $(, $member)*],
             name = $name,
             handler = placeholder!(),
             middleware = []
+            $(, backpressure = [$bp])?
         )
     };
-    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => placeholder!($msg:expr)) => {
+    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => placeholder!($msg:expr) $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_async_infinite_source_typed!(
             output = $first,
             output_contract = [$first $(, $member)*],
             name = $name,
             handler = placeholder!($msg),
             middleware = []
+            $(, backpressure = [$bp])?
         )
     };
-    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => placeholder!(), [$($mw:expr),*]) => {
+    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => placeholder!(), [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_async_infinite_source_typed!(
             output = $first,
             output_contract = [$first $(, $member)*],
             name = $name,
             handler = placeholder!(),
             middleware = [$($mw),*]
+            $(, backpressure = [$bp])?
         )
     };
-    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => placeholder!($msg:expr), [$($mw:expr),*]) => {
+    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => placeholder!($msg:expr), [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_async_infinite_source_typed!(
             output = $first,
             output_contract = [$first $(, $member)*],
             name = $name,
             handler = placeholder!($msg),
             middleware = [$($mw),*]
+            $(, backpressure = [$bp])?
         )
     };
-    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => ($handler:expr, $poll_timeout:expr)) => {
+    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => ($handler:expr, $poll_timeout:expr) $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_async_infinite_source_typed!(
             output = $first,
             output_contract = [$first $(, $member)*],
             name = $name,
             handler = ($handler, $poll_timeout),
             middleware = []
+            $(, backpressure = [$bp])?
         )
     };
-    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => ($handler:expr, $poll_timeout:expr), [$($mw:expr),*]) => {
+    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => ($handler:expr, $poll_timeout:expr), [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_async_infinite_source_typed!(
             output = $first,
             output_contract = [$first $(, $member)*],
             name = $name,
             handler = ($handler, $poll_timeout),
             middleware = [$($mw),*]
+            $(, backpressure = [$bp])?
         )
     };
-    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => $handler:expr) => {
+    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => $handler:expr $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_async_infinite_source_typed!(
             output = $first,
             output_contract = [$first $(, $member)*],
             name = $name,
             handler = $handler,
             middleware = []
+            $(, backpressure = [$bp])?
         )
     };
-    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => $handler:expr, [$($mw:expr),*]) => {
+    (name: $name:literal, { $first:ty $(, $member:ty)* $(,)? } => $handler:expr, [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_async_infinite_source_typed!(
             output = $first,
             output_contract = [$first $(, $member)*],
             name = $name,
             handler = $handler,
             middleware = [$($mw),*]
+            $(, backpressure = [$bp])?
         )
     };
-    (name: $name:literal, $out:ty => placeholder!()) => {
+    (name: $name:literal, $out:ty => placeholder!() $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_async_infinite_source_typed!(
             output = $out,
             name = $name,
             handler = placeholder!(),
             middleware = []
+            $(, backpressure = [$bp])?
         )
     };
-    (name: $name:literal, $out:ty => placeholder!($msg:expr)) => {
+    (name: $name:literal, $out:ty => placeholder!($msg:expr) $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_async_infinite_source_typed!(
             output = $out,
             name = $name,
             handler = placeholder!($msg),
             middleware = []
+            $(, backpressure = [$bp])?
         )
     };
-    (name: $name:literal, $out:ty => placeholder!(), [$($mw:expr),*]) => {
+    (name: $name:literal, $out:ty => placeholder!(), [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_async_infinite_source_typed!(
             output = $out,
             name = $name,
             handler = placeholder!(),
             middleware = [$($mw),*]
+            $(, backpressure = [$bp])?
         )
     };
-    (name: $name:literal, $out:ty => placeholder!($msg:expr), [$($mw:expr),*]) => {
+    (name: $name:literal, $out:ty => placeholder!($msg:expr), [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_async_infinite_source_typed!(
             output = $out,
             name = $name,
             handler = placeholder!($msg),
             middleware = [$($mw),*]
+            $(, backpressure = [$bp])?
         )
     };
-    (name: $name:literal, $out:ty => ($handler:expr, $poll_timeout:expr)) => {
+    (name: $name:literal, $out:ty => ($handler:expr, $poll_timeout:expr) $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_async_infinite_source_typed!(
             output = $out,
             name = $name,
             handler = ($handler, $poll_timeout),
             middleware = []
+            $(, backpressure = [$bp])?
         )
     };
-    (name: $name:literal, $out:ty => ($handler:expr, $poll_timeout:expr), [$($mw:expr),*]) => {
+    (name: $name:literal, $out:ty => ($handler:expr, $poll_timeout:expr), [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_async_infinite_source_typed!(
             output = $out,
             name = $name,
             handler = ($handler, $poll_timeout),
             middleware = [$($mw),*]
+            $(, backpressure = [$bp])?
         )
     };
-    (name: $name:literal, $out:ty => $handler:expr) => {
+    (name: $name:literal, $out:ty => $handler:expr $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_async_infinite_source_typed!(
             output = $out,
             name = $name,
             handler = $handler,
             middleware = []
+            $(, backpressure = [$bp])?
         )
     };
-    (name: $name:literal, $out:ty => $handler:expr, [$($mw:expr),*]) => {
+    (name: $name:literal, $out:ty => $handler:expr, [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_async_infinite_source_typed!(
             output = $out,
             name = $name,
             handler = $handler,
             middleware = [$($mw),*]
+            $(, backpressure = [$bp])?
         )
     };
 }
@@ -1326,12 +1458,18 @@ macro_rules! async_infinite_source {
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __obzenflow_transform_untyped {
-    (name = $name:literal, handler = $handler:expr, middleware = [$($mw:expr),*]) => {{
+    (name = $name:literal, handler = $handler:expr, middleware = [$($mw:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
         use $crate::dsl::stage_descriptor::{StageDescriptor, TransformDescriptor};
         Box::new(TransformDescriptor {
             name: $name.to_string(),
             handler: $handler,
             middleware: vec![$(Box::new($mw)),*],
+            backpressure: {
+                #[allow(unused_mut)]
+                let mut __bp: Option<$crate::dsl::backpressure_clause::BackpressureClause> = None;
+                $($( __bp = Some($bp); )?)?
+                __bp
+            },
         }) as Box<dyn StageDescriptor>
     }};
 }
@@ -1340,7 +1478,7 @@ macro_rules! __obzenflow_transform_untyped {
 #[macro_export]
 macro_rules! __obzenflow_transform_typed {
     // -- exact input, placeholder, explicit output contract --
-    (input = exact($in:ty), output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = placeholder!(), middleware = [$($mw:expr),*]) => {{
+    (input = exact($in:ty), output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = placeholder!(), middleware = [$($mw:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
         let __metadata = $crate::dsl::typing::StageTypingMetadata::transform(
             $crate::dsl::typing::TypeHint::exact_payload::<$in>(),
             $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
@@ -1352,10 +1490,11 @@ macro_rules! __obzenflow_transform_typed {
             name = $name,
             handler = $crate::dsl::typing::PlaceholderTransform::<$in, $out>::new(None),
             middleware = [$($mw),*]
+            $(, backpressure = [$($bp)?])?
         );
         $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
     }};
-    (input = exact($in:ty), output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = placeholder!($msg:expr), middleware = [$($mw:expr),*]) => {{
+    (input = exact($in:ty), output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = placeholder!($msg:expr), middleware = [$($mw:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
         let __metadata = $crate::dsl::typing::StageTypingMetadata::transform(
             $crate::dsl::typing::TypeHint::exact_payload::<$in>(),
             $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
@@ -1367,11 +1506,12 @@ macro_rules! __obzenflow_transform_typed {
             name = $name,
             handler = $crate::dsl::typing::PlaceholderTransform::<$in, $out>::new(Some($msg)),
             middleware = [$($mw),*]
+            $(, backpressure = [$($bp)?])?
         );
         $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
     }};
     // -- exact input, real handler, explicit output contract --
-    (input = exact($in:ty), output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = $handler:expr, middleware = [$($mw:expr),*]) => {{
+    (input = exact($in:ty), output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = $handler:expr, middleware = [$($mw:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
         let __handler = $handler;
         let __handler =
             $crate::dsl::typing::BoundTransform::<$in, $out, _>::new(__handler);
@@ -1383,11 +1523,11 @@ macro_rules! __obzenflow_transform_typed {
             None,
         )
         .with_additional_output_contract($crate::__obzenflow_output_contract_members!($($member),+));
-        let __descriptor = $crate::__obzenflow_transform_untyped!(name = $name, handler = __handler, middleware = [$($mw),*]);
+        let __descriptor = $crate::__obzenflow_transform_untyped!(name = $name, handler = __handler, middleware = [$($mw),*] $(, backpressure = [$($bp)?])?);
         $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
     }};
     // ── exact input, placeholder ──
-    (input = exact($in:ty), output = $out:ty, name = $name:literal, handler = placeholder!(), middleware = [$($mw:expr),*]) => {{
+    (input = exact($in:ty), output = $out:ty, name = $name:literal, handler = placeholder!(), middleware = [$($mw:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
         let __metadata = $crate::dsl::typing::StageTypingMetadata::transform(
             $crate::dsl::typing::TypeHint::exact_payload::<$in>(),
             $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
@@ -1398,10 +1538,11 @@ macro_rules! __obzenflow_transform_typed {
             name = $name,
             handler = $crate::dsl::typing::PlaceholderTransform::<$in, $out>::new(None),
             middleware = [$($mw),*]
+            $(, backpressure = [$($bp)?])?
         );
         $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
     }};
-    (input = exact($in:ty), output = $out:ty, name = $name:literal, handler = placeholder!($msg:expr), middleware = [$($mw:expr),*]) => {{
+    (input = exact($in:ty), output = $out:ty, name = $name:literal, handler = placeholder!($msg:expr), middleware = [$($mw:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
         let __metadata = $crate::dsl::typing::StageTypingMetadata::transform(
             $crate::dsl::typing::TypeHint::exact_payload::<$in>(),
             $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
@@ -1412,11 +1553,12 @@ macro_rules! __obzenflow_transform_typed {
             name = $name,
             handler = $crate::dsl::typing::PlaceholderTransform::<$in, $out>::new(Some($msg)),
             middleware = [$($mw),*]
+            $(, backpressure = [$($bp)?])?
         );
         $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
     }};
     // ── exact input, real handler ──
-    (input = exact($in:ty), output = $out:ty, name = $name:literal, handler = $handler:expr, middleware = [$($mw:expr),*]) => {{
+    (input = exact($in:ty), output = $out:ty, name = $name:literal, handler = $handler:expr, middleware = [$($mw:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
         let __handler = $handler;
         let __handler =
             $crate::dsl::typing::BoundTransform::<$in, $out, _>::new(__handler);
@@ -1427,7 +1569,7 @@ macro_rules! __obzenflow_transform_typed {
             false,
             None,
         );
-        let __descriptor = $crate::__obzenflow_transform_untyped!(name = $name, handler = __handler, middleware = [$($mw),*]);
+        let __descriptor = $crate::__obzenflow_transform_untyped!(name = $name, handler = __handler, middleware = [$($mw),*] $(, backpressure = [$($bp)?])?);
         $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
     }};
 }
@@ -1438,7 +1580,7 @@ macro_rules! __obzenflow_transform_exact_contract {
     (name = $name:literal, $($rest:tt)+) => {
         $crate::__obzenflow_transform_exact_contract!(@collect name = $name, in = (), $($rest)+)
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => placeholder!()) => {
+    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => placeholder!() $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_transform_typed!(
             input = exact($($in)+),
             output = $first,
@@ -1446,9 +1588,10 @@ macro_rules! __obzenflow_transform_exact_contract {
             name = $name,
             handler = placeholder!(),
             middleware = []
+            $(, backpressure = [$bp])?
         )
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => placeholder!($msg:expr)) => {
+    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => placeholder!($msg:expr) $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_transform_typed!(
             input = exact($($in)+),
             output = $first,
@@ -1456,9 +1599,10 @@ macro_rules! __obzenflow_transform_exact_contract {
             name = $name,
             handler = placeholder!($msg),
             middleware = []
+            $(, backpressure = [$bp])?
         )
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => placeholder!(), [$($mw:expr),*]) => {
+    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => placeholder!(), [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_transform_typed!(
             input = exact($($in)+),
             output = $first,
@@ -1466,9 +1610,10 @@ macro_rules! __obzenflow_transform_exact_contract {
             name = $name,
             handler = placeholder!(),
             middleware = [$($mw),*]
+            $(, backpressure = [$bp])?
         )
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => placeholder!($msg:expr), [$($mw:expr),*]) => {
+    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => placeholder!($msg:expr), [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_transform_typed!(
             input = exact($($in)+),
             output = $first,
@@ -1476,9 +1621,10 @@ macro_rules! __obzenflow_transform_exact_contract {
             name = $name,
             handler = placeholder!($msg),
             middleware = [$($mw),*]
+            $(, backpressure = [$bp])?
         )
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => $handler:expr) => {
+    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => $handler:expr $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_transform_typed!(
             input = exact($($in)+),
             output = $first,
@@ -1486,9 +1632,10 @@ macro_rules! __obzenflow_transform_exact_contract {
             name = $name,
             handler = $handler,
             middleware = []
+            $(, backpressure = [$bp])?
         )
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => $handler:expr, [$($mw:expr),*]) => {
+    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => $handler:expr, [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_transform_typed!(
             input = exact($($in)+),
             output = $first,
@@ -1496,9 +1643,10 @@ macro_rules! __obzenflow_transform_exact_contract {
             name = $name,
             handler = $handler,
             middleware = [$($mw),*]
+            $(, backpressure = [$bp])?
         )
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty, outputs: [$($member:ty),+ $(,)?] => placeholder!()) => {
+    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty, outputs: [$($member:ty),+ $(,)?] => placeholder!() $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_transform_typed!(
             input = exact($($in)+),
             output = $out,
@@ -1506,9 +1654,10 @@ macro_rules! __obzenflow_transform_exact_contract {
             name = $name,
             handler = placeholder!(),
             middleware = []
+            $(, backpressure = [$bp])?
         )
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty, outputs: [$($member:ty),+ $(,)?] => placeholder!($msg:expr)) => {
+    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty, outputs: [$($member:ty),+ $(,)?] => placeholder!($msg:expr) $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_transform_typed!(
             input = exact($($in)+),
             output = $out,
@@ -1516,9 +1665,10 @@ macro_rules! __obzenflow_transform_exact_contract {
             name = $name,
             handler = placeholder!($msg),
             middleware = []
+            $(, backpressure = [$bp])?
         )
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty, outputs: [$($member:ty),+ $(,)?] => placeholder!(), [$($mw:expr),*]) => {
+    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty, outputs: [$($member:ty),+ $(,)?] => placeholder!(), [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_transform_typed!(
             input = exact($($in)+),
             output = $out,
@@ -1526,9 +1676,10 @@ macro_rules! __obzenflow_transform_exact_contract {
             name = $name,
             handler = placeholder!(),
             middleware = [$($mw),*]
+            $(, backpressure = [$bp])?
         )
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty, outputs: [$($member:ty),+ $(,)?] => placeholder!($msg:expr), [$($mw:expr),*]) => {
+    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty, outputs: [$($member:ty),+ $(,)?] => placeholder!($msg:expr), [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_transform_typed!(
             input = exact($($in)+),
             output = $out,
@@ -1536,9 +1687,10 @@ macro_rules! __obzenflow_transform_exact_contract {
             name = $name,
             handler = placeholder!($msg),
             middleware = [$($mw),*]
+            $(, backpressure = [$bp])?
         )
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty, outputs: [$($member:ty),+ $(,)?] => $handler:expr) => {
+    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty, outputs: [$($member:ty),+ $(,)?] => $handler:expr $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_transform_typed!(
             input = exact($($in)+),
             output = $out,
@@ -1546,9 +1698,10 @@ macro_rules! __obzenflow_transform_exact_contract {
             name = $name,
             handler = $handler,
             middleware = []
+            $(, backpressure = [$bp])?
         )
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty, outputs: [$($member:ty),+ $(,)?] => $handler:expr, [$($mw:expr),*]) => {
+    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty, outputs: [$($member:ty),+ $(,)?] => $handler:expr, [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_transform_typed!(
             input = exact($($in)+),
             output = $out,
@@ -1556,60 +1709,67 @@ macro_rules! __obzenflow_transform_exact_contract {
             name = $name,
             handler = $handler,
             middleware = [$($mw),*]
+            $(, backpressure = [$bp])?
         )
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => placeholder!()) => {
+    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => placeholder!() $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_transform_typed!(
             input = exact($($in)+),
             output = $out,
             name = $name,
             handler = placeholder!(),
             middleware = []
+            $(, backpressure = [$bp])?
         )
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => placeholder!($msg:expr)) => {
+    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => placeholder!($msg:expr) $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_transform_typed!(
             input = exact($($in)+),
             output = $out,
             name = $name,
             handler = placeholder!($msg),
             middleware = []
+            $(, backpressure = [$bp])?
         )
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => placeholder!(), [$($mw:expr),*]) => {
+    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => placeholder!(), [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_transform_typed!(
             input = exact($($in)+),
             output = $out,
             name = $name,
             handler = placeholder!(),
             middleware = [$($mw),*]
+            $(, backpressure = [$bp])?
         )
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => placeholder!($msg:expr), [$($mw:expr),*]) => {
+    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => placeholder!($msg:expr), [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_transform_typed!(
             input = exact($($in)+),
             output = $out,
             name = $name,
             handler = placeholder!($msg),
             middleware = [$($mw),*]
+            $(, backpressure = [$bp])?
         )
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => $handler:expr) => {
+    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => $handler:expr $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_transform_typed!(
             input = exact($($in)+),
             output = $out,
             name = $name,
             handler = $handler,
             middleware = []
+            $(, backpressure = [$bp])?
         )
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => $handler:expr, [$($mw:expr),*]) => {
+    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => $handler:expr, [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_transform_typed!(
             input = exact($($in)+),
             output = $out,
             name = $name,
             handler = $handler,
             middleware = [$($mw),*]
+            $(, backpressure = [$bp])?
         )
     };
     (@collect name = $name:literal, in = ($($in:tt)*), $tok:tt $($rest:tt)+) => {
@@ -1650,12 +1810,18 @@ macro_rules! transform {
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __obzenflow_async_transform_untyped {
-    (name = $name:literal, handler = $handler:expr, middleware = [$($mw:expr),*]) => {{
+    (name = $name:literal, handler = $handler:expr, middleware = [$($mw:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
         use $crate::dsl::stage_descriptor::{AsyncTransformDescriptor, StageDescriptor};
         Box::new(AsyncTransformDescriptor {
             name: $name.to_string(),
             handler: $handler,
             middleware: vec![$(Box::new($mw)),*],
+            backpressure: {
+                #[allow(unused_mut)]
+                let mut __bp: Option<$crate::dsl::backpressure_clause::BackpressureClause> = None;
+                $($( __bp = Some($bp); )?)?
+                __bp
+            },
         }) as Box<dyn StageDescriptor>
     }};
 }
@@ -1664,7 +1830,7 @@ macro_rules! __obzenflow_async_transform_untyped {
 #[macro_export]
 macro_rules! __obzenflow_async_transform_typed {
     // -- exact input, placeholder, explicit output contract --
-    (input = exact($in:ty), output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = placeholder!(), middleware = [$($mw:expr),*]) => {{
+    (input = exact($in:ty), output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = placeholder!(), middleware = [$($mw:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
         let __metadata = $crate::dsl::typing::StageTypingMetadata::transform(
             $crate::dsl::typing::TypeHint::exact_payload::<$in>(),
             $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
@@ -1676,10 +1842,11 @@ macro_rules! __obzenflow_async_transform_typed {
             name = $name,
             handler = $crate::dsl::typing::PlaceholderAsyncTransform::<$in, $out>::new(None),
             middleware = [$($mw),*]
+            $(, backpressure = [$($bp)?])?
         );
         $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
     }};
-    (input = exact($in:ty), output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = placeholder!($msg:expr), middleware = [$($mw:expr),*]) => {{
+    (input = exact($in:ty), output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = placeholder!($msg:expr), middleware = [$($mw:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
         let __metadata = $crate::dsl::typing::StageTypingMetadata::transform(
             $crate::dsl::typing::TypeHint::exact_payload::<$in>(),
             $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
@@ -1691,11 +1858,12 @@ macro_rules! __obzenflow_async_transform_typed {
             name = $name,
             handler = $crate::dsl::typing::PlaceholderAsyncTransform::<$in, $out>::new(Some($msg)),
             middleware = [$($mw),*]
+            $(, backpressure = [$($bp)?])?
         );
         $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
     }};
     // -- exact input, real handler, explicit output contract --
-    (input = exact($in:ty), output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = $handler:expr, middleware = [$($mw:expr),*]) => {{
+    (input = exact($in:ty), output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = $handler:expr, middleware = [$($mw:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
         let __handler = $handler;
         let __handler =
             $crate::dsl::typing::BoundAsyncTransform::<$in, $out, _>::new(__handler);
@@ -1707,11 +1875,11 @@ macro_rules! __obzenflow_async_transform_typed {
             None,
         )
         .with_additional_output_contract($crate::__obzenflow_output_contract_members!($($member),+));
-        let __descriptor = $crate::__obzenflow_async_transform_untyped!(name = $name, handler = __handler, middleware = [$($mw),*]);
+        let __descriptor = $crate::__obzenflow_async_transform_untyped!(name = $name, handler = __handler, middleware = [$($mw),*] $(, backpressure = [$($bp)?])?);
         $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
     }};
     // ── exact input, placeholder ──
-    (input = exact($in:ty), output = $out:ty, name = $name:literal, handler = placeholder!(), middleware = [$($mw:expr),*]) => {{
+    (input = exact($in:ty), output = $out:ty, name = $name:literal, handler = placeholder!(), middleware = [$($mw:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
         let __metadata = $crate::dsl::typing::StageTypingMetadata::transform(
             $crate::dsl::typing::TypeHint::exact_payload::<$in>(),
             $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
@@ -1722,10 +1890,11 @@ macro_rules! __obzenflow_async_transform_typed {
             name = $name,
             handler = $crate::dsl::typing::PlaceholderAsyncTransform::<$in, $out>::new(None),
             middleware = [$($mw),*]
+            $(, backpressure = [$($bp)?])?
         );
         $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
     }};
-    (input = exact($in:ty), output = $out:ty, name = $name:literal, handler = placeholder!($msg:expr), middleware = [$($mw:expr),*]) => {{
+    (input = exact($in:ty), output = $out:ty, name = $name:literal, handler = placeholder!($msg:expr), middleware = [$($mw:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
         let __metadata = $crate::dsl::typing::StageTypingMetadata::transform(
             $crate::dsl::typing::TypeHint::exact_payload::<$in>(),
             $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
@@ -1736,11 +1905,12 @@ macro_rules! __obzenflow_async_transform_typed {
             name = $name,
             handler = $crate::dsl::typing::PlaceholderAsyncTransform::<$in, $out>::new(Some($msg)),
             middleware = [$($mw),*]
+            $(, backpressure = [$($bp)?])?
         );
         $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
     }};
     // ── exact input, real handler ──
-    (input = exact($in:ty), output = $out:ty, name = $name:literal, handler = $handler:expr, middleware = [$($mw:expr),*]) => {{
+    (input = exact($in:ty), output = $out:ty, name = $name:literal, handler = $handler:expr, middleware = [$($mw:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
         let __handler = $handler;
         let __handler =
             $crate::dsl::typing::BoundAsyncTransform::<$in, $out, _>::new(__handler);
@@ -1751,7 +1921,7 @@ macro_rules! __obzenflow_async_transform_typed {
             false,
             None,
         );
-        let __descriptor = $crate::__obzenflow_async_transform_untyped!(name = $name, handler = __handler, middleware = [$($mw),*]);
+        let __descriptor = $crate::__obzenflow_async_transform_untyped!(name = $name, handler = __handler, middleware = [$($mw),*] $(, backpressure = [$($bp)?])?);
         $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
     }};
 }
@@ -1762,7 +1932,7 @@ macro_rules! __obzenflow_async_transform_exact_contract {
     (name = $name:literal, $($rest:tt)+) => {
         $crate::__obzenflow_async_transform_exact_contract!(@collect name = $name, in = (), $($rest)+)
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => placeholder!()) => {
+    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => placeholder!() $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_async_transform_typed!(
             input = exact($($in)+),
             output = $first,
@@ -1770,9 +1940,10 @@ macro_rules! __obzenflow_async_transform_exact_contract {
             name = $name,
             handler = placeholder!(),
             middleware = []
+            $(, backpressure = [$bp])?
         )
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => placeholder!($msg:expr)) => {
+    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => placeholder!($msg:expr) $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_async_transform_typed!(
             input = exact($($in)+),
             output = $first,
@@ -1780,9 +1951,10 @@ macro_rules! __obzenflow_async_transform_exact_contract {
             name = $name,
             handler = placeholder!($msg),
             middleware = []
+            $(, backpressure = [$bp])?
         )
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => placeholder!(), [$($mw:expr),*]) => {
+    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => placeholder!(), [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_async_transform_typed!(
             input = exact($($in)+),
             output = $first,
@@ -1790,9 +1962,10 @@ macro_rules! __obzenflow_async_transform_exact_contract {
             name = $name,
             handler = placeholder!(),
             middleware = [$($mw),*]
+            $(, backpressure = [$bp])?
         )
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => placeholder!($msg:expr), [$($mw:expr),*]) => {
+    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => placeholder!($msg:expr), [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_async_transform_typed!(
             input = exact($($in)+),
             output = $first,
@@ -1800,9 +1973,10 @@ macro_rules! __obzenflow_async_transform_exact_contract {
             name = $name,
             handler = placeholder!($msg),
             middleware = [$($mw),*]
+            $(, backpressure = [$bp])?
         )
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => $handler:expr) => {
+    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => $handler:expr $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_async_transform_typed!(
             input = exact($($in)+),
             output = $first,
@@ -1810,9 +1984,10 @@ macro_rules! __obzenflow_async_transform_exact_contract {
             name = $name,
             handler = $handler,
             middleware = []
+            $(, backpressure = [$bp])?
         )
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => $handler:expr, [$($mw:expr),*]) => {
+    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => $handler:expr, [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_async_transform_typed!(
             input = exact($($in)+),
             output = $first,
@@ -1820,9 +1995,10 @@ macro_rules! __obzenflow_async_transform_exact_contract {
             name = $name,
             handler = $handler,
             middleware = [$($mw),*]
+            $(, backpressure = [$bp])?
         )
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty, outputs: [$($member:ty),+ $(,)?] => placeholder!()) => {
+    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty, outputs: [$($member:ty),+ $(,)?] => placeholder!() $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_async_transform_typed!(
             input = exact($($in)+),
             output = $out,
@@ -1830,9 +2006,10 @@ macro_rules! __obzenflow_async_transform_exact_contract {
             name = $name,
             handler = placeholder!(),
             middleware = []
+            $(, backpressure = [$bp])?
         )
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty, outputs: [$($member:ty),+ $(,)?] => placeholder!($msg:expr)) => {
+    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty, outputs: [$($member:ty),+ $(,)?] => placeholder!($msg:expr) $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_async_transform_typed!(
             input = exact($($in)+),
             output = $out,
@@ -1840,9 +2017,10 @@ macro_rules! __obzenflow_async_transform_exact_contract {
             name = $name,
             handler = placeholder!($msg),
             middleware = []
+            $(, backpressure = [$bp])?
         )
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty, outputs: [$($member:ty),+ $(,)?] => placeholder!(), [$($mw:expr),*]) => {
+    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty, outputs: [$($member:ty),+ $(,)?] => placeholder!(), [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_async_transform_typed!(
             input = exact($($in)+),
             output = $out,
@@ -1850,9 +2028,10 @@ macro_rules! __obzenflow_async_transform_exact_contract {
             name = $name,
             handler = placeholder!(),
             middleware = [$($mw),*]
+            $(, backpressure = [$bp])?
         )
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty, outputs: [$($member:ty),+ $(,)?] => placeholder!($msg:expr), [$($mw:expr),*]) => {
+    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty, outputs: [$($member:ty),+ $(,)?] => placeholder!($msg:expr), [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_async_transform_typed!(
             input = exact($($in)+),
             output = $out,
@@ -1860,9 +2039,10 @@ macro_rules! __obzenflow_async_transform_exact_contract {
             name = $name,
             handler = placeholder!($msg),
             middleware = [$($mw),*]
+            $(, backpressure = [$bp])?
         )
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty, outputs: [$($member:ty),+ $(,)?] => $handler:expr) => {
+    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty, outputs: [$($member:ty),+ $(,)?] => $handler:expr $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_async_transform_typed!(
             input = exact($($in)+),
             output = $out,
@@ -1870,9 +2050,10 @@ macro_rules! __obzenflow_async_transform_exact_contract {
             name = $name,
             handler = $handler,
             middleware = []
+            $(, backpressure = [$bp])?
         )
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty, outputs: [$($member:ty),+ $(,)?] => $handler:expr, [$($mw:expr),*]) => {
+    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty, outputs: [$($member:ty),+ $(,)?] => $handler:expr, [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_async_transform_typed!(
             input = exact($($in)+),
             output = $out,
@@ -1880,60 +2061,67 @@ macro_rules! __obzenflow_async_transform_exact_contract {
             name = $name,
             handler = $handler,
             middleware = [$($mw),*]
+            $(, backpressure = [$bp])?
         )
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => placeholder!()) => {
+    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => placeholder!() $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_async_transform_typed!(
             input = exact($($in)+),
             output = $out,
             name = $name,
             handler = placeholder!(),
             middleware = []
+            $(, backpressure = [$bp])?
         )
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => placeholder!($msg:expr)) => {
+    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => placeholder!($msg:expr) $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_async_transform_typed!(
             input = exact($($in)+),
             output = $out,
             name = $name,
             handler = placeholder!($msg),
             middleware = []
+            $(, backpressure = [$bp])?
         )
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => placeholder!(), [$($mw:expr),*]) => {
+    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => placeholder!(), [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_async_transform_typed!(
             input = exact($($in)+),
             output = $out,
             name = $name,
             handler = placeholder!(),
             middleware = [$($mw),*]
+            $(, backpressure = [$bp])?
         )
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => placeholder!($msg:expr), [$($mw:expr),*]) => {
+    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => placeholder!($msg:expr), [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_async_transform_typed!(
             input = exact($($in)+),
             output = $out,
             name = $name,
             handler = placeholder!($msg),
             middleware = [$($mw),*]
+            $(, backpressure = [$bp])?
         )
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => $handler:expr) => {
+    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => $handler:expr $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_async_transform_typed!(
             input = exact($($in)+),
             output = $out,
             name = $name,
             handler = $handler,
             middleware = []
+            $(, backpressure = [$bp])?
         )
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => $handler:expr, [$($mw:expr),*]) => {
+    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => $handler:expr, [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_async_transform_typed!(
             input = exact($($in)+),
             output = $out,
             name = $name,
             handler = $handler,
             middleware = [$($mw),*]
+            $(, backpressure = [$bp])?
         )
     };
     (@collect name = $name:literal, in = ($($in:tt)*), $tok:tt $($rest:tt)+) => {
@@ -2085,7 +2273,7 @@ macro_rules! __obzenflow_effect_entries {
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __obzenflow_effectful_transform_untyped {
-    (name = $name:literal, handler = $handler:expr, effects = [$($effects:tt)*], middleware = [$($mw:expr),* $(,)?]) => {{
+    (name = $name:literal, handler = $handler:expr, effects = [$($effects:tt)*], middleware = [$($mw:expr),* $(,)?] $(, backpressure = [$($bp:expr)?])?) => {{
         use $crate::dsl::stage_descriptor::{EffectfulTransformDescriptor, StageDescriptor};
         let __middleware: Vec<Box<dyn ::obzenflow_adapters::middleware::MiddlewareFactory>> =
             vec![$(Box::new($mw)),*];
@@ -2105,6 +2293,12 @@ macro_rules! __obzenflow_effectful_transform_untyped {
             effect_policies: __obzenflow_attachments,
             synthesized_outcomes: Vec::new(),
             type_shaping_errors: Vec::new(),
+            backpressure: {
+                #[allow(unused_mut)]
+                let mut __bp: Option<$crate::dsl::backpressure_clause::BackpressureClause> = None;
+                $($( __bp = Some($bp); )?)?
+                __bp
+            },
         }) as Box<dyn StageDescriptor>
     }};
 }
@@ -2112,7 +2306,7 @@ macro_rules! __obzenflow_effectful_transform_untyped {
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __obzenflow_effectful_transform_typed {
-    (input = exact($in:ty), output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = $handler:expr, effects = [$($effects:tt)*], middleware = [$($mw:expr),* $(,)?]) => {{
+    (input = exact($in:ty), output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = $handler:expr, effects = [$($effects:tt)*], middleware = [$($mw:expr),* $(,)?] $(, backpressure = [$($bp:expr)?])?) => {{
         let __handler = $handler;
         fn __assert_effectful_contract<H>(_handler: &H)
         where
@@ -2131,10 +2325,11 @@ macro_rules! __obzenflow_effectful_transform_typed {
             handler = __handler,
             effects = [$($effects)*],
             middleware = [$($mw),*]
+            $(, backpressure = [$($bp)?])?
         );
         $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
     }};
-    (input = exact($in:ty), output = $out:ty, name = $name:literal, handler = $handler:expr, effects = [$($effects:tt)*], middleware = [$($mw:expr),* $(,)?]) => {{
+    (input = exact($in:ty), output = $out:ty, name = $name:literal, handler = $handler:expr, effects = [$($effects:tt)*], middleware = [$($mw:expr),* $(,)?] $(, backpressure = [$($bp:expr)?])?) => {{
         let __handler = $handler;
         fn __assert_effectful_contract<H>(_handler: &H)
         where
@@ -2152,6 +2347,7 @@ macro_rules! __obzenflow_effectful_transform_typed {
             handler = __handler,
             effects = [$($effects)*],
             middleware = [$($mw),*]
+            $(, backpressure = [$($bp)?])?
         );
         $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
     }};
@@ -2163,7 +2359,7 @@ macro_rules! __obzenflow_effectful_transform_exact_contract {
     (name = $name:literal, $($rest:tt)+) => {
         $crate::__obzenflow_effectful_transform_exact_contract!(@collect name = $name, in = (), $($rest)+)
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => $handler:expr, effects: [$($effects:tt)*], middleware: [$($mw:expr),* $(,)?] $(,)?) => {
+    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => $handler:expr, effects: [$($effects:tt)*], middleware: [$($mw:expr),* $(,)?] $(, backpressure: $bp:expr)? $(,)?) => {
         $crate::__obzenflow_effectful_transform_typed!(
             input = exact($($in)+),
             output = $first,
@@ -2172,9 +2368,10 @@ macro_rules! __obzenflow_effectful_transform_exact_contract {
             handler = $handler,
             effects = [$($effects)*],
             middleware = [$($mw),*]
+            $(, backpressure = [$bp])?
         )
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty, outputs: [$($member:ty),+ $(,)?] => $handler:expr, effects: [$($effects:tt)*], middleware: [$($mw:expr),* $(,)?] $(,)?) => {
+    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty, outputs: [$($member:ty),+ $(,)?] => $handler:expr, effects: [$($effects:tt)*], middleware: [$($mw:expr),* $(,)?] $(, backpressure: $bp:expr)? $(,)?) => {
         $crate::__obzenflow_effectful_transform_typed!(
             input = exact($($in)+),
             output = $out,
@@ -2183,9 +2380,10 @@ macro_rules! __obzenflow_effectful_transform_exact_contract {
             handler = $handler,
             effects = [$($effects)*],
             middleware = [$($mw),*]
+            $(, backpressure = [$bp])?
         )
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => $handler:expr, effects: [$($effects:tt)*], middleware: [$($mw:expr),* $(,)?] $(,)?) => {
+    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => $handler:expr, effects: [$($effects:tt)*], middleware: [$($mw:expr),* $(,)?] $(, backpressure: $bp:expr)? $(,)?) => {
         $crate::__obzenflow_effectful_transform_typed!(
             input = exact($($in)+),
             output = $out,
@@ -2193,6 +2391,7 @@ macro_rules! __obzenflow_effectful_transform_exact_contract {
             handler = $handler,
             effects = [$($effects)*],
             middleware = [$($mw),*]
+            $(, backpressure = [$bp])?
         )
     };
     (@collect name = $name:literal, in = ($($in:tt)*), $tok:tt $($rest:tt)+) => {
@@ -2588,18 +2787,30 @@ macro_rules! sink {
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __obzenflow_stateful_untyped {
-    (name = $name:literal, handler = $handler:expr, emit = none, middleware = [$($mw:expr),*]) => {{
+    (name = $name:literal, handler = $handler:expr, emit = none, middleware = [$($mw:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
         use $crate::dsl::stage_descriptor::StatefulDescriptor;
-        StatefulDescriptor::new($name, $handler)
-            $(.with_middleware($mw))*
-            .build()
+        let mut __desc = StatefulDescriptor::new($name, $handler)
+            $(.with_middleware($mw))*;
+        {
+            #[allow(unused_mut)]
+            let mut __bp: Option<$crate::dsl::backpressure_clause::BackpressureClause> = None;
+            $($( __bp = Some($bp); )?)?
+            __desc.backpressure = __bp;
+        }
+        __desc.build()
     }};
-    (name = $name:literal, handler = $handler:expr, emit = some($emit_interval:expr), middleware = [$($mw:expr),*]) => {{
+    (name = $name:literal, handler = $handler:expr, emit = some($emit_interval:expr), middleware = [$($mw:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
         use $crate::dsl::stage_descriptor::StatefulDescriptor;
-        StatefulDescriptor::new($name, $handler)
+        let mut __desc = StatefulDescriptor::new($name, $handler)
             .with_emit_interval($emit_interval)
-            $(.with_middleware($mw))*
-            .build()
+            $(.with_middleware($mw))*;
+        {
+            #[allow(unused_mut)]
+            let mut __bp: Option<$crate::dsl::backpressure_clause::BackpressureClause> = None;
+            $($( __bp = Some($bp); )?)?
+            __desc.backpressure = __bp;
+        }
+        __desc.build()
     }};
 }
 
@@ -2607,7 +2818,7 @@ macro_rules! __obzenflow_stateful_untyped {
 #[macro_export]
 macro_rules! __obzenflow_stateful_typed {
     // -- exact input, placeholder, explicit output contract, no emit --
-    (input = exact($in:ty), output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = placeholder!(), emit = none, middleware = [$($mw:expr),*]) => {{
+    (input = exact($in:ty), output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = placeholder!(), emit = none, middleware = [$($mw:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
         let __metadata = $crate::dsl::typing::StageTypingMetadata::stateful(
             $crate::dsl::typing::TypeHint::exact_payload::<$in>(),
             $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
@@ -2620,11 +2831,12 @@ macro_rules! __obzenflow_stateful_typed {
             handler = $crate::dsl::typing::PlaceholderStateful::<$in, $out>::new(None),
             emit = none,
             middleware = [$($mw),*]
+            $(, backpressure = [$($bp)?])?
         );
         $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
     }};
     // -- exact input, placeholder, explicit output contract, with emit --
-    (input = exact($in:ty), output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = placeholder!(), emit = some($emit_interval:expr), middleware = [$($mw:expr),*]) => {{
+    (input = exact($in:ty), output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = placeholder!(), emit = some($emit_interval:expr), middleware = [$($mw:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
         let __metadata = $crate::dsl::typing::StageTypingMetadata::stateful(
             $crate::dsl::typing::TypeHint::exact_payload::<$in>(),
             $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
@@ -2637,11 +2849,12 @@ macro_rules! __obzenflow_stateful_typed {
             handler = $crate::dsl::typing::PlaceholderStateful::<$in, $out>::new(None),
             emit = some($emit_interval),
             middleware = [$($mw),*]
+            $(, backpressure = [$($bp)?])?
         );
         $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
     }};
     // -- exact input, placeholder msg, explicit output contract, no emit --
-    (input = exact($in:ty), output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = placeholder!($msg:expr), emit = none, middleware = [$($mw:expr),*]) => {{
+    (input = exact($in:ty), output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = placeholder!($msg:expr), emit = none, middleware = [$($mw:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
         let __metadata = $crate::dsl::typing::StageTypingMetadata::stateful(
             $crate::dsl::typing::TypeHint::exact_payload::<$in>(),
             $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
@@ -2654,11 +2867,12 @@ macro_rules! __obzenflow_stateful_typed {
             handler = $crate::dsl::typing::PlaceholderStateful::<$in, $out>::new(Some($msg)),
             emit = none,
             middleware = [$($mw),*]
+            $(, backpressure = [$($bp)?])?
         );
         $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
     }};
     // -- exact input, placeholder msg, explicit output contract, with emit --
-    (input = exact($in:ty), output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = placeholder!($msg:expr), emit = some($emit_interval:expr), middleware = [$($mw:expr),*]) => {{
+    (input = exact($in:ty), output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = placeholder!($msg:expr), emit = some($emit_interval:expr), middleware = [$($mw:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
         let __metadata = $crate::dsl::typing::StageTypingMetadata::stateful(
             $crate::dsl::typing::TypeHint::exact_payload::<$in>(),
             $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
@@ -2671,11 +2885,12 @@ macro_rules! __obzenflow_stateful_typed {
             handler = $crate::dsl::typing::PlaceholderStateful::<$in, $out>::new(Some($msg)),
             emit = some($emit_interval),
             middleware = [$($mw),*]
+            $(, backpressure = [$($bp)?])?
         );
         $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
     }};
     // -- exact input, real handler, explicit output contract, no emit --
-    (input = exact($in:ty), output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = $handler:expr, emit = none, middleware = [$($mw:expr),*]) => {{
+    (input = exact($in:ty), output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = $handler:expr, emit = none, middleware = [$($mw:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
         let __handler = $handler;
         // FLOWIP-114c PR D: assert_stateful_contract dropped, see sink rationale.
         let __metadata = $crate::dsl::typing::StageTypingMetadata::stateful(
@@ -2685,11 +2900,11 @@ macro_rules! __obzenflow_stateful_typed {
             None,
         )
         .with_additional_output_contract($crate::__obzenflow_output_contract_members!($($member),+));
-        let __descriptor = $crate::__obzenflow_stateful_untyped!(name = $name, handler = __handler, emit = none, middleware = [$($mw),*]);
+        let __descriptor = $crate::__obzenflow_stateful_untyped!(name = $name, handler = __handler, emit = none, middleware = [$($mw),*] $(, backpressure = [$($bp)?])?);
         $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
     }};
     // -- exact input, real handler, explicit output contract, with emit --
-    (input = exact($in:ty), output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = $handler:expr, emit = some($emit_interval:expr), middleware = [$($mw:expr),*]) => {{
+    (input = exact($in:ty), output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = $handler:expr, emit = some($emit_interval:expr), middleware = [$($mw:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
         let __handler = $handler;
         // FLOWIP-114c PR D: assert_stateful_contract dropped, see sink rationale.
         let __metadata = $crate::dsl::typing::StageTypingMetadata::stateful(
@@ -2699,11 +2914,11 @@ macro_rules! __obzenflow_stateful_typed {
             None,
         )
         .with_additional_output_contract($crate::__obzenflow_output_contract_members!($($member),+));
-        let __descriptor = $crate::__obzenflow_stateful_untyped!(name = $name, handler = __handler, emit = some($emit_interval), middleware = [$($mw),*]);
+        let __descriptor = $crate::__obzenflow_stateful_untyped!(name = $name, handler = __handler, emit = some($emit_interval), middleware = [$($mw),*] $(, backpressure = [$($bp)?])?);
         $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
     }};
     // ── exact input, placeholder, no emit ──
-    (input = exact($in:ty), output = $out:ty, name = $name:literal, handler = placeholder!(), emit = none, middleware = [$($mw:expr),*]) => {{
+    (input = exact($in:ty), output = $out:ty, name = $name:literal, handler = placeholder!(), emit = none, middleware = [$($mw:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
         let __metadata = $crate::dsl::typing::StageTypingMetadata::stateful(
             $crate::dsl::typing::TypeHint::exact_payload::<$in>(),
             $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
@@ -2715,11 +2930,12 @@ macro_rules! __obzenflow_stateful_typed {
             handler = $crate::dsl::typing::PlaceholderStateful::<$in, $out>::new(None),
             emit = none,
             middleware = [$($mw),*]
+            $(, backpressure = [$($bp)?])?
         );
         $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
     }};
     // ── exact input, placeholder, with emit ──
-    (input = exact($in:ty), output = $out:ty, name = $name:literal, handler = placeholder!(), emit = some($emit_interval:expr), middleware = [$($mw:expr),*]) => {{
+    (input = exact($in:ty), output = $out:ty, name = $name:literal, handler = placeholder!(), emit = some($emit_interval:expr), middleware = [$($mw:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
         let __metadata = $crate::dsl::typing::StageTypingMetadata::stateful(
             $crate::dsl::typing::TypeHint::exact_payload::<$in>(),
             $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
@@ -2731,11 +2947,12 @@ macro_rules! __obzenflow_stateful_typed {
             handler = $crate::dsl::typing::PlaceholderStateful::<$in, $out>::new(None),
             emit = some($emit_interval),
             middleware = [$($mw),*]
+            $(, backpressure = [$($bp)?])?
         );
         $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
     }};
     // ── exact input, placeholder msg, no emit ──
-    (input = exact($in:ty), output = $out:ty, name = $name:literal, handler = placeholder!($msg:expr), emit = none, middleware = [$($mw:expr),*]) => {{
+    (input = exact($in:ty), output = $out:ty, name = $name:literal, handler = placeholder!($msg:expr), emit = none, middleware = [$($mw:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
         let __metadata = $crate::dsl::typing::StageTypingMetadata::stateful(
             $crate::dsl::typing::TypeHint::exact_payload::<$in>(),
             $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
@@ -2747,11 +2964,12 @@ macro_rules! __obzenflow_stateful_typed {
             handler = $crate::dsl::typing::PlaceholderStateful::<$in, $out>::new(Some($msg)),
             emit = none,
             middleware = [$($mw),*]
+            $(, backpressure = [$($bp)?])?
         );
         $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
     }};
     // ── exact input, placeholder msg, with emit ──
-    (input = exact($in:ty), output = $out:ty, name = $name:literal, handler = placeholder!($msg:expr), emit = some($emit_interval:expr), middleware = [$($mw:expr),*]) => {{
+    (input = exact($in:ty), output = $out:ty, name = $name:literal, handler = placeholder!($msg:expr), emit = some($emit_interval:expr), middleware = [$($mw:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
         let __metadata = $crate::dsl::typing::StageTypingMetadata::stateful(
             $crate::dsl::typing::TypeHint::exact_payload::<$in>(),
             $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
@@ -2763,11 +2981,12 @@ macro_rules! __obzenflow_stateful_typed {
             handler = $crate::dsl::typing::PlaceholderStateful::<$in, $out>::new(Some($msg)),
             emit = some($emit_interval),
             middleware = [$($mw),*]
+            $(, backpressure = [$($bp)?])?
         );
         $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
     }};
     // ── exact input, real handler, no emit ──
-    (input = exact($in:ty), output = $out:ty, name = $name:literal, handler = $handler:expr, emit = none, middleware = [$($mw:expr),*]) => {{
+    (input = exact($in:ty), output = $out:ty, name = $name:literal, handler = $handler:expr, emit = none, middleware = [$($mw:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
         let __handler = $handler;
         // FLOWIP-114c PR D: assert_stateful_contract dropped, see sink rationale.
         let __metadata = $crate::dsl::typing::StageTypingMetadata::stateful(
@@ -2776,11 +2995,11 @@ macro_rules! __obzenflow_stateful_typed {
             false,
             None,
         );
-        let __descriptor = $crate::__obzenflow_stateful_untyped!(name = $name, handler = __handler, emit = none, middleware = [$($mw),*]);
+        let __descriptor = $crate::__obzenflow_stateful_untyped!(name = $name, handler = __handler, emit = none, middleware = [$($mw),*] $(, backpressure = [$($bp)?])?);
         $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
     }};
     // ── exact input, real handler, with emit ──
-    (input = exact($in:ty), output = $out:ty, name = $name:literal, handler = $handler:expr, emit = some($emit_interval:expr), middleware = [$($mw:expr),*]) => {{
+    (input = exact($in:ty), output = $out:ty, name = $name:literal, handler = $handler:expr, emit = some($emit_interval:expr), middleware = [$($mw:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
         let __handler = $handler;
         // FLOWIP-114c PR D: assert_stateful_contract dropped, see sink rationale.
         let __metadata = $crate::dsl::typing::StageTypingMetadata::stateful(
@@ -2789,7 +3008,7 @@ macro_rules! __obzenflow_stateful_typed {
             false,
             None,
         );
-        let __descriptor = $crate::__obzenflow_stateful_untyped!(name = $name, handler = __handler, emit = some($emit_interval), middleware = [$($mw),*]);
+        let __descriptor = $crate::__obzenflow_stateful_untyped!(name = $name, handler = __handler, emit = some($emit_interval), middleware = [$($mw),*] $(, backpressure = [$($bp)?])?);
         $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
     }};
 }
@@ -2800,7 +3019,7 @@ macro_rules! __obzenflow_stateful_exact_contract {
     (name = $name:literal, $($rest:tt)+) => {
         $crate::__obzenflow_stateful_exact_contract!(@collect name = $name, in = (), $($rest)+)
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => placeholder!()) => {
+    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => placeholder!() $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_stateful_typed!(
             input = exact($($in)+),
             output = $first,
@@ -2809,9 +3028,10 @@ macro_rules! __obzenflow_stateful_exact_contract {
             handler = placeholder!(),
             emit = none,
             middleware = []
+            $(, backpressure = [$bp])?
         )
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => placeholder!($msg:expr)) => {
+    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => placeholder!($msg:expr) $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_stateful_typed!(
             input = exact($($in)+),
             output = $first,
@@ -2820,9 +3040,10 @@ macro_rules! __obzenflow_stateful_exact_contract {
             handler = placeholder!($msg),
             emit = none,
             middleware = []
+            $(, backpressure = [$bp])?
         )
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => placeholder!(), [$($mw:expr),*]) => {
+    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => placeholder!(), [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_stateful_typed!(
             input = exact($($in)+),
             output = $first,
@@ -2831,9 +3052,10 @@ macro_rules! __obzenflow_stateful_exact_contract {
             handler = placeholder!(),
             emit = none,
             middleware = [$($mw),*]
+            $(, backpressure = [$bp])?
         )
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => placeholder!($msg:expr), [$($mw:expr),*]) => {
+    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => placeholder!($msg:expr), [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_stateful_typed!(
             input = exact($($in)+),
             output = $first,
@@ -2842,9 +3064,10 @@ macro_rules! __obzenflow_stateful_exact_contract {
             handler = placeholder!($msg),
             emit = none,
             middleware = [$($mw),*]
+            $(, backpressure = [$bp])?
         )
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => placeholder!(), emit_interval = $emit_interval:expr) => {
+    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => placeholder!(), emit_interval = $emit_interval:expr $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_stateful_typed!(
             input = exact($($in)+),
             output = $first,
@@ -2853,9 +3076,10 @@ macro_rules! __obzenflow_stateful_exact_contract {
             handler = placeholder!(),
             emit = some($emit_interval),
             middleware = []
+            $(, backpressure = [$bp])?
         )
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => placeholder!($msg:expr), emit_interval = $emit_interval:expr) => {
+    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => placeholder!($msg:expr), emit_interval = $emit_interval:expr $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_stateful_typed!(
             input = exact($($in)+),
             output = $first,
@@ -2864,9 +3088,10 @@ macro_rules! __obzenflow_stateful_exact_contract {
             handler = placeholder!($msg),
             emit = some($emit_interval),
             middleware = []
+            $(, backpressure = [$bp])?
         )
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => placeholder!(), emit_interval = $emit_interval:expr, [$($mw:expr),*]) => {
+    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => placeholder!(), emit_interval = $emit_interval:expr, [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_stateful_typed!(
             input = exact($($in)+),
             output = $first,
@@ -2875,9 +3100,10 @@ macro_rules! __obzenflow_stateful_exact_contract {
             handler = placeholder!(),
             emit = some($emit_interval),
             middleware = [$($mw),*]
+            $(, backpressure = [$bp])?
         )
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => placeholder!($msg:expr), emit_interval = $emit_interval:expr, [$($mw:expr),*]) => {
+    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => placeholder!($msg:expr), emit_interval = $emit_interval:expr, [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_stateful_typed!(
             input = exact($($in)+),
             output = $first,
@@ -2886,9 +3112,10 @@ macro_rules! __obzenflow_stateful_exact_contract {
             handler = placeholder!($msg),
             emit = some($emit_interval),
             middleware = [$($mw),*]
+            $(, backpressure = [$bp])?
         )
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => $handler:expr) => {
+    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => $handler:expr $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_stateful_typed!(
             input = exact($($in)+),
             output = $first,
@@ -2897,9 +3124,10 @@ macro_rules! __obzenflow_stateful_exact_contract {
             handler = $handler,
             emit = none,
             middleware = []
+            $(, backpressure = [$bp])?
         )
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => $handler:expr, [$($mw:expr),*]) => {
+    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => $handler:expr, [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_stateful_typed!(
             input = exact($($in)+),
             output = $first,
@@ -2908,9 +3136,10 @@ macro_rules! __obzenflow_stateful_exact_contract {
             handler = $handler,
             emit = none,
             middleware = [$($mw),*]
+            $(, backpressure = [$bp])?
         )
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => $handler:expr, emit_interval = $emit_interval:expr) => {
+    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => $handler:expr, emit_interval = $emit_interval:expr $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_stateful_typed!(
             input = exact($($in)+),
             output = $first,
@@ -2919,9 +3148,10 @@ macro_rules! __obzenflow_stateful_exact_contract {
             handler = $handler,
             emit = some($emit_interval),
             middleware = []
+            $(, backpressure = [$bp])?
         )
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => $handler:expr, emit_interval = $emit_interval:expr, [$($mw:expr),*]) => {
+    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => $handler:expr, emit_interval = $emit_interval:expr, [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_stateful_typed!(
             input = exact($($in)+),
             output = $first,
@@ -2930,9 +3160,10 @@ macro_rules! __obzenflow_stateful_exact_contract {
             handler = $handler,
             emit = some($emit_interval),
             middleware = [$($mw),*]
+            $(, backpressure = [$bp])?
         )
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => placeholder!()) => {
+    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => placeholder!() $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_stateful_typed!(
             input = exact($($in)+),
             output = $out,
@@ -2940,9 +3171,10 @@ macro_rules! __obzenflow_stateful_exact_contract {
             handler = placeholder!(),
             emit = none,
             middleware = []
+            $(, backpressure = [$bp])?
         )
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => placeholder!($msg:expr)) => {
+    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => placeholder!($msg:expr) $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_stateful_typed!(
             input = exact($($in)+),
             output = $out,
@@ -2950,9 +3182,10 @@ macro_rules! __obzenflow_stateful_exact_contract {
             handler = placeholder!($msg),
             emit = none,
             middleware = []
+            $(, backpressure = [$bp])?
         )
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => placeholder!(), [$($mw:expr),*]) => {
+    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => placeholder!(), [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_stateful_typed!(
             input = exact($($in)+),
             output = $out,
@@ -2960,9 +3193,10 @@ macro_rules! __obzenflow_stateful_exact_contract {
             handler = placeholder!(),
             emit = none,
             middleware = [$($mw),*]
+            $(, backpressure = [$bp])?
         )
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => placeholder!($msg:expr), [$($mw:expr),*]) => {
+    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => placeholder!($msg:expr), [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_stateful_typed!(
             input = exact($($in)+),
             output = $out,
@@ -2970,9 +3204,10 @@ macro_rules! __obzenflow_stateful_exact_contract {
             handler = placeholder!($msg),
             emit = none,
             middleware = [$($mw),*]
+            $(, backpressure = [$bp])?
         )
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => placeholder!(), emit_interval = $emit_interval:expr) => {
+    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => placeholder!(), emit_interval = $emit_interval:expr $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_stateful_typed!(
             input = exact($($in)+),
             output = $out,
@@ -2980,9 +3215,10 @@ macro_rules! __obzenflow_stateful_exact_contract {
             handler = placeholder!(),
             emit = some($emit_interval),
             middleware = []
+            $(, backpressure = [$bp])?
         )
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => placeholder!($msg:expr), emit_interval = $emit_interval:expr) => {
+    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => placeholder!($msg:expr), emit_interval = $emit_interval:expr $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_stateful_typed!(
             input = exact($($in)+),
             output = $out,
@@ -2990,9 +3226,10 @@ macro_rules! __obzenflow_stateful_exact_contract {
             handler = placeholder!($msg),
             emit = some($emit_interval),
             middleware = []
+            $(, backpressure = [$bp])?
         )
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => placeholder!(), emit_interval = $emit_interval:expr, [$($mw:expr),*]) => {
+    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => placeholder!(), emit_interval = $emit_interval:expr, [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_stateful_typed!(
             input = exact($($in)+),
             output = $out,
@@ -3000,9 +3237,10 @@ macro_rules! __obzenflow_stateful_exact_contract {
             handler = placeholder!(),
             emit = some($emit_interval),
             middleware = [$($mw),*]
+            $(, backpressure = [$bp])?
         )
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => placeholder!($msg:expr), emit_interval = $emit_interval:expr, [$($mw:expr),*]) => {
+    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => placeholder!($msg:expr), emit_interval = $emit_interval:expr, [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_stateful_typed!(
             input = exact($($in)+),
             output = $out,
@@ -3010,9 +3248,10 @@ macro_rules! __obzenflow_stateful_exact_contract {
             handler = placeholder!($msg),
             emit = some($emit_interval),
             middleware = [$($mw),*]
+            $(, backpressure = [$bp])?
         )
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => $handler:expr) => {
+    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => $handler:expr $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_stateful_typed!(
             input = exact($($in)+),
             output = $out,
@@ -3020,9 +3259,10 @@ macro_rules! __obzenflow_stateful_exact_contract {
             handler = $handler,
             emit = none,
             middleware = []
+            $(, backpressure = [$bp])?
         )
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => $handler:expr, [$($mw:expr),*]) => {
+    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => $handler:expr, [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_stateful_typed!(
             input = exact($($in)+),
             output = $out,
@@ -3030,9 +3270,10 @@ macro_rules! __obzenflow_stateful_exact_contract {
             handler = $handler,
             emit = none,
             middleware = [$($mw),*]
+            $(, backpressure = [$bp])?
         )
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => $handler:expr, emit_interval = $emit_interval:expr) => {
+    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => $handler:expr, emit_interval = $emit_interval:expr $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_stateful_typed!(
             input = exact($($in)+),
             output = $out,
@@ -3040,9 +3281,10 @@ macro_rules! __obzenflow_stateful_exact_contract {
             handler = $handler,
             emit = some($emit_interval),
             middleware = []
+            $(, backpressure = [$bp])?
         )
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => $handler:expr, emit_interval = $emit_interval:expr, [$($mw:expr),*]) => {
+    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => $handler:expr, emit_interval = $emit_interval:expr, [$($mw:expr),*] $(, backpressure: $bp:expr)?) => {
         $crate::__obzenflow_stateful_typed!(
             input = exact($($in)+),
             output = $out,
@@ -3050,6 +3292,7 @@ macro_rules! __obzenflow_stateful_exact_contract {
             handler = $handler,
             emit = some($emit_interval),
             middleware = [$($mw),*]
+            $(, backpressure = [$bp])?
         )
     };
     (@collect name = $name:literal, in = ($($in:tt)*), $tok:tt $($rest:tt)+) => {
@@ -3090,27 +3333,39 @@ macro_rules! stateful {
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __obzenflow_effectful_stateful_untyped {
-    (name = $name:literal, handler = $handler:expr, emit = none, effects = [$($effects:tt)*], middleware = [$($mw:expr),* $(,)?]) => {{
+    (name = $name:literal, handler = $handler:expr, emit = none, effects = [$($effects:tt)*], middleware = [$($mw:expr),* $(,)?] $(, backpressure = [$($bp:expr)?])?) => {{
         use $crate::dsl::stage_descriptor::EffectfulStatefulDescriptor;
-        EffectfulStatefulDescriptor::new($name, $handler)
+        let mut __desc = EffectfulStatefulDescriptor::new($name, $handler)
             .with_effect_declarations($crate::__obzenflow_effect_declarations_vec!($($effects)*))
-            $(.with_middleware($mw))*
-            .build()
+            $(.with_middleware($mw))*;
+        {
+            #[allow(unused_mut)]
+            let mut __bp: Option<$crate::dsl::backpressure_clause::BackpressureClause> = None;
+            $($( __bp = Some($bp); )?)?
+            __desc.backpressure = __bp;
+        }
+        __desc.build()
     }};
-    (name = $name:literal, handler = $handler:expr, emit = some($emit_interval:expr), effects = [$($effects:tt)*], middleware = [$($mw:expr),* $(,)?]) => {{
+    (name = $name:literal, handler = $handler:expr, emit = some($emit_interval:expr), effects = [$($effects:tt)*], middleware = [$($mw:expr),* $(,)?] $(, backpressure = [$($bp:expr)?])?) => {{
         use $crate::dsl::stage_descriptor::EffectfulStatefulDescriptor;
-        EffectfulStatefulDescriptor::new($name, $handler)
+        let mut __desc = EffectfulStatefulDescriptor::new($name, $handler)
             .with_emit_interval($emit_interval)
             .with_effect_declarations($crate::__obzenflow_effect_declarations_vec!($($effects)*))
-            $(.with_middleware($mw))*
-            .build()
+            $(.with_middleware($mw))*;
+        {
+            #[allow(unused_mut)]
+            let mut __bp: Option<$crate::dsl::backpressure_clause::BackpressureClause> = None;
+            $($( __bp = Some($bp); )?)?
+            __desc.backpressure = __bp;
+        }
+        __desc.build()
     }};
 }
 
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __obzenflow_effectful_stateful_typed {
-    (input = exact($in:ty), output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = $handler:expr, emit = none, effects = [$($effects:tt)*], middleware = [$($mw:expr),* $(,)?]) => {{
+    (input = exact($in:ty), output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = $handler:expr, emit = none, effects = [$($effects:tt)*], middleware = [$($mw:expr),* $(,)?] $(, backpressure = [$($bp:expr)?])?) => {{
         let __handler = $handler;
         fn __assert_effectful_stateful_contract<H>(_handler: &H)
         where
@@ -3130,10 +3385,11 @@ macro_rules! __obzenflow_effectful_stateful_typed {
             emit = none,
             effects = [$($effects)*],
             middleware = [$($mw),*]
+            $(, backpressure = [$($bp)?])?
         );
         $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
     }};
-    (input = exact($in:ty), output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = $handler:expr, emit = some($emit_interval:expr), effects = [$($effects:tt)*], middleware = [$($mw:expr),* $(,)?]) => {{
+    (input = exact($in:ty), output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = $handler:expr, emit = some($emit_interval:expr), effects = [$($effects:tt)*], middleware = [$($mw:expr),* $(,)?] $(, backpressure = [$($bp:expr)?])?) => {{
         let __handler = $handler;
         fn __assert_effectful_stateful_contract<H>(_handler: &H)
         where
@@ -3153,10 +3409,11 @@ macro_rules! __obzenflow_effectful_stateful_typed {
             emit = some($emit_interval),
             effects = [$($effects)*],
             middleware = [$($mw),*]
+            $(, backpressure = [$($bp)?])?
         );
         $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
     }};
-    (input = exact($in:ty), output = $out:ty, name = $name:literal, handler = $handler:expr, emit = none, effects = [$($effects:tt)*], middleware = [$($mw:expr),* $(,)?]) => {{
+    (input = exact($in:ty), output = $out:ty, name = $name:literal, handler = $handler:expr, emit = none, effects = [$($effects:tt)*], middleware = [$($mw:expr),* $(,)?] $(, backpressure = [$($bp:expr)?])?) => {{
         let __handler = $handler;
         fn __assert_effectful_stateful_contract<H>(_handler: &H)
         where
@@ -3175,10 +3432,11 @@ macro_rules! __obzenflow_effectful_stateful_typed {
             emit = none,
             effects = [$($effects)*],
             middleware = [$($mw),*]
+            $(, backpressure = [$($bp)?])?
         );
         $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
     }};
-    (input = exact($in:ty), output = $out:ty, name = $name:literal, handler = $handler:expr, emit = some($emit_interval:expr), effects = [$($effects:tt)*], middleware = [$($mw:expr),* $(,)?]) => {{
+    (input = exact($in:ty), output = $out:ty, name = $name:literal, handler = $handler:expr, emit = some($emit_interval:expr), effects = [$($effects:tt)*], middleware = [$($mw:expr),* $(,)?] $(, backpressure = [$($bp:expr)?])?) => {{
         let __handler = $handler;
         fn __assert_effectful_stateful_contract<H>(_handler: &H)
         where
@@ -3197,6 +3455,7 @@ macro_rules! __obzenflow_effectful_stateful_typed {
             emit = some($emit_interval),
             effects = [$($effects)*],
             middleware = [$($mw),*]
+            $(, backpressure = [$($bp)?])?
         );
         $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
     }};
@@ -3208,7 +3467,7 @@ macro_rules! __obzenflow_effectful_stateful_exact_contract {
     (name = $name:literal, $($rest:tt)+) => {
         $crate::__obzenflow_effectful_stateful_exact_contract!(@collect name = $name, in = (), $($rest)+)
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => $handler:expr, effects: [$($effects:tt)*], middleware: [$($mw:expr),* $(,)?] $(,)?) => {
+    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => $handler:expr, effects: [$($effects:tt)*], middleware: [$($mw:expr),* $(,)?] $(, backpressure: $bp:expr)? $(,)?) => {
         $crate::__obzenflow_effectful_stateful_typed!(
             input = exact($($in)+),
             output = $first,
@@ -3218,9 +3477,10 @@ macro_rules! __obzenflow_effectful_stateful_exact_contract {
             emit = none,
             effects = [$($effects)*],
             middleware = [$($mw),*]
+            $(, backpressure = [$bp])?
         )
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => $handler:expr, emit_interval = $emit_interval:expr, effects: [$($effects:tt)*], middleware: [$($mw:expr),* $(,)?] $(,)?) => {
+    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => $handler:expr, emit_interval = $emit_interval:expr, effects: [$($effects:tt)*], middleware: [$($mw:expr),* $(,)?] $(, backpressure: $bp:expr)? $(,)?) => {
         $crate::__obzenflow_effectful_stateful_typed!(
             input = exact($($in)+),
             output = $first,
@@ -3230,9 +3490,10 @@ macro_rules! __obzenflow_effectful_stateful_exact_contract {
             emit = some($emit_interval),
             effects = [$($effects)*],
             middleware = [$($mw),*]
+            $(, backpressure = [$bp])?
         )
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => $handler:expr, effects: [$($effects:tt)*], middleware: [$($mw:expr),* $(,)?] $(,)?) => {
+    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => $handler:expr, effects: [$($effects:tt)*], middleware: [$($mw:expr),* $(,)?] $(, backpressure: $bp:expr)? $(,)?) => {
         $crate::__obzenflow_effectful_stateful_typed!(
             input = exact($($in)+),
             output = $out,
@@ -3241,9 +3502,10 @@ macro_rules! __obzenflow_effectful_stateful_exact_contract {
             emit = none,
             effects = [$($effects)*],
             middleware = [$($mw),*]
+            $(, backpressure = [$bp])?
         )
     };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => $handler:expr, emit_interval = $emit_interval:expr, effects: [$($effects:tt)*], middleware: [$($mw:expr),* $(,)?] $(,)?) => {
+    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => $handler:expr, emit_interval = $emit_interval:expr, effects: [$($effects:tt)*], middleware: [$($mw:expr),* $(,)?] $(, backpressure: $bp:expr)? $(,)?) => {
         $crate::__obzenflow_effectful_stateful_typed!(
             input = exact($($in)+),
             output = $out,
@@ -3252,6 +3514,7 @@ macro_rules! __obzenflow_effectful_stateful_exact_contract {
             emit = some($emit_interval),
             effects = [$($effects)*],
             middleware = [$($mw),*]
+            $(, backpressure = [$bp])?
         )
     };
     (@collect name = $name:literal, in = ($($in:tt)*), $tok:tt $($rest:tt)+) => {
@@ -5339,4 +5602,49 @@ macro_rules! ai_map_reduce {
             $($rest)+
         )
     };
+}
+
+#[cfg(test)]
+mod backpressure_clause_macro_tests {
+    use crate::dsl::backpressure_clause::enforced;
+
+    #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+    struct TestFact(u64);
+
+    impl obzenflow_core::TypedPayload for TestFact {
+        const EVENT_TYPE: &'static str = "bp_clause_test.fact";
+    }
+
+    #[test]
+    fn source_macro_accepts_backpressure_clause_end_to_end() {
+        // Full user-facing chain: source! -> typed -> untyped with the clause.
+        let descriptor = crate::source!(
+            name: "s",
+            TestFact => placeholder!(),
+            [],
+            backpressure: enforced(1000)
+        );
+        assert_eq!(descriptor.name(), "s");
+        assert!(
+            descriptor.backpressure_clause().is_some(),
+            "the clause survives the typing wrapper"
+        );
+        let inner = crate::__obzenflow_source_untyped!(
+            name = "s_inner",
+            handler = crate::dsl::typing::PlaceholderFiniteSource::<TestFact>::new(None),
+            middleware = [],
+            backpressure = [enforced(1000)]
+        );
+        assert!(inner.backpressure_clause().is_some());
+    }
+
+    #[test]
+    fn source_macro_without_clause_leaves_backpressure_none() {
+        let inner = crate::__obzenflow_source_untyped!(
+            name = "s_none",
+            handler = crate::dsl::typing::PlaceholderFiniteSource::<TestFact>::new(None),
+            middleware = []
+        );
+        assert!(inner.backpressure_clause().is_none());
+    }
 }

@@ -457,7 +457,7 @@ mod tests {
     fn factory_and_instance_kinds_agree() {
         use crate::middleware::control::rate_limiter::RateLimiterBuilder;
         use crate::middleware::control::ControlMiddlewareAggregator;
-        use crate::middleware::{backpressure::backpressure, MiddlewareFactory, MiddlewareKind};
+        use crate::middleware::{MiddlewareFactory, MiddlewareKind};
         use obzenflow_runtime::pipeline::config::StageConfig;
 
         let config = StageConfig {
@@ -480,7 +480,6 @@ mod tests {
                 MiddlewareKind::Policy,
                 false,
             ),
-            (backpressure(64), MiddlewareKind::Structural, true),
         ];
 
         for (factory, expected, supports_generic_create) in factories {

@@ -938,12 +938,6 @@ macro_rules! build_typed_flow {
                         }
                     }
                     match factory.plan_contribution() {
-                        // FLOWIP-115e: the factory route is dead; the
-                        // `backpressure:` clause declares the candidates.
-                        // The variant is deleted with the cleanup sweep.
-                        obzenflow_adapters::middleware::MiddlewarePlanContribution::Backpressure {
-                            ..
-                        } => {}
                         obzenflow_adapters::middleware::MiddlewarePlanContribution::CircuitBreaker {
                             threshold,
                         } => match scope {

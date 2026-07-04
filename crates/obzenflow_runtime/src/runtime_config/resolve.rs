@@ -446,8 +446,9 @@ mod tests {
 
     #[test]
     fn the_4a_worked_example_resolves_verbatim() {
-        // Flow declares backpressure(1000); `enricher` declares a deliberate
-        // backpressure(200) exception; a global file entry sets 500.
+        // The flow's `backpressure:` clause declares a DSL-tier window of
+        // 1000; `enricher` declares a deliberate 200 exception; a global
+        // file entry sets 500.
         let mut set = CandidateSet::default();
         admit(
             &mut set,
