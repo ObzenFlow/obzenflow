@@ -1418,8 +1418,14 @@ macro_rules! build_typed_flow {
                     .expect("name_to_id should contain stage ids");
                 let (mode, mode_source) =
                     __flow_effective.backpressure_mode_for(&from_key, &to_key);
-                match mode {
-                    BackpressureMode::Enforce => {
+                let up_scc = topology.scc_id(to_topology_id(up_id));
+                let cycle_internal =
+                    up_scc.is_some() && up_scc == topology.scc_id(to_topology_id(down_id));
+                use $crate::dsl::backpressure_clause::{
+                    resolve_edge_backpressure, EdgeBackpressure,
+                };
+                match resolve_edge_backpressure(mode, mode_source, cycle_internal) {
+                    EdgeBackpressure::Enforce => {
                         let window = __flow_effective
                             .backpressure_window_for(&from_key, &to_key)
                             .and_then(|resolved| resolved.value.as_u64())
@@ -1442,23 +1448,10 @@ macro_rules! build_typed_flow {
                             stall_timeout,
                         );
                     }
-                    BackpressureMode::Track => {
+                    EdgeBackpressure::Track => {
                         backpressure_plan = backpressure_plan.track_only_edge(up_id, down_id);
                     }
-                    BackpressureMode::Off => {
-                        let up_scc = topology.scc_id(to_topology_id(up_id));
-                        let cycle_internal = up_scc.is_some()
-                            && up_scc == topology.scc_id(to_topology_id(down_id));
-                        if cycle_internal
-                            && matches!(
-                                mode_source,
-                                obzenflow_core::config::ConfigSource::Default
-                            )
-                        {
-                            backpressure_plan =
-                                backpressure_plan.track_only_edge(up_id, down_id);
-                        }
-                    }
+                    EdgeBackpressure::Disabled => {}
                 }
             }
         }

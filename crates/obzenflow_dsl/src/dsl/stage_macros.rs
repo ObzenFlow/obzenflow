@@ -5647,4 +5647,25 @@ mod backpressure_clause_macro_tests {
         );
         assert!(inner.backpressure_clause().is_none());
     }
+
+    // The syntax-section forms: transform! with a clause and no middleware
+    // list, and stateful! likewise, must parse.
+    #[test]
+    fn transform_and_stateful_macros_accept_clause_without_middleware_list() {
+        use crate::dsl::backpressure_clause::{enforced_from_config, track_only};
+
+        let t = crate::transform!(
+            name: "t",
+            TestFact -> TestFact => placeholder!(),
+            backpressure: enforced_from_config()
+        );
+        assert!(t.backpressure_clause().is_some());
+
+        let s = crate::stateful!(
+            name: "st",
+            TestFact -> TestFact => placeholder!(),
+            backpressure: track_only()
+        );
+        assert!(s.backpressure_clause().is_some());
+    }
 }

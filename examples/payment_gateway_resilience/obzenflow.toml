@@ -1,0 +1,20 @@
+# FLOWIP-115e: backpressure is operator-owned runtime configuration, never
+# baked into the flow definition. The flow in flow.rs declares no backpressure;
+# enforcement, the credit window, and the stall ceiling all resolve from this
+# file, so an SRE tunes them per environment (or unsets them with mode = "off")
+# without touching a line of Rust. Omit these tables and backpressure defaults
+# to off for every edge.
+#
+# Ingress backpressure on the two order sources: block a source when the
+# validation stage falls a full window behind, and fail the stage into a
+# recorded `backpressure.stalled` fact if the stall outlives the ceiling.
+
+[runtime.backpressure.stages.web_orders]
+mode = "enforce"
+window = 1000
+stall_timeout_ms = 30000
+
+[runtime.backpressure.stages.store_orders]
+mode = "enforce"
+window = 1000
+stall_timeout_ms = 30000

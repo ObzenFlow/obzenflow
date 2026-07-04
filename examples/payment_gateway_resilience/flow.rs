@@ -54,16 +54,10 @@ use obzenflow::typed::sources as typed_sources;
 use obzenflow_adapters::middleware::circuit_breaker::{HalfOpenPolicy, OpenPolicy};
 use obzenflow_adapters::middleware::observability::{indicator, log, IndicatorKind};
 use obzenflow_adapters::middleware::{CircuitBreakerBuilder, RateLimiterBuilder};
-use obzenflow_dsl::backpressure::enforced;
 use obzenflow_dsl::{effectful_transform, flow, sink, source};
 use obzenflow_infra::journal::disk_journals;
 use std::num::NonZeroU32;
 
-const BACKPRESSURE_WINDOW: u64 = 1_000;
-// A stall detector, set well above normal backpressure duration; a wedged
-// downstream fails into a recorded `backpressure.stalled` fact at this
-// ceiling instead of hanging (FLOWIP-115e).
-const BACKPRESSURE_STALL_TIMEOUT_MS: u64 = 30_000;
 const SOURCE_RATE_LIMIT_EVENTS_PER_SECOND: f64 = 20.0;
 const SOURCE_RATE_LIMIT_BURST: f64 = 1.0;
 
@@ -167,8 +161,7 @@ pub fn build_flow() -> obzenflow_dsl::FlowDefinition {
                 RateLimiterBuilder::new(SOURCE_RATE_LIMIT_EVENTS_PER_SECOND)
                     .with_burst(SOURCE_RATE_LIMIT_BURST)
                     .build()
-            ], backpressure: enforced(BACKPRESSURE_WINDOW)
-                .stall_timeout_ms(BACKPRESSURE_STALL_TIMEOUT_MS));
+            ]);
             store_orders = source!(CustomerOrderPlaced => typed_sources::finite_from_fn(move |index| {
                 let order = scripted_store_orders.get(index).cloned();
                 if order.is_some() {
@@ -179,8 +172,7 @@ pub fn build_flow() -> obzenflow_dsl::FlowDefinition {
                 RateLimiterBuilder::new(SOURCE_RATE_LIMIT_EVENTS_PER_SECOND)
                     .with_burst(SOURCE_RATE_LIMIT_BURST)
                     .build()
-            ], backpressure: enforced(BACKPRESSURE_WINDOW)
-                .stall_timeout_ms(BACKPRESSURE_STALL_TIMEOUT_MS));
+            ]);
 
             // Local validation: deterministic checks with no external I/O,
             // classified exactly once by one multi-type stage. This is typed
@@ -197,9 +189,7 @@ pub fn build_flow() -> obzenflow_dsl::FlowDefinition {
                     OrderCancelled
                 } => validation::ValidateOrder,
                 effects: [],
-                middleware: [],
-                backpressure: enforced(BACKPRESSURE_WINDOW)
-                    .stall_timeout_ms(BACKPRESSURE_STALL_TIMEOUT_MS)
+                middleware: []
             );
 
             // Payment authorization: the only stage that touches the outside

@@ -543,6 +543,13 @@ impl CreditCheckingJournal {
             appended: Mutex::new(Vec::new()),
         }
     }
+
+    fn appended(&self) -> Vec<ChainEvent> {
+        self.appended
+            .lock()
+            .expect("CreditCheckingJournal: poisoned lock")
+            .clone()
+    }
 }
 
 #[async_trait]
@@ -1109,4 +1116,269 @@ async fn drain_one_pending_requeues_and_returns_backed_off_when_reserve_fails() 
     assert_eq!(outcome, DrainOutcome::BackedOff);
     assert_eq!(pending_outputs.len(), 1);
     assert_eq!(pending_outputs.front().expect("front").event.id, id);
+}
+
+// C7: reconstruction never blocks. A reconstruction-scoped output reserves in
+// track mode, so it commits with accounting advanced even at zero credit,
+// never anchors a stall episode, and authors no stall fact or poison EOF.
+async fn reconstruction_scoped_drain_commits_at_zero_credit(
+    scope: obzenflow_core::MiddlewareExecutionScope,
+) {
+    assert!(scope.is_deterministic_replay());
+
+    let mut builder = TopologyBuilder::new();
+    let s_top = builder.add_stage(Some("s".to_string()));
+    let d_top = builder.add_stage(Some("d".to_string()));
+    let topology = builder.build_unchecked().expect("topology");
+    let s = StageId::from_topology_id(s_top);
+    let d = StageId::from_topology_id(d_top);
+    let plan = BackpressurePlan::disabled().with_stage_enforced(
+        s,
+        NonZeroU64::new(1).expect("window"),
+        std::time::Duration::from_secs(30),
+    );
+    let registry = BackpressureRegistry::new(&topology, &plan);
+    let writer = registry.writer(s);
+
+    // Exhaust the single credit so a live output here would block.
+    writer.reserve(1).expect("seed reserve").commit(1);
+    assert_eq!(writer.min_downstream_credit(), 0);
+    assert_eq!(
+        registry.metrics_snapshot().stage_writer_seq.get(&s).copied(),
+        Some(1)
+    );
+
+    let flow_context = make_flow_context(
+        "flow",
+        "flow_id",
+        "stage",
+        s,
+        obzenflow_core::event::context::StageType::Transform,
+    );
+    let checking = Arc::new(CreditCheckingJournal::new(
+        JournalOwner::stage(s),
+        writer.clone(),
+        /* expected_credit_at_append */ 0,
+    ));
+    let data_journal: Arc<dyn Journal<ChainEvent>> = checking.clone();
+    let system_journal: Arc<dyn Journal<SystemEvent>> =
+        Arc::new(NoopJournal::new(JournalOwner::stage(s)));
+    let instrumentation = Arc::new(StageInstrumentation::new());
+    let mut pulse = BackpressureActivityPulse::new();
+    let mut stall: Option<tokio::time::Instant> = None;
+    let mut pending_outputs = VecDeque::new();
+    let output_contract = output_contract_for_event_type("x");
+
+    let outcome = drain_one_pending(
+        crate::stages::common::supervision::backpressure_drain::PendingOutput {
+            event: ChainEventFactory::data_event(WriterId::from(s), "x", json!({"n": 1})),
+            scope,
+        },
+        &flow_context,
+        s,
+        None,
+        &data_journal,
+        &system_journal,
+        None,
+        &instrumentation,
+        &writer,
+        &mut pulse,
+        &mut stall,
+        Some(&output_contract),
+        None,
+        &mut pending_outputs,
+    )
+    .await
+    .expect("reconstruction drain commits");
+
+    // Committed, not requeued, and no stall episode was anchored.
+    assert_eq!(outcome, DrainOutcome::Committed { was_data: true });
+    assert!(pending_outputs.is_empty(), "reconstruction never requeues");
+    assert!(stall.is_none(), "reconstruction anchors no stall episode");
+
+    // Accounting advanced past the window (track mode), so the resume handoff
+    // sees the true in-flight backlog.
+    assert_eq!(
+        registry.metrics_snapshot().stage_writer_seq.get(&s).copied(),
+        Some(2),
+        "track-mode accounting advances even past the window"
+    );
+
+    // Only the data event was authored: no `backpressure.stalled` fact and no
+    // poison EOF exist under a reconstruction scope.
+    let appended = checking.appended();
+    assert_eq!(appended.len(), 1, "exactly the data output");
+    for event in &appended {
+        assert!(
+            !matches!(
+                &event.content,
+                obzenflow_core::event::ChainEventContent::Observability(
+                    obzenflow_core::event::payloads::observability_payload::ObservabilityPayload::Middleware(
+                        obzenflow_core::event::payloads::observability_payload::MiddlewareLifecycle::Backpressure(
+                            obzenflow_core::event::payloads::observability_payload::BackpressureEvent::Stalled { .. }
+                        )
+                    )
+                )
+            ),
+            "no stall fact under reconstruction"
+        );
+        assert!(
+            !matches!(
+                &event.content,
+                obzenflow_core::event::ChainEventContent::FlowControl(
+                    obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload::Eof { .. }
+                )
+            ),
+            "no poison EOF under reconstruction"
+        );
+    }
+
+    // The gate is scope-driven, not credit-driven: a second reconstruction
+    // output at still-zero live credit also commits without blocking.
+    let outcome2 = drain_one_pending(
+        crate::stages::common::supervision::backpressure_drain::PendingOutput {
+            event: ChainEventFactory::data_event(WriterId::from(s), "x", json!({"n": 2})),
+            scope,
+        },
+        &flow_context,
+        s,
+        None,
+        &data_journal,
+        &system_journal,
+        None,
+        &instrumentation,
+        &writer,
+        &mut pulse,
+        &mut stall,
+        Some(&output_contract),
+        None,
+        &mut pending_outputs,
+    )
+    .await
+    .expect("second reconstruction drain commits");
+    assert_eq!(outcome2, DrainOutcome::Committed { was_data: true });
+}
+
+#[tokio::test]
+async fn strict_replay_scoped_drain_never_blocks() {
+    reconstruction_scoped_drain_commits_at_zero_credit(
+        obzenflow_core::MiddlewareExecutionScope::StrictReplayHandler,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn resume_catch_up_scoped_drain_never_blocks() {
+    reconstruction_scoped_drain_commits_at_zero_credit(
+        obzenflow_core::MiddlewareExecutionScope::ResumeHandler,
+    )
+    .await;
+}
+
+// C7 resume handoff: catch-up-era track-mode commits advance the writer past
+// the window, so the first live-scoped output gates on the true recorded
+// backlog and starts the stall clock there, not at the handoff.
+#[tokio::test]
+async fn resume_handoff_first_live_output_gates_on_catch_up_backlog() {
+    if BackpressureWriter::is_bypass_enabled() {
+        return;
+    }
+
+    let mut builder = TopologyBuilder::new();
+    let s_top = builder.add_stage(Some("s".to_string()));
+    let d_top = builder.add_stage(Some("d".to_string()));
+    let topology = builder.build_unchecked().expect("topology");
+    let s = StageId::from_topology_id(s_top);
+    let d = StageId::from_topology_id(d_top);
+    let plan = BackpressurePlan::disabled().with_stage_enforced(
+        s,
+        NonZeroU64::new(2).expect("window"),
+        std::time::Duration::from_secs(30),
+    );
+    let registry = BackpressureRegistry::new(&topology, &plan);
+    let writer = registry.writer(s);
+    let _reader = registry.reader(s, d);
+
+    let flow_context = make_flow_context(
+        "flow",
+        "flow_id",
+        "stage",
+        s,
+        obzenflow_core::event::context::StageType::Transform,
+    );
+    let data_journal: Arc<dyn Journal<ChainEvent>> =
+        Arc::new(NoopJournal::new(JournalOwner::stage(s)));
+    let system_journal: Arc<dyn Journal<SystemEvent>> =
+        Arc::new(NoopJournal::new(JournalOwner::stage(s)));
+    let instrumentation = Arc::new(StageInstrumentation::new());
+    let mut pulse = BackpressureActivityPulse::new();
+    let mut stall: Option<tokio::time::Instant> = None;
+    let mut pending_outputs = VecDeque::new();
+    let output_contract = output_contract_for_event_type("x");
+
+    // Catch-up: three recorded outputs commit in track mode with a downstream
+    // that never acks, building a backlog of 3 against a window of 2.
+    for n in 0..3 {
+        let outcome = drain_one_pending(
+            crate::stages::common::supervision::backpressure_drain::PendingOutput {
+                event: ChainEventFactory::data_event(WriterId::from(s), "x", json!({ "n": n })),
+                scope: obzenflow_core::MiddlewareExecutionScope::ResumeHandler,
+            },
+            &flow_context,
+            s,
+            None,
+            &data_journal,
+            &system_journal,
+            None,
+            &instrumentation,
+            &writer,
+            &mut pulse,
+            &mut stall,
+            Some(&output_contract),
+            None,
+            &mut pending_outputs,
+        )
+        .await
+        .expect("catch-up drain commits");
+        assert_eq!(outcome, DrainOutcome::Committed { was_data: true });
+    }
+    assert_eq!(
+        registry.metrics_snapshot().stage_writer_seq.get(&s).copied(),
+        Some(3),
+        "catch-up accounting reflects the recorded backlog"
+    );
+    assert!(stall.is_none(), "no stall episode during catch-up");
+
+    // Handoff: the first live output gates on the true backlog (3 in flight
+    // against a window of 2), returns BackedOff, and anchors the stall clock.
+    let outcome = drain_one_pending(
+        crate::stages::common::supervision::backpressure_drain::PendingOutput {
+            event: ChainEventFactory::data_event(WriterId::from(s), "x", json!({ "n": 99 })),
+            scope: obzenflow_core::MiddlewareExecutionScope::LiveHandler,
+        },
+        &flow_context,
+        s,
+        None,
+        &data_journal,
+        &system_journal,
+        None,
+        &instrumentation,
+        &writer,
+        &mut pulse,
+        &mut stall,
+        Some(&output_contract),
+        None,
+        &mut pending_outputs,
+    )
+    .await
+    .expect("handoff drain");
+    assert_eq!(
+        outcome,
+        DrainOutcome::BackedOff,
+        "the first live output gates on the catch-up backlog"
+    );
+    assert!(
+        stall.is_some(),
+        "the stall clock starts at the first live-scoped block, not the handoff"
+    );
 }

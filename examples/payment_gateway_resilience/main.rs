@@ -95,9 +95,17 @@ fn footer_for(outcome: RunPresentationOutcome) -> Footer {
 fn main() -> std::process::ExitCode {
     let presentation = Presentation::for_mode(banner_for).with_footer(footer_for);
 
+    // FLOWIP-115e: backpressure is operator-owned config, resolved from this
+    // file rather than declared in the flow. See obzenflow.toml.
+    let config_file = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/examples/payment_gateway_resilience/obzenflow.toml"
+    );
+
     let result = FlowApplication::builder()
         .with_log_level(LogLevel::Info)
         .with_presentation(presentation)
+        .with_config_file(config_file)
         .run_blocking(flow::build_flow());
 
     match result {
