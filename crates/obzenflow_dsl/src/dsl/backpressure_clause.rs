@@ -50,7 +50,7 @@ pub fn resolve_edge_backpressure(
 /// One stage's (or the flow's) backpressure declaration.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BackpressureClause {
-    mode: &'static str,
+    mode: BackpressureMode,
     window: Option<NonZeroU64>,
     stall_timeout_ms: Option<u64>,
 }
@@ -58,7 +58,7 @@ pub struct BackpressureClause {
 /// Enforce with a DSL-tier window default; config may override per scope.
 pub fn enforced(window: u64) -> BackpressureClause {
     BackpressureClause {
-        mode: "enforce",
+        mode: BackpressureMode::Enforce,
         window: Some(NonZeroU64::new(window).expect("window must be > 0")),
         stall_timeout_ms: None,
     }
@@ -68,7 +68,7 @@ pub fn enforced(window: u64) -> BackpressureClause {
 /// the window and stall timeout for the declaring scope's edges.
 pub fn enforced_from_config() -> BackpressureClause {
     BackpressureClause {
-        mode: "enforce",
+        mode: BackpressureMode::Enforce,
         window: None,
         stall_timeout_ms: None,
     }
@@ -77,7 +77,7 @@ pub fn enforced_from_config() -> BackpressureClause {
 /// Track in-flight accounting without ever blocking (window-free).
 pub fn track_only() -> BackpressureClause {
     BackpressureClause {
-        mode: "track",
+        mode: BackpressureMode::Track,
         window: None,
         stall_timeout_ms: None,
     }
@@ -86,7 +86,7 @@ pub fn track_only() -> BackpressureClause {
 /// Explicit off; pins a cycle-internal edge against the SCC auto-enable.
 pub fn off() -> BackpressureClause {
     BackpressureClause {
-        mode: "off",
+        mode: BackpressureMode::Off,
         window: None,
         stall_timeout_ms: None,
     }
@@ -105,7 +105,7 @@ impl BackpressureClause {
         candidates.declare(
             "runtime.backpressure.mode",
             scope.clone(),
-            ConfigValue::Text(self.mode.to_string()),
+            ConfigValue::Text(self.mode.as_token().to_string()),
         );
         if let Some(window) = self.window {
             candidates.declare(

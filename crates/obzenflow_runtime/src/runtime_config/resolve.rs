@@ -8,7 +8,7 @@
 
 use super::candidates::{CandidateSet, ConfigValue};
 use super::error::ConfigResolveError;
-use super::flow_view::{FlowEffectiveConfig, FlowResolutionContext};
+use super::flow_view::{BackpressureMode, FlowEffectiveConfig, FlowResolutionContext};
 use super::model::{Resolved, ResolvedRuntimeConfig};
 use super::schema::{knob_registry, EdgeEndpoint, KnobDefault, KnobSpec, KnobTarget};
 use obzenflow_core::config::{ConfigScope, ConfigSource, ConfigValueMeta};
@@ -313,8 +313,9 @@ pub fn materialize_flow_config(
             .get("runtime.backpressure.mode")
             .and_then(|per_scope| per_scope.get(&address))
             .and_then(|resolved| resolved.value.as_text())
-            .unwrap_or("off");
-        if mode == "enforce" {
+            .and_then(BackpressureMode::from_token)
+            .unwrap_or(BackpressureMode::Off);
+        if mode == BackpressureMode::Enforce {
             let point = ResolutionPoint::Edge {
                 upstream: upstream.clone(),
                 downstream: downstream.clone(),
@@ -344,10 +345,11 @@ pub fn materialize_flow_config(
             let warning = format!(
                 "config warning at runtime.backpressure.window: a window resolved for \
                  edge {}|>{} whose mode is '{}'; it has no effect until the mode \
-                 resolves to 'enforce'",
+                 resolves to '{}'",
                 upstream.as_str(),
                 downstream.as_str(),
-                mode
+                mode.as_token(),
+                BackpressureMode::Enforce.as_token()
             );
             tracing::warn!("{warning}");
             warnings.push(warning);

@@ -14,7 +14,7 @@ use crate::stages::common::supervision::suspension::suspend_until;
 use obzenflow_core::event::context::FlowContext;
 use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
 use obzenflow_core::event::payloads::observability_payload::{
-    BackpressureEvent, MiddlewareLifecycle, ObservabilityPayload,
+    BackpressureEvent, ObservabilityPayload,
 };
 use obzenflow_core::event::types::SeqNo;
 use obzenflow_core::event::{ChainEventFactory, EventEnvelope};
@@ -137,7 +137,6 @@ pub(crate) async fn drain_one_pending(
                 flow_context,
                 measured,
                 data_journal,
-                system_journal,
                 instrumentation,
                 backpressure_writer,
                 backpressure_pulse,
@@ -227,7 +226,6 @@ pub(crate) async fn drain_one_pending_resolve(
             stage_id,
             flow_context,
             data_journal,
-            system_journal,
             instrumentation,
             backpressure_writer,
             backpressure_pulse,
@@ -254,7 +252,6 @@ pub(crate) async fn drain_one_pending_resolve(
                     &detail,
                     elapsed,
                     data_journal,
-                    system_journal,
                     instrumentation,
                 )
                 .await;
@@ -317,7 +314,6 @@ async fn emit_bypass_pulse_if_needed(
     stage_id: StageId,
     flow_context: &FlowContext,
     data_journal: &Arc<dyn Journal<ChainEvent>>,
-    system_journal: &Arc<dyn Journal<obzenflow_core::event::SystemEvent>>,
     instrumentation: &Arc<StageInstrumentation>,
     backpressure_writer: &BackpressureWriter,
     backpressure_pulse: &mut BackpressureActivityPulse,
@@ -339,23 +335,16 @@ async fn emit_bypass_pulse_if_needed(
     if let Some(pulse) = backpressure_pulse.maybe_emit() {
         let event = ChainEventFactory::observability_event(
             WriterId::from(stage_id),
-            ObservabilityPayload::Middleware(MiddlewareLifecycle::Backpressure(pulse)),
+            ObservabilityPayload::Backpressure(pulse),
         )
         .with_flow_context(flow_context.clone())
         .with_runtime_context(instrumentation.snapshot_with_control());
 
-        match data_journal.append(event, None).await {
-            Ok(written) => {
-                crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
-                    &written,
-                    system_journal,
-                )
-                .await;
-            }
-            Err(e) => tracing::warn!(
+        if let Err(e) = data_journal.append(event, None).await {
+            tracing::warn!(
                 journal_error = %e,
                 "Failed to append backpressure activity pulse"
-            ),
+            );
         }
     }
 }
@@ -369,37 +358,27 @@ async fn emit_stalled_fact(
     detail: &LimitingEdgeDetail,
     elapsed: std::time::Duration,
     data_journal: &Arc<dyn Journal<ChainEvent>>,
-    system_journal: &Arc<dyn Journal<obzenflow_core::event::SystemEvent>>,
     instrumentation: &Arc<StageInstrumentation>,
 ) {
     let event = ChainEventFactory::observability_event(
         WriterId::from(stage_id),
-        ObservabilityPayload::Middleware(MiddlewareLifecycle::Backpressure(
-            BackpressureEvent::Stalled {
-                upstream: stage_id,
-                downstream: detail.downstream,
-                window: detail.window,
-                stall_timeout_ms: detail.stall_timeout.as_millis().min(u64::MAX as u128) as u64,
-                elapsed_ms: elapsed.as_millis().min(u64::MAX as u128) as u64,
-                in_flight: detail.in_flight,
-            },
-        )),
+        ObservabilityPayload::Backpressure(BackpressureEvent::Stalled {
+            upstream: stage_id,
+            downstream: detail.downstream,
+            window: detail.window,
+            stall_timeout_ms: detail.stall_timeout.as_millis().min(u64::MAX as u128) as u64,
+            elapsed_ms: elapsed.as_millis().min(u64::MAX as u128) as u64,
+            in_flight: detail.in_flight,
+        }),
     )
     .with_flow_context(flow_context.clone())
     .with_runtime_context(instrumentation.snapshot_with_control());
 
-    match data_journal.append(event, None).await {
-        Ok(written) => {
-            crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
-                &written,
-                system_journal,
-            )
-            .await;
-        }
-        Err(e) => tracing::warn!(
+    if let Err(e) = data_journal.append(event, None).await {
+        tracing::warn!(
             journal_error = %e,
             "Failed to append backpressure.stalled fact"
-        ),
+        );
     }
 }
 
@@ -444,14 +423,14 @@ async fn emit_poison_eof(
 /// Feed the blocked-state pulse after one chunk of the credit wait, with the
 /// measured blocked time (a wake can cut the bound short). The coalescer
 /// still emits at most one pulse per second. Shared by the sync drain and the
-/// async-source wait so both paths append and mirror identically.
-#[allow(clippy::too_many_arguments)]
+/// async-source wait so both paths append identically. Backpressure is not
+/// middleware (FLOWIP-115e), so the pulse rides the data journal only, never
+/// the middleware system-journal mirror.
 pub(crate) async fn emit_blocked_pulse(
     stage_id: StageId,
     flow_context: &FlowContext,
     measured: std::time::Duration,
     data_journal: &Arc<dyn Journal<ChainEvent>>,
-    system_journal: &Arc<dyn Journal<obzenflow_core::event::SystemEvent>>,
     instrumentation: &Arc<StageInstrumentation>,
     backpressure_writer: &BackpressureWriter,
     backpressure_pulse: &mut BackpressureActivityPulse,
@@ -465,23 +444,16 @@ pub(crate) async fn emit_blocked_pulse(
     if let Some(pulse) = backpressure_pulse.maybe_emit() {
         let event = ChainEventFactory::observability_event(
             WriterId::from(stage_id),
-            ObservabilityPayload::Middleware(MiddlewareLifecycle::Backpressure(pulse)),
+            ObservabilityPayload::Backpressure(pulse),
         )
         .with_flow_context(flow_context.clone())
         .with_runtime_context(instrumentation.snapshot_with_control());
 
-        match data_journal.append(event, None).await {
-            Ok(written) => {
-                crate::stages::common::middleware_mirror::mirror_middleware_event_to_system_journal(
-                    &written,
-                    system_journal,
-                )
-                .await;
-            }
-            Err(e) => tracing::warn!(
+        if let Err(e) = data_journal.append(event, None).await {
+            tracing::warn!(
                 journal_error = %e,
                 "Failed to append backpressure activity pulse"
-            ),
+            );
         }
     }
 }

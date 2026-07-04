@@ -1222,10 +1222,8 @@ async fn reconstruction_scoped_drain_commits_at_zero_credit(
             !matches!(
                 &event.content,
                 obzenflow_core::event::ChainEventContent::Observability(
-                    obzenflow_core::event::payloads::observability_payload::ObservabilityPayload::Middleware(
-                        obzenflow_core::event::payloads::observability_payload::MiddlewareLifecycle::Backpressure(
-                            obzenflow_core::event::payloads::observability_payload::BackpressureEvent::Stalled { .. }
-                        )
+                    obzenflow_core::event::payloads::observability_payload::ObservabilityPayload::Backpressure(
+                        obzenflow_core::event::payloads::observability_payload::BackpressureEvent::Stalled { .. }
                     )
                 )
             ),

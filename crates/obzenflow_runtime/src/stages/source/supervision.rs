@@ -378,7 +378,6 @@ where
                     stage_flow_context,
                     waited,
                     data_journal,
-                    system_journal,
                     instrumentation,
                     backpressure_writer,
                     backpressure_pulse,
@@ -459,82 +458,6 @@ mod tests {
             event: T,
             _parent: Option<&EventEnvelope<T>>,
         ) -> Result<EventEnvelope<T>, JournalError> {
-            Ok(EventEnvelope::new(JournalWriterId::new(), event))
-        }
-
-        async fn read_all_unordered(&self) -> Result<Vec<EventEnvelope<T>>, JournalError> {
-            Ok(Vec::new())
-        }
-
-        async fn read_event(
-            &self,
-            _event_id: &EventId,
-        ) -> Result<Option<EventEnvelope<T>>, JournalError> {
-            Ok(None)
-        }
-
-        async fn reader_from(
-            &self,
-            position: u64,
-        ) -> Result<Box<dyn JournalReader<T>>, JournalError> {
-            Ok(Box::new(EmptyReader {
-                position,
-                _phantom: PhantomData,
-            }))
-        }
-
-        async fn read_last_n(&self, _count: usize) -> Result<Vec<EventEnvelope<T>>, JournalError> {
-            Ok(Vec::new())
-        }
-    }
-
-    /// A journal that records appended events so a test can inspect what the
-    /// drain authored (the blocked pulse, in particular).
-    struct RecordingJournal<T> {
-        id: JournalId,
-        appended: std::sync::Mutex<Vec<T>>,
-        _phantom: PhantomData<T>,
-    }
-
-    impl<T: Clone> RecordingJournal<T> {
-        fn new() -> Self {
-            Self {
-                id: JournalId::new(),
-                appended: std::sync::Mutex::new(Vec::new()),
-                _phantom: PhantomData,
-            }
-        }
-
-        fn appended(&self) -> Vec<T> {
-            self.appended
-                .lock()
-                .expect("recording journal lock")
-                .clone()
-        }
-    }
-
-    #[async_trait]
-    impl<T> Journal<T> for RecordingJournal<T>
-    where
-        T: obzenflow_core::event::JournalEvent + Clone + 'static,
-    {
-        fn id(&self) -> &JournalId {
-            &self.id
-        }
-
-        fn owner(&self) -> Option<&obzenflow_core::JournalOwner> {
-            None
-        }
-
-        async fn append(
-            &self,
-            event: T,
-            _parent: Option<&EventEnvelope<T>>,
-        ) -> Result<EventEnvelope<T>, JournalError> {
-            self.appended
-                .lock()
-                .expect("recording journal lock")
-                .push(event.clone());
             Ok(EventEnvelope::new(JournalWriterId::new(), event))
         }
 
@@ -714,7 +637,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn async_source_blocked_wait_flushes_activity_pulse_to_journal() {
         use obzenflow_core::event::payloads::observability_payload::{
-            BackpressureEvent, MiddlewareLifecycle, ObservabilityPayload,
+            BackpressureEvent, ObservabilityPayload,
         };
 
         if BackpressureWriter::is_bypass_enabled() {
@@ -738,8 +661,8 @@ mod tests {
         writer.reserve(1).expect("reserve").commit(1);
         assert!(writer.reserve(1).is_none(), "credit should be 0");
 
-        let data_journal: Arc<RecordingJournal<ChainEvent>> = Arc::new(RecordingJournal::new());
-        let data_journal_dyn: Arc<dyn Journal<ChainEvent>> = data_journal.clone();
+        let data_journal: Arc<dyn Journal<ChainEvent>> =
+            Arc::new(crate::testing::MemoryJournal::new());
         let error_journal: Arc<dyn Journal<ChainEvent>> = Arc::new(NoopJournal::new());
         let system_journal: Arc<dyn Journal<SystemEvent>> = Arc::new(NoopJournal::new());
         let instrumentation = Arc::new(StageInstrumentation::new());
@@ -781,7 +704,7 @@ mod tests {
                 &stage_flow_context,
                 s,
                 None,
-                &data_journal_dyn,
+                &data_journal,
                 &error_journal,
                 &system_journal,
                 &instrumentation,
@@ -801,13 +724,15 @@ mod tests {
             );
         }
 
-        let has_pulse = data_journal.appended().iter().any(|event| {
+        let appended = data_journal
+            .read_all_unordered()
+            .await
+            .expect("read data journal");
+        let has_pulse = appended.iter().any(|envelope| {
             matches!(
-                &event.content,
+                &envelope.event.content,
                 obzenflow_core::event::ChainEventContent::Observability(
-                    ObservabilityPayload::Middleware(MiddlewareLifecycle::Backpressure(
-                        BackpressureEvent::ActivityPulse { .. }
-                    ))
+                    ObservabilityPayload::Backpressure(BackpressureEvent::ActivityPulse { .. })
                 )
             )
         });

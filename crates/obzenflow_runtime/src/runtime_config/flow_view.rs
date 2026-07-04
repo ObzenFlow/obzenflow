@@ -24,13 +24,29 @@ pub enum BackpressureMode {
 }
 
 impl BackpressureMode {
-    fn from_token(token: &str) -> Self {
-        match token {
-            "off" => Self::Off,
-            "track" => Self::Track,
-            "enforce" => Self::Enforce,
-            other => unreachable!("mode token validated at admission: {other}"),
+    /// The single source of truth for the wire tokens the
+    /// `runtime.backpressure.mode` knob carries. Everything else (the Token
+    /// knob's allowed set, the resolver, the DSL clause) derives from here.
+    pub const fn as_token(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Track => "track",
+            Self::Enforce => "enforce",
         }
+    }
+
+    /// The valid tokens for the Token knob, in schema order.
+    pub const TOKENS: &'static [&'static str] = &[
+        Self::Off.as_token(),
+        Self::Track.as_token(),
+        Self::Enforce.as_token(),
+    ];
+
+    /// Parse a resolved token; `None` if it is not a known mode.
+    pub fn from_token(token: &str) -> Option<Self> {
+        [Self::Off, Self::Track, Self::Enforce]
+            .into_iter()
+            .find(|mode| mode.as_token() == token)
     }
 }
 
@@ -167,12 +183,11 @@ impl FlowEffectiveConfig {
             },
         )
         .and_then(|resolved| {
-            resolved.value.as_text().map(|token| {
-                (
-                    BackpressureMode::from_token(token),
-                    resolved.meta.source.clone(),
-                )
-            })
+            resolved
+                .value
+                .as_text()
+                .and_then(BackpressureMode::from_token)
+                .map(|mode| (mode, resolved.meta.source.clone()))
         })
         .unwrap_or((BackpressureMode::Off, ConfigSource::Default))
     }

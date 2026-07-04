@@ -407,9 +407,7 @@ pub(crate) fn is_framework_middleware_observability_event(event: &ChainEvent) ->
     matches!(
         &event.content,
         ChainEventContent::Observability(ObservabilityPayload::Middleware(
-            MiddlewareLifecycle::CircuitBreaker(_)
-                | MiddlewareLifecycle::RateLimiter(_)
-                | MiddlewareLifecycle::Backpressure(_)
+            MiddlewareLifecycle::CircuitBreaker(_) | MiddlewareLifecycle::RateLimiter(_)
         ))
     )
 }

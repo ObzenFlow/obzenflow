@@ -797,20 +797,18 @@ async fn wedged_downstream_authors_stalled_fact_and_fails_stage() {
         .iter()
         .find_map(|envelope| {
             use obzenflow_core::event::payloads::observability_payload::{
-                BackpressureEvent, MiddlewareLifecycle, ObservabilityPayload,
+                BackpressureEvent, ObservabilityPayload,
             };
             match &envelope.event.content {
                 obzenflow_core::event::ChainEventContent::Observability(
-                    ObservabilityPayload::Middleware(MiddlewareLifecycle::Backpressure(
-                        BackpressureEvent::Stalled {
-                            upstream,
-                            downstream,
-                            window,
-                            stall_timeout_ms,
-                            elapsed_ms,
-                            in_flight,
-                        },
-                    )),
+                    ObservabilityPayload::Backpressure(BackpressureEvent::Stalled {
+                        upstream,
+                        downstream,
+                        window,
+                        stall_timeout_ms,
+                        elapsed_ms,
+                        in_flight,
+                    }),
                 ) => Some((
                     *upstream,
                     *downstream,

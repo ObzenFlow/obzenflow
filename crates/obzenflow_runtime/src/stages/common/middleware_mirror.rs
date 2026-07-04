@@ -3,8 +3,7 @@
 // https://obzenflow.dev
 
 use obzenflow_core::event::payloads::observability_payload::{
-    BackpressureEvent, CircuitBreakerEvent, MiddlewareLifecycle, ObservabilityPayload,
-    RateLimiterEvent,
+    CircuitBreakerEvent, MiddlewareLifecycle, ObservabilityPayload, RateLimiterEvent,
 };
 use obzenflow_core::event::types::SeqNo;
 use obzenflow_core::event::{ChainEventContent, SystemEvent, SystemEventType, WriterId};
@@ -45,12 +44,6 @@ pub async fn mirror_middleware_event_to_system_journal(
                 RateLimiterEvent::ActivityPulse { .. }
                     | RateLimiterEvent::ModeChange { .. }
                     | RateLimiterEvent::WindowUtilization { .. }
-            )
-        }
-        MiddlewareLifecycle::Backpressure(bp) => {
-            matches!(
-                bp,
-                BackpressureEvent::ActivityPulse { .. } | BackpressureEvent::Stalled { .. }
             )
         }
         _ => false,

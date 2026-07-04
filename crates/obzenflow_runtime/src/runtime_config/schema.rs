@@ -10,6 +10,7 @@
 //! window downstream.
 
 use super::candidates::ConfigValue;
+use super::flow_view::BackpressureMode;
 
 /// The most specific scope a knob admits. The stage rung of an edge-target
 /// knob binds to one endpoint (§4c; backpressure binds upstream, matching
@@ -148,7 +149,6 @@ pub fn canonical_env_name(key_path: &str) -> String {
 
 const TOKENS_STRICT_MODE: &[&str] = &["abort", "warn"];
 const TOKENS_AI_PROVIDER: &[&str] = &["ollama", "openai", "openai_compatible"];
-pub const TOKENS_BACKPRESSURE_MODE: &[&str] = &["off", "track", "enforce"];
 
 /// The first-pass registry: consumers-only namespaces (FLOWIP-010
 /// implementation shape). Sorted by key path; a unit test enforces it.
@@ -248,7 +248,7 @@ pub fn knob_registry() -> &'static [KnobSpec] {
                 key_path: "runtime.backpressure.mode",
                 file_path: None,
                 value_type: KnobType::Token {
-                    allowed: TOKENS_BACKPRESSURE_MODE,
+                    allowed: BackpressureMode::TOKENS,
                 },
                 target: KnobTarget::Edge {
                     stage_binding: EdgeEndpoint::Upstream,
@@ -257,7 +257,9 @@ pub fn knob_registry() -> &'static [KnobSpec] {
                 // window + stall timeout are required where `enforce` resolves
                 // (the FLOWIP-115e materialization pass, not a registry
                 // Required).
-                default: KnobDefault::Value(ConfigValue::Text("off".to_string())),
+                default: KnobDefault::Value(ConfigValue::Text(
+                    BackpressureMode::Off.as_token().to_string(),
+                )),
                 mutability: Mutability::Restartful,
                 redaction: Redaction::Plain,
                 env: EnvBinding::Canonical,

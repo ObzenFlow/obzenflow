@@ -26,6 +26,12 @@ pub enum ObservabilityPayload {
     Stage(StageLifecycle),
     Metrics(MetricsLifecycle),
     Middleware(MiddlewareLifecycle),
+    /// Runtime flow-control observability (FLOWIP-115e). Backpressure is not
+    /// middleware, so its pulses and stall facts are a sibling of
+    /// `Middleware`, never nested under it: the middleware machinery
+    /// (system-journal mirror, framework-middleware classifier) matches only
+    /// `Middleware(..)` and structurally never sees these rows.
+    Backpressure(BackpressureEvent),
 }
 
 // =============================================================================
@@ -111,7 +117,6 @@ pub enum MetricsLifecycle {
 pub enum MiddlewareLifecycle {
     CircuitBreaker(CircuitBreakerEvent),
     RateLimiter(RateLimiterEvent),
-    Backpressure(BackpressureEvent),
     Retry(RetryEvent),
     /// One per-execution service-level-indicator sample (FLOWIP-115f).
     ///
