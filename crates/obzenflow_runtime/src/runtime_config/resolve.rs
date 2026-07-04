@@ -61,6 +61,18 @@ impl ResolutionPoint {
     }
 }
 
+/// Specificity rank of a resolved value's winning scope, coarsest first. Used
+/// to tell an inherited default (broader) from an override (more specific)
+/// when deciding whether a shadowed value is stray config or intentional.
+fn scope_rank(scope: &ConfigScope) -> u8 {
+    match scope {
+        ConfigScope::Global => 0,
+        ConfigScope::Flow => 1,
+        ConfigScope::Stage { .. } => 2,
+        ConfigScope::Edge { .. } => 3,
+    }
+}
+
 /// The scope ladder for one knob at one point, most to least specific
 /// (§2 lock; §4c for edge-target knobs, whose stage rung binds one
 /// endpoint).
@@ -231,6 +243,7 @@ pub fn materialize_flow_config(
                         return Err(ConfigResolveError::UnknownStage {
                             key_path: spec.key_path.to_string(),
                             stage: stage.as_str().to_string(),
+                            known: ctx.stages.iter().map(|s| s.as_str().to_string()).collect(),
                         });
                     }
                     // §4c fan-in footgun: the stage rung of an edge-target
@@ -258,6 +271,11 @@ pub fn materialize_flow_config(
                             key_path: spec.key_path.to_string(),
                             upstream: upstream.as_str().to_string(),
                             downstream: downstream.as_str().to_string(),
+                            known: ctx
+                                .edges
+                                .iter()
+                                .map(|(up, down)| format!("{}|>{}", up.as_str(), down.as_str()))
+                                .collect(),
                         });
                     }
                 }
@@ -309,9 +327,10 @@ pub fn materialize_flow_config(
             upstream: upstream.clone(),
             downstream: downstream.clone(),
         };
-        let mode = values
+        let mode_resolved = values
             .get("runtime.backpressure.mode")
-            .and_then(|per_scope| per_scope.get(&address))
+            .and_then(|per_scope| per_scope.get(&address));
+        let mode = mode_resolved
             .and_then(|resolved| resolved.value.as_text())
             .and_then(BackpressureMode::from_token)
             .unwrap_or(BackpressureMode::Off);
@@ -337,22 +356,30 @@ pub fn materialize_flow_config(
                     });
                 }
             }
-        } else if values
+        } else if let Some(window_resolved) = values
             .get("runtime.backpressure.window")
             .and_then(|per_scope| per_scope.get(&address))
-            .is_some()
         {
-            let warning = format!(
-                "config warning at runtime.backpressure.window: a window resolved for \
-                 edge {}|>{} whose mode is '{}'; it has no effect until the mode \
-                 resolves to '{}'",
-                upstream.as_str(),
-                downstream.as_str(),
-                mode.as_token(),
-                BackpressureMode::Enforce.as_token()
-            );
-            tracing::warn!("{warning}");
-            warnings.push(warning);
+            // A window resolved on a non-enforce edge governs nothing, but that
+            // is only a mistake worth flagging for stray config authored at or
+            // below the mode's scope. A flow- or global-wide window that a
+            // more-specific override turned off or track is intentional
+            // layering, so suppress the warning there.
+            let window_rank = scope_rank(&window_resolved.meta.scope);
+            let mode_rank = mode_resolved.map_or(0, |resolved| scope_rank(&resolved.meta.scope));
+            if window_rank >= mode_rank {
+                let warning = format!(
+                    "config warning at runtime.backpressure.window: a window resolved for \
+                     edge {}|>{} whose mode is '{}'; it has no effect until the mode \
+                     resolves to '{}'",
+                    upstream.as_str(),
+                    downstream.as_str(),
+                    mode.as_token(),
+                    BackpressureMode::Enforce.as_token()
+                );
+                tracing::warn!("{warning}");
+                warnings.push(warning);
+            }
         }
     }
 
@@ -801,6 +828,87 @@ mod tests {
                 .iter()
                 .any(|warning| warning.contains("has no effect") && warning.contains("src|>sink")),
             "off-with-window diagnostic expected: {:?}",
+            effective.warnings()
+        );
+    }
+
+    #[test]
+    fn an_inherited_window_shadowed_by_a_more_specific_off_draws_no_warning() {
+        // A flow-wide enforce policy with a stage that overrides mode=off. The
+        // inherited window governs nothing on that stage's edges, but the
+        // override is intentional layering, not stray config, so no warning
+        // fires. This is the common authoring shape: one flow default, sparse
+        // per-stage exceptions.
+        let mut set = CandidateSet::default();
+        admit(
+            &mut set,
+            "runtime.backpressure.mode",
+            ConfigScope::Flow,
+            ConfigSource::File,
+            ConfigValue::Text("enforce".to_string()),
+        );
+        admit(
+            &mut set,
+            "runtime.backpressure.window",
+            ConfigScope::Flow,
+            ConfigSource::File,
+            ConfigValue::U64(1000),
+        );
+        admit(
+            &mut set,
+            "runtime.backpressure.stall_timeout_ms",
+            ConfigScope::Flow,
+            ConfigSource::File,
+            ConfigValue::U64(30_000),
+        );
+        // `src` (the writing endpoint of the only edge) turns its outgoing
+        // edges off; the flow window is inherited but shadowed.
+        admit(
+            &mut set,
+            "runtime.backpressure.mode",
+            ConfigScope::stage("src"),
+            ConfigSource::File,
+            ConfigValue::Text("off".to_string()),
+        );
+        let snapshot = ResolvedRuntimeConfig::new(set);
+        let effective = materialize_flow_config(&snapshot, one_edge_ctx()).unwrap();
+        let (mode, _) =
+            effective.backpressure_mode_for(&StageKey::from("src"), &StageKey::from("sink"));
+        assert_eq!(mode, crate::runtime_config::BackpressureMode::Off);
+        assert!(
+            effective.warnings().is_empty(),
+            "an inherited window shadowed by a more-specific off must not warn: {:?}",
+            effective.warnings()
+        );
+    }
+
+    #[test]
+    fn a_window_authored_at_the_same_scope_as_off_still_warns() {
+        // Contrast to the inherited case: a window and an off mode authored at
+        // the same stage scope is stray config, so the diagnostic still fires.
+        let mut set = CandidateSet::default();
+        admit(
+            &mut set,
+            "runtime.backpressure.mode",
+            ConfigScope::stage("src"),
+            ConfigSource::File,
+            ConfigValue::Text("off".to_string()),
+        );
+        admit(
+            &mut set,
+            "runtime.backpressure.window",
+            ConfigScope::stage("src"),
+            ConfigSource::File,
+            ConfigValue::U64(500),
+        );
+        let snapshot = ResolvedRuntimeConfig::new(set);
+        let effective = materialize_flow_config(&snapshot, one_edge_ctx()).unwrap();
+        assert!(
+            effective
+                .warnings()
+                .iter()
+                .any(|warning| warning.contains("has no effect") && warning.contains("src|>sink")),
+            "same-scope window+off is stray config and must warn: {:?}",
             effective.warnings()
         );
     }

@@ -18,7 +18,6 @@
 pub mod delivered_order;
 pub mod flow_test_harness;
 pub mod journal_snapshot;
-pub mod memory_journal;
 pub mod metrics_barrier;
 pub mod probe;
 pub mod stage_journal;
@@ -31,7 +30,6 @@ pub use journal_snapshot::{
     JournalExpectation, JournalExpectationError, JournalOrder, JournalSnapshot, ParentEventId,
     ParentSelector, SequenceMatchMode,
 };
-pub use memory_journal::MemoryJournal;
 pub use metrics_barrier::{MetricsBarrier, MetricsBarrierError};
 pub use probe::{JournalProbe, JournalProbeError, JournalProbeEvent};
 pub use stage_journal::StageJournalLookupError;

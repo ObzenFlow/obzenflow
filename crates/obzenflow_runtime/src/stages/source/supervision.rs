@@ -487,6 +487,81 @@ mod tests {
         }
     }
 
+    // Test-local double for the `Journal<T>` port: retains appended events so
+    // a test can read them back through the trait. Not an infra adapter, not
+    // exported. Consolidating these doubles codebase-wide is FLOWIP-114t.
+    struct RecordingJournal<T: obzenflow_core::event::JournalEvent> {
+        id: JournalId,
+        events: std::sync::Mutex<Vec<EventEnvelope<T>>>,
+        _phantom: PhantomData<T>,
+    }
+
+    impl<T: obzenflow_core::event::JournalEvent> RecordingJournal<T> {
+        fn new() -> Self {
+            Self {
+                id: JournalId::new(),
+                events: std::sync::Mutex::new(Vec::new()),
+                _phantom: PhantomData,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl<T> Journal<T> for RecordingJournal<T>
+    where
+        T: obzenflow_core::event::JournalEvent + Clone + 'static,
+    {
+        fn id(&self) -> &JournalId {
+            &self.id
+        }
+
+        fn owner(&self) -> Option<&obzenflow_core::JournalOwner> {
+            None
+        }
+
+        async fn append(
+            &self,
+            event: T,
+            _parent: Option<&EventEnvelope<T>>,
+        ) -> Result<EventEnvelope<T>, JournalError> {
+            let envelope = EventEnvelope::new(JournalWriterId::new(), event);
+            self.events
+                .lock()
+                .expect("RecordingJournal: poisoned lock")
+                .push(envelope.clone());
+            Ok(envelope)
+        }
+
+        async fn read_all_unordered(&self) -> Result<Vec<EventEnvelope<T>>, JournalError> {
+            Ok(self
+                .events
+                .lock()
+                .expect("RecordingJournal: poisoned lock")
+                .clone())
+        }
+
+        async fn read_event(
+            &self,
+            _event_id: &EventId,
+        ) -> Result<Option<EventEnvelope<T>>, JournalError> {
+            Ok(None)
+        }
+
+        async fn reader_from(
+            &self,
+            position: u64,
+        ) -> Result<Box<dyn JournalReader<T>>, JournalError> {
+            Ok(Box::new(EmptyReader {
+                position,
+                _phantom: PhantomData,
+            }))
+        }
+
+        async fn read_last_n(&self, _count: usize) -> Result<Vec<EventEnvelope<T>>, JournalError> {
+            Ok(Vec::new())
+        }
+    }
+
     #[derive(Debug)]
     enum TestEvent {
         BeginDrain,
@@ -661,8 +736,7 @@ mod tests {
         writer.reserve(1).expect("reserve").commit(1);
         assert!(writer.reserve(1).is_none(), "credit should be 0");
 
-        let data_journal: Arc<dyn Journal<ChainEvent>> =
-            Arc::new(crate::testing::MemoryJournal::new());
+        let data_journal: Arc<dyn Journal<ChainEvent>> = Arc::new(RecordingJournal::new());
         let error_journal: Arc<dyn Journal<ChainEvent>> = Arc::new(NoopJournal::new());
         let system_journal: Arc<dyn Journal<SystemEvent>> = Arc::new(NoopJournal::new());
         let instrumentation = Arc::new(StageInstrumentation::new());
