@@ -763,7 +763,7 @@ async fn fan_out_trickle_acks_never_reset_the_stall_deadline() {
             iterations < 400,
             "stall never fired: spurious wakes must not reset the anchored deadline"
         );
-        if iterations % 4 == 0 {
+        if iterations.is_multiple_of(4) {
             // Healthy-edge ack: a spurious wake, since k2 stays at zero credit.
             healthy_reader.ack_consumed(1);
         }
@@ -1128,10 +1128,11 @@ async fn reconstruction_scoped_drain_commits_at_zero_credit(
 
     let mut builder = TopologyBuilder::new();
     let s_top = builder.add_stage(Some("s".to_string()));
-    let d_top = builder.add_stage(Some("d".to_string()));
+    // The downstream stage exists only to give `s` an outgoing edge for
+    // backpressure to gate; its id is never needed here.
+    builder.add_stage(Some("d".to_string()));
     let topology = builder.build_unchecked().expect("topology");
     let s = StageId::from_topology_id(s_top);
-    let d = StageId::from_topology_id(d_top);
     let plan = BackpressurePlan::disabled().with_stage_enforced(
         s,
         NonZeroU64::new(1).expect("window"),
@@ -1144,7 +1145,11 @@ async fn reconstruction_scoped_drain_commits_at_zero_credit(
     writer.reserve(1).expect("seed reserve").commit(1);
     assert_eq!(writer.min_downstream_credit(), 0);
     assert_eq!(
-        registry.metrics_snapshot().stage_writer_seq.get(&s).copied(),
+        registry
+            .metrics_snapshot()
+            .stage_writer_seq
+            .get(&s)
+            .copied(),
         Some(1)
     );
 
@@ -1199,7 +1204,11 @@ async fn reconstruction_scoped_drain_commits_at_zero_credit(
     // Accounting advanced past the window (track mode), so the resume handoff
     // sees the true in-flight backlog.
     assert_eq!(
-        registry.metrics_snapshot().stage_writer_seq.get(&s).copied(),
+        registry
+            .metrics_snapshot()
+            .stage_writer_seq
+            .get(&s)
+            .copied(),
         Some(2),
         "track-mode accounting advances even past the window"
     );
@@ -1286,10 +1295,11 @@ async fn resume_handoff_first_live_output_gates_on_catch_up_backlog() {
 
     let mut builder = TopologyBuilder::new();
     let s_top = builder.add_stage(Some("s".to_string()));
-    let d_top = builder.add_stage(Some("d".to_string()));
+    // Downstream stage: gives `s` an outgoing edge to gate. It never acks, so
+    // its backlog stays in flight; no reader handle is needed here.
+    builder.add_stage(Some("d".to_string()));
     let topology = builder.build_unchecked().expect("topology");
     let s = StageId::from_topology_id(s_top);
-    let d = StageId::from_topology_id(d_top);
     let plan = BackpressurePlan::disabled().with_stage_enforced(
         s,
         NonZeroU64::new(2).expect("window"),
@@ -1297,7 +1307,6 @@ async fn resume_handoff_first_live_output_gates_on_catch_up_backlog() {
     );
     let registry = BackpressureRegistry::new(&topology, &plan);
     let writer = registry.writer(s);
-    let _reader = registry.reader(s, d);
 
     let flow_context = make_flow_context(
         "flow",
@@ -1343,7 +1352,11 @@ async fn resume_handoff_first_live_output_gates_on_catch_up_backlog() {
         assert_eq!(outcome, DrainOutcome::Committed { was_data: true });
     }
     assert_eq!(
-        registry.metrics_snapshot().stage_writer_seq.get(&s).copied(),
+        registry
+            .metrics_snapshot()
+            .stage_writer_seq
+            .get(&s)
+            .copied(),
         Some(3),
         "catch-up accounting reflects the recorded backlog"
     );

@@ -506,7 +506,10 @@ mod tests {
         }
 
         fn appended(&self) -> Vec<T> {
-            self.appended.lock().expect("recording journal lock").clone()
+            self.appended
+                .lock()
+                .expect("recording journal lock")
+                .clone()
         }
     }
 
@@ -720,10 +723,10 @@ mod tests {
 
         let mut builder = TopologyBuilder::new();
         let s_top = builder.add_stage(Some("s".to_string()));
-        let d_top = builder.add_stage(Some("d".to_string()));
+        // Downstream stage: gives `s` an outgoing edge to gate; its id is unused.
+        builder.add_stage(Some("d".to_string()));
         let topology = builder.build_unchecked().expect("topology");
         let s = StageId::from_topology_id(s_top);
-        let _d = StageId::from_topology_id(d_top);
 
         let plan = BackpressurePlan::disabled().with_stage_enforced(
             s,
