@@ -684,7 +684,11 @@ fn make_writer_with_window(window: NonZeroU64) -> (StageId, BackpressureWriter) 
     let s = StageId::from_topology_id(s_top);
     let d = StageId::from_topology_id(_d_top);
 
-    let plan = BackpressurePlan::disabled().with_stage_enforced(s, window, std::time::Duration::from_secs(30));
+    let plan = BackpressurePlan::disabled().with_stage_enforced(
+        s,
+        window,
+        std::time::Duration::from_secs(30),
+    );
     let registry = BackpressureRegistry::new(&topology, &plan);
 
     let writer = registry.writer(s);

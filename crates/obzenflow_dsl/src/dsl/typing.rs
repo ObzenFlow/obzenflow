@@ -974,9 +974,7 @@ impl StageDescriptor for TypedStageDescriptor {
         self.inner.name()
     }
 
-    fn backpressure_clause(
-        &self,
-    ) -> Option<&crate::dsl::backpressure_clause::BackpressureClause> {
+    fn backpressure_clause(&self) -> Option<&crate::dsl::backpressure_clause::BackpressureClause> {
         self.inner.backpressure_clause()
     }
 
@@ -2257,9 +2255,7 @@ impl StageDescriptor for DeterministicOrdererOverride {
         self.inner.name()
     }
 
-    fn backpressure_clause(
-        &self,
-    ) -> Option<&crate::dsl::backpressure_clause::BackpressureClause> {
+    fn backpressure_clause(&self) -> Option<&crate::dsl::backpressure_clause::BackpressureClause> {
         self.inner.backpressure_clause()
     }
 

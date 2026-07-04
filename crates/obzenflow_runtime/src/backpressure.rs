@@ -50,7 +50,8 @@ impl BackpressurePlan {
         window: NonZeroU64,
         stall_timeout: Duration,
     ) -> Self {
-        self.stage_defaults.insert(stage_id, (window, stall_timeout));
+        self.stage_defaults
+            .insert(stage_id, (window, stall_timeout));
         self
     }
 

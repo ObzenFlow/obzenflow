@@ -10,8 +10,8 @@
 //! with file entries outranking these code-declared defaults. No attachment
 //! semantics: enforcement is the resolved mode, never the clause's presence.
 
-use obzenflow_runtime::runtime_config::{ConfigValue, DslCandidates};
 use obzenflow_core::config::ConfigScope;
+use obzenflow_runtime::runtime_config::{ConfigValue, DslCandidates};
 use std::num::NonZeroU64;
 
 /// One stage's (or the flow's) backpressure declaration.

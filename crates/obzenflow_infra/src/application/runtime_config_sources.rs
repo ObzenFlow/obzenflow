@@ -251,9 +251,7 @@ fn admit_file_candidates(
                 "runtime.backpressure.stall_timeout_ms",
                 ConfigScope::edge(stage.as_str(), downstream.as_str()),
                 edge.stall_timeout_ms,
-                &format!(
-                    "runtime.backpressure.stages.{stage}.edges.{downstream}.stall_timeout_ms"
-                )
+                &format!("runtime.backpressure.stages.{stage}.edges.{downstream}.stall_timeout_ms")
             );
         }
     }

@@ -12,9 +12,11 @@ use crate::stages::common::backpressure_activity_pulse::BackpressureActivityPuls
 use crate::stages::common::control_strategies::{CreditWaker, WakeOn};
 use crate::stages::common::supervision::suspension::suspend_until;
 use obzenflow_core::event::context::FlowContext;
+use obzenflow_core::event::payloads::flow_control_payload::{EofKind, FlowControlPayload};
 use obzenflow_core::event::payloads::observability_payload::{
     BackpressureEvent, MiddlewareLifecycle, ObservabilityPayload,
 };
+use obzenflow_core::event::types::SeqNo;
 use obzenflow_core::event::{ChainEventFactory, EventEnvelope};
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{ChainEvent, StageId, WriterId};
@@ -256,6 +258,7 @@ pub(crate) async fn drain_one_pending_resolve(
                     instrumentation,
                 )
                 .await;
+                emit_poison_eof(stage_id, flow_context, data_journal, instrumentation).await;
                 return Err(format!(
                     "backpressure.stalled: edge {stage_id}|>{} exceeded its stall ceiling \
                      ({} ms elapsed, timeout {} ms, window {}, in flight {})",
@@ -359,7 +362,7 @@ async fn emit_bypass_pulse_if_needed(
 
 /// Author the `backpressure.stalled` fact (FLOWIP-115e): the continuous
 /// stall exceeded the limiting edge's ceiling. Live-scoped only; the caller
-/// then fails the stage through the dispatch error path.
+/// then emits poison EOF and fails the stage through the dispatch error path.
 async fn emit_stalled_fact(
     stage_id: StageId,
     flow_context: &FlowContext,
@@ -397,6 +400,44 @@ async fn emit_stalled_fact(
             journal_error = %e,
             "Failed to append backpressure.stalled fact"
         ),
+    }
+}
+
+/// Pass the existing Jonestown poison pill downstream before the stage fails.
+async fn emit_poison_eof(
+    stage_id: StageId,
+    flow_context: &FlowContext,
+    data_journal: &Arc<dyn Journal<ChainEvent>>,
+    instrumentation: &Arc<StageInstrumentation>,
+) {
+    let writer_id = WriterId::from(stage_id);
+    let runtime_context = instrumentation.snapshot_with_control();
+    let writer_seq_by_event_type = instrumentation.data_writer_seq_by_event_type();
+
+    let mut event = ChainEventFactory::eof_event_with_kind(writer_id, EofKind::Poison);
+    if let obzenflow_core::event::ChainEventContent::FlowControl(FlowControlPayload::Eof {
+        writer_id: ref mut eof_writer,
+        writer_seq,
+        writer_seq_by_event_type: eof_writer_seq_by_event_type,
+        last_event_id,
+        ..
+    }) = &mut event.content
+    {
+        *eof_writer = Some(writer_id);
+        *writer_seq = Some(SeqNo(runtime_context.writer_seq));
+        *eof_writer_seq_by_event_type = writer_seq_by_event_type;
+        *last_event_id = runtime_context.last_emitted_event_id;
+    }
+
+    event.flow_context = flow_context.clone();
+    event.runtime_context = Some(runtime_context);
+    instrumentation.record_emitted(&event);
+
+    if let Err(e) = data_journal.append(event, None).await {
+        tracing::warn!(
+            journal_error = %e,
+            "Failed to append backpressure poison EOF"
+        );
     }
 }
 

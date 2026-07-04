@@ -323,7 +323,9 @@ pub fn materialize_flow_config(
                 "runtime.backpressure.window",
                 "runtime.backpressure.stall_timeout_ms",
             ] {
-                let resolved = values.get(key).and_then(|per_scope| per_scope.get(&address));
+                let resolved = values
+                    .get(key)
+                    .and_then(|per_scope| per_scope.get(&address));
                 if resolved.is_none() {
                     let spec = crate::runtime_config::schema::knob(key)
                         .expect("backpressure knobs are registered");
@@ -696,8 +698,7 @@ mod tests {
         let err = materialize_flow_config(&snapshot, one_edge_ctx()).unwrap_err();
         let message = err.to_string();
         assert!(
-            message.contains("runtime.backpressure.window")
-                && message.contains("edge src|>sink"),
+            message.contains("runtime.backpressure.window") && message.contains("edge src|>sink"),
             "window required where enforce resolves: {message}"
         );
 
@@ -751,8 +752,8 @@ mod tests {
         );
         let snapshot = ResolvedRuntimeConfig::new(set);
         let effective = materialize_flow_config(&snapshot, one_edge_ctx()).unwrap();
-        let (mode, source) = effective
-            .backpressure_mode_for(&StageKey::from("src"), &StageKey::from("sink"));
+        let (mode, source) =
+            effective.backpressure_mode_for(&StageKey::from("src"), &StageKey::from("sink"));
         assert_eq!(mode, crate::runtime_config::BackpressureMode::Enforce);
         assert_eq!(source, ConfigSource::File);
         assert_eq!(
@@ -796,8 +797,7 @@ mod tests {
             effective
                 .warnings()
                 .iter()
-                .any(|warning| warning.contains("has no effect")
-                    && warning.contains("src|>sink")),
+                .any(|warning| warning.contains("has no effect") && warning.contains("src|>sink")),
             "off-with-window diagnostic expected: {:?}",
             effective.warnings()
         );

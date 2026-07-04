@@ -695,8 +695,9 @@ async fn queued_external_event_is_observed_within_one_cap_while_wedged() {
         TransformState<ExpandHandler>,
     >::new()
     .build(TransformState::Running);
-    let mut wrapped =
-        crate::supervised_base::HandlerSupervisedWithExternalEvents::new(supervisor, receiver, watcher);
+    let mut wrapped = crate::supervised_base::HandlerSupervisedWithExternalEvents::new(
+        supervisor, receiver, watcher,
+    );
 
     let state = TransformState::<ExpandHandler>::Running;
     let mut task =
@@ -823,11 +824,29 @@ async fn wedged_downstream_authors_stalled_fact_and_fails_stage() {
         })
         .expect("backpressure.stalled fact authored");
     assert_eq!(stalled.0, t);
-    assert_eq!(stalled.1, k, "the limiting edge names the wedged downstream");
+    assert_eq!(
+        stalled.1, k,
+        "the limiting edge names the wedged downstream"
+    );
     assert_eq!(stalled.2, 1, "window");
     assert_eq!(stalled.3, 30_000, "configured ceiling in ms");
     assert!(stalled.4 >= 30_000, "elapsed covers the ceiling");
     assert_eq!(stalled.5, 1, "one event in flight at expiry");
+
+    let poison_eof = events
+        .iter()
+        .find_map(|envelope| match &envelope.event.content {
+            obzenflow_core::event::ChainEventContent::FlowControl(
+                obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload::Eof {
+                    kind,
+                    writer_id,
+                    ..
+                },
+            ) if kind.is_poison() => Some(*writer_id),
+            _ => None,
+        })
+        .expect("backpressure stall passes Jonestown poison EOF downstream");
+    assert_eq!(poison_eof, Some(WriterId::from(t)));
 }
 
 #[tokio::test]

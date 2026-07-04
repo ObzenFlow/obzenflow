@@ -542,8 +542,11 @@ mod tests {
         let s = StageId::from_topology_id(s_top);
         let _d = StageId::from_topology_id(d_top);
 
-        let plan =
-            BackpressurePlan::disabled().with_stage_enforced(s, NonZeroU64::new(1).expect("window"), std::time::Duration::from_secs(30));
+        let plan = BackpressurePlan::disabled().with_stage_enforced(
+            s,
+            NonZeroU64::new(1).expect("window"),
+            std::time::Duration::from_secs(30),
+        );
         let registry = BackpressureRegistry::new(&topology, &plan);
         let writer = registry.writer(s);
         writer.reserve(1).expect("reserve").commit(1);

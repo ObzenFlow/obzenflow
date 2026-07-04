@@ -167,15 +167,12 @@ impl FlowEffectiveConfig {
             },
         )
         .and_then(|resolved| {
-            resolved
-                .value
-                .as_text()
-                .map(|token| {
-                    (
-                        BackpressureMode::from_token(token),
-                        resolved.meta.source.clone(),
-                    )
-                })
+            resolved.value.as_text().map(|token| {
+                (
+                    BackpressureMode::from_token(token),
+                    resolved.meta.source.clone(),
+                )
+            })
         })
         .unwrap_or((BackpressureMode::Off, ConfigSource::Default))
     }
