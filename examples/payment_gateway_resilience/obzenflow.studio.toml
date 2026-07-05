@@ -14,7 +14,14 @@ startup_mode = "manual"
 # 127.0.0.1 and localhost are different origins.
 [server.cors]
 mode = "allow-list"
-allow_origins = ["http://127.0.0.1:7010", "http://localhost:7010"]
+# 7010 = the studiod-served bundle origin; 8080 = the `trunk serve` UI-dev
+# origin. Both loopback; 127.0.0.1 and localhost are distinct origins.
+allow_origins = [
+    "http://127.0.0.1:7010",
+    "http://localhost:7010",
+    "http://127.0.0.1:8080",
+    "http://localhost:8080",
+]
 
 [studio]
 enabled = true
