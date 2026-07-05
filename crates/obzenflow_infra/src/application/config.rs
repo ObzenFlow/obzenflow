@@ -44,6 +44,16 @@ pub enum StartupMode {
     Manual,
 }
 
+/// Server-mode behaviour when the pipeline reaches a terminal state
+/// (FLOWIP-114d): registered means the control plane is serving.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+pub enum OnTerminalArg {
+    /// Run the close sequence and exit with a code mapped from the terminal state (default).
+    Exit,
+    /// Stay up serving the control plane; the heartbeat keeps renewing with the terminal phase.
+    Park,
+}
+
 #[derive(Parser, Debug, Clone)]
 #[command(about = "ObzenFlow Application")]
 pub struct FlowConfig {
@@ -163,6 +173,27 @@ pub struct FlowConfig {
     /// "output matched the original run, 0 differences" and exits 0.
     #[arg(long, action = ArgAction::SetTrue)]
     pub verify: bool,
+
+    /// Behaviour when the pipeline reaches a terminal state under --server
+    /// (FLOWIP-114d): exit the process (default) or park until a signal.
+    #[arg(long, value_enum)]
+    pub server_on_terminal: Option<OnTerminalArg>,
+
+    /// Enable Studio phonebook registration (FLOWIP-114d).
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub studio_enabled: bool,
+
+    /// Phonebook base URL for Studio registration.
+    #[arg(long)]
+    pub studio_phonebook_url: Option<String>,
+
+    /// Operator-facing job identity carried in Studio registrations.
+    #[arg(long)]
+    pub studio_job_id: Option<String>,
+
+    /// Reachable base URL this runtime advertises in its registration.
+    #[arg(long)]
+    pub studio_advertise_url: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -171,6 +202,10 @@ pub(crate) struct ResolvedStartupConfig {
     pub runtime: ResolvedStartupRuntimeConfig,
     pub metrics: ResolvedMetricsConfig,
     pub replay: Option<ResolvedReplayConfig>,
+    /// FLOWIP-114d: Some when studio.enabled resolves true; the enabled flag
+    /// collapses into the Option.
+    #[cfg(feature = "studio-registration")]
+    pub studio: Option<ResolvedStudioConfig>,
     /// FLOWIP-010 §7: the immutable runtime config snapshot, host-owned for
     /// the run and handed to the flow build as `FlowBuildContext`.
     pub runtime_config: std::sync::Arc<obzenflow_runtime::runtime_config::ResolvedRuntimeConfig>,
@@ -184,9 +219,23 @@ pub(crate) struct ResolvedServerConfig {
     pub max_body_size_bytes: usize,
     pub request_timeout_secs: u64,
     pub startup_mode: StartupMode,
+    pub on_terminal: OnTerminalArg,
     pub cors_mode: CorsModeArg,
     pub cors_allow_origin: Vec<String>,
     pub control_plane_auth: Option<AuthPolicy>,
+}
+
+/// FLOWIP-114d Studio registration settings, resolved and validated.
+/// Feature-gated with its only consumer (the heartbeat client); a build
+/// without the feature fails loud in resolve() when studio.enabled is set.
+#[cfg(feature = "studio-registration")]
+#[derive(Debug, Clone)]
+pub(crate) struct ResolvedStudioConfig {
+    pub phonebook_url: String,
+    pub job_id: String,
+    pub advertise_url: String,
+    pub lease_ttl_secs: u64,
+    pub renew_interval_secs: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -299,6 +348,8 @@ pub(crate) struct RawFileStartupConfig {
     pub(crate) contracts: RawFileContractsConfig,
     pub(crate) effects: RawFileEffectsConfig,
     pub(crate) ai: RawFileAiConfig,
+    /// FLOWIP-114d: Studio phonebook registration (010h startup layer).
+    studio: RawFileStudioConfig,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -308,10 +359,22 @@ struct RawFileServerConfig {
     host: Option<String>,
     port: Option<i64>,
     startup_mode: Option<String>,
+    on_terminal: Option<String>,
     max_body_size_bytes: Option<i64>,
     request_timeout_secs: Option<i64>,
     cors: RawFileCorsConfig,
     control_plane_auth: RawFileControlPlaneAuthConfig,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+struct RawFileStudioConfig {
+    enabled: Option<bool>,
+    phonebook_url: Option<String>,
+    job_id: Option<String>,
+    advertise_url: Option<String>,
+    lease_ttl_secs: Option<i64>,
+    renew_interval_secs: Option<i64>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -505,6 +568,18 @@ impl FlowConfig {
             super::runtime_config_sources::build_runtime_config_snapshot(&self, &file)?,
         );
         let control_plane_auth = self.resolve_control_plane_auth(&file)?;
+        // FLOWIP-114d: captured before resolve() starts partially moving
+        // `self` and `file` field-by-field below.
+        #[cfg(feature = "studio-registration")]
+        let studio_inputs = StudioResolveInputs {
+            cli_enabled: self.studio_enabled,
+            cli_phonebook_url: self.studio_phonebook_url.clone(),
+            cli_job_id: self.studio_job_id.clone(),
+            cli_advertise_url: self.studio_advertise_url.clone(),
+            file: file.studio.clone(),
+        };
+        #[cfg(not(feature = "studio-registration"))]
+        let studio_inputs = (self.studio_enabled, file.studio.enabled);
 
         let server_enabled = if self.server {
             true
@@ -526,6 +601,14 @@ impl FlowConfig {
                 "server.cors.mode",
             )?)
             .unwrap_or(CorsModeArg::SameOrigin);
+        let on_terminal = self
+            .server_on_terminal
+            .or(parse_on_terminal(
+                file.server.on_terminal.as_deref(),
+                "server.on_terminal",
+            )?)
+            .or(parse_env_on_terminal()?)
+            .unwrap_or(OnTerminalArg::Exit);
 
         let cors_allow_origin = if !self.cors_allow_origin.is_empty() {
             self.cors_allow_origin
@@ -566,6 +649,7 @@ impl FlowConfig {
                 30,
             ),
             startup_mode,
+            on_terminal,
             cors_mode,
             cors_allow_origin,
             control_plane_auth,
@@ -722,11 +806,35 @@ impl FlowConfig {
             ));
         }
 
+        // FLOWIP-114d feature guard: no inert config. A binary without the
+        // heartbeat client refuses studio.enabled rather than ignoring it.
+        #[cfg(not(feature = "studio-registration"))]
+        {
+            let (cli_enabled, file_enabled) = studio_inputs;
+            let studio_enabled = resolve_positive_flag(
+                cli_enabled,
+                file_enabled,
+                parse_env_bool("OBZENFLOW_STUDIO_ENABLED", "studio.enabled")?,
+                false,
+            );
+            if studio_enabled {
+                return Err(ConfigError::at(
+                    "studio.enabled",
+                    "this binary was built without the studio-registration feature; \
+                     rebuild with features = [\"studio-registration\"]",
+                ));
+            }
+        }
+        #[cfg(feature = "studio-registration")]
+        let studio = resolve_studio(studio_inputs, &server)?;
+
         Ok(ResolvedStartupConfig {
             server,
             runtime,
             metrics,
             replay,
+            #[cfg(feature = "studio-registration")]
+            studio,
             runtime_config,
         })
     }
@@ -893,6 +1001,145 @@ fn validate_replay(replay: &ResolvedReplayConfig) -> Result<(), ConfigError> {
     Ok(())
 }
 
+/// FLOWIP-114d: studio-relevant CLI and file inputs, captured before
+/// `resolve()` partially moves `self` and `file`.
+#[cfg(feature = "studio-registration")]
+struct StudioResolveInputs {
+    cli_enabled: bool,
+    cli_phonebook_url: Option<String>,
+    cli_job_id: Option<String>,
+    cli_advertise_url: Option<String>,
+    file: RawFileStudioConfig,
+}
+
+/// FLOWIP-114d: resolve and cross-validate the `[studio]` block. Returns
+/// None when registration is disabled; every error names its field.
+#[cfg(feature = "studio-registration")]
+fn resolve_studio(
+    inputs: StudioResolveInputs,
+    server: &ResolvedServerConfig,
+) -> Result<Option<ResolvedStudioConfig>, ConfigError> {
+    let enabled = resolve_positive_flag(
+        inputs.cli_enabled,
+        inputs.file.enabled,
+        parse_env_bool("OBZENFLOW_STUDIO_ENABLED", "studio.enabled")?,
+        false,
+    );
+    if !enabled {
+        return Ok(None);
+    }
+    if !server.enabled {
+        return Err(ConfigError::at(
+            "studio.enabled",
+            "requires server.enabled = true; registration is meaningless without the control plane",
+        ));
+    }
+    let phonebook_url = resolve_optional(
+        inputs.cli_phonebook_url,
+        inputs.file.phonebook_url,
+        parse_env_string("OBZENFLOW_STUDIO_PHONEBOOK_URL", "studio.phonebook_url")?,
+    )
+    .ok_or_else(|| {
+        ConfigError::at(
+            "studio.phonebook_url",
+            "required when studio.enabled = true",
+        )
+    })?;
+    let job_id = resolve_optional(
+        inputs.cli_job_id,
+        inputs.file.job_id,
+        parse_env_string("OBZENFLOW_STUDIO_JOB_ID", "studio.job_id")?,
+    )
+    .ok_or_else(|| ConfigError::at("studio.job_id", "required when studio.enabled = true"))?;
+    let advertise_url = resolve_optional(
+        inputs.cli_advertise_url,
+        inputs.file.advertise_url,
+        parse_env_string("OBZENFLOW_STUDIO_ADVERTISE_URL", "studio.advertise_url")?,
+    )
+    .ok_or_else(|| {
+        ConfigError::at(
+            "studio.advertise_url",
+            "required when studio.enabled = true",
+        )
+    })?;
+    if advertise_url.contains("0.0.0.0") {
+        return Err(ConfigError::at(
+            "studio.advertise_url",
+            "must be a URL the browser can reach, never a 0.0.0.0 bind address",
+        ));
+    }
+    let lease_ttl_secs = resolve_scalar(
+        None,
+        parse_non_negative_u64(inputs.file.lease_ttl_secs, "studio.lease_ttl_secs")?,
+        parse_env_u64("OBZENFLOW_STUDIO_LEASE_TTL_SECS", "studio.lease_ttl_secs")?,
+        15,
+    );
+    let renew_interval_secs = resolve_scalar(
+        None,
+        parse_non_negative_u64(
+            inputs.file.renew_interval_secs,
+            "studio.renew_interval_secs",
+        )?,
+        parse_env_u64(
+            "OBZENFLOW_STUDIO_RENEW_INTERVAL_SECS",
+            "studio.renew_interval_secs",
+        )?,
+        5,
+    );
+    if renew_interval_secs >= lease_ttl_secs {
+        return Err(ConfigError::at(
+            "studio.renew_interval_secs",
+            format!(
+                "must be < studio.lease_ttl_secs ({lease_ttl_secs}), got {renew_interval_secs}"
+            ),
+        ));
+    }
+
+    // The Studio bundle is served from the phonebook origin while this
+    // runtime listens on another port, so every browser request here is
+    // cross-origin; the CORS posture must admit that origin exactly.
+    let phonebook_origin = url_origin(&phonebook_url).ok_or_else(|| {
+        ConfigError::at(
+            "studio.phonebook_url",
+            format!("cannot derive an origin from {phonebook_url:?}"),
+        )
+    })?;
+    match server.cors_mode {
+        CorsModeArg::AllowAnyOrigin => {}
+        CorsModeArg::AllowList => {
+            if !server
+                .cors_allow_origin
+                .iter()
+                .any(|origin| origin == &phonebook_origin)
+            {
+                return Err(ConfigError::at(
+                    "server.cors.allow_origins",
+                    format!(
+                        "must contain the phonebook origin {phonebook_origin:?} when \
+                         studio.enabled = true; 127.0.0.1 and localhost are different \
+                         origins, so list both spellings"
+                    ),
+                ));
+            }
+        }
+        CorsModeArg::SameOrigin => {
+            return Err(ConfigError::at(
+                "server.cors.mode",
+                "same-origin blocks the Studio browser (served from the phonebook \
+                 origin); use allow-list containing the phonebook origin",
+            ));
+        }
+    }
+
+    Ok(Some(ResolvedStudioConfig {
+        phonebook_url,
+        job_id,
+        advertise_url,
+        lease_ttl_secs,
+        renew_interval_secs,
+    }))
+}
+
 fn parse_startup_mode(value: Option<&str>, path: &str) -> Result<Option<StartupMode>, ConfigError> {
     match value.map(normalise_enum_token) {
         None => Ok(None),
@@ -1004,6 +1251,46 @@ fn parse_env_path(key: &str, path: &str) -> Result<Option<PathBuf>, ConfigError>
         .map_err(|err| ConfigError::at(path, err.to_string()))
 }
 
+#[cfg(feature = "studio-registration")]
+fn parse_env_string(key: &str, path: &str) -> Result<Option<String>, ConfigError> {
+    env_var::<String>(key).map_err(|err| ConfigError::at(path, err.to_string()))
+}
+
+fn parse_on_terminal(
+    value: Option<&str>,
+    path: &str,
+) -> Result<Option<OnTerminalArg>, ConfigError> {
+    match value.map(normalise_enum_token) {
+        None => Ok(None),
+        Some(value) if value == "exit" => Ok(Some(OnTerminalArg::Exit)),
+        Some(value) if value == "park" => Ok(Some(OnTerminalArg::Park)),
+        Some(value) => Err(ConfigError::at(
+            path,
+            format!("unknown value {value:?}; expected one of exit, park"),
+        )),
+    }
+}
+
+fn parse_env_on_terminal() -> Result<Option<OnTerminalArg>, ConfigError> {
+    let value = env_var::<String>("OBZENFLOW_SERVER_ON_TERMINAL")
+        .map_err(|err| ConfigError::at("server.on_terminal", err.to_string()))?;
+    parse_on_terminal(value.as_deref(), "server.on_terminal")
+}
+
+/// Derive scheme://authority from a URL string; the phonebook-origin CORS
+/// check compares origins exactly (spellings are distinct origins).
+#[cfg(feature = "studio-registration")]
+fn url_origin(url: &str) -> Option<String> {
+    let scheme_end = url.find("://")?;
+    let rest = &url[scheme_end + 3..];
+    let authority_end = rest.find('/').unwrap_or(rest.len());
+    let authority = &rest[..authority_end];
+    if authority.is_empty() {
+        return None;
+    }
+    Some(format!("{}://{authority}", &url[..scheme_end]))
+}
+
 fn resolve_scalar<T: Clone>(cli: Option<T>, file: Option<T>, env: Option<T>, default: T) -> T {
     cli.or(file).or(env).unwrap_or(default)
 }
@@ -1068,6 +1355,237 @@ exporter = "console"
         assert!(resolved.server.enabled);
         assert!(!resolved.metrics.enabled);
         assert_eq!(resolved.metrics.exporter, MetricsExporterKind::Console);
+    }
+
+    /// FLOWIP-114d: a studio-enabled config file whose CORS allow-list carries
+    /// the phonebook origin; the baseline every studio test perturbs.
+    #[cfg(feature = "studio-registration")]
+    fn studio_config_toml() -> &'static str {
+        r#"
+[server]
+enabled = true
+port = 9090
+
+[server.cors]
+mode = "allow-list"
+allow_origins = ["http://127.0.0.1:7010"]
+
+[studio]
+enabled = true
+phonebook_url = "http://127.0.0.1:7010"
+job_id = "demo_job"
+advertise_url = "http://127.0.0.1:9090"
+"#
+    }
+
+    #[cfg(feature = "studio-registration")]
+    fn resolve_studio_file(
+        contents: &str,
+        extra_args: &[&str],
+    ) -> Result<ResolvedStartupConfig, ConfigError> {
+        let tempdir = tempfile::tempdir().unwrap();
+        let config_path = tempdir.path().join("obzenflow.toml");
+        fs::write(&config_path, contents).unwrap();
+        let mut args = vec!["obzenflow", "--config", config_path.to_str().unwrap()];
+        args.extend_from_slice(extra_args);
+        FlowConfig::try_parse_from(args)
+            .unwrap()
+            .resolve(None, true)
+    }
+
+    #[cfg(feature = "studio-registration")]
+    #[test]
+    fn studio_resolves_with_defaults() {
+        let _lock = env_lock();
+        let resolved = resolve_studio_file(studio_config_toml(), &[]).unwrap();
+        let studio = resolved.studio.expect("studio enabled");
+        assert_eq!(studio.job_id, "demo_job");
+        assert_eq!(studio.lease_ttl_secs, 15);
+        assert_eq!(studio.renew_interval_secs, 5);
+    }
+
+    #[cfg(feature = "studio-registration")]
+    #[test]
+    fn studio_cli_overrides_file() {
+        let _lock = env_lock();
+        let resolved =
+            resolve_studio_file(studio_config_toml(), &["--studio-job-id", "cli_job"]).unwrap();
+        assert_eq!(resolved.studio.expect("studio enabled").job_id, "cli_job");
+    }
+
+    #[cfg(feature = "studio-registration")]
+    #[test]
+    fn studio_env_below_file() {
+        let _lock = env_lock();
+        let guard = EnvGuard::new(&["OBZENFLOW_STUDIO_JOB_ID"]);
+        guard.set("OBZENFLOW_STUDIO_JOB_ID", "env_job");
+        let resolved = resolve_studio_file(studio_config_toml(), &[]).unwrap();
+        // The file carries demo_job; env sits below the file tier.
+        assert_eq!(resolved.studio.expect("studio enabled").job_id, "demo_job");
+    }
+
+    #[cfg(feature = "studio-registration")]
+    #[test]
+    fn studio_env_fills_when_file_omits() {
+        let _lock = env_lock();
+        let guard = EnvGuard::new(&["OBZENFLOW_STUDIO_JOB_ID"]);
+        guard.set("OBZENFLOW_STUDIO_JOB_ID", "env_job");
+        let contents = studio_config_toml().replace("job_id = \"demo_job\"\n", "");
+        let resolved = resolve_studio_file(&contents, &[]).unwrap();
+        assert_eq!(resolved.studio.expect("studio enabled").job_id, "env_job");
+    }
+
+    #[cfg(feature = "studio-registration")]
+    #[test]
+    fn studio_requireds_fail_naming_the_field() {
+        let _lock = env_lock();
+        for (field, needle) in [
+            ("phonebook_url", "studio.phonebook_url"),
+            ("job_id", "studio.job_id"),
+            ("advertise_url", "studio.advertise_url"),
+        ] {
+            let contents = studio_config_toml()
+                .lines()
+                .filter(|line| !line.starts_with(field))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let error = resolve_studio_file(&contents, &[]).unwrap_err();
+            assert!(
+                error.to_string().contains(needle),
+                "missing {field} must name {needle}, got: {error}"
+            );
+        }
+    }
+
+    #[cfg(feature = "studio-registration")]
+    #[test]
+    fn studio_disabled_ignores_other_fields() {
+        let _lock = env_lock();
+        let contents = studio_config_toml().replace(
+            "enabled = true\nphonebook_url",
+            "enabled = false\nphonebook_url",
+        );
+        let resolved = resolve_studio_file(&contents, &[]).unwrap();
+        assert!(resolved.studio.is_none());
+    }
+
+    #[cfg(feature = "studio-registration")]
+    #[test]
+    fn studio_requires_server_enabled() {
+        let _lock = env_lock();
+        let contents = studio_config_toml().replacen("enabled = true", "enabled = false", 1);
+        let error = resolve_studio_file(&contents, &[]).unwrap_err();
+        assert!(error.to_string().contains("server.enabled"));
+    }
+
+    #[cfg(feature = "studio-registration")]
+    #[test]
+    fn studio_rejects_zeros_advertise_bind() {
+        let _lock = env_lock();
+        let contents = studio_config_toml().replace("http://127.0.0.1:9090", "http://0.0.0.0:9090");
+        let error = resolve_studio_file(&contents, &[]).unwrap_err();
+        assert!(error.to_string().contains("studio.advertise_url"));
+    }
+
+    #[cfg(feature = "studio-registration")]
+    #[test]
+    fn studio_rejects_renew_not_below_ttl() {
+        let _lock = env_lock();
+        let contents = format!(
+            "{}lease_ttl_secs = 5\nrenew_interval_secs = 5\n",
+            studio_config_toml()
+        );
+        let error = resolve_studio_file(&contents, &[]).unwrap_err();
+        assert!(error.to_string().contains("studio.renew_interval_secs"));
+    }
+
+    #[cfg(feature = "studio-registration")]
+    #[test]
+    fn studio_cors_must_admit_phonebook_origin() {
+        let _lock = env_lock();
+        // Allow-list missing the phonebook origin: error suggests both spellings.
+        let contents = studio_config_toml().replace(
+            "allow_origins = [\"http://127.0.0.1:7010\"]",
+            "allow_origins = [\"http://localhost:7010\"]",
+        );
+        let error = resolve_studio_file(&contents, &[]).unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("server.cors.allow_origins"), "{message}");
+        assert!(message.contains("both spellings"), "{message}");
+
+        // same-origin blocks the Studio browser outright.
+        let contents = studio_config_toml()
+            .replace("mode = \"allow-list\"", "mode = \"same-origin\"")
+            .replace("allow_origins = [\"http://127.0.0.1:7010\"]\n", "");
+        let error = resolve_studio_file(&contents, &[]).unwrap_err();
+        assert!(error.to_string().contains("server.cors.mode"));
+
+        // allow-any-origin passes.
+        let contents = studio_config_toml()
+            .replace("mode = \"allow-list\"", "mode = \"allow-any-origin\"")
+            .replace("allow_origins = [\"http://127.0.0.1:7010\"]\n", "");
+        assert!(resolve_studio_file(&contents, &[])
+            .unwrap()
+            .studio
+            .is_some());
+    }
+
+    #[test]
+    fn on_terminal_resolves_exit_default_and_park() {
+        let _lock = env_lock();
+        let tempdir = tempfile::tempdir().unwrap();
+        let config_path = tempdir.path().join("obzenflow.toml");
+        fs::write(&config_path, "[server]\nenabled = true\n").unwrap();
+        let cli =
+            FlowConfig::try_parse_from(["obzenflow", "--config", config_path.to_str().unwrap()])
+                .unwrap();
+        assert_eq!(
+            cli.resolve(None, true).unwrap().server.on_terminal,
+            OnTerminalArg::Exit
+        );
+
+        fs::write(
+            &config_path,
+            "[server]\nenabled = true\non_terminal = \"park\"\n",
+        )
+        .unwrap();
+        let cli =
+            FlowConfig::try_parse_from(["obzenflow", "--config", config_path.to_str().unwrap()])
+                .unwrap();
+        assert_eq!(
+            cli.resolve(None, true).unwrap().server.on_terminal,
+            OnTerminalArg::Park
+        );
+
+        // CLI outranks the file.
+        let cli = FlowConfig::try_parse_from([
+            "obzenflow",
+            "--config",
+            config_path.to_str().unwrap(),
+            "--server-on-terminal",
+            "exit",
+        ])
+        .unwrap();
+        assert_eq!(
+            cli.resolve(None, true).unwrap().server.on_terminal,
+            OnTerminalArg::Exit
+        );
+    }
+
+    #[test]
+    fn url_origin_derivation() {
+        #[cfg(feature = "studio-registration")]
+        {
+            assert_eq!(
+                url_origin("http://127.0.0.1:7010").as_deref(),
+                Some("http://127.0.0.1:7010")
+            );
+            assert_eq!(
+                url_origin("http://localhost:7010/registry/").as_deref(),
+                Some("http://localhost:7010")
+            );
+            assert_eq!(url_origin("not-a-url"), None);
+        }
     }
 
     #[test]

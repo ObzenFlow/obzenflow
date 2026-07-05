@@ -1,0 +1,18 @@
+# FLOWIP-114d Studio walkthrough config: select with
+#   --config examples/csv_demo_support_sla/obzenflow.studio.toml
+
+[server]
+enabled = true
+host = "127.0.0.1"
+port = 9091
+startup_mode = "manual"
+
+[server.cors]
+mode = "allow-list"
+allow_origins = ["http://127.0.0.1:7010", "http://localhost:7010"]
+
+[studio]
+enabled = true
+phonebook_url = "http://127.0.0.1:7010"
+job_id = "csv_support_sla"
+advertise_url = "http://127.0.0.1:9091"

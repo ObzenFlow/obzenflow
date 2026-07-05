@@ -165,6 +165,91 @@ impl StateVariant for PipelineState {
     }
 }
 
+impl PipelineState {
+    /// Terminal states: no further pipeline transitions occur.
+    pub fn is_terminal(&self) -> bool {
+        matches!(
+            self,
+            PipelineState::AbortRequested { .. }
+                | PipelineState::Drained
+                | PipelineState::Failed { .. }
+        )
+    }
+}
+
+/// The coarse advisory phase of the pipeline FSM: the canonical wire
+/// vocabulary for control-plane rejections and the Studio registry badge
+/// (FLOWIP-114d). Payload-free mirror of [`PipelineState`]; serde snake_case
+/// is the one wire spelling.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PipelinePhase {
+    Created,
+    Materializing,
+    Materialized,
+    ReadyForRun,
+    Running,
+    SourceCompleted,
+    AbortRequested,
+    Draining,
+    Drained,
+    Failed,
+}
+
+impl PipelinePhase {
+    /// The wire label; identical to the serde representation by the pin test.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            PipelinePhase::Created => "created",
+            PipelinePhase::Materializing => "materializing",
+            PipelinePhase::Materialized => "materialized",
+            PipelinePhase::ReadyForRun => "ready_for_run",
+            PipelinePhase::Running => "running",
+            PipelinePhase::SourceCompleted => "source_completed",
+            PipelinePhase::AbortRequested => "abort_requested",
+            PipelinePhase::Draining => "draining",
+            PipelinePhase::Drained => "drained",
+            PipelinePhase::Failed => "failed",
+        }
+    }
+
+    pub const ALL: [PipelinePhase; 10] = [
+        PipelinePhase::Created,
+        PipelinePhase::Materializing,
+        PipelinePhase::Materialized,
+        PipelinePhase::ReadyForRun,
+        PipelinePhase::Running,
+        PipelinePhase::SourceCompleted,
+        PipelinePhase::AbortRequested,
+        PipelinePhase::Draining,
+        PipelinePhase::Drained,
+        PipelinePhase::Failed,
+    ];
+}
+
+impl std::fmt::Display for PipelinePhase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl From<&PipelineState> for PipelinePhase {
+    fn from(state: &PipelineState) -> Self {
+        match state {
+            PipelineState::Created => PipelinePhase::Created,
+            PipelineState::Materializing => PipelinePhase::Materializing,
+            PipelineState::Materialized => PipelinePhase::Materialized,
+            PipelineState::ReadyForRun => PipelinePhase::ReadyForRun,
+            PipelineState::Running => PipelinePhase::Running,
+            PipelineState::SourceCompleted => PipelinePhase::SourceCompleted,
+            PipelineState::AbortRequested { .. } => PipelinePhase::AbortRequested,
+            PipelineState::Draining => PipelinePhase::Draining,
+            PipelineState::Drained => PipelinePhase::Drained,
+            PipelineState::Failed { .. } => PipelinePhase::Failed,
+        }
+    }
+}
+
 /// Pipeline events
 #[derive(Clone, Debug)]
 pub enum PipelineEvent {
@@ -1746,7 +1831,7 @@ pub(crate) fn build_pipeline_fsm_with_initial(initial: PipelineState) -> Pipelin
             on PipelineEvent::Run => |_state: &PipelineState, _event: &PipelineEvent, _ctx: &mut PipelineContext| {
                 Box::pin(async move {
                     tracing::debug!(
-                        state = "sourcecompleted",
+                        state = "source_completed",
                         "Duplicate Run received after start; treating as idempotent"
                     );
                     Ok(Transition {
@@ -2020,7 +2105,7 @@ pub(crate) fn build_pipeline_fsm_with_initial(initial: PipelineState) -> Pipelin
                 let state = state.clone();
                 Box::pin(async move {
                     tracing::debug!(
-                        state = "abortrequested",
+                        state = "abort_requested",
                         "Duplicate Run received after start; treating as idempotent"
                     );
                     Ok(Transition {
@@ -2121,6 +2206,47 @@ mod fsm_lifecycle_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// FLOWIP-114d wire-contract pin: the ten `phase` strings consumed by the
+    /// 059h rejected response, the phonebook heartbeat, and the Studio badge.
+    /// A variant rename must not silently change the wire.
+    #[test]
+    fn pipeline_phase_wire_labels_are_pinned() {
+        let expected = [
+            "created",
+            "materializing",
+            "materialized",
+            "ready_for_run",
+            "running",
+            "source_completed",
+            "abort_requested",
+            "draining",
+            "drained",
+            "failed",
+        ];
+        assert_eq!(PipelinePhase::ALL.len(), expected.len());
+        for (phase, label) in PipelinePhase::ALL.iter().zip(expected) {
+            assert_eq!(phase.as_str(), label);
+            let json = serde_json::to_string(phase).expect("phase serializes");
+            assert_eq!(json, format!("\"{label}\""), "serde and as_str must agree");
+            let back: PipelinePhase = serde_json::from_str(&json).expect("phase deserializes");
+            assert_eq!(back, *phase);
+        }
+    }
+
+    #[test]
+    fn terminal_states_are_exactly_the_locked_set() {
+        assert!(PipelineState::Drained.is_terminal());
+        assert!(PipelineState::Failed {
+            reason: "x".to_string(),
+            failure_cause: None
+        }
+        .is_terminal());
+        assert!(!PipelineState::Created.is_terminal());
+        assert!(!PipelineState::Running.is_terminal());
+        assert!(!PipelineState::Draining.is_terminal());
+        assert!(!PipelineState::SourceCompleted.is_terminal());
+    }
 
     #[test]
     fn stop_intent_cancel_sets_defaults() {

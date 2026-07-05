@@ -39,6 +39,12 @@ pub struct WebServerResources {
     /// FLOWIP-010: the owned resolved snapshot; presence turns on the seven
     /// read-only `/api/config/*` routes.
     pub runtime_config: Option<Arc<obzenflow_runtime::runtime_config::ResolvedRuntimeConfig>>,
+    /// FLOWIP-114d: per-process incarnation identity, stamped into the SSE
+    /// bootstrap event for data-path generation detection.
+    pub runtime_instance_id: Option<String>,
+    /// FLOWIP-114d gap 8: fires after the terminal pipeline state; the
+    /// listener then closes gracefully and SSE producers end their streams.
+    pub shutdown: Option<tokio::sync::watch::Receiver<bool>>,
 }
 
 fn is_reserved_built_in_path(path: &str) -> bool {
@@ -148,6 +154,8 @@ fn validate_extra_endpoints(extra_endpoints: &[Box<dyn HttpEndpoint>]) -> Result
 ///     extra_endpoints: vec![],
 ///     surface_metrics: None,
 ///     runtime_config: None,
+///     runtime_instance_id: None,
+///     shutdown: None,
 /// }, 9090).await?;
 /// ```
 #[cfg(feature = "warp-server")]
@@ -175,6 +183,8 @@ pub async fn start_web_server_with_config(
         extra_endpoints,
         surface_metrics,
         runtime_config,
+        runtime_instance_id,
+        shutdown,
     } = resources;
 
     validate_extra_endpoints(&extra_endpoints)?;
@@ -182,6 +192,12 @@ pub async fn start_web_server_with_config(
     let mut server = super::warp::WarpServer::new();
     if let Some(collector) = surface_metrics {
         server.with_surface_metrics(collector);
+    }
+    if let Some(runtime_instance_id) = runtime_instance_id {
+        server.with_runtime_instance_id(runtime_instance_id);
+    }
+    if let Some(shutdown) = shutdown {
+        server.with_shutdown(shutdown);
     }
     let pipeline_ready = flow_handle.as_ref().map(|handle| {
         let ready = Arc::new(AtomicBool::new(false));

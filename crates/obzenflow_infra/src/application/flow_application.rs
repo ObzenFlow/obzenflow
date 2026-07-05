@@ -16,7 +16,7 @@ use super::{
     ApplicationError, FlowConfig, Presentation, RunPresentationOutcome, WebSurfaceAttachment,
     WebSurfaceWiringContext,
 };
-use crate::application::config::{CorsModeArg, ResolvedStartupConfig, StartupMode};
+use crate::application::config::{CorsModeArg, OnTerminalArg, ResolvedStartupConfig, StartupMode};
 use crate::web::endpoints::event_ingestion::{HttpIngress, IngressHandle};
 #[cfg(feature = "warp-server")]
 use crate::web::surface_metrics::{HttpSurfaceMetricsCollector, HttpSurfaceMetricsEmitter};
@@ -947,6 +947,12 @@ impl FlowApplication {
                 tracing::debug!(surface = %surface_name, "Web surface attached");
             }
 
+            // FLOWIP-114d: per-process incarnation identity (stamped into the
+            // SSE bootstrap event and every registration) and the terminal-
+            // gated listener-close signal (gap 8).
+            let runtime_instance_id = ulid::Ulid::new().to_string();
+            let (server_shutdown_tx, server_shutdown_rx) = tokio::sync::watch::channel(false);
+
             // Start server if --server flag present
             let server_handle = if config.server.enabled {
                 let cors_mode = match config.server.cors_mode {
@@ -972,13 +978,22 @@ impl FlowApplication {
                             all_extra_endpoints,
                             surface_metrics_collector,
                             config.runtime_config.clone(),
+                            runtime_instance_id.clone(),
+                            server_shutdown_rx.clone(),
                         )
                         .await
                     }
 
                     #[cfg(not(feature = "warp-server"))]
                     {
-                        Self::start_server(&flow_handle, server_config, all_extra_endpoints).await
+                        Self::start_server(
+                            &flow_handle,
+                            server_config,
+                            all_extra_endpoints,
+                            runtime_instance_id.clone(),
+                            server_shutdown_rx.clone(),
+                        )
+                        .await
                     }
                 };
 
@@ -991,6 +1006,29 @@ impl FlowApplication {
             } else {
                 None
             };
+
+            // FLOWIP-114d: registration heartbeat as a managed task.
+            // Deregistration is exit-tied through the shutdown signal in both
+            // on_terminal modes; park keeps renewing with the terminal phase.
+            #[cfg(feature = "studio-registration")]
+            if let Some(studio) = config.studio.clone() {
+                if server_handle.is_some() {
+                    managed_tasks.push(crate::web::studio_registration::spawn_heartbeat(
+                        crate::web::studio_registration::HeartbeatContext {
+                            studio,
+                            runtime_instance_id: runtime_instance_id.clone(),
+                            flow_name: flow_name.clone(),
+                            startup_mode: config.server.startup_mode,
+                            probe_base_url: format!(
+                                "http://{}:{}",
+                                config.server.host, config.server.port
+                            ),
+                        },
+                        flow_handle.state_receiver(),
+                        server_shutdown_rx.clone(),
+                    ));
+                }
+            }
 
             if config.server.enabled {
                 if server_handle.is_none() {
@@ -1079,152 +1117,241 @@ impl FlowApplication {
                         }
                     };
 
-                    // Wait for first shutdown signal:
+                    // FLOWIP-114d gap 9: on_terminal=exit adds a terminal arm to
+                    // the wait, so a finished flow closes and exits instead of
+                    // parking until a signal.
+                    enum ServeOutcome {
+                        Signal(ShutdownSignal),
+                        FlowTerminal,
+                    }
+
+                    let exit_on_terminal = config.server.on_terminal == OnTerminalArg::Exit;
+                    let mut terminal_rx = flow_handle.state_receiver();
+                    let wait_terminal = async move {
+                        loop {
+                            if terminal_rx.borrow().is_terminal() {
+                                break;
+                            }
+                            if terminal_rx.changed().await.is_err() {
+                                break;
+                            }
+                        }
+                    };
+
+                    // Wait for the first shutdown trigger:
                     // - SIGINT (Ctrl+C) => Cancel
                     // - SIGTERM => GracefulStop(timeout=GRACE)
+                    // - terminal pipeline state (on_terminal=exit) => close and exit
                     #[cfg(test)]
-                    let first_signal = if let Some(test_shutdown_signal) = test_shutdown_signal {
-                        test_shutdown_signal.await.unwrap_or(ShutdownSignal::Sigint)
+                    let outcome = if let Some(test_shutdown_signal) = test_shutdown_signal {
+                        ServeOutcome::Signal(
+                            test_shutdown_signal.await.unwrap_or(ShutdownSignal::Sigint),
+                        )
                     } else {
                         #[cfg(unix)]
                         {
                             tokio::select! {
-                                _ = tokio::signal::ctrl_c() => ShutdownSignal::Sigint,
-                                _ = sigterm_stream.recv() => ShutdownSignal::Sigterm,
+                                _ = tokio::signal::ctrl_c() => ServeOutcome::Signal(ShutdownSignal::Sigint),
+                                _ = sigterm_stream.recv() => ServeOutcome::Signal(ShutdownSignal::Sigterm),
+                                _ = wait_terminal, if exit_on_terminal => ServeOutcome::FlowTerminal,
                             }
                         }
                         #[cfg(not(unix))]
                         {
-                            if let Err(err) = tokio::signal::ctrl_c().await {
-                                break 'run (
-                                    Err(ApplicationError::from(err)),
-                                    Some(flow_name),
-                                    run_state,
-                                    false,
-                                );
+                            tokio::select! {
+                                signal = tokio::signal::ctrl_c() => {
+                                    if let Err(err) = signal {
+                                        break 'run (
+                                            Err(ApplicationError::from(err)),
+                                            Some(flow_name),
+                                            run_state,
+                                            false,
+                                        );
+                                    }
+                                    ServeOutcome::Signal(ShutdownSignal::Sigint)
+                                }
+                                _ = wait_terminal, if exit_on_terminal => ServeOutcome::FlowTerminal,
                             }
-                            ShutdownSignal::Sigint
                         }
                     };
 
                     #[cfg(not(test))]
-                    let first_signal = {
+                    let outcome = {
                         #[cfg(unix)]
                         {
                             tokio::select! {
-                                _ = tokio::signal::ctrl_c() => ShutdownSignal::Sigint,
-                                _ = sigterm_stream.recv() => ShutdownSignal::Sigterm,
+                                _ = tokio::signal::ctrl_c() => ServeOutcome::Signal(ShutdownSignal::Sigint),
+                                _ = sigterm_stream.recv() => ServeOutcome::Signal(ShutdownSignal::Sigterm),
+                                _ = wait_terminal, if exit_on_terminal => ServeOutcome::FlowTerminal,
                             }
                         }
                         #[cfg(not(unix))]
                         {
-                            if let Err(err) = tokio::signal::ctrl_c().await {
-                                break 'run (
-                                    Err(ApplicationError::from(err)),
-                                    Some(flow_name),
-                                    run_state,
-                                    false,
-                                );
+                            tokio::select! {
+                                signal = tokio::signal::ctrl_c() => {
+                                    if let Err(err) = signal {
+                                        break 'run (
+                                            Err(ApplicationError::from(err)),
+                                            Some(flow_name),
+                                            run_state,
+                                            false,
+                                        );
+                                    }
+                                    ServeOutcome::Signal(ShutdownSignal::Sigint)
+                                }
+                                _ = wait_terminal, if exit_on_terminal => ServeOutcome::FlowTerminal,
                             }
-                            ShutdownSignal::Sigint
                         }
                     };
 
-                    tracing::info!(?first_signal, "👋 Shutting down server");
-
-                    // The web server currently has no explicit shutdown hook; abort its task so we don't
-                    // keep servicing requests while the pipeline is draining.
-                    server_task.abort();
-                    let _ = server_task.await;
-
-                    // Best-effort: stop the flow before tearing down the runtime.
-                    //
-                    // We avoid force-aborting here because it can cancel in-flight disk journal
-                    // writes (spawn_blocking), which then surfaces as "Background writer task was
-                    // cancelled/panicked" errors inside stage supervisors.
-                    match first_signal {
-                        ShutdownSignal::Sigint => {
-                            if let Err(e) = flow_handle.stop_cancel().await {
-                                tracing::warn!(
-                                    error = %e,
-                                    "Failed to request flow cancel during SIGINT shutdown; continuing shutdown"
-                                );
+                    // FLOWIP-114d gap 8: the web surface keeps serving through
+                    // the drain. Observation stays live; Play is refused by the
+                    // FSM guard and push ingress refuses via admission. The
+                    // listener closes only after the terminal state.
+                    let signal_phase = match outcome {
+                        ServeOutcome::Signal(first_signal) => {
+                            tracing::info!(
+                                ?first_signal,
+                                "👋 Shutting down; web surface serves through the drain"
+                            );
+                            // Best-effort: stop the flow before tearing down the runtime.
+                            //
+                            // We avoid force-aborting here because it can cancel in-flight disk journal
+                            // writes (spawn_blocking), which then surfaces as "Background writer task was
+                            // cancelled/panicked" errors inside stage supervisors.
+                            match first_signal {
+                                ShutdownSignal::Sigint => {
+                                    if let Err(e) = flow_handle.stop_cancel().await {
+                                        tracing::warn!(
+                                            error = %e,
+                                            "Failed to request flow cancel during SIGINT shutdown; continuing shutdown"
+                                        );
+                                    }
+                                }
+                                ShutdownSignal::Sigterm => {
+                                    if let Err(e) = flow_handle.stop_graceful(grace_timeout).await {
+                                        tracing::warn!(
+                                            error = %e,
+                                            "Failed to request flow graceful stop during SIGTERM shutdown; continuing shutdown"
+                                        );
+                                    }
+                                }
                             }
+                            Some(first_signal)
                         }
-                        ShutdownSignal::Sigterm => {
-                            if let Err(e) = flow_handle.stop_graceful(grace_timeout).await {
+                        ServeOutcome::FlowTerminal => {
+                            tracing::info!(
+                                "🏁 Flow reached a terminal state (on_terminal=exit); closing"
+                            );
+                            None
+                        }
+                    };
+
+                    if let Some(first_signal) = signal_phase {
+                        let mut phase = first_signal;
+                        let mut phase_deadline = match first_signal {
+                            ShutdownSignal::Sigint => Instant::now() + grace_timeout,
+                            ShutdownSignal::Sigterm => Instant::now() + grace_timeout,
+                        };
+
+                        while flow_handle.is_running() {
+                            if Instant::now() >= phase_deadline {
+                                if phase == ShutdownSignal::Sigterm {
+                                    tracing::warn!(
+                                        grace_secs = grace_timeout.as_secs(),
+                                        "Graceful stop timeout expired; escalating to cancel"
+                                    );
+                                    if let Err(e) = flow_handle.stop_cancel_timeout().await {
+                                        tracing::warn!(
+                                            error = %e,
+                                            "Failed to request flow cancel during escalation; continuing shutdown"
+                                        );
+                                    }
+                                    phase = ShutdownSignal::Sigint;
+                                    phase_deadline = Instant::now() + grace_timeout;
+                                    continue;
+                                }
+
                                 tracing::warn!(
-                                    error = %e,
-                                    "Failed to request flow graceful stop during SIGTERM shutdown; continuing shutdown"
-                                );
+                                shutdown_timeout_secs = grace_timeout.as_secs(),
+                                "Flow did not terminate within shutdown timeout; exiting anyway"
+                            );
+                                break;
+                            }
+
+                            if phase == ShutdownSignal::Sigterm {
+                                #[cfg(unix)]
+                                {
+                                    tokio::select! {
+                                        _ = tokio::time::sleep(Duration::from_millis(50)) => {},
+                                        _ = tokio::signal::ctrl_c() => {
+                                            tracing::warn!("Second SIGINT during graceful stop; escalating to cancel");
+                                            let _ = flow_handle.stop_cancel().await;
+                                            phase = ShutdownSignal::Sigint;
+                                            phase_deadline = Instant::now() + grace_timeout;
+                                        }
+                                        _ = sigterm_stream.recv() => {
+                                            tracing::warn!("Second SIGTERM during graceful stop; escalating to cancel");
+                                            let _ = flow_handle.stop_cancel().await;
+                                            phase = ShutdownSignal::Sigint;
+                                            phase_deadline = Instant::now() + grace_timeout;
+                                        }
+                                    }
+                                }
+                                #[cfg(not(unix))]
+                                {
+                                    tokio::select! {
+                                        _ = tokio::time::sleep(Duration::from_millis(50)) => {},
+                                        _ = tokio::signal::ctrl_c() => {
+                                            tracing::warn!("Second SIGINT during graceful stop; escalating to cancel");
+                                            let _ = flow_handle.stop_cancel().await;
+                                            phase = ShutdownSignal::Sigint;
+                                            phase_deadline = Instant::now() + grace_timeout;
+                                        }
+                                    }
+                                }
+                            } else {
+                                tokio::time::sleep(Duration::from_millis(50)).await;
                             }
                         }
                     }
 
-                    let mut phase = first_signal;
-                    let mut phase_deadline = match first_signal {
-                        ShutdownSignal::Sigint => Instant::now() + grace_timeout,
-                        ShutdownSignal::Sigterm => Instant::now() + grace_timeout,
-                    };
+                    // Terminal state reached (or the shutdown timeout expired).
+                    // The heartbeat deregisters and SSE producers flush the
+                    // terminal event on this signal; the listener close carries
+                    // a bounded deadline with abort as the escalation backstop,
+                    // mirroring the flow's own graceful-to-cancel ladder.
+                    let _ = server_shutdown_tx.send(true);
+                    const SERVER_CLOSE_GRACE: Duration = Duration::from_secs(5);
+                    let mut server_task = server_task;
+                    if tokio::time::timeout(SERVER_CLOSE_GRACE, &mut server_task)
+                        .await
+                        .is_err()
+                    {
+                        tracing::warn!(
+                            close_grace_secs = SERVER_CLOSE_GRACE.as_secs(),
+                            "Web server did not close within the grace period; aborting listener"
+                        );
+                        server_task.abort();
+                        let _ = server_task.await;
+                    }
 
-                    while flow_handle.is_running() {
-                        if Instant::now() >= phase_deadline {
-                            if phase == ShutdownSignal::Sigterm {
-                                tracing::warn!(
-                                    grace_secs = grace_timeout.as_secs(),
-                                    "Graceful stop timeout expired; escalating to cancel"
-                                );
-                                if let Err(e) = flow_handle.stop_cancel_timeout().await {
-                                    tracing::warn!(
-                                        error = %e,
-                                        "Failed to request flow cancel during escalation; continuing shutdown"
-                                    );
-                                }
-                                phase = ShutdownSignal::Sigint;
-                                phase_deadline = Instant::now() + grace_timeout;
-                                continue;
-                            }
-
-                            tracing::warn!(
-                                shutdown_timeout_secs = grace_timeout.as_secs(),
-                                "Flow did not terminate within shutdown timeout; exiting anyway"
+                    // FLOWIP-114d gap 9: truthful exit codes. A flow that
+                    // failed on its own must not exit zero; an operator stop
+                    // is deliberate and exits zero even when cancel semantics
+                    // land the FSM in Failed{user_stop}.
+                    if signal_phase.is_none() {
+                        let final_state = flow_handle.current_state();
+                        if let obzenflow_runtime::pipeline::PipelineState::Failed {
+                            reason, ..
+                        } = &final_state
+                        {
+                            break 'run (
+                                Err(ApplicationError::FlowExecutionFailed(reason.clone())),
+                                Some(flow_name),
+                                run_state,
+                                true,
                             );
-                            break;
-                        }
-
-                        if phase == ShutdownSignal::Sigterm {
-                            #[cfg(unix)]
-                            {
-                                tokio::select! {
-                                    _ = tokio::time::sleep(Duration::from_millis(50)) => {},
-                                    _ = tokio::signal::ctrl_c() => {
-                                        tracing::warn!("Second SIGINT during graceful stop; escalating to cancel");
-                                        let _ = flow_handle.stop_cancel().await;
-                                        phase = ShutdownSignal::Sigint;
-                                        phase_deadline = Instant::now() + grace_timeout;
-                                    }
-                                    _ = sigterm_stream.recv() => {
-                                        tracing::warn!("Second SIGTERM during graceful stop; escalating to cancel");
-                                        let _ = flow_handle.stop_cancel().await;
-                                        phase = ShutdownSignal::Sigint;
-                                        phase_deadline = Instant::now() + grace_timeout;
-                                    }
-                                }
-                            }
-                            #[cfg(not(unix))]
-                            {
-                                tokio::select! {
-                                    _ = tokio::time::sleep(Duration::from_millis(50)) => {},
-                                    _ = tokio::signal::ctrl_c() => {
-                                        tracing::warn!("Second SIGINT during graceful stop; escalating to cancel");
-                                        let _ = flow_handle.stop_cancel().await;
-                                        phase = ShutdownSignal::Sigint;
-                                        phase_deadline = Instant::now() + grace_timeout;
-                                    }
-                                }
-                            }
-                        } else {
-                            tokio::time::sleep(Duration::from_millis(50)).await;
                         }
                     }
                 }
@@ -1497,6 +1624,8 @@ impl FlowApplication {
         extra_endpoints: Vec<Box<dyn HttpEndpoint>>,
         surface_metrics: Option<Arc<HttpSurfaceMetricsCollector>>,
         runtime_config: Arc<obzenflow_runtime::runtime_config::ResolvedRuntimeConfig>,
+        runtime_instance_id: String,
+        shutdown: tokio::sync::watch::Receiver<bool>,
     ) -> Result<Option<JoinHandle<()>>, ApplicationError> {
         use crate::web::start_web_server_with_config;
         use crate::web::web_server::WebServerResources;
@@ -1525,6 +1654,8 @@ impl FlowApplication {
                 extra_endpoints,
                 surface_metrics,
                 runtime_config: Some(runtime_config),
+                runtime_instance_id: Some(runtime_instance_id),
+                shutdown: Some(shutdown),
             },
             _server_config,
         )
@@ -1549,6 +1680,8 @@ impl FlowApplication {
         _flow_handle: &Arc<FlowHandle>,
         _server_config: ServerConfig,
         extra_endpoints: Vec<Box<dyn HttpEndpoint>>,
+        _runtime_instance_id: String,
+        _shutdown: tokio::sync::watch::Receiver<bool>,
     ) -> Result<Option<JoinHandle<()>>, ApplicationError> {
         if !extra_endpoints.is_empty() {
             return Err(ApplicationError::FeatureNotEnabled(
