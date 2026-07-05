@@ -5,7 +5,7 @@
 //! Integration test for error-kind metrics on the prometheus volume-demo-style flow.
 //!
 //! This mirrors the high-volume source + error_prone_transform pipeline from
-//! `examples/prometheus_100k_demo.rs`, but runs entirely under `cargo test`.
+//! `examples/prometheus_demo/main.rs`, but runs entirely under `cargo test`.
 //! It asserts that:
 //! - `error_processor` reports exactly 100 Domain errors, and
 //! - there are no Unknown errors for that stage.

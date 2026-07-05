@@ -2,9 +2,9 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Prometheus 100k Demo with FlowApplication Framework (FLOWIP-080h, 080j & 082a)
+//! Prometheus Demo with FlowApplication Framework (FLOWIP-080h, 080j & 082a)
 //!
-//! This demo processes 100,000 events demonstrating:
+//! Processes a configurable volume of events (default 100,000) demonstrating:
 //! - Source-intake rate limiting middleware
 //! - Fan-out topology pattern (one stage to multiple downstream stages)
 //! - ReduceTyped for type-safe event counting (FLOWIP-080j)
@@ -15,7 +15,10 @@
 //! **FLOWIP-080j Update**: Replaced 59-line EventCounter StatefulHandler with ReduceTyped
 //! **FLOWIP-082a Update**: Added TypedPayload with EVENT_TYPE and SCHEMA_VERSION constants
 //!
-//! Run with: cargo run -p obzenflow --example prometheus_100k_demo --features obzenflow_infra/warp-server
+//! Run with: cargo run -p obzenflow --example prometheus_demo --features obzenflow_infra/warp-server
+//!
+//! Event volume is operator-tunable via `PROMETHEUS_EVENT_COUNT` (default
+//! 100000), so varying the load needs no code change.
 //!
 //! The default startup config starts the web server with:
 //! - /metrics endpoint for Prometheus metrics (framework-level metrics)
@@ -24,6 +27,7 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
+use obzenflow::env::env_var_or;
 use obzenflow::typed::{sources, stateful as typed_stateful, transforms as typed_transforms};
 use obzenflow_adapters::middleware::RateLimiterBuilder;
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
@@ -39,8 +43,11 @@ use obzenflow_runtime::typing::SinkTyping;
 use serde::{Deserialize, Serialize};
 const CONFIG_FILE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/examples/prometheus_100k_demo/obzenflow.toml"
+    "/examples/prometheus_demo/obzenflow.toml"
 );
+
+/// Default event volume; override with `PROMETHEUS_EVENT_COUNT`.
+const DEFAULT_EVENT_COUNT: usize = 100_000;
 
 // ============================================================================
 // FLOWIP-082a: Strongly-Typed Domain Events
@@ -153,9 +160,13 @@ impl SinkHandler for CompletionSink {
 }
 
 fn main() -> Result<()> {
+    // Operator-tunable event volume through the framework env helpers, so the
+    // load varies without a code change (default 100k).
+    let total_events = env_var_or::<usize>("PROMETHEUS_EVENT_COUNT", DEFAULT_EVENT_COUNT)?;
+
     let presentation = Presentation::new(
-        Banner::new("Prometheus 100k Demo")
-            .description("100,000 events with rate limiting and fan-out.")
+        Banner::new("Prometheus Demo")
+            .description("Configurable event volume (default 100k) with rate limiting and fan-out.")
             .bullets(
                 "Demonstrating",
                 [
@@ -167,7 +178,7 @@ fn main() -> Result<()> {
             )
             .section(
                 "Usage",
-                "Default:     cargo run --package obzenflow --example prometheus_100k_demo --features obzenflow_infra/warp-server\nCustom port: cargo run --package obzenflow --example prometheus_100k_demo --features obzenflow_infra/warp-server -- --server-port 8080",
+                "Default:     cargo run --package obzenflow --example prometheus_demo --features obzenflow_infra/warp-server\nVolume:      PROMETHEUS_EVENT_COUNT=1000 cargo run --package obzenflow --example prometheus_demo --features obzenflow_infra/warp-server\nCustom port: cargo run --package obzenflow --example prometheus_demo --features obzenflow_infra/warp-server -- --server-port 8080",
             ),
     )
     .with_footer(|outcome| {
@@ -182,17 +193,17 @@ fn main() -> Result<()> {
         .with_log_level(LogLevel::Info)
         .with_presentation(presentation)
         .run_blocking(flow! {
-            name: "prometheus_100k_demo",
-            journals: disk_journals(std::path::PathBuf::from("target/prometheus_100k_demo_journal")),
+            name: "prometheus_demo",
+            journals: disk_journals(std::path::PathBuf::from("target/prometheus_demo_journal")),
             middleware: [],
 
             stages: {
-                // Source generating 100k events. Source intake is the live I/O
-                // boundary where rate limiting belongs under FLOWIP-120c H1.
+                // Source generating the configured event volume. Source intake
+                // is the live I/O boundary where rate limiting belongs under
+                // FLOWIP-120c H1.
                 high_volume_source = source!(DataRequest =>
                     sources::finite_from_fn(move |index| {
-                        let total = 100_000usize;
-                        if index >= total {
+                        if index >= total_events {
                             println!("🏁 Source complete: Generated {index} total events");
                             return None;
                         }
@@ -235,16 +246,16 @@ fn main() -> Result<()> {
                         }
                     ).emit_on_eof()
                 );
-                summary_sink = sink!(|summary: EventCountState| {
+                summary_sink = sink!(move |summary: EventCountState| {
                     let count = summary.event_count;
-                    let errors = 100_000usize.saturating_sub(count);
+                    let errors = total_events.saturating_sub(count);
 
                     println!();
                     println!("=====================================");
                     println!("📊 Business-Level Event Count (FLOWIP-080j):");
                     println!("   Successfully processed: {count} events");
                     println!(
-                        "   Note: 100000 generated - {count} = {errors} errors (routed to error journal)"
+                        "   Note: {total_events} generated - {count} = {errors} errors (routed to error journal)"
                     );
                     println!("=====================================");
                     println!();

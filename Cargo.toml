@@ -181,8 +181,8 @@ name = "flow_middleware_config"
 path = "examples/flow_middleware_config/main.rs"
 
 [[example]]
-name = "prometheus_100k_demo"
-path = "examples/prometheus_100k_demo/main.rs"
+name = "prometheus_demo"
+path = "examples/prometheus_demo/main.rs"
 
 [[example]]
 name = "product_catalog_enrichment"
