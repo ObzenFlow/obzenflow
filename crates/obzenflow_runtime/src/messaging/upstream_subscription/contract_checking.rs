@@ -516,7 +516,7 @@ where
         // render mid-flight contract health (even when no violations are present).
         //
         // MetricsAggregator also observes ContractResult, so this provides a
-        // lightweight heartbeat for long-running flows (e.g. prometheus_100k_demo).
+        // lightweight heartbeat for long-running flows (e.g. prometheus_demo).
         if let Some(system_journal) = &tracker.system_journal {
             let mut emitted_any = false;
             for (contract_name, result) in &results {

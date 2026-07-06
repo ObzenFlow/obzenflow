@@ -24,7 +24,7 @@ use crate::{
         SelfSupervisedWithExternalEvents, SupervisorBuilder, SupervisorTaskBuilder,
     },
 };
-use obzenflow_core::event::{ChainEvent, SystemEvent};
+use obzenflow_core::event::{ChainEvent, SystemEvent, WriterId};
 use obzenflow_core::id::{FlowId, SystemId};
 use obzenflow_core::journal::Journal;
 use obzenflow_core::metrics::MetricsExporter;
@@ -450,6 +450,7 @@ impl SupervisorBuilder for PipelineBuilder {
                 flow_name,
                 contract_attachments,
                 system_journal: Some(self.system_journal.clone()),
+                pipeline_writer_id: WriterId::from(system_id),
                 liveness_snapshots: self.liveness_snapshots.clone(),
                 run_substrate: self
                     .run_substrate

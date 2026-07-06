@@ -30,6 +30,7 @@ use obzenflow_core::EventId;
 use crate::web::endpoint_tags::SURFACE_NAME_TAG_PREFIX;
 use crate::web::routing::{matchit_template_to_public, public_template_to_matchit};
 use crate::web::surface_metrics::{HttpSurfaceMetricsCollector, HttpSurfaceObservation};
+use crate::web::RuntimeInstanceId;
 
 /// Warp-based web server implementation
 pub struct WarpServer {
@@ -37,6 +38,13 @@ pub struct WarpServer {
     /// Optional system journal for SSE lifecycle events
     system_journal: Option<Arc<dyn Journal<SystemEvent>>>,
     surface_metrics: Option<Arc<HttpSurfaceMetricsCollector>>,
+    /// FLOWIP-114d: per-process incarnation identity stamped into the SSE
+    /// bootstrap event so browsers detect generation changes on the data path.
+    runtime_instance_id: Option<RuntimeInstanceId>,
+    /// FLOWIP-114d gap 8: fired after the terminal pipeline state; the
+    /// listener closes gracefully and SSE producers end their streams after
+    /// flushing the terminal lifecycle event.
+    shutdown: Option<tokio::sync::watch::Receiver<bool>>,
 }
 
 const DEFAULT_MAX_BODY_SIZE_BYTES: usize = 10 * 1024 * 1024;
@@ -56,12 +64,24 @@ impl WarpServer {
             endpoints: Vec::new(),
             system_journal: None,
             surface_metrics: None,
+            runtime_instance_id: None,
+            shutdown: None,
         }
     }
 
     /// Attach a system journal to enable SSE lifecycle streaming
     pub fn with_system_journal(&mut self, journal: Arc<dyn Journal<SystemEvent>>) {
         self.system_journal = Some(journal);
+    }
+
+    /// Attach the per-process incarnation identity (FLOWIP-114d).
+    pub fn with_runtime_instance_id(&mut self, runtime_instance_id: RuntimeInstanceId) {
+        self.runtime_instance_id = Some(runtime_instance_id);
+    }
+
+    /// Attach the graceful-shutdown signal (FLOWIP-114d gap 8).
+    pub fn with_shutdown(&mut self, shutdown: tokio::sync::watch::Receiver<bool>) {
+        self.shutdown = Some(shutdown);
     }
 
     /// Attach an in-memory metrics collector for hosted web surfaces (FLOWIP-093a).
@@ -267,7 +287,12 @@ impl WarpServer {
 
         // Add SSE /api/flow/events route if a system journal is available
         if let Some(journal) = &self.system_journal {
-            let sse_route = self.build_flow_events_route(journal.clone(), host_policy.clone());
+            let sse_route = self.build_flow_events_route(
+                journal.clone(),
+                host_policy.clone(),
+                self.runtime_instance_id.clone(),
+                self.shutdown.clone(),
+            );
             combined_route = combined_route.or(sse_route).unify().boxed();
         }
 
@@ -371,6 +396,8 @@ impl WarpServer {
         &self,
         system_journal: Arc<dyn Journal<SystemEvent>>,
         host_policy: HostPolicy,
+        runtime_instance_id: Option<RuntimeInstanceId>,
+        shutdown: Option<tokio::sync::watch::Receiver<bool>>,
     ) -> impl Filter<Extract = (Box<dyn Reply>,), Error = Rejection> + Clone {
         let journal_filter = warp::any().map(move || system_journal.clone());
 
@@ -384,6 +411,8 @@ impl WarpServer {
                       last_event_id: Option<String>,
                       journal: Arc<dyn Journal<SystemEvent>>| {
                     let host_policy = host_policy.clone();
+                    let runtime_instance_id = runtime_instance_id.clone();
+                    let shutdown = shutdown.clone();
                     async move {
                     let req_headers = headers_to_owned_map(&headers);
                     if let Err(response) = maybe_enforce_control_plane_auth(
@@ -393,6 +422,20 @@ impl WarpServer {
                         &[],
                     ) {
                         return reply_from_response(response);
+                    }
+
+                    // FLOWIP-114d gap 8 (114a RP4): a 204 stops browser
+                    // EventSource auto-reconnect politely during shutdown.
+                    if shutdown
+                        .as_ref()
+                        .is_some_and(|shutdown| *shutdown.borrow())
+                    {
+                        return Ok::<Box<dyn Reply>, Rejection>(Box::new(
+                            warp::reply::with_status(
+                                warp::reply(),
+                                warp::http::StatusCode::NO_CONTENT,
+                            ),
+                        ) as Box<dyn Reply>);
                     }
 
                     let (tx, rx) =
@@ -447,6 +490,35 @@ impl WarpServer {
                         };
 
                         loop {
+                            // FLOWIP-114d gap 8: the shutdown signal fires only after the
+                            // terminal fact is committed, so ending once that fact has been
+                            // delivered loses nothing. The loop never blocks (EOF sleeps
+                            // 100ms), so a borrow check per iteration suffices.
+                            if shutdown
+                                .as_ref()
+                                .is_some_and(|shutdown| *shutdown.borrow())
+                                && ready_to_stream
+                                && matches!(
+                                    last_pipeline_event,
+                                    Some(
+                                        "flow_drained"
+                                            | "flow_completed"
+                                            | "flow_cancelled"
+                                            | "flow_failed"
+                                    )
+                                )
+                            {
+                                let payload = serde_json::json!({
+                                    "system_event_type": "server_shutdown",
+                                    "runtime_instance_id": runtime_instance_id.as_ref().map(RuntimeInstanceId::as_str),
+                                });
+                                let bye = SseEvent::default()
+                                    .event("server_shutdown")
+                                    .data(payload.to_string());
+                                let _ = tx.send(Ok(bye));
+                                return;
+                            }
+
                             match reader.next().await {
                                 Ok(Some(envelope)) => {
                                     checkpoint_event_id = Some(envelope.event.id);
@@ -477,6 +549,8 @@ impl WarpServer {
                                     }
 
                                     stage_lifecycle_state.observe(&envelope);
+                                    last_pipeline_event =
+                                        last_pipeline_event_name(&envelope).or(last_pipeline_event);
                                     if let Some(ev) =
                                         map_system_event_to_sse(&envelope, &mut middleware_state)
                                     {
@@ -518,6 +592,7 @@ impl WarpServer {
                                                 "system_event_type": "bootstrap",
                                                 "event_type": "flow_bootstrap",
                                                 "checkpoint_event_id": checkpoint_event_id.map(|id| id.to_string()),
+                                                "runtime_instance_id": runtime_instance_id.as_ref().map(RuntimeInstanceId::as_str),
                                             });
                                             let mut ev = SseEvent::default()
                                                 .event("bootstrap")
@@ -564,6 +639,7 @@ impl WarpServer {
                                                 "system_event_type": "bootstrap",
                                                 "event_type": "flow_bootstrap",
                                                 "checkpoint_event_id": checkpoint_event_id.map(|id| id.to_string()),
+                                                "runtime_instance_id": runtime_instance_id.as_ref().map(RuntimeInstanceId::as_str),
                                             });
                                             let mut ev = SseEvent::default()
                                                 .event("bootstrap")
@@ -1543,8 +1619,27 @@ impl WebServer for WarpServer {
                 .boxed()
         };
 
-        // Start the server
-        warp::serve(routes_with_cors).run(addr).await;
+        // Start the server. With a shutdown signal attached, the listener
+        // closes gracefully after it fires (FLOWIP-114d gap 8); SSE producers
+        // self-close separately, since transport-level graceful shutdown
+        // never ends an infinite stream.
+        match self.shutdown.clone() {
+            Some(mut shutdown) => {
+                let (_bound, server) =
+                    warp::serve(routes_with_cors).bind_with_graceful_shutdown(addr, async move {
+                        // A dropped sender also means: close now.
+                        while !*shutdown.borrow() {
+                            if shutdown.changed().await.is_err() {
+                                break;
+                            }
+                        }
+                    });
+                server.await;
+            }
+            None => {
+                warp::serve(routes_with_cors).run(addr).await;
+            }
+        }
 
         Ok(())
     }
@@ -2655,6 +2750,27 @@ fn map_system_event_to_sse(
                         .data(data.to_string()),
                 )
             }
+            obzenflow_core::event::system_event::PipelineLifecycleEvent::ReadyForRun {
+                stage_count,
+            } => {
+                let mut data = json!({
+                    "system_event_type": "pipeline_lifecycle",
+                    "event_type": "flow_ready_for_run",
+                    "timestamp_ms": event.timestamp,
+                });
+                if let Some(count) = stage_count {
+                    data["stage_count"] = json!(count);
+                }
+                if let Some(vc) = &vector_clock_value {
+                    data["vector_clock"] = vc.clone();
+                }
+                Some(
+                    SseEvent::default()
+                        .id(id_str)
+                        .event("flow_lifecycle")
+                        .data(data.to_string()),
+                )
+            }
             obzenflow_core::event::system_event::PipelineLifecycleEvent::Running {
                 stage_count,
             } => {
@@ -3223,6 +3339,9 @@ fn last_pipeline_event_name(envelope: &SystemEventEnvelope) -> Option<&'static s
         obzenflow_core::event::SystemEventType::PipelineLifecycle(event) => Some(match event {
             obzenflow_core::event::system_event::PipelineLifecycleEvent::Starting => {
                 "flow_starting"
+            }
+            obzenflow_core::event::system_event::PipelineLifecycleEvent::ReadyForRun { .. } => {
+                "flow_ready_for_run"
             }
             obzenflow_core::event::system_event::PipelineLifecycleEvent::Running { .. } => {
                 "flow_running"

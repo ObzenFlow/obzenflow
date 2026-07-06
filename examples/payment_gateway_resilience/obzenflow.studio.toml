@@ -1,0 +1,38 @@
+# FLOWIP-114d Studio walkthrough config: select with
+#   --config examples/payment_gateway_resilience/obzenflow.studio.toml
+# The runtime registers with the phonebook and the browser attaches directly
+# to this process's port; the phonebook never proxies the data path.
+
+[server]
+enabled = true
+host = "127.0.0.1"
+port = 9090
+startup_mode = "manual"
+
+# The Studio bundle is served from the phonebook origin, so every browser
+# request to this runtime is cross-origin; both spellings are listed because
+# 127.0.0.1 and localhost are different origins.
+[server.cors]
+mode = "allow-list"
+# 7010 = the studiod-served bundle origin; 8080 = the `trunk serve` UI-dev
+# origin. Both loopback; 127.0.0.1 and localhost are distinct origins.
+allow_origins = [
+    "http://127.0.0.1:7010",
+    "http://localhost:7010",
+    "http://127.0.0.1:8080",
+    "http://localhost:8080",
+]
+
+[studio]
+enabled = true
+phonebook_url = "http://127.0.0.1:7010"
+job_id = "payment_gateway"
+advertise_url = "http://127.0.0.1:9090"
+
+[runtime.backpressure.flow]
+mode = "enforce"
+window = 1000
+stall_timeout_ms = 30000
+
+[runtime.backpressure.stages.authorize_payment]
+stall_timeout_ms = 120000

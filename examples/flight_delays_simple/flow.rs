@@ -32,7 +32,9 @@ pub fn run_example() -> Result<()> {
             flights = source!(FlightRecord => sources::finite(flights));
 
             val = transform!(FlightRecord -> FlightRecord => FlightValidator::new());
-            calc = transform!(EnrichedFlight -> EnrichedFlight => DelayCalculator::new());
+            // DelayCalculator adds delay_category on the raw record, before the
+            // enricher joins carrier details, so it is FlightRecord -> FlightRecord.
+            calc = transform!(FlightRecord -> FlightRecord => DelayCalculator::new());
 
             enricher = join!(
                 catalog carriers: CarrierDetails,

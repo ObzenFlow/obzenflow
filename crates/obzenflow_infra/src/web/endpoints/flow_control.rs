@@ -104,22 +104,6 @@ impl FlowControlTarget for FlowHandle {
     }
 }
 
-fn pipeline_state_label(state: &PipelineState) -> String {
-    match state {
-        PipelineState::Created => "created",
-        PipelineState::Materializing => "materializing",
-        PipelineState::Materialized => "materialized",
-        PipelineState::ReadyForRun => "readyforrun",
-        PipelineState::Running => "running",
-        PipelineState::SourceCompleted => "sourcecompleted",
-        PipelineState::AbortRequested { .. } => "abortrequested",
-        PipelineState::Draining => "draining",
-        PipelineState::Drained => "drained",
-        PipelineState::Failed { .. } => "failed",
-    }
-    .to_string()
-}
-
 #[async_trait]
 impl HttpEndpoint for FlowControlEndpoint {
     fn path(&self) -> &str {
@@ -163,18 +147,18 @@ impl HttpEndpoint for FlowControlEndpoint {
                         return ok_json_response(FlowControlResponse {
                             status: FlowControlStatus::Accepted,
                             message: "Play accepted".to_string(),
-                            state: Some(pipeline_state_label(&state)),
+                            state: Some(state_diagnostic_label(&state).to_string()),
                         });
                     }
                     Ok(FlowStartControlOutcome::AlreadyRunning { state }) => {
                         return ok_json_response(FlowControlResponse {
                             status: FlowControlStatus::Accepted,
                             message: "Play accepted: already running".to_string(),
-                            state: Some(pipeline_state_label(&state)),
+                            state: Some(state_diagnostic_label(&state).to_string()),
                         });
                     }
                     Ok(FlowStartControlOutcome::Rejected { state, reason }) => {
-                        let state_label = pipeline_state_label(&state);
+                        let state_label = state_diagnostic_label(&state).to_string();
                         return ok_json_response(FlowControlResponse {
                             status: FlowControlStatus::Rejected,
                             message: format!("Play rejected: {reason} (state={state_label})"),
@@ -186,7 +170,10 @@ impl HttpEndpoint for FlowControlEndpoint {
                         return ok_json_response(FlowControlResponse {
                             status: FlowControlStatus::Rejected,
                             message: format!("Action {:?} failed: {}", action, e),
-                            state: Some(pipeline_state_label(&self.flow_handle.current_state())),
+                            state: Some(
+                                state_diagnostic_label(&self.flow_handle.current_state())
+                                    .to_string(),
+                            ),
                         });
                     }
                 }
@@ -199,7 +186,7 @@ impl HttpEndpoint for FlowControlEndpoint {
                 return ok_json_response(FlowControlResponse {
                     status: FlowControlStatus::Rejected,
                     message: "Pause is not yet supported for this flow".to_string(),
-                    state: Some(pipeline_state_label(&state)),
+                    state: Some(state_diagnostic_label(&state).to_string()),
                 });
             }
             FlowControlAction::Stop => {
@@ -242,14 +229,16 @@ impl HttpEndpoint for FlowControlEndpoint {
             Ok(()) => ok_json_response(FlowControlResponse {
                 status: FlowControlStatus::Accepted,
                 message: format!("Action {:?} accepted", action),
-                state: Some(pipeline_state_label(&self.flow_handle.current_state())),
+                state: Some(state_diagnostic_label(&self.flow_handle.current_state()).to_string()),
             }),
             Err(e) => {
                 tracing::error!("Flow control action {:?} failed: {}", action, e);
                 ok_json_response(FlowControlResponse {
                     status: FlowControlStatus::Rejected,
                     message: format!("Action {:?} failed: {}", action, e),
-                    state: Some(pipeline_state_label(&self.flow_handle.current_state())),
+                    state: Some(
+                        state_diagnostic_label(&self.flow_handle.current_state()).to_string(),
+                    ),
                 })
             }
         }
@@ -264,6 +253,21 @@ fn ok_json_response(body: FlowControlResponse) -> Result<ManagedResponse, WebErr
             source: None,
         })
         .map(Into::into)
+}
+
+fn state_diagnostic_label(state: &PipelineState) -> &'static str {
+    match state {
+        PipelineState::Created => "created",
+        PipelineState::Materializing => "materializing",
+        PipelineState::Materialized => "materialized",
+        PipelineState::ReadyForRun => "ready_for_run",
+        PipelineState::Running => "running",
+        PipelineState::SourceCompleted => "source_completed",
+        PipelineState::AbortRequested { .. } => "abort_requested",
+        PipelineState::Draining => "draining",
+        PipelineState::Drained => "drained",
+        PipelineState::Failed { .. } => "failed",
+    }
 }
 
 #[cfg(test)]
@@ -361,13 +365,13 @@ mod tests {
             (PipelineState::Created, "created"),
             (PipelineState::Materializing, "materializing"),
             (PipelineState::Materialized, "materialized"),
-            (PipelineState::SourceCompleted, "sourcecompleted"),
+            (PipelineState::SourceCompleted, "source_completed"),
             (
                 PipelineState::AbortRequested {
                     reason: ViolationCause::Other("abort".to_string()),
                     upstream: None,
                 },
-                "abortrequested",
+                "abort_requested",
             ),
             (PipelineState::Draining, "draining"),
             (PipelineState::Drained, "drained"),
@@ -413,7 +417,7 @@ mod tests {
 
         assert_eq!(status, 200);
         assert_eq!(response.status, FlowControlStatus::Accepted);
-        assert_eq!(response.state.as_deref(), Some("readyforrun"));
+        assert_eq!(response.state.as_deref(), Some("ready_for_run"));
         assert_eq!(response.message, "Play accepted");
         assert_eq!(target.play_calls.load(Ordering::Relaxed), 1);
     }

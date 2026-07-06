@@ -6,8 +6,8 @@ enabled = true
 startup_mode = "manual"
 
 [server.cors]
-# allow_any_origin: development/demo default so the Trunk-served UI on
+# allow-any-origin: development/demo default so the Trunk-served UI on
 # 127.0.0.1:8080 can fetch /api/topology + /api/flow/events from the
-# obzenflow server on localhost:9090. Tighten to "allow_list" + populate
+# obzenflow server on localhost:9090. Tighten to "allow-list" + populate
 # server.cors.allow_origins for production.
-mode = "allow_any_origin"
+mode = "allow-any-origin"

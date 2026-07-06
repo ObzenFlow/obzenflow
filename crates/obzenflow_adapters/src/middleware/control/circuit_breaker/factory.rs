@@ -993,7 +993,7 @@ impl MiddlewareFactory for CircuitBreakerFactory {
         // control middleware that declares the Effect surface there, never here.
         // Fail closed so a direct caller cannot construct a second, off-carrier
         // effect breaker with its own state authority. `create` (the
-        // FLOWIP-120p-deprecated handler shell for non-boundary stages) stays
+        // FLOWIP-128b-deprecated handler shell for non-boundary stages) stays
         // until FLOWIP-115g retires the scaffolding.
         Err(MiddlewareFactoryError::not_hook_bound(self.label()))
     }

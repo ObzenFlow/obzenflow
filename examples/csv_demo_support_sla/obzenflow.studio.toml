@@ -1,0 +1,25 @@
+# FLOWIP-114d Studio walkthrough config: select with
+#   --config examples/csv_demo_support_sla/obzenflow.studio.toml
+
+[server]
+enabled = true
+host = "127.0.0.1"
+port = 9091
+startup_mode = "manual"
+
+[server.cors]
+mode = "allow-list"
+# 7010 = the studiod-served bundle origin; 8080 = the `trunk serve` UI-dev
+# origin. Both loopback; 127.0.0.1 and localhost are distinct origins.
+allow_origins = [
+    "http://127.0.0.1:7010",
+    "http://localhost:7010",
+    "http://127.0.0.1:8080",
+    "http://localhost:8080",
+]
+
+[studio]
+enabled = true
+phonebook_url = "http://127.0.0.1:7010"
+job_id = "csv_support_sla"
+advertise_url = "http://127.0.0.1:9091"

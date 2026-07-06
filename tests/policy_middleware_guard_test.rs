@@ -8,7 +8,7 @@
 //! sync stateful, join) is a flow build error: a deterministic handler shell
 //! has no unreliable call to protect. The deprecated async-non-effectful
 //! surface still builds with a warning, because the canonical AI example
-//! rides it until FLOWIP-120p moves those legs onto effects and FLOWIP-120f
+//! rides it until FLOWIP-128b moves those legs onto effects and FLOWIP-120f
 //! deletes the surface.
 
 use async_trait::async_trait;
@@ -181,7 +181,7 @@ async fn policy_middleware_on_pure_sync_stage_is_rejected_at_build() {
 #[tokio::test]
 async fn policy_middleware_on_async_surface_still_builds() {
     // H1 keeps the deprecated async-non-effectful surface building (with a
-    // warning) so the canonical AI example survives until FLOWIP-120p/120f.
+    // warning) so the canonical AI example survives until FLOWIP-128b/120f.
     let flow_handle = flow! {
         name: "policy_guard_async",
         journals: disk_journals(std::path::PathBuf::from(

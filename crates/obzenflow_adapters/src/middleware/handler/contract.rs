@@ -123,7 +123,7 @@ pub trait Middleware: Send + Sync {
     /// short-circuits the chain with `Skip` or `Abort`. Internal machinery
     /// scoped to the legacy async transform runner; not a public composition
     /// surface. The effect boundary records rejections under the effect
-    /// cursor instead (FLOWIP-120c), and FLOWIP-120p decides this hook's
+    /// cursor instead (FLOWIP-120c), and FLOWIP-128b decides this hook's
     /// fate when the AI legs move onto effects.
     fn on_rejected(
         &self,

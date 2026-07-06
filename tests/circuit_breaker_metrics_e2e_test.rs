@@ -60,7 +60,7 @@ impl ControlledFailureTransform {
 
 // FLOWIP-120c H1: a circuit breaker on a pure sync transform is now a build
 // error, so this test rides the async-non-effectful surface (deprecated,
-// warns) until FLOWIP-120p moves breaker-guarded work onto effects.
+// warns) until FLOWIP-128b moves breaker-guarded work onto effects.
 #[async_trait]
 impl AsyncTransformHandler for ControlledFailureTransform {
     async fn process(

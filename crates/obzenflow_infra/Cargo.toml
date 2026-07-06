@@ -57,6 +57,8 @@ prometheus = []
 warp-server = ["dep:warp", "dep:bytes", "dep:tokio-stream"]
 console = ["dep:console-subscriber"]
 reqwest-client = ["dep:reqwest", "dep:rustls-native-certs"]
+# FLOWIP-114d: Studio phonebook registration (heartbeat client + [studio] config).
+studio-registration = ["warp-server", "reqwest-client"]
 ai-rig = ["reqwest-client", "dep:rig_rs"]
 ai-tiktoken = ["dep:tiktoken-rs"]
 

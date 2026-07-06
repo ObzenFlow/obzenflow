@@ -165,6 +165,18 @@ impl StateVariant for PipelineState {
     }
 }
 
+impl PipelineState {
+    /// Terminal states: no further pipeline transitions occur.
+    pub fn is_terminal(&self) -> bool {
+        matches!(
+            self,
+            PipelineState::AbortRequested { .. }
+                | PipelineState::Drained
+                | PipelineState::Failed { .. }
+        )
+    }
+}
+
 /// Pipeline events
 #[derive(Clone, Debug)]
 pub enum PipelineEvent {
@@ -221,6 +233,7 @@ impl EventVariant for PipelineEvent {
 pub(crate) enum PipelineAction {
     CreateStages,
     NotifyStagesStart,
+    WritePipelineReadyForRun,
     NotifySourceStart,
     /// Publish a pipeline stop-requested lifecycle marker (Cancel vs Graceful).
     WritePipelineStopRequested {
@@ -563,6 +576,21 @@ impl FsmAction for PipelineAction {
                 }
 
                 tracing::debug!("NotifyStagesStart: All non-source stages started");
+            }
+
+            PipelineAction::WritePipelineReadyForRun => {
+                let system_event_factory = SystemEventFactory::new(context.system_id);
+                let stage_count = context.topology.stages().count();
+                let ready_event = system_event_factory.pipeline_ready_for_run(Some(stage_count));
+                context
+                    .system_journal
+                    .append(ready_event, None)
+                    .await
+                    .map_err(|e| {
+                        obzenflow_fsm::FsmError::HandlerError(format!(
+                            "Failed to publish pipeline ready_for_run event: {e}"
+                        ))
+                    })?;
             }
 
             PipelineAction::NotifySourceStart => {
@@ -1422,7 +1450,7 @@ pub(crate) fn build_pipeline_fsm_with_initial(initial: PipelineState) -> Pipelin
                     );
                     Ok(Transition {
                         next_state: PipelineState::ReadyForRun,
-                        actions: vec![],
+                        actions: vec![PipelineAction::WritePipelineReadyForRun],
                     })
                 })
             };
@@ -1746,7 +1774,7 @@ pub(crate) fn build_pipeline_fsm_with_initial(initial: PipelineState) -> Pipelin
             on PipelineEvent::Run => |_state: &PipelineState, _event: &PipelineEvent, _ctx: &mut PipelineContext| {
                 Box::pin(async move {
                     tracing::debug!(
-                        state = "sourcecompleted",
+                        state = "source_completed",
                         "Duplicate Run received after start; treating as idempotent"
                     );
                     Ok(Transition {
@@ -2020,7 +2048,7 @@ pub(crate) fn build_pipeline_fsm_with_initial(initial: PipelineState) -> Pipelin
                 let state = state.clone();
                 Box::pin(async move {
                     tracing::debug!(
-                        state = "abortrequested",
+                        state = "abort_requested",
                         "Duplicate Run received after start; treating as idempotent"
                     );
                     Ok(Transition {
@@ -2121,6 +2149,20 @@ mod fsm_lifecycle_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn terminal_states_are_exactly_the_locked_set() {
+        assert!(PipelineState::Drained.is_terminal());
+        assert!(PipelineState::Failed {
+            reason: "x".to_string(),
+            failure_cause: None
+        }
+        .is_terminal());
+        assert!(!PipelineState::Created.is_terminal());
+        assert!(!PipelineState::Running.is_terminal());
+        assert!(!PipelineState::Draining.is_terminal());
+        assert!(!PipelineState::SourceCompleted.is_terminal());
+    }
 
     #[test]
     fn stop_intent_cancel_sets_defaults() {

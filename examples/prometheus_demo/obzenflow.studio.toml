@@ -1,0 +1,33 @@
+# FLOWIP-114d Studio walkthrough config: select with
+#   --config examples/prometheus_demo/obzenflow.studio.toml
+# This is the long-runner of the walkthrough set: the default 100k events
+# rate-limited to 1000/sec runs for roughly 100 seconds, so parallel "running"
+# badges and the drain-then-depart transition stay observable past the
+# heartbeat lag. Shorten with PROMETHEUS_EVENT_COUNT for a quicker pass.
+# --config wins over the example's built-in with_config_file(obzenflow.toml).
+
+[server]
+enabled = true
+host = "127.0.0.1"
+port = 9093
+startup_mode = "manual"
+
+# The Studio bundle is served from the phonebook origin, so every browser
+# request to this runtime is cross-origin; both spellings are listed because
+# 127.0.0.1 and localhost are different origins.
+[server.cors]
+mode = "allow-list"
+# 7010 = the studiod-served bundle origin; 8080 = the `trunk serve` UI-dev
+# origin. Both loopback; 127.0.0.1 and localhost are distinct origins.
+allow_origins = [
+    "http://127.0.0.1:7010",
+    "http://localhost:7010",
+    "http://127.0.0.1:8080",
+    "http://localhost:8080",
+]
+
+[studio]
+enabled = true
+phonebook_url = "http://127.0.0.1:7010"
+job_id = "prometheus"
+advertise_url = "http://127.0.0.1:9093"

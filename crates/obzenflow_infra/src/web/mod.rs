@@ -15,15 +15,23 @@ pub mod endpoints;
 pub mod factory;
 #[cfg(feature = "warp-server")]
 pub(crate) mod routing;
+pub mod runtime_instance_id;
 #[cfg(feature = "warp-server")]
 pub(crate) mod surface_metrics;
 
 #[cfg(feature = "warp-server")]
 pub mod web_server;
 
+/// FLOWIP-114d: Studio phonebook registration heartbeat.
+#[cfg(feature = "studio-registration")]
+pub(crate) mod studio_presence;
+#[cfg(feature = "studio-registration")]
+pub(crate) mod studio_registration;
+
 // Re-export implementations when features are enabled
 #[cfg(feature = "warp-server")]
 pub use self::warp::WarpServer;
+pub use runtime_instance_id::RuntimeInstanceId;
 
 // Re-export factory functions
 

@@ -11,7 +11,7 @@ publish = true
 
 [workspace]
 resolver = "2"
-members = ["crates/*"]
+members = ["crates/*", "xtask"]
 # Build all workspace members by default (excluding the root package)
 # Note: obzenflow_benchmarks is excluded from default-members as it's only for benchmarking
 default-members = [
@@ -181,8 +181,8 @@ name = "flow_middleware_config"
 path = "examples/flow_middleware_config/main.rs"
 
 [[example]]
-name = "prometheus_100k_demo"
-path = "examples/prometheus_100k_demo/main.rs"
+name = "prometheus_demo"
+path = "examples/prometheus_demo/main.rs"
 
 [[example]]
 name = "product_catalog_enrichment"

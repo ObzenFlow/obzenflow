@@ -8,7 +8,7 @@ use crate::journal::RunSubstrateState;
 use crate::stages::common::stage_handle::STOP_REASON_TIMEOUT;
 use crate::stages::LivenessSnapshots;
 use crate::supervised_base::{HandleError, StandardHandle, SupervisorHandle};
-use obzenflow_core::event::SystemEvent;
+use obzenflow_core::event::{SystemEvent, WriterId};
 use obzenflow_core::journal::Journal;
 use obzenflow_core::StageId;
 use obzenflow_topology::Topology;
@@ -25,6 +25,7 @@ pub(crate) struct FlowHandleExtras {
     pub flow_name: String,
     pub contract_attachments: Option<ContractAttachments>,
     pub system_journal: Option<Arc<dyn Journal<SystemEvent>>>,
+    pub pipeline_writer_id: WriterId,
     pub liveness_snapshots: Option<LivenessSnapshots>,
     /// The selected run substrate (FLOWIP-120u): durable with its locator, or ephemeral.
     pub run_substrate: RunSubstrateState,
@@ -111,6 +112,9 @@ pub struct FlowHandle {
     /// System journal for lifecycle events (for SSE / observability)
     system_journal: Option<Arc<dyn Journal<SystemEvent>>>,
 
+    /// Writer identity for this pipeline's lifecycle facts in the system journal.
+    pipeline_writer_id: WriterId,
+
     /// Flow-scoped stage liveness snapshots (FLOWIP-063e).
     liveness_snapshots: Option<LivenessSnapshots>,
 
@@ -133,6 +137,7 @@ impl FlowHandle {
             flow_name,
             contract_attachments,
             system_journal,
+            pipeline_writer_id,
             liveness_snapshots,
             run_substrate,
             flow_effective_config,
@@ -145,6 +150,7 @@ impl FlowHandle {
             flow_name,
             contract_attachments,
             system_journal,
+            pipeline_writer_id,
             liveness_snapshots,
             run_substrate,
             flow_effective_config,
@@ -528,6 +534,10 @@ impl FlowHandle {
         self.system_journal.clone()
     }
 
+    pub fn pipeline_writer_id(&self) -> WriterId {
+        self.pipeline_writer_id
+    }
+
     pub fn liveness_snapshots(&self) -> Option<LivenessSnapshots> {
         self.liveness_snapshots.clone()
     }
@@ -619,6 +629,7 @@ mod tests {
             flow_name: "test_flow".to_string(),
             contract_attachments: None,
             system_journal: None,
+            pipeline_writer_id: WriterId::from(obzenflow_core::id::SystemId::new()),
             flow_effective_config: None,
             liveness_snapshots: None,
             run_substrate: RunSubstrateState::Ephemeral,

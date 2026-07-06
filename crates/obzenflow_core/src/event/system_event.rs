@@ -358,6 +358,10 @@ pub enum StageLifecycleEvent {
 #[serde(tag = "pipeline_event", rename_all = "snake_case")]
 pub enum PipelineLifecycleEvent {
     Starting,
+    ReadyForRun {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        stage_count: Option<usize>,
+    },
     Running {
         #[serde(skip_serializing_if = "Option::is_none")]
         stage_count: Option<usize>,
@@ -742,6 +746,13 @@ impl SystemEventFactory {
         )
     }
 
+    pub fn pipeline_ready_for_run(&self, stage_count: Option<usize>) -> SystemEvent {
+        SystemEvent::new(
+            self.writer_id,
+            SystemEventType::PipelineLifecycle(PipelineLifecycleEvent::ReadyForRun { stage_count }),
+        )
+    }
+
     pub fn pipeline_stop_requested(
         &self,
         mode: String,
@@ -887,6 +898,7 @@ impl JournalEvent for SystemEvent {
             },
             SystemEventType::PipelineLifecycle(event) => match event {
                 PipelineLifecycleEvent::Starting => "system.pipeline.starting",
+                PipelineLifecycleEvent::ReadyForRun { .. } => "system.pipeline.ready_for_run",
                 PipelineLifecycleEvent::Running { .. } => "system.pipeline.running",
                 PipelineLifecycleEvent::StopRequested { .. } => "system.pipeline.stop_requested",
                 PipelineLifecycleEvent::AllStagesCompleted { .. } => {

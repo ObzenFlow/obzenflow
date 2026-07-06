@@ -16,10 +16,11 @@ use super::{
     ApplicationError, FlowConfig, Presentation, RunPresentationOutcome, WebSurfaceAttachment,
     WebSurfaceWiringContext,
 };
-use crate::application::config::{CorsModeArg, ResolvedStartupConfig, StartupMode};
+use crate::application::config::{CorsModeArg, OnTerminalArg, ResolvedStartupConfig, StartupMode};
 use crate::web::endpoints::event_ingestion::{HttpIngress, IngressHandle};
 #[cfg(feature = "warp-server")]
 use crate::web::surface_metrics::{HttpSurfaceMetricsCollector, HttpSurfaceMetricsEmitter};
+use crate::web::RuntimeInstanceId;
 use obzenflow_core::metrics::{InfraMetricsSnapshot, MetricsExporter};
 use obzenflow_core::web::{CorsConfig, CorsMode, HttpEndpoint, ServerConfig};
 use obzenflow_core::TypedPayload;
@@ -65,11 +66,14 @@ mod tests {
     use crate::journal::disk_journals;
     use async_trait::async_trait;
     use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
-    use obzenflow_core::ChainEvent;
-    use obzenflow_dsl::{flow, infinite_source, sink};
+    use obzenflow_core::event::ChainEventFactory;
+    use obzenflow_core::{ChainEvent, StageId, WriterId};
+    use obzenflow_dsl::{flow, infinite_source, sink, source};
     use obzenflow_runtime::pipeline::PipelineState;
     use obzenflow_runtime::stages::common::handler_error::HandlerError;
-    use obzenflow_runtime::stages::common::handlers::{InfiniteSourceHandler, SinkHandler};
+    use obzenflow_runtime::stages::common::handlers::{
+        FiniteSourceHandler, InfiniteSourceHandler, SinkHandler,
+    };
     use obzenflow_runtime::stages::SourceError;
     use std::net::TcpListener;
     use std::sync::Mutex;
@@ -88,6 +92,36 @@ mod tests {
     impl InfiniteSourceHandler for IdleInfiniteSource {
         fn next(&mut self) -> Result<Vec<ChainEvent>, SourceError> {
             Ok(Vec::new())
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    struct OneShotSource {
+        emitted: bool,
+        writer_id: WriterId,
+    }
+
+    impl OneShotSource {
+        fn new() -> Self {
+            Self {
+                emitted: false,
+                writer_id: WriterId::from(StageId::new()),
+            }
+        }
+    }
+
+    impl FiniteSourceHandler for OneShotSource {
+        fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
+            if self.emitted {
+                Ok(None)
+            } else {
+                self.emitted = true;
+                Ok(Some(vec![ChainEventFactory::data_event(
+                    self.writer_id,
+                    IdlePayload::EVENT_TYPE,
+                    serde_json::json!({ "kind": "one-shot" }),
+                )]))
+            }
         }
     }
 
@@ -202,6 +236,275 @@ enabled = false
 
         result.expect("server auto mode should shut down cleanly");
         running_rx.await.expect("flow should reach Running");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn server_on_terminal_exit_waits_for_terminal_journal_fact() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let journal_dir = tempdir.path().join("journals");
+        let flow_journal_dir = journal_dir.clone();
+        std::fs::create_dir_all(&journal_dir).expect("create journal root");
+        let config_path = tempdir.path().join("obzenflow.toml");
+        let port = available_local_port();
+        std::fs::write(
+            &config_path,
+            format!(
+                r#"
+[server]
+enabled = true
+host = "127.0.0.1"
+port = {port}
+startup_mode = "auto"
+on_terminal = "exit"
+
+[runtime]
+shutdown_timeout_secs = 2
+
+[metrics]
+enabled = false
+"#
+            ),
+        )
+        .expect("write test config");
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            FlowApplication::launch(
+                flow! {
+                    name: "server_terminal_journal_regression",
+                    journals: disk_journals(flow_journal_dir),
+                    middleware: [],
+
+                    stages: {
+                        src = source!(IdlePayload => OneShotSource::new());
+                        sink = sink!(IdlePayload => NoopSink);
+                    },
+
+                    topology: {
+                        src |> sink;
+                    }
+                },
+                LaunchParams {
+                    enable_autodiscovery: false,
+                    cli_args: Some(vec![
+                        OsString::from("obzenflow"),
+                        OsString::from("--config"),
+                        config_path.into_os_string(),
+                    ]),
+                    ..LaunchParams::default()
+                },
+            ),
+        )
+        .await
+        .expect("FlowApplication should not hang in on_terminal=exit mode");
+
+        result.expect("finite server flow should exit cleanly");
+
+        let flows_dir = journal_dir.join("flows");
+        let run_dir = std::fs::read_dir(&flows_dir)
+            .expect("flows directory should exist")
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .find(|path| path.is_dir())
+            .expect("one run directory should exist");
+        let system_log =
+            std::fs::read_to_string(run_dir.join("system.log")).expect("system.log readable");
+
+        assert!(
+            system_log.contains(r#""pipeline_event":"completed""#),
+            "on_terminal=exit must not close the runtime before the final pipeline_completed fact is committed; system.log:\n{system_log}"
+        );
+    }
+
+    // FLOWIP-114d gap 24 regression: on graceful server-mode shutdown the
+    // heartbeat's fenced DELETE must reach the phonebook rather than being
+    // cancelled mid-flight by the generic managed-task abort (which would
+    // leave the entry to linger until lease expiry). Drives a real
+    // FlowApplication in server mode against a stub phonebook, waits until a
+    // registration has landed, then triggers shutdown and asserts the fenced
+    // deregistration arrives.
+    #[cfg(feature = "studio-registration")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn server_mode_deregisters_from_phonebook_on_graceful_shutdown() {
+        use warp::Filter;
+
+        #[derive(Default)]
+        struct Stub {
+            registrations: Mutex<Vec<serde_json::Value>>,
+            deletes: Mutex<Vec<String>>,
+        }
+        let stub = Arc::new(Stub::default());
+
+        let register = {
+            let stub = stub.clone();
+            warp::path!("register")
+                .and(warp::post())
+                .and(warp::body::json())
+                .map(move |body: serde_json::Value| {
+                    stub.registrations
+                        .lock()
+                        .expect("registrations lock")
+                        .push(body);
+                    warp::reply::with_status(warp::reply(), warp::http::StatusCode::NO_CONTENT)
+                })
+        };
+        let deregister = {
+            let stub = stub.clone();
+            warp::path!("register" / String)
+                .and(warp::delete())
+                .and(warp::query::raw())
+                .map(move |job_id: String, query: String| {
+                    stub.deletes
+                        .lock()
+                        .expect("deletes lock")
+                        .push(format!("{job_id}?{query}"));
+                    warp::reply::with_status(warp::reply(), warp::http::StatusCode::NO_CONTENT)
+                })
+        };
+        let (phonebook_addr, phonebook_server) =
+            warp::serve(register.or(deregister)).bind_ephemeral(([127, 0, 0, 1], 0));
+        let phonebook_task = tokio::spawn(phonebook_server);
+        let phonebook_url = format!("http://{phonebook_addr}");
+
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let journal_dir = tempdir.path().join("journals");
+        std::fs::create_dir_all(&journal_dir).expect("create journal root");
+        let config_path = tempdir.path().join("obzenflow.toml");
+        let port = available_local_port();
+        std::fs::write(
+            &config_path,
+            format!(
+                r#"
+[server]
+enabled = true
+host = "127.0.0.1"
+port = {port}
+startup_mode = "auto"
+
+[server.cors]
+mode = "allow-list"
+allow_origins = ["{phonebook_url}"]
+
+[studio]
+enabled = true
+phonebook_url = "{phonebook_url}"
+job_id = "gap24_demo"
+advertise_url = "http://127.0.0.1:{port}"
+lease_ttl_secs = 30
+renew_interval_secs = 1
+
+[runtime]
+shutdown_timeout_secs = 2
+
+[metrics]
+enabled = false
+"#
+            ),
+        )
+        .expect("write test config");
+
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let shutdown_tx = Arc::new(Mutex::new(Some(shutdown_tx)));
+        let (running_tx, running_rx) = oneshot::channel();
+        let running_tx = Arc::new(Mutex::new(Some(running_tx)));
+
+        // The hook waits for Running, then for the first registration to land
+        // at the stub, and only then triggers shutdown, so registration always
+        // precedes deregistration deterministically.
+        let hook_shutdown = Arc::clone(&shutdown_tx);
+        let hook_running = Arc::clone(&running_tx);
+        let hook_stub = Arc::clone(&stub);
+        let hook = move |flow_handle: &Arc<FlowHandle>| {
+            let flow_handle = Arc::clone(flow_handle);
+            let hook_shutdown = Arc::clone(&hook_shutdown);
+            let hook_running = Arc::clone(&hook_running);
+            let hook_stub = Arc::clone(&hook_stub);
+            tokio::spawn(async move {
+                let mut states = flow_handle.state_receiver();
+                loop {
+                    if matches!(*states.borrow(), PipelineState::Running) {
+                        break;
+                    }
+                    if states.changed().await.is_err() {
+                        return;
+                    }
+                }
+                if let Some(tx) = hook_running.lock().expect("running lock poisoned").take() {
+                    let _ = tx.send(());
+                }
+                // Bounded wait for the heartbeat's first registration.
+                for _ in 0..100 {
+                    if !hook_stub
+                        .registrations
+                        .lock()
+                        .expect("registrations lock")
+                        .is_empty()
+                    {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                if let Some(tx) = hook_shutdown.lock().expect("shutdown lock poisoned").take() {
+                    let _ = tx.send(ShutdownSignal::Sigint);
+                }
+            })
+        };
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(15),
+            FlowApplication::launch(
+                flow! {
+                    name: "gap24_deregister_regression",
+                    journals: disk_journals(journal_dir),
+                    middleware: [],
+
+                    stages: {
+                        src = infinite_source!(IdlePayload => IdleInfiniteSource);
+                        sink = sink!(IdlePayload => NoopSink);
+                    },
+
+                    topology: {
+                        src |> sink;
+                    }
+                },
+                LaunchParams {
+                    enable_autodiscovery: false,
+                    flow_handle_hooks: vec![Box::new(move |flow_handle| Ok(hook(flow_handle)))],
+                    cli_args: Some(vec![
+                        OsString::from("obzenflow"),
+                        OsString::from("--config"),
+                        config_path.into_os_string(),
+                    ]),
+                    test_shutdown_signal: Some(shutdown_rx),
+                    ..LaunchParams::default()
+                },
+            ),
+        )
+        .await
+        .expect("FlowApplication should not hang in server studio mode");
+
+        result.expect("server studio mode should shut down cleanly");
+        running_rx.await.expect("flow should reach Running");
+
+        assert!(
+            !stub
+                .registrations
+                .lock()
+                .expect("registrations lock")
+                .is_empty(),
+            "runtime should have registered with the phonebook"
+        );
+        let deletes = stub.deletes.lock().expect("deletes lock");
+        let prefix = "gap24_demo?runtime_instance_id=";
+        assert!(
+            deletes
+                .iter()
+                .any(|d| d.starts_with(prefix) && d.len() > prefix.len()),
+            "graceful shutdown must send a fenced deregistration rather than \
+             relying on lease expiry; got {deletes:?}"
+        );
+
+        phonebook_task.abort();
     }
 }
 
@@ -764,6 +1067,11 @@ impl FlowApplication {
         // Background tasks spawned by FlowHandle hooks and/or web surface wiring closures.
         // These must not be allowed to outlive FlowApplication, even on early-return paths.
         let mut managed_tasks: Vec<JoinHandle<()>> = Vec::new();
+        // FLOWIP-114d gap 24: the Studio heartbeat is tracked here rather than in
+        // `managed_tasks` so the shutdown sequence can join its fenced deregistration
+        // before the generic managed-task abort would cancel the in-flight DELETE.
+        #[cfg(feature = "studio-registration")]
+        let mut heartbeat_task: Option<JoinHandle<()>> = None;
         #[cfg(feature = "warp-server")]
         let mut surface_metrics_emitter: Option<HttpSurfaceMetricsEmitter> = None;
 
@@ -947,6 +1255,12 @@ impl FlowApplication {
                 tracing::debug!(surface = %surface_name, "Web surface attached");
             }
 
+            // FLOWIP-114d: per-process incarnation identity (stamped into the
+            // SSE bootstrap event and every registration) and the terminal-
+            // gated listener-close signal (gap 8).
+            let runtime_instance_id = RuntimeInstanceId::new();
+            let (server_shutdown_tx, server_shutdown_rx) = tokio::sync::watch::channel(false);
+
             // Start server if --server flag present
             let server_handle = if config.server.enabled {
                 let cors_mode = match config.server.cors_mode {
@@ -972,13 +1286,22 @@ impl FlowApplication {
                             all_extra_endpoints,
                             surface_metrics_collector,
                             config.runtime_config.clone(),
+                            runtime_instance_id.clone(),
+                            server_shutdown_rx.clone(),
                         )
                         .await
                     }
 
                     #[cfg(not(feature = "warp-server"))]
                     {
-                        Self::start_server(&flow_handle, server_config, all_extra_endpoints).await
+                        Self::start_server(
+                            &flow_handle,
+                            server_config,
+                            all_extra_endpoints,
+                            runtime_instance_id.clone(),
+                            server_shutdown_rx.clone(),
+                        )
+                        .await
                     }
                 };
 
@@ -991,6 +1314,41 @@ impl FlowApplication {
             } else {
                 None
             };
+
+            // FLOWIP-114d: registration heartbeat as a managed task.
+            // Deregistration is exit-tied through the shutdown signal in both
+            // on_terminal modes; park keeps renewing with the terminal phase.
+            #[cfg(feature = "studio-registration")]
+            if let Some(studio) = config.studio.clone() {
+                if server_handle.is_some() {
+                    if let Some(system_journal) = flow_handle.system_journal() {
+                        let presence =
+                            crate::web::studio_presence::RuntimePresenceProjection::open(
+                                system_journal,
+                                flow_handle.pipeline_writer_id(),
+                            )
+                            .await;
+                        heartbeat_task = Some(crate::web::studio_registration::spawn_heartbeat(
+                            crate::web::studio_registration::HeartbeatContext {
+                                studio,
+                                runtime_instance_id: runtime_instance_id.clone(),
+                                flow_name: flow_name.clone(),
+                                startup_mode: config.server.startup_mode,
+                                probe_base_url: format!(
+                                    "http://{}:{}",
+                                    config.server.host, config.server.port
+                                ),
+                            },
+                            presence,
+                            server_shutdown_rx.clone(),
+                        ));
+                    } else {
+                        tracing::warn!(
+                            "Studio registration disabled: flow has no system journal for presence projection"
+                        );
+                    }
+                }
+            }
 
             if config.server.enabled {
                 if server_handle.is_none() {
@@ -1079,152 +1437,278 @@ impl FlowApplication {
                         }
                     };
 
-                    // Wait for first shutdown signal:
+                    // FLOWIP-114d gap 9: on_terminal=exit adds a terminal arm to
+                    // the wait, so a finished flow closes and exits instead of
+                    // parking until a signal.
+                    enum ServeOutcome {
+                        Signal(ShutdownSignal),
+                        FlowTerminal,
+                    }
+
+                    let exit_on_terminal = config.server.on_terminal == OnTerminalArg::Exit;
+                    let mut terminal_rx = flow_handle.state_receiver();
+                    let wait_terminal = async move {
+                        loop {
+                            if terminal_rx.borrow().is_terminal() {
+                                break;
+                            }
+                            if terminal_rx.changed().await.is_err() {
+                                break;
+                            }
+                        }
+                    };
+
+                    // Wait for the first shutdown trigger:
                     // - SIGINT (Ctrl+C) => Cancel
                     // - SIGTERM => GracefulStop(timeout=GRACE)
+                    // - terminal pipeline state (on_terminal=exit) => close and exit
                     #[cfg(test)]
-                    let first_signal = if let Some(test_shutdown_signal) = test_shutdown_signal {
-                        test_shutdown_signal.await.unwrap_or(ShutdownSignal::Sigint)
+                    let outcome = if let Some(test_shutdown_signal) = test_shutdown_signal {
+                        ServeOutcome::Signal(
+                            test_shutdown_signal.await.unwrap_or(ShutdownSignal::Sigint),
+                        )
                     } else {
                         #[cfg(unix)]
                         {
                             tokio::select! {
-                                _ = tokio::signal::ctrl_c() => ShutdownSignal::Sigint,
-                                _ = sigterm_stream.recv() => ShutdownSignal::Sigterm,
+                                _ = tokio::signal::ctrl_c() => ServeOutcome::Signal(ShutdownSignal::Sigint),
+                                _ = sigterm_stream.recv() => ServeOutcome::Signal(ShutdownSignal::Sigterm),
+                                _ = wait_terminal, if exit_on_terminal => ServeOutcome::FlowTerminal,
                             }
                         }
                         #[cfg(not(unix))]
                         {
-                            if let Err(err) = tokio::signal::ctrl_c().await {
-                                break 'run (
-                                    Err(ApplicationError::from(err)),
-                                    Some(flow_name),
-                                    run_state,
-                                    false,
-                                );
+                            tokio::select! {
+                                signal = tokio::signal::ctrl_c() => {
+                                    if let Err(err) = signal {
+                                        break 'run (
+                                            Err(ApplicationError::from(err)),
+                                            Some(flow_name),
+                                            run_state,
+                                            false,
+                                        );
+                                    }
+                                    ServeOutcome::Signal(ShutdownSignal::Sigint)
+                                }
+                                _ = wait_terminal, if exit_on_terminal => ServeOutcome::FlowTerminal,
                             }
-                            ShutdownSignal::Sigint
                         }
                     };
 
                     #[cfg(not(test))]
-                    let first_signal = {
+                    let outcome = {
                         #[cfg(unix)]
                         {
                             tokio::select! {
-                                _ = tokio::signal::ctrl_c() => ShutdownSignal::Sigint,
-                                _ = sigterm_stream.recv() => ShutdownSignal::Sigterm,
+                                _ = tokio::signal::ctrl_c() => ServeOutcome::Signal(ShutdownSignal::Sigint),
+                                _ = sigterm_stream.recv() => ServeOutcome::Signal(ShutdownSignal::Sigterm),
+                                _ = wait_terminal, if exit_on_terminal => ServeOutcome::FlowTerminal,
                             }
                         }
                         #[cfg(not(unix))]
                         {
-                            if let Err(err) = tokio::signal::ctrl_c().await {
-                                break 'run (
-                                    Err(ApplicationError::from(err)),
-                                    Some(flow_name),
-                                    run_state,
-                                    false,
-                                );
+                            tokio::select! {
+                                signal = tokio::signal::ctrl_c() => {
+                                    if let Err(err) = signal {
+                                        break 'run (
+                                            Err(ApplicationError::from(err)),
+                                            Some(flow_name),
+                                            run_state,
+                                            false,
+                                        );
+                                    }
+                                    ServeOutcome::Signal(ShutdownSignal::Sigint)
+                                }
+                                _ = wait_terminal, if exit_on_terminal => ServeOutcome::FlowTerminal,
                             }
-                            ShutdownSignal::Sigint
                         }
                     };
 
-                    tracing::info!(?first_signal, "👋 Shutting down server");
-
-                    // The web server currently has no explicit shutdown hook; abort its task so we don't
-                    // keep servicing requests while the pipeline is draining.
-                    server_task.abort();
-                    let _ = server_task.await;
-
-                    // Best-effort: stop the flow before tearing down the runtime.
-                    //
-                    // We avoid force-aborting here because it can cancel in-flight disk journal
-                    // writes (spawn_blocking), which then surfaces as "Background writer task was
-                    // cancelled/panicked" errors inside stage supervisors.
-                    match first_signal {
-                        ShutdownSignal::Sigint => {
-                            if let Err(e) = flow_handle.stop_cancel().await {
-                                tracing::warn!(
-                                    error = %e,
-                                    "Failed to request flow cancel during SIGINT shutdown; continuing shutdown"
-                                );
+                    // FLOWIP-114d gap 8: the web surface keeps serving through
+                    // the drain. Observation stays live; Play is refused by the
+                    // FSM guard and push ingress refuses via admission. The
+                    // listener closes only after the terminal state.
+                    let signal_phase = match outcome {
+                        ServeOutcome::Signal(first_signal) => {
+                            tracing::info!(
+                                ?first_signal,
+                                "👋 Shutting down; web surface serves through the drain"
+                            );
+                            // Best-effort: stop the flow before tearing down the runtime.
+                            //
+                            // We avoid force-aborting here because it can cancel in-flight disk journal
+                            // writes (spawn_blocking), which then surfaces as "Background writer task was
+                            // cancelled/panicked" errors inside stage supervisors.
+                            match first_signal {
+                                ShutdownSignal::Sigint => {
+                                    if let Err(e) = flow_handle.stop_cancel().await {
+                                        tracing::warn!(
+                                            error = %e,
+                                            "Failed to request flow cancel during SIGINT shutdown; continuing shutdown"
+                                        );
+                                    }
+                                }
+                                ShutdownSignal::Sigterm => {
+                                    if let Err(e) = flow_handle.stop_graceful(grace_timeout).await {
+                                        tracing::warn!(
+                                            error = %e,
+                                            "Failed to request flow graceful stop during SIGTERM shutdown; continuing shutdown"
+                                        );
+                                    }
+                                }
                             }
+                            Some(first_signal)
                         }
-                        ShutdownSignal::Sigterm => {
-                            if let Err(e) = flow_handle.stop_graceful(grace_timeout).await {
+                        ServeOutcome::FlowTerminal => {
+                            tracing::info!(
+                                "🏁 Flow reached a terminal state (on_terminal=exit); closing"
+                            );
+                            None
+                        }
+                    };
+
+                    if let Some(first_signal) = signal_phase {
+                        let mut phase = first_signal;
+                        let mut phase_deadline = match first_signal {
+                            ShutdownSignal::Sigint => Instant::now() + grace_timeout,
+                            ShutdownSignal::Sigterm => Instant::now() + grace_timeout,
+                        };
+
+                        while flow_handle.is_running() {
+                            if Instant::now() >= phase_deadline {
+                                if phase == ShutdownSignal::Sigterm {
+                                    tracing::warn!(
+                                        grace_secs = grace_timeout.as_secs(),
+                                        "Graceful stop timeout expired; escalating to cancel"
+                                    );
+                                    if let Err(e) = flow_handle.stop_cancel_timeout().await {
+                                        tracing::warn!(
+                                            error = %e,
+                                            "Failed to request flow cancel during escalation; continuing shutdown"
+                                        );
+                                    }
+                                    phase = ShutdownSignal::Sigint;
+                                    phase_deadline = Instant::now() + grace_timeout;
+                                    continue;
+                                }
+
                                 tracing::warn!(
-                                    error = %e,
-                                    "Failed to request flow graceful stop during SIGTERM shutdown; continuing shutdown"
-                                );
+                                shutdown_timeout_secs = grace_timeout.as_secs(),
+                                "Flow did not terminate within shutdown timeout; exiting anyway"
+                            );
+                                break;
+                            }
+
+                            if phase == ShutdownSignal::Sigterm {
+                                #[cfg(unix)]
+                                {
+                                    tokio::select! {
+                                        _ = tokio::time::sleep(Duration::from_millis(50)) => {},
+                                        _ = tokio::signal::ctrl_c() => {
+                                            tracing::warn!("Second SIGINT during graceful stop; escalating to cancel");
+                                            let _ = flow_handle.stop_cancel().await;
+                                            phase = ShutdownSignal::Sigint;
+                                            phase_deadline = Instant::now() + grace_timeout;
+                                        }
+                                        _ = sigterm_stream.recv() => {
+                                            tracing::warn!("Second SIGTERM during graceful stop; escalating to cancel");
+                                            let _ = flow_handle.stop_cancel().await;
+                                            phase = ShutdownSignal::Sigint;
+                                            phase_deadline = Instant::now() + grace_timeout;
+                                        }
+                                    }
+                                }
+                                #[cfg(not(unix))]
+                                {
+                                    tokio::select! {
+                                        _ = tokio::time::sleep(Duration::from_millis(50)) => {},
+                                        _ = tokio::signal::ctrl_c() => {
+                                            tracing::warn!("Second SIGINT during graceful stop; escalating to cancel");
+                                            let _ = flow_handle.stop_cancel().await;
+                                            phase = ShutdownSignal::Sigint;
+                                            phase_deadline = Instant::now() + grace_timeout;
+                                        }
+                                    }
+                                }
+                            } else {
+                                tokio::time::sleep(Duration::from_millis(50)).await;
                             }
                         }
                     }
 
-                    let mut phase = first_signal;
-                    let mut phase_deadline = match first_signal {
-                        ShutdownSignal::Sigint => Instant::now() + grace_timeout,
-                        ShutdownSignal::Sigterm => Instant::now() + grace_timeout,
-                    };
-
-                    while flow_handle.is_running() {
-                        if Instant::now() >= phase_deadline {
-                            if phase == ShutdownSignal::Sigterm {
+                    if signal_phase.is_none() {
+                        let terminal_deadline = Instant::now() + grace_timeout;
+                        while flow_handle.is_running() {
+                            if Instant::now() >= terminal_deadline {
                                 tracing::warn!(
-                                    grace_secs = grace_timeout.as_secs(),
-                                    "Graceful stop timeout expired; escalating to cancel"
+                                    shutdown_timeout_secs = grace_timeout.as_secs(),
+                                    "Pipeline supervisor did not finish terminal dispatch within shutdown timeout; closing server anyway"
                                 );
-                                if let Err(e) = flow_handle.stop_cancel_timeout().await {
-                                    tracing::warn!(
-                                        error = %e,
-                                        "Failed to request flow cancel during escalation; continuing shutdown"
-                                    );
-                                }
-                                phase = ShutdownSignal::Sigint;
-                                phase_deadline = Instant::now() + grace_timeout;
-                                continue;
+                                break;
                             }
-
-                            tracing::warn!(
-                                shutdown_timeout_secs = grace_timeout.as_secs(),
-                                "Flow did not terminate within shutdown timeout; exiting anyway"
-                            );
-                            break;
+                            tokio::time::sleep(Duration::from_millis(10)).await;
                         }
+                    }
 
-                        if phase == ShutdownSignal::Sigterm {
-                            #[cfg(unix)]
-                            {
-                                tokio::select! {
-                                    _ = tokio::time::sleep(Duration::from_millis(50)) => {},
-                                    _ = tokio::signal::ctrl_c() => {
-                                        tracing::warn!("Second SIGINT during graceful stop; escalating to cancel");
-                                        let _ = flow_handle.stop_cancel().await;
-                                        phase = ShutdownSignal::Sigint;
-                                        phase_deadline = Instant::now() + grace_timeout;
-                                    }
-                                    _ = sigterm_stream.recv() => {
-                                        tracing::warn!("Second SIGTERM during graceful stop; escalating to cancel");
-                                        let _ = flow_handle.stop_cancel().await;
-                                        phase = ShutdownSignal::Sigint;
-                                        phase_deadline = Instant::now() + grace_timeout;
-                                    }
-                                }
-                            }
-                            #[cfg(not(unix))]
-                            {
-                                tokio::select! {
-                                    _ = tokio::time::sleep(Duration::from_millis(50)) => {},
-                                    _ = tokio::signal::ctrl_c() => {
-                                        tracing::warn!("Second SIGINT during graceful stop; escalating to cancel");
-                                        let _ = flow_handle.stop_cancel().await;
-                                        phase = ShutdownSignal::Sigint;
-                                        phase_deadline = Instant::now() + grace_timeout;
-                                    }
-                                }
-                            }
-                        } else {
-                            tokio::time::sleep(Duration::from_millis(50)).await;
+                    // Terminal state reached (or the shutdown timeout expired).
+                    // The heartbeat deregisters and SSE producers flush the
+                    // terminal event on this signal; the listener close carries
+                    // a bounded deadline with abort as the escalation backstop,
+                    // mirroring the flow's own graceful-to-cancel ladder.
+                    let _ = server_shutdown_tx.send(true);
+                    const SERVER_CLOSE_GRACE: Duration = Duration::from_secs(5);
+                    let mut server_task = server_task;
+                    if tokio::time::timeout(SERVER_CLOSE_GRACE, &mut server_task)
+                        .await
+                        .is_err()
+                    {
+                        tracing::warn!(
+                            close_grace_secs = SERVER_CLOSE_GRACE.as_secs(),
+                            "Web server did not close within the grace period; aborting listener"
+                        );
+                        server_task.abort();
+                        let _ = server_task.await;
+                    }
+
+                    // FLOWIP-114d gap 24: join the heartbeat so its fenced
+                    // DELETE lands before the generic managed-task abort below
+                    // could cancel it mid-flight. It reacts to the same signal
+                    // and runs concurrently with the listener close above, so
+                    // it has usually already deregistered by now; the deadline
+                    // bounds a slow phonebook, after which lease expiry is the
+                    // fallback.
+                    #[cfg(feature = "studio-registration")]
+                    if let Some(mut heartbeat) = heartbeat_task.take() {
+                        const DEREGISTER_GRACE: Duration = Duration::from_secs(5);
+                        if tokio::time::timeout(DEREGISTER_GRACE, &mut heartbeat)
+                            .await
+                            .is_err()
+                        {
+                            tracing::warn!(
+                                deregister_grace_secs = DEREGISTER_GRACE.as_secs(),
+                                "Studio deregistration did not complete within the grace period; aborting heartbeat (lease will expire instead)"
+                            );
+                            heartbeat.abort();
+                            let _ = heartbeat.await;
+                        }
+                    }
+
+                    // FLOWIP-114d gap 9: truthful exit codes. A flow that
+                    // failed on its own must not exit zero; an operator stop
+                    // is deliberate and exits zero even when cancel semantics
+                    // land the FSM in Failed{user_stop}.
+                    if signal_phase.is_none() {
+                        let final_state = flow_handle.current_state();
+                        if let obzenflow_runtime::pipeline::PipelineState::Failed {
+                            reason, ..
+                        } = &final_state
+                        {
+                            break 'run (
+                                Err(ApplicationError::FlowExecutionFailed(reason.clone())),
+                                Some(flow_name),
+                                run_state,
+                                true,
+                            );
                         }
                     }
                 }
@@ -1262,6 +1746,16 @@ impl FlowApplication {
         #[cfg(feature = "warp-server")]
         if let Some(emitter) = &surface_metrics_emitter {
             let _ = tokio::time::timeout(grace_timeout, emitter.flush()).await;
+        }
+
+        // FLOWIP-114d gap 24: a non-graceful exit (an early break during server
+        // setup) can leave the heartbeat unjoined; the shared close path above
+        // already took it on every normal exit. Abort any leftover so it cannot
+        // outlive FlowApplication; lease expiry covers deregistration here.
+        #[cfg(feature = "studio-registration")]
+        if let Some(heartbeat) = heartbeat_task.take() {
+            heartbeat.abort();
+            let _ = tokio::time::timeout(grace_timeout, heartbeat).await;
         }
 
         // Best-effort: ensure any hook/surface background tasks cannot escape `FlowApplication`
@@ -1497,6 +1991,8 @@ impl FlowApplication {
         extra_endpoints: Vec<Box<dyn HttpEndpoint>>,
         surface_metrics: Option<Arc<HttpSurfaceMetricsCollector>>,
         runtime_config: Arc<obzenflow_runtime::runtime_config::ResolvedRuntimeConfig>,
+        runtime_instance_id: RuntimeInstanceId,
+        shutdown: tokio::sync::watch::Receiver<bool>,
     ) -> Result<Option<JoinHandle<()>>, ApplicationError> {
         use crate::web::start_web_server_with_config;
         use crate::web::web_server::WebServerResources;
@@ -1525,6 +2021,8 @@ impl FlowApplication {
                 extra_endpoints,
                 surface_metrics,
                 runtime_config: Some(runtime_config),
+                runtime_instance_id: Some(runtime_instance_id),
+                shutdown: Some(shutdown),
             },
             _server_config,
         )
@@ -1549,6 +2047,8 @@ impl FlowApplication {
         _flow_handle: &Arc<FlowHandle>,
         _server_config: ServerConfig,
         extra_endpoints: Vec<Box<dyn HttpEndpoint>>,
+        _runtime_instance_id: RuntimeInstanceId,
+        _shutdown: tokio::sync::watch::Receiver<bool>,
     ) -> Result<Option<JoinHandle<()>>, ApplicationError> {
         if !extra_endpoints.is_empty() {
             return Err(ApplicationError::FeatureNotEnabled(

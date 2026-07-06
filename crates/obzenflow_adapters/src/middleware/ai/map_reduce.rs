@@ -327,7 +327,7 @@ where
     }
 
     fn kind(&self) -> crate::middleware::MiddlewareKind {
-        // Structural-transitional (FLOWIP-120c H2): deleted when FLOWIP-120p
+        // Structural-transitional (FLOWIP-120c H2): deleted when FLOWIP-128b
         // moves the AI legs onto effects.
         crate::middleware::MiddlewareKind::Structural
     }
@@ -598,7 +598,7 @@ where
     }
 
     fn kind(&self) -> crate::middleware::MiddlewareKind {
-        // Structural-transitional (FLOWIP-120c H2): deleted when FLOWIP-120p
+        // Structural-transitional (FLOWIP-120c H2): deleted when FLOWIP-128b
         // moves the AI legs onto effects.
         crate::middleware::MiddlewareKind::Structural
     }
