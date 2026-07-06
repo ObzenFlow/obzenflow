@@ -25,7 +25,7 @@ impl RuntimeInstanceId {
         &self.0
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "studio-registration"))]
     pub(crate) fn for_test(value: impl Into<String>) -> Self {
         Self(value.into())
     }
