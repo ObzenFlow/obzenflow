@@ -12,8 +12,9 @@
 
 use crate::application::config::{ResolvedStudioConfig, StartupMode};
 use crate::http_client::default_http_client;
+use crate::web::studio_presence::RuntimePresenceProjection;
+use crate::web::RuntimeInstanceId;
 use obzenflow_core::http_client::{HttpClient, HttpMethod, RequestSpec, Url};
-use obzenflow_runtime::pipeline::{PipelinePhase, PipelineState};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::watch;
@@ -26,7 +27,7 @@ const FAILURE_LOG_INTERVAL: Duration = Duration::from_secs(60);
 
 pub(crate) struct HeartbeatContext {
     pub(crate) studio: ResolvedStudioConfig,
-    pub(crate) runtime_instance_id: String,
+    pub(crate) runtime_instance_id: RuntimeInstanceId,
     pub(crate) flow_name: String,
     pub(crate) startup_mode: StartupMode,
     /// The runtime's own bind, probed before first registration (RP 5).
@@ -38,7 +39,7 @@ pub(crate) struct HeartbeatContext {
 /// the terminal phase until a signal arrives).
 pub(crate) fn spawn_heartbeat(
     ctx: HeartbeatContext,
-    state_rx: watch::Receiver<PipelineState>,
+    mut presence: RuntimePresenceProjection,
     mut shutdown_rx: watch::Receiver<bool>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
@@ -69,12 +70,12 @@ pub(crate) fn spawn_heartbeat(
         loop {
             tokio::select! {
                 _ = ticker.tick() => {
-                    let sent = register_once(client.clone(), &register_url, &ctx, &state_rx).await;
+                    let sent = register_once(client.clone(), &register_url, &ctx, &mut presence).await;
                     // Prompt single retry keeps repopulation within roughly one
                     // renew interval after a phonebook restart; the tick cadence
                     // is the bounded backoff beyond that.
                     let sent = if sent.is_err() {
-                        register_once(client.clone(), &register_url, &ctx, &state_rx).await
+                        register_once(client.clone(), &register_url, &ctx, &mut presence).await
                     } else {
                         sent
                     };
@@ -134,19 +135,20 @@ async fn register_once(
     client: Arc<dyn HttpClient>,
     register_url: &Url,
     ctx: &HeartbeatContext,
-    state_rx: &watch::Receiver<PipelineState>,
+    presence: &mut RuntimePresenceProjection,
 ) -> Result<(), String> {
-    let phase = PipelinePhase::from(&*state_rx.borrow());
+    presence.catch_up().await;
+    let phase = presence.phase();
     let payload = serde_json::json!({
         "job_id": ctx.studio.job_id,
         "base_url": ctx.studio.advertise_url,
-        "runtime_instance_id": ctx.runtime_instance_id,
+        "runtime_instance_id": ctx.runtime_instance_id.as_str(),
         "flow_name": ctx.flow_name,
         "startup_mode": match ctx.startup_mode {
             StartupMode::Auto => "auto",
             StartupMode::Manual => "manual",
         },
-        "phase": phase.as_str(),
+        "phase": phase.as_wire(),
         "lease_ttl_secs": ctx.studio.lease_ttl_secs,
     });
     let mut request = RequestSpec::new(HttpMethod::Post, register_url.clone());
@@ -176,7 +178,7 @@ async fn deregister(client: &dyn HttpClient, ctx: &HeartbeatContext) {
         }
     };
     url.query_pairs_mut()
-        .append_pair("runtime_instance_id", &ctx.runtime_instance_id);
+        .append_pair("runtime_instance_id", ctx.runtime_instance_id.as_str());
     let request = RequestSpec::new(HttpMethod::Delete, url);
     if let Err(error) = client.execute(request).await {
         tracing::warn!(%error, "phonebook deregistration failed; lease will expire instead");
@@ -186,7 +188,11 @@ async fn deregister(client: &dyn HttpClient, ctx: &HeartbeatContext) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use obzenflow_runtime::pipeline::PipelineState;
+    use crate::journal::MemoryJournal;
+    use obzenflow_core::event::{PipelineLifecycleEvent, SystemEvent, SystemEventType, WriterId};
+    use obzenflow_core::id::SystemId;
+    use obzenflow_core::journal::Journal;
+    use obzenflow_core::JournalOwner;
     use std::sync::Mutex;
     use warp::Filter;
 
@@ -249,22 +255,49 @@ mod tests {
         panic!("timed out waiting for {what}");
     }
 
+    async fn append_lifecycle(
+        journal: &MemoryJournal<SystemEvent>,
+        writer_id: WriterId,
+        event: PipelineLifecycleEvent,
+    ) {
+        journal
+            .append(
+                SystemEvent::new(writer_id, SystemEventType::PipelineLifecycle(event)),
+                None,
+            )
+            .await
+            .expect("append lifecycle event");
+    }
+
     #[tokio::test]
     async fn registers_restamps_phase_and_deregisters_on_shutdown() {
         let stub = Arc::new(StubPhonebook::default());
         let (base, server) = spawn_stub(stub.clone()).await;
-        let (state_tx, state_rx) = watch::channel(PipelineState::ReadyForRun);
+        let system_id = SystemId::new();
+        let writer_id = WriterId::from(system_id);
+        let journal = Arc::new(MemoryJournal::<SystemEvent>::with_owner(
+            JournalOwner::system(system_id),
+        ));
+        append_lifecycle(
+            &journal,
+            writer_id,
+            PipelineLifecycleEvent::ReadyForRun {
+                stage_count: Some(3),
+            },
+        )
+        .await;
+        let presence = RuntimePresenceProjection::open(journal.clone(), writer_id).await;
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
         let task = spawn_heartbeat(
             HeartbeatContext {
                 studio: studio(&base),
-                runtime_instance_id: "01TESTINSTANCE".to_string(),
+                runtime_instance_id: RuntimeInstanceId::for_test("01TESTINSTANCE"),
                 flow_name: "demo_flow".to_string(),
                 startup_mode: StartupMode::Manual,
                 probe_base_url: base.clone(),
             },
-            state_rx,
+            presence,
             shutdown_rx,
         );
 
@@ -282,7 +315,14 @@ mod tests {
             assert_eq!(first["lease_ttl_secs"], 3);
         }
 
-        state_tx.send(PipelineState::Running).expect("state send");
+        append_lifecycle(
+            &journal,
+            writer_id,
+            PipelineLifecycleEvent::Running {
+                stage_count: Some(3),
+            },
+        )
+        .await;
         wait_for("renewal restamping phase to running", || {
             stub.registrations
                 .lock()
@@ -315,17 +355,30 @@ mod tests {
         let server = tokio::spawn(server);
         let base = format!("http://{addr}");
 
-        let (_state_tx, state_rx) = watch::channel(PipelineState::Running);
+        let system_id = SystemId::new();
+        let writer_id = WriterId::from(system_id);
+        let journal = Arc::new(MemoryJournal::<SystemEvent>::with_owner(
+            JournalOwner::system(system_id),
+        ));
+        append_lifecycle(
+            &journal,
+            writer_id,
+            PipelineLifecycleEvent::Running {
+                stage_count: Some(3),
+            },
+        )
+        .await;
+        let presence = RuntimePresenceProjection::open(journal, writer_id).await;
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let task = spawn_heartbeat(
             HeartbeatContext {
                 studio: studio(&base),
-                runtime_instance_id: "01TESTINSTANCE".to_string(),
+                runtime_instance_id: RuntimeInstanceId::for_test("01TESTINSTANCE"),
                 flow_name: "demo_flow".to_string(),
                 startup_mode: StartupMode::Auto,
                 probe_base_url: base.clone(),
             },
-            state_rx,
+            presence,
             shutdown_rx,
         );
 

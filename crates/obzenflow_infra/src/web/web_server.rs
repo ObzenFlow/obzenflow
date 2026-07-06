@@ -18,6 +18,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use super::surface_metrics::HttpSurfaceMetricsCollector;
+use super::RuntimeInstanceId;
 
 pub type ContractAttachments = Arc<HashMap<(StageId, StageId), Vec<String>>>;
 
@@ -41,7 +42,7 @@ pub struct WebServerResources {
     pub runtime_config: Option<Arc<obzenflow_runtime::runtime_config::ResolvedRuntimeConfig>>,
     /// FLOWIP-114d: per-process incarnation identity, stamped into the SSE
     /// bootstrap event for data-path generation detection.
-    pub runtime_instance_id: Option<String>,
+    pub runtime_instance_id: Option<RuntimeInstanceId>,
     /// FLOWIP-114d gap 8: fires after the terminal pipeline state; the
     /// listener then closes gracefully and SSE producers end their streams.
     pub shutdown: Option<tokio::sync::watch::Receiver<bool>>,

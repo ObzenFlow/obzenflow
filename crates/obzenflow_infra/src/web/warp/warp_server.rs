@@ -30,6 +30,7 @@ use obzenflow_core::EventId;
 use crate::web::endpoint_tags::SURFACE_NAME_TAG_PREFIX;
 use crate::web::routing::{matchit_template_to_public, public_template_to_matchit};
 use crate::web::surface_metrics::{HttpSurfaceMetricsCollector, HttpSurfaceObservation};
+use crate::web::RuntimeInstanceId;
 
 /// Warp-based web server implementation
 pub struct WarpServer {
@@ -39,7 +40,7 @@ pub struct WarpServer {
     surface_metrics: Option<Arc<HttpSurfaceMetricsCollector>>,
     /// FLOWIP-114d: per-process incarnation identity stamped into the SSE
     /// bootstrap event so browsers detect generation changes on the data path.
-    runtime_instance_id: Option<String>,
+    runtime_instance_id: Option<RuntimeInstanceId>,
     /// FLOWIP-114d gap 8: fired after the terminal pipeline state; the
     /// listener closes gracefully and SSE producers end their streams after
     /// flushing the terminal lifecycle event.
@@ -74,7 +75,7 @@ impl WarpServer {
     }
 
     /// Attach the per-process incarnation identity (FLOWIP-114d).
-    pub fn with_runtime_instance_id(&mut self, runtime_instance_id: String) {
+    pub fn with_runtime_instance_id(&mut self, runtime_instance_id: RuntimeInstanceId) {
         self.runtime_instance_id = Some(runtime_instance_id);
     }
 
@@ -395,7 +396,7 @@ impl WarpServer {
         &self,
         system_journal: Arc<dyn Journal<SystemEvent>>,
         host_policy: HostPolicy,
-        runtime_instance_id: Option<String>,
+        runtime_instance_id: Option<RuntimeInstanceId>,
         shutdown: Option<tokio::sync::watch::Receiver<bool>>,
     ) -> impl Filter<Extract = (Box<dyn Reply>,), Error = Rejection> + Clone {
         let journal_filter = warp::any().map(move || system_journal.clone());
@@ -509,7 +510,7 @@ impl WarpServer {
                             {
                                 let payload = serde_json::json!({
                                     "system_event_type": "server_shutdown",
-                                    "runtime_instance_id": runtime_instance_id,
+                                    "runtime_instance_id": runtime_instance_id.as_ref().map(RuntimeInstanceId::as_str),
                                 });
                                 let bye = SseEvent::default()
                                     .event("server_shutdown")
@@ -591,7 +592,7 @@ impl WarpServer {
                                                 "system_event_type": "bootstrap",
                                                 "event_type": "flow_bootstrap",
                                                 "checkpoint_event_id": checkpoint_event_id.map(|id| id.to_string()),
-                                                "runtime_instance_id": runtime_instance_id,
+                                                "runtime_instance_id": runtime_instance_id.as_ref().map(RuntimeInstanceId::as_str),
                                             });
                                             let mut ev = SseEvent::default()
                                                 .event("bootstrap")
@@ -638,7 +639,7 @@ impl WarpServer {
                                                 "system_event_type": "bootstrap",
                                                 "event_type": "flow_bootstrap",
                                                 "checkpoint_event_id": checkpoint_event_id.map(|id| id.to_string()),
-                                                "runtime_instance_id": runtime_instance_id,
+                                                "runtime_instance_id": runtime_instance_id.as_ref().map(RuntimeInstanceId::as_str),
                                             });
                                             let mut ev = SseEvent::default()
                                                 .event("bootstrap")
@@ -2749,6 +2750,27 @@ fn map_system_event_to_sse(
                         .data(data.to_string()),
                 )
             }
+            obzenflow_core::event::system_event::PipelineLifecycleEvent::ReadyForRun {
+                stage_count,
+            } => {
+                let mut data = json!({
+                    "system_event_type": "pipeline_lifecycle",
+                    "event_type": "flow_ready_for_run",
+                    "timestamp_ms": event.timestamp,
+                });
+                if let Some(count) = stage_count {
+                    data["stage_count"] = json!(count);
+                }
+                if let Some(vc) = &vector_clock_value {
+                    data["vector_clock"] = vc.clone();
+                }
+                Some(
+                    SseEvent::default()
+                        .id(id_str)
+                        .event("flow_lifecycle")
+                        .data(data.to_string()),
+                )
+            }
             obzenflow_core::event::system_event::PipelineLifecycleEvent::Running {
                 stage_count,
             } => {
@@ -3317,6 +3339,9 @@ fn last_pipeline_event_name(envelope: &SystemEventEnvelope) -> Option<&'static s
         obzenflow_core::event::SystemEventType::PipelineLifecycle(event) => Some(match event {
             obzenflow_core::event::system_event::PipelineLifecycleEvent::Starting => {
                 "flow_starting"
+            }
+            obzenflow_core::event::system_event::PipelineLifecycleEvent::ReadyForRun { .. } => {
+                "flow_ready_for_run"
             }
             obzenflow_core::event::system_event::PipelineLifecycleEvent::Running { .. } => {
                 "flow_running"

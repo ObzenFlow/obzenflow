@@ -20,6 +20,7 @@ use crate::application::config::{CorsModeArg, OnTerminalArg, ResolvedStartupConf
 use crate::web::endpoints::event_ingestion::{HttpIngress, IngressHandle};
 #[cfg(feature = "warp-server")]
 use crate::web::surface_metrics::{HttpSurfaceMetricsCollector, HttpSurfaceMetricsEmitter};
+use crate::web::RuntimeInstanceId;
 use obzenflow_core::metrics::{InfraMetricsSnapshot, MetricsExporter};
 use obzenflow_core::web::{CorsConfig, CorsMode, HttpEndpoint, ServerConfig};
 use obzenflow_core::TypedPayload;
@@ -65,11 +66,14 @@ mod tests {
     use crate::journal::disk_journals;
     use async_trait::async_trait;
     use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
-    use obzenflow_core::ChainEvent;
-    use obzenflow_dsl::{flow, infinite_source, sink};
+    use obzenflow_core::event::ChainEventFactory;
+    use obzenflow_core::{ChainEvent, StageId, WriterId};
+    use obzenflow_dsl::{flow, infinite_source, sink, source};
     use obzenflow_runtime::pipeline::PipelineState;
     use obzenflow_runtime::stages::common::handler_error::HandlerError;
-    use obzenflow_runtime::stages::common::handlers::{InfiniteSourceHandler, SinkHandler};
+    use obzenflow_runtime::stages::common::handlers::{
+        FiniteSourceHandler, InfiniteSourceHandler, SinkHandler,
+    };
     use obzenflow_runtime::stages::SourceError;
     use std::net::TcpListener;
     use std::sync::Mutex;
@@ -88,6 +92,36 @@ mod tests {
     impl InfiniteSourceHandler for IdleInfiniteSource {
         fn next(&mut self) -> Result<Vec<ChainEvent>, SourceError> {
             Ok(Vec::new())
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    struct OneShotSource {
+        emitted: bool,
+        writer_id: WriterId,
+    }
+
+    impl OneShotSource {
+        fn new() -> Self {
+            Self {
+                emitted: false,
+                writer_id: WriterId::from(StageId::new()),
+            }
+        }
+    }
+
+    impl FiniteSourceHandler for OneShotSource {
+        fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
+            if self.emitted {
+                Ok(None)
+            } else {
+                self.emitted = true;
+                Ok(Some(vec![ChainEventFactory::data_event(
+                    self.writer_id,
+                    IdlePayload::EVENT_TYPE,
+                    serde_json::json!({ "kind": "one-shot" }),
+                )]))
+            }
         }
     }
 
@@ -202,6 +236,84 @@ enabled = false
 
         result.expect("server auto mode should shut down cleanly");
         running_rx.await.expect("flow should reach Running");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn server_on_terminal_exit_waits_for_terminal_journal_fact() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let journal_dir = tempdir.path().join("journals");
+        let flow_journal_dir = journal_dir.clone();
+        std::fs::create_dir_all(&journal_dir).expect("create journal root");
+        let config_path = tempdir.path().join("obzenflow.toml");
+        let port = available_local_port();
+        std::fs::write(
+            &config_path,
+            format!(
+                r#"
+[server]
+enabled = true
+host = "127.0.0.1"
+port = {port}
+startup_mode = "auto"
+on_terminal = "exit"
+
+[runtime]
+shutdown_timeout_secs = 2
+
+[metrics]
+enabled = false
+"#
+            ),
+        )
+        .expect("write test config");
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            FlowApplication::launch(
+                flow! {
+                    name: "server_terminal_journal_regression",
+                    journals: disk_journals(flow_journal_dir),
+                    middleware: [],
+
+                    stages: {
+                        src = source!(IdlePayload => OneShotSource::new());
+                        sink = sink!(IdlePayload => NoopSink);
+                    },
+
+                    topology: {
+                        src |> sink;
+                    }
+                },
+                LaunchParams {
+                    enable_autodiscovery: false,
+                    cli_args: Some(vec![
+                        OsString::from("obzenflow"),
+                        OsString::from("--config"),
+                        config_path.into_os_string(),
+                    ]),
+                    ..LaunchParams::default()
+                },
+            ),
+        )
+        .await
+        .expect("FlowApplication should not hang in on_terminal=exit mode");
+
+        result.expect("finite server flow should exit cleanly");
+
+        let flows_dir = journal_dir.join("flows");
+        let run_dir = std::fs::read_dir(&flows_dir)
+            .expect("flows directory should exist")
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .find(|path| path.is_dir())
+            .expect("one run directory should exist");
+        let system_log =
+            std::fs::read_to_string(run_dir.join("system.log")).expect("system.log readable");
+
+        assert!(
+            system_log.contains(r#""pipeline_event":"completed""#),
+            "on_terminal=exit must not close the runtime before the final pipeline_completed fact is committed; system.log:\n{system_log}"
+        );
     }
 
     // FLOWIP-114d gap 24 regression: on graceful server-mode shutdown the
@@ -1146,7 +1258,7 @@ impl FlowApplication {
             // FLOWIP-114d: per-process incarnation identity (stamped into the
             // SSE bootstrap event and every registration) and the terminal-
             // gated listener-close signal (gap 8).
-            let runtime_instance_id = ulid::Ulid::new().to_string();
+            let runtime_instance_id = RuntimeInstanceId::new();
             let (server_shutdown_tx, server_shutdown_rx) = tokio::sync::watch::channel(false);
 
             // Start server if --server flag present
@@ -1209,20 +1321,32 @@ impl FlowApplication {
             #[cfg(feature = "studio-registration")]
             if let Some(studio) = config.studio.clone() {
                 if server_handle.is_some() {
-                    heartbeat_task = Some(crate::web::studio_registration::spawn_heartbeat(
-                        crate::web::studio_registration::HeartbeatContext {
-                            studio,
-                            runtime_instance_id: runtime_instance_id.clone(),
-                            flow_name: flow_name.clone(),
-                            startup_mode: config.server.startup_mode,
-                            probe_base_url: format!(
-                                "http://{}:{}",
-                                config.server.host, config.server.port
-                            ),
-                        },
-                        flow_handle.state_receiver(),
-                        server_shutdown_rx.clone(),
-                    ));
+                    if let Some(system_journal) = flow_handle.system_journal() {
+                        let presence =
+                            crate::web::studio_presence::RuntimePresenceProjection::open(
+                                system_journal,
+                                flow_handle.pipeline_writer_id(),
+                            )
+                            .await;
+                        heartbeat_task = Some(crate::web::studio_registration::spawn_heartbeat(
+                            crate::web::studio_registration::HeartbeatContext {
+                                studio,
+                                runtime_instance_id: runtime_instance_id.clone(),
+                                flow_name: flow_name.clone(),
+                                startup_mode: config.server.startup_mode,
+                                probe_base_url: format!(
+                                    "http://{}:{}",
+                                    config.server.host, config.server.port
+                                ),
+                            },
+                            presence,
+                            server_shutdown_rx.clone(),
+                        ));
+                    } else {
+                        tracing::warn!(
+                            "Studio registration disabled: flow has no system journal for presence projection"
+                        );
+                    }
                 }
             }
 
@@ -1509,6 +1633,20 @@ impl FlowApplication {
                             } else {
                                 tokio::time::sleep(Duration::from_millis(50)).await;
                             }
+                        }
+                    }
+
+                    if signal_phase.is_none() {
+                        let terminal_deadline = Instant::now() + grace_timeout;
+                        while flow_handle.is_running() {
+                            if Instant::now() >= terminal_deadline {
+                                tracing::warn!(
+                                    shutdown_timeout_secs = grace_timeout.as_secs(),
+                                    "Pipeline supervisor did not finish terminal dispatch within shutdown timeout; closing server anyway"
+                                );
+                                break;
+                            }
+                            tokio::time::sleep(Duration::from_millis(10)).await;
                         }
                     }
 
@@ -1853,7 +1991,7 @@ impl FlowApplication {
         extra_endpoints: Vec<Box<dyn HttpEndpoint>>,
         surface_metrics: Option<Arc<HttpSurfaceMetricsCollector>>,
         runtime_config: Arc<obzenflow_runtime::runtime_config::ResolvedRuntimeConfig>,
-        runtime_instance_id: String,
+        runtime_instance_id: RuntimeInstanceId,
         shutdown: tokio::sync::watch::Receiver<bool>,
     ) -> Result<Option<JoinHandle<()>>, ApplicationError> {
         use crate::web::start_web_server_with_config;
@@ -1909,7 +2047,7 @@ impl FlowApplication {
         _flow_handle: &Arc<FlowHandle>,
         _server_config: ServerConfig,
         extra_endpoints: Vec<Box<dyn HttpEndpoint>>,
-        _runtime_instance_id: String,
+        _runtime_instance_id: RuntimeInstanceId,
         _shutdown: tokio::sync::watch::Receiver<bool>,
     ) -> Result<Option<JoinHandle<()>>, ApplicationError> {
         if !extra_endpoints.is_empty() {

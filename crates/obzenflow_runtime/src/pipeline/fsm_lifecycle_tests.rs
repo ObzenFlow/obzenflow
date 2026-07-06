@@ -181,7 +181,13 @@ async fn materialized_readiness_complete_moves_to_ready_for_run() {
         .await
         .expect("readiness transition should succeed");
 
-    assert!(actions.is_empty());
+    assert!(
+        matches!(
+            actions.as_slice(),
+            [PipelineAction::WritePipelineReadyForRun]
+        ),
+        "readiness transition must publish the ReadyForRun lifecycle fact"
+    );
     assert!(matches!(fsm.state(), PipelineState::ReadyForRun));
 }
 

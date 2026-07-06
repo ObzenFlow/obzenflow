@@ -611,6 +611,9 @@ mod tests {
             flow_name: "dummy".to_string(),
             contract_attachments: None,
             system_journal: None,
+            pipeline_writer_id: obzenflow_core::event::WriterId::from(
+                obzenflow_core::id::SystemId::new(),
+            ),
             liveness_snapshots: None,
             run_substrate: crate::journal::RunSubstrateState::Ephemeral,
             flow_effective_config: None,
