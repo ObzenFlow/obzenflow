@@ -902,7 +902,7 @@ macro_rules! build_typed_flow {
                     // pure sync surfaces hard-reject, effectful-stateful rejects
                     // until FLOWIP-120l installs its boundary, and the deprecated
                     // async-non-effectful surface warns until FLOWIP-120f deletes
-                    // it (FLOWIP-120p migrates its AI legs to effects).
+                    // it (FLOWIP-128b migrates its AI legs to effects).
                     if factory.kind() == obzenflow_adapters::middleware::MiddlewareKind::Policy {
                         use $crate::dsl::stage_descriptor::PolicyGuardSurface;
                         match descriptor.policy_guard_surface() {
@@ -927,7 +927,7 @@ macro_rules! build_typed_flow {
                                     stage = %name,
                                     middleware = factory.label(),
                                     "policy middleware on the async non-effectful surface is \
-                                     deprecated: FLOWIP-120p moves these handlers onto effects and \
+                                     deprecated: FLOWIP-128b moves these handlers onto effects and \
                                      FLOWIP-120f removes this surface; the policy then attaches at \
                                      the effect boundary (FLOWIP-120c H1)"
                                 );

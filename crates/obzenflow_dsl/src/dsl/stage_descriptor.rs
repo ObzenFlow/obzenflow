@@ -509,7 +509,7 @@ pub enum PolicyGuardSurface {
     /// shells with no live I/O unit. Policy middleware is build-rejected.
     PureSync,
     /// Async non-effectful transforms: deprecated surface; policy middleware
-    /// warns naming FLOWIP-120p and FLOWIP-120f until 120f deletes it.
+    /// warns naming FLOWIP-128b and FLOWIP-120f until 120f deletes it.
     AsyncNonEffectful,
     /// Effectful stages: per-effect policy placement (FLOWIP-120c phase 3).
     Effectful,

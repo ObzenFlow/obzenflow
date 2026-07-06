@@ -1034,6 +1034,25 @@ fn resolve_studio(
             "requires server.enabled = true; registration is meaningless without the control plane",
         ));
     }
+    // FLOWIP-114d Gap 25: the Studio browser attaches to each runtime directly.
+    // It has no access to the server-side secret, and native EventSource cannot
+    // carry an API key or HMAC signature at all, so a runtime enabling both
+    // Studio and control-plane auth would 401 every topology, SSE, metrics, and
+    // control request while still appearing selectable. Fail loud; the
+    // authenticating proxy is FLOWIP-114u's boundary.
+    if matches!(
+        server.control_plane_auth,
+        Some(AuthPolicy::ApiKey { .. } | AuthPolicy::HmacSha256 { .. })
+    ) {
+        return Err(ConfigError::at(
+            "studio.enabled",
+            "cannot be combined with server.control_plane_auth: the Studio browser \
+             attaches to each runtime directly and native EventSource cannot carry an \
+             API key or HMAC signature, so every request would return 401. Use a \
+             loopback bind without control-plane auth (FLOWIP-093e permits this), or \
+             wait for the authenticating proxy tracked in FLOWIP-114u",
+        ));
+    }
     let phonebook_url = resolve_optional(
         inputs.cli_phonebook_url,
         inputs.file.phonebook_url,
@@ -1062,10 +1081,18 @@ fn resolve_studio(
             "required when studio.enabled = true",
         )
     })?;
-    if advertise_url.contains("0.0.0.0") {
+    // FLOWIP-114d Gap 26: loopback-only v1. The advertised URL must resolve to
+    // a host the browser reaches on this machine; a 0.0.0.0 bind, a LAN address,
+    // or a public host is refused here (non-loopback Studio is FLOWIP-114u).
+    if !is_loopback_url(&advertise_url) {
         return Err(ConfigError::at(
             "studio.advertise_url",
-            "must be a URL the browser can reach, never a 0.0.0.0 bind address",
+            format!(
+                "must advertise a loopback host the browser reaches on this machine \
+                 (127.0.0.0/8, ::1, or localhost); got {advertise_url:?}. A 0.0.0.0 bind or \
+                 a non-loopback address is refused in the loopback-only v1; non-loopback \
+                 Studio is deferred to FLOWIP-114u"
+            ),
         ));
     }
     let lease_ttl_secs = resolve_scalar(
@@ -1291,6 +1318,23 @@ fn url_origin(url: &str) -> Option<String> {
     Some(format!("{}://{authority}", &url[..scheme_end]))
 }
 
+/// True when the URL's host is a loopback address (127.0.0.0/8 or ::1) or
+/// `localhost`. Keeps Studio's advertised runtime URL reachable only on this
+/// machine in the loopback-only v1 (FLOWIP-093e posture). A URL that fails to
+/// parse, or has no host, is treated as non-loopback (fail closed).
+#[cfg(feature = "studio-registration")]
+fn is_loopback_url(url: &str) -> bool {
+    let Ok(parsed) = url::Url::parse(url) else {
+        return false;
+    };
+    match parsed.host() {
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        Some(url::Host::Domain(domain)) => domain.eq_ignore_ascii_case("localhost"),
+        None => false,
+    }
+}
+
 fn resolve_scalar<T: Clone>(cli: Option<T>, file: Option<T>, env: Option<T>, default: T) -> T {
     cli.or(file).or(env).unwrap_or(default)
 }
@@ -1485,6 +1529,50 @@ advertise_url = "http://127.0.0.1:9090"
         let contents = studio_config_toml().replace("http://127.0.0.1:9090", "http://0.0.0.0:9090");
         let error = resolve_studio_file(&contents, &[]).unwrap_err();
         assert!(error.to_string().contains("studio.advertise_url"));
+    }
+
+    // FLOWIP-114d Gap 26: a non-loopback advertised host is refused in v1.
+    #[cfg(feature = "studio-registration")]
+    #[test]
+    fn studio_rejects_non_loopback_advertise() {
+        let _lock = env_lock();
+        let contents =
+            studio_config_toml().replace("http://127.0.0.1:9090", "http://192.168.1.20:9090");
+        let error = resolve_studio_file(&contents, &[]).unwrap_err().to_string();
+        assert!(error.contains("studio.advertise_url"), "got: {error}");
+        assert!(error.contains("114u"), "got: {error}");
+    }
+
+    // FLOWIP-114d Gap 26: localhost is a loopback host and is accepted.
+    #[cfg(feature = "studio-registration")]
+    #[test]
+    fn studio_accepts_localhost_advertise() {
+        let _lock = env_lock();
+        let contents = studio_config_toml().replace(
+            "advertise_url = \"http://127.0.0.1:9090\"",
+            "advertise_url = \"http://localhost:9090\"",
+        );
+        let resolved = resolve_studio_file(&contents, &[]).unwrap();
+        assert_eq!(
+            resolved.studio.expect("studio enabled").advertise_url,
+            "http://localhost:9090"
+        );
+    }
+
+    // FLOWIP-114d Gap 25: Studio and control-plane auth cannot compose in v1,
+    // because the browser cannot authenticate directly. Fail loud, name 114u.
+    #[cfg(feature = "studio-registration")]
+    #[test]
+    fn studio_rejects_control_plane_auth() {
+        let _lock = env_lock();
+        let contents = format!(
+            "{}\n[server.control_plane_auth]\nmode = \"api-key\"\nvalue_env = \"OBZENFLOW_STUDIO_TEST_KEY\"\n",
+            studio_config_toml()
+        );
+        let error = resolve_studio_file(&contents, &[]).unwrap_err().to_string();
+        assert!(error.contains("studio.enabled"), "got: {error}");
+        assert!(error.contains("control_plane_auth"), "got: {error}");
+        assert!(error.contains("114u"), "got: {error}");
     }
 
     #[cfg(feature = "studio-registration")]

@@ -203,6 +203,197 @@ enabled = false
         result.expect("server auto mode should shut down cleanly");
         running_rx.await.expect("flow should reach Running");
     }
+
+    // FLOWIP-114d gap 24 regression: on graceful server-mode shutdown the
+    // heartbeat's fenced DELETE must reach the phonebook rather than being
+    // cancelled mid-flight by the generic managed-task abort (which would
+    // leave the entry to linger until lease expiry). Drives a real
+    // FlowApplication in server mode against a stub phonebook, waits until a
+    // registration has landed, then triggers shutdown and asserts the fenced
+    // deregistration arrives.
+    #[cfg(feature = "studio-registration")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn server_mode_deregisters_from_phonebook_on_graceful_shutdown() {
+        use warp::Filter;
+
+        #[derive(Default)]
+        struct Stub {
+            registrations: Mutex<Vec<serde_json::Value>>,
+            deletes: Mutex<Vec<String>>,
+        }
+        let stub = Arc::new(Stub::default());
+
+        let register = {
+            let stub = stub.clone();
+            warp::path!("register")
+                .and(warp::post())
+                .and(warp::body::json())
+                .map(move |body: serde_json::Value| {
+                    stub.registrations
+                        .lock()
+                        .expect("registrations lock")
+                        .push(body);
+                    warp::reply::with_status(warp::reply(), warp::http::StatusCode::NO_CONTENT)
+                })
+        };
+        let deregister = {
+            let stub = stub.clone();
+            warp::path!("register" / String)
+                .and(warp::delete())
+                .and(warp::query::raw())
+                .map(move |job_id: String, query: String| {
+                    stub.deletes
+                        .lock()
+                        .expect("deletes lock")
+                        .push(format!("{job_id}?{query}"));
+                    warp::reply::with_status(warp::reply(), warp::http::StatusCode::NO_CONTENT)
+                })
+        };
+        let (phonebook_addr, phonebook_server) =
+            warp::serve(register.or(deregister)).bind_ephemeral(([127, 0, 0, 1], 0));
+        let phonebook_task = tokio::spawn(phonebook_server);
+        let phonebook_url = format!("http://{phonebook_addr}");
+
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let journal_dir = tempdir.path().join("journals");
+        std::fs::create_dir_all(&journal_dir).expect("create journal root");
+        let config_path = tempdir.path().join("obzenflow.toml");
+        let port = available_local_port();
+        std::fs::write(
+            &config_path,
+            format!(
+                r#"
+[server]
+enabled = true
+host = "127.0.0.1"
+port = {port}
+startup_mode = "auto"
+
+[server.cors]
+mode = "allow-list"
+allow_origins = ["{phonebook_url}"]
+
+[studio]
+enabled = true
+phonebook_url = "{phonebook_url}"
+job_id = "gap24_demo"
+advertise_url = "http://127.0.0.1:{port}"
+lease_ttl_secs = 30
+renew_interval_secs = 1
+
+[runtime]
+shutdown_timeout_secs = 2
+
+[metrics]
+enabled = false
+"#
+            ),
+        )
+        .expect("write test config");
+
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let shutdown_tx = Arc::new(Mutex::new(Some(shutdown_tx)));
+        let (running_tx, running_rx) = oneshot::channel();
+        let running_tx = Arc::new(Mutex::new(Some(running_tx)));
+
+        // The hook waits for Running, then for the first registration to land
+        // at the stub, and only then triggers shutdown, so registration always
+        // precedes deregistration deterministically.
+        let hook_shutdown = Arc::clone(&shutdown_tx);
+        let hook_running = Arc::clone(&running_tx);
+        let hook_stub = Arc::clone(&stub);
+        let hook = move |flow_handle: &Arc<FlowHandle>| {
+            let flow_handle = Arc::clone(flow_handle);
+            let hook_shutdown = Arc::clone(&hook_shutdown);
+            let hook_running = Arc::clone(&hook_running);
+            let hook_stub = Arc::clone(&hook_stub);
+            tokio::spawn(async move {
+                let mut states = flow_handle.state_receiver();
+                loop {
+                    if matches!(*states.borrow(), PipelineState::Running) {
+                        break;
+                    }
+                    if states.changed().await.is_err() {
+                        return;
+                    }
+                }
+                if let Some(tx) = hook_running.lock().expect("running lock poisoned").take() {
+                    let _ = tx.send(());
+                }
+                // Bounded wait for the heartbeat's first registration.
+                for _ in 0..100 {
+                    if !hook_stub
+                        .registrations
+                        .lock()
+                        .expect("registrations lock")
+                        .is_empty()
+                    {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                if let Some(tx) = hook_shutdown.lock().expect("shutdown lock poisoned").take() {
+                    let _ = tx.send(ShutdownSignal::Sigint);
+                }
+            })
+        };
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(15),
+            FlowApplication::launch(
+                flow! {
+                    name: "gap24_deregister_regression",
+                    journals: disk_journals(journal_dir),
+                    middleware: [],
+
+                    stages: {
+                        src = infinite_source!(IdlePayload => IdleInfiniteSource);
+                        sink = sink!(IdlePayload => NoopSink);
+                    },
+
+                    topology: {
+                        src |> sink;
+                    }
+                },
+                LaunchParams {
+                    enable_autodiscovery: false,
+                    flow_handle_hooks: vec![Box::new(move |flow_handle| Ok(hook(flow_handle)))],
+                    cli_args: Some(vec![
+                        OsString::from("obzenflow"),
+                        OsString::from("--config"),
+                        config_path.into_os_string(),
+                    ]),
+                    test_shutdown_signal: Some(shutdown_rx),
+                    ..LaunchParams::default()
+                },
+            ),
+        )
+        .await
+        .expect("FlowApplication should not hang in server studio mode");
+
+        result.expect("server studio mode should shut down cleanly");
+        running_rx.await.expect("flow should reach Running");
+
+        assert!(
+            !stub
+                .registrations
+                .lock()
+                .expect("registrations lock")
+                .is_empty(),
+            "runtime should have registered with the phonebook"
+        );
+        let deletes = stub.deletes.lock().expect("deletes lock");
+        let prefix = "gap24_demo?runtime_instance_id=";
+        assert!(
+            deletes
+                .iter()
+                .any(|d| d.starts_with(prefix) && d.len() > prefix.len()),
+            "graceful shutdown must send a fenced deregistration rather than \
+             relying on lease expiry; got {deletes:?}"
+        );
+
+        phonebook_task.abort();
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -764,6 +955,11 @@ impl FlowApplication {
         // Background tasks spawned by FlowHandle hooks and/or web surface wiring closures.
         // These must not be allowed to outlive FlowApplication, even on early-return paths.
         let mut managed_tasks: Vec<JoinHandle<()>> = Vec::new();
+        // FLOWIP-114d gap 24: the Studio heartbeat is tracked here rather than in
+        // `managed_tasks` so the shutdown sequence can join its fenced deregistration
+        // before the generic managed-task abort would cancel the in-flight DELETE.
+        #[cfg(feature = "studio-registration")]
+        let mut heartbeat_task: Option<JoinHandle<()>> = None;
         #[cfg(feature = "warp-server")]
         let mut surface_metrics_emitter: Option<HttpSurfaceMetricsEmitter> = None;
 
@@ -1013,7 +1209,7 @@ impl FlowApplication {
             #[cfg(feature = "studio-registration")]
             if let Some(studio) = config.studio.clone() {
                 if server_handle.is_some() {
-                    managed_tasks.push(crate::web::studio_registration::spawn_heartbeat(
+                    heartbeat_task = Some(crate::web::studio_registration::spawn_heartbeat(
                         crate::web::studio_registration::HeartbeatContext {
                             studio,
                             runtime_instance_id: runtime_instance_id.clone(),
@@ -1336,6 +1532,29 @@ impl FlowApplication {
                         let _ = server_task.await;
                     }
 
+                    // FLOWIP-114d gap 24: join the heartbeat so its fenced
+                    // DELETE lands before the generic managed-task abort below
+                    // could cancel it mid-flight. It reacts to the same signal
+                    // and runs concurrently with the listener close above, so
+                    // it has usually already deregistered by now; the deadline
+                    // bounds a slow phonebook, after which lease expiry is the
+                    // fallback.
+                    #[cfg(feature = "studio-registration")]
+                    if let Some(mut heartbeat) = heartbeat_task.take() {
+                        const DEREGISTER_GRACE: Duration = Duration::from_secs(5);
+                        if tokio::time::timeout(DEREGISTER_GRACE, &mut heartbeat)
+                            .await
+                            .is_err()
+                        {
+                            tracing::warn!(
+                                deregister_grace_secs = DEREGISTER_GRACE.as_secs(),
+                                "Studio deregistration did not complete within the grace period; aborting heartbeat (lease will expire instead)"
+                            );
+                            heartbeat.abort();
+                            let _ = heartbeat.await;
+                        }
+                    }
+
                     // FLOWIP-114d gap 9: truthful exit codes. A flow that
                     // failed on its own must not exit zero; an operator stop
                     // is deliberate and exits zero even when cancel semantics
@@ -1389,6 +1608,16 @@ impl FlowApplication {
         #[cfg(feature = "warp-server")]
         if let Some(emitter) = &surface_metrics_emitter {
             let _ = tokio::time::timeout(grace_timeout, emitter.flush()).await;
+        }
+
+        // FLOWIP-114d gap 24: a non-graceful exit (an early break during server
+        // setup) can leave the heartbeat unjoined; the shared close path above
+        // already took it on every normal exit. Abort any leftover so it cannot
+        // outlive FlowApplication; lease expiry covers deregistration here.
+        #[cfg(feature = "studio-registration")]
+        if let Some(heartbeat) = heartbeat_task.take() {
+            heartbeat.abort();
+            let _ = tokio::time::timeout(grace_timeout, heartbeat).await;
         }
 
         // Best-effort: ensure any hook/surface background tasks cannot escape `FlowApplication`
