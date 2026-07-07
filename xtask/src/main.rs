@@ -30,6 +30,7 @@ const JOBS: &[JobSpec] = &[
         example: "payment_gateway_resilience",
         config: "examples/payment_gateway_resilience/obzenflow.studio.toml",
         port: 9090,
+        extra_features: &[],
     },
     JobSpec {
         job_id: "csv_support_sla",
@@ -37,6 +38,7 @@ const JOBS: &[JobSpec] = &[
         example: "csv_demo_support_sla",
         config: "examples/csv_demo_support_sla/obzenflow.studio.toml",
         port: 9091,
+        extra_features: &[],
     },
     JobSpec {
         job_id: "flight_delays",
@@ -44,6 +46,7 @@ const JOBS: &[JobSpec] = &[
         example: "flight_delays_simple",
         config: "examples/flight_delays_simple/obzenflow.studio.toml",
         port: 9092,
+        extra_features: &[],
     },
     JobSpec {
         job_id: "prometheus",
@@ -51,6 +54,19 @@ const JOBS: &[JobSpec] = &[
         example: "prometheus_demo",
         config: "examples/prometheus_demo/obzenflow.studio.toml",
         port: 9093,
+        extra_features: &[],
+    },
+    // FLOWIP-128a composite showcase: `digest` renders as one collapsed node
+    // in Studio. Mock HN feed by default; the AI provider comes from HN_AI_*
+    // env vars (default: local Ollama). `[server] on_terminal = "park"` keeps
+    // the run inspectable after the digest completes.
+    JobSpec {
+        job_id: "hn_ai_digest",
+        flow_name: "hn_ai_digest_demo",
+        example: "hn_ai_digest_demo",
+        config: "examples/hn_ai_digest_demo/obzenflow.studio.toml",
+        port: 9094,
+        extra_features: &["http-pull", "ai"],
     },
 ];
 
@@ -61,6 +77,10 @@ struct JobSpec {
     example: &'static str,
     config: &'static str,
     port: u16,
+    /// Example `required-features` beyond the Studio registration feature.
+    /// Features unify across the single build invocation, so one job's
+    /// extras are additive for the whole example build.
+    extra_features: &'static [&'static str],
 }
 
 #[derive(Clone, Debug)]
@@ -243,10 +263,22 @@ fn reject_flags(command: &str, flags: &[String]) -> Result<()> {
 
 fn build_examples(root: &Path) -> Result<()> {
     println!("building Studio example binaries");
+    let mut features = vec![STUDIO_FEATURE];
+    for job in JOBS {
+        for feature in job.extra_features {
+            if !features.contains(feature) {
+                features.push(feature);
+            }
+        }
+    }
     let mut command = Command::new("cargo");
-    command
-        .current_dir(root)
-        .args(["build", "-p", "obzenflow", "--features", STUDIO_FEATURE]);
+    command.current_dir(root).args([
+        "build",
+        "-p",
+        "obzenflow",
+        "--features",
+        &features.join(","),
+    ]);
     for job in JOBS {
         command.arg("--example").arg(job.example);
     }
@@ -508,6 +540,9 @@ fn print_studio_jobs_help() {
     println!("  cargo xtask studio-jobs up [--force]");
     println!("  cargo xtask studio-jobs status");
     println!("  cargo xtask studio-jobs down");
+    println!();
+    println!("jobs inherit the environment; hn_ai_digest honours HN_* / HN_AI_* vars");
+    println!("(mock HN feed by default; AI provider defaults to local Ollama)");
 }
 
 fn is_help(arg: &str) -> bool {
