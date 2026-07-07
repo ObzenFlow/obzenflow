@@ -25,7 +25,7 @@ use async_trait::async_trait;
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventContent, ChainEventFactory};
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
 use obzenflow_core::{id::StageId, TypedPayload, WriterId};
-use obzenflow_dsl::{ai_map_reduce, flow, sink, source};
+use obzenflow_dsl::{ai_map_reduce, flow, join, sink, source};
 use obzenflow_infra::journal::memory_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::source::SourceError;
@@ -418,4 +418,157 @@ async fn ai_map_reduce_runtime_commits_framework_internal_transport_events() {
         3,
         "collector should route tagged partials and finalise their sum"
     );
+}
+
+/// FLOWIP-128a D1 diagnostics: a downstream whose type no boundary port
+/// carries binds the default port, and the resulting edge-typing error names
+/// the composite and the port rather than only the mangled member stage.
+#[tokio::test]
+async fn boundary_type_mismatch_diagnostic_names_composite_and_port() {
+    let result = flow! {
+        name: "amr_boundary_mismatch",
+        journals: memory_journals(),
+        middleware: [],
+
+        stages: {
+            seed = source!(BuildOnlySeed => NoEventSource);
+            digest = ai_map_reduce!(
+                chunk: BuildOnlySeed -> BuildOnlyChunk => NoopChunker,
+                map: BuildOnlyChunk -> BuildOnlyPartial => NoopMap,
+                collect: BuildOnlyPartial -> BuildOnlyCollected => CollectByInput::new(
+                    BuildOnlyCollected::default(),
+                    |acc: &mut BuildOnlyCollected, partial: &BuildOnlyPartial| {
+                        acc.values.push(partial.value);
+                    },
+                ),
+                reduce: BuildOnlyCollected -> BuildOnlyOut => NoopFinalize,
+            );
+            // Wrong type: no output port carries BuildOnlySeed, so the edge
+            // binds the default `out` port and must fail edge typing there.
+            sink_stage = sink!(BuildOnlySeed => NoopSink);
+        },
+
+        topology: {
+            seed |> digest;
+            digest |> sink_stage;
+        }
+    }
+    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+    .await;
+
+    let err = match result {
+        Ok(_) => panic!("expected an edge-typing failure at the composite boundary"),
+        Err(err) => err,
+    };
+    let message = format!("{err:?}");
+    assert!(
+        message.contains("digest__finalize"),
+        "error should name the member stage: {message}"
+    );
+    assert!(
+        message.contains("composite 'digest' boundary port 'out'"),
+        "error should name the composite and port (FLOWIP-128a D1): {message}"
+    );
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct JoinStreamP {
+    key: u64,
+}
+impl TypedPayload for JoinStreamP {
+    const EVENT_TYPE: &'static str = "regression.amr.join_stream";
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct JoinedP {
+    key: u64,
+}
+impl TypedPayload for JoinedP {
+    const EVENT_TYPE: &'static str = "regression.amr.joined";
+}
+
+#[derive(Clone, Debug)]
+struct LocalNoopJoin;
+
+#[async_trait]
+impl obzenflow_runtime::stages::common::handlers::JoinHandler for LocalNoopJoin {
+    type State = ();
+
+    fn initial_state(&self) -> Self::State {}
+
+    fn process_event(
+        &self,
+        _state: &mut Self::State,
+        _event: ChainEvent,
+        _source_id: StageId,
+        _writer_id: WriterId,
+    ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
+        Ok(vec![])
+    }
+
+    fn on_source_eof(
+        &self,
+        _state: &mut Self::State,
+        _source_id: StageId,
+        _writer_id: WriterId,
+    ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
+        Ok(vec![])
+    }
+}
+
+#[derive(Clone, Debug)]
+struct NoStreamSource;
+impl SourceTyping for NoStreamSource {
+    type Output = JoinStreamP;
+}
+impl FiniteSourceHandler for NoStreamSource {
+    fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
+        Ok(None)
+    }
+}
+
+/// FLOWIP-128a A4: a join reference variable naming a composite resolves
+/// through the boundary by the join's declared reference type, with
+/// default-port fallback. Before the fix this build failed with
+/// "references unknown stage variable 'digest'".
+#[tokio::test]
+async fn join_reference_resolves_through_composite_boundary_port() {
+    let result = flow! {
+        name: "amr_join_reference",
+        journals: memory_journals(),
+        middleware: [],
+
+        stages: {
+            seed = source!(BuildOnlySeed => NoEventSource);
+            digest = ai_map_reduce!(
+                chunk: BuildOnlySeed -> BuildOnlyChunk => NoopChunker,
+                map: BuildOnlyChunk -> BuildOnlyPartial => NoopMap,
+                collect: BuildOnlyPartial -> BuildOnlyCollected => CollectByInput::new(
+                    BuildOnlyCollected::default(),
+                    |acc: &mut BuildOnlyCollected, partial: &BuildOnlyPartial| {
+                        acc.values.push(partial.value);
+                    },
+                ),
+                reduce: BuildOnlyCollected -> BuildOnlyOut => NoopFinalize,
+            );
+            stream_src = source!(JoinStreamP => NoStreamSource);
+            enrich = join!(catalog digest: BuildOnlyOut, JoinStreamP -> JoinedP => LocalNoopJoin);
+            joined_sink = sink!(JoinedP => NoopSink);
+        },
+
+        topology: {
+            seed |> digest;
+            stream_src |> enrich;
+            enrich |> joined_sink;
+        }
+    }
+    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+    .await;
+
+    result.unwrap_or_else(|err| {
+        panic!(
+            "FLOWIP-128a A4: a join referencing the composite binding must resolve \
+             through the boundary's typed output port. Error: {err:?}"
+        )
+    });
 }

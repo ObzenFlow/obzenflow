@@ -263,7 +263,7 @@ fn multi_source_ingest_demo_satisfies_typed_fan_in_invariants() {
     topology.add_edge(aggregator_id.to_topology_id(), sink_id.to_topology_id());
     let topology = topology.build_unchecked().unwrap();
 
-    validate_edge_typing(&topology, &descriptors, &name_to_id)
+    validate_edge_typing(&topology, &descriptors, &name_to_id, &[])
         .expect("multi_source_ingest_demo: edge validator must return Ok(())");
 
     // Invariant 4: the three alignment transforms emit IngestedEvent.

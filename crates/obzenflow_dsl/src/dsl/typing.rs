@@ -8,9 +8,6 @@ use crate::dsl::stage_descriptor::StageDescriptor;
 use crate::dsl::StageCreationResult;
 use async_trait::async_trait;
 use obzenflow_adapters::middleware::{control::ControlMiddlewareAggregator, MiddlewareFactory};
-use obzenflow_core::ai::{
-    AiMapReduceChunkFailed, AiMapReducePlanningManifest, AiMapReduceTaggedPartial,
-};
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
 use obzenflow_core::TypedPayload;
@@ -990,18 +987,6 @@ impl StageDescriptor for TypedStageDescriptor {
         self.inner.policy_guard_surface()
     }
 
-    fn is_composite(&self) -> bool {
-        self.inner.is_composite()
-    }
-
-    fn try_lower_composite(
-        self: Box<Self>,
-        binding: &str,
-    ) -> Result<Option<crate::dsl::composites::CompositeLowering>, crate::dsl::FlowBuildError> {
-        let TypedStageDescriptor { inner, metadata: _ } = *self;
-        inner.try_lower_composite(binding)
-    }
-
     fn reference_stage_id(&self) -> Option<StageId> {
         self.inner.reference_stage_id()
     }
@@ -1105,43 +1090,42 @@ fn select_downstream_input_hint<'a>(
     (EdgeInputRole::Input, &downstream_metadata.input_type)
 }
 
-fn ai_map_reduce_internal_transport_feeds(
-    topology: &Topology,
-    edge: &obzenflow_topology::DirectedEdge,
-) -> Option<Vec<TypeHint>> {
-    let upstream = topology.stage_info(edge.from)?.subgraph.as_ref()?;
-    let downstream = topology.stage_info(edge.to)?.subgraph.as_ref()?;
-
-    if upstream.subgraph_id != downstream.subgraph_id
-        || upstream.kind != "ai_map_reduce"
-        || downstream.kind != "ai_map_reduce"
-        || downstream.role != "collect"
-    {
-        return None;
+/// Index composite-declared internal feeds by resolved stage-id pair
+/// (FLOWIP-128a D3). Feed keys and visibility come from the declaration,
+/// generically; no composite kind is named here.
+fn internal_feed_index<'a>(
+    internal_feeds: &'a [crate::dsl::composition::ResolvedInternalFeed],
+    name_to_id: &HashMap<String, StageId>,
+) -> HashMap<(StageId, StageId), Vec<&'a crate::dsl::composition::ResolvedInternalFeed>> {
+    let mut index: HashMap<
+        (StageId, StageId),
+        Vec<&crate::dsl::composition::ResolvedInternalFeed>,
+    > = HashMap::new();
+    for feed in internal_feeds {
+        let (Some(from), Some(to)) = (
+            name_to_id.get(&feed.from_stage),
+            name_to_id.get(&feed.to_stage),
+        ) else {
+            continue;
+        };
+        index.entry((*from, *to)).or_default().push(feed);
     }
-
-    match upstream.role.as_str() {
-        "chunk" => Some(vec![
-            TypeHint::exact_payload::<AiMapReducePlanningManifest>(),
-        ]),
-        "map" => Some(vec![
-            TypeHint::exact_payload::<AiMapReduceTaggedPartial<serde_json::Value>>(),
-            TypeHint::exact_payload::<AiMapReduceChunkFailed>(),
-        ]),
-        _ => None,
-    }
+    index
 }
 
 /// Derive the runtime-owned feed plan from DSL descriptors and forward edges.
 ///
 /// This is the authoritative runtime projection for FLOWIP-120b. It deliberately
 /// does not read `obzenflow-topology` edge typing annotations; those are
-/// render-only metadata for clients.
+/// render-only metadata for clients. Composite internal lanes arrive as
+/// declared `InternalFeedSpec`s (FLOWIP-128a), never as kind-specific branches.
 pub fn derive_feed_plan(
     topology: &Topology,
     descriptors: &HashMap<String, Box<dyn StageDescriptor>>,
     name_to_id: &HashMap<String, StageId>,
+    internal_feeds: &[crate::dsl::composition::ResolvedInternalFeed],
 ) -> FeedPlan {
+    let feed_index = internal_feed_index(internal_feeds, name_to_id);
     let mut id_to_descriptor: HashMap<StageId, &dyn StageDescriptor> = HashMap::new();
     let mut stage_output_contracts: HashMap<StageId, StageOutputContract> = HashMap::new();
 
@@ -1180,25 +1164,27 @@ pub fn derive_feed_plan(
             continue;
         };
 
-        if let Some(transport_feeds) = ai_map_reduce_internal_transport_feeds(topology, edge) {
-            for selected_hint in transport_feeds {
-                if matches!(selected_hint, TypeHint::Unspecified) {
-                    continue;
+        if let Some(declared) = feed_index.get(&(upstream_stage_id, downstream_stage_id)) {
+            for feed in declared {
+                for selected_hint in &feed.payloads {
+                    if matches!(selected_hint, TypeHint::Unspecified) {
+                        continue;
+                    }
+
+                    let selected_payload =
+                        payload_descriptor_from_type_hint(selected_hint, feed.visibility);
+                    let selected_payload_key = selected_payload.payload_key();
+
+                    feeds.push(LogicalFeed {
+                        key: FeedKey::new(
+                            upstream_stage_id,
+                            downstream_stage_id,
+                            selected_payload_key,
+                            feed.feed_role,
+                        ),
+                        selected_payload,
+                    });
                 }
-
-                let selected_payload =
-                    payload_descriptor_from_type_hint(&selected_hint, FactVisibility::Routable);
-                let selected_payload_key = selected_payload.payload_key();
-
-                feeds.push(LogicalFeed {
-                    key: FeedKey::new(
-                        upstream_stage_id,
-                        downstream_stage_id,
-                        selected_payload_key,
-                        FeedRole::Input,
-                    ),
-                    selected_payload,
-                });
             }
 
             continue;
@@ -1731,10 +1717,12 @@ pub fn validate_archive_sink_delivery_safety(
 /// Validate edge typing across forward edges in a built topology.
 ///
 /// Returns `Ok(())` when every edge is compatible, or `Err(errors)` listing
-/// every per-edge and per-slot mismatch. Composite-internal edges (both
-/// endpoints sharing a `StageSubgraphMembership.subgraph_id`) are skipped:
-/// the composite outer-boundary invariant is responsible for those, not the
-/// per-edge validator. See FLOWIP-114c "Composite-internal edge handling."
+/// every per-edge and per-slot mismatch. Edges covered by a composite's
+/// declared internal feed (FLOWIP-128a D3/A6) validate their lane payloads
+/// against the upstream output contract and are exempt from downstream-input
+/// matching; the lane is the contract. Every other edge, including ordinary
+/// composite-internal data edges, goes through normal validation. Subgraph
+/// co-membership alone never skips validation.
 ///
 /// Two passes:
 /// - Per-edge `Exact` mismatch produces `EdgeTypingMismatchKind::SingleEdge`
@@ -1748,8 +1736,12 @@ pub fn validate_edge_typing(
     topology: &Topology,
     descriptors: &HashMap<String, Box<dyn StageDescriptor>>,
     name_to_id: &HashMap<String, StageId>,
+    internal_feeds: &[crate::dsl::composition::ResolvedInternalFeed],
 ) -> Result<(), Vec<EdgeError>> {
     use crate::dsl::error::EdgeTypingMismatchKind;
+
+    let feed_index = internal_feed_index(internal_feeds, name_to_id);
+    let mut feed_errors: Vec<EdgeError> = Vec::new();
 
     let mut id_to_descriptor: HashMap<StageId, &dyn StageDescriptor> = HashMap::new();
     for (dsl_name, descriptor) in descriptors {
@@ -1781,22 +1773,6 @@ pub fn validate_edge_typing(
         let upstream_stage_id = StageId::from_ulid(edge.from.ulid());
         let downstream_stage_id = StageId::from_ulid(edge.to.ulid());
 
-        // Composite-internal-edge skip: if both endpoints belong to the same
-        // composite expansion (same `subgraph_id`), the edge is internal to a
-        // composite that was wired by composite-author code under composite
-        // unit tests. Per-edge validation does not apply.
-        let upstream_subgraph = topology
-            .stage_info(edge.from)
-            .and_then(|info| info.subgraph.as_ref().map(|m| m.subgraph_id.clone()));
-        let downstream_subgraph = topology
-            .stage_info(edge.to)
-            .and_then(|info| info.subgraph.as_ref().map(|m| m.subgraph_id.clone()));
-        if let (Some(u_sg), Some(d_sg)) = (&upstream_subgraph, &downstream_subgraph) {
-            if u_sg == d_sg {
-                continue;
-            }
-        }
-
         let Some(upstream_descriptor) = id_to_descriptor.get(&upstream_stage_id) else {
             continue;
         };
@@ -1810,6 +1786,39 @@ pub fn validate_edge_typing(
         let Some(downstream_metadata) = downstream_descriptor.typing_metadata() else {
             continue;
         };
+
+        // Declared-feed edge (FLOWIP-128a A6): the lane is the typing
+        // contract. Validate each payload against the upstream output
+        // contract; the edge is exempt from downstream-input matching and
+        // fan-in grouping.
+        if let Some(declared) = feed_index.get(&(upstream_stage_id, downstream_stage_id)) {
+            for feed in declared {
+                for payload in &feed.payloads {
+                    let TypeHint::Exact {
+                        type_id: payload_id,
+                        display_name: payload_name,
+                        ..
+                    } = payload
+                    else {
+                        continue;
+                    };
+                    let in_contract = upstream_metadata.output_contract.iter().any(
+                        |output| matches!(output, TypeHint::Exact { type_id, .. } if type_id == payload_id),
+                    );
+                    if !in_contract {
+                        feed_errors.push(EdgeError {
+                            upstream_stage: upstream_descriptor.name().to_string(),
+                            downstream_stage: downstream_descriptor.name().to_string(),
+                            upstream_type: output_contract_display(upstream_metadata),
+                            expected_type: payload_name.clone(),
+                            input_role: EdgeInputRole::Input,
+                            kind: EdgeTypingMismatchKind::DeclaredFeedPayloadMissing,
+                        });
+                    }
+                }
+            }
+            continue;
+        }
 
         let (input_role, downstream_input_hint) = select_downstream_input_hint(
             upstream_stage_id,
@@ -1912,13 +1921,21 @@ pub fn validate_edge_typing(
         });
     }
 
-    // Final assembly: HeterogeneousFanIn first (the architecturally-meaningful
-    // diagnosis), then SingleEdge errors that are NOT subsumed by a hetero
-    // group on the same (downstream, role) slot. `build_typed_flow!` surfaces
-    // the first error from the returned vector as the structured
-    // `FlowBuildError::EdgeTypingMismatch`, so the ordering chosen here
-    // determines which kind reaches the user.
-    let mut errors: Vec<EdgeError> = hetero_errors;
+    // Final assembly: declared-feed payload errors first (a broken composite
+    // declaration means the lane can never deliver), then HeterogeneousFanIn
+    // (the architecturally-meaningful diagnosis), then SingleEdge errors that
+    // are NOT subsumed by a hetero group on the same (downstream, role) slot.
+    // `build_typed_flow!` surfaces the first error from the returned vector
+    // as the structured `FlowBuildError::EdgeTypingMismatch`, so the ordering
+    // chosen here determines which kind reaches the user.
+    feed_errors.sort_by(|a, b| {
+        a.upstream_stage
+            .cmp(&b.upstream_stage)
+            .then_with(|| a.downstream_stage.cmp(&b.downstream_stage))
+            .then_with(|| a.expected_type.cmp(&b.expected_type))
+    });
+    let mut errors: Vec<EdgeError> = feed_errors;
+    errors.extend(hetero_errors);
     let mut surviving_single_keys: Vec<IngressKey> = single_edge_errors.keys().copied().collect();
     surviving_single_keys
         .sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.as_str().cmp(b.1.as_str())));
@@ -2352,18 +2369,6 @@ impl StageDescriptor for DeterministicOrdererOverride {
 
     fn type_shaping_config_errors(&self) -> Vec<String> {
         self.inner.type_shaping_config_errors()
-    }
-
-    fn is_composite(&self) -> bool {
-        self.inner.is_composite()
-    }
-
-    #[allow(clippy::result_large_err)]
-    fn try_lower_composite(
-        self: Box<Self>,
-        binding: &str,
-    ) -> Result<Option<crate::dsl::composites::CompositeLowering>, crate::dsl::FlowBuildError> {
-        self.inner.try_lower_composite(binding)
     }
 }
 

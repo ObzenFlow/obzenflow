@@ -830,7 +830,7 @@ mod tests {
         topology.add_edge(source_id.to_topology_id(), sink_id.to_topology_id());
         let topology = topology.build_unchecked().unwrap();
 
-        let errors = validate_edge_typing(&topology, &descriptors, &name_to_id)
+        let errors = validate_edge_typing(&topology, &descriptors, &name_to_id, &[])
             .expect_err("expected an EdgeError for the mismatched edge");
         assert_eq!(errors.len(), 1);
         assert_eq!(errors[0].upstream_stage, "source");
@@ -894,7 +894,7 @@ mod tests {
         topology.add_edge(transform_id.to_topology_id(), sink_id.to_topology_id());
         let topology = topology.build_unchecked().unwrap();
 
-        validate_edge_typing(&topology, &descriptors, &name_to_id)
+        validate_edge_typing(&topology, &descriptors, &name_to_id, &[])
             .expect("downstream selected type is a member of upstream output contract");
     }
 
@@ -936,7 +936,7 @@ mod tests {
         topology.add_edge(source_id.to_topology_id(), sink_id.to_topology_id());
         let topology = topology.build_unchecked().unwrap();
 
-        validate_edge_typing(&topology, &descriptors, &name_to_id)
+        validate_edge_typing(&topology, &descriptors, &name_to_id, &[])
             .expect("any output-set member, including a non-first member, is selectable");
     }
 
@@ -992,7 +992,7 @@ mod tests {
         topology.add_edge(stream_id.to_topology_id(), join_id.to_topology_id());
         let topology = topology.build_unchecked().unwrap();
 
-        let mut errors = validate_edge_typing(&topology, &descriptors, &name_to_id)
+        let mut errors = validate_edge_typing(&topology, &descriptors, &name_to_id, &[])
             .expect_err("expected EdgeErrors on join reference + stream mismatches");
         errors.sort_by_key(|err| match err.input_role {
             EdgeInputRole::Reference => 0,
@@ -2401,7 +2401,8 @@ mod tests {
         topology.add_edge(merge_id.to_topology_id(), effectful_id.to_topology_id());
         let topology = topology.build_unchecked().unwrap();
 
-        let before = crate::dsl::typing::derive_feed_plan(&topology, &descriptors, &name_to_id);
+        let before =
+            crate::dsl::typing::derive_feed_plan(&topology, &descriptors, &name_to_id, &[]);
 
         let marked = crate::dsl::typing::derive_deterministic_fan_in_stages(
             &topology,
@@ -2414,7 +2415,7 @@ mod tests {
             descriptors["merge"].typing_metadata().is_some(),
             "the override must delegate typing metadata"
         );
-        let after = crate::dsl::typing::derive_feed_plan(&topology, &descriptors, &name_to_id);
+        let after = crate::dsl::typing::derive_feed_plan(&topology, &descriptors, &name_to_id, &[]);
         for stage_id in [merge_id, effectful_id] {
             assert_eq!(
                 format!("{:?}", before.input_feeds(stage_id)),
@@ -2594,7 +2595,7 @@ mod tests {
         topology.add_edge(source_c_id.to_topology_id(), sink_id.to_topology_id());
         let topology = topology.build_unchecked().unwrap();
 
-        let errors = validate_edge_typing(&topology, &descriptors, &name_to_id)
+        let errors = validate_edge_typing(&topology, &descriptors, &name_to_id, &[])
             .expect_err("expected EdgeErrors for heterogeneous fan-in into a non-join sink");
 
         // Find the HeterogeneousFanIn error (there may also be SingleEdge
@@ -2669,7 +2670,7 @@ mod tests {
 
         // Despite the two different spellings, the TypeId is identical, so
         // validate_edge_typing must report no mismatch.
-        validate_edge_typing(&topology, &descriptors, &name_to_id)
+        validate_edge_typing(&topology, &descriptors, &name_to_id, &[])
             .expect("identical TypeId from two spellings must validate clean");
     }
 
@@ -2740,7 +2741,7 @@ mod tests {
         // The validator accepts this. That is the failure mode this test
         // exists to document: the type system is satisfied because every
         // slot's TypeId is the same, but the topology is meaningless.
-        validate_edge_typing(&topology, &descriptors, &name_to_id).expect(
+        validate_edge_typing(&topology, &descriptors, &name_to_id, &[]).expect(
             "one shared envelope collapses every payload into one TypeId and event descriptor, \
              so the validator accepts this flow even though the two sources semantically emit \
              different events. This is the wrong answer. See examples/multi_source_ingest_demo/ \
@@ -2802,7 +2803,7 @@ mod tests {
         topology.add_edge(stream_b_id.to_topology_id(), join_id.to_topology_id());
         let topology = topology.build_unchecked().unwrap();
 
-        validate_edge_typing(&topology, &descriptors, &name_to_id).expect(
+        validate_edge_typing(&topology, &descriptors, &name_to_id, &[]).expect(
             "homogeneous fan-in on a join stream leg with matching reference leg must \
              validate cleanly under FLOWIP-114c",
         );
@@ -2858,7 +2859,7 @@ mod tests {
         topology.add_edge(stream_id.to_topology_id(), join_id.to_topology_id());
         let topology = topology.build_unchecked().unwrap();
 
-        let plan = derive_feed_plan(&topology, &descriptors, &name_to_id);
+        let plan = derive_feed_plan(&topology, &descriptors, &name_to_id, &[]);
         assert_eq!(plan.all_feeds().len(), 2);
 
         let reference_type = TypeHintInfo::exact(type_name::<ReferenceEvent>());
@@ -2933,7 +2934,7 @@ mod tests {
         topology.add_edge(source_id.to_topology_id(), sink_id.to_topology_id());
         let topology = topology.build_unchecked().unwrap();
 
-        let plan = derive_feed_plan(&topology, &descriptors, &name_to_id);
+        let plan = derive_feed_plan(&topology, &descriptors, &name_to_id, &[]);
         assert_eq!(plan.all_feeds().len(), 1);
 
         let alternate_key = AlternateEvent::versioned_event_type();
@@ -3018,7 +3019,7 @@ mod tests {
         topology.add_edge(stream_b_id.to_topology_id(), join_id.to_topology_id());
         let topology = topology.build_unchecked().unwrap();
 
-        let errors = validate_edge_typing(&topology, &descriptors, &name_to_id).expect_err(
+        let errors = validate_edge_typing(&topology, &descriptors, &name_to_id, &[]).expect_err(
             "expected a HeterogeneousFanIn error on the join stream leg with differing types",
         );
 

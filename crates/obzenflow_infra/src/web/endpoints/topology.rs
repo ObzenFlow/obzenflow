@@ -916,32 +916,31 @@ mod tests {
             },
         );
 
-        let membership = StageSubgraphMembership {
-            subgraph_id: "ai_map_reduce:digest".to_string(),
-            kind: "ai_map_reduce".to_string(),
-            binding: "digest".to_string(),
-            role: "chunk".to_string(),
-            order: 0,
-            is_entry: true,
-            is_exit: false,
-        };
+        let membership = StageSubgraphMembership::new(
+            "ai_map_reduce:digest",
+            "ai_map_reduce",
+            "digest",
+            "chunk",
+            0,
+            true,
+            false,
+        );
 
-        let subgraph = TopologySubgraphInfo {
-            subgraph_id: "ai_map_reduce:digest".to_string(),
-            kind: "ai_map_reduce".to_string(),
-            binding: "digest".to_string(),
-            label: "digest".to_string(),
-            member_stage_ids: vec![a_core.to_topology_id(), b_core.to_topology_id()],
-            internal_edges: vec![SubgraphInternalEdge {
-                from_stage_id: a_core.to_topology_id(),
-                to_stage_id: b_core.to_topology_id(),
-                role: "data".to_string(),
-            }],
-            entry_stage_ids: vec![a_core.to_topology_id()],
-            exit_stage_ids: vec![b_core.to_topology_id()],
-            parent_subgraph_id: None,
-            collapsible: true,
-        };
+        let subgraph = TopologySubgraphInfo::new(
+            "ai_map_reduce:digest",
+            "ai_map_reduce",
+            "digest",
+            "digest",
+            vec![a_core.to_topology_id(), b_core.to_topology_id()],
+            vec![SubgraphInternalEdge::new(
+                a_core.to_topology_id(),
+                b_core.to_topology_id(),
+                "data",
+            )],
+            vec![a_core.to_topology_id()],
+            vec![b_core.to_topology_id()],
+            true,
+        );
 
         let stages: Vec<StageInfo> = topology
             .stages()

@@ -187,12 +187,13 @@ macro_rules! flow {
             let journals = $journals;
             let effect_ports = $crate::__obzenflow_effect_ports_or_default!($($effect_ports)?);
 
-            // Create stages
-            let mut stages: HashMap<String, Box<dyn StageDescriptor>> = HashMap::new();
+            // Collect flow members (FLOWIP-128a D5): stages and composites
+            // both enter through IntoFlowMember; user syntax is unchanged.
+            let mut members: HashMap<String, $crate::dsl::composition::FlowMember> = HashMap::new();
 
             $(
-                let descriptor = $descriptor;
-                stages.insert(stringify!($stage_name).to_string(), descriptor);
+                let member = $crate::dsl::composition::IntoFlowMember::into_flow_member($descriptor);
+                members.insert(stringify!($stage_name).to_string(), member);
             )*
 
             // FLOWIP-105g-part-2: resolve binding-derived runtime stage names.
@@ -200,9 +201,9 @@ macro_rules! flow {
             // Stage macros can request name derivation by setting the descriptor name to
             // `BINDING_DERIVED_NAME_SENTINEL`. Resolve those to the left-hand binding
             // before uniqueness checks and build phases run.
-            for (binding, descriptor) in stages.iter_mut() {
-                if descriptor.name() == BINDING_DERIVED_NAME_SENTINEL {
-                    descriptor.set_name(binding.clone());
+            for (binding, member) in members.iter_mut() {
+                if member.name() == BINDING_DERIVED_NAME_SENTINEL {
+                    member.set_name(binding.clone());
                 }
             }
 
@@ -212,10 +213,11 @@ macro_rules! flow {
             // Parse topology edges
             $crate::parse_topology!(connections, $($edge)*);
 
-            // FLOWIP-086z-part-2: lower composite descriptors (e.g. ai_map_reduce) into
-            // concrete stages + edges before topology validation and runtime build.
-            let lowering_artifacts =
-                $crate::dsl::composites::lower_composites(&mut stages, &mut connections)?;
+            // FLOWIP-128a: expand composites into concrete stages + edges
+            // before topology validation and runtime build. Post-lowering,
+            // only stages exist; the signature enforces it.
+            let (stages, lowering_artifacts) =
+                $crate::dsl::composites::lower_composites(members, &mut connections)?;
 
             // Create closure for flow middleware
             let create_flow_middleware =
@@ -267,12 +269,13 @@ macro_rules! flow {
             let journals = $journals;
             let effect_ports = $crate::__obzenflow_effect_ports_or_default!($($effect_ports)?);
 
-            // Create stages
-            let mut stages: HashMap<String, Box<dyn StageDescriptor>> = HashMap::new();
+            // Collect flow members (FLOWIP-128a D5): stages and composites
+            // both enter through IntoFlowMember; user syntax is unchanged.
+            let mut members: HashMap<String, $crate::dsl::composition::FlowMember> = HashMap::new();
 
             $(
-                let descriptor = $descriptor;
-                stages.insert(stringify!($stage_name).to_string(), descriptor);
+                let member = $crate::dsl::composition::IntoFlowMember::into_flow_member($descriptor);
+                members.insert(stringify!($stage_name).to_string(), member);
             )*
 
             // FLOWIP-105g-part-2: resolve binding-derived runtime stage names.
@@ -280,9 +283,9 @@ macro_rules! flow {
             // Stage macros can request name derivation by setting the descriptor name to
             // `BINDING_DERIVED_NAME_SENTINEL`. Resolve those to the left-hand binding
             // before uniqueness checks and build phases run.
-            for (binding, descriptor) in stages.iter_mut() {
-                if descriptor.name() == BINDING_DERIVED_NAME_SENTINEL {
-                    descriptor.set_name(binding.clone());
+            for (binding, member) in members.iter_mut() {
+                if member.name() == BINDING_DERIVED_NAME_SENTINEL {
+                    member.set_name(binding.clone());
                 }
             }
 
@@ -292,10 +295,11 @@ macro_rules! flow {
             // Parse topology edges
             $crate::parse_topology!(connections, $($edge)*);
 
-            // FLOWIP-086z-part-2: lower composite descriptors (e.g. ai_map_reduce) into
-            // concrete stages + edges before topology validation and runtime build.
-            let lowering_artifacts =
-                $crate::dsl::composites::lower_composites(&mut stages, &mut connections)?;
+            // FLOWIP-128a: expand composites into concrete stages + edges
+            // before topology validation and runtime build. Post-lowering,
+            // only stages exist; the signature enforces it.
+            let (stages, lowering_artifacts) =
+                $crate::dsl::composites::lower_composites(members, &mut connections)?;
 
             // Create closure for flow middleware
             let create_flow_middleware =
@@ -355,23 +359,23 @@ macro_rules! test_flow {
             let journals = $journals;
             let effect_ports = $crate::__obzenflow_effect_ports_or_default!($($effect_ports)?);
 
-            let mut stages: HashMap<String, Box<dyn StageDescriptor>> = HashMap::new();
+            let mut members: HashMap<String, $crate::dsl::composition::FlowMember> = HashMap::new();
             $(
-                let descriptor = $descriptor;
-                stages.insert(stringify!($stage_name).to_string(), descriptor);
+                let member = $crate::dsl::composition::IntoFlowMember::into_flow_member($descriptor);
+                members.insert(stringify!($stage_name).to_string(), member);
             )*
 
-            for (binding, descriptor) in stages.iter_mut() {
-                if descriptor.name() == BINDING_DERIVED_NAME_SENTINEL {
-                    descriptor.set_name(binding.clone());
+            for (binding, member) in members.iter_mut() {
+                if member.name() == BINDING_DERIVED_NAME_SENTINEL {
+                    member.set_name(binding.clone());
                 }
             }
 
             let mut connections: Vec<(String, String, obzenflow_topology::EdgeKind)> = Vec::new();
             $crate::parse_topology!(connections, $($edge)*);
 
-            let lowering_artifacts =
-                $crate::dsl::composites::lower_composites(&mut stages, &mut connections)?;
+            let (stages, lowering_artifacts) =
+                $crate::dsl::composites::lower_composites(members, &mut connections)?;
 
             let create_flow_middleware =
                 || -> Vec<Box<dyn obzenflow_adapters::middleware::MiddlewareFactory>> {
@@ -610,18 +614,63 @@ macro_rules! build_typed_flow {
 
             // If this is a join stage with a DSL reference variable, resolve it
             if let Some(ref_var) = descriptor.reference_stage_name().map(|s| s.to_string()) {
-                // Compute this before mutating the descriptor; `reference_stage_name()` returns a
-                // `&str` tied to the descriptor borrow, and we may still need the value later.
+                // FLOWIP-128a A4: a reference variable naming a composite
+                // resolves through its boundary by the join's declared
+                // reference type (D1), with default-port fallback.
+                let resolved_ref_name = if name_to_id.contains_key(ref_var.as_str()) {
+                    ref_var.clone()
+                } else if let Some(boundary) =
+                    lowering_artifacts.boundaries.get(ref_var.as_str())
+                {
+                    let reference_hint = descriptor
+                        .typing_metadata()
+                        .map(|metadata| metadata.reference_type.clone())
+                        .filter(|hint| {
+                            matches!(hint, $crate::dsl::typing::TypeHint::Exact { .. })
+                        });
+                    let port = boundary.resolve_output(reference_hint.as_ref()).map_err(|err| {
+                        match err {
+                            $crate::dsl::composition::PortResolveError::Ambiguous {
+                                ports,
+                                input_display,
+                            } => {
+                                let listed = ports
+                                    .iter()
+                                    .map(|p| format!("'{p}'"))
+                                    .collect::<Vec<_>>()
+                                    .join(" and ");
+                                FlowBuildError::StageResourcesFailed(format!(
+                                    "join '{name}' references composite '{ref_var}': ambiguous output port (reference '{input_display}' matches ports {listed})"
+                                ))
+                            }
+                            $crate::dsl::composition::PortResolveError::NoDefaultPort => {
+                                FlowBuildError::StageResourcesFailed(format!(
+                                    "join '{name}' references composite '{ref_var}': no output port matches and no default port exists; available ports: {}",
+                                    boundary.describe_outputs()
+                                ))
+                            }
+                        }
+                    })?;
+                    port.stage_name.clone()
+                } else {
+                    return Err(FlowBuildError::StageResourcesFailed(format!(
+                        "Join stage '{}' references unknown stage variable '{}'",
+                        name, ref_var
+                    )));
+                };
+
+                // Explicit tuple-syntax edges were rewritten by lowering, so
+                // dedup against the RESOLVED reference stage name.
                 let reference_edge_explicit =
-                    explicit_forward_edges.contains(&(ref_var.clone(), name.clone()));
+                    explicit_forward_edges.contains(&(resolved_ref_name.clone(), name.clone()));
 
                 let ref_id = name_to_id
-                    .get(ref_var.as_str())
+                    .get(resolved_ref_name.as_str())
                     .copied()
                     .ok_or_else(|| {
                         FlowBuildError::StageResourcesFailed(format!(
-                            "Join stage '{}' references unknown stage variable '{}'",
-                            name, ref_var
+                            "Join stage '{}' resolved reference '{}' to missing stage '{}'",
+                            name, ref_var, resolved_ref_name
                         ))
                     })?;
 
@@ -683,9 +732,12 @@ macro_rules! build_typed_flow {
         // missing from the arrow contract.
         $crate::dsl::typing::validate_effect_fact_containment(&descriptors)?;
 
-        if let Err(edge_errors) =
-            $crate::dsl::typing::validate_edge_typing(&topology, &descriptors, &name_to_id)
-        {
+        if let Err(edge_errors) = $crate::dsl::typing::validate_edge_typing(
+            &topology,
+            &descriptors,
+            &name_to_id,
+            &lowering_artifacts.internal_feeds,
+        ) {
             // Surface every error to tracing so the build log captures the full set.
             for err in &edge_errors {
                 tracing::error!(
@@ -702,6 +754,31 @@ macro_rules! build_typed_flow {
                 .into_iter()
                 .next()
                 .expect("Err carries at least one error");
+            // FLOWIP-128a D1 diagnostics: when the failing edge crosses a
+            // composite boundary port, say so by composite and port name
+            // instead of leaving the user to decode the mangled member stage.
+            let composite_context =
+                lowering_artifacts
+                    .boundaries
+                    .iter()
+                    .find_map(|(binding, boundary)| {
+                        boundary
+                            .inputs
+                            .iter()
+                            .chain(boundary.outputs.iter())
+                            .find_map(|port| {
+                                if port.stage_name == first.upstream_stage
+                                    || port.stage_name == first.downstream_stage
+                                {
+                                    Some(format!(
+                                        "This edge crosses composite '{binding}' boundary port '{}'. ",
+                                        port.name
+                                    ))
+                                } else {
+                                    None
+                                }
+                            })
+                    });
             let suggested_fix = match first.kind {
                 $crate::dsl::error::EdgeTypingMismatchKind::SingleEdge => {
                     "Align the upstream and downstream types, or insert an alignment transform. \
@@ -714,6 +791,15 @@ macro_rules! build_typed_flow {
                      FLOWIP-114c \"How to handle heterogeneous fan-in\"."
                         .to_string()
                 }
+                $crate::dsl::error::EdgeTypingMismatchKind::DeclaredFeedPayloadMissing => {
+                    "Add the payload type to the member's output contract, or remove it from \
+                     the composite's internal feed declaration (FLOWIP-128a D3)."
+                        .to_string()
+                }
+            };
+            let suggested_fix = match composite_context {
+                Some(prefix) => format!("{prefix}{suggested_fix}"),
+                None => suggested_fix,
             };
             return Err($crate::dsl::error::FlowBuildError::EdgeTypingMismatch {
                 upstream_stage: first.upstream_stage,
@@ -761,8 +847,12 @@ macro_rules! build_typed_flow {
         )
         .map_err(|err| *err)?;
 
-        let feed_plan =
-            $crate::dsl::typing::derive_feed_plan(&topology, &descriptors, &name_to_id);
+        let feed_plan = $crate::dsl::typing::derive_feed_plan(
+            &topology,
+            &descriptors,
+            &name_to_id,
+            &lowering_artifacts.internal_feeds,
+        );
 
         if let Some(replay) = obzenflow_runtime::bootstrap::replay_bootstrap() {
             // FLOWIP-120n F13: cyclic resume is a v1 non-goal; the
@@ -1135,11 +1225,11 @@ macro_rules! build_typed_flow {
                         edge.to_stage
                     ))
                 })?;
-                internal_edges.push(SubgraphInternalEdge {
-                    from_stage_id: to_topology_id(from_stage_id),
-                    to_stage_id: to_topology_id(to_stage_id),
-                    role: edge.role.clone(),
-                });
+                internal_edges.push(SubgraphInternalEdge::new(
+                    to_topology_id(from_stage_id),
+                    to_topology_id(to_stage_id),
+                    edge.role.clone(),
+                ));
             }
 
             let mut entry_stage_ids = Vec::with_capacity(spec.entry_stage_names.len());
@@ -1162,18 +1252,71 @@ macro_rules! build_typed_flow {
                 exit_stage_ids.push(to_topology_id(id));
             }
 
-            subgraphs.push(TopologySubgraphInfo {
-                subgraph_id: spec.subgraph_id,
-                kind: spec.kind,
-                binding: spec.binding,
-                label: spec.label,
+            // Boundary ports resolve to member stage ids here at the
+            // name-to-id seam (FLOWIP-128a D1/D4). Payload strings use the
+            // payload-key convention (`event_type.vN`).
+            let mut boundary_ports = Vec::with_capacity(spec.boundary_ports.len());
+            for port in &spec.boundary_ports {
+                let member_id = *name_to_id.get(&port.stage_name).ok_or_else(|| {
+                    FlowBuildError::StageResourcesFailed(format!(
+                        "Lowering artifacts reference unknown stage '{}'",
+                        port.stage_name
+                    ))
+                })?;
+                let direction = match port.direction {
+                    $crate::dsl::composition::PortDirection::Input => {
+                        obzenflow_topology::PortDirection::Input
+                    }
+                    $crate::dsl::composition::PortDirection::Output => {
+                        obzenflow_topology::PortDirection::Output
+                    }
+                };
+                let payload_event_types = port
+                    .payloads
+                    .iter()
+                    .filter_map(|hint| match hint {
+                        $crate::dsl::typing::TypeHint::Exact {
+                            event_type: Some(event_type),
+                            schema_version,
+                            ..
+                        } => Some(match schema_version {
+                            Some(version) => format!("{event_type}.v{version}"),
+                            None => event_type.clone(),
+                        }),
+                        _ => None,
+                    })
+                    .collect();
+                boundary_ports.push(obzenflow_topology::BoundaryPortSpec::new(
+                    port.name.clone(),
+                    direction,
+                    to_topology_id(member_id),
+                    payload_event_types,
+                    port.default,
+                ));
+            }
+
+            let mut info = TopologySubgraphInfo::new(
+                spec.subgraph_id,
+                spec.kind,
+                spec.binding,
+                spec.label,
                 member_stage_ids,
                 internal_edges,
                 entry_stage_ids,
                 exit_stage_ids,
-                parent_subgraph_id: spec.parent_subgraph_id,
-                collapsible: spec.collapsible,
-            });
+                spec.collapsible,
+            );
+            info.schema_version = spec.schema_version;
+            if let Some(parent) = spec.parent_subgraph_id {
+                info = info.with_parent_subgraph_id(parent);
+            }
+            if !boundary_ports.is_empty() {
+                info = info.with_boundary_ports(boundary_ports);
+            }
+            if let Some(extension) = spec.kind_extension {
+                info = info.with_kind_extension(extension);
+            }
+            subgraphs.push(info);
         }
 
         // Create services

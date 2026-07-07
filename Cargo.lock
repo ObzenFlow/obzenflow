@@ -1520,6 +1520,7 @@ dependencies = [
  "tokio-test",
  "tracing",
  "tracing-subscriber",
+ "trybuild",
 ]
 
 [[package]]
@@ -1559,9 +1560,7 @@ dependencies = [
 
 [[package]]
 name = "obzenflow-topology"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "217303dfeec0df5f65565bc9a7471ddba30d482f62be98d12bb19551c90e9c82"
+version = "0.5.0"
 dependencies = [
  "obzenflow-idkit",
  "once_cell",

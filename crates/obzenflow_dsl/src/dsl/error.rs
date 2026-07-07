@@ -87,6 +87,9 @@ pub enum EdgeTypingMismatchKind {
         other_upstream_stages: Vec<String>,
         other_actual_types: Vec<String>,
     },
+    /// A composite-declared internal feed payload (FLOWIP-128a D3) is not in
+    /// the upstream member's output contract; the lane could never deliver.
+    DeclaredFeedPayloadMissing,
 }
 
 /// Structured error type for failures during flow construction
@@ -342,6 +345,11 @@ impl FlowBuildError {
                 msg.push_str(&format!(". {suggested_fix}"));
                 msg
             }
+            EdgeTypingMismatchKind::DeclaredFeedPayloadMissing => format!(
+                "Declared internal feed into '{downstream_stage}': lane payload \
+                 '{expected_type}' is not in '{upstream_stage}''s output contract \
+                 ({actual_type}). {suggested_fix}"
+            ),
         }
     }
 }

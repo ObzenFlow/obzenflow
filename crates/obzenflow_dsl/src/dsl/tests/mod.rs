@@ -6,6 +6,8 @@
 
 pub mod ai_map_reduce_lowering_test;
 pub mod archive_sink_gate_test;
+pub mod composite_source_guards_test;
+pub mod composite_substrate_test;
 pub mod cycle_detection_test;
 pub mod join_tuple_syntax_test;
 pub mod placeholder_handlers_test;

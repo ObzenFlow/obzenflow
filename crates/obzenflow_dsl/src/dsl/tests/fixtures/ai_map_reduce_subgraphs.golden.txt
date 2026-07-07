@@ -1,0 +1,7 @@
+subgraph id=ai_map_reduce:digest kind=ai_map_reduce binding=digest label=digest collapsible=true
+  members=["digest__chunk", "digest__map", "digest__collect", "digest__finalize"]
+  entry=["digest__chunk"] exit=["digest__finalize"] parent=None
+  edge digest__chunk -> digest__map role=data
+  edge digest__chunk -> digest__collect role=manifest
+  edge digest__map -> digest__collect role=data
+  edge digest__collect -> digest__finalize role=data

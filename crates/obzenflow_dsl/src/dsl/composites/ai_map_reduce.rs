@@ -2,20 +2,20 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! AI map-reduce composite descriptor (FLOWIP-086z-part-2).
+//! AI map-reduce composite descriptor (FLOWIP-086z-part-2, migrated to the
+//! FLOWIP-128a composite substrate).
 //!
-//! This is a DSL-level authoring surface that lowers into ordinary stages:
+//! This is a DSL-level authoring surface that expands into ordinary stages:
 //! `<binding>__chunk`, `<binding>__map`, `<binding>__collect`, `<binding>__finalize`.
 
-use super::{CompositeLowering, LoweringArtifacts, SubgraphInternalEdgeSpec, TopologySubgraphSpec};
+use crate::dsl::composition::{CompositeBuildContext, CompositeBuildError, CompositeDescriptor};
 use crate::dsl::stage_descriptor::{
-    AsyncTransformDescriptor, StageDescriptor, StatefulDescriptor, TransformDescriptor,
+    AsyncTransformDescriptor, StatefulDescriptor, TransformDescriptor,
     BINDING_DERIVED_NAME_SENTINEL,
 };
 use crate::dsl::typing::{
     wrap_typed_descriptor, BoundAsyncTransform, BoundTransform, StageTypingMetadata, TypeHint,
 };
-use crate::dsl::StageCreationResult;
 use obzenflow_adapters::middleware::ai::map_reduce::{
     AiMapReduceChunkManifestFactory, AiMapReduceMapFactory,
 };
@@ -27,7 +27,6 @@ use obzenflow_core::TypedPayload;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{AsyncTransformHandler, TransformHandler};
 use obzenflow_runtime::stages::stateful::CollectByInput;
-use obzenflow_topology::{EdgeKind, StageSubgraphMembership};
 use std::any::type_name;
 use std::fmt;
 use std::marker::PhantomData;
@@ -353,7 +352,7 @@ impl<In, Chunk, Partial, Collected, Out> AiMapReduceBuilder<In, Chunk, Partial, 
         self
     }
 
-    pub fn build(self) -> Box<dyn StageDescriptor>
+    pub fn build(self) -> Box<dyn CompositeDescriptor>
     where
         In: Clone + TypedPayload + Send + Sync + 'static,
         Chunk: Clone + TypedPayload + Send + Sync + 'static,
@@ -394,8 +393,7 @@ struct AiMapReduceCompositeDescriptor<In, Chunk, Partial, Collected, Out> {
     _phantom: PhantomData<(In, Chunk, Partial, Collected, Out)>,
 }
 
-#[async_trait::async_trait]
-impl<In, Chunk, Partial, Collected, Out> StageDescriptor
+impl<In, Chunk, Partial, Collected, Out> CompositeDescriptor
     for AiMapReduceCompositeDescriptor<In, Chunk, Partial, Collected, Out>
 where
     In: Clone + TypedPayload + Send + Sync + 'static,
@@ -412,25 +410,15 @@ where
         self.name = name;
     }
 
-    fn stage_type(&self) -> obzenflow_core::event::context::StageType {
-        obzenflow_core::event::context::StageType::Transform
+    fn kind(&self) -> &'static str {
+        "ai_map_reduce"
     }
 
-    fn is_composite(&self) -> bool {
-        true
+    fn schema_version(&self) -> u32 {
+        1
     }
 
-    fn try_lower_composite(
-        self: Box<Self>,
-        binding: &str,
-    ) -> Result<Option<CompositeLowering>, crate::dsl::FlowBuildError> {
-        let chunk_stage = format!("{binding}__chunk");
-        let map_stage = format!("{binding}__map");
-        let collect_stage = format!("{binding}__collect");
-        let finalize_stage = format!("{binding}__finalize");
-
-        let subgraph_id = format!("ai_map_reduce:{binding}");
-
+    fn expand(self: Box<Self>, ctx: &mut CompositeBuildContext) -> Result<(), CompositeBuildError> {
         // ---------------------------------------------------------------------
         // Chunk stage: In -> Chunk (+ manifest control event)
         // ---------------------------------------------------------------------
@@ -439,7 +427,9 @@ where
 
         let chunk_handler = BoundTransform::<In, Chunk, _>::new(self.chunker);
         let chunk_descriptor = TransformDescriptor {
-            name: chunk_stage.clone(),
+            // Placeholder; the derived `{binding}__chunk` is stamped at
+            // expansion finish (D2 derived names).
+            name: "chunk".to_string(),
             handler: chunk_handler,
             middleware: chunk_middleware,
             backpressure: None,
@@ -466,7 +456,7 @@ where
 
         let map_handler = BoundAsyncTransform::<Chunk, Partial, _>::new(self.map);
         let map_descriptor = AsyncTransformDescriptor {
-            name: map_stage.clone(),
+            name: "map".to_string(),
             handler: map_handler,
             middleware: map_middleware,
             backpressure: None,
@@ -489,7 +479,7 @@ where
         // Collect stage: Partial -> Collected (but consumes internal manifest + tagged partials)
         // ---------------------------------------------------------------------
         let collect_descriptor = StatefulDescriptor {
-            name: collect_stage.clone(),
+            name: "collect".to_string(),
             handler: self.collect,
             emit_interval: None,
             middleware: self.collect_middleware,
@@ -510,7 +500,7 @@ where
         // ---------------------------------------------------------------------
         let finalize_handler = BoundAsyncTransform::<Collected, Out, _>::new(self.finalize);
         let finalize_descriptor = AsyncTransformDescriptor {
-            name: finalize_stage.clone(),
+            name: "finalize".to_string(),
             handler: finalize_handler,
             middleware: self.finalize_middleware,
             backpressure: None,
@@ -526,143 +516,32 @@ where
         );
 
         // ---------------------------------------------------------------------
-        // Edges + topology metadata
+        // Composite declaration (FLOWIP-128a): members, lanes, boundary.
+        // Declaration order is manifest presentation order.
         // ---------------------------------------------------------------------
-        let edges = vec![
-            (chunk_stage.clone(), map_stage.clone(), EdgeKind::Forward),
-            (
-                chunk_stage.clone(),
-                collect_stage.clone(),
-                EdgeKind::Forward,
-            ),
-            (map_stage.clone(), collect_stage.clone(), EdgeKind::Forward),
-            (
-                collect_stage.clone(),
-                finalize_stage.clone(),
-                EdgeKind::Forward,
-            ),
-        ];
+        ctx.member("chunk").descriptor(chunk_descriptor);
+        ctx.member("map").descriptor(map_descriptor);
+        ctx.member("collect").descriptor(collect_descriptor);
+        ctx.member("finalize").descriptor(finalize_descriptor);
 
-        let mut stage_subgraphs = std::collections::HashMap::new();
-        stage_subgraphs.insert(
-            chunk_stage.clone(),
-            StageSubgraphMembership {
-                subgraph_id: subgraph_id.clone(),
-                kind: "ai_map_reduce".to_string(),
-                binding: binding.to_string(),
-                role: "chunk".to_string(),
-                order: 0,
-                is_entry: true,
-                is_exit: false,
-            },
-        );
-        stage_subgraphs.insert(
-            map_stage.clone(),
-            StageSubgraphMembership {
-                subgraph_id: subgraph_id.clone(),
-                kind: "ai_map_reduce".to_string(),
-                binding: binding.to_string(),
-                role: "map".to_string(),
-                order: 1,
-                is_entry: false,
-                is_exit: false,
-            },
-        );
-        stage_subgraphs.insert(
-            collect_stage.clone(),
-            StageSubgraphMembership {
-                subgraph_id: subgraph_id.clone(),
-                kind: "ai_map_reduce".to_string(),
-                binding: binding.to_string(),
-                role: "collect".to_string(),
-                order: 2,
-                is_entry: false,
-                is_exit: false,
-            },
-        );
-        stage_subgraphs.insert(
-            finalize_stage.clone(),
-            StageSubgraphMembership {
-                subgraph_id: subgraph_id.clone(),
-                kind: "ai_map_reduce".to_string(),
-                binding: binding.to_string(),
-                role: "finalize".to_string(),
-                order: 3,
-                is_entry: false,
-                is_exit: true,
-            },
-        );
+        ctx.edge("chunk", "map");
+        ctx.feed("chunk", "collect")
+            .lane("manifest")
+            .payload::<AiMapReducePlanningManifest>();
+        ctx.feed("map", "collect")
+            .lane("data")
+            .payload::<AiMapReduceTaggedPartial<serde_json::Value>>()
+            .payload::<AiMapReduceChunkFailed>();
+        ctx.edge("collect", "finalize");
 
-        let subgraph = TopologySubgraphSpec {
-            subgraph_id: subgraph_id.clone(),
-            kind: "ai_map_reduce".to_string(),
-            binding: binding.to_string(),
-            label: binding.to_string(),
-            member_stage_names: vec![
-                chunk_stage.clone(),
-                map_stage.clone(),
-                collect_stage.clone(),
-                finalize_stage.clone(),
-            ],
-            internal_edges: vec![
-                SubgraphInternalEdgeSpec {
-                    from_stage: chunk_stage.clone(),
-                    to_stage: map_stage.clone(),
-                    role: "data".to_string(),
-                },
-                SubgraphInternalEdgeSpec {
-                    from_stage: chunk_stage.clone(),
-                    to_stage: collect_stage.clone(),
-                    role: "manifest".to_string(),
-                },
-                SubgraphInternalEdgeSpec {
-                    from_stage: map_stage.clone(),
-                    to_stage: collect_stage.clone(),
-                    role: "data".to_string(),
-                },
-                SubgraphInternalEdgeSpec {
-                    from_stage: collect_stage.clone(),
-                    to_stage: finalize_stage.clone(),
-                    role: "data".to_string(),
-                },
-            ],
-            entry_stage_names: vec![chunk_stage.clone()],
-            exit_stage_names: vec![finalize_stage.clone()],
-            parent_subgraph_id: None,
-            collapsible: true,
-        };
+        ctx.boundary()
+            .input("in", "chunk")
+            .payload::<In>()
+            .default()
+            .output("out", "finalize")
+            .payload::<Out>()
+            .default();
 
-        Ok(Some(CompositeLowering {
-            stages: vec![
-                (chunk_stage, chunk_descriptor),
-                (map_stage, map_descriptor),
-                (collect_stage, collect_descriptor),
-                (finalize_stage, finalize_descriptor),
-            ],
-            edges,
-            entry_stage: format!("{binding}__chunk"),
-            exit_stage: format!("{binding}__finalize"),
-            artifacts: LoweringArtifacts {
-                stage_subgraphs,
-                subgraphs: vec![subgraph],
-            },
-        }))
-    }
-
-    async fn create_handle_with_flow_middleware(
-        self: Box<Self>,
-        _config: obzenflow_runtime::pipeline::config::StageConfig,
-        _resources: obzenflow_runtime::stages::StageResources,
-        _flow_middleware: Vec<Box<dyn MiddlewareFactory>>,
-        _control_middleware: Arc<
-            obzenflow_adapters::middleware::control::ControlMiddlewareAggregator,
-        >,
-    ) -> StageCreationResult<obzenflow_runtime::stages::common::stage_handle::BoxedStageHandle>
-    {
-        Err(
-            "ai::map_reduce composite descriptors must be lowered during flow! materialisation"
-                .to_string()
-                .into(),
-        )
+        Ok(())
     }
 }
