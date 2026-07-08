@@ -14,7 +14,7 @@ use crate::event::system_event::{ContractName, ContractResultStatusLabel, System
 use crate::event::types::EventType;
 use crate::id::{CompositeId, FlowId, StageId};
 use crate::ingress::IngressKey;
-use crate::metrics::composite::{CompositeRed, StageMetricsView};
+use crate::metrics::composite::{CompositeContract, CompositeRed, StageMetricsView};
 use crate::metrics::Percentile;
 use crate::time::MetricsDuration;
 use serde::{Deserialize, Serialize};
@@ -220,6 +220,12 @@ pub struct AppMetricsSnapshot {
     /// A pure projection over the per-stage maps above; the exporter renders
     /// these as `obzenflow_composite_*{composite}` families.
     pub composites: Vec<(CompositeId, CompositeRed)>,
+
+    /// Composite boundary contract views (FLOWIP-128a B5). A pure re-key of the
+    /// `contract_metrics` above to the composite boundary; the exporter renders
+    /// these as `obzenflow_composite_contract_*{composite,peer,direction}`
+    /// families.
+    pub composite_contracts: Vec<CompositeContract>,
 }
 
 /// Read-only view over the snapshot's per-stage maps, so a composite boundary
@@ -603,6 +609,7 @@ impl Default for AppMetricsSnapshot {
             pipeline_state: String::new(),
             stage_vector_clocks: HashMap::new(),
             composites: Vec::new(),
+            composite_contracts: Vec::new(),
         }
     }
 }

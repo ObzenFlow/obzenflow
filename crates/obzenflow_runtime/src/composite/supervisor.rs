@@ -21,9 +21,7 @@ use crate::messaging::system_subscription::SystemSubscription;
 use crate::messaging::{PollResult, SubscriptionPoller};
 use crate::supervised_base::base::Supervisor;
 use crate::supervised_base::{EventLoopDirective, SelfSupervised};
-use obzenflow_core::event::{
-    PipelineLifecycleEvent, SystemEvent, SystemEventType, WriterId,
-};
+use obzenflow_core::event::{PipelineLifecycleEvent, SystemEvent, SystemEventType, WriterId};
 use obzenflow_core::id::{CompositeId, SystemId};
 use obzenflow_core::journal::Journal;
 use std::sync::Arc;

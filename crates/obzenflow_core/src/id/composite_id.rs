@@ -67,6 +67,9 @@ mod tests {
 
     #[test]
     fn display_is_the_bare_subgraph_id() {
-        assert_eq!(CompositeId::from("ai_map_reduce:digest").to_string(), "ai_map_reduce:digest");
+        assert_eq!(
+            CompositeId::from("ai_map_reduce:digest").to_string(),
+            "ai_map_reduce:digest"
+        );
     }
 }

@@ -213,7 +213,10 @@ impl PrometheusExporter {
                 output,
                 "# HELP obzenflow_composite_events_out_total Events emitted at a composite's exit boundary port"
             )?;
-            writeln!(output, "# TYPE obzenflow_composite_events_out_total counter")?;
+            writeln!(
+                output,
+                "# TYPE obzenflow_composite_events_out_total counter"
+            )?;
             for (composite, red) in &snapshot.composites {
                 writeln!(
                     output,
@@ -241,12 +244,112 @@ impl PrometheusExporter {
                 output,
                 "# HELP obzenflow_composite_boundary_latency_ms Composite entry-to-exit latency (p95, ms)"
             )?;
-            writeln!(output, "# TYPE obzenflow_composite_boundary_latency_ms gauge")?;
+            writeln!(
+                output,
+                "# TYPE obzenflow_composite_boundary_latency_ms gauge"
+            )?;
             for (composite, red) in &snapshot.composites {
                 if let Some(ms) = red.boundary_latency_ms {
                     writeln!(
                         output,
                         "obzenflow_composite_boundary_latency_ms{{composite=\"{composite}\"}} {ms}"
+                    )?;
+                }
+            }
+            writeln!(output)?;
+        }
+
+        // Composite boundary contract views, keyed by composite id (FLOWIP-128a B5).
+        // Re-keyed from the boundary members' contract facts; `peer` is the
+        // external stage on the far side, `direction` inbound/outbound.
+        if !snapshot.composite_contracts.is_empty() {
+            writeln!(
+                output,
+                "# HELP obzenflow_composite_contract_results_total Contract results at a composite's boundary edges, per contract and status"
+            )?;
+            writeln!(
+                output,
+                "# TYPE obzenflow_composite_contract_results_total counter"
+            )?;
+            for cc in &snapshot.composite_contracts {
+                for (contract, status, count) in &cc.results {
+                    writeln!(
+                        output,
+                        "obzenflow_composite_contract_results_total{{composite=\"{}\",peer=\"{}\",direction=\"{}\",contract=\"{}\",status=\"{}\"}} {}",
+                        escape_label(cc.composite.as_ref()),
+                        escape_label(&cc.peer.to_string()),
+                        cc.direction.as_str(),
+                        escape_label(contract.as_str()),
+                        escape_label(status.as_str()),
+                        count
+                    )?;
+                }
+            }
+            writeln!(output)?;
+
+            writeln!(
+                output,
+                "# HELP obzenflow_composite_contract_violations_total Contract violations at a composite's boundary edges, per contract and cause"
+            )?;
+            writeln!(
+                output,
+                "# TYPE obzenflow_composite_contract_violations_total counter"
+            )?;
+            for cc in &snapshot.composite_contracts {
+                for (contract, cause, count) in &cc.violations {
+                    writeln!(
+                        output,
+                        "obzenflow_composite_contract_violations_total{{composite=\"{}\",peer=\"{}\",direction=\"{}\",contract=\"{}\",cause=\"{}\"}} {}",
+                        escape_label(cc.composite.as_ref()),
+                        escape_label(&cc.peer.to_string()),
+                        cc.direction.as_str(),
+                        escape_label(contract.as_str()),
+                        escape_label(cause.as_str()),
+                        count
+                    )?;
+                }
+            }
+            writeln!(output)?;
+
+            writeln!(
+                output,
+                "# HELP obzenflow_composite_contract_reader_seq Reader sequence at a composite's boundary edges"
+            )?;
+            writeln!(
+                output,
+                "# TYPE obzenflow_composite_contract_reader_seq gauge"
+            )?;
+            for cc in &snapshot.composite_contracts {
+                if let Some(seq) = cc.reader_seq {
+                    writeln!(
+                        output,
+                        "obzenflow_composite_contract_reader_seq{{composite=\"{}\",peer=\"{}\",direction=\"{}\"}} {}",
+                        escape_label(cc.composite.as_ref()),
+                        escape_label(&cc.peer.to_string()),
+                        cc.direction.as_str(),
+                        seq
+                    )?;
+                }
+            }
+            writeln!(output)?;
+
+            writeln!(
+                output,
+                "# HELP obzenflow_composite_contract_advertised_writer_seq Advertised writer sequence at a composite's boundary edges"
+            )?;
+            writeln!(
+                output,
+                "# TYPE obzenflow_composite_contract_advertised_writer_seq gauge"
+            )?;
+            for cc in &snapshot.composite_contracts {
+                if let Some(seq) = cc.advertised_writer_seq {
+                    writeln!(
+                        output,
+                        "obzenflow_composite_contract_advertised_writer_seq{{composite=\"{}\",peer=\"{}\",direction=\"{}\"}} {}",
+                        escape_label(cc.composite.as_ref()),
+                        escape_label(&cc.peer.to_string()),
+                        cc.direction.as_str(),
+                        seq
                     )?;
                 }
             }

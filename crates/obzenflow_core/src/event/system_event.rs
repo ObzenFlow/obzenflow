@@ -12,7 +12,9 @@ use crate::event::vector_clock::VectorClock;
 use crate::id::{CompositeId, RoleId, StageId, StageKey, SystemId};
 use crate::ingress::{IngressAttemptSeq, IngressKey, IngressRefusalReason};
 use crate::journal::{ArchiveStatus, StatusDerivation};
-use crate::metrics::{CompositeMetricsSnapshot, FlowLifecycleMetricsSnapshot, StageMetricsSnapshot};
+use crate::metrics::{
+    CompositeMetricsSnapshot, FlowLifecycleMetricsSnapshot, StageMetricsSnapshot,
+};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::str::FromStr;

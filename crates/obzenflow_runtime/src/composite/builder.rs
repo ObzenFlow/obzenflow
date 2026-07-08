@@ -9,9 +9,7 @@
 //! lifecycle), spawns it, and returns a handle the pipeline retains. One builder
 //! per composite, wired from topology subgraph membership by the pipeline.
 
-use super::fsm::{
-    CompositeSupervisorContext, CompositeSupervisorEvent, CompositeSupervisorState,
-};
+use super::fsm::{CompositeSupervisorContext, CompositeSupervisorEvent, CompositeSupervisorState};
 use super::rollup::CompositeRollup;
 use super::supervisor::CompositeSupervisor;
 use crate::messaging::system_subscription::SystemSubscription;
@@ -86,17 +84,17 @@ impl SupervisorBuilder for CompositeSupervisorBuilder {
             rollup,
         };
 
-        let supervisor_task =
-            SupervisorTaskBuilder::<CompositeSupervisor>::new("composite_supervisor").spawn(
-                move || async move {
-                    SelfSupervisedExt::run(
-                        supervisor,
-                        CompositeSupervisorState::Running,
-                        CompositeSupervisorContext,
-                    )
-                    .await
-                },
-            );
+        let supervisor_task = SupervisorTaskBuilder::<CompositeSupervisor>::new(
+            "composite_supervisor",
+        )
+        .spawn(move || async move {
+            SelfSupervisedExt::run(
+                supervisor,
+                CompositeSupervisorState::Running,
+                CompositeSupervisorContext,
+            )
+            .await
+        });
 
         HandleBuilder::new()
             .with_event_sender(event_sender)

@@ -2751,9 +2751,7 @@ fn map_system_event_to_sse(
             use obzenflow_core::event::system_event::CompositeLifecycleEvent;
 
             let (event_type, metrics_value, reason, error, at) = match lifecycle {
-                CompositeLifecycleEvent::Running => {
-                    ("composite_running", None, None, None, None)
-                }
+                CompositeLifecycleEvent::Running => ("composite_running", None, None, None, None),
                 CompositeLifecycleEvent::Completed { metrics } => (
                     "composite_completed",
                     metrics.as_ref().and_then(|m| serde_json::to_value(m).ok()),
@@ -2761,9 +2759,13 @@ fn map_system_event_to_sse(
                     None,
                     None,
                 ),
-                CompositeLifecycleEvent::Cancelled { reason } => {
-                    ("composite_cancelled", None, Some(reason.clone()), None, None)
-                }
+                CompositeLifecycleEvent::Cancelled { reason } => (
+                    "composite_cancelled",
+                    None,
+                    Some(reason.clone()),
+                    None,
+                    None,
+                ),
                 CompositeLifecycleEvent::Failed { at, error } => (
                     "composite_failed",
                     None,

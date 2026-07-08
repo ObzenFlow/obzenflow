@@ -14,7 +14,9 @@ pub mod percentile;
 pub mod primitives;
 pub mod snapshots;
 
-pub use composite::{CompositeBoundary, CompositeRed, StageMetricsView};
+pub use composite::{
+    BoundaryDirection, CompositeBoundary, CompositeContract, CompositeRed, StageMetricsView,
+};
 pub use exporter::{MetricsExporter, NoOpMetricsExporter};
 pub use percentile::{Percentile, PercentileExt};
 pub use primitives::{Counter, Gauge, Histogram};

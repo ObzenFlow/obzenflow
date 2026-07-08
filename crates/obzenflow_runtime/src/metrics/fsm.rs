@@ -985,6 +985,16 @@ impl MetricsAggregatorContext {
             .map(|b| (b.composite_id.clone(), CompositeRed::project(b, &snapshot)))
             .collect();
 
+        // FLOWIP-128a B5: re-key the boundary members' contract facts to the
+        // composite boundary. Pure relabel of the contract_metrics set just
+        // built; the exporter renders these as composite contract families.
+        use obzenflow_core::metrics::CompositeContract;
+        snapshot.composite_contracts = self
+            .composite_boundaries
+            .iter()
+            .flat_map(|b| CompositeContract::project(b, &snapshot.contract_metrics))
+            .collect();
+
         snapshot
     }
 }
