@@ -12,8 +12,9 @@ use crate::event::observability::HttpSurfaceRouteMetricsSnapshot;
 use crate::event::status::processing_status::ErrorKind;
 use crate::event::system_event::{ContractName, ContractResultStatusLabel, SystemFeedRole};
 use crate::event::types::EventType;
-use crate::id::{FlowId, StageId};
+use crate::id::{CompositeId, FlowId, StageId};
 use crate::ingress::IngressKey;
+use crate::metrics::composite::{CompositeRed, StageMetricsView};
 use crate::metrics::Percentile;
 use crate::time::MetricsDuration;
 use serde::{Deserialize, Serialize};
@@ -214,6 +215,41 @@ pub struct AppMetricsSnapshot {
     /// This mirrors MetricsStore.stage_vector_clocks and is used by exporters
     /// to expose obzenflow_stage_vector_clock metrics.
     pub stage_vector_clocks: HashMap<StageId, u64>,
+
+    /// Composite boundary RED metrics, keyed by composite id (FLOWIP-128a B4).
+    /// A pure projection over the per-stage maps above; the exporter renders
+    /// these as `obzenflow_composite_*{composite}` families.
+    pub composites: Vec<(CompositeId, CompositeRed)>,
+}
+
+/// Read-only view over the snapshot's per-stage maps, so a composite boundary
+/// projection reads input rate at its entry port, output rate at its exit port,
+/// errors at each member, and the source-relative flow latency used for the
+/// boundary interval (FLOWIP-128a B4).
+impl StageMetricsView for AppMetricsSnapshot {
+    fn events_in(&self, stage: StageId) -> u64 {
+        self.event_counts.get(&stage).copied().unwrap_or(0)
+    }
+
+    fn events_out(&self, stage: StageId) -> u64 {
+        self.events_emitted_total.get(&stage).copied().unwrap_or(0)
+    }
+
+    fn errors(&self, stage: StageId) -> u64 {
+        self.error_counts.get(&stage).copied().unwrap_or(0)
+    }
+
+    fn latency_p95_ms(&self, stage: StageId) -> Option<u64> {
+        // Flow latency is the source-relative (correlation) end-to-end latency,
+        // the only per-stage latency for which exit − entry is meaningful.
+        let seconds = self
+            .flow_latency_seconds
+            .get(&stage)?
+            .percentiles
+            .get(&Percentile::P95)
+            .copied()?;
+        Some((seconds * 1000.0).round() as u64)
+    }
 }
 
 /// Contract verification metrics per edge.
@@ -423,6 +459,25 @@ pub struct StageMetricsSnapshot {
     pub event_loops_with_work_total: u64,
 }
 
+/// Composite-level metrics snapshot for the aggregate `CompositeLifecycle`
+/// completion fact (UI-focused, FLOWIP-128a).
+///
+/// Live composite metrics ride the 086k rail keyed by `composite_id`; this is
+/// the summary captured at composite completion, for parity with
+/// `StageMetricsSnapshot` on `StageLifecycle::Completed`. Measured at the
+/// composite boundary, not composed across member percentiles.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompositeMetricsSnapshot {
+    /// Events admitted at the composite's entry boundary port.
+    pub boundary_events_in_total: u64,
+
+    /// Events emitted from the composite's exit boundary port(s).
+    pub boundary_events_out_total: u64,
+
+    /// Total errors observed across the composite's members.
+    pub errors_total: u64,
+}
+
 /// Flow-level lifecycle metrics snapshot for UI events
 ///
 /// This complements `FlowMetricsSnapshot` by providing a minimal view that
@@ -547,6 +602,7 @@ impl Default for AppMetricsSnapshot {
             stage_lifecycle_states: HashMap::new(),
             pipeline_state: String::new(),
             stage_vector_clocks: HashMap::new(),
+            composites: Vec::new(),
         }
     }
 }

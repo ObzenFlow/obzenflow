@@ -687,6 +687,7 @@ mod tests {
             export_interval_secs: 10,
             system_id,
             stage_metadata: HashMap::new(),
+            composite_boundaries: Vec::new(),
         };
 
         let _ = SelfSupervisedExt::run(supervisor, MetricsAggregatorState::Initializing, ctx).await;

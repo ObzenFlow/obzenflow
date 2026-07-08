@@ -319,6 +319,11 @@ pub(crate) struct PipelineContext {
 
     /// Metrics aggregator handle (for coordinated shutdown/drain).
     pub(crate) metrics_handle: Option<MetricsHandle>,
+    /// Per-composite monitor-supervisor handles (FLOWIP-128a), retained so the
+    /// supervisor tasks are not dropped. Each observes its members' lifecycle
+    /// and authors the composite's own `CompositeLifecycle`; the
+    /// PipelineSupervisor stays composite-blind.
+    pub(crate) composite_handles: Vec<crate::composite::CompositeSupervisorHandle>,
     /// Last known per-stage lifecycle metrics (for flow rollup)
     pub(crate) stage_lifecycle_metrics: HashMap<StageId, StageMetricsSnapshot>,
 
@@ -457,6 +462,97 @@ pub(crate) fn compute_flow_lifecycle_metrics(
         events_out_total,
         errors_total,
     }
+}
+
+/// Spawn one monitor-supervisor per collapsible composite (FLOWIP-128a B3).
+///
+/// Enumerates the topology's collapsible subgraphs, resolves each composite's
+/// `(member stage, role)` set from per-stage subgraph membership, and spawns a
+/// `CompositeSupervisor` for it, retaining the handle on the context. The
+/// PipelineSupervisor is untouched. Best-effort: a build failure for one
+/// composite is logged and skipped rather than failing materialisation.
+async fn spawn_composite_supervisors(context: &mut PipelineContext) {
+    use crate::composite::CompositeSupervisorBuilder;
+    use crate::id_conversions::StageIdExt;
+    use crate::supervised_base::SupervisorBuilder;
+    use obzenflow_core::id::{CompositeId, RoleId, StageId};
+
+    let topology = context.topology.clone();
+
+    let collapsible: HashSet<String> = topology
+        .subgraphs()
+        .iter()
+        .filter(|s| s.collapsible)
+        .map(|s| s.subgraph_id.clone())
+        .collect();
+    if collapsible.is_empty() {
+        return;
+    }
+
+    // Group member (stage, role) by composite in one pass over stages.
+    let mut members_by_composite: HashMap<String, Vec<(StageId, RoleId)>> = HashMap::new();
+    for stage_info in topology.stages() {
+        if let Some(membership) = &stage_info.subgraph {
+            if collapsible.contains(&membership.subgraph_id) {
+                members_by_composite
+                    .entry(membership.subgraph_id.clone())
+                    .or_default()
+                    .push((
+                        StageId::from_topology_id(stage_info.id),
+                        RoleId::new(membership.role.clone()),
+                    ));
+            }
+        }
+    }
+
+    for (subgraph_id, members) in members_by_composite {
+        let composite_id = CompositeId::new(subgraph_id.clone());
+        match CompositeSupervisorBuilder::new(composite_id, members, context.system_journal.clone())
+            .build()
+            .await
+        {
+            Ok(handle) => context.composite_handles.push(handle),
+            Err(e) => {
+                tracing::error!(
+                    composite = %subgraph_id,
+                    error = %e,
+                    "Failed to build composite supervisor; continuing without composite observability for it"
+                );
+            }
+        }
+    }
+}
+
+/// Build composite boundaries from the subgraph registry for the composite RED
+/// projection (FLOWIP-128a B4). One per collapsible composite, with its entry
+/// and exit member stages and its member set. Composites without an entry or
+/// exit member are skipped.
+fn composite_boundaries_from_topology(
+    topology: &obzenflow_topology::Topology,
+) -> Vec<obzenflow_core::metrics::CompositeBoundary> {
+    use crate::id_conversions::StageIdExt;
+    use obzenflow_core::id::{CompositeId, StageId};
+
+    topology
+        .subgraphs()
+        .iter()
+        .filter(|s| s.collapsible)
+        .filter_map(|s| {
+            let entry = StageId::from_topology_id(*s.entry_stage_ids.first()?);
+            let exit = StageId::from_topology_id(*s.exit_stage_ids.first()?);
+            let members = s
+                .member_stage_ids
+                .iter()
+                .map(|id| StageId::from_topology_id(*id))
+                .collect();
+            Some(obzenflow_core::metrics::CompositeBoundary {
+                composite_id: CompositeId::new(s.subgraph_id.clone()),
+                entry,
+                exit,
+                members,
+            })
+        })
+        .collect()
 }
 
 fn record_stage_completion(
@@ -1028,8 +1124,10 @@ impl FsmAction for PipelineAction {
                 let inputs = MetricsInputs::new(stage_journals, error_journals)
                     .with_backpressure_registry_opt(backpressure_registry);
 
+                let composite_boundaries = composite_boundaries_from_topology(&context.topology);
                 match MetricsAggregatorBuilder::new(inputs, system_journal, exporter)
                     .with_stage_metadata(stage_metadata)
+                    .with_composite_boundaries(composite_boundaries)
                     .with_export_interval(1) // 10 second interval
                     .build()
                     .await
@@ -1042,6 +1140,12 @@ impl FsmAction for PipelineAction {
                         return Ok(());
                     }
                 }
+
+                // FLOWIP-128a: spawn one monitor-supervisor per collapsible
+                // composite. Each observes its members' StageLifecycle and
+                // authors the composite's own CompositeLifecycle; the pipeline
+                // stays composite-blind. Best-effort per composite.
+                spawn_composite_supervisors(context).await;
 
                 // Best-effort: wait briefly for metrics aggregator readiness.
                 // If it doesn't become ready quickly (or the journal read fails),

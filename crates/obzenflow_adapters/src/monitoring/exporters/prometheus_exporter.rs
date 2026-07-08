@@ -193,6 +193,66 @@ impl PrometheusExporter {
             writeln!(output)?;
         }
 
+        // Composite boundary RED metrics, keyed by composite id (FLOWIP-128a B4).
+        if !snapshot.composites.is_empty() {
+            writeln!(
+                output,
+                "# HELP obzenflow_composite_events_in_total Events admitted at a composite's entry boundary port"
+            )?;
+            writeln!(output, "# TYPE obzenflow_composite_events_in_total counter")?;
+            for (composite, red) in &snapshot.composites {
+                writeln!(
+                    output,
+                    "obzenflow_composite_events_in_total{{composite=\"{composite}\"}} {}",
+                    red.events_in
+                )?;
+            }
+            writeln!(output)?;
+
+            writeln!(
+                output,
+                "# HELP obzenflow_composite_events_out_total Events emitted at a composite's exit boundary port"
+            )?;
+            writeln!(output, "# TYPE obzenflow_composite_events_out_total counter")?;
+            for (composite, red) in &snapshot.composites {
+                writeln!(
+                    output,
+                    "obzenflow_composite_events_out_total{{composite=\"{composite}\"}} {}",
+                    red.events_out
+                )?;
+            }
+            writeln!(output)?;
+
+            writeln!(
+                output,
+                "# HELP obzenflow_composite_errors_total Errors summed over a composite's members"
+            )?;
+            writeln!(output, "# TYPE obzenflow_composite_errors_total counter")?;
+            for (composite, red) in &snapshot.composites {
+                writeln!(
+                    output,
+                    "obzenflow_composite_errors_total{{composite=\"{composite}\"}} {}",
+                    red.errors
+                )?;
+            }
+            writeln!(output)?;
+
+            writeln!(
+                output,
+                "# HELP obzenflow_composite_boundary_latency_ms Composite entry-to-exit latency (p95, ms)"
+            )?;
+            writeln!(output, "# TYPE obzenflow_composite_boundary_latency_ms gauge")?;
+            for (composite, red) in &snapshot.composites {
+                if let Some(ms) = red.boundary_latency_ms {
+                    writeln!(
+                        output,
+                        "obzenflow_composite_boundary_latency_ms{{composite=\"{composite}\"}} {ms}"
+                    )?;
+                }
+            }
+            writeln!(output)?;
+        }
+
         // Live join gauge: how many reference events have been processed since the last stream event.
         if !snapshot.join_reference_since_last_stream.is_empty() {
             writeln!(

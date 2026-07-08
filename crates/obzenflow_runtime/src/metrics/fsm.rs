@@ -154,6 +154,9 @@ pub struct MetricsAggregatorContext {
     pub export_interval_secs: u64,
     pub system_id: SystemId,
     pub stage_metadata: HashMap<StageId, StageMetadata>,
+    /// Composite boundaries (FLOWIP-128a B4), built once from the subgraph
+    /// registry; each export projects composite RED metrics from them.
+    pub composite_boundaries: Vec<obzenflow_core::metrics::CompositeBoundary>,
 }
 
 pub(crate) struct MetricsAggregatorIo {
@@ -664,6 +667,7 @@ impl MetricsAggregatorContext {
             export_interval_secs,
             system_id,
             stage_metadata,
+            composite_boundaries: Vec::new(),
         };
 
         let io = MetricsAggregatorIo {
@@ -970,6 +974,16 @@ impl MetricsAggregatorContext {
                 snapshot.stage_vector_clocks.insert(*stage_id, *seq);
             }
         }
+
+        // FLOWIP-128a B4: project composite RED metrics from the per-stage maps
+        // just built, using each composite's boundary. Pure projection; the
+        // snapshot itself is the StageMetricsView.
+        use obzenflow_core::metrics::CompositeRed;
+        snapshot.composites = self
+            .composite_boundaries
+            .iter()
+            .map(|b| (b.composite_id.clone(), CompositeRed::project(b, &snapshot)))
+            .collect();
 
         snapshot
     }
@@ -2532,6 +2546,7 @@ mod tests {
             export_interval_secs: 10,
             system_id: obzenflow_core::SystemId::new(),
             stage_metadata,
+            composite_boundaries: Vec::new(),
         };
 
         let snapshot = ctx.build_app_metrics_snapshot();

@@ -20,7 +20,7 @@ use crate::supervised_base::{
 use obzenflow_core::{
     event::SystemEvent,
     journal::Journal,
-    metrics::{MetricsExporter, StageMetadata},
+    metrics::{CompositeBoundary, MetricsExporter, StageMetadata},
     StageId,
 };
 use std::collections::HashMap;
@@ -40,6 +40,9 @@ pub struct MetricsAggregatorBuilder {
     /// Stage metadata for display and categorization
     stage_metadata: HashMap<StageId, StageMetadata>,
 
+    /// Composite boundaries for composite RED projection (FLOWIP-128a B4).
+    composite_boundaries: Vec<CompositeBoundary>,
+
     config: DefaultMetricsConfig,
     export_interval_secs: u64,
 }
@@ -56,6 +59,7 @@ impl MetricsAggregatorBuilder {
             system_journal,
             exporter,
             stage_metadata: HashMap::new(),
+            composite_boundaries: Vec::new(),
             config: DefaultMetricsConfig::default(),
             export_interval_secs: 10, // Default to 10 seconds
         }
@@ -78,6 +82,12 @@ impl MetricsAggregatorBuilder {
         self.stage_metadata = metadata;
         self
     }
+
+    /// Set composite boundaries for composite RED projection (FLOWIP-128a B4).
+    pub fn with_composite_boundaries(mut self, boundaries: Vec<CompositeBoundary>) -> Self {
+        self.composite_boundaries = boundaries;
+        self
+    }
 }
 
 #[async_trait::async_trait]
@@ -90,7 +100,7 @@ impl SupervisorBuilder for MetricsAggregatorBuilder {
         let system_id = obzenflow_core::id::SystemId::new();
 
         // Create metrics context with all mutable state
-        let (metrics_context, metrics_io) = MetricsAggregatorContext::new(
+        let (mut metrics_context, metrics_io) = MetricsAggregatorContext::new(
             self.inputs.clone(),
             self.system_journal.clone(),
             Some(self.exporter),
@@ -100,6 +110,7 @@ impl SupervisorBuilder for MetricsAggregatorBuilder {
         )
         .await
         .map_err(BuilderError::Other)?;
+        metrics_context.composite_boundaries = self.composite_boundaries;
 
         // Create channels for supervisor communication
         // Even though metrics runs autonomously, we still create channels

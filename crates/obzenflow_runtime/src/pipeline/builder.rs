@@ -333,6 +333,7 @@ impl SupervisorBuilder for PipelineBuilder {
             completion_subscription: None,
             metrics_exporter: self.metrics_exporter.clone(),
             metrics_handle: None,
+            composite_handles: Vec::new(),
             contract_status: HashMap::new(),
             contract_pairs: HashMap::new(),
             expected_contract_pairs,

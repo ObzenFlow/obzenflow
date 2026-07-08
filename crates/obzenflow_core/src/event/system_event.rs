@@ -9,10 +9,10 @@ use crate::event::payloads::flow_control_payload::EofKind;
 use crate::event::payloads::observability_payload::MiddlewareLifecycle;
 use crate::event::types::{Count, DurationMs, EventId, EventType, SeqNo, WriterId};
 use crate::event::vector_clock::VectorClock;
-use crate::id::{StageId, StageKey, SystemId};
+use crate::id::{CompositeId, RoleId, StageId, StageKey, SystemId};
 use crate::ingress::{IngressAttemptSeq, IngressKey, IngressRefusalReason};
 use crate::journal::{ArchiveStatus, StatusDerivation};
-use crate::metrics::{FlowLifecycleMetricsSnapshot, StageMetricsSnapshot};
+use crate::metrics::{CompositeMetricsSnapshot, FlowLifecycleMetricsSnapshot, StageMetricsSnapshot};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -122,6 +122,19 @@ pub enum SystemEventType {
         stage_id: StageId,
         #[serde(flatten)]
         event: StageLifecycleEvent,
+    },
+
+    /// Composite lifecycle events (FLOWIP-128a).
+    ///
+    /// The aggregate node lifecycle of a first-class composite, keyed by its
+    /// manifest identity (`subgraph_id`), authored by the composite's own
+    /// monitor-supervisor as a fold over member `StageLifecycle`. One fact per
+    /// binding; the per-instance run span is FLOWIP-128c's `CompositeSpan`.
+    #[serde(rename = "composite_lifecycle")]
+    CompositeLifecycle {
+        composite_id: CompositeId,
+        #[serde(flatten)]
+        event: CompositeLifecycleEvent,
     },
 
     /// Pipeline lifecycle events
@@ -352,6 +365,33 @@ pub enum StageLifecycleEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         metrics: Option<StageMetricsSnapshot>,
     },
+}
+
+/// The aggregate lifecycle of a first-class composite (FLOWIP-128a B1/B2).
+///
+/// A fold over member `StageLifecycleEvent`s using the PipelineSupervisor's
+/// rollup rules scoped to the composite's members: fail-fast on `Failed`,
+/// `Cancelled`/`Completed` resolved once every member is terminal, precedence
+/// `Failed` > `Cancelled` > `Completed`, at most one terminal per composite.
+/// The terminal state is order-insensitive over the member set. A per-input
+/// domain failure fact (such as `AiMapReduceChunkFailed`) never moves this
+/// aggregate; only a member `StageLifecycle::Failed` does.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "lifecycle_event", rename_all = "snake_case")]
+pub enum CompositeLifecycleEvent {
+    /// The first member reached `Running`.
+    Running,
+    /// Every member is terminal and all reached `Completed`/`Drained`. Live
+    /// metrics ride the rail; this optional summary is captured at completion.
+    Completed {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        metrics: Option<CompositeMetricsSnapshot>,
+    },
+    /// Every member is terminal, at least one `Cancelled`, none `Failed`.
+    Cancelled { reason: String },
+    /// A member could not recover; fail-fast. `at` names the role whose member
+    /// stage failed (resolved from manifest membership by the supervisor).
+    Failed { at: RoleId, error: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -895,6 +935,12 @@ impl JournalEvent for SystemEvent {
                 StageLifecycleEvent::Completed { .. } => "system.stage.completed",
                 StageLifecycleEvent::Failed { .. } => "system.stage.failed",
                 StageLifecycleEvent::Cancelled { .. } => "system.stage.cancelled",
+            },
+            SystemEventType::CompositeLifecycle { event, .. } => match event {
+                CompositeLifecycleEvent::Running => "system.composite.running",
+                CompositeLifecycleEvent::Completed { .. } => "system.composite.completed",
+                CompositeLifecycleEvent::Cancelled { .. } => "system.composite.cancelled",
+                CompositeLifecycleEvent::Failed { .. } => "system.composite.failed",
             },
             SystemEventType::PipelineLifecycle(event) => match event {
                 PipelineLifecycleEvent::Starting => "system.pipeline.starting",

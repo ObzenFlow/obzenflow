@@ -465,6 +465,7 @@ impl WarpServer {
 
                         let mut middleware_state = MiddlewareSseState::default();
                         let mut stage_lifecycle_state = StageLifecycleSseState::default();
+                        let mut composite_lifecycle_state = CompositeLifecycleSseState::default();
                         let mut last_pipeline_event: Option<&'static str> = None;
                         let mut checkpoint_event_id: Option<EventId> = None;
 
@@ -527,6 +528,7 @@ impl WarpServer {
                                             if !resume_seen {
                                                 middleware_state.observe(&envelope);
                                                 stage_lifecycle_state.observe(&envelope);
+                                                composite_lifecycle_state.observe(&envelope);
                                                 last_pipeline_event = last_pipeline_event_name(&envelope)
                                                     .or(last_pipeline_event);
 
@@ -542,6 +544,7 @@ impl WarpServer {
                                             // Fresh connect: discard history until we reach EOF once.
                                             middleware_state.observe(&envelope);
                                             stage_lifecycle_state.observe(&envelope);
+                                            composite_lifecycle_state.observe(&envelope);
                                             last_pipeline_event = last_pipeline_event_name(&envelope)
                                                 .or(last_pipeline_event);
                                             continue;
@@ -549,6 +552,7 @@ impl WarpServer {
                                     }
 
                                     stage_lifecycle_state.observe(&envelope);
+                                    composite_lifecycle_state.observe(&envelope);
                                     last_pipeline_event =
                                         last_pipeline_event_name(&envelope).or(last_pipeline_event);
                                     if let Some(ev) =
@@ -575,6 +579,13 @@ impl WarpServer {
                                         ready_to_stream = true;
 
                                         for snapshot_ev in stage_lifecycle_state
+                                            .build_snapshot_sse_events()
+                                            .into_iter()
+                                        {
+                                            let _ = tx.send(Ok(snapshot_ev));
+                                        }
+
+                                        for snapshot_ev in composite_lifecycle_state
                                             .build_snapshot_sse_events()
                                             .into_iter()
                                         {
@@ -2733,6 +2744,65 @@ fn map_system_event_to_sse(
                     .data(data.to_string()),
             )
         }
+        SystemEventType::CompositeLifecycle {
+            composite_id,
+            event: lifecycle,
+        } => {
+            use obzenflow_core::event::system_event::CompositeLifecycleEvent;
+
+            let (event_type, metrics_value, reason, error, at) = match lifecycle {
+                CompositeLifecycleEvent::Running => {
+                    ("composite_running", None, None, None, None)
+                }
+                CompositeLifecycleEvent::Completed { metrics } => (
+                    "composite_completed",
+                    metrics.as_ref().and_then(|m| serde_json::to_value(m).ok()),
+                    None,
+                    None,
+                    None,
+                ),
+                CompositeLifecycleEvent::Cancelled { reason } => {
+                    ("composite_cancelled", None, Some(reason.clone()), None, None)
+                }
+                CompositeLifecycleEvent::Failed { at, error } => (
+                    "composite_failed",
+                    None,
+                    None,
+                    Some(error.clone()),
+                    Some(at.to_string()),
+                ),
+            };
+
+            let mut data = json!({
+                "system_event_type": "composite_lifecycle",
+                "event_type": event_type,
+                "composite_id": composite_id.to_string(),
+                "timestamp_ms": event.timestamp,
+            });
+
+            if let Some(vc) = &vector_clock_value {
+                data["vector_clock"] = vc.clone();
+            }
+            if let Some(m) = metrics_value {
+                data["metrics"] = m;
+            }
+            if let Some(r) = reason {
+                data["reason"] = serde_json::Value::String(r);
+            }
+            if let Some(e) = error {
+                data["error"] = serde_json::Value::String(e);
+            }
+            if let Some(a) = at {
+                data["at"] = serde_json::Value::String(a);
+            }
+
+            Some(
+                SseEvent::default()
+                    .id(id_str)
+                    .event("composite_lifecycle")
+                    .data(data.to_string()),
+            )
+        }
         SystemEventType::PipelineLifecycle(pipeline_event) => match pipeline_event {
             obzenflow_core::event::system_event::PipelineLifecycleEvent::Starting => {
                 let mut data = json!({
@@ -3441,6 +3511,42 @@ impl StageLifecycleSseState {
         let mut out = Vec::new();
         for envelope in self.latest_by_stage.values() {
             if let Some(ev) = map_stage_lifecycle_to_sse_snapshot(envelope) {
+                out.push(ev);
+            }
+        }
+        out
+    }
+}
+
+/// Bootstraps new SSE clients with each composite's latest lifecycle so the UI
+/// can render composite node status even if it connected after the run finished
+/// (FLOWIP-128a). The composite authors at most one terminal (the fold latch),
+/// so latest-wins is correct.
+#[derive(Default)]
+struct CompositeLifecycleSseState {
+    latest_by_composite:
+        std::collections::BTreeMap<obzenflow_core::id::CompositeId, SystemEventEnvelope>,
+}
+
+impl CompositeLifecycleSseState {
+    fn observe(&mut self, envelope: &SystemEventEnvelope) {
+        use obzenflow_core::event::SystemEventType;
+
+        let SystemEventType::CompositeLifecycle { composite_id, .. } = &envelope.event.event else {
+            return;
+        };
+        self.latest_by_composite
+            .insert(composite_id.clone(), envelope.clone());
+    }
+
+    fn build_snapshot_sse_events(&self) -> Vec<SseEvent> {
+        // Reuse the live mapping so the snapshot frame is byte-identical to the
+        // streamed one. The middleware state is throwaway (only its vector-clock
+        // side effect matters for middleware events, not composite ones).
+        let mut out = Vec::new();
+        let mut throwaway = MiddlewareSseState::default();
+        for envelope in self.latest_by_composite.values() {
+            if let Some(ev) = map_system_event_to_sse(envelope, &mut throwaway) {
                 out.push(ev);
             }
         }

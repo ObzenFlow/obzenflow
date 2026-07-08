@@ -187,6 +187,7 @@ fn test_context(
         completion_subscription,
         metrics_exporter: None,
         metrics_handle: None,
+        composite_handles: Vec::new(),
         stage_data_journals: Vec::new(),
         stage_error_journals: Vec::new(),
         backpressure_registry: None,
