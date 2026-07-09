@@ -665,6 +665,7 @@ mod tests {
             export_interval_secs: 60,
             system_id: SystemId::new(),
             stage_metadata: HashMap::new(),
+            composite_boundaries: Vec::new(),
         };
 
         for envelope in events {

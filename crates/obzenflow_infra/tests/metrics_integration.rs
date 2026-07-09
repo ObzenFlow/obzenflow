@@ -93,6 +93,7 @@ fn make_empty_context(
         export_interval_secs: 60,
         system_id,
         stage_metadata: single_stage_metadata(stage_id),
+        composite_boundaries: Vec::new(),
     }
 }
 
