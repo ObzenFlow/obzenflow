@@ -43,9 +43,7 @@ obzenflow_benchmarks = { version = "0.1.2", path = "crates/obzenflow_benchmarks"
 obzenflow_sketches = { version = "0.1.2", path = "crates/obzenflow_sketches" }
 
 # External ObzenFlow crates
-# FLOWIP-128a dev wiring: path override while 0.5.0 is unpublished. Drop the
-# `path =` at publish time, before merge (the documented UI-repo pattern).
-obzenflow-topology = { version = "0.5.0", path = "../obzenflow-topology" }
+obzenflow-topology = "0.5.0"
 obzenflow-fsm = "0.3.1"
 
 	# Async/runtime + utilities
