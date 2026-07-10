@@ -4,12 +4,17 @@
 
 //! Observability context that can be attached to any event (wide events pattern)
 
+use super::CompositeActivationContext;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// Observability context that can be attached to any event
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ObservabilityContext {
+    /// Composite input facts that causally contribute to this event.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub composite_activations: Vec<CompositeActivationContext>,
+
     /// Metrics snapshots at event time
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metrics: Option<MetricsSnapshot>,

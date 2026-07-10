@@ -361,6 +361,8 @@ pub struct ResolvedPort {
 /// The composite boundary after expansion (FLOWIP-128a D1).
 #[derive(Clone, Debug, Default)]
 pub struct ResolvedBoundary {
+    /// Stable manifest identity assigned by composite lowering.
+    pub subgraph_id: String,
     pub inputs: Vec<ResolvedPort>,
     pub outputs: Vec<ResolvedPort>,
 }

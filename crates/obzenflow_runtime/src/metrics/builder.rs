@@ -100,17 +100,17 @@ impl SupervisorBuilder for MetricsAggregatorBuilder {
         let system_id = obzenflow_core::id::SystemId::new();
 
         // Create metrics context with all mutable state
-        let (mut metrics_context, metrics_io) = MetricsAggregatorContext::new(
+        let (metrics_context, metrics_io) = MetricsAggregatorContext::new(
             self.inputs.clone(),
             self.system_journal.clone(),
             Some(self.exporter),
             self.export_interval_secs,
             system_id,
             self.stage_metadata,
+            self.composite_boundaries,
         )
         .await
         .map_err(BuilderError::Other)?;
-        metrics_context.composite_boundaries = self.composite_boundaries;
 
         // Create channels for supervisor communication
         // Even though metrics runs autonomously, we still create channels

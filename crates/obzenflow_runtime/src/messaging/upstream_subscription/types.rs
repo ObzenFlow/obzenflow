@@ -10,6 +10,7 @@ use obzenflow_core::event::types::{
 };
 use obzenflow_core::event::vector_clock::VectorClock;
 use obzenflow_core::event::ChainEvent;
+use obzenflow_core::id::CompositeId;
 use obzenflow_core::journal::Journal;
 use obzenflow_core::{EventEnvelope, EventId, EventType, StageId, WriterId};
 use std::collections::{BTreeMap, HashMap, VecDeque};
@@ -17,6 +18,23 @@ use std::sync::Arc;
 use tokio::time::Instant;
 
 use crate::pipeline::config::CycleGuardConfig;
+
+/// One input-port activation stamp selected from the durable topology cut
+/// (FLOWIP-128a B3). The containing map supplies the physical upstream stage.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CompositeEntrySpec {
+    pub composite_id: CompositeId,
+    pub port_name: String,
+    pub event_types: Vec<EventType>,
+}
+
+impl CompositeEntrySpec {
+    pub fn matches(&self, event_type: &str) -> bool {
+        self.event_types
+            .iter()
+            .any(|candidate| candidate.as_str() == event_type)
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct StageInputPosition(pub u64);

@@ -9,6 +9,7 @@ use crate::stages::common::handlers::JoinHandler;
 use crate::stages::join::config::JoinReferenceMode;
 use crate::typing::JoinTyping;
 use obzenflow_core::event::context::causality_context::CausalityContext;
+use obzenflow_core::event::context::CompositeActivationContext;
 use obzenflow_core::event::schema::TypedPayload;
 use obzenflow_core::StageId;
 use obzenflow_core::{ChainEvent, WriterId};
@@ -29,6 +30,10 @@ where
 {
     /// Reference catalog (dimension data)
     pub reference_catalog: HashMap<K, Ref>,
+
+    /// Exact activation provenance of the currently stored reference row for
+    /// each key. Catalog replacement replaces provenance at the same key.
+    pub reference_activations: HashMap<K, Vec<CompositeActivationContext>>,
 
     /// Stream catalog (ONLY for Streaming strategy - stream-to-stream joins)
     pub stream_catalog: HashMap<K, Stream>,
@@ -57,6 +62,7 @@ where
     pub fn new() -> Self {
         Self {
             reference_catalog: HashMap::new(),
+            reference_activations: HashMap::new(),
             stream_catalog: HashMap::new(),
             stream_pending: Vec::new(),
             reference_complete: false,
@@ -69,6 +75,29 @@ where
     /// Check if both upstreams are complete
     pub fn is_fully_drained(&self) -> bool {
         self.reference_complete && self.stream_complete
+    }
+}
+
+/// Outputs from one stream match plus the exact reference catalog keys whose
+/// values contributed to them. Requiring this declaration prevents the join
+/// wrapper from silently dropping reference-side composite activations or
+/// over-attributing every catalog row.
+#[derive(Clone, Debug)]
+pub struct JoinStrategyOutput<K> {
+    pub events: Vec<ChainEvent>,
+    pub contributing_reference_keys: Vec<K>,
+}
+
+impl<K> JoinStrategyOutput<K> {
+    pub fn new(events: Vec<ChainEvent>, contributing_reference_keys: Vec<K>) -> Self {
+        Self {
+            events,
+            contributing_reference_keys,
+        }
+    }
+
+    pub fn without_reference(events: Vec<ChainEvent>) -> Self {
+        Self::new(events, Vec::new())
     }
 }
 
@@ -96,7 +125,7 @@ pub trait JoinStrategy {
         stream_data: Self::StreamType,
         stream_key: Self::Key,
         writer_id: WriterId,
-    ) -> Vec<ChainEvent>;
+    ) -> JoinStrategyOutput<Self::Key>;
 }
 
 /// Wrapper that implements JoinHandler by delegating to a JoinStrategy
@@ -177,6 +206,7 @@ where
     fn initial_state(&self) -> Self::State {
         TypedJoinState {
             reference_catalog: HashMap::new(),
+            reference_activations: HashMap::new(),
             stream_catalog: HashMap::new(),
             stream_pending: Vec::new(),
             reference_complete: false,
@@ -201,6 +231,9 @@ where
                 key = ?key,
                 "JoinWithStrategy: Added to catalog"
             );
+            state
+                .reference_activations
+                .insert(key.clone(), event.composite_activations().to_vec());
             state.reference_catalog.insert(key, catalog_data);
             return Ok(vec![]);
         }
@@ -208,13 +241,30 @@ where
         // Enriching: stream side
         if let Some(stream_data) = S::StreamType::from_event(&event) {
             let key = (self.stream_key_fn)(&stream_data);
-            let mut events = self.strategy.match_stream_event(
+            let strategy_output = self.strategy.match_stream_event(
                 &state.reference_catalog,
                 stream_data,
                 key,
                 writer_id,
             );
+            for reference_key in &strategy_output.contributing_reference_keys {
+                if !state.reference_catalog.contains_key(reference_key) {
+                    return Err(HandlerError::Validation(format!(
+                        "join strategy declared missing contributing reference key {reference_key:?}"
+                    )));
+                }
+            }
+            let mut events = strategy_output.events;
             propagate_stream_lineage(&event, &mut events, self.lineage);
+            for reference_key in strategy_output.contributing_reference_keys {
+                if let Some(activations) = state.reference_activations.get(&reference_key) {
+                    for output in &mut events {
+                        for activation in activations {
+                            output.add_composite_activation(activation.clone());
+                        }
+                    }
+                }
+            }
             return Ok(events);
         }
 
@@ -317,6 +367,8 @@ fn propagate_stream_lineage(
             event.replay_context = parent.replay_context.clone();
         }
 
+        event.merge_composite_activations_from(parent);
+
         if event.causality.is_root() {
             let mut causality = CausalityContext::with_parent(parent.id);
 
@@ -340,8 +392,9 @@ fn propagate_stream_lineage(
 mod tests {
     use super::*;
     use crate::stages::join::config::DEFAULT_REFERENCE_BATCH_CAP;
+    use obzenflow_core::event::context::CompositeActivationContext;
     use obzenflow_core::event::schema::TypedPayload;
-    use obzenflow_core::id::StageId;
+    use obzenflow_core::id::{CompositeId, StageId};
     use obzenflow_core::WriterId;
     use serde::{Deserialize, Serialize};
 
@@ -389,12 +442,20 @@ mod tests {
             _stream_data: Self::StreamType,
             stream_key: Self::Key,
             writer_id: WriterId,
-        ) -> Vec<ChainEvent> {
+        ) -> JoinStrategyOutput<Self::Key> {
+            let contributing_reference_keys = catalog
+                .contains_key(&stream_key)
+                .then(|| stream_key.clone())
+                .into_iter()
+                .collect();
             let joined = JoinedRow {
                 catalog_value: catalog.get(&stream_key).map(|c| c.value.clone()),
                 stream_key,
             };
-            vec![joined.to_event(writer_id)]
+            JoinStrategyOutput::new(
+                vec![joined.to_event(writer_id)],
+                contributing_reference_keys,
+            )
         }
     }
 
@@ -465,6 +526,55 @@ mod tests {
                 stream_key: "k1".into()
             }
         );
+    }
+
+    #[test]
+    fn stream_hit_unions_only_the_matching_reference_activation() {
+        let handler = make_join();
+        let mut state = handler.initial_state();
+        let writer = WriterId::from(StageId::new());
+
+        for key in ["k1", "k2"] {
+            let mut reference = CatalogRow {
+                key: key.into(),
+                value: format!("value-{key}"),
+            }
+            .to_event(writer);
+            reference.add_composite_activation(CompositeActivationContext::new(
+                CompositeId::new("catalog:lookup"),
+                reference.id,
+                key,
+                100,
+            ));
+            handler
+                .process_event(&mut state, reference, StageId::new(), writer)
+                .unwrap();
+        }
+
+        let mut stream = StreamRow { key: "k1".into() }.to_event(writer);
+        stream.add_composite_activation(CompositeActivationContext::new(
+            CompositeId::new("saga:checkout"),
+            stream.id,
+            "commands",
+            200,
+        ));
+        let output = handler
+            .process_event(&mut state, stream, StageId::new(), writer)
+            .unwrap();
+        assert_eq!(output.len(), 1);
+        let activations = output[0].composite_activations();
+        assert_eq!(activations.len(), 2);
+        assert!(activations.iter().any(|activation| {
+            activation.composite_id == CompositeId::new("catalog:lookup")
+                && activation.entry_port == "k1"
+        }));
+        assert!(!activations
+            .iter()
+            .any(|activation| activation.entry_port == "k2"));
+        assert!(activations.iter().any(|activation| {
+            activation.composite_id == CompositeId::new("saga:checkout")
+                && activation.entry_port == "commands"
+        }));
     }
 
     #[test]

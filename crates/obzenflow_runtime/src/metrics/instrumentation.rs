@@ -9,6 +9,7 @@ use crate::control_plane::{
     RateLimiterSnapshotter,
 };
 use hdrhistogram::Histogram;
+use obzenflow_core::event::context::{EventTypeCountContext, UpstreamEventTypeCountContext};
 use obzenflow_core::event::event_envelope::EventEnvelope;
 use obzenflow_core::event::identity::journal_writer_id::JournalWriterId;
 use obzenflow_core::event::vector_clock::VectorClock;
@@ -19,6 +20,7 @@ use obzenflow_core::EventId;
 use obzenflow_core::EventType;
 use obzenflow_core::StageId;
 use obzenflow_core::WriterId;
+use std::any::Any;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::RwLock;
@@ -108,6 +110,7 @@ pub struct StageInstrumentation {
     pub last_emitted_event_id: RwLock<Option<EventId>>,
     pub last_emitted_writer: RwLock<Option<WriterId>>,
     pub data_writer_seq_by_event_type: RwLock<HashMap<EventType, u64>>,
+    pub data_reader_seq_by_upstream_event_type: RwLock<HashMap<(StageId, EventType), u64>>,
 
     /// Error breakdown by kind
     pub errors_by_kind: RwLock<
@@ -201,6 +204,7 @@ impl StageInstrumentation {
             last_emitted_event_id: RwLock::new(None),
             last_emitted_writer: RwLock::new(None),
             data_writer_seq_by_event_type: RwLock::new(HashMap::new()),
+            data_reader_seq_by_upstream_event_type: RwLock::new(HashMap::new()),
 
             errors_by_kind: RwLock::new(std::collections::HashMap::new()),
 
@@ -293,6 +297,40 @@ impl StageInstrumentation {
             events_processed_total: self.events_processed_total.load(Ordering::Relaxed),
             events_accumulated_total: self.events_accumulated_total.load(Ordering::Relaxed),
             events_emitted_total: self.events_emitted_total.load(Ordering::Relaxed),
+            data_outputs_by_event_type: {
+                let mut counts: Vec<_> = self
+                    .data_writer_seq_by_event_type
+                    .read()
+                    .unwrap()
+                    .iter()
+                    .map(|(event_type, total)| EventTypeCountContext {
+                        event_type: event_type.clone(),
+                        total: *total,
+                    })
+                    .collect();
+                counts.sort_by(|left, right| left.event_type.cmp(&right.event_type));
+                counts
+            },
+            data_inputs_by_upstream_event_type: {
+                let mut counts: Vec<_> = self
+                    .data_reader_seq_by_upstream_event_type
+                    .read()
+                    .unwrap()
+                    .iter()
+                    .map(
+                        |((upstream, event_type), total)| UpstreamEventTypeCountContext {
+                            upstream: *upstream,
+                            event_type: event_type.clone(),
+                            total: *total,
+                        },
+                    )
+                    .collect();
+                counts.sort_by(|left, right| {
+                    (left.upstream, left.event_type.as_str())
+                        .cmp(&(right.upstream, right.event_type.as_str()))
+                });
+                counts
+            },
             join_reference_since_last_stream: self
                 .join_reference_since_last_stream
                 .load(Ordering::Relaxed),
@@ -433,11 +471,23 @@ impl StageInstrumentation {
     }
 
     /// Note a consumed envelope so downstream events capture reader position and origin.
-    pub fn record_consumed<T: JournalEvent>(&self, envelope: &EventEnvelope<T>) {
+    pub fn record_consumed<T: JournalEvent + 'static>(
+        &self,
+        envelope: &EventEnvelope<T>,
+        upstream_stage: StageId,
+    ) {
         self.reader_seq.fetch_add(1, Ordering::Relaxed);
         *self.last_consumed_event_id.write().unwrap() = Some(*envelope.event.id());
         *self.last_consumed_writer.write().unwrap() = Some(envelope.journal_writer_id);
         *self.last_consumed_vector_clock.write().unwrap() = Some(envelope.vector_clock.clone());
+        if let Some(event) = (&envelope.event as &dyn Any).downcast_ref::<ChainEvent>() {
+            if let ChainEventContent::Data { event_type, .. } = &event.content {
+                let mut counts = self.data_reader_seq_by_upstream_event_type.write().unwrap();
+                *counts
+                    .entry((upstream_stage, EventType::from(event_type.clone())))
+                    .or_insert(0) += 1;
+            }
+        }
     }
 
     /// Note the latest durable delivery watermark for sink stages.
@@ -469,6 +519,14 @@ impl StageInstrumentation {
             let mut by_type = self.data_writer_seq_by_event_type.write().unwrap();
             *by_type.entry(event_type.clone().into()).or_insert(0) += 1;
         }
+        self.events_emitted_total.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Note a Data output routed to the error journal. It remains an emitted
+    /// stage event for existing lifecycle accounting, but it is deliberately
+    /// absent from the typed data-journal counters used by composite ports.
+    pub fn record_error_journal_output_event(&self, event: &ChainEvent) {
+        self.record_emitted(event);
         self.events_emitted_total.fetch_add(1, Ordering::Relaxed);
     }
 
@@ -685,9 +743,11 @@ pub fn snapshot_stage_metrics(instrumentation: &StageInstrumentation) -> StageMe
 #[cfg(test)]
 mod tests {
     use super::StageInstrumentation;
+    use obzenflow_core::event::identity::JournalWriterId;
     use obzenflow_core::event::status::processing_status::ErrorKind;
     use obzenflow_core::event::vector_clock::VectorClock;
-    use obzenflow_core::EventId;
+    use obzenflow_core::event::ChainEventFactory;
+    use obzenflow_core::{EventEnvelope, EventId, EventType, JournalId, StageId, WriterId};
 
     #[test]
     fn record_error_updates_totals_and_by_kind() {
@@ -722,5 +782,49 @@ mod tests {
         assert_eq!(snapshot.receipted_seq, 7);
         assert_eq!(snapshot.last_receipted_event_id, Some(event_id));
         assert_eq!(snapshot.last_receipted_vector_clock, Some(vector_clock));
+    }
+
+    #[test]
+    fn consumed_type_counter_uses_the_delivering_reader_not_the_preserved_event_author() {
+        let instrumentation = StageInstrumentation::new();
+        let author = StageId::new();
+        let physical_upstream = StageId::new();
+        let event = ChainEventFactory::data_event(
+            WriterId::from(author),
+            "checkout.command.v1",
+            serde_json::json!({}),
+        );
+        let envelope = EventEnvelope::new(JournalWriterId::from(JournalId::new()), event);
+
+        instrumentation.record_consumed(&envelope, physical_upstream);
+
+        assert_eq!(
+            instrumentation
+                .snapshot()
+                .data_inputs_by_upstream_event_type,
+            vec![
+                obzenflow_core::event::context::UpstreamEventTypeCountContext {
+                    upstream: physical_upstream,
+                    event_type: EventType::from("checkout.command.v1"),
+                    total: 1,
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn error_journal_data_is_excluded_from_typed_data_output_counters() {
+        let instrumentation = StageInstrumentation::new();
+        let event = ChainEventFactory::data_event(
+            WriterId::from(StageId::new()),
+            "checkout.failed.v1",
+            serde_json::json!({}),
+        );
+
+        instrumentation.record_error_journal_output_event(&event);
+
+        let snapshot = instrumentation.snapshot();
+        assert_eq!(snapshot.events_emitted_total, 1);
+        assert!(snapshot.data_outputs_by_event_type.is_empty());
     }
 }

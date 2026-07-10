@@ -12,9 +12,12 @@ use crate::event::observability::HttpSurfaceRouteMetricsSnapshot;
 use crate::event::status::processing_status::ErrorKind;
 use crate::event::system_event::{ContractName, ContractResultStatusLabel, SystemFeedRole};
 use crate::event::types::EventType;
-use crate::id::{CompositeId, FlowId, StageId};
+use crate::id::{FlowId, StageId};
 use crate::ingress::IngressKey;
-use crate::metrics::composite::{CompositeContract, CompositeRed, StageMetricsView};
+use crate::metrics::composite::{
+    CompositeContract, CompositeDurationHistogram, CompositeDurationInvalid, CompositeMemberHealth,
+    CompositePortTraffic,
+};
 use crate::metrics::Percentile;
 use crate::time::MetricsDuration;
 use serde::{Deserialize, Serialize};
@@ -216,46 +219,27 @@ pub struct AppMetricsSnapshot {
     /// to expose obzenflow_stage_vector_clock metrics.
     pub stage_vector_clocks: HashMap<StageId, u64>,
 
-    /// Composite boundary RED metrics, keyed by composite id (FLOWIP-128a B4).
-    /// A pure projection over the per-stage maps above; the exporter renders
-    /// these as `obzenflow_composite_*{composite}` families.
-    pub composites: Vec<(CompositeId, CompositeRed)>,
+    /// Exact logical throughput at connected named composite ports
+    /// (FLOWIP-128a B3). Fan-out is counted once per authored output fact.
+    pub composite_port_traffic: Vec<CompositePortTraffic>,
+
+    /// Member error volume per composite. This is component health, not an
+    /// inferred failed-activation count.
+    pub composite_member_health: Vec<CompositeMemberHealth>,
+
+    /// Exact paired boundary duration histograms, reconstructed from durable
+    /// output facts and their propagated activation contexts.
+    pub composite_boundary_durations: Vec<CompositeDurationHistogram>,
+
+    /// Rejected duration evidence, such as an exit timestamp before its exact
+    /// entry timestamp.
+    pub composite_boundary_duration_invalid: Vec<CompositeDurationInvalid>,
 
     /// Composite boundary contract views (FLOWIP-128a B5). A pure re-key of the
     /// `contract_metrics` above to the composite boundary; the exporter renders
     /// these as `obzenflow_composite_contract_*{composite,peer,direction}`
     /// families.
     pub composite_contracts: Vec<CompositeContract>,
-}
-
-/// Read-only view over the snapshot's per-stage maps, so a composite boundary
-/// projection reads input rate at its entry port, output rate at its exit port,
-/// errors at each member, and the source-relative flow latency used for the
-/// boundary interval (FLOWIP-128a B4).
-impl StageMetricsView for AppMetricsSnapshot {
-    fn events_in(&self, stage: StageId) -> u64 {
-        self.event_counts.get(&stage).copied().unwrap_or(0)
-    }
-
-    fn events_out(&self, stage: StageId) -> u64 {
-        self.events_emitted_total.get(&stage).copied().unwrap_or(0)
-    }
-
-    fn errors(&self, stage: StageId) -> u64 {
-        self.error_counts.get(&stage).copied().unwrap_or(0)
-    }
-
-    fn latency_p95_ms(&self, stage: StageId) -> Option<u64> {
-        // Flow latency is the source-relative (correlation) end-to-end latency,
-        // the only per-stage latency for which exit − entry is meaningful.
-        let seconds = self
-            .flow_latency_seconds
-            .get(&stage)?
-            .percentiles
-            .get(&Percentile::P95)
-            .copied()?;
-        Some((seconds * 1000.0).round() as u64)
-    }
 }
 
 /// Contract verification metrics per edge.
@@ -589,7 +573,10 @@ impl Default for AppMetricsSnapshot {
             stage_lifecycle_states: HashMap::new(),
             pipeline_state: String::new(),
             stage_vector_clocks: HashMap::new(),
-            composites: Vec::new(),
+            composite_port_traffic: Vec::new(),
+            composite_member_health: Vec::new(),
+            composite_boundary_durations: Vec::new(),
+            composite_boundary_duration_invalid: Vec::new(),
             composite_contracts: Vec::new(),
         }
     }

@@ -8,7 +8,7 @@
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
 
     use obzenflow_core::TypedPayload;
     use obzenflow_runtime::effects::{EffectDeclaration, EffectSafety, IdempotencyKeyPolicy};
@@ -317,8 +317,33 @@ mod tests {
 
         // Manifest ports resolved to member stage names.
         let boundary = &artifacts.boundaries["branch"];
+        assert_eq!(boundary.subgraph_id, "test_branch:branch");
         assert_eq!(boundary.input().stage_name, "branch__intake");
         assert_eq!(boundary.outputs.len(), 2);
+
+        // Type-directed port choice survives the physical edge rewrite. The
+        // runtime and Studio consume these names rather than re-inferring them
+        // from member position or type metadata (B3).
+        let bound_port = |from: &str, to: &str| {
+            artifacts
+                .boundary_edges
+                .iter()
+                .find(|edge| edge.from_stage == from && edge.to_stage == to)
+                .and_then(|edge| edge.ports.first())
+                .map(|port| (port.subgraph_id.as_str(), port.port_name.as_str()))
+        };
+        assert_eq!(
+            bound_port("src", "branch__intake"),
+            Some(("test_branch:branch", "in"))
+        );
+        assert_eq!(
+            bound_port("branch__done", "ok_sink"),
+            Some(("test_branch:branch", "completed"))
+        );
+        assert_eq!(
+            bound_port("branch__failed", "err_sink"),
+            Some(("test_branch:branch", "failed"))
+        );
 
         // Feed plan and edge validation through the generic path.
         let mut name_to_id: HashMap<String, obzenflow_core::StageId> = HashMap::new();
@@ -529,6 +554,42 @@ mod tests {
         assert_eq!(render(&artifacts_one), vec!["alpha", "beta"]);
         assert_eq!(render(&artifacts_one), render(&artifacts_two));
         assert_eq!(connections_one, connections_two);
+    }
+
+    #[test]
+    fn composite_to_composite_edge_retains_both_named_cut_bindings() {
+        let mut members: HashMap<String, FlowMember> = HashMap::new();
+        for binding in ["alpha", "beta"] {
+            let composite: Box<dyn CompositeDescriptor> = Box::new(TestBranchComposite::new());
+            members.insert(binding.to_string(), composite.into_flow_member());
+        }
+        let mut connections = vec![("alpha".to_string(), "beta".to_string(), EdgeKind::Forward)];
+
+        let (_, artifacts) =
+            lower_composites(members, &mut connections).expect("lowering succeeds");
+
+        assert!(connections.contains(&(
+            "alpha__done".to_string(),
+            "beta__intake".to_string(),
+            EdgeKind::Forward,
+        )));
+        let edge = artifacts
+            .boundary_edges
+            .iter()
+            .find(|edge| edge.from_stage == "alpha__done" && edge.to_stage == "beta__intake")
+            .expect("rewritten boundary edge");
+        let refs: HashSet<_> = edge
+            .ports
+            .iter()
+            .map(|port| (port.subgraph_id.as_str(), port.port_name.as_str()))
+            .collect();
+        assert_eq!(
+            refs,
+            HashSet::from([
+                ("test_branch:alpha", "completed"),
+                ("test_branch:beta", "in"),
+            ])
+        );
     }
 
     #[test]

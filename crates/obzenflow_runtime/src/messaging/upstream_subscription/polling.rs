@@ -9,6 +9,7 @@ use super::{
     DeliveryFilter, EofOutcome, HeldHead, MergeCandidateMeta, PollResult, ReaderProgress,
     StageInputPosition, UpstreamSubscription,
 };
+use obzenflow_core::event::context::CompositeActivationContext;
 use obzenflow_core::event::payloads::effect_payload::is_framework_effect_event_type;
 use obzenflow_core::event::payloads::flow_control_payload::EofKind;
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
@@ -495,6 +496,29 @@ where
 
         self.last_delivered_upstream_stage = Some(stage_id);
         self.last_delivered_stage_input_position = delivered_stage_input_position;
+
+        let mut envelope = envelope;
+        if let Some(specs) = self.composite_entries_by_stage.get(&stage_id) {
+            if let Some(chain_event) =
+                (&mut envelope.event as &mut dyn Any).downcast_mut::<ChainEvent>()
+            {
+                if let ChainEventContent::Data { event_type, .. } = &chain_event.content {
+                    let matching: Vec<_> = specs
+                        .iter()
+                        .filter(|spec| spec.matches(event_type))
+                        .cloned()
+                        .collect();
+                    for spec in matching {
+                        chain_event.add_composite_activation(CompositeActivationContext::new(
+                            spec.composite_id,
+                            chain_event.id,
+                            spec.port_name,
+                            chain_event.processing_info.event_time,
+                        ));
+                    }
+                }
+            }
+        }
 
         PollResult::Event(envelope)
     }

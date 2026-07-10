@@ -24,9 +24,9 @@ mod tests;
 pub use super::subscription_poller::{PollResult, SubscriptionPoller};
 use types::{AdvertisedWriterSeqByEventType, SelectedDataSeqByEventType};
 pub use types::{
-    ContractConfig, ContractStatus, ContractTracker, ContractsWiring, DeliveredCount,
-    DeliveredOrdinal, EofOutcome, FeedIdentity, MergeCandidateStatus, MergeWaitState,
-    ReaderProgress, ReaderSelectionPolicy, ReaderTiebreakKey, SelectedFeedMetadata,
+    CompositeEntrySpec, ContractConfig, ContractStatus, ContractTracker, ContractsWiring,
+    DeliveredCount, DeliveredOrdinal, EofOutcome, FeedIdentity, MergeCandidateStatus,
+    MergeWaitState, ReaderProgress, ReaderSelectionPolicy, ReaderTiebreakKey, SelectedFeedMetadata,
     SelectedFeedRole, StageInputPosition, StageKey, SubscriptionState,
 };
 
@@ -147,6 +147,9 @@ where
 
     /// Selected logical feed metadata by upstream reader stage.
     selected_feeds_by_stage: HashMap<StageId, Vec<SelectedFeedMetadata>>,
+
+    /// Input-boundary activation stamps keyed by the physical upstream stage.
+    composite_entries_by_stage: HashMap<StageId, Vec<CompositeEntrySpec>>,
 
     /// Per-reader count of Data events that survived the selected event-type
     /// filter and were delivered as stage inputs.

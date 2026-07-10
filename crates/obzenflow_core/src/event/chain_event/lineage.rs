@@ -3,6 +3,8 @@
 // https://obzenflow.dev
 
 use super::{ChainEvent, CorrelationContext};
+use crate::event::context::observability_context::ObservabilityContext;
+use crate::event::context::CompositeActivationContext;
 use crate::event::payloads::correlation_payload::CorrelationPayload;
 use crate::event::types::CorrelationId;
 
@@ -22,7 +24,50 @@ impl ChainEvent {
         self.correlation = parent.correlation.clone();
         self.cycle_depth = parent.cycle_depth;
         self.cycle_scc_id = parent.cycle_scc_id;
+        self.merge_composite_activations_from(parent);
         self
+    }
+
+    /// Composite activations that causally contribute to this event.
+    pub fn composite_activations(&self) -> &[CompositeActivationContext] {
+        self.observability
+            .as_ref()
+            .map(|observability| observability.composite_activations.as_slice())
+            .unwrap_or_default()
+    }
+
+    /// Stamp one reconstructable input-boundary activation, idempotently.
+    pub fn add_composite_activation(&mut self, activation: CompositeActivationContext) {
+        let activations = &mut self
+            .observability
+            .get_or_insert_with(ObservabilityContext::default)
+            .composite_activations;
+        if !activations.iter().any(|existing| {
+            existing.composite_id == activation.composite_id
+                && existing.activation == activation.activation
+                && existing.entry_port == activation.entry_port
+        }) {
+            activations.push(activation);
+            activations.sort_by(|left, right| {
+                (
+                    left.composite_id.as_ref(),
+                    left.activation,
+                    left.entry_port.as_str(),
+                )
+                    .cmp(&(
+                        right.composite_id.as_ref(),
+                        right.activation,
+                        right.entry_port.as_str(),
+                    ))
+            });
+        }
+    }
+
+    /// Union exact activation provenance from one causal parent.
+    pub fn merge_composite_activations_from(&mut self, parent: &ChainEvent) {
+        for activation in parent.composite_activations() {
+            self.add_composite_activation(activation.clone());
+        }
     }
 
     /// Check if this event has correlation info
@@ -68,5 +113,54 @@ impl ChainEvent {
 
     pub fn clear_correlation(&mut self) {
         self.correlation = None;
+    }
+}
+
+#[cfg(test)]
+mod composite_activation_tests {
+    use crate::config::LineagePolicy;
+    use crate::event::chain_event::ChainEventFactory;
+    use crate::event::context::CompositeActivationContext;
+    use crate::event::types::WriterId;
+    use crate::id::{CompositeId, StageId};
+    use serde_json::json;
+
+    #[test]
+    fn derived_events_preserve_exact_activation_identity() {
+        let writer = WriterId::from(StageId::new());
+        let mut entry = ChainEventFactory::data_event(writer, "test.input.v1", json!({}));
+        entry.processing_info.event_time = 100;
+        entry.add_composite_activation(CompositeActivationContext::new(
+            CompositeId::new("test:composite"),
+            entry.id,
+            "in",
+            entry.processing_info.event_time,
+        ));
+
+        let child = ChainEventFactory::derived_data_event(
+            writer,
+            &entry,
+            "test.output.v1",
+            json!({}),
+            LineagePolicy::default(),
+        );
+
+        assert_eq!(child.composite_activations(), entry.composite_activations());
+        let json = serde_json::to_value(&child).expect("event serializes");
+        assert_eq!(
+            json["observability"]["composite_activations"][0]["entry_port"],
+            "in"
+        );
+    }
+
+    #[test]
+    fn activation_merge_is_idempotent_and_deterministic() {
+        let writer = WriterId::from(StageId::new());
+        let mut event = ChainEventFactory::data_event(writer, "test.v1", json!({}));
+        let activation =
+            CompositeActivationContext::new(CompositeId::new("test:composite"), event.id, "in", 10);
+        event.add_composite_activation(activation.clone());
+        event.add_composite_activation(activation);
+        assert_eq!(event.composite_activations().len(), 1);
     }
 }

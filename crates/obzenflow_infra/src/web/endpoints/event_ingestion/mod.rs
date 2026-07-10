@@ -666,6 +666,7 @@ mod tests {
             system_id: SystemId::new(),
             stage_metadata: HashMap::new(),
             composite_boundaries: Vec::new(),
+            composite_durations: obzenflow_core::metrics::CompositeDurationAccumulator::default(),
         };
 
         for envelope in events {

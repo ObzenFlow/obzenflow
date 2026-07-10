@@ -15,7 +15,10 @@ pub mod primitives;
 pub mod snapshots;
 
 pub use composite::{
-    BoundaryDirection, CompositeBoundary, CompositeContract, CompositeRed, StageMetricsView,
+    BoundaryDirection, BoundaryMetricsView, CompositeBoundary, CompositeBoundaryEdge,
+    CompositeBoundaryPort, CompositeContract, CompositeDurationAccumulator,
+    CompositeDurationBucket, CompositeDurationHistogram, CompositeDurationInvalid,
+    CompositeMemberHealth, CompositePortTraffic,
 };
 pub use exporter::{MetricsExporter, NoOpMetricsExporter};
 pub use percentile::{Percentile, PercentileExt};

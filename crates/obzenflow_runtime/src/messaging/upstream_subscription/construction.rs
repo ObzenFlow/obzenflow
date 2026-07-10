@@ -6,9 +6,9 @@ use super::types::{
     AdvertisedWriterSeqByEventType, ReaderSelectionPolicy, SelectedDataSeqByEventType,
 };
 use super::{
-    ContractTracker, ContractsWiring, DeliveredCount, DeliveryFilter, FeedContractChain,
-    FeedIdentity, ReaderSlot, ReaderTiebreakKey, SelectedFeedMetadata, StageKey, SubscriptionState,
-    UpstreamSubscription,
+    CompositeEntrySpec, ContractTracker, ContractsWiring, DeliveredCount, DeliveryFilter,
+    FeedContractChain, FeedIdentity, ReaderSlot, ReaderTiebreakKey, SelectedFeedMetadata, StageKey,
+    SubscriptionState, UpstreamSubscription,
 };
 use crate::contracts::ContractChain;
 use crate::control_plane::NoControlPlane;
@@ -197,6 +197,7 @@ where
             readers,
             selected_event_types_by_stage: HashMap::new(),
             selected_feeds_by_stage: HashMap::new(),
+            composite_entries_by_stage: HashMap::new(),
             state,
             contract_tracker: None,
             contract_chains: Vec::new(),
@@ -307,6 +308,15 @@ where
             .collect();
         self.selected_feeds_by_stage = selected_feeds_by_stage;
         self.recompute_tiebreak_keys();
+        self
+    }
+
+    /// Configure exact composite input-boundary stamps per upstream edge.
+    pub fn with_composite_entries(
+        mut self,
+        entries_by_stage: HashMap<StageId, Vec<CompositeEntrySpec>>,
+    ) -> Self {
+        self.composite_entries_by_stage = entries_by_stage;
         self
     }
 

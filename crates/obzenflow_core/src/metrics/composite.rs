@@ -2,94 +2,27 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Composite boundary metrics: the RED (rate, errors, duration) projection of a
-//! composite as a black-box span (FLOWIP-128a B4).
+//! Exact composite boundary metrics (FLOWIP-128a B3).
 //!
-//! This is a pure projection over per-stage metrics, defined by the composite's
-//! own boundary (entry-port member, exit-port member, and the member set) read
-//! from the subgraph registry. The domain logic lives here as a unit-tested
-//! function; the metrics aggregator and Prometheus exporter each provide a thin
-//! `StageMetricsView` over their own maps and render the result uniformly.
-//!
-//! The composite already carries its structure, so this is pull-based: rate at
-//! the exit port, input rate at the entry port, errors summed over members, and
-//! boundary latency as the source-relative `exit − entry` difference (L1). The
-//! exact per-activation entry-to-exit interval (L2) is FLOWIP-128c's
-//! `CompositeSpan`, not this aggregate rail.
+//! A composite boundary is a named graph cut. Physical topology edges carry
+//! the port they cross, while wide stage events carry exact Data input and
+//! output counts. The projection in this module never guesses a boundary from
+//! a first entry/exit member, stage names, payload heuristics, or display state.
 
-use crate::event::system_event::{ContractName, ContractResultStatusLabel};
+use crate::event::chain_event::ChainEventContent;
+use crate::event::system_event::{ContractName, ContractResultStatusLabel, SystemFeedRole};
+use crate::event::ChainEvent;
 use crate::id::{CompositeId, StageId};
 use crate::metrics::snapshots::{ContractMetricsSnapshot, ContractViolationCauseLabel};
+use crate::{EventId, EventType};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-/// A composite's boundary structure, derived once from the subgraph registry.
-/// Pure data, no metrics.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CompositeBoundary {
-    pub composite_id: CompositeId,
-    /// Entry-port member stage.
-    pub entry: StageId,
-    /// Exit-port member stage.
-    pub exit: StageId,
-    /// All member stages of the composite.
-    pub members: Vec<StageId>,
-}
-
-/// Read-only view over per-stage metrics. Keeps the projection free of the
-/// concrete store or snapshot shape, and trivial to test with a fake view.
-pub trait StageMetricsView {
-    /// Events admitted (processed) by a member stage.
-    fn events_in(&self, stage: StageId) -> u64;
-    /// Events emitted by a member stage.
-    fn events_out(&self, stage: StageId) -> u64;
-    /// Errors observed at a member stage.
-    fn errors(&self, stage: StageId) -> u64;
-    /// End-to-end (correlation-relative) p95 latency at a member stage, in ms.
-    fn latency_p95_ms(&self, stage: StageId) -> Option<u64>;
-}
-
-/// Composite RED metrics, the pure projection over per-stage metrics.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CompositeRed {
-    /// Input rate proxy: events admitted at the entry-port member.
-    pub events_in: u64,
-    /// Output rate proxy: events emitted at the exit-port member.
-    pub events_out: u64,
-    /// Errors summed over all members.
-    pub errors: u64,
-    /// Boundary latency: the source-relative `exit − entry` interval (L1).
-    /// `None` until both boundary members have a latency sample.
-    pub boundary_latency_ms: Option<u64>,
-}
-
-impl CompositeRed {
-    /// Project composite RED from a stage-metrics view, using the boundary to
-    /// select the entry-port rate, exit-port rate, and boundary latency, and
-    /// summing errors over the members.
-    pub fn project(boundary: &CompositeBoundary, stages: &impl StageMetricsView) -> Self {
-        CompositeRed {
-            events_in: stages.events_in(boundary.entry),
-            events_out: stages.events_out(boundary.exit),
-            errors: boundary.members.iter().map(|&s| stages.errors(s)).sum(),
-            boundary_latency_ms: match (
-                stages.latency_p95_ms(boundary.exit),
-                stages.latency_p95_ms(boundary.entry),
-            ) {
-                (Some(exit), Some(entry)) => Some(exit.saturating_sub(entry)),
-                _ => None,
-            },
-        }
-    }
-}
-
-/// Which boundary an external edge crosses, relative to the composite.
+/// Which side of a named composite boundary a physical edge crosses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BoundaryDirection {
-    /// An external producer into the composite's entry-port member.
     Inbound,
-    /// The composite's exit-port member out to an external consumer.
     Outbound,
 }
 
@@ -102,33 +35,176 @@ impl BoundaryDirection {
     }
 }
 
-/// One composite boundary edge's contract facts, re-keyed from the real member
-/// edge to the composite identity (FLOWIP-128a B5). A pure relabel of existing
-/// contract facts (a view), never a new fact: an inbound edge's real
-/// `external -> entry_member` becomes `(peer = external, Inbound)`, an outbound
-/// edge's `exit_member -> external` becomes `(peer = external, Outbound)`.
+/// One declared named boundary port.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompositeBoundaryPort {
+    pub name: String,
+    pub direction: BoundaryDirection,
+    pub member: StageId,
+    pub payload_event_types: Vec<EventType>,
+}
+
+impl CompositeBoundaryPort {
+    pub fn accepts(&self, event_type: &str) -> bool {
+        self.payload_event_types
+            .iter()
+            .any(|candidate| candidate.as_str() == event_type)
+    }
+}
+
+/// One physical graph-cut edge bound to a named port.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompositeBoundaryEdge {
+    pub port: String,
+    pub direction: BoundaryDirection,
+    pub member: StageId,
+    pub peer: StageId,
+    pub upstream: StageId,
+    pub downstream: StageId,
+}
+
+/// A composite's exact named graph cut, derived from the topology manifest and
+/// persisted edge-port bindings.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompositeBoundary {
+    pub composite_id: CompositeId,
+    pub members: Vec<StageId>,
+    pub ports: Vec<CompositeBoundaryPort>,
+    pub edges: Vec<CompositeBoundaryEdge>,
+}
+
+/// Read-only view of the cumulative Data counters needed by the graph-cut
+/// projection. Inputs retain the physical upstream dimension so internal
+/// member traffic cannot leak into an input-port count.
+pub trait BoundaryMetricsView {
+    fn data_inputs(&self, member: StageId, upstream: StageId, event_type: &EventType) -> u64;
+    fn data_outputs(&self, member: StageId, event_type: &EventType) -> u64;
+    fn errors(&self, member: StageId) -> u64;
+}
+
+/// Logical throughput at one named boundary port.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CompositePortTraffic {
+    pub composite: CompositeId,
+    pub port: String,
+    pub direction: BoundaryDirection,
+    pub events_total: u64,
+}
+
+impl CompositePortTraffic {
+    /// Project one counter per connected named port. Fan-out does not multiply
+    /// output traffic: the member/event-type counter is read once per port.
+    pub fn project(boundary: &CompositeBoundary, metrics: &impl BoundaryMetricsView) -> Vec<Self> {
+        let mut projected = Vec::new();
+
+        for port in &boundary.ports {
+            let edges: Vec<_> = boundary
+                .edges
+                .iter()
+                .filter(|edge| edge.port == port.name && edge.direction == port.direction)
+                .collect();
+
+            // An unbound or legacy port has no graph-cut traffic identity. Do
+            // not manufacture a zero from member-wide counters.
+            if edges.is_empty() {
+                continue;
+            }
+
+            let events_total = match port.direction {
+                BoundaryDirection::Inbound => {
+                    let unique_upstreams: HashSet<StageId> =
+                        edges.iter().map(|edge| edge.upstream).collect();
+                    unique_upstreams
+                        .into_iter()
+                        .flat_map(|upstream| {
+                            port.payload_event_types
+                                .iter()
+                                .map(move |event_type| (upstream, event_type))
+                        })
+                        .map(|(upstream, event_type)| {
+                            metrics.data_inputs(port.member, upstream, event_type)
+                        })
+                        .fold(0, u64::saturating_add)
+                }
+                BoundaryDirection::Outbound => port
+                    .payload_event_types
+                    .iter()
+                    .map(|event_type| metrics.data_outputs(port.member, event_type))
+                    .fold(0, u64::saturating_add),
+            };
+
+            projected.push(Self {
+                composite: boundary.composite_id.clone(),
+                port: port.name.clone(),
+                direction: port.direction,
+                events_total,
+            });
+        }
+
+        projected.sort_by(|left, right| {
+            (left.direction.as_str(), left.port.as_str())
+                .cmp(&(right.direction.as_str(), right.port.as_str()))
+        });
+        projected
+    }
+}
+
+/// Component-health volume for all members of one composite. This is not an
+/// inferred failed-activation count.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CompositeMemberHealth {
+    pub composite: CompositeId,
+    pub member_errors_total: u64,
+}
+
+impl CompositeMemberHealth {
+    pub fn project(boundary: &CompositeBoundary, metrics: &impl BoundaryMetricsView) -> Self {
+        Self {
+            composite: boundary.composite_id.clone(),
+            member_errors_total: boundary
+                .members
+                .iter()
+                .map(|member| metrics.errors(*member))
+                .fold(0, u64::saturating_add),
+        }
+    }
+}
+
+/// One composite boundary edge's contract facts, re-keyed without discarding
+/// its named port, selected event type, or logical feed role.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CompositeContract {
     pub composite: CompositeId,
-    /// The external peer stage on the far side of the boundary edge.
+    pub port: String,
     pub peer: StageId,
     pub direction: BoundaryDirection,
-    /// Per-contract result counts on this boundary edge.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selected_event_type: Option<EventType>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub feed_role: Option<SystemFeedRole>,
     pub results: Vec<(ContractName, ContractResultStatusLabel, u64)>,
-    /// Per-contract violation counts on this boundary edge.
     pub violations: Vec<(ContractName, ContractViolationCauseLabel, u64)>,
-    /// Latest reader sequence at the boundary edge (max over its contracts).
     pub reader_seq: Option<u64>,
-    /// Latest advertised writer sequence at the boundary edge.
     pub advertised_writer_seq: Option<u64>,
 }
 
+type ContractProjectionKey = (
+    StageId,
+    BoundaryDirection,
+    String,
+    Option<EventType>,
+    Option<SystemFeedRole>,
+);
+
 impl CompositeContract {
-    fn empty(composite: CompositeId, peer: StageId, direction: BoundaryDirection) -> Self {
-        CompositeContract {
+    fn empty(composite: CompositeId, key: &ContractProjectionKey) -> Self {
+        Self {
             composite,
-            peer,
-            direction,
+            peer: key.0,
+            direction: key.1,
+            port: key.2.clone(),
+            selected_event_type: key.3.clone(),
+            feed_role: key.4,
             results: Vec::new(),
             violations: Vec::new(),
             reader_seq: None,
@@ -136,279 +212,687 @@ impl CompositeContract {
         }
     }
 
-    /// Project a composite's boundary contract views from the contract-metrics
-    /// snapshot. Each entry whose edge touches a boundary member is re-keyed to
-    /// the composite boundary; internal and unrelated edges are skipped. Returns
-    /// one entry per `(peer, direction)` boundary edge, deterministically
-    /// ordered. Single entry and exit today; a multi-member boundary
-    /// (FLOWIP-128c) yields several entries per peer, which this `Vec` shape
-    /// already accommodates.
+    /// Relabel only exact physical edges in the durable graph cut. Internal
+    /// member edges and unrelated edges cannot be classified accidentally.
     pub fn project(boundary: &CompositeBoundary, contracts: &ContractMetricsSnapshot) -> Vec<Self> {
         let classify = |upstream: StageId, downstream: StageId| {
-            if downstream == boundary.entry {
-                Some((upstream, BoundaryDirection::Inbound))
-            } else if upstream == boundary.exit {
-                Some((downstream, BoundaryDirection::Outbound))
-            } else {
-                None
-            }
+            boundary
+                .edges
+                .iter()
+                .find(|edge| edge.upstream == upstream && edge.downstream == downstream)
+                .map(|edge| (edge.peer, edge.direction, edge.port.clone()))
         };
 
-        let mut acc: HashMap<(StageId, BoundaryDirection), CompositeContract> = HashMap::new();
-        let composite_id = &boundary.composite_id;
+        let key_for = |edge: &crate::metrics::snapshots::ContractMetricEdgeKey| {
+            let (peer, direction, port) = classify(edge.upstream, edge.downstream)?;
+            Some((
+                peer,
+                direction,
+                port,
+                edge.selected_event_type.clone(),
+                edge.feed_role,
+            ))
+        };
 
-        for (key, count) in &contracts.results_total {
-            if let Some((peer, direction)) = classify(key.edge.upstream, key.edge.downstream) {
-                acc.entry((peer, direction))
-                    .or_insert_with(|| {
-                        CompositeContract::empty(composite_id.clone(), peer, direction)
-                    })
+        let mut projected: HashMap<ContractProjectionKey, CompositeContract> = HashMap::new();
+
+        for (result, count) in &contracts.results_total {
+            if let Some(key) = key_for(&result.edge) {
+                projected
+                    .entry(key.clone())
+                    .or_insert_with(|| Self::empty(boundary.composite_id.clone(), &key))
                     .results
-                    .push((key.edge.contract.clone(), key.status, *count));
+                    .push((result.edge.contract.clone(), result.status, *count));
             }
         }
-        for (key, count) in &contracts.violations_total {
-            if let Some((peer, direction)) = classify(key.edge.upstream, key.edge.downstream) {
-                acc.entry((peer, direction))
-                    .or_insert_with(|| {
-                        CompositeContract::empty(composite_id.clone(), peer, direction)
-                    })
+        for (violation, count) in &contracts.violations_total {
+            if let Some(key) = key_for(&violation.edge) {
+                projected
+                    .entry(key.clone())
+                    .or_insert_with(|| Self::empty(boundary.composite_id.clone(), &key))
                     .violations
-                    .push((key.edge.contract.clone(), key.cause.clone(), *count));
+                    .push((
+                        violation.edge.contract.clone(),
+                        violation.cause.clone(),
+                        *count,
+                    ));
             }
         }
-        for (key, seq) in &contracts.reader_seq {
-            if let Some((peer, direction)) = classify(key.upstream, key.downstream) {
-                let entry = acc.entry((peer, direction)).or_insert_with(|| {
-                    CompositeContract::empty(composite_id.clone(), peer, direction)
-                });
-                entry.reader_seq = Some(entry.reader_seq.map_or(*seq, |cur| cur.max(*seq)));
+        for (edge, seq) in &contracts.reader_seq {
+            if let Some(key) = key_for(edge) {
+                let entry = projected
+                    .entry(key.clone())
+                    .or_insert_with(|| Self::empty(boundary.composite_id.clone(), &key));
+                entry.reader_seq = Some(entry.reader_seq.map_or(*seq, |current| current.max(*seq)));
             }
         }
-        for (key, seq) in &contracts.advertised_writer_seq {
-            if let Some((peer, direction)) = classify(key.upstream, key.downstream) {
-                let entry = acc.entry((peer, direction)).or_insert_with(|| {
-                    CompositeContract::empty(composite_id.clone(), peer, direction)
-                });
+        for (edge, seq) in &contracts.advertised_writer_seq {
+            if let Some(key) = key_for(edge) {
+                let entry = projected
+                    .entry(key.clone())
+                    .or_insert_with(|| Self::empty(boundary.composite_id.clone(), &key));
                 entry.advertised_writer_seq = Some(
                     entry
                         .advertised_writer_seq
-                        .map_or(*seq, |cur| cur.max(*seq)),
+                        .map_or(*seq, |current| current.max(*seq)),
                 );
             }
         }
 
-        let mut out: Vec<CompositeContract> = acc.into_values().collect();
-        for entry in &mut out {
-            entry
-                .results
-                .sort_by(|a, b| (a.0.as_str(), a.1.as_str()).cmp(&(b.0.as_str(), b.1.as_str())));
-            entry
-                .violations
-                .sort_by(|a, b| (a.0.as_str(), a.1.as_str()).cmp(&(b.0.as_str(), b.1.as_str())));
+        let mut result: Vec<_> = projected.into_values().collect();
+        for entry in &mut result {
+            entry.results.sort_by(|left, right| {
+                (left.0.as_str(), left.1.as_str()).cmp(&(right.0.as_str(), right.1.as_str()))
+            });
+            entry.violations.sort_by(|left, right| {
+                (left.0.as_str(), left.1.as_str()).cmp(&(right.0.as_str(), right.1.as_str()))
+            });
         }
-        out.sort_by(|a, b| {
-            (a.direction.as_str(), a.peer.to_string())
-                .cmp(&(b.direction.as_str(), b.peer.to_string()))
+        result.sort_by(|left, right| {
+            (
+                left.direction.as_str(),
+                left.port.as_str(),
+                left.peer,
+                left.selected_event_type.as_ref(),
+                left.feed_role.map(SystemFeedRole::as_str),
+            )
+                .cmp(&(
+                    right.direction.as_str(),
+                    right.port.as_str(),
+                    right.peer,
+                    right.selected_event_type.as_ref(),
+                    right.feed_role.map(SystemFeedRole::as_str),
+                ))
         });
-        out
+        result
+    }
+}
+
+/// One cumulative Prometheus histogram bucket.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CompositeDurationBucket {
+    pub upper_bound_seconds: f64,
+    pub cumulative_count: u64,
+}
+
+/// Exact paired boundary-duration histogram for one entry-port/exit-port pair.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CompositeDurationHistogram {
+    pub composite: CompositeId,
+    pub entry_port: String,
+    pub exit_port: String,
+    pub buckets: Vec<CompositeDurationBucket>,
+    pub count: u64,
+    pub sum_seconds: f64,
+}
+
+/// Rejected duration evidence. Reasons are a fixed vocabulary and all identity
+/// labels come from the topology manifest.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CompositeDurationInvalid {
+    pub composite: CompositeId,
+    pub entry_port: String,
+    pub exit_port: String,
+    pub reason: String,
+    pub total: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct DurationSeriesKey {
+    composite: CompositeId,
+    entry_port: String,
+    exit_port: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct DurationObservationKey {
+    series: DurationSeriesKey,
+    activation: EventId,
+    exit_event: EventId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct InvalidDurationKey {
+    series: DurationSeriesKey,
+    reason: &'static str,
+}
+
+#[derive(Debug, Clone)]
+struct DurationHistogramState {
+    cumulative_buckets: Vec<u64>,
+    count: u64,
+    sum_seconds: f64,
+}
+
+/// Replayable fold of output-boundary facts into exact paired histograms.
+///
+/// The seen set is a projection idempotency key, not an activation registry:
+/// no entry waits in memory for an exit. Every observation is self-contained
+/// on the durable exit fact through `CompositeActivationContext`.
+#[derive(Debug, Clone)]
+pub struct CompositeDurationAccumulator {
+    bucket_upper_bounds_seconds: Vec<f64>,
+    histograms: HashMap<DurationSeriesKey, DurationHistogramState>,
+    invalid: HashMap<InvalidDurationKey, u64>,
+    seen: HashSet<DurationObservationKey>,
+}
+
+impl Default for CompositeDurationAccumulator {
+    fn default() -> Self {
+        Self::new(vec![
+            0.005, 0.010, 0.025, 0.050, 0.100, 0.250, 0.500, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 300.0,
+        ])
+    }
+}
+
+impl CompositeDurationAccumulator {
+    pub fn new(mut bucket_upper_bounds_seconds: Vec<f64>) -> Self {
+        bucket_upper_bounds_seconds.retain(|bound| bound.is_finite() && *bound >= 0.0);
+        bucket_upper_bounds_seconds.sort_by(f64::total_cmp);
+        bucket_upper_bounds_seconds.dedup_by(|left, right| left.total_cmp(right).is_eq());
+        Self {
+            bucket_upper_bounds_seconds,
+            histograms: HashMap::new(),
+            invalid: HashMap::new(),
+            seen: HashSet::new(),
+        }
+    }
+
+    /// Observe one committed stage data-journal fact. Non-Data facts, internal
+    /// traffic, unmatched output types, and facts without activation context do
+    /// not produce observations.
+    pub fn observe_event(
+        &mut self,
+        boundaries: &[CompositeBoundary],
+        journal_stage: StageId,
+        event: &ChainEvent,
+    ) {
+        let ChainEventContent::Data { event_type, .. } = &event.content else {
+            return;
+        };
+
+        for boundary in boundaries {
+            let output_ports: Vec<_> = boundary
+                .ports
+                .iter()
+                .filter(|port| {
+                    port.direction == BoundaryDirection::Outbound
+                        && port.member == journal_stage
+                        && port.accepts(event_type)
+                        && boundary.edges.iter().any(|edge| {
+                            edge.direction == BoundaryDirection::Outbound
+                                && edge.port == port.name
+                                && edge.member == journal_stage
+                        })
+                })
+                .collect();
+            if output_ports.is_empty() {
+                continue;
+            }
+
+            for activation in event
+                .composite_activations()
+                .iter()
+                .filter(|activation| activation.composite_id == boundary.composite_id)
+            {
+                let declared_entry = boundary.ports.iter().any(|port| {
+                    port.direction == BoundaryDirection::Inbound
+                        && port.name == activation.entry_port
+                });
+
+                for output_port in &output_ports {
+                    let entry_port = if declared_entry {
+                        activation.entry_port.clone()
+                    } else {
+                        // Keep Prometheus label cardinality topology-bounded for
+                        // malformed historical metadata.
+                        "<unknown>".to_string()
+                    };
+                    let series = DurationSeriesKey {
+                        composite: boundary.composite_id.clone(),
+                        entry_port,
+                        exit_port: output_port.name.clone(),
+                    };
+                    let observation = DurationObservationKey {
+                        series: series.clone(),
+                        activation: activation.activation,
+                        exit_event: event.id,
+                    };
+                    if !self.seen.insert(observation) {
+                        continue;
+                    }
+
+                    if !declared_entry {
+                        let total = self
+                            .invalid
+                            .entry(InvalidDurationKey {
+                                series,
+                                reason: "unknown_entry_port",
+                            })
+                            .or_insert(0);
+                        *total = total.saturating_add(1);
+                        continue;
+                    }
+
+                    let Some(duration_ms) = event
+                        .processing_info
+                        .event_time
+                        .checked_sub(activation.entered_at_ms)
+                    else {
+                        let total = self
+                            .invalid
+                            .entry(InvalidDurationKey {
+                                series,
+                                reason: "exit_precedes_entry",
+                            })
+                            .or_insert(0);
+                        *total = total.saturating_add(1);
+                        continue;
+                    };
+
+                    let duration_seconds = duration_ms as f64 / 1_000.0;
+                    let histogram =
+                        self.histograms
+                            .entry(series)
+                            .or_insert_with(|| DurationHistogramState {
+                                cumulative_buckets: vec![0; self.bucket_upper_bounds_seconds.len()],
+                                count: 0,
+                                sum_seconds: 0.0,
+                            });
+                    for (index, upper_bound) in self.bucket_upper_bounds_seconds.iter().enumerate()
+                    {
+                        if duration_seconds <= *upper_bound {
+                            histogram.cumulative_buckets[index] =
+                                histogram.cumulative_buckets[index].saturating_add(1);
+                        }
+                    }
+                    histogram.count = histogram.count.saturating_add(1);
+                    histogram.sum_seconds += duration_seconds;
+                }
+            }
+        }
+    }
+
+    pub fn histograms(&self) -> Vec<CompositeDurationHistogram> {
+        let mut snapshots: Vec<_> = self
+            .histograms
+            .iter()
+            .map(|(key, state)| CompositeDurationHistogram {
+                composite: key.composite.clone(),
+                entry_port: key.entry_port.clone(),
+                exit_port: key.exit_port.clone(),
+                buckets: self
+                    .bucket_upper_bounds_seconds
+                    .iter()
+                    .zip(&state.cumulative_buckets)
+                    .map(
+                        |(upper_bound_seconds, cumulative_count)| CompositeDurationBucket {
+                            upper_bound_seconds: *upper_bound_seconds,
+                            cumulative_count: *cumulative_count,
+                        },
+                    )
+                    .collect(),
+                count: state.count,
+                sum_seconds: state.sum_seconds,
+            })
+            .collect();
+        snapshots.sort_by(|left, right| {
+            (
+                left.composite.as_str(),
+                left.entry_port.as_str(),
+                left.exit_port.as_str(),
+            )
+                .cmp(&(
+                    right.composite.as_str(),
+                    right.entry_port.as_str(),
+                    right.exit_port.as_str(),
+                ))
+        });
+        snapshots
+    }
+
+    pub fn invalid_evidence(&self) -> Vec<CompositeDurationInvalid> {
+        let mut snapshots: Vec<_> = self
+            .invalid
+            .iter()
+            .map(|(key, total)| CompositeDurationInvalid {
+                composite: key.series.composite.clone(),
+                entry_port: key.series.entry_port.clone(),
+                exit_port: key.series.exit_port.clone(),
+                reason: key.reason.to_string(),
+                total: *total,
+            })
+            .collect();
+        snapshots.sort_by(|left, right| {
+            (
+                left.composite.as_str(),
+                left.entry_port.as_str(),
+                left.exit_port.as_str(),
+                left.reason.as_str(),
+            )
+                .cmp(&(
+                    right.composite.as_str(),
+                    right.entry_port.as_str(),
+                    right.exit_port.as_str(),
+                    right.reason.as_str(),
+                ))
+        });
+        snapshots
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::metrics::snapshots::{
-        ContractMetricEdgeKey, ContractMetricResultKey, ContractMetricViolationKey,
-    };
-    use std::collections::HashMap;
+    use crate::event::context::CompositeActivationContext;
+    use crate::event::system_event::SystemFeedRole;
+    use crate::event::{ChainEventFactory, WriterId};
+    use crate::metrics::snapshots::{ContractMetricEdgeKey, ContractMetricResultKey};
+    use serde_json::json;
 
     #[derive(Default)]
-    struct FakeView {
-        events_in: HashMap<StageId, u64>,
-        events_out: HashMap<StageId, u64>,
+    struct FakeMetrics {
+        inputs: HashMap<(StageId, StageId, EventType), u64>,
+        outputs: HashMap<(StageId, EventType), u64>,
         errors: HashMap<StageId, u64>,
-        latency: HashMap<StageId, u64>,
     }
 
-    impl StageMetricsView for FakeView {
-        fn events_in(&self, s: StageId) -> u64 {
-            self.events_in.get(&s).copied().unwrap_or(0)
+    impl BoundaryMetricsView for FakeMetrics {
+        fn data_inputs(&self, member: StageId, upstream: StageId, event_type: &EventType) -> u64 {
+            self.inputs
+                .get(&(member, upstream, event_type.clone()))
+                .copied()
+                .unwrap_or(0)
         }
-        fn events_out(&self, s: StageId) -> u64 {
-            self.events_out.get(&s).copied().unwrap_or(0)
-        }
-        fn errors(&self, s: StageId) -> u64 {
-            self.errors.get(&s).copied().unwrap_or(0)
-        }
-        fn latency_p95_ms(&self, s: StageId) -> Option<u64> {
-            self.latency.get(&s).copied()
-        }
-    }
 
-    fn boundary(entry: StageId, exit: StageId, members: Vec<StageId>) -> CompositeBoundary {
-        CompositeBoundary {
-            composite_id: CompositeId::new("ai_map_reduce:digest"),
-            entry,
-            exit,
-            members,
+        fn data_outputs(&self, member: StageId, event_type: &EventType) -> u64 {
+            self.outputs
+                .get(&(member, event_type.clone()))
+                .copied()
+                .unwrap_or(0)
+        }
+
+        fn errors(&self, member: StageId) -> u64 {
+            self.errors.get(&member).copied().unwrap_or(0)
         }
     }
 
-    #[test]
-    fn rate_reads_entry_in_and_exit_out_not_a_sum() {
-        let (entry, mid, exit) = (StageId::new(), StageId::new(), StageId::new());
-        let mut v = FakeView::default();
-        v.events_in.insert(entry, 100);
-        v.events_in.insert(exit, 20); // must be ignored for input rate
-        v.events_out.insert(exit, 5);
-        v.events_out.insert(mid, 999); // must be ignored for output rate
-        let red = CompositeRed::project(&boundary(entry, exit, vec![entry, mid, exit]), &v);
-        assert_eq!(red.events_in, 100);
-        assert_eq!(red.events_out, 5);
+    fn boundary() -> (
+        CompositeBoundary,
+        StageId,
+        StageId,
+        StageId,
+        StageId,
+        StageId,
+    ) {
+        let input = StageId::new();
+        let success = StageId::new();
+        let failed = StageId::new();
+        let producer = StageId::new();
+        let consumer = StageId::new();
+        let composite_id = CompositeId::new("saga:checkout");
+        (
+            CompositeBoundary {
+                composite_id,
+                members: vec![input, success, failed],
+                ports: vec![
+                    CompositeBoundaryPort {
+                        name: "commands".into(),
+                        direction: BoundaryDirection::Inbound,
+                        member: input,
+                        payload_event_types: vec![EventType::from("checkout.command.v1")],
+                    },
+                    CompositeBoundaryPort {
+                        name: "completed".into(),
+                        direction: BoundaryDirection::Outbound,
+                        member: success,
+                        payload_event_types: vec![EventType::from("checkout.completed.v1")],
+                    },
+                    CompositeBoundaryPort {
+                        name: "failed".into(),
+                        direction: BoundaryDirection::Outbound,
+                        member: failed,
+                        payload_event_types: vec![EventType::from("checkout.failed.v1")],
+                    },
+                ],
+                edges: vec![
+                    CompositeBoundaryEdge {
+                        port: "commands".into(),
+                        direction: BoundaryDirection::Inbound,
+                        member: input,
+                        peer: producer,
+                        upstream: producer,
+                        downstream: input,
+                    },
+                    CompositeBoundaryEdge {
+                        port: "completed".into(),
+                        direction: BoundaryDirection::Outbound,
+                        member: success,
+                        peer: consumer,
+                        upstream: success,
+                        downstream: consumer,
+                    },
+                    CompositeBoundaryEdge {
+                        port: "failed".into(),
+                        direction: BoundaryDirection::Outbound,
+                        member: failed,
+                        peer: consumer,
+                        upstream: failed,
+                        downstream: consumer,
+                    },
+                ],
+            },
+            input,
+            success,
+            failed,
+            producer,
+            consumer,
+        )
     }
 
     #[test]
-    fn errors_sum_over_all_members() {
-        let (entry, mid, exit) = (StageId::new(), StageId::new(), StageId::new());
-        let mut v = FakeView::default();
-        v.errors.insert(entry, 1);
-        v.errors.insert(mid, 2);
-        v.errors.insert(exit, 4);
-        let red = CompositeRed::project(&boundary(entry, exit, vec![entry, mid, exit]), &v);
-        assert_eq!(red.errors, 7);
+    fn named_ports_use_exact_cut_counters_and_distinct_output_members() {
+        let (boundary, input, success, failed, producer, _) = boundary();
+        let mut metrics = FakeMetrics::default();
+        metrics.inputs.insert(
+            (input, producer, EventType::from("checkout.command.v1")),
+            11,
+        );
+        metrics
+            .inputs
+            .insert((input, success, EventType::from("checkout.command.v1")), 99);
+        metrics
+            .outputs
+            .insert((success, EventType::from("checkout.completed.v1")), 7);
+        metrics
+            .outputs
+            .insert((failed, EventType::from("checkout.failed.v1")), 4);
+
+        let projected = CompositePortTraffic::project(&boundary, &metrics);
+        assert_eq!(projected.len(), 3);
+        assert_eq!(projected[0].port, "commands");
+        assert_eq!(projected[0].events_total, 11);
+        assert_eq!(projected[1].port, "completed");
+        assert_eq!(projected[1].events_total, 7);
+        assert_eq!(projected[2].port, "failed");
+        assert_eq!(projected[2].events_total, 4);
     }
 
     #[test]
-    fn boundary_latency_is_exit_minus_entry() {
-        let (entry, exit) = (StageId::new(), StageId::new());
-        let mut v = FakeView::default();
-        v.latency.insert(entry, 30); // source -> entry
-        v.latency.insert(exit, 80); // source -> exit
-        let red = CompositeRed::project(&boundary(entry, exit, vec![entry, exit]), &v);
-        assert_eq!(red.boundary_latency_ms, Some(50));
+    fn outbound_fanout_counts_one_authored_fact_once() {
+        let (mut boundary, _, success, _, _, consumer) = boundary();
+        let second_consumer = StageId::new();
+        boundary.edges.push(CompositeBoundaryEdge {
+            port: "completed".into(),
+            direction: BoundaryDirection::Outbound,
+            member: success,
+            peer: second_consumer,
+            upstream: success,
+            downstream: second_consumer,
+        });
+        let mut metrics = FakeMetrics::default();
+        metrics
+            .outputs
+            .insert((success, EventType::from("checkout.completed.v1")), 7);
+        let completed = CompositePortTraffic::project(&boundary, &metrics)
+            .into_iter()
+            .find(|metric| metric.port == "completed")
+            .unwrap();
+        assert_eq!(completed.events_total, 7);
+        assert_ne!(consumer, boundary.edges.last().unwrap().peer);
     }
 
     #[test]
-    fn boundary_latency_is_none_until_both_boundaries_have_a_sample() {
-        let (entry, exit) = (StageId::new(), StageId::new());
-        let mut v = FakeView::default();
-        v.latency.insert(exit, 80); // entry missing
-        let red = CompositeRed::project(&boundary(entry, exit, vec![entry, exit]), &v);
-        assert_eq!(red.boundary_latency_ms, None);
+    fn inbound_fanin_sums_exact_admissions_from_each_bound_peer() {
+        let (mut boundary, input, _, _, producer, _) = boundary();
+        let second_producer = StageId::new();
+        boundary.edges.push(CompositeBoundaryEdge {
+            port: "commands".into(),
+            direction: BoundaryDirection::Inbound,
+            member: input,
+            peer: second_producer,
+            upstream: second_producer,
+            downstream: input,
+        });
+        let event_type = EventType::from("checkout.command.v1");
+        let mut metrics = FakeMetrics::default();
+        metrics
+            .inputs
+            .insert((input, producer, event_type.clone()), 4);
+        metrics
+            .inputs
+            .insert((input, second_producer, event_type), 6);
+
+        let commands = CompositePortTraffic::project(&boundary, &metrics)
+            .into_iter()
+            .find(|metric| metric.port == "commands")
+            .unwrap();
+        assert_eq!(commands.events_total, 10);
     }
 
     #[test]
-    fn boundary_latency_saturates_when_exit_precedes_entry_sample() {
-        // Skew (exit sample older than entry) must not underflow.
-        let (entry, exit) = (StageId::new(), StageId::new());
-        let mut v = FakeView::default();
-        v.latency.insert(entry, 90);
-        v.latency.insert(exit, 40);
-        let red = CompositeRed::project(&boundary(entry, exit, vec![entry, exit]), &v);
-        assert_eq!(red.boundary_latency_ms, Some(0));
-    }
-
-    fn edge_key(upstream: StageId, downstream: StageId, contract: &str) -> ContractMetricEdgeKey {
-        ContractMetricEdgeKey {
-            upstream,
-            downstream,
-            contract: ContractName::new(contract),
-            selected_event_type: None,
-            feed_role: None,
-        }
-    }
-
-    #[test]
-    fn inbound_edge_rekeys_external_peer_to_the_composite() {
-        let (external, entry, exit) = (StageId::new(), StageId::new(), StageId::new());
-        let mut snap = ContractMetricsSnapshot::default();
-        snap.results_total.insert(
+    fn contracts_require_an_exact_cut_edge_and_preserve_feed_identity() {
+        let (boundary, input, success, _, producer, consumer) = boundary();
+        let mut contracts = ContractMetricsSnapshot::default();
+        let edge = ContractMetricEdgeKey {
+            upstream: producer,
+            downstream: input,
+            contract: ContractName::new("TransportContract"),
+            selected_event_type: Some(EventType::from("checkout.command.v1")),
+            feed_role: Some(SystemFeedRole::Input),
+        };
+        contracts.results_total.insert(
             ContractMetricResultKey {
-                edge: edge_key(external, entry, "TransportContract"),
+                edge: edge.clone(),
                 status: ContractResultStatusLabel::Passed,
             },
-            20,
+            3,
         );
-        let out = CompositeContract::project(&boundary(entry, exit, vec![entry, exit]), &snap);
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0].peer, external);
-        assert_eq!(out[0].direction, BoundaryDirection::Inbound);
+        // Touching a boundary member is insufficient: this internal edge is
+        // absent from the durable cut and must not be relabelled.
+        contracts.results_total.insert(
+            ContractMetricResultKey {
+                edge: ContractMetricEdgeKey {
+                    upstream: input,
+                    downstream: success,
+                    ..edge
+                },
+                status: ContractResultStatusLabel::Passed,
+            },
+            99,
+        );
+
+        let projected = CompositeContract::project(&boundary, &contracts);
+        assert_eq!(projected.len(), 1);
+        assert_eq!(projected[0].port, "commands");
+        assert_eq!(projected[0].peer, producer);
         assert_eq!(
-            out[0].results,
-            vec![(
-                ContractName::new("TransportContract"),
-                ContractResultStatusLabel::Passed,
-                20
-            )]
+            projected[0].selected_event_type,
+            Some(EventType::from("checkout.command.v1"))
         );
+        assert_eq!(projected[0].feed_role, Some(SystemFeedRole::Input));
+        assert_eq!(projected[0].results[0].2, 3);
+        assert_ne!(consumer, producer);
+    }
+
+    fn exit_event(
+        boundary: &CompositeBoundary,
+        exit_member: StageId,
+        event_type: &str,
+        entered_at_ms: u64,
+        exited_at_ms: u64,
+    ) -> ChainEvent {
+        let mut entry = ChainEventFactory::data_event(
+            WriterId::Stage(StageId::new()),
+            "checkout.command.v1",
+            json!({}),
+        );
+        entry.processing_info.event_time = entered_at_ms;
+        let activation = entry.id;
+        entry.add_composite_activation(CompositeActivationContext::new(
+            boundary.composite_id.clone(),
+            activation,
+            "commands",
+            entered_at_ms,
+        ));
+        let mut exit =
+            ChainEventFactory::data_event(WriterId::Stage(exit_member), event_type, json!({}));
+        exit.processing_info.event_time = exited_at_ms;
+        exit.merge_composite_activations_from(&entry);
+        exit
     }
 
     #[test]
-    fn outbound_edge_rekeys_and_carries_seq() {
-        let (entry, exit, external) = (StageId::new(), StageId::new(), StageId::new());
-        let mut snap = ContractMetricsSnapshot::default();
-        snap.results_total.insert(
-            ContractMetricResultKey {
-                edge: edge_key(exit, external, "SinkContract"),
-                status: ContractResultStatusLabel::Passed,
-            },
-            5,
-        );
-        snap.reader_seq
-            .insert(edge_key(exit, external, "SinkContract"), 55);
-        snap.advertised_writer_seq
-            .insert(edge_key(exit, external, "SinkContract"), 55);
-        let out = CompositeContract::project(&boundary(entry, exit, vec![entry, exit]), &snap);
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0].direction, BoundaryDirection::Outbound);
-        assert_eq!(out[0].peer, external);
-        assert_eq!(out[0].reader_seq, Some(55));
-        assert_eq!(out[0].advertised_writer_seq, Some(55));
-    }
+    fn duration_is_exact_replay_idempotent_and_negative_time_is_invalid() {
+        let (boundary, _, success, failed, _, _) = boundary();
+        let valid = exit_event(&boundary, success, "checkout.completed.v1", 1_000, 1_250);
+        let mut second_exit = valid.clone();
+        second_exit.id = EventId::new();
+        second_exit.processing_info.event_time = 1_300;
+        let invalid = exit_event(&boundary, failed, "checkout.failed.v1", 2_000, 1_900);
+        let mut accumulator = CompositeDurationAccumulator::new(vec![0.1, 0.25, 1.0]);
+        accumulator.observe_event(std::slice::from_ref(&boundary), success, &valid);
+        accumulator.observe_event(std::slice::from_ref(&boundary), success, &valid);
+        accumulator.observe_event(std::slice::from_ref(&boundary), success, &second_exit);
+        accumulator.observe_event(std::slice::from_ref(&boundary), failed, &invalid);
 
-    #[test]
-    fn internal_edges_between_members_are_skipped() {
-        let (entry, mid, exit) = (StageId::new(), StageId::new(), StageId::new());
-        let mut snap = ContractMetricsSnapshot::default();
-        snap.results_total.insert(
-            ContractMetricResultKey {
-                edge: edge_key(entry, mid, "Internal"),
-                status: ContractResultStatusLabel::Passed,
-            },
-            9,
-        );
-        snap.results_total.insert(
-            ContractMetricResultKey {
-                edge: edge_key(mid, exit, "Internal"),
-                status: ContractResultStatusLabel::Passed,
-            },
-            9,
-        );
-        let out = CompositeContract::project(&boundary(entry, exit, vec![entry, mid, exit]), &snap);
-        assert!(out.is_empty());
-    }
-
-    #[test]
-    fn violation_cause_survives_the_projection() {
-        let (external, entry, exit) = (StageId::new(), StageId::new(), StageId::new());
-        let mut snap = ContractMetricsSnapshot::default();
-        snap.violations_total.insert(
-            ContractMetricViolationKey {
-                edge: edge_key(external, entry, "TransportContract"),
-                cause: ContractViolationCauseLabel::new("seq_divergence"),
-            },
-            2,
-        );
-        let out = CompositeContract::project(&boundary(entry, exit, vec![entry, exit]), &snap);
-        assert_eq!(out.len(), 1);
+        let histograms = accumulator.histograms();
+        assert_eq!(histograms.len(), 1);
+        assert_eq!(histograms[0].entry_port, "commands");
+        assert_eq!(histograms[0].exit_port, "completed");
+        assert_eq!(histograms[0].count, 2);
+        assert!((histograms[0].sum_seconds - 0.55).abs() < f64::EPSILON * 4.0);
         assert_eq!(
-            out[0].violations,
-            vec![(
-                ContractName::new("TransportContract"),
-                ContractViolationCauseLabel::new("seq_divergence"),
-                2
-            )]
+            histograms[0]
+                .buckets
+                .iter()
+                .map(|bucket| bucket.cumulative_count)
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2]
         );
+
+        let invalid = accumulator.invalid_evidence();
+        assert_eq!(invalid.len(), 1);
+        assert_eq!(invalid[0].exit_port, "failed");
+        assert_eq!(invalid[0].reason, "exit_precedes_entry");
+        assert_eq!(invalid[0].total, 1);
+    }
+
+    #[test]
+    fn duration_excludes_signals_unmatched_data_and_internal_member_output() {
+        let (boundary, input, success, _, _, _) = boundary();
+        let mut unmatched = exit_event(&boundary, success, "internal.fact.v1", 10, 20);
+        unmatched.content = ChainEventContent::Delivery(
+            crate::event::payloads::delivery_payload::DeliveryPayload::success(
+                crate::event::payloads::delivery_payload::DeliveryMethod::Noop,
+                None,
+            ),
+        );
+        let internal = exit_event(&boundary, input, "checkout.command.v1", 10, 20);
+        let mut accumulator = CompositeDurationAccumulator::default();
+        accumulator.observe_event(std::slice::from_ref(&boundary), success, &unmatched);
+        accumulator.observe_event(std::slice::from_ref(&boundary), input, &internal);
+        assert!(accumulator.histograms().is_empty());
+        assert!(accumulator.invalid_evidence().is_empty());
     }
 }

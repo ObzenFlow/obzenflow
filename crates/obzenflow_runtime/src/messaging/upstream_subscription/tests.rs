@@ -3,9 +3,9 @@
 // https://obzenflow.dev
 
 use super::{
-    ContractConfig, ContractStatus, ContractsWiring, DeliveredCount, FeedIdentity, PollResult,
-    ReaderProgress, ReaderSelectionPolicy, SelectedFeedMetadata, SelectedFeedRole,
-    StageInputPosition, UpstreamSubscription,
+    CompositeEntrySpec, ContractConfig, ContractStatus, ContractsWiring, DeliveredCount,
+    FeedIdentity, PollResult, ReaderProgress, ReaderSelectionPolicy, SelectedFeedMetadata,
+    SelectedFeedRole, StageInputPosition, UpstreamSubscription,
 };
 use crate::control_plane::{ControlPlaneProvider, NoControlPlane};
 use async_trait::async_trait;
@@ -26,7 +26,7 @@ use obzenflow_core::event::types::{
 };
 use obzenflow_core::event::vector_clock::VectorClock;
 use obzenflow_core::event::{ChainEvent, ChainEventContent, ChainEventFactory};
-use obzenflow_core::id::JournalId;
+use obzenflow_core::id::{CompositeId, JournalId};
 use obzenflow_core::journal::journal_error::JournalError;
 use obzenflow_core::journal::journal_owner::JournalOwner;
 use obzenflow_core::journal::journal_reader::JournalReader;
@@ -1565,6 +1565,60 @@ async fn transport_only_filters_unselected_data_and_reconciles_selected_writer_s
             && *advertised_writer_seq == Some(SeqNo(1))
             && reason.is_none()
     )));
+}
+
+#[tokio::test]
+async fn matching_input_boundary_delivery_stamps_exact_replayable_activation() {
+    let upstream_stage = StageId::new();
+    let upstream_journal: Arc<dyn Journal<ChainEvent>> =
+        Arc::new(TestJournal::new(JournalOwner::stage(upstream_stage)));
+    let writer_id = WriterId::Stage(upstream_stage);
+
+    let mut ignored = ChainEventFactory::data_event(writer_id, "checkout.other.v1", json!({}));
+    ignored.processing_info.event_time = 100;
+    upstream_journal.append(ignored, None).await.unwrap();
+
+    let mut admitted = ChainEventFactory::data_event(writer_id, "checkout.command.v1", json!({}));
+    admitted.processing_info.event_time = 123;
+    let admitted_id = admitted.id;
+    upstream_journal.append(admitted, None).await.unwrap();
+
+    let upstreams = [(upstream_stage, "upstream".to_string(), upstream_journal)];
+    let mut entries = HashMap::new();
+    entries.insert(
+        upstream_stage,
+        vec![CompositeEntrySpec {
+            composite_id: CompositeId::new("saga:checkout"),
+            port_name: "commands".to_string(),
+            event_types: vec![EventType::from("checkout.command.v1")],
+        }],
+    );
+    let mut subscription = UpstreamSubscription::new_with_names("test_owner", &upstreams)
+        .await
+        .unwrap()
+        .with_composite_entries(entries);
+    let mut progress = [ReaderProgress::new(upstream_stage)];
+
+    let PollResult::Event(ignored) = subscription
+        .poll_next_with_state("test_fsm", Some(&mut progress))
+        .await
+    else {
+        panic!("expected ignored Data delivery");
+    };
+    assert!(ignored.event.composite_activations().is_empty());
+
+    let PollResult::Event(admitted) = subscription
+        .poll_next_with_state("test_fsm", Some(&mut progress))
+        .await
+    else {
+        panic!("expected boundary Data delivery");
+    };
+    assert_eq!(admitted.event.composite_activations().len(), 1);
+    let activation = &admitted.event.composite_activations()[0];
+    assert_eq!(activation.composite_id, CompositeId::new("saga:checkout"));
+    assert_eq!(activation.activation, admitted_id);
+    assert_eq!(activation.entry_port, "commands");
+    assert_eq!(activation.entered_at_ms, 123);
 }
 
 #[tokio::test]

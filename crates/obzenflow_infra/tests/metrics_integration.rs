@@ -94,6 +94,7 @@ fn make_empty_context(
         system_id,
         stage_metadata: single_stage_metadata(stage_id),
         composite_boundaries: Vec::new(),
+        composite_durations: obzenflow_core::metrics::CompositeDurationAccumulator::default(),
     }
 }
 

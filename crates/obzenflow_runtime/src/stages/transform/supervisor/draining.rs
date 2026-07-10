@@ -129,12 +129,15 @@ async fn dispatch_draining_inner<
                 "transform: draining received event from subscription"
             );
 
-            ctx.instrumentation.record_consumed(&envelope);
-
             let upstream_stage = sup
                 .subscription
                 .as_ref()
                 .and_then(|subscription| subscription.last_delivered_upstream_stage());
+            ctx.instrumentation.record_consumed(
+                &envelope,
+                upstream_stage.expect("delivered event must identify its upstream stage"),
+            );
+
             let stage_input_position = sup
                 .subscription
                 .as_ref()

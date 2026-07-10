@@ -15,7 +15,7 @@ pub mod left_join;
 pub mod strict_join;
 
 // Re-export key types
-pub use common::{JoinStrategy, JoinWithStrategy, TypedJoinState};
+pub use common::{JoinStrategy, JoinStrategyOutput, JoinWithStrategy, TypedJoinState};
 pub use inner_join::{InnerJoin, InnerJoinBuilder};
 pub use left_join::{LeftJoin, LeftJoinBuilder};
 pub use strict_join::{StrictJoin, StrictJoinBuilder};

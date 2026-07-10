@@ -22,7 +22,7 @@ use std::sync::Arc;
 
 use super::fsm::{
     MetricsAggregatorAction, MetricsAggregatorContext, MetricsAggregatorEvent,
-    MetricsAggregatorState,
+    MetricsAggregatorState, MetricsJournalKind,
 };
 
 const IDLE_BACKOFF_MS: u64 = 10;
@@ -288,6 +288,12 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
                     result = data_recv => {
                         match result {
                             PollResult::Event(envelope) => {
+                                let journal_stage = data_subscription
+                                    .as_ref()
+                                    .and_then(|subscription| {
+                                        subscription.last_delivered_upstream_stage()
+                                    })
+                                    .expect("delivered metrics event must identify its journal");
                                 let kind = if envelope.event.is_control() {
                                     "control"
                                 } else if envelope.event.is_system() {
@@ -310,6 +316,8 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
                                     directive = Ok(EventLoopDirective::Transition(
                                         MetricsAggregatorEvent::ProcessBatch {
                                             events: vec![envelope],
+                                            journal_kind: MetricsJournalKind::Data,
+                                            journal_stage,
                                         },
                                     ));
                                 }
@@ -341,6 +349,12 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
                     result = error_recv => {
                         match result {
                             Ok(Some(envelope)) => {
+                                let journal_stage = error_subscription
+                                    .as_ref()
+                                    .and_then(|subscription| {
+                                        subscription.last_delivered_upstream_stage()
+                                    })
+                                    .expect("delivered metrics event must identify its journal");
                                 tracing::debug!(
                                     event_id = %envelope.event.id(),
                                     event_type = envelope.event.event_type(),
@@ -354,6 +368,8 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
                                     directive = Ok(EventLoopDirective::Transition(
                                         MetricsAggregatorEvent::ProcessBatch {
                                             events: vec![envelope],
+                                            journal_kind: MetricsJournalKind::Error,
+                                            journal_stage,
                                         },
                                     ));
                                 }
@@ -439,6 +455,9 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
                 if let Some(sub) = data_subscription.as_mut() {
                     match sub.poll_next_with_state(state.variant_name(), None).await {
                         PollResult::Event(envelope) => {
+                            let journal_stage = sub
+                                .last_delivered_upstream_stage()
+                                .expect("delivered metrics event must identify its journal");
                             let kind = if envelope.event.is_control() {
                                 "control"
                             } else if envelope.event.is_system() {
@@ -466,6 +485,8 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
                             return Ok(EventLoopDirective::Transition(
                                 MetricsAggregatorEvent::ProcessBatch {
                                     events: vec![envelope],
+                                    journal_kind: MetricsJournalKind::Data,
+                                    journal_stage,
                                 },
                             ));
                         }
@@ -490,6 +511,9 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
                 if let Some(sub) = error_subscription.as_mut() {
                     match sub.poll_next_with_state(state.variant_name(), None).await {
                         PollResult::Event(envelope) => {
+                            let journal_stage = sub
+                                .last_delivered_upstream_stage()
+                                .expect("delivered metrics event must identify its journal");
                             tracing::debug!(
                                 event_id = %envelope.event.id(),
                                 event_type = envelope.event.event_type(),
@@ -508,6 +532,8 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
                             return Ok(EventLoopDirective::Transition(
                                 MetricsAggregatorEvent::ProcessBatch {
                                     events: vec![envelope],
+                                    journal_kind: MetricsJournalKind::Error,
+                                    journal_stage,
                                 },
                             ));
                         }
@@ -704,6 +730,7 @@ mod tests {
             system_id,
             stage_metadata: HashMap::new(),
             composite_boundaries: Vec::new(),
+            composite_durations: obzenflow_core::metrics::CompositeDurationAccumulator::default(),
         };
 
         let _ = SelfSupervisedExt::run(supervisor, MetricsAggregatorState::Initializing, ctx).await;

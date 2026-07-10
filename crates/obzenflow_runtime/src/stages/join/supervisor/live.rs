@@ -152,7 +152,11 @@ async fn handle_reference_envelope<
     let Some(subscription) = sup.reference_subscription.as_mut() else {
         return Ok(None);
     };
-    ctx.instrumentation.record_consumed(&envelope);
+    let delivered_upstream_stage = subscription
+        .last_delivered_upstream_stage()
+        .expect("delivered event must identify its upstream stage");
+    ctx.instrumentation
+        .record_consumed(&envelope, delivered_upstream_stage);
     ctx.instrumentation
         .event_loops_with_work_total
         .fetch_add(1, Ordering::Relaxed);
@@ -493,7 +497,11 @@ async fn handle_stream_envelope<
     let Some(subscription) = sup.stream_subscription.as_mut() else {
         return Ok(None);
     };
-    ctx.instrumentation.record_consumed(&envelope);
+    let delivered_upstream_stage = subscription
+        .last_delivered_upstream_stage()
+        .expect("delivered event must identify its upstream stage");
+    ctx.instrumentation
+        .record_consumed(&envelope, delivered_upstream_stage);
     ctx.instrumentation
         .event_loops_with_work_total
         .fetch_add(1, Ordering::Relaxed);

@@ -207,6 +207,16 @@ impl OutputCommitter<'_> {
 
         let mut event = event;
 
+        // One-to-one handlers frequently author a fresh typed event and rely
+        // on the commit seam for integration metadata. Fan-in accumulators
+        // author their exact union before this point, so only apply the parent
+        // fallback when no per-output activation provenance exists.
+        if event.composite_activations().is_empty() {
+            if let Some(parent) = parent {
+                event.merge_composite_activations_from(&parent.event);
+            }
+        }
+
         if let Some(flow_context) = self.flow_context {
             event = event.with_flow_context(flow_context.clone());
             if intent.runs_output_commit_hooks() && !self.observer_scope.is_deterministic_replay() {

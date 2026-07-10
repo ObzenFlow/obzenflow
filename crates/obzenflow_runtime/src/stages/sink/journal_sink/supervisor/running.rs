@@ -101,7 +101,11 @@ pub(super) async fn dispatch_running<
                 event_id = ?envelope.event.id,
                 "sink: poll_next returned Event"
             );
-            ctx.instrumentation.record_consumed(&envelope);
+            let delivered_upstream_stage = subscription
+                .last_delivered_upstream_stage()
+                .expect("delivered event must identify its upstream stage");
+            ctx.instrumentation
+                .record_consumed(&envelope, delivered_upstream_stage);
             ctx.instrumentation
                 .event_loops_with_work_total
                 .fetch_add(1, Ordering::Relaxed);
@@ -853,7 +857,8 @@ async fn dispatch_data_event<
                     );
 
                     if error_event.is_data() {
-                        ctx.instrumentation.record_output_event(&error_event);
+                        ctx.instrumentation
+                            .record_error_journal_output_event(&error_event);
                     }
 
                     ctx.error_journal

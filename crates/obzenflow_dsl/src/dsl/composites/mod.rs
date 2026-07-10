@@ -21,7 +21,7 @@ use crate::dsl::composition::{
 use crate::dsl::stage_descriptor::StageDescriptor;
 use crate::dsl::typing::TypeHint;
 use crate::dsl::FlowBuildError;
-use obzenflow_topology::{EdgeKind, StageSubgraphMembership};
+use obzenflow_topology::{CompositePortRef, EdgeKind, StageSubgraphMembership};
 use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone)]
@@ -49,6 +49,17 @@ pub struct TopologySubgraphSpec {
     pub kind_extension: Option<serde_json::Value>,
 }
 
+/// Port annotations retained when a composite binding is rewritten to its
+/// physical member edge. This is the hand-off from type-directed DSL
+/// resolution to the durable topology manifest (FLOWIP-128a B3).
+#[derive(Debug, Clone)]
+pub struct BoundaryEdgeBindingSpec {
+    pub from_stage: String,
+    pub to_stage: String,
+    pub kind: EdgeKind,
+    pub ports: Vec<CompositePortRef>,
+}
+
 #[derive(Default)]
 pub struct LoweringArtifacts {
     pub stage_subgraphs: HashMap<String, StageSubgraphMembership>,
@@ -59,6 +70,8 @@ pub struct LoweringArtifacts {
     /// Composite boundaries keyed by binding, for join-reference resolution
     /// (A4) and boundary diagnostics.
     pub boundaries: HashMap<String, ResolvedBoundary>,
+    /// Named port identities on rewritten physical boundary edges (B3).
+    pub boundary_edges: Vec<BoundaryEdgeBindingSpec>,
 }
 
 fn build_error(message: String) -> FlowBuildError {
@@ -150,8 +163,9 @@ pub fn lower_composites(
     let mut artifacts = LoweringArtifacts::default();
 
     // Capture manifest data, then merge member stages and internal edges.
-    for (binding, expansion) in expansions {
+    for (binding, mut expansion) in expansions {
         let subgraph_id = format!("{}:{binding}", expansion.kind);
+        expansion.boundary.subgraph_id = subgraph_id.clone();
 
         let mut member_stage_names = Vec::with_capacity(expansion.members.len());
         let mut entry_stage_names = Vec::new();
@@ -193,7 +207,7 @@ pub fn lower_composites(
             .collect();
 
         artifacts.subgraphs.push(TopologySubgraphSpec {
-            subgraph_id,
+            subgraph_id: subgraph_id.clone(),
             kind: expansion.kind.to_string(),
             binding: binding.clone(),
             label: binding.clone(),
@@ -232,9 +246,15 @@ pub fn lower_composites(
     // default fallback; ambiguity fails loud. Backward edges use the same
     // rule. Targets are rewritten first so composite-to-composite edges see
     // the resolved member when the source side looks up its hint.
-    for (from, to, _kind) in connections.iter_mut() {
+    for (from, to, kind) in connections.iter_mut() {
+        let mut ports = Vec::new();
         if let Some(boundary) = artifacts.boundaries.get(to.as_str()) {
-            *to = boundary.input().stage_name.clone();
+            let input = boundary.input();
+            ports.push(CompositePortRef::new(
+                boundary.subgraph_id.clone(),
+                input.name.clone(),
+            ));
+            *to = input.stage_name.clone();
         }
         if let Some(boundary) = artifacts.boundaries.get(from.as_str()) {
             let binding = from.clone();
@@ -257,7 +277,19 @@ pub fn lower_composites(
                     "composite '{binding}': no default output port for downstream '{to}'"
                 )),
             })?;
+            ports.push(CompositePortRef::new(
+                boundary.subgraph_id.clone(),
+                port.name.clone(),
+            ));
             *from = port.stage_name.clone();
+        }
+        if !ports.is_empty() {
+            artifacts.boundary_edges.push(BoundaryEdgeBindingSpec {
+                from_stage: from.clone(),
+                to_stage: to.clone(),
+                kind: *kind,
+                ports,
+            });
         }
     }
 

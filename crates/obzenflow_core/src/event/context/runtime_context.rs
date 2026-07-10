@@ -7,7 +7,7 @@
 use crate::event::identity::journal_writer_id::JournalWriterId;
 use crate::event::status::processing_status::ErrorKind;
 use crate::event::vector_clock::VectorClock;
-use crate::{EventId, WriterId};
+use crate::{EventId, EventType, StageId, WriterId};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -39,6 +39,17 @@ pub struct RuntimeContext {
     /// Total output events emitted by the stage (data/delivery; excludes observability-only events).
     #[serde(default)]
     pub events_emitted_total: u64,
+
+    /// Cumulative committed Data outputs, keyed by exact event type. This is
+    /// the tail-seed for named composite output-port counters (FLOWIP-128a B3).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub data_outputs_by_event_type: Vec<EventTypeCountContext>,
+
+    /// Cumulative selected Data inputs admitted by this stage, keyed by their
+    /// physical upstream and exact event type. The upstream dimension keeps
+    /// internal member traffic out of composite input-port counters.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub data_inputs_by_upstream_event_type: Vec<UpstreamEventTypeCountContext>,
 
     /// Join-only gauge (Live join): number of reference events processed since the last stream event.
     ///
@@ -156,6 +167,19 @@ pub struct RuntimeContext {
     /// Per-effect rate limiter counters, keyed by declared effect type.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub effect_rate_limiters: Vec<EffectRateLimiterContext>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EventTypeCountContext {
+    pub event_type: EventType,
+    pub total: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpstreamEventTypeCountContext {
+    pub upstream: StageId,
+    pub event_type: EventType,
+    pub total: u64,
 }
 
 /// Cumulative circuit breaker metrics for one declared effect (FLOWIP-120c).

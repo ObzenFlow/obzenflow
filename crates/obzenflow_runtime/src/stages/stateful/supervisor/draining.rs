@@ -117,6 +117,9 @@ pub(super) async fn dispatch_draining<
         {
             PollResult::Event(envelope) => {
                 let stage_input_position = subscription.last_delivered_stage_input_position();
+                let delivered_upstream_stage = subscription
+                    .last_delivered_upstream_stage()
+                    .expect("delivered event must identify its upstream stage");
                 if envelope.event.is_data() {
                     ctx.last_input_position = stage_input_position;
                 }
@@ -134,7 +137,8 @@ pub(super) async fn dispatch_draining<
                     }
                     None => ctx.last_consumed_envelope = Some(envelope.clone()),
                 }
-                ctx.instrumentation.record_consumed(&envelope);
+                ctx.instrumentation
+                    .record_consumed(&envelope, delivered_upstream_stage);
 
                 if envelope.event.is_data() {
                     // Accumulate data events during draining, synchronously.
@@ -387,7 +391,8 @@ pub(super) async fn dispatch_draining<
                                             );
 
                                             if out.is_data() {
-                                                ctx.instrumentation.record_output_event(&out);
+                                                ctx.instrumentation
+                                                    .record_error_journal_output_event(&out);
                                                 if let Some(subscription) =
                                                     sup.subscription.as_mut()
                                                 {
@@ -448,7 +453,8 @@ pub(super) async fn dispatch_draining<
                                     // Error events are still data, so record them for transport
                                     // contracts and metrics.
                                     if error_event.is_data() {
-                                        ctx.instrumentation.record_output_event(&error_event);
+                                        ctx.instrumentation
+                                            .record_error_journal_output_event(&error_event);
                                         if let Some(subscription) = sup.subscription.as_mut() {
                                             subscription.track_output_event();
                                         }
@@ -663,7 +669,8 @@ pub(super) async fn dispatch_draining<
                     );
 
                     if event.is_data() {
-                        ctx.instrumentation.record_output_event(&event);
+                        ctx.instrumentation
+                            .record_error_journal_output_event(&event);
                         if let Some(subscription) = sup.subscription.as_mut() {
                             subscription.track_output_event();
                         }

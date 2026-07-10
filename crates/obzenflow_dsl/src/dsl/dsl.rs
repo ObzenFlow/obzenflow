@@ -617,8 +617,8 @@ macro_rules! build_typed_flow {
                 // FLOWIP-128a A4: a reference variable naming a composite
                 // resolves through its boundary by the join's declared
                 // reference type (D1), with default-port fallback.
-                let resolved_ref_name = if name_to_id.contains_key(ref_var.as_str()) {
-                    ref_var.clone()
+                let (resolved_ref_name, resolved_composite_port) = if name_to_id.contains_key(ref_var.as_str()) {
+                    (ref_var.clone(), None)
                 } else if let Some(boundary) =
                     lowering_artifacts.boundaries.get(ref_var.as_str())
                 {
@@ -651,7 +651,13 @@ macro_rules! build_typed_flow {
                             }
                         }
                     })?;
-                    port.stage_name.clone()
+                    (
+                        port.stage_name.clone(),
+                        Some(obzenflow_topology::CompositePortRef::new(
+                            boundary.subgraph_id.clone(),
+                            port.name.clone(),
+                        )),
+                    )
                 } else {
                     return Err(FlowBuildError::StageResourcesFailed(format!(
                         "Join stage '{}' references unknown stage variable '{}'",
@@ -681,11 +687,15 @@ macro_rules! build_typed_flow {
                 // Add topology edge from reference stage to join stage (forward) unless already
                 // declared in the user's explicit topology (e.g. join tuple syntax).
                 if !reference_edge_explicit {
-                    topology_edges.push(DirectedEdge::new(
+                    let mut edge = DirectedEdge::new(
                         to_topology_id(ref_id),
                         topology_id,
                         EdgeKind::Forward,
-                    ));
+                    );
+                    if let Some(port) = resolved_composite_port {
+                        edge = edge.with_composite_ports(vec![port]);
+                    }
+                    topology_edges.push(edge);
                 }
             }
         }
@@ -696,11 +706,21 @@ macro_rules! build_typed_flow {
         for (from, to, kind) in &connections {
             if let (Some(&from_id), Some(&to_id)) =
                 (name_to_id.get(from), name_to_id.get(to)) {
+                let ports = lowering_artifacts
+                    .boundary_edges
+                    .iter()
+                    .find(|binding| {
+                        binding.from_stage == *from
+                            && binding.to_stage == *to
+                            && binding.kind == *kind
+                    })
+                    .map(|binding| binding.ports.clone())
+                    .unwrap_or_default();
                 topology_edges.push(DirectedEdge::new(
                     to_topology_id(from_id),
                     to_topology_id(to_id),
                     *kind,
-                ));
+                ).with_composite_ports(ports));
             }
         }
 
@@ -1975,15 +1995,18 @@ macro_rules! build_typed_flow {
             let annotated_edges: Vec<obzenflow_topology::DirectedEdge> =
                 topology.edges().to_vec();
 
-            Arc::new(
+            let annotated =
                 obzenflow_topology::Topology::new_unvalidated(annotated_stages, annotated_edges)
                     .map_err(FlowBuildError::TopologyValidationFailed)?
                     .with_flow_name($flow_name)
-                    .with_api_version("0.5")
+                    .with_api_version("0.5.1")
                     .with_subgraphs(subgraphs.clone())
                     .populate_derived_stage_annotations()
-                    .derive_edge_typings(),
-            )
+                    .derive_edge_typings();
+            annotated
+                .validate_composite_boundaries()
+                .map_err(FlowBuildError::TopologyValidationFailed)?;
+            Arc::new(annotated)
         };
 
         // Create flow handle using builder pattern
