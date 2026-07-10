@@ -31,7 +31,10 @@ enum ReadStep<T: JournalEvent> {
     Head { head: HeldHead<T>, is_data: bool },
     /// A row consumed from the journal and filtered read-side: it never
     /// becomes a head, takes no ordinal, and is not delivered.
-    Filtered,
+    Filtered {
+        upstream: StageId,
+        completed_data_rows: u64,
+    },
     /// Nothing available from this reader right now.
     Empty,
 }
@@ -96,9 +99,13 @@ where
         self.state.clear_reader_baseline_at_tail(index);
 
         let chain_event = (&envelope.event as &dyn Any).downcast_ref::<ChainEvent>();
+        let is_data = chain_event.map(ChainEvent::is_data).unwrap_or(false);
         if let Some(chain_event) = chain_event {
             if self.transport_filter_skips(chain_event, stage_id) {
-                return Ok(ReadStep::Filtered);
+                return Ok(ReadStep::Filtered {
+                    upstream: stage_id,
+                    completed_data_rows: u64::from(is_data),
+                });
             }
         }
 
@@ -129,7 +136,6 @@ where
             }
             _ => None,
         };
-        let is_data = chain_event.map(ChainEvent::is_data).unwrap_or(false);
         // FLOWIP-120n F18: re-admittable rows own a cross-run-stable sequence;
         // re-authored control rows order by journal position instead.
         let orders_by_own_seq = chain_event
@@ -297,11 +303,17 @@ where
                     );
                     return PollResult::Error(Box::new(e));
                 }
-                Ok(ReadStep::Filtered) => {
-                    // A filtered row is consumed without ending the poll
-                    // cycle, so a run of filtered rows cannot make a poll
-                    // report NoEvents while deliverable events remain.
+                Ok(ReadStep::Filtered {
+                    upstream,
+                    completed_data_rows,
+                }) => {
+                    // One cursor step is one bounded unit of poll work. The
+                    // next dispatch resumes scanning from the next reader.
                     self.state.next_reader_index();
+                    return PollResult::CursorAdvanced {
+                        upstream,
+                        completed_data_rows,
+                    };
                 }
                 Ok(ReadStep::Empty) => {
                     if self.advance_cycle(starting_index) {
@@ -790,6 +802,13 @@ where
             .await
         {
             Err(e) => PollResult::Error(e),
+            Ok(MergeCandidateStatus::CursorAdvanced {
+                upstream,
+                completed_data_rows,
+            }) => PollResult::CursorAdvanced {
+                upstream,
+                completed_data_rows,
+            },
             Ok(MergeCandidateStatus::Quiet) | Ok(MergeCandidateStatus::AllExhausted) => {
                 PollResult::NoEvents
             }
@@ -819,7 +838,16 @@ where
             if self.state.is_reader_eof(index) || self.held_heads[index].is_some() {
                 continue;
             }
-            self.acquire_head(index, fsm_state, reader_progress).await?;
+            if let Some((upstream, completed_data_rows)) =
+                self.acquire_head(index, fsm_state, reader_progress).await?
+            {
+                self.merge_candidate_index = None;
+                self.last_merge_wait = None;
+                return Ok(MergeCandidateStatus::CursorAdvanced {
+                    upstream,
+                    completed_data_rows,
+                });
+            }
         }
 
         let quiet_inputs: Vec<(StageId, String)> = (0..self.readers.len())
@@ -877,7 +905,16 @@ where
                 if self.state.is_reader_eof(index) || self.held_heads[index].is_some() {
                     continue;
                 }
-                self.acquire_head(index, fsm_state, reader_progress).await?;
+                if let Some((upstream, completed_data_rows)) =
+                    self.acquire_head(index, fsm_state, reader_progress).await?
+                {
+                    self.merge_candidate_index = None;
+                    self.last_merge_wait = None;
+                    return Ok(MergeCandidateStatus::CursorAdvanced {
+                        upstream,
+                        completed_data_rows,
+                    });
+                }
             }
             if self.held_head_count() == held_before {
                 break;
@@ -1013,41 +1050,45 @@ where
             .0)
     }
 
-    /// Drain one reader's journal until it presents a head or runs empty.
+    /// Take one bounded read step while acquiring a head.
+    ///
+    /// A filtered row returns its physical completion immediately. It never
+    /// becomes a logical delivery or takes a canonical merge ordinal.
     async fn acquire_head(
         &mut self,
         index: usize,
         fsm_state: &str,
         reader_progress: &mut Option<&mut [ReaderProgress]>,
-    ) -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        loop {
-            match self.read_transport_step(index).await {
-                Err(e) => {
-                    tracing::error!(
-                        target: "flowip-095d",
-                        owner = %self.owner_label,
-                        reader_index = index,
-                        error = %e,
-                        "canonical merge: reader.next() returned Error"
-                    );
-                    return Err(Box::new(e));
-                }
-                Ok(ReadStep::Filtered) => continue,
-                Ok(ReadStep::Empty) => return Ok(()),
-                Ok(ReadStep::Head { head, is_data }) => {
-                    self.note_read_instant(reader_progress, index, is_data);
-                    tracing::debug!(
-                        target: "flowip-095d",
-                        owner = %self.owner_label,
-                        reader_index = index,
-                        fsm_state = fsm_state,
-                        event_type = %head.envelope.event.event_type_name(),
-                        is_authored_eof = head.is_authored_eof,
-                        "canonical merge: acquired head"
-                    );
-                    self.held_heads[index] = Some(head);
-                    return Ok(());
-                }
+    ) -> std::result::Result<Option<(StageId, u64)>, Box<dyn std::error::Error + Send + Sync>> {
+        match self.read_transport_step(index).await {
+            Err(e) => {
+                tracing::error!(
+                    target: "flowip-095d",
+                    owner = %self.owner_label,
+                    reader_index = index,
+                    error = %e,
+                    "canonical merge: reader.next() returned Error"
+                );
+                return Err(Box::new(e));
+            }
+            Ok(ReadStep::Filtered {
+                upstream,
+                completed_data_rows,
+            }) => Ok(Some((upstream, completed_data_rows))),
+            Ok(ReadStep::Empty) => Ok(None),
+            Ok(ReadStep::Head { head, is_data }) => {
+                self.note_read_instant(reader_progress, index, is_data);
+                tracing::debug!(
+                    target: "flowip-095d",
+                    owner = %self.owner_label,
+                    reader_index = index,
+                    fsm_state = fsm_state,
+                    event_type = %head.envelope.event.event_type_name(),
+                    is_authored_eof = head.is_authored_eof,
+                    "canonical merge: acquired head"
+                );
+                self.held_heads[index] = Some(head);
+                Ok(None)
             }
         }
     }

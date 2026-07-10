@@ -21,9 +21,8 @@ pub use exporter::{MetricsExporter, NoOpMetricsExporter};
 pub use percentile::{Percentile, PercentileExt};
 pub use primitives::{Counter, Gauge, Histogram};
 pub use snapshots::{
-    AiChunkingMetricsSnapshot, AppMetricsSnapshot, CompositeMetricsSnapshot, ContractMetricEdgeKey,
-    ContractMetricResultKey, ContractMetricViolationKey, ContractMetricsSnapshot,
-    ContractViolationCauseLabel, FlowLifecycleMetricsSnapshot, FlowMetricsSnapshot,
-    HistogramSnapshot, InfraMetricsSnapshot, JournalMetricsSnapshot, StageInfraMetrics,
-    StageMetadata, StageMetricsSnapshot,
+    AiChunkingMetricsSnapshot, AppMetricsSnapshot, ContractMetricEdgeKey, ContractMetricResultKey,
+    ContractMetricViolationKey, ContractMetricsSnapshot, ContractViolationCauseLabel,
+    FlowLifecycleMetricsSnapshot, FlowMetricsSnapshot, HistogramSnapshot, InfraMetricsSnapshot,
+    JournalMetricsSnapshot, StageInfraMetrics, StageMetadata, StageMetricsSnapshot,
 };

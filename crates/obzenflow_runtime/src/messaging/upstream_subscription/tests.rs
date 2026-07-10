@@ -3,9 +3,9 @@
 // https://obzenflow.dev
 
 use super::{
-    ContractConfig, ContractStatus, ContractsWiring, FeedIdentity, PollResult, ReaderProgress,
-    ReaderSelectionPolicy, SelectedFeedMetadata, SelectedFeedRole, StageInputPosition,
-    UpstreamSubscription,
+    ContractConfig, ContractStatus, ContractsWiring, DeliveredCount, FeedIdentity, PollResult,
+    ReaderProgress, ReaderSelectionPolicy, SelectedFeedMetadata, SelectedFeedRole,
+    StageInputPosition, UpstreamSubscription,
 };
 use crate::control_plane::{ControlPlaneProvider, NoControlPlane};
 use async_trait::async_trait;
@@ -1130,6 +1130,7 @@ async fn drive_subscription_to_eof(
             .await
         {
             PollResult::Event(_env) => continue,
+            PollResult::CursorAdvanced { .. } => continue,
             PollResult::NoEvents => break,
             PollResult::Error(e) => {
                 panic!("poll_next_with_state returned error: {e:?}");
@@ -1320,10 +1321,26 @@ async fn transport_only_skips_observability_events() {
 
     let mut reader_progress = [ReaderProgress::new(upstream_stage)];
 
-    let first = subscription
+    for _ in 0..2 {
+        match subscription
+            .poll_next_with_state("test_fsm", Some(&mut reader_progress[..]))
+            .await
+        {
+            PollResult::CursorAdvanced {
+                upstream,
+                completed_data_rows,
+            } => {
+                assert_eq!(upstream, upstream_stage);
+                assert_eq!(completed_data_rows, 0, "observability is not Data");
+            }
+            other => panic!("expected bounded observability cursor progress, got {other:?}"),
+        }
+    }
+
+    let data = subscription
         .poll_next_with_state("test_fsm", Some(&mut reader_progress[..]))
         .await;
-    match first {
+    match data {
         PollResult::Event(env) => match env.event.content {
             ChainEventContent::Data { .. } => {}
             other => panic!("expected first delivered event to be Data, got {other:?}"),
@@ -1331,10 +1348,24 @@ async fn transport_only_skips_observability_events() {
         other => panic!("expected PollResult::Event, got {other:?}"),
     }
 
-    let second = subscription
+    match subscription
+        .poll_next_with_state("test_fsm", Some(&mut reader_progress[..]))
+        .await
+    {
+        PollResult::CursorAdvanced {
+            upstream,
+            completed_data_rows,
+        } => {
+            assert_eq!(upstream, upstream_stage);
+            assert_eq!(completed_data_rows, 0);
+        }
+        other => panic!("expected trailing observability cursor progress, got {other:?}"),
+    }
+
+    let eof = subscription
         .poll_next_with_state("test_fsm", Some(&mut reader_progress[..]))
         .await;
-    match second {
+    match eof {
         PollResult::Event(env) => match env.event.content {
             ChainEventContent::FlowControl(FlowControlPayload::Eof { .. }) => {}
             other => panic!("expected second delivered event to be EOF, got {other:?}"),
@@ -1397,10 +1428,15 @@ async fn transport_only_filters_unselected_data_and_reconciles_selected_writer_s
     let mut selected_feeds = HashMap::new();
     selected_feeds.insert(
         upstream_stage,
-        vec![SelectedFeedMetadata::new(
-            EventType::from("test.selected.v1"),
-            SelectedFeedRole::Input,
-        )],
+        vec![
+            SelectedFeedMetadata::new(EventType::from("test.selected.v1"), SelectedFeedRole::Input),
+            // A second logical feed shares this same physical reader edge.
+            // It must not multiply completion for the ignored physical row.
+            SelectedFeedMetadata::new(
+                EventType::from("test.second_selected.v1"),
+                SelectedFeedRole::Stream,
+            ),
+        ],
     );
 
     let mut subscription = UpstreamSubscription::new_with_names("test_owner", &upstreams)
@@ -1425,6 +1461,29 @@ async fn transport_only_filters_unselected_data_and_reconciles_selected_writer_s
         .poll_next_with_state("test_fsm", Some(&mut reader_progress[..]))
         .await;
     match first {
+        PollResult::CursorAdvanced {
+            upstream,
+            completed_data_rows,
+        } => {
+            assert_eq!(upstream, upstream_stage);
+            assert_eq!(completed_data_rows, 1);
+        }
+        other => panic!("expected physical cursor completion, got {other:?}"),
+    }
+
+    // Physical completion is not logical delivery: no position, ordinal,
+    // contract read, or receipt state moves for the filtered row.
+    assert_eq!(reader_progress[0].reader_seq, SeqNo(0));
+    assert_eq!(reader_progress[0].receipted_seq, SeqNo(0));
+    assert!(reader_progress[0].last_event_id.is_none());
+    assert_eq!(subscription.delivered_data_count(), 0);
+    assert_eq!(subscription.delivered_counts()[0], DeliveredCount(0));
+    assert_eq!(subscription.last_delivered_stage_input_position(), None);
+
+    let selected = subscription
+        .poll_next_with_state("test_fsm", Some(&mut reader_progress[..]))
+        .await;
+    match selected {
         PollResult::Event(env) => match env.event.content {
             ChainEventContent::Data { event_type, .. } => {
                 assert_eq!(event_type, "test.selected.v1");
@@ -1937,10 +1996,25 @@ async fn transport_only_skips_framework_effect_data_without_stage_input_position
         .transport_only();
     let mut reader_progress = [ReaderProgress::new(upstream_stage)];
 
+    let filtered = subscription
+        .poll_next_with_state("test_fsm", Some(&mut reader_progress[..]))
+        .await;
+    match filtered {
+        PollResult::CursorAdvanced {
+            upstream,
+            completed_data_rows,
+        } => {
+            assert_eq!(upstream, upstream_stage);
+            assert_eq!(completed_data_rows, 1);
+        }
+        other => panic!("expected framework effect physical completion, got {other:?}"),
+    }
+    assert_eq!(subscription.last_delivered_stage_input_position(), None);
+    assert_eq!(reader_progress[0].reader_seq, SeqNo(0));
+
     let first = subscription
         .poll_next_with_state("test_fsm", Some(&mut reader_progress[..]))
         .await;
-
     match first {
         PollResult::Event(env) => match env.event.content {
             ChainEventContent::Data { .. } => {}
@@ -2535,6 +2609,7 @@ async fn eof_kind_fold_is_worst_wins_under_both_arrival_orders() {
         loop {
             match subscription.poll_next_with_state("test_fsm", None).await {
                 PollResult::Event(_) => {}
+                PollResult::CursorAdvanced { .. } => {}
                 PollResult::NoEvents => break,
                 PollResult::Error(e) => panic!("unexpected poll error: {e:?}"),
             }
@@ -2567,6 +2642,7 @@ async fn eof_kind_fold_single_input_is_the_identity() {
     loop {
         match subscription.poll_next_with_state("test_fsm", None).await {
             PollResult::Event(_) => {}
+            PollResult::CursorAdvanced { .. } => {}
             PollResult::NoEvents => break,
             PollResult::Error(e) => panic!("unexpected poll error: {e:?}"),
         }
@@ -2597,6 +2673,7 @@ async fn eof_kind_fold_keeps_the_worst_on_duplicate_eofs_from_one_input() {
     loop {
         match subscription.poll_next_with_state("test_fsm", None).await {
             PollResult::Event(_) => {}
+            PollResult::CursorAdvanced { .. } => {}
             PollResult::NoEvents => break,
             PollResult::Error(e) => panic!("unexpected poll error: {e:?}"),
         }
@@ -2626,6 +2703,7 @@ async fn canonical_merge_forwarded_control_takes_ordinal_without_exhausting() {
     loop {
         match subscription.poll_next_with_state("test_fsm", None).await {
             PollResult::Event(_) => deliveries += 1,
+            PollResult::CursorAdvanced { .. } => {}
             PollResult::NoEvents => break,
             PollResult::Error(e) => panic!("unexpected poll error: {e:?}"),
         }
@@ -2733,6 +2811,7 @@ async fn canonical_merge_filtered_events_take_no_ordinals() {
                 );
                 deliveries += 1;
             }
+            PollResult::CursorAdvanced { .. } => {}
             PollResult::NoEvents => break,
             PollResult::Error(e) => panic!("unexpected poll error: {e:?}"),
         }
@@ -2741,6 +2820,62 @@ async fn canonical_merge_filtered_events_take_no_ordinals() {
     assert_eq!(deliveries, 5);
     // The filtered row took no ordinal: A delivered sel, sel, eof.
     assert_eq!(delivered(&subscription), [3, 2]);
+}
+
+#[tokio::test]
+async fn long_filtered_run_yields_bounded_cursor_progress_before_delivery() {
+    const FILTERED_ROWS: usize = 64;
+
+    let upstream = StageId::new();
+    let journal = Arc::new(SharedTestJournal::new(JournalOwner::stage(upstream)));
+    for _ in 0..FILTERED_ROWS {
+        journal.append_with_clock(merge_data(upstream, "test.unselected"), VectorClock::new());
+    }
+    journal.append_with_clock(merge_data(upstream, "test.selected"), VectorClock::new());
+
+    let upstreams = [(
+        upstream,
+        "upstream".to_string(),
+        journal as Arc<dyn Journal<ChainEvent>>,
+    )];
+    let mut selected = HashMap::new();
+    selected.insert(
+        upstream,
+        vec![SelectedFeedMetadata::new(
+            EventType::from("test.selected"),
+            SelectedFeedRole::Input,
+        )],
+    );
+    let mut subscription = UpstreamSubscription::new_with_names("bounded_filter", &upstreams)
+        .await
+        .expect("subscription")
+        .with_selected_feeds(selected)
+        .transport_only();
+
+    for completed in 0..FILTERED_ROWS {
+        match subscription.poll_next_with_state("test_fsm", None).await {
+            PollResult::CursorAdvanced {
+                upstream: completed_upstream,
+                completed_data_rows,
+            } => {
+                assert_eq!(completed_upstream, upstream);
+                assert_eq!(completed_data_rows, 1);
+            }
+            other => panic!(
+                "filtered poll {completed} should yield cursor progress before scanning on: {other:?}"
+            ),
+        }
+        assert_eq!(subscription.delivered_data_count(), 0);
+        assert_eq!(subscription.last_delivered_stage_input_position(), None);
+    }
+
+    match subscription.poll_next_with_state("test_fsm", None).await {
+        PollResult::Event(envelope) => {
+            assert_eq!(envelope.event.event_type(), "test.selected");
+        }
+        other => panic!("selected row should eventually deliver: {other:?}"),
+    }
+    assert_eq!(subscription.delivered_data_count(), 1);
 }
 
 #[tokio::test]
@@ -2795,6 +2930,7 @@ async fn canonical_merge_skips_reader_telemetry_without_taking_ordinals() {
     loop {
         match subscription.poll_next_with_state("test_fsm", None).await {
             PollResult::Event(envelope) => order.push(envelope.event.event_type()),
+            PollResult::CursorAdvanced { .. } => {}
             PollResult::NoEvents => break,
             PollResult::Error(e) => panic!("unexpected poll error: {e:?}"),
         }
@@ -2833,6 +2969,7 @@ async fn round_robin_transport_only_skips_reader_telemetry() {
     loop {
         match subscription.poll_next_with_state("test_fsm", None).await {
             PollResult::Event(envelope) => order.push(envelope.event.event_type()),
+            PollResult::CursorAdvanced { .. } => {}
             PollResult::NoEvents => break,
             PollResult::Error(e) => panic!("unexpected poll error: {e:?}"),
         }
@@ -2862,6 +2999,7 @@ async fn interleaved_telemetry_does_not_perturb_merged_order() {
         loop {
             match subscription.poll_next_with_state("test_fsm", None).await {
                 PollResult::Event(envelope) => order.push(envelope.event.event_type()),
+                PollResult::CursorAdvanced { .. } => {}
                 PollResult::NoEvents => break,
                 PollResult::Error(e) => panic!("unexpected poll error: {e:?}"),
             }
@@ -3396,6 +3534,7 @@ async fn seq_merge_orders_by_admission_seq_not_arrival() {
                 order.push(envelope.event.event_type());
                 delivering_stage.push(subscription.last_delivered_upstream_stage().unwrap());
             }
+            PollResult::CursorAdvanced { .. } => {}
             PollResult::NoEvents => break,
             PollResult::Error(e) => panic!("unexpected poll error: {e:?}"),
         }

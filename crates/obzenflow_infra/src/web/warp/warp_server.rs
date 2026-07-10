@@ -26,6 +26,9 @@ use obzenflow_core::web::{
     WebServer,
 };
 use obzenflow_core::EventId;
+use obzenflow_runtime::composite::{
+    CompositeDefinition, CompositeLifecycleProjection, CompositeStatus,
+};
 
 use crate::web::endpoint_tags::SURFACE_NAME_TAG_PREFIX;
 use crate::web::routing::{matchit_template_to_public, public_template_to_matchit};
@@ -37,6 +40,8 @@ pub struct WarpServer {
     endpoints: Vec<Arc<dyn HttpEndpoint>>,
     /// Optional system journal for SSE lifecycle events
     system_journal: Option<Arc<dyn Journal<SystemEvent>>>,
+    /// Manifest-derived definitions for the composite lifecycle read model.
+    composite_definitions: Vec<CompositeDefinition>,
     surface_metrics: Option<Arc<HttpSurfaceMetricsCollector>>,
     /// FLOWIP-114d: per-process incarnation identity stamped into the SSE
     /// bootstrap event so browsers detect generation changes on the data path.
@@ -63,6 +68,7 @@ impl WarpServer {
         Self {
             endpoints: Vec::new(),
             system_journal: None,
+            composite_definitions: Vec::new(),
             surface_metrics: None,
             runtime_instance_id: None,
             shutdown: None,
@@ -72,6 +78,11 @@ impl WarpServer {
     /// Attach a system journal to enable SSE lifecycle streaming
     pub fn with_system_journal(&mut self, journal: Arc<dyn Journal<SystemEvent>>) {
         self.system_journal = Some(journal);
+    }
+
+    /// Attach validated composite definitions for lifecycle status projection.
+    pub fn with_composite_definitions(&mut self, definitions: Vec<CompositeDefinition>) {
+        self.composite_definitions = definitions;
     }
 
     /// Attach the per-process incarnation identity (FLOWIP-114d).
@@ -289,6 +300,7 @@ impl WarpServer {
         if let Some(journal) = &self.system_journal {
             let sse_route = self.build_flow_events_route(
                 journal.clone(),
+                self.composite_definitions.clone(),
                 host_policy.clone(),
                 self.runtime_instance_id.clone(),
                 self.shutdown.clone(),
@@ -395,6 +407,7 @@ impl WarpServer {
     fn build_flow_events_route(
         &self,
         system_journal: Arc<dyn Journal<SystemEvent>>,
+        composite_definitions: Vec<CompositeDefinition>,
         host_policy: HostPolicy,
         runtime_instance_id: Option<RuntimeInstanceId>,
         shutdown: Option<tokio::sync::watch::Receiver<bool>>,
@@ -411,6 +424,7 @@ impl WarpServer {
                       last_event_id: Option<String>,
                       journal: Arc<dyn Journal<SystemEvent>>| {
                     let host_policy = host_policy.clone();
+                    let composite_definitions = composite_definitions.clone();
                     let runtime_instance_id = runtime_instance_id.clone();
                     let shutdown = shutdown.clone();
                     async move {
@@ -465,7 +479,8 @@ impl WarpServer {
 
                         let mut middleware_state = MiddlewareSseState::default();
                         let mut stage_lifecycle_state = StageLifecycleSseState::default();
-                        let mut composite_lifecycle_state = CompositeLifecycleSseState::default();
+                        let mut composite_lifecycle_state =
+                            CompositeLifecycleSseState::new(composite_definitions);
                         let mut last_pipeline_event: Option<&'static str> = None;
                         let mut checkpoint_event_id: Option<EventId> = None;
 
@@ -534,6 +549,16 @@ impl WarpServer {
 
                                                 if envelope.event.id == *resume_id {
                                                     resume_seen = true;
+                                                    ready_to_stream = true;
+                                                    // A projected status frame is emitted after its
+                                                    // causative journal frame and has no independent
+                                                    // SSE id. Rebuild and snapshot at the resume
+                                                    // boundary to repair a disconnect between them.
+                                                    for snapshot_ev in composite_lifecycle_state
+                                                        .build_snapshot_sse_events()
+                                                    {
+                                                        let _ = tx.send(Ok(snapshot_ev));
+                                                    }
                                                 }
                                                 continue;
                                             }
@@ -552,13 +577,23 @@ impl WarpServer {
                                     }
 
                                     stage_lifecycle_state.observe(&envelope);
-                                    composite_lifecycle_state.observe(&envelope);
+                                    let composite_update =
+                                        composite_lifecycle_state.observe(&envelope);
                                     last_pipeline_event =
                                         last_pipeline_event_name(&envelope).or(last_pipeline_event);
                                     if let Some(ev) =
                                         map_system_event_to_sse(&envelope, &mut middleware_state)
                                     {
                                         if tx.send(Ok(ev)).is_err() {
+                                            break;
+                                        }
+                                    }
+
+                                    if let Some(snapshot) = composite_update {
+                                        if tx
+                                            .send(Ok(map_composite_status_to_sse(&snapshot)))
+                                            .is_err()
+                                        {
                                             break;
                                         }
                                     }
@@ -639,6 +674,12 @@ impl WarpServer {
                                         for snapshot_ev in stage_lifecycle_state
                                             .build_snapshot_sse_events()
                                             .into_iter()
+                                        {
+                                            let _ = tx.send(Ok(snapshot_ev));
+                                        }
+
+                                        for snapshot_ev in composite_lifecycle_state
+                                            .build_snapshot_sse_events()
                                         {
                                             let _ = tx.send(Ok(snapshot_ev));
                                         }
@@ -2744,67 +2785,6 @@ fn map_system_event_to_sse(
                     .data(data.to_string()),
             )
         }
-        SystemEventType::CompositeLifecycle {
-            composite_id,
-            event: lifecycle,
-        } => {
-            use obzenflow_core::event::system_event::CompositeLifecycleEvent;
-
-            let (event_type, metrics_value, reason, error, at) = match lifecycle {
-                CompositeLifecycleEvent::Running => ("composite_running", None, None, None, None),
-                CompositeLifecycleEvent::Completed { metrics } => (
-                    "composite_completed",
-                    metrics.as_ref().and_then(|m| serde_json::to_value(m).ok()),
-                    None,
-                    None,
-                    None,
-                ),
-                CompositeLifecycleEvent::Cancelled { reason } => (
-                    "composite_cancelled",
-                    None,
-                    Some(reason.clone()),
-                    None,
-                    None,
-                ),
-                CompositeLifecycleEvent::Failed { at, error } => (
-                    "composite_failed",
-                    None,
-                    None,
-                    Some(error.clone()),
-                    Some(at.to_string()),
-                ),
-            };
-
-            let mut data = json!({
-                "system_event_type": "composite_lifecycle",
-                "event_type": event_type,
-                "composite_id": composite_id.to_string(),
-                "timestamp_ms": event.timestamp,
-            });
-
-            if let Some(vc) = &vector_clock_value {
-                data["vector_clock"] = vc.clone();
-            }
-            if let Some(m) = metrics_value {
-                data["metrics"] = m;
-            }
-            if let Some(r) = reason {
-                data["reason"] = serde_json::Value::String(r);
-            }
-            if let Some(e) = error {
-                data["error"] = serde_json::Value::String(e);
-            }
-            if let Some(a) = at {
-                data["at"] = serde_json::Value::String(a);
-            }
-
-            Some(
-                SseEvent::default()
-                    .id(id_str)
-                    .event("composite_lifecycle")
-                    .data(data.to_string()),
-            )
-        }
         SystemEventType::PipelineLifecycle(pipeline_event) => match pipeline_event {
             obzenflow_core::event::system_event::PipelineLifecycleEvent::Starting => {
                 let mut data = json!({
@@ -3520,39 +3500,279 @@ impl StageLifecycleSseState {
     }
 }
 
-/// Bootstraps new SSE clients with each composite's latest lifecycle so the UI
-/// can render composite node status even if it connected after the run finished
-/// (FLOWIP-128a). The composite authors at most one terminal (the fold latch),
-/// so latest-wins is correct.
-#[derive(Default)]
+#[derive(Clone, Debug)]
+struct CompositeStatusSnapshot {
+    composite_id: obzenflow_core::id::CompositeId,
+    status: CompositeStatus,
+    revision: u64,
+    as_of_event_id: Option<EventId>,
+    timestamp_ms: u64,
+}
+
+/// Per-SSE-connection Moore projection over the ordered member lifecycle tape.
+///
+/// The state is disposable and rebuilt from the system journal. Projected
+/// frames never become journal events or independent SSE resume cursors.
 struct CompositeLifecycleSseState {
+    projection: CompositeLifecycleProjection,
     latest_by_composite:
-        std::collections::BTreeMap<obzenflow_core::id::CompositeId, SystemEventEnvelope>,
+        std::collections::BTreeMap<obzenflow_core::id::CompositeId, CompositeStatusSnapshot>,
+    /// Raw system-journal position through which this disposable view has been
+    /// rebuilt. This remains a source cursor; projected frames never own one.
+    as_of_event_id: Option<EventId>,
+    as_of_timestamp_ms: u64,
 }
 
 impl CompositeLifecycleSseState {
-    fn observe(&mut self, envelope: &SystemEventEnvelope) {
+    fn new(definitions: Vec<CompositeDefinition>) -> Self {
+        let projection = CompositeLifecycleProjection::new(definitions)
+            .expect("web-server startup validates composite lifecycle definitions");
+        let latest_by_composite = projection
+            .statuses()
+            .into_iter()
+            .map(|(composite_id, status)| {
+                (
+                    composite_id.clone(),
+                    CompositeStatusSnapshot {
+                        composite_id,
+                        status,
+                        revision: 0,
+                        as_of_event_id: None,
+                        timestamp_ms: 0,
+                    },
+                )
+            })
+            .collect();
+
+        Self {
+            projection,
+            latest_by_composite,
+            as_of_event_id: None,
+            as_of_timestamp_ms: 0,
+        }
+    }
+
+    /// Fold one source fact and return a view update only when status changes.
+    fn observe(&mut self, envelope: &SystemEventEnvelope) -> Option<CompositeStatusSnapshot> {
         use obzenflow_core::event::SystemEventType;
 
-        let SystemEventType::CompositeLifecycle { composite_id, .. } = &envelope.event.event else {
-            return;
+        self.as_of_event_id = Some(envelope.event.id);
+        self.as_of_timestamp_ms = envelope.event.timestamp;
+
+        let SystemEventType::StageLifecycle { stage_id, event } = &envelope.event.event else {
+            return None;
         };
+        let composite_id = self.projection.composite_for_stage(*stage_id)?.clone();
+        let before = self
+            .projection
+            .status(&composite_id)
+            .expect("indexed composite has projection state");
+        let apply_error = self.projection.apply(*stage_id, event).err();
+        let after = self
+            .projection
+            .status(&composite_id)
+            .expect("indexed composite has projection state");
+
+        if before == after {
+            return None;
+        }
+
+        if let Some(error) = apply_error {
+            tracing::error!(
+                composite = %composite_id,
+                stage = %stage_id,
+                error = %error,
+                "Composite lifecycle projection detected an invalid member history"
+            );
+        }
+
+        let snapshot = self
+            .latest_by_composite
+            .get_mut(&composite_id)
+            .expect("projection snapshot exists for every composite");
+        snapshot.status = after;
+        snapshot.revision = snapshot.revision.saturating_add(1);
+        snapshot.as_of_event_id = Some(envelope.event.id);
+        snapshot.timestamp_ms = envelope.event.timestamp;
+        Some(snapshot.clone())
+    }
+
+    fn snapshots(&self) -> Vec<CompositeStatusSnapshot> {
         self.latest_by_composite
-            .insert(composite_id.clone(), envelope.clone());
+            .values()
+            .cloned()
+            .map(|mut snapshot| {
+                snapshot.as_of_event_id = self.as_of_event_id;
+                snapshot.timestamp_ms = self.as_of_timestamp_ms;
+                snapshot
+            })
+            .collect()
     }
 
     fn build_snapshot_sse_events(&self) -> Vec<SseEvent> {
-        // Reuse the live mapping so the snapshot frame is byte-identical to the
-        // streamed one. The middleware state is throwaway (only its vector-clock
-        // side effect matters for middleware events, not composite ones).
-        let mut out = Vec::new();
-        let mut throwaway = MiddlewareSseState::default();
-        for envelope in self.latest_by_composite.values() {
-            if let Some(ev) = map_system_event_to_sse(envelope, &mut throwaway) {
-                out.push(ev);
-            }
+        self.snapshots()
+            .iter()
+            .map(map_composite_status_to_sse)
+            .collect()
+    }
+}
+
+fn map_composite_status_to_sse(snapshot: &CompositeStatusSnapshot) -> SseEvent {
+    SseEvent::default()
+        .event("composite_status")
+        .data(composite_status_payload(snapshot).to_string())
+}
+
+fn composite_status_payload(snapshot: &CompositeStatusSnapshot) -> serde_json::Value {
+    use serde_json::json;
+
+    let (status, reason, error, at) = match &snapshot.status {
+        CompositeStatus::Waiting => ("waiting", None, None, None),
+        CompositeStatus::Running => ("running", None, None, None),
+        CompositeStatus::Completed => ("completed", None, None, None),
+        CompositeStatus::Cancelled { reason } => ("cancelled", Some(reason.clone()), None, None),
+        CompositeStatus::Failed { at, error } => {
+            ("failed", None, Some(error.clone()), Some(at.to_string()))
         }
-        out
+        CompositeStatus::Invalid { error } => ("invalid", None, Some(error.clone()), None),
+    };
+
+    let mut data = json!({
+        "message_type": "composite_status",
+        "composite_id": snapshot.composite_id.to_string(),
+        "status": status,
+        "revision": snapshot.revision,
+        "as_of_event_id": snapshot.as_of_event_id.map(|id| id.to_string()),
+        "timestamp_ms": snapshot.timestamp_ms,
+    });
+    if let Some(reason) = reason {
+        data["reason"] = serde_json::Value::String(reason);
+    }
+    if let Some(error) = error {
+        data["error"] = serde_json::Value::String(error);
+    }
+    if let Some(at) = at {
+        data["at"] = serde_json::Value::String(at);
+    }
+
+    data
+}
+
+#[cfg(test)]
+mod composite_status_projection_tests {
+    use super::*;
+    use crate::journal::MemoryJournal;
+    use obzenflow_core::event::{StageLifecycleEvent, SystemEventType, WriterId};
+    use obzenflow_core::id::{CompositeId, RoleId, StageId, SystemId};
+    use obzenflow_core::journal::Journal;
+    use obzenflow_core::JournalOwner;
+
+    async fn envelope(stage: StageId, event: StageLifecycleEvent) -> SystemEventEnvelope {
+        let system_id = SystemId::new();
+        let journal = MemoryJournal::<SystemEvent>::with_owner(JournalOwner::system(system_id));
+        journal
+            .append(
+                SystemEvent::new(
+                    WriterId::from(system_id),
+                    SystemEventType::StageLifecycle {
+                        stage_id: stage,
+                        event,
+                    },
+                ),
+                None,
+            )
+            .await
+            .unwrap()
+    }
+
+    fn state(map: StageId, finish: StageId) -> CompositeLifecycleSseState {
+        CompositeLifecycleSseState::new(vec![CompositeDefinition::new(
+            CompositeId::new("ai_map_reduce:digest"),
+            vec![(map, RoleId::new("map")), (finish, RoleId::new("finalize"))],
+        )])
+    }
+
+    #[tokio::test]
+    async fn live_updates_are_state_changes_with_source_identity() {
+        let map = StageId::new();
+        let finish = StageId::new();
+        let mut state = state(map, finish);
+
+        let running_envelope = envelope(map, StageLifecycleEvent::Running).await;
+        let running = state
+            .observe(&running_envelope)
+            .expect("first running changes the view");
+        assert_eq!(running.status, CompositeStatus::Running);
+        assert_eq!(running.revision, 1);
+        assert_eq!(running.as_of_event_id, Some(running_envelope.event.id));
+
+        let sibling_running = envelope(finish, StageLifecycleEvent::Running).await;
+        assert!(state.observe(&sibling_running).is_none());
+        let catch_up_snapshot = state.snapshots().pop().unwrap();
+        assert_eq!(catch_up_snapshot.revision, 1);
+        assert_eq!(
+            catch_up_snapshot.as_of_event_id,
+            Some(sibling_running.event.id)
+        );
+
+        let map_completed = envelope(map, StageLifecycleEvent::Completed { metrics: None }).await;
+        assert!(state.observe(&map_completed).is_none());
+
+        let finish_completed = envelope(finish, StageLifecycleEvent::Drained).await;
+        let completed = state
+            .observe(&finish_completed)
+            .expect("all terminal changes the view");
+        assert_eq!(completed.status, CompositeStatus::Completed);
+        assert_eq!(completed.revision, 2);
+
+        let payload = composite_status_payload(&completed);
+        assert_eq!(payload["message_type"], "composite_status");
+        assert_eq!(payload["status"], "completed");
+        assert_eq!(payload["revision"], 2);
+        assert_eq!(
+            payload["as_of_event_id"],
+            finish_completed.event.id.to_string()
+        );
+        assert!(payload.get("system_event_type").is_none());
+    }
+
+    #[tokio::test]
+    async fn contradictory_tape_is_an_explicit_invalid_view() {
+        let map = StageId::new();
+        let finish = StageId::new();
+        let mut state = state(map, finish);
+
+        let completed = envelope(map, StageLifecycleEvent::Completed { metrics: None }).await;
+        assert!(state.observe(&completed).is_none());
+
+        let cancelled = envelope(
+            map,
+            StageLifecycleEvent::Cancelled {
+                reason: "late stop".to_string(),
+                metrics: None,
+            },
+        )
+        .await;
+        let invalid = state
+            .observe(&cancelled)
+            .expect("integrity failure changes the view");
+        assert!(matches!(invalid.status, CompositeStatus::Invalid { .. }));
+        assert_eq!(composite_status_payload(&invalid)["status"], "invalid");
+    }
+
+    #[test]
+    fn fresh_snapshot_includes_waiting_composites_at_revision_zero() {
+        let map = StageId::new();
+        let finish = StageId::new();
+        let state = state(map, finish);
+        let snapshot = state
+            .latest_by_composite
+            .get(&CompositeId::new("ai_map_reduce:digest"))
+            .unwrap();
+
+        assert_eq!(snapshot.status, CompositeStatus::Waiting);
+        assert_eq!(snapshot.revision, 0);
+        assert!(snapshot.as_of_event_id.is_none());
     }
 }
 

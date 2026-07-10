@@ -148,7 +148,6 @@ fn make_context(
         completion_subscription: None,
         metrics_exporter,
         metrics_handle: None,
-        composite_handles: Vec::new(),
         stage_data_journals,
         stage_error_journals: Vec::new(),
         backpressure_registry: None,

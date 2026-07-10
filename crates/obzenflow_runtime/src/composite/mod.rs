@@ -2,19 +2,16 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Per-composite monitor-supervisor (FLOWIP-128a).
+//! Pure composite lifecycle projection (FLOWIP-128a B1).
 //!
-//! Each first-class composite is materialised with its own `CompositeSupervisor`
-//! beside the member stage supervisors. It is a monitor: it watches its members'
-//! `StageLifecycle` through its own system-journal subscription, folds them via
-//! the pure `CompositeRollup`, and authors the composite's own
-//! `CompositeLifecycle` facts. It owns the composite's lifecycle truth and drives
-//! no execution; the PipelineSupervisor stays composite-blind.
+//! Composites are graph abstractions, not executable runtime nodes. Their
+//! lifecycle is therefore a Moore-style view reconstructed from the topology's
+//! member mapping and the ordered `StageLifecycle` input tape. This module owns
+//! that semantic fold and performs no I/O, journalling, scheduling, or runtime
+//! signalling.
 
-pub mod builder;
-pub mod fsm;
-pub mod rollup;
-pub mod supervisor;
+mod projection;
 
-pub use builder::{CompositeSupervisorBuilder, CompositeSupervisorHandle};
-pub use rollup::CompositeRollup;
+pub use projection::{
+    CompositeDefinition, CompositeLifecycleProjection, CompositeProjectionError, CompositeStatus,
+};

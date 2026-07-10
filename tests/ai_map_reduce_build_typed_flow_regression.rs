@@ -8,13 +8,11 @@
 //! Before the closing-PR fix, `build_typed_flow!` built `topology_stages`
 //! from `TopologyStageInfo::new(...)` without `.with_subgraph(...)`, and the
 //! validator's composite-internal-edge skip rule could not fire. Any flow
-//! using `ai_map_reduce!` would surface as a `SingleEdge` mismatch on the
-//! `chunk -> collect` manifest edge (the chunker emits `Chunk`, the collect
-//! stage declares `Partial` as its typed input). This test wires a minimal
+//! using `ai_map_reduce!` would surface its mixed internal selected feeds as a
+//! `SingleEdge` mismatch (the map consumes both chunks and manifests; the
+//! collector consumes forwarded manifests plus tagged partials). This test wires a minimal
 //! `ai_map_reduce!` composite end-to-end through `flow!`, awaits the build,
-//! and asserts `Ok(_)`. Without the fix it returns
-//! `Err(FlowBuildError::EdgeTypingMismatch { kind: SingleEdge, .. })` on the
-//! `digest__chunk -> digest__collect` manifest edge.
+//! and asserts `Ok(_)`.
 //!
 //! The handlers below are stubs: the source emits no events, the transforms
 //! return empty vectors, the sink is a no-op. The test only exercises the
@@ -242,7 +240,7 @@ impl TransformTyping for RuntimeChunker {
 #[async_trait]
 impl TransformHandler for RuntimeChunker {
     fn process(&self, event: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> {
-        let chunk_count = 2;
+        let chunk_count = 5;
         let mut out = Vec::new();
         for chunk_index in 0..chunk_count {
             out.push(ChainEventFactory::derived_data_event(
@@ -322,12 +320,12 @@ impl AsyncTransformHandler for RuntimeFinalize {
 #[tokio::test]
 async fn build_typed_flow_accepts_ai_map_reduce_with_subgraph_attached() {
     // The build is the assertion. If `validate_edge_typing` ran against a
-    // topology without composite subgraph membership, the `chunk -> collect`
-    // manifest edge would surface as
+    // topology without composite subgraph membership, the mixed selected
+    // internal feeds would surface as
     // `FlowBuildError::EdgeTypingMismatch { kind: SingleEdge, .. }` and this
     // `.await` would resolve to `Err`. With the FLOWIP-114c closing-PR fix in
     // `build_typed_flow!`, subgraph membership is attached before the
-    // validator runs and the four composite-internal edges are skipped.
+    // validator runs and the three composite-internal edges are recognized.
     let result = flow! {
         name: "amr_build_only",
         journals: memory_journals(),
@@ -377,6 +375,8 @@ async fn ai_map_reduce_runtime_commits_framework_internal_transport_events() {
         name: "amr_runtime_internal_contracts",
         journals: memory_journals(),
         middleware: [],
+        backpressure: obzenflow_dsl::dsl::backpressure_clause::enforced(2)
+            .stall_timeout_ms(3_000),
 
         stages: {
             seed = source!(BuildOnlySeed => OneSeedSource::new());
@@ -403,10 +403,11 @@ async fn ai_map_reduce_runtime_commits_framework_internal_transport_events() {
     .await
     .expect("ai_map_reduce runtime flow should build");
 
-    handle
-        .run()
+    let metrics = handle
+        .run_with_metrics()
         .await
-        .expect("ai_map_reduce should commit planning manifests and tagged partials");
+        .expect("ai_map_reduce should commit planning manifests and tagged partials")
+        .expect("test flow should expose its terminal metrics snapshot");
 
     assert_eq!(
         delivered.load(Ordering::SeqCst),
@@ -415,9 +416,33 @@ async fn ai_map_reduce_runtime_commits_framework_internal_transport_events() {
     );
     assert_eq!(
         total.load(Ordering::SeqCst),
-        3,
+        15,
         "collector should route tagged partials and finalise their sum"
     );
+
+    let rendered = metrics
+        .render_metrics()
+        .expect("terminal backpressure metrics should render");
+    let in_flight: Vec<&str> = rendered
+        .lines()
+        .filter(|line| {
+            line.starts_with("obzenflow_backpressure_in_flight{")
+                && line.contains("flow=\"amr_runtime_internal_contracts\"")
+        })
+        .collect();
+    assert!(
+        !in_flight.is_empty(),
+        "window-2 run should export physical edge debt"
+    );
+    for line in in_flight {
+        let debt = line
+            .split_whitespace()
+            .last()
+            .expect("metric value")
+            .parse::<u64>()
+            .expect("integer in-flight value");
+        assert_eq!(debt, 0, "terminal physical debt must be zero: {line}");
+    }
 }
 
 /// FLOWIP-128a D1 diagnostics: a downstream whose type no boundary port

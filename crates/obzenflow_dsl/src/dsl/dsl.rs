@@ -552,9 +552,9 @@ macro_rules! build_typed_flow {
         // entries passed to `validate_edge_typing` carry `subgraph_id`.
         // Without this, the validator's composite-internal-edge skip rule
         // cannot fire (it reads `topology.stage_info(...).subgraph`), and
-        // any flow using `ai_map_reduce!` would surface as a SingleEdge
-        // mismatch on the `chunk -> collect` manifest edge at the validator
-        // boundary. The same map is reused downstream when assembling the
+        // any flow using `ai_map_reduce!` would surface its mixed internal
+        // selected feeds as a SingleEdge mismatch at the validator boundary.
+        // The same map is reused downstream when assembling the
         // annotated topology returned to the caller.
         let mut subgraph_membership_map: HashMap<StageId, obzenflow_topology::StageSubgraphMembership> =
             HashMap::new();

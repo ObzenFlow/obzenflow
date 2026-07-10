@@ -6,8 +6,8 @@
 //! composite (`chunk`, `map`, `collect`, `finalize`, `compensate`, ...).
 //!
 //! A stable string id with the locked grammar `[a-z][a-z0-9_]*`, unique per
-//! composite (FLOWIP-128a D2). It names the member that a composite lifecycle
-//! `Failed { at }` fact points at, resolved by the supervisor from manifest
+//! composite (FLOWIP-128a D2). It names the member attributed by a failed
+//! composite status, resolved by the lifecycle projection from manifest
 //! membership.
 
 use serde::{Deserialize, Serialize};

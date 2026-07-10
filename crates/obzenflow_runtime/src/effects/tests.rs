@@ -3,11 +3,14 @@
 // https://obzenflow.dev
 
 use super::*;
+use crate::backpressure::{BackpressurePlan, BackpressureRegistry};
+use crate::id_conversions::StageIdExt;
 use obzenflow_core::event::{EventEnvelope, JournalEvent};
 use obzenflow_core::journal::{JournalError, JournalReader};
 use obzenflow_core::{JournalId, JournalOwner, JournalWriterId, TypedPayload};
-use obzenflow_topology::TypeHintInfo;
+use obzenflow_topology::{TopologyBuilder, TypeHintInfo};
 use serde_json::json;
+use std::num::NonZeroU64;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 
@@ -100,6 +103,89 @@ impl<T: JournalEvent + 'static> Journal<T> for MemoryJournal<T> {
         let start = events.len().saturating_sub(count);
         Ok(events[start..].iter().rev().cloned().collect())
     }
+}
+
+struct InspectingFailJournal {
+    id: JournalId,
+    owner: JournalOwner,
+    registry: BackpressureRegistry,
+    upstream: StageId,
+    downstream: StageId,
+}
+
+#[async_trait]
+impl Journal<ChainEvent> for InspectingFailJournal {
+    fn id(&self) -> &JournalId {
+        &self.id
+    }
+
+    fn owner(&self) -> Option<&JournalOwner> {
+        Some(&self.owner)
+    }
+
+    async fn append(
+        &self,
+        event: ChainEvent,
+        _parent: Option<&EventEnvelope<ChainEvent>>,
+    ) -> Result<EventEnvelope<ChainEvent>, JournalError> {
+        assert!(event.is_data());
+        assert_eq!(
+            self.registry.edge_in_flight(self.upstream, self.downstream),
+            Some(1),
+            "direct Data must reserve its physical row before append"
+        );
+        Err(JournalError::Implementation {
+            message: "injected append failure".to_string(),
+            source: "test journal rejected append".into(),
+        })
+    }
+
+    async fn read_all_unordered(&self) -> Result<Vec<EventEnvelope<ChainEvent>>, JournalError> {
+        Ok(Vec::new())
+    }
+
+    async fn read_event(
+        &self,
+        _event_id: &EventId,
+    ) -> Result<Option<EventEnvelope<ChainEvent>>, JournalError> {
+        Ok(None)
+    }
+
+    async fn reader_from(
+        &self,
+        _position: u64,
+    ) -> Result<Box<dyn JournalReader<ChainEvent>>, JournalError> {
+        Err(JournalError::Implementation {
+            message: "failing append journal has no reader".to_string(),
+            source: "test-only journal".into(),
+        })
+    }
+
+    async fn read_last_n(
+        &self,
+        _count: usize,
+    ) -> Result<Vec<EventEnvelope<ChainEvent>>, JournalError> {
+        Ok(Vec::new())
+    }
+}
+
+fn effect_backpressure_fixture(window: u64) -> (BackpressureRegistry, StageId, StageId) {
+    let mut builder = TopologyBuilder::new();
+    let upstream_top = builder.add_stage(Some("effect_stage".to_string()));
+    let downstream_top = builder.add_stage(Some("downstream".to_string()));
+    let topology = builder.build_unchecked().expect("topology");
+    let upstream = StageId::from_topology_id(upstream_top);
+    let downstream = StageId::from_topology_id(downstream_top);
+    let plan = BackpressurePlan::disabled().with_stage_enforced(
+        upstream,
+        NonZeroU64::new(window).expect("window"),
+        std::time::Duration::from_secs(30),
+    );
+    (
+        BackpressureRegistry::new(&topology, &plan),
+        upstream,
+        downstream,
+    )
 }
 
 #[derive(Clone, Debug)]
@@ -595,6 +681,77 @@ async fn emit_commits_declared_fact_type_immediately() {
 }
 
 #[tokio::test]
+async fn direct_emit_tracks_honest_over_window_physical_debt() {
+    let (registry, stage_id, downstream) = effect_backpressure_fixture(1);
+    let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
+    let mut ctx = invocation_context(
+        journal.clone(),
+        parent_envelope(WriterId::from(stage_id)),
+        None,
+    );
+    ctx.stage_id = stage_id;
+    ctx.writer_id = WriterId::from(stage_id);
+    ctx.backpressure_writer = registry.writer(stage_id);
+    ctx.emit_enabled = true;
+    let mut effects = Effects::new(ctx);
+
+    for value in 0..3 {
+        effects
+            .emit(FirstOutput { value })
+            .await
+            .expect("direct emit does not wait after input admission");
+    }
+
+    assert_eq!(journal.events().len(), 3);
+    let snapshot = registry.metrics_snapshot();
+    assert_eq!(snapshot.stage_writer_seq.get(&stage_id), Some(&3));
+    assert_eq!(
+        snapshot.edge_in_flight.get(&(stage_id, downstream)),
+        Some(&3)
+    );
+    assert_eq!(
+        snapshot.edge_credits.get(&(stage_id, downstream)),
+        Some(&0),
+        "credits saturate at zero while direct debt remains visible"
+    );
+
+    registry.reader(stage_id, downstream).ack_consumed(3);
+    assert_eq!(registry.edge_in_flight(stage_id, downstream), Some(0));
+}
+
+#[tokio::test]
+async fn failed_direct_append_releases_tracked_position_without_writer_advance() {
+    let (registry, stage_id, downstream) = effect_backpressure_fixture(2);
+    let journal: Arc<dyn Journal<ChainEvent>> = Arc::new(InspectingFailJournal {
+        id: JournalId::new(),
+        owner: JournalOwner::stage(stage_id),
+        registry: registry.clone(),
+        upstream: stage_id,
+        downstream,
+    });
+    let mut ctx = invocation_context(journal, parent_envelope(WriterId::from(stage_id)), None);
+    ctx.stage_id = stage_id;
+    ctx.writer_id = WriterId::from(stage_id);
+    ctx.backpressure_writer = registry.writer(stage_id);
+    ctx.emit_enabled = true;
+    let mut effects = Effects::new(ctx);
+
+    let error = effects
+        .emit(FirstOutput { value: 7 })
+        .await
+        .expect_err("injected append failure");
+    assert!(matches!(error, EffectError::Journal(_)));
+
+    let snapshot = registry.metrics_snapshot();
+    assert_eq!(snapshot.stage_writer_seq.get(&stage_id), Some(&0));
+    assert_eq!(
+        snapshot.edge_in_flight.get(&(stage_id, downstream)),
+        Some(&0)
+    );
+    assert_eq!(snapshot.edge_credits.get(&(stage_id, downstream)), Some(&2));
+}
+
+#[tokio::test]
 async fn emit_rejects_routed_fanout_beyond_contract_member_bound() {
     let stage_id = StageId::new();
     let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
@@ -730,6 +887,93 @@ async fn live_perform_records_effect_data_fact() {
     assert_eq!(
         provenance.group_id.as_ref(),
         Some(&effect_outcome_group_id(&records[0].cursor))
+    );
+}
+
+#[tokio::test]
+async fn effect_and_capture_rows_reconstruct_identical_debt_without_waiting() {
+    let (live_registry, live_stage, live_downstream) = effect_backpressure_fixture(1);
+    let live_journal = Arc::new(MemoryJournal::new(JournalOwner::stage(live_stage)));
+    let parent = parent_envelope(WriterId::from(live_stage));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut live_ctx = invocation_context(live_journal.clone(), parent.clone(), None);
+    live_ctx.stage_id = live_stage;
+    live_ctx.writer_id = WriterId::from(live_stage);
+    live_ctx.backpressure_writer = live_registry.writer(live_stage);
+    let live_flow_id = live_ctx.flow_id.to_string();
+    let mut live = Effects::new(live_ctx);
+
+    live.perform(CountingEffect {
+        value: 41,
+        label: "same",
+        calls: calls.clone(),
+    })
+    .await
+    .expect("live effect");
+    let captured: u64 = live.capture("side_value", 7).await.expect("live capture");
+    assert_eq!(captured, 7);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        live_registry.edge_in_flight(live_stage, live_downstream),
+        Some(2),
+        "effect outcome and capture are both physical Data rows"
+    );
+    assert_eq!(
+        live_registry
+            .metrics_snapshot()
+            .edge_credits
+            .get(&(live_stage, live_downstream)),
+        Some(&0)
+    );
+
+    let history = Arc::new(
+        EffectHistory::from_records(live_flow_id, effect_records(&live_journal))
+            .expect("effect history"),
+    );
+
+    for mode in [
+        EffectRuntimeMode::ReplayStrict,
+        EffectRuntimeMode::ResumeIncomplete,
+    ] {
+        let (registry, stage_id, downstream) = effect_backpressure_fixture(1);
+        let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
+        let mut ctx = invocation_context_with_mode(
+            journal.clone(),
+            parent.clone(),
+            Some(history.clone()),
+            mode,
+            EffectPortRegistry::new(),
+        );
+        ctx.stage_id = stage_id;
+        ctx.writer_id = WriterId::from(stage_id);
+        ctx.backpressure_writer = registry.writer(stage_id);
+        let mut reconstructed = Effects::new(ctx);
+
+        reconstructed
+            .perform(CountingEffect {
+                value: 41,
+                label: "same",
+                calls: calls.clone(),
+            })
+            .await
+            .expect("recorded effect reconstructs");
+        let captured: u64 = reconstructed
+            .capture("side_value", 7)
+            .await
+            .expect("recorded capture reconstructs");
+        assert_eq!(captured, 7);
+        assert_eq!(journal.events().len(), 2);
+        assert_eq!(registry.edge_in_flight(stage_id, downstream), Some(2));
+        assert_eq!(
+            registry.metrics_snapshot().stage_writer_seq.get(&stage_id),
+            Some(&2)
+        );
+    }
+
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "replay and resume do not re-execute the effect"
     );
 }
 

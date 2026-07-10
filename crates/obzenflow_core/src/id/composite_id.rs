@@ -5,10 +5,10 @@
 //! Composite identifier - the manifest identity of a first-class composite.
 //!
 //! The value is the topology `subgraph_id` (`{kind}:{binding}`), one per
-//! composite binding in a flow. It keys the composite's own lifecycle evidence
-//! (`SystemEventType::CompositeLifecycle`) and its metrics on the rail. String
-//! backed because the durable identity is a string at every boundary (topology
-//! membership, Studio, diagnostics), per FLOWIP-128a D2/B1.
+//! composite binding in a flow. It keys the composite lifecycle view and its
+//! metrics on the rail. String backed because the durable identity is a string
+//! at every boundary (topology membership, Studio, diagnostics), per
+//! FLOWIP-128a D2/B1.
 
 use serde::{Deserialize, Serialize};
 

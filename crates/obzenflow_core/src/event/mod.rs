@@ -40,9 +40,8 @@ pub use payloads::effect_payload::{
     OutcomeFactOrdinal, RecordedFlowId, RetryDisposition, StageLogicVersion,
 };
 pub use system_event::{
-    CompositeLifecycleEvent, EdgeLivenessState, MetricsCoordinationEvent, PipelineLifecycleEvent,
-    ReplayLifecycleEvent, StageActivity, StageLifecycleEvent, SystemEvent, SystemEventFactory,
-    SystemEventType,
+    EdgeLivenessState, MetricsCoordinationEvent, PipelineLifecycleEvent, ReplayLifecycleEvent,
+    StageActivity, StageLifecycleEvent, SystemEvent, SystemEventFactory, SystemEventType,
 };
 pub use types::{
     AdmissionSeq, CorrelationId, EventId, EventType, JournalWriterId, ReaderGeneration, WriterId,

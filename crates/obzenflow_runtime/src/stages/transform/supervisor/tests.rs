@@ -314,6 +314,23 @@ impl TransformHandler for FilterHandler {
     }
 }
 
+#[derive(Clone, Debug)]
+struct CountingFilterHandler {
+    calls: Arc<AtomicU64>,
+}
+
+#[async_trait]
+impl TransformHandler for CountingFilterHandler {
+    fn process(&self, _event: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> {
+        self.calls.fetch_add(1, Ordering::Relaxed);
+        Ok(Vec::new())
+    }
+
+    async fn drain(&mut self) -> Result<(), HandlerError> {
+        Ok(())
+    }
+}
+
 async fn build_transform_harness<
     H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
     F: FnOnce(StageId) -> H,
@@ -548,6 +565,78 @@ async fn filter_transform_acks_upstream_even_with_zero_outputs() {
         1,
         "filter must ack upstream even when it emits 0 outputs"
     );
+}
+
+#[tokio::test]
+async fn transport_filtered_data_completes_one_physical_credit_without_handler_delivery() {
+    let calls = Arc::new(AtomicU64::new(0));
+    let handler_calls = calls.clone();
+    let (mut supervisor, mut ctx, registry, s, _t, _k, upstream_journal, _data_journal) =
+        build_transform_harness(
+            |_| CountingFilterHandler {
+                calls: handler_calls,
+            },
+            1,
+            1,
+        )
+        .await;
+
+    // Two logical feed selections share the one s -> t physical reader.
+    // Neither selects the row below.
+    let mut selected = HashMap::new();
+    selected.insert(
+        s,
+        vec![
+            crate::messaging::upstream_subscription::SelectedFeedMetadata::new(
+                obzenflow_core::EventType::from("bp_test.selected_a"),
+                crate::messaging::upstream_subscription::SelectedFeedRole::Input,
+            ),
+            crate::messaging::upstream_subscription::SelectedFeedMetadata::new(
+                obzenflow_core::EventType::from("bp_test.selected_b"),
+                crate::messaging::upstream_subscription::SelectedFeedRole::Stream,
+            ),
+        ],
+    );
+    let subscription = ctx.subscription.take().expect("allocated subscription");
+    ctx.subscription = Some(subscription.with_selected_feeds(selected).transport_only());
+
+    let upstream_writer = registry.writer(s);
+    upstream_writer.reserve(1).expect("seed reserve").commit(1);
+    upstream_journal
+        .append(
+            ChainEventFactory::data_event(WriterId::from(s), "bp_test.unselected", json!({})),
+            None,
+        )
+        .await
+        .expect("append unselected input");
+
+    let state = TransformState::<CountingFilterHandler>::Running;
+    supervisor
+        .dispatch_state(&state, &mut ctx)
+        .await
+        .expect("dispatch filtered cursor progress");
+
+    assert_eq!(calls.load(Ordering::Relaxed), 0, "handler was not invoked");
+    assert_eq!(
+        upstream_writer.min_downstream_credit(),
+        1,
+        "the filtered physical row completed exactly once"
+    );
+    let subscription = supervisor
+        .subscription
+        .as_ref()
+        .expect("subscription moved");
+    assert_eq!(subscription.delivered_data_count(), 0);
+    assert_eq!(subscription.last_delivered_stage_input_position(), None);
+    assert_eq!(subscription.last_delivered_upstream_stage(), None);
+
+    // An empty follow-up poll must not fabricate another completion.
+    supervisor
+        .dispatch_state(&state, &mut ctx)
+        .await
+        .expect("dispatch empty cursor");
+    assert_eq!(upstream_writer.min_downstream_credit(), 1);
+    assert_eq!(registry.edge_in_flight(s, ctx.stage_id), Some(0));
 }
 
 #[tokio::test]

@@ -448,7 +448,7 @@ where
         );
 
         // ---------------------------------------------------------------------
-        // Map stage: Chunk -> Partial (+ wrapper to drop manifests, tag partials, emit chunk_failed)
+        // Map stage: Chunk -> Partial (+ wrapper to forward manifests, tag partials, emit chunk_failed)
         // ---------------------------------------------------------------------
         let mut map_middleware: Vec<Box<dyn MiddlewareFactory>> = Vec::new();
         map_middleware.push(Box::new(AiMapReduceMapFactory::<Chunk, Partial>::new()));
@@ -470,13 +470,15 @@ where
                 None,
             )
             .with_additional_output_contract(vec![
+                TypeHint::exact_payload::<AiMapReducePlanningManifest>(),
                 TypeHint::exact_payload::<AiMapReduceTaggedPartial<serde_json::Value>>(),
                 TypeHint::exact_payload::<AiMapReduceChunkFailed>(),
             ]),
         );
 
         // ---------------------------------------------------------------------
-        // Collect stage: Partial -> Collected (but consumes internal manifest + tagged partials)
+        // Collect stage: Partial -> Collected (consumes the manifest and
+        // tagged partials from the single map journal)
         // ---------------------------------------------------------------------
         let collect_descriptor = StatefulDescriptor {
             name: "collect".to_string(),
@@ -524,12 +526,13 @@ where
         ctx.member("collect").descriptor(collect_descriptor);
         ctx.member("finalize").descriptor(finalize_descriptor);
 
-        ctx.edge("chunk", "map");
-        ctx.feed("chunk", "collect")
-            .lane("manifest")
+        ctx.feed("chunk", "map")
+            .lane("data")
+            .payload::<Chunk>()
             .payload::<AiMapReducePlanningManifest>();
         ctx.feed("map", "collect")
             .lane("data")
+            .payload::<AiMapReducePlanningManifest>()
             .payload::<AiMapReduceTaggedPartial<serde_json::Value>>()
             .payload::<AiMapReduceChunkFailed>();
         ctx.edge("collect", "finalize");

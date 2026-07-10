@@ -465,25 +465,6 @@ pub struct StageMetricsSnapshot {
     pub event_loops_with_work_total: u64,
 }
 
-/// Composite-level metrics snapshot for the aggregate `CompositeLifecycle`
-/// completion fact (UI-focused, FLOWIP-128a).
-///
-/// Live composite metrics ride the 086k rail keyed by `composite_id`; this is
-/// the summary captured at composite completion, for parity with
-/// `StageMetricsSnapshot` on `StageLifecycle::Completed`. Measured at the
-/// composite boundary, not composed across member percentiles.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CompositeMetricsSnapshot {
-    /// Events admitted at the composite's entry boundary port.
-    pub boundary_events_in_total: u64,
-
-    /// Events emitted from the composite's exit boundary port(s).
-    pub boundary_events_out_total: u64,
-
-    /// Total errors observed across the composite's members.
-    pub errors_total: u64,
-}
-
 /// Flow-level lifecycle metrics snapshot for UI events
 ///
 /// This complements `FlowMetricsSnapshot` by providing a minimal view that

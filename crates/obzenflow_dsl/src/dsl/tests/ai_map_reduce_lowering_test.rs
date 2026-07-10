@@ -235,10 +235,14 @@ mod tests {
             "no edge should reference the logical composite binding after lowering"
         );
 
-        // Internal edges include the direct chunk -> collect manifest edge.
+        // The manifest follows the event-sourced data path through map. There
+        // is no direct chunk -> collect fan-in edge.
         assert!(connections.iter().any(|(from, to, kind)| {
-            from == "digest__chunk" && to == "digest__collect" && *kind == EdgeKind::Forward
+            from == "digest__chunk" && to == "digest__map" && *kind == EdgeKind::Forward
         }));
+        assert!(!connections
+            .iter()
+            .any(|(from, to, _)| { from == "digest__chunk" && to == "digest__collect" }));
 
         // Lowering artifacts include subgraph membership + registry entry.
         assert_eq!(artifacts.stage_subgraphs.len(), 4);
@@ -265,15 +269,14 @@ mod tests {
                 "digest__finalize".to_string(),
             ]
         );
-        assert!(
-            subgraph
-                .internal_edges
-                .iter()
-                .any(|edge| edge.from_stage == "digest__chunk"
-                    && edge.to_stage == "digest__collect"
-                    && edge.role == "manifest"),
-            "subgraph internal edges should include the manifest path"
-        );
+        assert!(subgraph.internal_edges.iter().any(|edge| {
+            edge.from_stage == "digest__chunk"
+                && edge.to_stage == "digest__map"
+                && edge.role == "data"
+        }));
+        assert!(!subgraph.internal_edges.iter().any(|edge| {
+            edge.from_stage == "digest__chunk" && edge.to_stage == "digest__collect"
+        }));
     }
 
     #[test]
@@ -466,6 +469,12 @@ mod tests {
         assert!(
             map_meta
                 .output_contract
+                .contains(&TypeHint::exact_payload::<AiMapReducePlanningManifest>()),
+            "map output contract must include the forwarded planning manifest"
+        );
+        assert!(
+            map_meta
+                .output_contract
                 .contains(&TypeHint::exact_payload::<
                     AiMapReduceTaggedPartial<serde_json::Value>,
                 >()),
@@ -494,11 +503,12 @@ mod tests {
     /// FLOWIP-114c Acceptance #18 success case, revised by FLOWIP-128a A6:
     /// an `ai_map_reduce`-using flow with external upstream and downstream
     /// stages must build clean under `validate_edge_typing`. Declared-feed
-    /// edges (chunk -> collect manifest, map -> collect transport) validate
-    /// their lane payloads against the upstream output contract and are
-    /// exempt from downstream-input matching; ordinary internal data edges
-    /// (chunk -> map, collect -> finalize) type-check normally; the external
-    /// boundary edges are checked against the composite's outer types.
+    /// edges (chunk -> map carries chunks plus manifest; map -> collect carries
+    /// forwarded manifest plus terminal/partial transport) validate their lane
+    /// payloads against the upstream output contract and are exempt from
+    /// downstream-input matching; the ordinary collect -> finalize edge
+    /// type-checks normally; the external boundary edges are checked against
+    /// the composite's outer types.
     /// Subgraph co-membership alone never skips validation.
     #[test]
     fn ai_map_reduce_external_flow_validates_clean_with_subgraph_attached() {

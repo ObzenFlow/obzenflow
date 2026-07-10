@@ -398,6 +398,20 @@ pub(super) async fn dispatch_enriching<
 
             Ok(directive)
         }
+        PollResult::CursorAdvanced {
+            upstream,
+            completed_data_rows,
+        } => {
+            crate::backpressure::complete_filtered_data_rows(
+                &ctx.backpressure_readers,
+                upstream,
+                completed_data_rows,
+            );
+            ctx.instrumentation
+                .event_loops_with_work_total
+                .fetch_add(1, Ordering::Relaxed);
+            Ok(EventLoopDirective::Continue)
+        }
         PollResult::NoEvents => {
             if let Some(status) = subscription
                 .maybe_check_contracts_tick(

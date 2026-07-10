@@ -176,6 +176,7 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
                     if let Some(sub) = error_subscription.as_mut() {
                         match sub.poll_next_with_state(state.variant_name(), None).await {
                             PollResult::Event(envelope) => Ok(Some(envelope)),
+                            PollResult::CursorAdvanced { .. } => Ok(None),
                             PollResult::NoEvents => Ok(None),
                             PollResult::Error(e) => Err(format!("Error: {e}")),
                         }
@@ -193,6 +194,7 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
                     if let Some(sub) = system_subscription.as_mut() {
                         match sub.poll_next().await {
                             PollResult::Event(envelope) => Ok(Some(envelope)),
+                            PollResult::CursorAdvanced { .. } => Ok(None),
                             PollResult::NoEvents => Ok(None),
                             PollResult::Error(e) => {
                                 Err(format!("Error reading system events: {e}"))
@@ -312,6 +314,11 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
                                     ));
                                 }
                             }
+                            // Observation readers advance their cursor but do
+                            // not participate in physical stage-edge credit.
+                            PollResult::CursorAdvanced { .. } => {
+                                directive = Ok(EventLoopDirective::Continue);
+                            }
                             PollResult::NoEvents => {
                                 // No events available, continue
                                 tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
@@ -411,6 +418,9 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
                                 },
                             ));
                         }
+                        PollResult::CursorAdvanced { .. } => {
+                            return Ok(EventLoopDirective::Continue);
+                        }
                         PollResult::NoEvents => {}
                         PollResult::Error(e) => {
                             // FLOWIP-120q live-tail observer resilience: best-effort
@@ -459,6 +469,9 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
                                 },
                             ));
                         }
+                        PollResult::CursorAdvanced { .. } => {
+                            return Ok(EventLoopDirective::Continue);
+                        }
                         PollResult::NoEvents => {}
                         PollResult::Error(e) => {
                             // FLOWIP-120q live-tail observer resilience: best-effort
@@ -497,6 +510,9 @@ impl SelfSupervised for MetricsAggregatorSupervisor {
                                     events: vec![envelope],
                                 },
                             ));
+                        }
+                        PollResult::CursorAdvanced { .. } => {
+                            return Ok(EventLoopDirective::Continue);
                         }
                         PollResult::NoEvents => {}
                         PollResult::Error(e) => {

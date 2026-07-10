@@ -146,6 +146,12 @@ pub struct MergeWaitState {
 pub enum MergeCandidateStatus {
     /// Every non-exhausted reader presents a head and a winner is selected.
     Candidate,
+    /// A transport-filtered row was consumed while acquiring heads. Candidate
+    /// selection is deferred to the next bounded poll.
+    CursorAdvanced {
+        upstream: StageId,
+        completed_data_rows: u64,
+    },
     /// At least one non-exhausted reader has no head; nothing may deliver.
     Quiet,
     /// Every reader has delivered its authored EOF; the merge is finished.

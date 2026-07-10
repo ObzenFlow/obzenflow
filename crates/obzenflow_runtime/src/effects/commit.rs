@@ -24,6 +24,7 @@ struct EffectCommitHandleInner<T> {
     instrumentation: Option<Arc<StageInstrumentation>>,
     heartbeat_state: Option<Arc<HeartbeatState>>,
     output_contract: StageOutputContract,
+    backpressure_writer: BackpressureWriter,
     parent: EventEnvelope<ChainEvent>,
     cursor: EffectCursor,
     descriptor_hash: EffectDescriptorHash,
@@ -42,6 +43,7 @@ pub(super) struct EffectCommitHandleParams {
     pub(super) instrumentation: Option<Arc<StageInstrumentation>>,
     pub(super) heartbeat_state: Option<Arc<HeartbeatState>>,
     pub(super) output_contract: StageOutputContract,
+    pub(super) backpressure_writer: BackpressureWriter,
     pub(super) parent: EventEnvelope<ChainEvent>,
     pub(super) cursor: EffectCursor,
     pub(super) descriptor_hash: EffectDescriptorHash,
@@ -74,6 +76,7 @@ where
                 instrumentation: params.instrumentation,
                 heartbeat_state: params.heartbeat_state,
                 output_contract: params.output_contract,
+                backpressure_writer: params.backpressure_writer,
                 parent: params.parent,
                 cursor: params.cursor,
                 descriptor_hash: params.descriptor_hash,
@@ -114,6 +117,7 @@ where
             self.inner.instrumentation.as_ref(),
             self.inner.heartbeat_state.as_ref(),
             Some(&self.inner.output_contract),
+            &self.inner.backpressure_writer,
             self.inner.writer_id,
             &self.inner.parent,
             self.inner.cursor.clone(),
@@ -195,6 +199,7 @@ where
             &self.inner.parent,
             record,
             self.inner.lineage,
+            &self.inner.backpressure_writer,
         )
         .await;
 
@@ -231,6 +236,7 @@ pub(super) async fn append_domain_effect_success_facts(
     instrumentation: Option<&Arc<StageInstrumentation>>,
     heartbeat_state: Option<&Arc<HeartbeatState>>,
     output_contract: Option<&StageOutputContract>,
+    backpressure_writer: &BackpressureWriter,
     writer_id: WriterId,
     parent: &EventEnvelope<ChainEvent>,
     cursor: EffectCursor,
@@ -260,6 +266,7 @@ pub(super) async fn append_domain_effect_success_facts(
         instrumentation,
         heartbeat_state,
         output_contract,
+        backpressure_writer: Some(backpressure_writer),
         observers: None,
         observer_scope: obzenflow_core::MiddlewareExecutionScope::LiveEffectBoundary,
     };
@@ -346,6 +353,7 @@ pub(super) async fn append_effect_record(
     parent: &EventEnvelope<ChainEvent>,
     record: EffectRecord,
     lineage: obzenflow_core::config::LineagePolicy,
+    backpressure_writer: &BackpressureWriter,
 ) -> Result<(), EffectError> {
     let event_type = framework_effect_event_type(&record.descriptor.effect_type);
     let provenance = EffectProvenance::from_record(&record, EffectFactOwner::Framework);
@@ -369,10 +377,9 @@ pub(super) async fn append_effect_record(
             );
     }
 
-    // FLOWIP-120b Step 1: route the framework effect/capture record append
-    // through the shared OutputCommitter. With only the journal handle present,
-    // this is the same credit-free, unenriched, unmirrored append it was before,
-    // but it now shares the one commit path the supervisor drain uses.
+    // Framework effect/capture records are physical Data rows even though the
+    // transport filter hides them from handlers. Track them around the durable
+    // append so downstream filtering can complete the same physical credit.
     let committer = OutputCommitter {
         data_journal,
         flow_context: None,
@@ -380,6 +387,7 @@ pub(super) async fn append_effect_record(
         instrumentation: None,
         heartbeat_state: None,
         output_contract: None,
+        backpressure_writer: Some(backpressure_writer),
         observers: None,
         observer_scope: obzenflow_core::MiddlewareExecutionScope::LiveEffectBoundary,
     };

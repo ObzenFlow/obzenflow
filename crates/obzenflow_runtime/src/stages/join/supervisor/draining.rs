@@ -168,6 +168,20 @@ pub(super) async fn dispatch_draining<
 
                 return Ok(EventLoopDirective::Continue);
             }
+            PollResult::CursorAdvanced {
+                upstream,
+                completed_data_rows,
+            } => {
+                crate::backpressure::complete_filtered_data_rows(
+                    &ctx.backpressure_readers,
+                    upstream,
+                    completed_data_rows,
+                );
+                ctx.instrumentation
+                    .event_loops_with_work_total
+                    .fetch_add(1, Ordering::Relaxed);
+                return Ok(EventLoopDirective::Continue);
+            }
             PollResult::NoEvents => {
                 drop(
                     subscription
@@ -333,6 +347,20 @@ pub(super) async fn dispatch_draining<
                     common::forward_control_event_and_mirror(ctx, &envelope).await?;
                 }
 
+                return Ok(EventLoopDirective::Continue);
+            }
+            PollResult::CursorAdvanced {
+                upstream,
+                completed_data_rows,
+            } => {
+                crate::backpressure::complete_filtered_data_rows(
+                    &ctx.backpressure_readers,
+                    upstream,
+                    completed_data_rows,
+                );
+                ctx.instrumentation
+                    .event_loops_with_work_total
+                    .fetch_add(1, Ordering::Relaxed);
                 return Ok(EventLoopDirective::Continue);
             }
             PollResult::NoEvents => {

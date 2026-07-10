@@ -1,12 +1,14 @@
-feed digest__chunk -> digest__collect role=input key=ai.map_reduce.planning_manifest.v1 visibility=routable
+feed digest__chunk -> digest__map role=input key=ai.map_reduce.planning_manifest.v1 visibility=routable
 feed digest__chunk -> digest__map role=input key=test.ai_map_reduce.chunk.v1 visibility=routable
 feed digest__collect -> digest__finalize role=input key=test.ai_map_reduce.collected.v1 visibility=routable
 feed digest__map -> digest__collect role=input key=ai.map_reduce.chunk_failed.v1 visibility=routable
+feed digest__map -> digest__collect role=input key=ai.map_reduce.planning_manifest.v1 visibility=routable
 feed digest__map -> digest__collect role=input key=ai.map_reduce.tagged_partial.v1 visibility=routable
 contract digest__chunk key=ai.map_reduce.planning_manifest.v1 visibility=routable
 contract digest__chunk key=test.ai_map_reduce.chunk.v1 visibility=routable
 contract digest__collect key=test.ai_map_reduce.collected.v1 visibility=routable
 contract digest__finalize key=test.ai_map_reduce.out.v1 visibility=unrouted
 contract digest__map key=ai.map_reduce.chunk_failed.v1 visibility=routable
+contract digest__map key=ai.map_reduce.planning_manifest.v1 visibility=routable
 contract digest__map key=ai.map_reduce.tagged_partial.v1 visibility=routable
 contract digest__map key=test.ai_map_reduce.partial.v1 visibility=unrouted
