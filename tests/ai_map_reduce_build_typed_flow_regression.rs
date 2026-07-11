@@ -223,7 +223,7 @@ impl FiniteSourceHandler for OneSeedSource {
         self.emitted = true;
         Ok(Some(vec![ChainEventFactory::data_event(
             self.writer_id,
-            BuildOnlySeed::EVENT_TYPE,
+            BuildOnlySeed::versioned_event_type(),
             json!(BuildOnlySeed { n: 2 }),
         )]))
     }
@@ -246,7 +246,7 @@ impl TransformHandler for RuntimeChunker {
             out.push(ChainEventFactory::derived_data_event(
                 event.writer_id,
                 &event,
-                BuildOnlyChunk::EVENT_TYPE,
+                BuildOnlyChunk::versioned_event_type(),
                 json!(BuildOnlyChunk {
                     chunk_index,
                     chunk_count,
@@ -278,7 +278,7 @@ impl AsyncTransformHandler for RuntimeMap {
         Ok(vec![ChainEventFactory::derived_data_event(
             event.writer_id,
             &event,
-            BuildOnlyPartial::EVENT_TYPE,
+            BuildOnlyPartial::versioned_event_type(),
             json!(BuildOnlyPartial { value: chunk.value }),
             obzenflow_core::config::LineagePolicy::default(),
         )])
@@ -306,7 +306,7 @@ impl AsyncTransformHandler for RuntimeFinalize {
         Ok(vec![ChainEventFactory::derived_data_event(
             event.writer_id,
             &event,
-            BuildOnlyOut::EVENT_TYPE,
+            BuildOnlyOut::versioned_event_type(),
             json!(BuildOnlyOut { total }),
             obzenflow_core::config::LineagePolicy::default(),
         )])
@@ -487,29 +487,38 @@ async fn ai_map_reduce_runtime_commits_framework_internal_transport_events() {
         "collector should route tagged partials and finalise their sum"
     );
 
-    let duration = metrics
-        .composite_boundary_durations
-        .iter()
-        .find(|duration| {
-            duration.composite.as_ref() == "ai_map_reduce:digest"
-                && duration.entry_port == "in"
-                && duration.exit_port == "out"
-        })
-        .expect(
-            "runtime resource wiring must stamp the digest input activation and project its final output",
-        );
-    assert_eq!(
-        duration.count, 1,
-        "one admitted seed and one final output form one paired boundary duration"
-    );
-    assert!(
-        metrics.composite_boundary_duration_invalid.is_empty(),
-        "the canonical ai_map_reduce boundary must not produce rejected duration evidence"
-    );
-
     let rendered = metrics
         .render_metrics()
         .expect("terminal backpressure metrics should render");
+    let duration_count = rendered
+        .lines()
+        .find_map(|line| {
+            if line.starts_with("obzenflow_composite_boundary_duration_seconds_count{")
+                && line.contains("composite=\"ai_map_reduce:digest\"")
+                && line.contains("entry_port=\"in\"")
+                && line.contains("exit_port=\"out\"")
+            {
+                line.split_whitespace().last()?.parse::<u64>().ok()
+            } else {
+                None
+            }
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "runtime resource wiring must stamp the digest input activation and project its final output:\n{rendered}"
+            )
+        });
+    assert_eq!(
+        duration_count, 1,
+        "one admitted seed and one final output form one paired boundary duration"
+    );
+    assert!(
+        !rendered.lines().any(|line| {
+            line.starts_with("obzenflow_composite_boundary_duration_invalid_total{")
+                && line.contains("composite=\"ai_map_reduce:digest\"")
+        }),
+        "the canonical ai_map_reduce boundary must not produce rejected duration evidence"
+    );
     let in_flight: Vec<&str> = rendered
         .lines()
         .filter(|line| {
