@@ -368,6 +368,73 @@ async fn build_typed_flow_accepts_ai_map_reduce_with_subgraph_attached() {
 }
 
 #[tokio::test]
+async fn built_flow_serializes_canonical_boundary_payload_types_exactly_once() {
+    let handle = flow! {
+        name: "amr_boundary_payload_contract",
+        journals: memory_journals(),
+        middleware: [],
+
+        stages: {
+            seed = source!(BuildOnlySeed => NoEventSource);
+            digest = ai_map_reduce!(
+                chunk: BuildOnlySeed -> BuildOnlyChunk => NoopChunker,
+                map: BuildOnlyChunk -> BuildOnlyPartial => NoopMap,
+                collect: BuildOnlyPartial -> BuildOnlyCollected => CollectByInput::new(
+                    BuildOnlyCollected::default(),
+                    |acc: &mut BuildOnlyCollected, partial: &BuildOnlyPartial| {
+                        acc.values.push(partial.value);
+                    },
+                ),
+                reduce: BuildOnlyCollected -> BuildOnlyOut => NoopFinalize,
+            );
+            sink_stage = sink!(BuildOnlyOut => NoopSink);
+        },
+
+        topology: {
+            seed |> digest;
+            digest |> sink_stage;
+        }
+    }
+    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+    .await
+    .expect("typed ai_map_reduce flow should build");
+
+    let topology = handle.topology().expect("built flow exposes topology");
+    let digest = topology
+        .subgraphs()
+        .iter()
+        .find(|subgraph| subgraph.subgraph_id == "ai_map_reduce:digest")
+        .expect("digest subgraph");
+    let input = digest
+        .boundary_ports
+        .iter()
+        .find(|port| port.name == "in")
+        .expect("input port");
+    let output = digest
+        .boundary_ports
+        .iter()
+        .find(|port| port.name == "out")
+        .expect("output port");
+
+    assert_eq!(
+        input.payload_event_types,
+        vec![BuildOnlySeed::versioned_event_type()]
+    );
+    assert_eq!(
+        output.payload_event_types,
+        vec![BuildOnlyOut::versioned_event_type()]
+    );
+
+    let serialized = serde_json::to_string(&*topology).expect("topology serializes");
+    assert!(serialized.contains("regression.amr.seed.v1"));
+    assert!(serialized.contains("regression.amr.out.v1"));
+    assert!(
+        !serialized.contains(".v1.v1"),
+        "boundary payload event types must already be canonical: {serialized}"
+    );
+}
+
+#[tokio::test]
 async fn ai_map_reduce_runtime_commits_framework_internal_transport_events() {
     let (sink_handler, delivered, total) = CountingOutSink::new();
 

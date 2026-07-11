@@ -408,7 +408,7 @@ mod tests {
     }
 
     #[test]
-    fn ambiguous_output_port_fails_with_locked_diagnostic() {
+    fn duplicate_output_payload_ownership_fails_during_expansion() {
         struct AmbiguousComposite {
             name: String,
         }
@@ -474,20 +474,16 @@ mod tests {
 
         let mut connections = vec![("amb".to_string(), "dup_sink".to_string(), EdgeKind::Forward)];
         let err = match lower_composites(members, &mut connections) {
-            Ok(_) => panic!("expected ambiguity error"),
+            Ok(_) => panic!("expected duplicate ownership error"),
             Err(err) => err,
         };
         let message = err.to_string();
         assert!(
-            message.contains("composite 'amb': ambiguous output port for downstream 'dup_sink'"),
+            message.contains("composite 'amb': payload"),
             "unexpected: {message}"
         );
         assert!(
-            message.contains("matches ports 'first' and 'second'"),
-            "unexpected: {message}"
-        );
-        assert!(
-            message.contains("bind explicitly via the composite's branch clause"),
+            message.contains("owned by both output ports 'first' and 'second'"),
             "unexpected: {message}"
         );
     }

@@ -86,9 +86,27 @@ fn valid_role_id(role: &str) -> bool {
 }
 
 fn exact_hints_only(payloads: &[TypeHint]) -> bool {
+    payloads.iter().all(|hint| {
+        matches!(
+            hint,
+            TypeHint::Exact {
+                event_type: Some(_),
+                schema_version: Some(_),
+                ..
+            }
+        )
+    })
+}
+
+fn describe_hints(payloads: &[TypeHint]) -> String {
     payloads
         .iter()
-        .all(|hint| matches!(hint, TypeHint::Exact { .. }))
+        .map(|hint| match hint {
+            TypeHint::Exact { display_name, .. } => display_name.as_str(),
+            TypeHint::Unspecified => "unspecified",
+        })
+        .collect::<Vec<_>>()
+        .join(" | ")
 }
 
 struct MemberDecl {
@@ -123,7 +141,7 @@ struct PortDecl {
     default: bool,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum PortDirection {
     Input,
     Output,
@@ -611,6 +629,10 @@ impl CompositeBuildContext {
         // Boundary ports (D1): reference declared roles, exact payloads,
         // unique names, exactly one input port, exactly one default output.
         let mut port_names = std::collections::HashSet::new();
+        let mut payload_owners: std::collections::HashMap<
+            (PortDirection, std::any::TypeId),
+            String,
+        > = std::collections::HashMap::new();
         for port in &self.ports {
             if !known(&port.role) {
                 return Err(unknown_role("boundary port", &port.role));
@@ -626,6 +648,109 @@ impl CompositeBuildContext {
                     "composite '{composite}': duplicate boundary port name '{}'",
                     port.name
                 )));
+            }
+
+            let member = self
+                .members
+                .iter()
+                .find(|member| member.role == port.role)
+                .expect("boundary role validated above");
+            let descriptor = member.descriptor.as_ref().expect("members validated above");
+            let member_stage = format!("{binding}__{}", port.role);
+            let metadata = descriptor.typing_metadata().ok_or_else(|| {
+                CompositeBuildError::new(format!(
+                    "composite '{composite}': boundary port '{}' on role '{}' (member '{member_stage}') cannot be validated because the member has no typing metadata",
+                    port.name, port.role
+                ))
+            })?;
+
+            let mut declared_ids = std::collections::HashSet::new();
+            for payload in &port.payloads {
+                let TypeHint::Exact {
+                    type_id,
+                    display_name,
+                    ..
+                } = payload
+                else {
+                    unreachable!("exact boundary payloads validated above")
+                };
+                if !declared_ids.insert(*type_id) {
+                    return Err(CompositeBuildError::new(format!(
+                        "composite '{composite}': boundary port '{}' on role '{}' (member '{member_stage}') declares payload '{display_name}' more than once",
+                        port.name, port.role
+                    )));
+                }
+                if let Some(first_port) =
+                    payload_owners.insert((port.direction, *type_id), port.name.clone())
+                {
+                    return Err(CompositeBuildError::new(format!(
+                        "composite '{composite}': payload '{display_name}' is owned by both {} ports '{first_port}' and '{}'",
+                        match port.direction {
+                            PortDirection::Input => "input",
+                            PortDirection::Output => "output",
+                        },
+                        port.name
+                    )));
+                }
+            }
+
+            match port.direction {
+                PortDirection::Input => {
+                    let member_input = match &metadata.input_type {
+                        exact @ TypeHint::Exact { .. } => Some(exact),
+                        TypeHint::Unspecified => match &metadata.stream_type {
+                            exact @ TypeHint::Exact { .. } => Some(exact),
+                            TypeHint::Unspecified => None,
+                        },
+                    };
+                    let Some(TypeHint::Exact {
+                        type_id: member_input_id,
+                        display_name: member_input_name,
+                        ..
+                    }) = member_input
+                    else {
+                        return Err(CompositeBuildError::new(format!(
+                            "composite '{composite}': input boundary port '{}' on role '{}' names member '{member_stage}', which has no exact primary input contract",
+                            port.name, port.role
+                        )));
+                    };
+                    if declared_ids.len() != 1 || !declared_ids.contains(member_input_id) {
+                        return Err(CompositeBuildError::new(format!(
+                            "composite '{composite}': input boundary port '{}' on role '{}' (member '{member_stage}') declares [{}], but the member input contract is '{member_input_name}'",
+                            port.name,
+                            port.role,
+                            describe_hints(&port.payloads)
+                        )));
+                    }
+                }
+                PortDirection::Output => {
+                    let member_outputs: std::collections::HashSet<std::any::TypeId> = metadata
+                        .output_contract
+                        .iter()
+                        .filter_map(|hint| match hint {
+                            TypeHint::Exact { type_id, .. } => Some(*type_id),
+                            TypeHint::Unspecified => None,
+                        })
+                        .collect();
+                    for payload in &port.payloads {
+                        let TypeHint::Exact {
+                            type_id,
+                            display_name,
+                            ..
+                        } = payload
+                        else {
+                            unreachable!("exact boundary payloads validated above")
+                        };
+                        if !member_outputs.contains(type_id) {
+                            return Err(CompositeBuildError::new(format!(
+                                "composite '{composite}': output boundary port '{}' on role '{}' (member '{member_stage}') declares payload '{display_name}', which is absent from the member output contract [{}]",
+                                port.name,
+                                port.role,
+                                describe_hints(&metadata.output_contract)
+                            )));
+                        }
+                    }
+                }
             }
         }
         let input_count = self
@@ -747,6 +872,7 @@ impl CompositeBuildContext {
 mod tests {
     use super::*;
     use crate::dsl::stage_descriptor::TransformDescriptor;
+    use crate::dsl::typing::StageTypingMetadata;
     use obzenflow_runtime::stages::common::handler_error::HandlerError;
     use obzenflow_runtime::stages::common::handlers::TransformHandler;
     use serde::{Deserialize, Serialize};
@@ -789,10 +915,32 @@ mod tests {
         const EVENT_TYPE: &'static str = "test.composition.b";
     }
 
+    fn typed_noop_descriptor(
+        name: &str,
+        input: TypeHint,
+        output: TypeHint,
+        additional_outputs: Vec<TypeHint>,
+    ) -> Box<dyn StageDescriptor> {
+        let descriptor = noop_descriptor(name);
+        let metadata = StageTypingMetadata::transform(input, output, false, None)
+            .with_additional_output_contract(additional_outputs);
+        crate::dsl::typing::wrap_typed_descriptor(descriptor, metadata)
+    }
+
     fn two_member_ctx() -> CompositeBuildContext {
         let mut ctx = CompositeBuildContext::new("test_kind");
-        ctx.member("first").descriptor(noop_descriptor("first"));
-        ctx.member("second").descriptor(noop_descriptor("second"));
+        ctx.member("first").descriptor(typed_noop_descriptor(
+            "first",
+            TypeHint::exact_payload::<PayloadA>(),
+            TypeHint::exact_payload::<PayloadA>(),
+            vec![],
+        ));
+        ctx.member("second").descriptor(typed_noop_descriptor(
+            "second",
+            TypeHint::exact_payload::<PayloadA>(),
+            TypeHint::exact_payload::<PayloadB>(),
+            vec![],
+        ));
         ctx.edge("first", "second");
         ctx.boundary()
             .input("in", "first")
@@ -872,9 +1020,19 @@ mod tests {
         ctx.permit_lane("compensation_trigger");
         ctx.permit_class("driver");
         ctx.member("first")
-            .descriptor(noop_descriptor("a"))
+            .descriptor(typed_noop_descriptor(
+                "a",
+                TypeHint::exact_payload::<PayloadA>(),
+                TypeHint::exact_payload::<PayloadA>(),
+                vec![],
+            ))
             .class("driver");
-        ctx.member("second").descriptor(noop_descriptor("b"));
+        ctx.member("second").descriptor(typed_noop_descriptor(
+            "b",
+            TypeHint::exact_payload::<PayloadA>(),
+            TypeHint::exact_payload::<PayloadB>(),
+            vec![],
+        ));
         ctx.feed("first", "second")
             .lane("compensation_trigger")
             .payload::<PayloadA>();
@@ -913,11 +1071,119 @@ mod tests {
     }
 
     #[test]
+    fn boundary_owner_requires_typing_metadata() {
+        let mut ctx = CompositeBuildContext::new("test_kind");
+        ctx.member("only").descriptor(noop_descriptor("only"));
+        ctx.boundary()
+            .input("in", "only")
+            .payload::<PayloadA>()
+            .default()
+            .output("out", "only")
+            .payload::<PayloadB>()
+            .default();
+
+        let err = ctx.finish("bind", 1).expect_err("typing metadata required");
+        assert!(
+            err.to_string().contains(
+                "boundary port 'in' on role 'only' (member 'bind__only') cannot be validated because the member has no typing metadata"
+            ),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn input_port_must_equal_owning_member_input_contract() {
+        let mut ctx = CompositeBuildContext::new("test_kind");
+        ctx.member("only").descriptor(typed_noop_descriptor(
+            "only",
+            TypeHint::exact_payload::<PayloadB>(),
+            TypeHint::exact_payload::<PayloadB>(),
+            vec![],
+        ));
+        ctx.boundary()
+            .input("in", "only")
+            .payload::<PayloadA>()
+            .default()
+            .output("out", "only")
+            .payload::<PayloadB>()
+            .default();
+
+        let err = ctx.finish("bind", 1).expect_err("input mismatch");
+        let message = err.to_string();
+        assert!(message.contains("input boundary port 'in'"), "{message}");
+        assert!(message.contains("member 'bind__only'"), "{message}");
+        assert!(message.contains("member input contract"), "{message}");
+    }
+
+    #[test]
+    fn output_port_must_be_a_subset_of_owning_member_output_contract() {
+        let mut ctx = CompositeBuildContext::new("test_kind");
+        ctx.member("only").descriptor(typed_noop_descriptor(
+            "only",
+            TypeHint::exact_payload::<PayloadA>(),
+            TypeHint::exact_payload::<PayloadA>(),
+            vec![],
+        ));
+        ctx.boundary()
+            .input("in", "only")
+            .payload::<PayloadA>()
+            .default()
+            .output("out", "only")
+            .payload::<PayloadB>()
+            .default();
+
+        let err = ctx.finish("bind", 1).expect_err("output mismatch");
+        let message = err.to_string();
+        assert!(message.contains("output boundary port 'out'"), "{message}");
+        assert!(message.contains("member 'bind__only'"), "{message}");
+        assert!(
+            message.contains("absent from the member output contract"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn output_port_may_expose_a_subset_of_a_multi_type_member_contract() {
+        let mut ctx = CompositeBuildContext::new("test_kind");
+        ctx.member("only").descriptor(typed_noop_descriptor(
+            "only",
+            TypeHint::exact_payload::<PayloadA>(),
+            TypeHint::exact_payload::<PayloadA>(),
+            vec![TypeHint::exact_payload::<PayloadB>()],
+        ));
+        ctx.boundary()
+            .input("in", "only")
+            .payload::<PayloadA>()
+            .default()
+            .output("out", "only")
+            .payload::<PayloadB>()
+            .default();
+
+        let expansion = ctx.finish("bind", 1).expect("subset is a valid boundary");
+        assert_eq!(expansion.boundary.outputs[0].name, "out");
+    }
+
+    #[test]
     fn resolve_output_matches_unique_type_falls_back_and_rejects_ambiguity() {
         let mut ctx = CompositeBuildContext::new("test_kind");
-        ctx.member("first").descriptor(noop_descriptor("a"));
-        ctx.member("second").descriptor(noop_descriptor("b"));
-        ctx.member("third").descriptor(noop_descriptor("c"));
+        ctx.member("first").descriptor(typed_noop_descriptor(
+            "a",
+            TypeHint::exact_payload::<PayloadA>(),
+            TypeHint::exact_payload::<PayloadA>(),
+            vec![],
+        ));
+        ctx.member("second").descriptor(typed_noop_descriptor(
+            "b",
+            TypeHint::exact_payload::<PayloadA>(),
+            TypeHint::exact_payload::<PayloadA>(),
+            vec![],
+        ));
+        ctx.member("third").descriptor(typed_noop_descriptor(
+            "c",
+            TypeHint::exact_payload::<PayloadA>(),
+            TypeHint::exact_payload::<PayloadB>(),
+            vec![],
+        ));
         ctx.edge("first", "second");
         ctx.edge("first", "third");
         ctx.boundary()
@@ -960,10 +1226,20 @@ mod tests {
     }
 
     #[test]
-    fn resolve_output_ambiguity_is_an_error() {
+    fn duplicate_output_payload_ownership_fails_before_resolution() {
         let mut ctx = CompositeBuildContext::new("test_kind");
-        ctx.member("first").descriptor(noop_descriptor("a"));
-        ctx.member("second").descriptor(noop_descriptor("b"));
+        ctx.member("first").descriptor(typed_noop_descriptor(
+            "a",
+            TypeHint::exact_payload::<PayloadA>(),
+            TypeHint::exact_payload::<PayloadA>(),
+            vec![],
+        ));
+        ctx.member("second").descriptor(typed_noop_descriptor(
+            "b",
+            TypeHint::exact_payload::<PayloadA>(),
+            TypeHint::exact_payload::<PayloadB>(),
+            vec![],
+        ));
         ctx.boundary()
             .input("in", "first")
             .payload::<PayloadA>()
@@ -973,16 +1249,12 @@ mod tests {
             .default()
             .output("also", "second")
             .payload::<PayloadB>();
-        let expansion = ctx.finish("bind", 1).expect("valid");
-        let err = expansion
-            .boundary
-            .resolve_output(Some(&TypeHint::exact_payload::<PayloadB>()))
-            .expect_err("ambiguous");
-        match err {
-            PortResolveError::Ambiguous { ports, .. } => {
-                assert_eq!(ports, vec!["out".to_string(), "also".to_string()]);
-            }
-            other => panic!("expected ambiguity, got {other:?}"),
-        }
+        let err = ctx.finish("bind", 1).expect_err("duplicate ownership");
+        assert!(
+            err.to_string().contains(
+                "payload 'obzenflow_dsl::dsl::composition::tests::PayloadB' is owned by both output ports 'out' and 'also'"
+            ),
+            "{err}"
+        );
     }
 }

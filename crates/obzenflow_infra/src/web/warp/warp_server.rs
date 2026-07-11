@@ -651,7 +651,11 @@ impl WarpServer {
                                 return;
                             }
 
-                            match reader.next().await {
+                            let next = tokio::select! {
+                                _ = tx.closed() => return,
+                                next = reader.next() => next,
+                            };
+                            match next {
                                 Ok(Some(envelope)) => {
                                     checkpoint_event_id = Some(envelope.event.id);
                                     if !ready_to_stream {
@@ -823,7 +827,10 @@ impl WarpServer {
                                         }
                                     } else {
                                         // No new events; back off briefly.
-                                        sleep(Duration::from_millis(100)).await;
+                                        tokio::select! {
+                                            _ = tx.closed() => return,
+                                            _ = sleep(Duration::from_millis(100)) => {}
+                                        }
                                     }
                                 }
                                 Err(e) => {
@@ -4970,4 +4977,422 @@ fn now_timestamp_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
+}
+
+#[cfg(test)]
+mod composite_status_route_acceptance_tests {
+    use super::*;
+    use crate::journal::MemoryJournal;
+    use obzenflow_core::event::event_envelope::EventEnvelope;
+    use obzenflow_core::event::{
+        PipelineLifecycleEvent, StageLifecycleEvent, SystemEventType, WriterId,
+    };
+    use obzenflow_core::id::{CompositeId, JournalId, RoleId, SystemId};
+    use obzenflow_core::journal::{JournalError, JournalReader};
+    use obzenflow_core::JournalOwner;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    fn host_policy() -> HostPolicy {
+        HostPolicy {
+            max_body_size_bytes: 1024,
+            request_timeout: None,
+            control_plane_auth: None,
+        }
+    }
+
+    fn definition(left: StageId, right: StageId) -> Vec<CompositeDefinition> {
+        vec![CompositeDefinition::new(
+            CompositeId::new("test:pair"),
+            vec![(left, RoleId::new("left")), (right, RoleId::new("right"))],
+        )]
+    }
+
+    async fn append(
+        journal: &dyn Journal<SystemEvent>,
+        writer: WriterId,
+        event: SystemEventType,
+    ) -> SystemEventEnvelope {
+        journal
+            .append(SystemEvent::new(writer, event), None)
+            .await
+            .expect("test event appends")
+    }
+
+    async fn request_body(
+        journal: Arc<dyn Journal<SystemEvent>>,
+        definitions: Vec<CompositeDefinition>,
+        last_event_id: Option<EventId>,
+    ) -> String {
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let mut server = WarpServer::new();
+        server.with_system_journal(journal);
+        server.with_composite_definitions(definitions);
+        server.with_shutdown(shutdown_rx);
+        let filter = server.build_filter(host_policy()).expect("route builds");
+
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+            let _ = shutdown_tx.send(true);
+        });
+
+        let request = warp::test::request().method("GET").path("/api/flow/events");
+        let response = tokio::time::timeout(Duration::from_secs(2), async {
+            match last_event_id {
+                Some(id) => {
+                    request
+                        .header("Last-Event-ID", id.to_string())
+                        .reply(&filter)
+                        .await
+                }
+                None => request.reply(&filter).await,
+            }
+        })
+        .await
+        .expect("SSE response closes after terminal shutdown");
+        assert_eq!(response.status(), warp::http::StatusCode::OK);
+        std::str::from_utf8(response.body())
+            .expect("SSE is UTF-8")
+            .to_string()
+    }
+
+    fn frames<'a>(body: &'a str, event_name: &str) -> Vec<&'a str> {
+        let marker = format!("event:{event_name}");
+        body.split("\n\n")
+            .filter(|frame| frame.lines().any(|line| line == marker))
+            .collect()
+    }
+
+    fn frame_payload(frame: &str) -> serde_json::Value {
+        serde_json::from_str(
+            frame
+                .lines()
+                .find_map(|line| line.strip_prefix("data:"))
+                .expect("SSE data line"),
+        )
+        .expect("SSE data is JSON")
+    }
+
+    async fn completed_tape() -> (
+        Arc<MemoryJournal<SystemEvent>>,
+        Vec<CompositeDefinition>,
+        EventId,
+    ) {
+        let system_id = SystemId::new();
+        let writer = WriterId::from(system_id);
+        let journal = Arc::new(MemoryJournal::with_owner(JournalOwner::system(system_id)));
+        let left = StageId::new();
+        let right = StageId::new();
+
+        append(
+            journal.as_ref(),
+            writer,
+            SystemEventType::StageLifecycle {
+                stage_id: left,
+                event: StageLifecycleEvent::Running,
+            },
+        )
+        .await;
+        append(
+            journal.as_ref(),
+            writer,
+            SystemEventType::StageLifecycle {
+                stage_id: left,
+                event: StageLifecycleEvent::Completed { metrics: None },
+            },
+        )
+        .await;
+        let terminal = append(
+            journal.as_ref(),
+            writer,
+            SystemEventType::StageLifecycle {
+                stage_id: right,
+                event: StageLifecycleEvent::Drained,
+            },
+        )
+        .await;
+        append(
+            journal.as_ref(),
+            writer,
+            SystemEventType::PipelineLifecycle(PipelineLifecycleEvent::Drained),
+        )
+        .await;
+
+        (journal, definition(left, right), terminal.event.id)
+    }
+
+    #[tokio::test]
+    async fn fresh_valid_resume_and_missing_cursor_converge_on_terminal_snapshot() {
+        let (journal, definitions, terminal_id) = completed_tape().await;
+
+        let fresh = request_body(journal.clone(), definitions.clone(), None).await;
+        let fresh_status = frames(&fresh, "composite_status");
+        assert_eq!(fresh_status.len(), 1);
+        assert_eq!(frame_payload(fresh_status[0])["status"], "completed");
+        assert!(
+            !fresh_status[0].lines().any(|line| line.starts_with("id:")),
+            "projected status must not mint a resume cursor"
+        );
+
+        let resumed = request_body(journal.clone(), definitions.clone(), Some(terminal_id)).await;
+        let resumed_status = frames(&resumed, "composite_status");
+        assert_eq!(resumed_status.len(), 1);
+        let resumed_payload = frame_payload(resumed_status[0]);
+        assert_eq!(resumed_payload["status"], "completed");
+        assert_eq!(resumed_payload["as_of_event_id"], terminal_id.to_string());
+        assert!(!resumed_status[0]
+            .lines()
+            .any(|line| line.starts_with("id:")));
+
+        let missing = request_body(journal, definitions, Some(EventId::new())).await;
+        let errors = frames(&missing, "error");
+        assert!(errors
+            .iter()
+            .any(|frame| { frame_payload(frame)["error_type"] == "journal_resume_not_found" }));
+        let missing_status = frames(&missing, "composite_status");
+        assert_eq!(missing_status.len(), 1);
+        assert_eq!(frame_payload(missing_status[0])["status"], "completed");
+        assert_eq!(frames(&missing, "bootstrap").len(), 1);
+    }
+
+    async fn terminal_projection_body(
+        events: Vec<(StageId, StageLifecycleEvent)>,
+        definitions: Vec<CompositeDefinition>,
+    ) -> String {
+        let system_id = SystemId::new();
+        let writer = WriterId::from(system_id);
+        let journal = Arc::new(MemoryJournal::with_owner(JournalOwner::system(system_id)));
+        for (stage_id, event) in events {
+            append(
+                journal.as_ref(),
+                writer,
+                SystemEventType::StageLifecycle { stage_id, event },
+            )
+            .await;
+        }
+        append(
+            journal.as_ref(),
+            writer,
+            SystemEventType::PipelineLifecycle(PipelineLifecycleEvent::Drained),
+        )
+        .await;
+        request_body(journal, definitions, None).await
+    }
+
+    #[tokio::test]
+    async fn clean_cancellation_and_contradictory_history_surface_at_the_route() {
+        let left = StageId::new();
+        let right = StageId::new();
+        let cancelled = terminal_projection_body(
+            vec![
+                (
+                    left,
+                    StageLifecycleEvent::Cancelled {
+                        reason: "operator stop".to_string(),
+                        metrics: None,
+                    },
+                ),
+                (
+                    right,
+                    StageLifecycleEvent::Cancelled {
+                        reason: "sibling stop".to_string(),
+                        metrics: None,
+                    },
+                ),
+            ],
+            definition(left, right),
+        )
+        .await;
+        let cancelled_payload = frame_payload(frames(&cancelled, "composite_status")[0]);
+        assert_eq!(cancelled_payload["status"], "cancelled");
+        assert_eq!(cancelled_payload["reason"], "operator stop");
+
+        let left = StageId::new();
+        let right = StageId::new();
+        let contradictory = terminal_projection_body(
+            vec![
+                (left, StageLifecycleEvent::Completed { metrics: None }),
+                (
+                    left,
+                    StageLifecycleEvent::Cancelled {
+                        reason: "late contradiction".to_string(),
+                        metrics: None,
+                    },
+                ),
+            ],
+            definition(left, right),
+        )
+        .await;
+        let invalid_payload = frame_payload(frames(&contradictory, "composite_status")[0]);
+        assert_eq!(invalid_payload["status"], "invalid");
+        assert!(invalid_payload["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("conflicting terminal")));
+    }
+
+    struct ScriptedReader {
+        events: Vec<SystemEventEnvelope>,
+        position: usize,
+        fail_at: Option<usize>,
+        dropped: Arc<AtomicBool>,
+    }
+
+    impl Drop for ScriptedReader {
+        fn drop(&mut self) {
+            self.dropped.store(true, Ordering::SeqCst);
+        }
+    }
+
+    #[async_trait]
+    impl JournalReader<SystemEvent> for ScriptedReader {
+        async fn next(&mut self) -> Result<Option<SystemEventEnvelope>, JournalError> {
+            if self.fail_at == Some(self.position) {
+                return Err(JournalError::SubscriptionClosed);
+            }
+            let next = self.events.get(self.position).cloned();
+            if next.is_some() {
+                self.position += 1;
+            }
+            Ok(next)
+        }
+
+        fn position(&self) -> u64 {
+            self.position as u64
+        }
+    }
+
+    struct ScriptedJournal {
+        inner: MemoryJournal<SystemEvent>,
+        fail_at: Option<usize>,
+        fail_open: bool,
+        reader_dropped: Arc<AtomicBool>,
+    }
+
+    impl ScriptedJournal {
+        fn new(system_id: SystemId) -> Self {
+            Self {
+                inner: MemoryJournal::with_owner(JournalOwner::system(system_id)),
+                fail_at: None,
+                fail_open: false,
+                reader_dropped: Arc::new(AtomicBool::new(false)),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Journal<SystemEvent> for ScriptedJournal {
+        fn id(&self) -> &JournalId {
+            self.inner.id()
+        }
+
+        fn owner(&self) -> Option<&JournalOwner> {
+            self.inner.owner()
+        }
+
+        async fn append(
+            &self,
+            event: SystemEvent,
+            parent: Option<&EventEnvelope<SystemEvent>>,
+        ) -> Result<SystemEventEnvelope, JournalError> {
+            self.inner.append(event, parent).await
+        }
+
+        async fn read_all_unordered(&self) -> Result<Vec<SystemEventEnvelope>, JournalError> {
+            self.inner.read_all_unordered().await
+        }
+
+        async fn read_event(
+            &self,
+            event_id: &EventId,
+        ) -> Result<Option<SystemEventEnvelope>, JournalError> {
+            self.inner.read_event(event_id).await
+        }
+
+        async fn reader_from(
+            &self,
+            position: u64,
+        ) -> Result<Box<dyn JournalReader<SystemEvent>>, JournalError> {
+            if self.fail_open {
+                return Err(JournalError::SubscriptionClosed);
+            }
+            Ok(Box::new(ScriptedReader {
+                events: self.inner.read_all_unordered().await?,
+                position: position as usize,
+                fail_at: self.fail_at,
+                dropped: self.reader_dropped.clone(),
+            }))
+        }
+
+        async fn read_last_n(
+            &self,
+            count: usize,
+        ) -> Result<Vec<SystemEventEnvelope>, JournalError> {
+            self.inner.read_last_n(count).await
+        }
+    }
+
+    #[tokio::test]
+    async fn journal_open_and_read_failures_are_typed_route_errors_only() {
+        let system_id = SystemId::new();
+        let writer = WriterId::from(system_id);
+        let left = StageId::new();
+        let right = StageId::new();
+        let mut read_failure = ScriptedJournal::new(system_id);
+        append(
+            &read_failure,
+            writer,
+            SystemEventType::StageLifecycle {
+                stage_id: left,
+                event: StageLifecycleEvent::Running,
+            },
+        )
+        .await;
+        read_failure.fail_at = Some(1);
+        let read_failure = Arc::new(read_failure);
+        let body = request_body(read_failure.clone(), definition(left, right), None).await;
+        assert_eq!(
+            frame_payload(frames(&body, "error")[0])["error_type"],
+            "journal_read_error"
+        );
+        assert_eq!(read_failure.read_all_unordered().await.unwrap().len(), 1);
+
+        let system_id = SystemId::new();
+        let mut open_failure = ScriptedJournal::new(system_id);
+        open_failure.fail_open = true;
+        let body = request_body(
+            Arc::new(open_failure),
+            definition(StageId::new(), StageId::new()),
+            None,
+        )
+        .await;
+        assert_eq!(
+            frame_payload(frames(&body, "error")[0])["error_type"],
+            "journal_open_error"
+        );
+    }
+
+    #[tokio::test]
+    async fn dropping_the_sse_client_cancels_the_reader_task() {
+        let system_id = SystemId::new();
+        let journal = Arc::new(ScriptedJournal::new(system_id));
+        let reader_dropped = journal.reader_dropped.clone();
+        let mut server = WarpServer::new();
+        server.with_system_journal(journal);
+        let filter = server.build_filter(host_policy()).expect("route builds");
+
+        let reply = warp::test::request()
+            .method("GET")
+            .path("/api/flow/events")
+            .filter(&filter)
+            .await
+            .expect("route accepts request");
+        drop(reply);
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !reader_dropped.load(Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("dropping the response must cancel and drop the journal reader");
+    }
 }

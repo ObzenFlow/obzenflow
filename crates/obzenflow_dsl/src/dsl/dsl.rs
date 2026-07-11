@@ -1297,12 +1297,8 @@ macro_rules! build_typed_flow {
                     .filter_map(|hint| match hint {
                         $crate::dsl::typing::TypeHint::Exact {
                             event_type: Some(event_type),
-                            schema_version,
                             ..
-                        } => Some(match schema_version {
-                            Some(version) => format!("{event_type}.v{version}"),
-                            None => event_type.clone(),
-                        }),
+                        } => Some(event_type.clone()),
                         _ => None,
                     })
                     .collect();
@@ -1332,9 +1328,6 @@ macro_rules! build_typed_flow {
             }
             if !boundary_ports.is_empty() {
                 info = info.with_boundary_ports(boundary_ports);
-            }
-            if let Some(extension) = spec.kind_extension {
-                info = info.with_kind_extension(extension);
             }
             subgraphs.push(info);
         }

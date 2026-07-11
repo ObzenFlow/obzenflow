@@ -46,7 +46,6 @@ pub struct TopologySubgraphSpec {
     pub collapsible: bool,
     pub schema_version: u32,
     pub boundary_ports: Vec<ResolvedPort>,
-    pub kind_extension: Option<serde_json::Value>,
 }
 
 /// Port annotations retained when a composite binding is rewritten to its
@@ -225,7 +224,6 @@ pub fn lower_composites(
                 .chain(expansion.boundary.inputs.iter())
                 .cloned()
                 .collect(),
-            kind_extension: None,
         });
 
         artifacts.internal_feeds.extend(expansion.feeds);
