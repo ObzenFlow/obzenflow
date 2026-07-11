@@ -32,7 +32,108 @@ use obzenflow_core::web::{
     ManagedRouteInfo, Request, Response, RouteKind, ServerConfig, SseBody, SseFrame, WebError,
     WebServer,
 };
-use obzenflow_core::EventId;
+use obzenflow_core::{EventId, StageId};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum ContractBoundaryDirectionV1 {
+    Inbound,
+    Outbound,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
+struct ContractBoundaryAliasV1 {
+    composite_id: String,
+    port: String,
+    direction: ContractBoundaryDirectionV1,
+}
+
+/// Topology-derived aliases for physical contract facts. The physical edge
+/// remains the occurrence identity; these values are read-model keys only.
+#[derive(Clone, Debug, Default)]
+struct ContractBoundaryAliasIndex {
+    by_edge: Arc<HashMap<(StageId, StageId), Vec<ContractBoundaryAliasV1>>>,
+}
+
+impl ContractBoundaryAliasIndex {
+    fn from_topology(topology: &obzenflow_topology::Topology) -> Result<Self, WebError> {
+        topology
+            .validate_composite_boundaries()
+            .map_err(|error| WebError::Implementation {
+                message: format!("invalid composite contract boundary projection: {error}"),
+                source: Some(Box::new(error)),
+            })?;
+
+        let subgraphs = topology
+            .subgraphs()
+            .iter()
+            .map(|subgraph| (subgraph.subgraph_id.as_str(), subgraph))
+            .collect::<HashMap<_, _>>();
+        let mut by_edge = HashMap::new();
+
+        for edge in topology.edges() {
+            let mut aliases = Vec::with_capacity(edge.composite_ports.len());
+            for port_ref in &edge.composite_ports {
+                let subgraph = subgraphs
+                    .get(port_ref.subgraph_id.as_str())
+                    .ok_or_else(|| WebError::Implementation {
+                        message: format!(
+                            "edge {} -> {} references missing composite {}",
+                            edge.from, edge.to, port_ref.subgraph_id
+                        ),
+                        source: None,
+                    })?;
+                let port = subgraph
+                    .boundary_ports
+                    .iter()
+                    .find(|port| port.name == port_ref.port_name)
+                    .ok_or_else(|| WebError::Implementation {
+                        message: format!(
+                            "edge {} -> {} references missing port {}.{}",
+                            edge.from, edge.to, port_ref.subgraph_id, port_ref.port_name
+                        ),
+                        source: None,
+                    })?;
+                let direction = match port.direction {
+                    obzenflow_topology::PortDirection::Input => {
+                        ContractBoundaryDirectionV1::Inbound
+                    }
+                    obzenflow_topology::PortDirection::Output => {
+                        ContractBoundaryDirectionV1::Outbound
+                    }
+                };
+                aliases.push(ContractBoundaryAliasV1 {
+                    composite_id: port_ref.subgraph_id.clone(),
+                    port: port_ref.port_name.clone(),
+                    direction,
+                });
+            }
+
+            aliases.sort();
+            aliases.dedup();
+            if !aliases.is_empty() {
+                by_edge.insert(
+                    (
+                        StageId::from_ulid(edge.from.ulid()),
+                        StageId::from_ulid(edge.to.ulid()),
+                    ),
+                    aliases,
+                );
+            }
+        }
+
+        Ok(Self {
+            by_edge: Arc::new(by_edge),
+        })
+    }
+
+    fn aliases(&self, upstream: StageId, reader: StageId) -> &[ContractBoundaryAliasV1] {
+        self.by_edge
+            .get(&(upstream, reader))
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+    }
+}
 
 /// Warp-based web server implementation
 pub struct WarpServer {
@@ -41,6 +142,8 @@ pub struct WarpServer {
     system_journal: Option<Arc<dyn Journal<SystemEvent>>>,
     /// Manifest-derived definitions for the composite lifecycle read model.
     composite_definitions: Vec<CompositeDefinition>,
+    /// Exact logical aliases for physical contract facts crossing composites.
+    contract_boundary_aliases: ContractBoundaryAliasIndex,
     surface_metrics: Option<Arc<HttpSurfaceMetricsCollector>>,
     /// FLOWIP-114d: per-process incarnation identity stamped into the SSE
     /// bootstrap event so browsers detect generation changes on the data path.
@@ -68,6 +171,7 @@ impl WarpServer {
             endpoints: Vec::new(),
             system_journal: None,
             composite_definitions: Vec::new(),
+            contract_boundary_aliases: ContractBoundaryAliasIndex::default(),
             surface_metrics: None,
             runtime_instance_id: None,
             shutdown: None,
@@ -82,6 +186,16 @@ impl WarpServer {
     /// Attach validated composite definitions for lifecycle status projection.
     pub fn with_composite_definitions(&mut self, definitions: Vec<CompositeDefinition>) {
         self.composite_definitions = definitions;
+    }
+
+    /// Attach the validated topology projection used to enrich contract SSE
+    /// frames without minting a second occurrence or cursor.
+    pub(crate) fn with_contract_boundary_aliases(
+        &mut self,
+        topology: &obzenflow_topology::Topology,
+    ) -> Result<(), WebError> {
+        self.contract_boundary_aliases = ContractBoundaryAliasIndex::from_topology(topology)?;
+        Ok(())
     }
 
     /// Attach the per-process incarnation identity (FLOWIP-114d).
@@ -300,6 +414,7 @@ impl WarpServer {
             let sse_route = self.build_flow_events_route(
                 journal.clone(),
                 self.composite_definitions.clone(),
+                self.contract_boundary_aliases.clone(),
                 host_policy.clone(),
                 self.runtime_instance_id.clone(),
                 self.shutdown.clone(),
@@ -407,6 +522,7 @@ impl WarpServer {
         &self,
         system_journal: Arc<dyn Journal<SystemEvent>>,
         composite_definitions: Vec<CompositeDefinition>,
+        contract_boundary_aliases: ContractBoundaryAliasIndex,
         host_policy: HostPolicy,
         runtime_instance_id: Option<RuntimeInstanceId>,
         shutdown: Option<tokio::sync::watch::Receiver<bool>>,
@@ -424,6 +540,7 @@ impl WarpServer {
                       journal: Arc<dyn Journal<SystemEvent>>| {
                     let host_policy = host_policy.clone();
                     let composite_definitions = composite_definitions.clone();
+                    let contract_boundary_aliases = contract_boundary_aliases.clone();
                     let runtime_instance_id = runtime_instance_id.clone();
                     let shutdown = shutdown.clone();
                     async move {
@@ -581,7 +698,11 @@ impl WarpServer {
                                     last_pipeline_event =
                                         last_pipeline_event_name(&envelope).or(last_pipeline_event);
                                     if let Some(ev) =
-                                        map_system_event_to_sse(&envelope, &mut middleware_state)
+                                        map_system_event_to_sse(
+                                            &envelope,
+                                            &mut middleware_state,
+                                            &contract_boundary_aliases,
+                                        )
                                     {
                                         if tx.send(Ok(ev)).is_err() {
                                             break;
@@ -2701,6 +2822,7 @@ mod tests {
 fn map_system_event_to_sse(
     envelope: &SystemEventEnvelope,
     middleware_state: &mut MiddlewareSseState,
+    contract_boundary_aliases: &ContractBoundaryAliasIndex,
 ) -> Option<SseEvent> {
     use obzenflow_core::event::system_event::StageLifecycleEvent;
     use obzenflow_core::event::SystemEventType;
@@ -3194,6 +3316,12 @@ fn map_system_event_to_sse(
             if let Some(feed_role) = feed_role {
                 data["feed_role"] = serde_json::json!(feed_role);
             }
+            attach_contract_boundary_aliases(
+                &mut data,
+                contract_boundary_aliases,
+                *upstream,
+                *reader,
+            );
             if let Some(vc) = &vector_clock_value {
                 data["vector_clock"] = vc.clone();
             }
@@ -3246,6 +3374,12 @@ fn map_system_event_to_sse(
             if let Some(feed_role) = feed_role {
                 data["feed_role"] = serde_json::json!(feed_role);
             }
+            attach_contract_boundary_aliases(
+                &mut data,
+                contract_boundary_aliases,
+                *upstream,
+                *reader,
+            );
             if let Some(vc) = &vector_clock_value {
                 data["vector_clock"] = vc.clone();
             }
@@ -3382,6 +3516,281 @@ fn map_system_event_to_sse(
         // FLOWIP-115d: ingress refusal facts are projected into /metrics, not the
         // SSE lifecycle stream (same treatment as the hosted-surface snapshot).
         SystemEventType::IngressRefusal { .. } => None,
+    }
+}
+
+fn attach_contract_boundary_aliases(
+    data: &mut serde_json::Value,
+    aliases: &ContractBoundaryAliasIndex,
+    upstream: StageId,
+    reader: StageId,
+) {
+    let aliases = aliases.aliases(upstream, reader);
+    if !aliases.is_empty() {
+        data["composite_boundaries"] = serde_json::json!(aliases);
+    }
+}
+
+#[cfg(test)]
+mod contract_boundary_sse_tests {
+    use super::*;
+    use crate::journal::MemoryJournal;
+    use obzenflow_core::event::system_event::{
+        ContractName, ContractResultStatusLabel, MetricsCoordinationEvent, PipelineLifecycleEvent,
+        SystemFeedRole,
+    };
+    use obzenflow_core::event::types::{EventType, SeqNo, WriterId};
+    use obzenflow_core::event::SystemEventType;
+    use obzenflow_core::id::SystemId;
+    use obzenflow_core::journal::Journal;
+    use obzenflow_core::JournalOwner;
+    use obzenflow_topology::{
+        BoundaryPortSpec, CompositePortRef, DirectedEdge, EdgeKind, PortDirection, StageInfo,
+        StageType, Topology, TopologySubgraphInfo,
+    };
+
+    fn dual_composite_edge() -> (
+        Topology,
+        obzenflow_topology::StageId,
+        obzenflow_topology::StageId,
+    ) {
+        let checkout = obzenflow_topology::StageId::from_bytes(1_u128.to_be_bytes());
+        let audit = obzenflow_topology::StageId::from_bytes(2_u128.to_be_bytes());
+        let checkout_subgraph = TopologySubgraphInfo::new(
+            "saga:checkout",
+            "saga",
+            "checkout",
+            "Checkout",
+            vec![checkout],
+            vec![],
+            vec![checkout],
+            vec![checkout],
+            true,
+        )
+        .with_boundary_ports(vec![BoundaryPortSpec::new(
+            "completed",
+            PortDirection::Output,
+            checkout,
+            vec!["checkout.completed.v1".to_string()],
+            true,
+        )]);
+        let audit_subgraph = TopologySubgraphInfo::new(
+            "audit:orders",
+            "audit",
+            "orders",
+            "Orders audit",
+            vec![audit],
+            vec![],
+            vec![audit],
+            vec![audit],
+            true,
+        )
+        .with_boundary_ports(vec![BoundaryPortSpec::new(
+            "in",
+            PortDirection::Input,
+            audit,
+            vec!["checkout.completed.v1".to_string()],
+            true,
+        )]);
+        let topology = Topology::new_unvalidated(
+            vec![
+                StageInfo::new(checkout, "checkout", StageType::Transform),
+                StageInfo::new(audit, "audit", StageType::Transform),
+            ],
+            vec![
+                DirectedEdge::new(checkout, audit, EdgeKind::Forward).with_composite_ports(vec![
+                    CompositePortRef::new("saga:checkout", "completed"),
+                    CompositePortRef::new("audit:orders", "in"),
+                ]),
+            ],
+        )
+        .unwrap()
+        .with_subgraphs(vec![checkout_subgraph, audit_subgraph]);
+        (topology, checkout, audit)
+    }
+
+    async fn contract_result_envelope(upstream: StageId, reader: StageId) -> SystemEventEnvelope {
+        let system_id = SystemId::new();
+        let journal = MemoryJournal::<SystemEvent>::with_owner(JournalOwner::system(system_id));
+        journal
+            .append(
+                SystemEvent::new(
+                    WriterId::from(system_id),
+                    SystemEventType::ContractResult {
+                        upstream,
+                        reader,
+                        selected_event_type: Some(EventType::from("checkout.completed.v1")),
+                        feed_role: Some(SystemFeedRole::Input),
+                        contract_name: ContractName::from("DeliveryContract"),
+                        status: ContractResultStatusLabel::Pending,
+                        cause: None,
+                        reader_seq: Some(SeqNo(7)),
+                        advertised_writer_seq: Some(SeqNo(9)),
+                    },
+                ),
+                None,
+            )
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn contract_frame_keeps_one_physical_cursor_and_both_composite_aliases() {
+        let (topology, upstream, reader) = dual_composite_edge();
+        topology.validate_composite_boundaries().unwrap();
+        let aliases = ContractBoundaryAliasIndex::from_topology(&topology).unwrap();
+        let upstream = StageId::from_ulid(upstream.ulid());
+        let reader = StageId::from_ulid(reader.ulid());
+        let envelope = contract_result_envelope(upstream, reader).await;
+
+        let event =
+            map_system_event_to_sse(&envelope, &mut MiddlewareSseState::default(), &aliases)
+                .expect("contract result maps to SSE");
+        let wire = event.to_string();
+        assert!(wire.contains("event:contract_result\n"));
+        assert!(wire.contains(&format!("id:{}\n", envelope.event.id)));
+        let payload: serde_json::Value = serde_json::from_str(
+            wire.lines()
+                .find_map(|line| line.strip_prefix("data:"))
+                .expect("data line"),
+        )
+        .unwrap();
+
+        assert_eq!(payload["upstream_stage_id"], upstream.to_string());
+        assert_eq!(payload["reader_stage_id"], reader.to_string());
+        assert_eq!(payload["selected_event_type"], "checkout.completed.v1");
+        assert_eq!(payload["feed_role"], "input");
+        assert_eq!(
+            payload["composite_boundaries"],
+            serde_json::json!([
+                {
+                    "composite_id": "audit:orders",
+                    "port": "in",
+                    "direction": "inbound"
+                },
+                {
+                    "composite_id": "saga:checkout",
+                    "port": "completed",
+                    "direction": "outbound"
+                }
+            ])
+        );
+    }
+
+    #[tokio::test]
+    async fn valid_resume_streams_the_enriched_contract_frame_after_its_cursor() {
+        let (topology, upstream, reader) = dual_composite_edge();
+        let upstream = StageId::from_ulid(upstream.ulid());
+        let reader = StageId::from_ulid(reader.ulid());
+        let system_id = SystemId::new();
+        let writer = WriterId::from(system_id);
+        let journal = Arc::new(MemoryJournal::<SystemEvent>::with_owner(
+            JournalOwner::system(system_id),
+        ));
+        let cursor = journal
+            .append(
+                SystemEvent::new(
+                    writer,
+                    SystemEventType::MetricsCoordination(MetricsCoordinationEvent::Ready),
+                ),
+                None,
+            )
+            .await
+            .unwrap();
+        let contract = journal
+            .append(
+                SystemEvent::new(
+                    writer,
+                    SystemEventType::ContractResult {
+                        upstream,
+                        reader,
+                        selected_event_type: Some(EventType::from("checkout.completed.v1")),
+                        feed_role: Some(SystemFeedRole::Input),
+                        contract_name: ContractName::from("DeliveryContract"),
+                        status: ContractResultStatusLabel::Pending,
+                        cause: None,
+                        reader_seq: Some(SeqNo(7)),
+                        advertised_writer_seq: Some(SeqNo(9)),
+                    },
+                ),
+                None,
+            )
+            .await
+            .unwrap();
+        journal
+            .append(
+                SystemEvent::new(
+                    writer,
+                    SystemEventType::PipelineLifecycle(PipelineLifecycleEvent::Drained),
+                ),
+                None,
+            )
+            .await
+            .unwrap();
+
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let mut server = WarpServer::new();
+        server.with_system_journal(journal);
+        server.with_contract_boundary_aliases(&topology).unwrap();
+        server.with_shutdown(shutdown_rx);
+        let filter = server
+            .build_filter(HostPolicy {
+                max_body_size_bytes: DEFAULT_MAX_BODY_SIZE_BYTES as u64,
+                request_timeout: None,
+                control_plane_auth: None,
+            })
+            .unwrap();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let _ = shutdown_tx.send(true);
+        });
+
+        let response = tokio::time::timeout(
+            Duration::from_secs(2),
+            warp::test::request()
+                .method("GET")
+                .path("/api/flow/events")
+                .header("Last-Event-ID", cursor.event.id.to_string())
+                .reply(&filter),
+        )
+        .await
+        .expect("resumed SSE stream should close after terminal shutdown");
+        assert_eq!(response.status(), 200);
+        let body = std::str::from_utf8(response.body()).unwrap();
+        let frame = body
+            .split("\n\n")
+            .find(|frame| frame.contains("event:contract_result"))
+            .expect("resumed stream contains contract result");
+        assert!(frame.contains(&format!("id:{}", contract.event.id)));
+        assert!(!frame.contains(&format!("id:{}", cursor.event.id)));
+        let payload: serde_json::Value = serde_json::from_str(
+            frame
+                .lines()
+                .find_map(|line| line.strip_prefix("data:"))
+                .expect("contract data line"),
+        )
+        .unwrap();
+        assert_eq!(payload["composite_boundaries"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            payload["composite_boundaries"][0]["composite_id"],
+            "audit:orders"
+        );
+        assert_eq!(
+            payload["composite_boundaries"][1]["composite_id"],
+            "saga:checkout"
+        );
+    }
+
+    #[test]
+    fn ordinary_physical_edge_omits_unavailable_aliases() {
+        let mut payload = serde_json::json!({"system_event_type": "contract_status"});
+        attach_contract_boundary_aliases(
+            &mut payload,
+            &ContractBoundaryAliasIndex::default(),
+            StageId::new(),
+            StageId::new(),
+        );
+        assert!(payload.get("composite_boundaries").is_none());
     }
 }
 

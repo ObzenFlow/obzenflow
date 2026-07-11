@@ -246,6 +246,7 @@ pub async fn start_web_server_with_config(
 
     let mut server = super::warp::WarpServer::new();
     server.with_composite_definitions(composite_definitions_from_topology(&topology)?);
+    server.with_contract_boundary_aliases(&topology)?;
     if let Some(collector) = surface_metrics {
         server.with_surface_metrics(collector);
     }
