@@ -48,7 +48,7 @@ impl ChainEventFactory {
         let mut event = Self::create_event(writer_id, content);
 
         event.correlation = parent.correlation.clone();
-        event.merge_composite_activations_from(parent);
+        event.observability = parent.inherited_composite_observability();
         event.replay_context = parent.replay_context.clone();
         event.ingress_context = parent.ingress_context.clone();
         event.cycle_depth = parent.cycle_depth;

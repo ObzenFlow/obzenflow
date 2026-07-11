@@ -936,7 +936,10 @@ async fn journal_delivery_receipt<
     let delivery_event = ChainEventFactory::delivery_event(writer_id, payload)
         .with_flow_context(flow_context)
         .with_causality(CausalityContext::with_parent(parent_envelope.event.id))
-        .with_correlation_from(&parent_envelope.event);
+        .with_correlation_from(&parent_envelope.event)
+        .with_cycle_state_from(&parent_envelope.event);
+    let delivery_event = delivery_event
+        .try_with_composite_activations(parent_envelope.event.composite_activations().to_vec())?;
 
     if delivery_event.is_data() || delivery_event.is_delivery() {
         ctx.instrumentation.record_output_event(&delivery_event);

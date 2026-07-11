@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
+use obzenflow_core::event::context::composite_activation_context::union_composite_activations;
 use obzenflow_core::event::context::{CompositeActivationContext, ReplayContext};
 use obzenflow_core::event::payloads::correlation_payload::CorrelationPayload;
 use obzenflow_core::event::types::{CorrelationId, EventId};
@@ -54,27 +55,19 @@ impl TraceState {
             self.parent_ids.pop_front();
         }
 
-        for activation in event.composite_activations() {
-            if !self.composite_activations.iter().any(|existing| {
-                existing.composite_id == activation.composite_id
-                    && existing.activation == activation.activation
-                    && existing.entry_port == activation.entry_port
-            }) {
-                self.composite_activations.push(activation.clone());
+        match union_composite_activations(
+            &self.composite_activations,
+            event.composite_activations(),
+        ) {
+            Ok(activations) => self.composite_activations = activations,
+            Err(error) => {
+                tracing::error!(
+                    error = %error,
+                    event_id = %event.id,
+                    "stateful trace rejected conflicting composite activation evidence"
+                );
             }
         }
-        self.composite_activations.sort_by(|left, right| {
-            (
-                left.composite_id.as_ref(),
-                left.activation,
-                left.entry_port.as_str(),
-            )
-                .cmp(&(
-                    right.composite_id.as_ref(),
-                    right.activation,
-                    right.entry_port.as_str(),
-                ))
-        });
 
         if let Some(correlation_ids) = event.correlation_ids() {
             for correlation_id in correlation_ids {
@@ -161,8 +154,12 @@ impl TraceState {
     }
 
     pub(crate) fn apply_correlation_to_event(&self, event: &mut ChainEvent) {
-        for activation in &self.composite_activations {
-            event.add_composite_activation(activation.clone());
+        if let Err(error) = event.try_extend_composite_activations(&self.composite_activations) {
+            tracing::error!(
+                error = %error,
+                event_id = %event.id,
+                "stateful trace could not apply composite activation evidence"
+            );
         }
         if let Some(ids) = self.mixed_correlation_ids() {
             event.clear_correlation();
@@ -279,13 +276,16 @@ mod tests {
         let writer = WriterId::from(StageId::new());
         let mut trace = TraceState::default();
         for index in 0..3 {
-            let mut input = ChainEventFactory::data_event(writer, "input", json!({}));
-            input.add_composite_activation(CompositeActivationContext::new(
-                CompositeId::new("saga:checkout"),
-                input.id,
-                format!("input_{index}"),
-                100 + index,
-            ));
+            let input = ChainEventFactory::data_event(writer, "input", json!({}));
+            let input_id = input.id;
+            let input = input
+                .try_with_composite_activations(vec![CompositeActivationContext::new(
+                    CompositeId::new("saga:checkout"),
+                    input_id,
+                    format!("input_{index}"),
+                    100 + index,
+                )])
+                .unwrap();
             trace.record_event(
                 &input,
                 obzenflow_core::config::LineagePolicy {

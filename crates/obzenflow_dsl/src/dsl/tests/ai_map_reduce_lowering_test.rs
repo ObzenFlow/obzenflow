@@ -786,24 +786,6 @@ mod tests {
         );
     }
 
-    fn assert_matches_golden(rel: &str, actual: &str) {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("src/dsl/tests/fixtures")
-            .join(rel);
-        if std::env::var("OBZENFLOW_BLESS_GOLDENS").is_ok() {
-            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            std::fs::write(&path, actual).unwrap();
-            return;
-        }
-        let expected = std::fs::read_to_string(&path).unwrap_or_else(|err| {
-            panic!("missing golden {path:?} ({err}); regenerate with OBZENFLOW_BLESS_GOLDENS=1")
-        });
-        assert_eq!(
-            expected, actual,
-            "parity golden mismatch for {rel}; regenerate deliberately with OBZENFLOW_BLESS_GOLDENS=1"
-        );
-    }
-
     fn render_visibility(visibility: obzenflow_runtime::feed_plan::FactVisibility) -> &'static str {
         match visibility {
             obzenflow_runtime::feed_plan::FactVisibility::Routable => "routable",
@@ -811,13 +793,11 @@ mod tests {
         }
     }
 
-    /// FLOWIP-128a parity baseline: canonical renderings of the derived feed
-    /// plan and lowering artifacts for the reference `ai_map_reduce` flow.
-    /// The generic `InternalFeedSpec` path must reproduce these byte for
-    /// byte; feed keys and visibility changing here means journal routing
-    /// changed.
+    /// FLOWIP-128a regression snapshots for the reference `ai_map_reduce`
+    /// lowering. Feed keys and visibility changing here means journal routing
+    /// changed and requires an explicit Insta snapshot review.
     #[test]
-    fn lowering_feed_plan_and_artifacts_match_parity_goldens() {
+    fn lowering_feed_plan_and_artifacts_match_snapshots() {
         let mut members: HashMap<String, FlowMember> = HashMap::new();
         members.insert(
             "batch".to_string(),
@@ -846,15 +826,54 @@ mod tests {
         let (stages, artifacts) =
             lower_composites(members, &mut connections).expect("lowering succeeds");
 
-        // Membership golden: serialized shape must stay byte-identical for
+        // Membership snapshot: serialized shape must stay byte-identical for
         // flows that declare no new manifest annotations.
         let membership: std::collections::BTreeMap<_, _> =
             artifacts.stage_subgraphs.iter().collect();
         let membership_json =
             serde_json::to_string_pretty(&membership).expect("membership serializes");
-        assert_matches_golden("ai_map_reduce_membership.golden.json", &membership_json);
+        insta::assert_snapshot!(membership_json, @r###"
+        {
+          "digest__chunk": {
+            "subgraph_id": "ai_map_reduce:digest",
+            "kind": "ai_map_reduce",
+            "binding": "digest",
+            "role": "chunk",
+            "order": 0,
+            "is_entry": true,
+            "is_exit": false
+          },
+          "digest__collect": {
+            "subgraph_id": "ai_map_reduce:digest",
+            "kind": "ai_map_reduce",
+            "binding": "digest",
+            "role": "collect",
+            "order": 2,
+            "is_entry": false,
+            "is_exit": false
+          },
+          "digest__finalize": {
+            "subgraph_id": "ai_map_reduce:digest",
+            "kind": "ai_map_reduce",
+            "binding": "digest",
+            "role": "finalize",
+            "order": 3,
+            "is_entry": false,
+            "is_exit": true
+          },
+          "digest__map": {
+            "subgraph_id": "ai_map_reduce:digest",
+            "kind": "ai_map_reduce",
+            "binding": "digest",
+            "role": "map",
+            "order": 1,
+            "is_entry": false,
+            "is_exit": false
+          }
+        }
+        "###);
 
-        // Subgraph registry golden (name-keyed spec; hand-rendered because the
+        // Subgraph registry snapshot (name-keyed spec; rendered because the
         // spec type is not serde).
         let mut spec_lines = Vec::new();
         for spec in &artifacts.subgraphs {
@@ -876,11 +895,18 @@ mod tests {
         }
         let mut spec_text = spec_lines.join("\n");
         spec_text.push('\n');
-        assert_matches_golden("ai_map_reduce_subgraphs.golden.txt", &spec_text);
+        insta::assert_snapshot!(spec_text, @r###"
+        subgraph id=ai_map_reduce:digest kind=ai_map_reduce binding=digest label=digest collapsible=true
+          members=["digest__chunk", "digest__map", "digest__collect", "digest__finalize"]
+          entry=["digest__chunk"] exit=["digest__finalize"] parent=None
+          edge digest__chunk -> digest__map role=data
+          edge digest__map -> digest__collect role=data
+          edge digest__collect -> digest__finalize role=data
+        "###);
 
-        // Feed-plan golden: build the topology the way the flow build seam
+        // Feed-plan snapshot: build the topology the way the flow build seam
         // does (StageInfo + subgraph membership), then render feeds and
-        // contracts keyed by stage NAME so the golden survives fresh ULIDs.
+        // contracts keyed by stage NAME so the snapshot survives fresh ULIDs.
         fn to_topology_stage_type(
             core: obzenflow_core::event::context::StageType,
         ) -> obzenflow_topology::StageType {
@@ -934,8 +960,8 @@ mod tests {
         let topology = obzenflow_topology::Topology::new(topo_stages, topo_edges)
             .expect("fixture topology is valid");
 
-        // The parity moment: the plan must come from the generic declared-feed
-        // path and match the golden captured from the retired AI branch.
+        // The plan must come from the generic declared-feed path. The snapshot
+        // pins the complete selected-feed and output-contract inventory.
         let plan = crate::dsl::typing::derive_feed_plan(
             &topology,
             &stages,
@@ -979,6 +1005,21 @@ mod tests {
         plan_text.push('\n');
         plan_text.push_str(&contract_lines.join("\n"));
         plan_text.push('\n');
-        assert_matches_golden("ai_map_reduce_feed_plan.golden.txt", &plan_text);
+        insta::assert_snapshot!(plan_text, @r###"
+        feed digest__chunk -> digest__map role=input key=ai.map_reduce.planning_manifest.v1 visibility=routable
+        feed digest__chunk -> digest__map role=input key=test.ai_map_reduce.chunk.v1 visibility=routable
+        feed digest__collect -> digest__finalize role=input key=test.ai_map_reduce.collected.v1 visibility=routable
+        feed digest__map -> digest__collect role=input key=ai.map_reduce.chunk_failed.v1 visibility=routable
+        feed digest__map -> digest__collect role=input key=ai.map_reduce.planning_manifest.v1 visibility=routable
+        feed digest__map -> digest__collect role=input key=ai.map_reduce.tagged_partial.v1 visibility=routable
+        contract digest__chunk key=ai.map_reduce.planning_manifest.v1 visibility=routable
+        contract digest__chunk key=test.ai_map_reduce.chunk.v1 visibility=routable
+        contract digest__collect key=test.ai_map_reduce.collected.v1 visibility=routable
+        contract digest__finalize key=test.ai_map_reduce.out.v1 visibility=unrouted
+        contract digest__map key=ai.map_reduce.chunk_failed.v1 visibility=routable
+        contract digest__map key=ai.map_reduce.planning_manifest.v1 visibility=routable
+        contract digest__map key=ai.map_reduce.tagged_partial.v1 visibility=routable
+        contract digest__map key=test.ai_map_reduce.partial.v1 visibility=unrouted
+        "###);
     }
 }

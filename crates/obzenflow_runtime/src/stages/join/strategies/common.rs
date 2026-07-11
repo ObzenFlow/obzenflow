@@ -254,17 +254,22 @@ where
                     )));
                 }
             }
-            let mut events = strategy_output.events;
-            propagate_stream_lineage(&event, &mut events, self.lineage);
-            for reference_key in strategy_output.contributing_reference_keys {
-                if let Some(activations) = state.reference_activations.get(&reference_key) {
-                    for output in &mut events {
-                        for activation in activations {
-                            output.add_composite_activation(activation.clone());
-                        }
-                    }
-                }
-            }
+            let reference_activations: Vec<_> = strategy_output
+                .contributing_reference_keys
+                .iter()
+                .filter_map(|key| state.reference_activations.get(key))
+                .flatten()
+                .cloned()
+                .collect();
+            let events = propagate_stream_lineage(&event, strategy_output.events, self.lineage)?;
+            let events = events
+                .into_iter()
+                .map(|event| {
+                    event
+                        .try_with_composite_activations(reference_activations.clone())
+                        .map_err(|error| HandlerError::Validation(error.to_string()))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
             return Ok(events);
         }
 
@@ -343,9 +348,9 @@ where
 
 fn propagate_stream_lineage(
     parent: &ChainEvent,
-    outputs: &mut [ChainEvent],
+    outputs: Vec<ChainEvent>,
     lineage: obzenflow_core::config::LineagePolicy,
-) {
+) -> Result<Vec<ChainEvent>, HandlerError> {
     // The join strategies typically materialize new events via `TypedPayload::to_event`,
     // which does not preserve correlation/lineage. Since joins conceptually enrich a
     // stream event, we propagate correlation + causality from the stream parent.
@@ -354,38 +359,45 @@ fn propagate_stream_lineage(
     // policy, threaded as data (FLOWIP-010 §7).
     let max_depth = lineage.max_lineage_depth;
 
-    for event in outputs.iter_mut() {
-        if event.is_lifecycle() || event.is_control() {
-            continue;
-        }
-
-        if event.correlation.is_none() {
-            event.correlation = parent.correlation.clone();
-        }
-
-        if event.replay_context.is_none() {
-            event.replay_context = parent.replay_context.clone();
-        }
-
-        event.merge_composite_activations_from(parent);
-
-        if event.causality.is_root() {
-            let mut causality = CausalityContext::with_parent(parent.id);
-
-            // Propagate ancestors up to depth limit (parent already counts as depth=1).
-            let ancestors_to_add = parent
-                .causality
-                .parent_ids
-                .iter()
-                .take(max_depth.saturating_sub(1));
-
-            for ancestor in ancestors_to_add {
-                causality = causality.add_parent(*ancestor);
+    outputs
+        .into_iter()
+        .map(|mut event| {
+            if event.is_lifecycle() || event.is_control() {
+                return Ok(event);
             }
 
-            event.causality = causality;
-        }
-    }
+            if event.correlation.is_none() {
+                event.correlation = parent.correlation.clone();
+            }
+
+            if event.replay_context.is_none() {
+                event.replay_context = parent.replay_context.clone();
+            }
+
+            event = event
+                .try_with_composite_activations(parent.composite_activations().to_vec())
+                .map_err(|error| HandlerError::Validation(error.to_string()))?;
+
+            if event.causality.is_root() {
+                let mut causality = CausalityContext::with_parent(parent.id);
+
+                // Propagate ancestors up to depth limit (parent already counts as depth=1).
+                let ancestors_to_add = parent
+                    .causality
+                    .parent_ids
+                    .iter()
+                    .take(max_depth.saturating_sub(1));
+
+                for ancestor in ancestors_to_add {
+                    causality = causality.add_parent(*ancestor);
+                }
+
+                event.causality = causality;
+            }
+
+            Ok(event)
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -535,29 +547,35 @@ mod tests {
         let writer = WriterId::from(StageId::new());
 
         for key in ["k1", "k2"] {
-            let mut reference = CatalogRow {
+            let reference = CatalogRow {
                 key: key.into(),
                 value: format!("value-{key}"),
             }
             .to_event(writer);
-            reference.add_composite_activation(CompositeActivationContext::new(
-                CompositeId::new("catalog:lookup"),
-                reference.id,
-                key,
-                100,
-            ));
+            let reference_id = reference.id;
+            let reference = reference
+                .try_with_composite_activations(vec![CompositeActivationContext::new(
+                    CompositeId::new("catalog:lookup"),
+                    reference_id,
+                    key,
+                    100,
+                )])
+                .unwrap();
             handler
                 .process_event(&mut state, reference, StageId::new(), writer)
                 .unwrap();
         }
 
-        let mut stream = StreamRow { key: "k1".into() }.to_event(writer);
-        stream.add_composite_activation(CompositeActivationContext::new(
-            CompositeId::new("saga:checkout"),
-            stream.id,
-            "commands",
-            200,
-        ));
+        let stream = StreamRow { key: "k1".into() }.to_event(writer);
+        let stream_id = stream.id;
+        let stream = stream
+            .try_with_composite_activations(vec![CompositeActivationContext::new(
+                CompositeId::new("saga:checkout"),
+                stream_id,
+                "commands",
+                200,
+            )])
+            .unwrap();
         let output = handler
             .process_event(&mut state, stream, StageId::new(), writer)
             .unwrap();

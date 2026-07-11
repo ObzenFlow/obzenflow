@@ -213,7 +213,9 @@ impl OutputCommitter<'_> {
         // fallback when no per-output activation provenance exists.
         if event.composite_activations().is_empty() {
             if let Some(parent) = parent {
-                event.merge_composite_activations_from(&parent.event);
+                event = event.try_with_composite_activations(
+                    parent.event.composite_activations().to_vec(),
+                )?;
             }
         }
 

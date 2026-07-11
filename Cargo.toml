@@ -106,6 +106,7 @@ subtle = "2"
 
 	# Benchmarking / testing
 	criterion = "0.5"
+	insta = "1"
 	proptest = "1.0"
 	fastrand = "2.0"
 	tempfile = "3.8"

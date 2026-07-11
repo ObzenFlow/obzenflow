@@ -509,12 +509,16 @@ where
                         .cloned()
                         .collect();
                     for spec in matching {
-                        chain_event.add_composite_activation(CompositeActivationContext::new(
-                            spec.composite_id,
-                            chain_event.id,
-                            spec.port_name,
-                            chain_event.processing_info.event_time,
-                        ));
+                        if let Err(error) = chain_event.try_insert_composite_activation(
+                            CompositeActivationContext::new(
+                                spec.composite_id,
+                                chain_event.id,
+                                spec.port_name,
+                                chain_event.processing_info.event_time,
+                            ),
+                        ) {
+                            return PollResult::Error(Box::new(error));
+                        }
                     }
                 }
             }

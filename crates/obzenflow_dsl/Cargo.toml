@@ -28,4 +28,5 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
+insta = { workspace = true }
 tokio-test = { workspace = true }

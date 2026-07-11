@@ -815,7 +815,11 @@ async fn journal_commit_receipt<H: UnifiedSinkHandler + Send + Sync + 'static>(
     let evt = ChainEventFactory::delivery_event(writer_id, payload)
         .with_flow_context(flow_ctx)
         .with_causality(CausalityContext::with_parent(parent_envelope.event.id))
-        .with_correlation_from(&parent_envelope.event);
+        .with_correlation_from(&parent_envelope.event)
+        .with_cycle_state_from(&parent_envelope.event);
+    let evt = evt
+        .try_with_composite_activations(parent_envelope.event.composite_activations().to_vec())
+        .map_err(|error| obzenflow_fsm::FsmError::HandlerError(error.to_string()))?;
 
     if evt.is_data() || evt.is_delivery() {
         ctx.instrumentation.record_output_event(&evt);

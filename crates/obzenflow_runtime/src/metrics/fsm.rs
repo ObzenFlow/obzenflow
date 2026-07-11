@@ -2531,12 +2531,14 @@ mod tests {
             serde_json::json!({}),
         );
         output.processing_info.event_time = 1_250;
-        output.add_composite_activation(CompositeActivationContext::new(
-            composite,
-            EventId::new(),
-            "commands",
-            1_000,
-        ));
+        output = output
+            .try_with_composite_activations(vec![CompositeActivationContext::new(
+                composite,
+                EventId::new(),
+                "commands",
+                1_000,
+            )])
+            .unwrap();
         let mut error_rail = CompositeDurationAccumulator::new(vec![0.1, 0.25, 1.0]);
         observe_live_composite_duration(
             MetricsJournalKind::Error,
@@ -2587,8 +2589,12 @@ mod tests {
 
         // Simulate what the sink supervisor does when creating a delivery event
         let payload = DeliveryPayload::success(DeliveryMethod::Noop, Some(1));
-        let delivery_event =
-            ChainEventFactory::delivery_event(writer_id, payload).with_correlation_from(&event);
+        let delivery_event = ChainEventFactory::delivery_event(writer_id, payload)
+            .with_correlation_from(&event)
+            .with_cycle_state_from(&event);
+        let delivery_event = delivery_event
+            .try_with_composite_activations(event.composite_activations().to_vec())
+            .unwrap();
 
         // Verify correlation is preserved
         assert_eq!(delivery_event.correlation_id(), Some(correlation_id));

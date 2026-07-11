@@ -938,17 +938,19 @@ mod tests {
         );
         entry.processing_info.event_time = entered_at_ms;
         let activation = entry.id;
-        entry.add_composite_activation(CompositeActivationContext::new(
-            boundary.composite_id.clone(),
-            activation,
-            "commands",
-            entered_at_ms,
-        ));
+        entry = entry
+            .try_with_composite_activations(vec![CompositeActivationContext::new(
+                boundary.composite_id.clone(),
+                activation,
+                "commands",
+                entered_at_ms,
+            )])
+            .unwrap();
         let mut exit =
             ChainEventFactory::data_event(WriterId::Stage(exit_member), event_type, json!({}));
         exit.processing_info.event_time = exited_at_ms;
-        exit.merge_composite_activations_from(&entry);
-        exit
+        exit.try_with_composite_activations(entry.composite_activations().to_vec())
+            .unwrap()
     }
 
     #[test]

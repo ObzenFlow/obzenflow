@@ -30,14 +30,14 @@ fn derived_event_propagates_cycle_state() {
 }
 
 #[test]
-fn with_correlation_from_propagates_cycle_state() {
+fn with_cycle_state_from_propagates_cycle_state() {
     let writer_id = WriterId::from(StageId::new());
     let mut parent = ChainEventFactory::data_event(writer_id, "test.parent", json!({"x": 1}));
     parent.cycle_depth = Some(CycleDepth::new(3));
     parent.cycle_scc_id = Some(test_scc_id(9));
 
     let child = ChainEventFactory::data_event(writer_id, "test.child", json!({"x": 2}))
-        .with_correlation_from(&parent);
+        .with_cycle_state_from(&parent);
 
     assert_eq!(child.cycle_depth, Some(CycleDepth::new(3)));
     assert_eq!(child.cycle_scc_id, Some(test_scc_id(9)));
