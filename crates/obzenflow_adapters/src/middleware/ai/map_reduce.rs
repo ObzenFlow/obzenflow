@@ -6,8 +6,9 @@
 //!
 //! These middleware adapters are intentionally narrow:
 //! - `chunk` stage: emit a framework-internal planning manifest per input job.
-//! - `map` stage: drop manifests, tag partial outputs with job/chunk metadata,
-//!   and emit a terminal failure marker when a chunk produces no partial output.
+//! - `map` stage: durably forward manifests without invoking the user handler,
+//!   tag partial outputs with job/chunk metadata, and emit a terminal failure
+//!   marker when a chunk produces no partial output.
 
 use crate::middleware::{
     context_keys::{
@@ -352,7 +353,7 @@ where
 }
 
 // ============================================================================
-// Map stage: drop manifests, tag partials, emit chunk_failed
+// Map stage: forward manifests, tag partials, emit chunk_failed
 // ============================================================================
 
 #[derive(Debug, Clone)]
@@ -412,10 +413,13 @@ where
             };
         };
 
-        // Drop framework planning manifests before the user map handler.
+        // Forward framework planning manifests through this stage journal
+        // without exposing them to the user map handler. Keeping the manifest
+        // and tagged partials on one physical journal removes the collector's
+        // quiet-input Kahn wait while preserving a durable event-sourced path.
         if AiMapReducePlanningManifest::event_type_matches(event_type) {
             return MiddlewareAction::Skip {
-                results: vec![],
+                results: vec![event.clone()],
                 cause: None,
             };
         }
@@ -857,7 +861,7 @@ mod tests {
     }
 
     #[test]
-    fn map_wrapper_drops_planning_manifests_before_user_handler() {
+    fn map_wrapper_forwards_planning_manifests_without_user_handler_delivery() {
         let middleware = mk_map_middleware();
         let mut ctx = MiddlewareContext::live_handler();
 
@@ -875,7 +879,17 @@ mod tests {
         .to_event(writer_id());
 
         let action = middleware.pre_handle(&manifest, &mut ctx);
-        assert!(matches!(action, MiddlewareAction::Skip { results: v, .. } if v.is_empty()));
+        let MiddlewareAction::Skip { results, .. } = action else {
+            panic!("manifest must bypass the user handler");
+        };
+        assert_eq!(results.len(), 1);
+        assert_eq!(
+            results[0].id, manifest.id,
+            "forwarding preserves fact identity"
+        );
+        assert!(AiMapReducePlanningManifest::event_type_matches(
+            &results[0].event_type()
+        ));
         assert!(ctx.control_events().is_empty());
     }
 

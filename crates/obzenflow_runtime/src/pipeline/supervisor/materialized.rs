@@ -119,6 +119,7 @@ pub(super) async fn dispatch_materialized(
                 }
             }
         }
+        PollResult::CursorAdvanced { .. } => {}
         PollResult::NoEvents => {
             // No new events, but that's OK: stages might already be running.
             // Add a brief sleep to avoid busy loop.

@@ -20,9 +20,9 @@
 //! The caller still owns the decisions this committer does not yet absorb:
 //!
 //! * Backpressure credit and requeue stay in the drain for legacy returned
-//!   handler outputs. `fx.emit` commits immediately after input admission; full
-//!   input-admission debt and bounded-fanout enforcement are still a later
-//!   120b slice.
+//!   handler outputs. Direct data facts use track-only physical-row accounting
+//!   around their durable append; stronger direct-fact admission remains a
+//!   later 120b slice.
 //! * The pending-output drain still calls validation before credit reservation,
 //!   preserving the fail-before-backpressure-ordering rule. The validation rule
 //!   itself now lives here so every committer-based authoring path has one
@@ -50,6 +50,7 @@ use obzenflow_core::event::{ChainEventContent, EventEnvelope, SystemEvent};
 use obzenflow_core::journal::Journal;
 use obzenflow_core::ChainEvent;
 
+use crate::backpressure::BackpressureWriter;
 use crate::feed_plan::StageOutputContract;
 use crate::metrics::instrumentation::StageInstrumentation;
 use crate::stages::common::heartbeat::HeartbeatState;
@@ -159,6 +160,10 @@ pub(crate) struct OutputCommitter<'a> {
     /// Runtime output contract for stage-authored domain `Data` facts. Absent
     /// on reserved framework append paths and legacy callers.
     pub output_contract: Option<&'a StageOutputContract>,
+    /// Physical-row accounting for direct `Data` facts. Pending-output drains
+    /// leave this absent because they own an enforced or replay-scoped
+    /// reservation outside the commit helper.
+    pub backpressure_writer: Option<&'a BackpressureWriter>,
     /// Observer bundle for stage output commit hooks.
     pub observers: Option<&'a StageObserverBundle>,
     /// Per-event observer execution scope for replay suppression.
@@ -201,6 +206,18 @@ impl OutputCommitter<'_> {
         self.validate_prebuilt(&event, options)?;
 
         let mut event = event;
+
+        // One-to-one handlers frequently author a fresh typed event and rely
+        // on the commit seam for integration metadata. Fan-in accumulators
+        // author their exact union before this point, so only apply the parent
+        // fallback when no per-output activation provenance exists.
+        if event.composite_activations().is_empty() {
+            if let Some(parent) = parent {
+                event = event.try_with_composite_activations(
+                    parent.event.composite_activations().to_vec(),
+                )?;
+            }
+        }
 
         if let Some(flow_context) = self.flow_context {
             event = event.with_flow_context(flow_context.clone());
@@ -249,11 +266,26 @@ impl OutputCommitter<'_> {
             }
         }
 
+        // Direct facts are already past input admission, so this path must not
+        // wait. It nevertheless records every durable physical Data row. A
+        // failed append drops the reservation and releases it.
+        let backpressure_reservation = event
+            .is_data()
+            .then(|| {
+                self.backpressure_writer
+                    .map(|writer| writer.reserve_tracked(1))
+            })
+            .flatten();
+
         let written = self
             .data_journal
             .append(event, parent)
             .await
             .map_err(|e| -> CommitError { e.to_string().into() })?;
+
+        if let Some(reservation) = backpressure_reservation {
+            reservation.commit(1);
+        }
 
         if let Some(instrumentation) = self.instrumentation {
             if options.count_output && written.event.is_data() {
@@ -366,6 +398,10 @@ pub(crate) struct FrameworkObservabilityCommit<'a> {
     pub system_journal: Option<&'a Arc<dyn Journal<SystemEvent>>>,
     pub instrumentation: Option<&'a Arc<StageInstrumentation>>,
     pub heartbeat_state: Option<&'a Arc<HeartbeatState>>,
+    /// Stage physical-row writer. Most events on this path are non-Data, but
+    /// middleware may author durable framework Data facts through the same
+    /// buffer, and those rows participate in B2 accounting.
+    pub backpressure_writer: &'a BackpressureWriter,
     pub parent: Option<&'a EventEnvelope<ChainEvent>>,
     pub observer_scope: MiddlewareExecutionScope,
 }
@@ -385,6 +421,7 @@ pub(crate) async fn commit_framework_observability_events(
         instrumentation: context.instrumentation,
         heartbeat_state: context.heartbeat_state,
         output_contract: None,
+        backpressure_writer: Some(context.backpressure_writer),
         observers: None,
         observer_scope: context.observer_scope,
     };
@@ -430,6 +467,7 @@ pub(crate) async fn append_observer_diagnostics(
         instrumentation,
         heartbeat_state: None,
         output_contract: None,
+        backpressure_writer: None,
         observers: None,
         observer_scope: MiddlewareExecutionScope::LiveHandler,
     };

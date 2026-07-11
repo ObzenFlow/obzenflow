@@ -175,6 +175,7 @@ pub(super) async fn dispatch_draining(
                 }
             }
         }
+        PollResult::CursorAdvanced { .. } => Ok(EventLoopDirective::Continue),
         PollResult::NoEvents => {
             // No events available right now: sleep briefly to avoid busy loop.
             idle_backoff().await;

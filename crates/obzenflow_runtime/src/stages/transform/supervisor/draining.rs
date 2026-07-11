@@ -23,6 +23,7 @@ use crate::supervised_base::EventLoopDirective;
 use obzenflow_core::event::context::{FlowContext, StageType};
 use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
 use obzenflow_fsm::StateVariant;
+use std::sync::atomic::Ordering;
 
 use super::TransformSupervisor;
 use crate::stages::transform::fsm::{TransformContext, TransformEvent, TransformState};
@@ -128,12 +129,15 @@ async fn dispatch_draining_inner<
                 "transform: draining received event from subscription"
             );
 
-            ctx.instrumentation.record_consumed(&envelope);
-
             let upstream_stage = sup
                 .subscription
                 .as_ref()
                 .and_then(|subscription| subscription.last_delivered_upstream_stage());
+            ctx.instrumentation.record_consumed(
+                &envelope,
+                upstream_stage.expect("delivered event must identify its upstream stage"),
+            );
+
             let stage_input_position = sup
                 .subscription
                 .as_ref()
@@ -289,6 +293,7 @@ async fn dispatch_draining_inner<
                         system_journal: Some(&ctx.system_journal),
                         instrumentation: Some(&ctx.instrumentation),
                         heartbeat_state: ctx.heartbeat.as_ref().map(|heartbeat| &heartbeat.state),
+                        backpressure_writer: &ctx.backpressure_writer,
                         parent: Some(&envelope),
                         observer_scope: scope,
                     },
@@ -316,6 +321,7 @@ async fn dispatch_draining_inner<
                                 .heartbeat
                                 .as_ref()
                                 .map(|heartbeat| &heartbeat.state),
+                            backpressure_writer: &ctx.backpressure_writer,
                             parent: Some(&envelope),
                             observer_scope: scope,
                         },
@@ -393,6 +399,20 @@ async fn dispatch_draining_inner<
                 }
             }
 
+            Ok(EventLoopDirective::Continue)
+        }
+        PollResult::CursorAdvanced {
+            upstream,
+            completed_data_rows,
+        } => {
+            crate::backpressure::complete_filtered_data_rows(
+                &ctx.backpressure_readers,
+                upstream,
+                completed_data_rows,
+            );
+            ctx.instrumentation
+                .event_loops_with_work_total
+                .fetch_add(1, Ordering::Relaxed);
             Ok(EventLoopDirective::Continue)
         }
         PollResult::NoEvents => {

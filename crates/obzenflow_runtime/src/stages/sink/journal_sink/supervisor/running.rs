@@ -101,7 +101,11 @@ pub(super) async fn dispatch_running<
                 event_id = ?envelope.event.id,
                 "sink: poll_next returned Event"
             );
-            ctx.instrumentation.record_consumed(&envelope);
+            let delivered_upstream_stage = subscription
+                .last_delivered_upstream_stage()
+                .expect("delivered event must identify its upstream stage");
+            ctx.instrumentation
+                .record_consumed(&envelope, delivered_upstream_stage);
             ctx.instrumentation
                 .event_loops_with_work_total
                 .fetch_add(1, Ordering::Relaxed);
@@ -163,6 +167,20 @@ pub(super) async fn dispatch_running<
             }
 
             Ok(directive)
+        }
+        PollResult::CursorAdvanced {
+            upstream,
+            completed_data_rows,
+        } => {
+            crate::backpressure::complete_filtered_data_rows(
+                &ctx.backpressure_readers,
+                upstream,
+                completed_data_rows,
+            );
+            ctx.instrumentation
+                .event_loops_with_work_total
+                .fetch_add(1, Ordering::Relaxed);
+            Ok(EventLoopDirective::Continue)
         }
         PollResult::NoEvents => {
             // FLOWIP-095d: a canonical merge that delivered nothing because an
@@ -839,7 +857,8 @@ async fn dispatch_data_event<
                     );
 
                     if error_event.is_data() {
-                        ctx.instrumentation.record_output_event(&error_event);
+                        ctx.instrumentation
+                            .record_error_journal_output_event(&error_event);
                     }
 
                     ctx.error_journal
@@ -917,7 +936,10 @@ async fn journal_delivery_receipt<
     let delivery_event = ChainEventFactory::delivery_event(writer_id, payload)
         .with_flow_context(flow_context)
         .with_causality(CausalityContext::with_parent(parent_envelope.event.id))
-        .with_correlation_from(&parent_envelope.event);
+        .with_correlation_from(&parent_envelope.event)
+        .with_cycle_state_from(&parent_envelope.event);
+    let delivery_event = delivery_event
+        .try_with_composite_activations(parent_envelope.event.composite_activations().to_vec())?;
 
     if delivery_event.is_data() || delivery_event.is_delivery() {
         ctx.instrumentation.record_output_event(&delivery_event);

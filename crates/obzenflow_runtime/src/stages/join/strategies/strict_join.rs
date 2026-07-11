@@ -6,12 +6,11 @@
 //!
 //! Mission-critical systems where missing reference data indicates corruption
 
-use super::common::{JoinStrategy, JoinWithStrategy};
+use super::common::{JoinStrategy, JoinStrategyOutput, JoinWithStrategy};
 use crate::stages::common::stage_handle::StageHandle;
 use crate::stages::join::config::{JoinReferenceMode, DEFAULT_REFERENCE_BATCH_CAP};
 use obzenflow_core::event::payloads::flow_control_payload::EofKind;
 use obzenflow_core::event::ChainEventFactory;
-use obzenflow_core::ChainEvent;
 use obzenflow_core::TypedPayload;
 use obzenflow_core::{StageId, WriterId};
 use std::collections::HashMap;
@@ -303,12 +302,12 @@ where
         stream_data: Self::StreamType,
         stream_key: Self::Key,
         writer_id: WriterId,
-    ) -> Vec<ChainEvent> {
+    ) -> JoinStrategyOutput<Self::Key> {
         match catalog.get(&stream_key) {
             Some(catalog_data) => {
                 tracing::debug!("StrictJoin: Found match for key: {:?}", stream_key);
                 let output = (self.join_fn)(catalog_data.clone(), stream_data);
-                vec![output.to_event(writer_id)]
+                JoinStrategyOutput::new(vec![output.to_event(writer_id)], vec![stream_key])
             }
             None => {
                 tracing::error!(
@@ -320,7 +319,7 @@ where
 
                 tracing::error!("StrictJoin: emitting poison EOF for unmatched stream event");
 
-                vec![poison_eof]
+                JoinStrategyOutput::without_reference(vec![poison_eof])
             }
         }
     }

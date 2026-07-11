@@ -459,6 +459,105 @@ pub(crate) fn compute_flow_lifecycle_metrics(
     }
 }
 
+/// Build exact named graph cuts from durable topology edge-port bindings
+/// (FLOWIP-128a B3). `collapsible` is presentation metadata and never gates
+/// backend projection.
+pub(crate) fn composite_boundaries_from_topology(
+    topology: &obzenflow_topology::Topology,
+) -> Vec<obzenflow_core::metrics::CompositeBoundary> {
+    use crate::id_conversions::StageIdExt;
+    use obzenflow_core::id::{CompositeId, StageId};
+    use obzenflow_core::metrics::{
+        BoundaryDirection, CompositeBoundary, CompositeBoundaryEdge, CompositeBoundaryPort,
+    };
+
+    let mut boundaries: Vec<_> = topology
+        .subgraphs()
+        .iter()
+        .map(|subgraph| {
+            let members = subgraph
+                .member_stage_ids
+                .iter()
+                .map(|id| StageId::from_topology_id(*id))
+                .collect();
+
+            let mut ports: Vec<_> = subgraph
+                .boundary_ports
+                .iter()
+                .map(|port| CompositeBoundaryPort {
+                    name: port.name.clone(),
+                    direction: match port.direction {
+                        obzenflow_topology::PortDirection::Input => BoundaryDirection::Inbound,
+                        obzenflow_topology::PortDirection::Output => BoundaryDirection::Outbound,
+                    },
+                    member: StageId::from_topology_id(port.member_stage_id),
+                    payload_event_types: port
+                        .payload_event_types
+                        .iter()
+                        .cloned()
+                        .map(obzenflow_core::EventType::from)
+                        .collect(),
+                })
+                .collect();
+            ports.sort_by(|left, right| {
+                (left.direction.as_str(), left.name.as_str())
+                    .cmp(&(right.direction.as_str(), right.name.as_str()))
+            });
+
+            let mut edges = Vec::new();
+            for edge in topology.edges() {
+                for port_ref in &edge.composite_ports {
+                    if port_ref.subgraph_id != subgraph.subgraph_id {
+                        continue;
+                    }
+                    let Some(port) = ports.iter().find(|port| port.name == port_ref.port_name)
+                    else {
+                        // Topology validation rejects this before runtime build.
+                        continue;
+                    };
+                    let upstream = StageId::from_topology_id(edge.from);
+                    let downstream = StageId::from_topology_id(edge.to);
+                    let (member, peer) = match port.direction {
+                        BoundaryDirection::Inbound => (downstream, upstream),
+                        BoundaryDirection::Outbound => (upstream, downstream),
+                    };
+                    edges.push(CompositeBoundaryEdge {
+                        port: port.name.clone(),
+                        direction: port.direction,
+                        member,
+                        peer,
+                        upstream,
+                        downstream,
+                    });
+                }
+            }
+            edges.sort_by(|left, right| {
+                (
+                    left.direction.as_str(),
+                    left.port.as_str(),
+                    left.upstream,
+                    left.downstream,
+                )
+                    .cmp(&(
+                        right.direction.as_str(),
+                        right.port.as_str(),
+                        right.upstream,
+                        right.downstream,
+                    ))
+            });
+
+            CompositeBoundary {
+                composite_id: CompositeId::new(subgraph.subgraph_id.clone()),
+                members,
+                ports,
+                edges,
+            }
+        })
+        .collect();
+    boundaries.sort_by(|left, right| left.composite_id.cmp(&right.composite_id));
+    boundaries
+}
+
 fn record_stage_completion(
     completed_stages: &mut Vec<StageId>,
     stage_id: StageId,
@@ -1028,8 +1127,10 @@ impl FsmAction for PipelineAction {
                 let inputs = MetricsInputs::new(stage_journals, error_journals)
                     .with_backpressure_registry_opt(backpressure_registry);
 
+                let composite_boundaries = composite_boundaries_from_topology(&context.topology);
                 match MetricsAggregatorBuilder::new(inputs, system_journal, exporter)
                     .with_stage_metadata(stage_metadata)
+                    .with_composite_boundaries(composite_boundaries)
                     .with_export_interval(1) // 10 second interval
                     .build()
                     .await
@@ -2149,6 +2250,11 @@ mod fsm_lifecycle_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::id_conversions::StageIdExt;
+    use obzenflow_topology::{
+        BoundaryPortSpec, CompositePortRef, DirectedEdge, EdgeKind, PortDirection, StageInfo,
+        StageType as TopologyStageType, SubgraphInternalEdge, Topology, TopologySubgraphInfo,
+    };
 
     #[test]
     fn terminal_states_are_exactly_the_locked_set() {
@@ -2162,6 +2268,88 @@ mod tests {
         assert!(!PipelineState::Running.is_terminal());
         assert!(!PipelineState::Draining.is_terminal());
         assert!(!PipelineState::SourceCompleted.is_terminal());
+    }
+
+    #[test]
+    fn runtime_boundary_is_the_named_multi_port_cut_even_when_not_collapsible() {
+        let ids: Vec<_> = (1_u128..=6)
+            .map(|value| obzenflow_topology::StageId::from_bytes(value.to_be_bytes()))
+            .collect();
+        let (producer, entry, completed, failed, ok_sink, err_sink) =
+            (ids[0], ids[1], ids[2], ids[3], ids[4], ids[5]);
+        let stages = vec![
+            StageInfo::new(producer, "producer", TopologyStageType::FiniteSource),
+            StageInfo::new(entry, "entry", TopologyStageType::Transform),
+            StageInfo::new(completed, "completed", TopologyStageType::Transform),
+            StageInfo::new(failed, "failed", TopologyStageType::Transform),
+            StageInfo::new(ok_sink, "ok", TopologyStageType::Sink),
+            StageInfo::new(err_sink, "err", TopologyStageType::Sink),
+        ];
+        let subgraph_id = "saga:checkout";
+        let edges = vec![
+            DirectedEdge::new(producer, entry, EdgeKind::Forward)
+                .with_composite_ports(vec![CompositePortRef::new(subgraph_id, "commands")]),
+            DirectedEdge::new(entry, completed, EdgeKind::Forward),
+            DirectedEdge::new(entry, failed, EdgeKind::Forward),
+            DirectedEdge::new(completed, ok_sink, EdgeKind::Forward)
+                .with_composite_ports(vec![CompositePortRef::new(subgraph_id, "completed")]),
+            DirectedEdge::new(failed, err_sink, EdgeKind::Forward)
+                .with_composite_ports(vec![CompositePortRef::new(subgraph_id, "failed")]),
+        ];
+        let subgraph = TopologySubgraphInfo::new(
+            subgraph_id,
+            "saga",
+            "checkout",
+            "checkout",
+            vec![entry, completed, failed],
+            vec![
+                SubgraphInternalEdge::new(entry, completed, "terminal"),
+                SubgraphInternalEdge::new(entry, failed, "terminal"),
+            ],
+            vec![entry],
+            vec![completed, failed],
+            false,
+        )
+        .with_boundary_ports(vec![
+            BoundaryPortSpec::new(
+                "commands",
+                PortDirection::Input,
+                entry,
+                vec!["checkout.command.v1".into()],
+                true,
+            ),
+            BoundaryPortSpec::new(
+                "completed",
+                PortDirection::Output,
+                completed,
+                vec!["checkout.completed.v1".into()],
+                true,
+            ),
+            BoundaryPortSpec::new(
+                "failed",
+                PortDirection::Output,
+                failed,
+                vec!["checkout.failed.v1".into()],
+                false,
+            ),
+        ]);
+        let topology = Topology::new_unvalidated(stages, edges)
+            .unwrap()
+            .with_subgraphs(vec![subgraph]);
+
+        let boundaries = composite_boundaries_from_topology(&topology);
+        assert_eq!(boundaries.len(), 1);
+        let boundary = &boundaries[0];
+        assert_eq!(boundary.ports.len(), 3);
+        assert_eq!(boundary.edges.len(), 3);
+        assert!(boundary.edges.iter().any(|edge| {
+            edge.port == "completed"
+                && edge.member == obzenflow_core::StageId::from_topology_id(completed)
+        }));
+        assert!(boundary.edges.iter().any(|edge| {
+            edge.port == "failed"
+                && edge.member == obzenflow_core::StageId::from_topology_id(failed)
+        }));
     }
 
     #[test]

@@ -8,6 +8,7 @@
 //! ensuring that FSMs control sleep timing and preventing busy loops.
 
 use obzenflow_core::event::JournalEvent;
+use obzenflow_core::StageId;
 use std::fmt::Debug;
 
 /// Result of polling a subscription for events
@@ -15,6 +16,17 @@ use std::fmt::Debug;
 pub enum PollResult<T: JournalEvent> {
     /// An event is available
     Event(obzenflow_core::EventEnvelope<T>),
+
+    /// The journal cursor advanced across a transport-filtered row.
+    ///
+    /// `completed_data_rows` is physical transport accounting. It deliberately
+    /// does not imply a logical delivery, input position, receipt, or contract
+    /// update. Returning it as a poll outcome bounds filtered-row work and lets
+    /// the owning FSM replenish the matching physical edge directly.
+    CursorAdvanced {
+        upstream: StageId,
+        completed_data_rows: u64,
+    },
 
     /// No events currently available (would block)
     NoEvents,
@@ -39,6 +51,7 @@ pub trait SubscriptionPoller: Send + Sync {
     ///
     /// Returns immediately with one of:
     /// - `Event`: An event is ready
+    /// - `CursorAdvanced`: a filtered row was consumed
     /// - `NoEvents`: No events available right now
     /// - `Error`: An error occurred
     async fn poll_next(&mut self) -> PollResult<Self::Event>;

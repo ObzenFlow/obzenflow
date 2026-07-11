@@ -8,13 +8,11 @@
 //! Before the closing-PR fix, `build_typed_flow!` built `topology_stages`
 //! from `TopologyStageInfo::new(...)` without `.with_subgraph(...)`, and the
 //! validator's composite-internal-edge skip rule could not fire. Any flow
-//! using `ai_map_reduce!` would surface as a `SingleEdge` mismatch on the
-//! `chunk -> collect` manifest edge (the chunker emits `Chunk`, the collect
-//! stage declares `Partial` as its typed input). This test wires a minimal
+//! using `ai_map_reduce!` would surface its mixed internal selected feeds as a
+//! `SingleEdge` mismatch (the map consumes both chunks and manifests; the
+//! collector consumes forwarded manifests plus tagged partials). This test wires a minimal
 //! `ai_map_reduce!` composite end-to-end through `flow!`, awaits the build,
-//! and asserts `Ok(_)`. Without the fix it returns
-//! `Err(FlowBuildError::EdgeTypingMismatch { kind: SingleEdge, .. })` on the
-//! `digest__chunk -> digest__collect` manifest edge.
+//! and asserts `Ok(_)`.
 //!
 //! The handlers below are stubs: the source emits no events, the transforms
 //! return empty vectors, the sink is a no-op. The test only exercises the
@@ -25,7 +23,7 @@ use async_trait::async_trait;
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventContent, ChainEventFactory};
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
 use obzenflow_core::{id::StageId, TypedPayload, WriterId};
-use obzenflow_dsl::{ai_map_reduce, flow, sink, source};
+use obzenflow_dsl::{ai_map_reduce, flow, join, sink, source};
 use obzenflow_infra::journal::memory_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::source::SourceError;
@@ -225,7 +223,7 @@ impl FiniteSourceHandler for OneSeedSource {
         self.emitted = true;
         Ok(Some(vec![ChainEventFactory::data_event(
             self.writer_id,
-            BuildOnlySeed::EVENT_TYPE,
+            BuildOnlySeed::versioned_event_type(),
             json!(BuildOnlySeed { n: 2 }),
         )]))
     }
@@ -242,13 +240,13 @@ impl TransformTyping for RuntimeChunker {
 #[async_trait]
 impl TransformHandler for RuntimeChunker {
     fn process(&self, event: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> {
-        let chunk_count = 2;
+        let chunk_count = 5;
         let mut out = Vec::new();
         for chunk_index in 0..chunk_count {
             out.push(ChainEventFactory::derived_data_event(
                 event.writer_id,
                 &event,
-                BuildOnlyChunk::EVENT_TYPE,
+                BuildOnlyChunk::versioned_event_type(),
                 json!(BuildOnlyChunk {
                     chunk_index,
                     chunk_count,
@@ -280,7 +278,7 @@ impl AsyncTransformHandler for RuntimeMap {
         Ok(vec![ChainEventFactory::derived_data_event(
             event.writer_id,
             &event,
-            BuildOnlyPartial::EVENT_TYPE,
+            BuildOnlyPartial::versioned_event_type(),
             json!(BuildOnlyPartial { value: chunk.value }),
             obzenflow_core::config::LineagePolicy::default(),
         )])
@@ -308,7 +306,7 @@ impl AsyncTransformHandler for RuntimeFinalize {
         Ok(vec![ChainEventFactory::derived_data_event(
             event.writer_id,
             &event,
-            BuildOnlyOut::EVENT_TYPE,
+            BuildOnlyOut::versioned_event_type(),
             json!(BuildOnlyOut { total }),
             obzenflow_core::config::LineagePolicy::default(),
         )])
@@ -322,12 +320,12 @@ impl AsyncTransformHandler for RuntimeFinalize {
 #[tokio::test]
 async fn build_typed_flow_accepts_ai_map_reduce_with_subgraph_attached() {
     // The build is the assertion. If `validate_edge_typing` ran against a
-    // topology without composite subgraph membership, the `chunk -> collect`
-    // manifest edge would surface as
+    // topology without composite subgraph membership, the mixed selected
+    // internal feeds would surface as
     // `FlowBuildError::EdgeTypingMismatch { kind: SingleEdge, .. }` and this
     // `.await` would resolve to `Err`. With the FLOWIP-114c closing-PR fix in
     // `build_typed_flow!`, subgraph membership is attached before the
-    // validator runs and the four composite-internal edges are skipped.
+    // validator runs and the three composite-internal edges are recognized.
     let result = flow! {
         name: "amr_build_only",
         journals: memory_journals(),
@@ -370,6 +368,73 @@ async fn build_typed_flow_accepts_ai_map_reduce_with_subgraph_attached() {
 }
 
 #[tokio::test]
+async fn built_flow_serializes_canonical_boundary_payload_types_exactly_once() {
+    let handle = flow! {
+        name: "amr_boundary_payload_contract",
+        journals: memory_journals(),
+        middleware: [],
+
+        stages: {
+            seed = source!(BuildOnlySeed => NoEventSource);
+            digest = ai_map_reduce!(
+                chunk: BuildOnlySeed -> BuildOnlyChunk => NoopChunker,
+                map: BuildOnlyChunk -> BuildOnlyPartial => NoopMap,
+                collect: BuildOnlyPartial -> BuildOnlyCollected => CollectByInput::new(
+                    BuildOnlyCollected::default(),
+                    |acc: &mut BuildOnlyCollected, partial: &BuildOnlyPartial| {
+                        acc.values.push(partial.value);
+                    },
+                ),
+                reduce: BuildOnlyCollected -> BuildOnlyOut => NoopFinalize,
+            );
+            sink_stage = sink!(BuildOnlyOut => NoopSink);
+        },
+
+        topology: {
+            seed |> digest;
+            digest |> sink_stage;
+        }
+    }
+    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+    .await
+    .expect("typed ai_map_reduce flow should build");
+
+    let topology = handle.topology().expect("built flow exposes topology");
+    let digest = topology
+        .subgraphs()
+        .iter()
+        .find(|subgraph| subgraph.subgraph_id == "ai_map_reduce:digest")
+        .expect("digest subgraph");
+    let input = digest
+        .boundary_ports
+        .iter()
+        .find(|port| port.name == "in")
+        .expect("input port");
+    let output = digest
+        .boundary_ports
+        .iter()
+        .find(|port| port.name == "out")
+        .expect("output port");
+
+    assert_eq!(
+        input.payload_event_types,
+        vec![BuildOnlySeed::versioned_event_type()]
+    );
+    assert_eq!(
+        output.payload_event_types,
+        vec![BuildOnlyOut::versioned_event_type()]
+    );
+
+    let serialized = serde_json::to_string(&*topology).expect("topology serializes");
+    assert!(serialized.contains("regression.amr.seed.v1"));
+    assert!(serialized.contains("regression.amr.out.v1"));
+    assert!(
+        !serialized.contains(".v1.v1"),
+        "boundary payload event types must already be canonical: {serialized}"
+    );
+}
+
+#[tokio::test]
 async fn ai_map_reduce_runtime_commits_framework_internal_transport_events() {
     let (sink_handler, delivered, total) = CountingOutSink::new();
 
@@ -377,6 +442,8 @@ async fn ai_map_reduce_runtime_commits_framework_internal_transport_events() {
         name: "amr_runtime_internal_contracts",
         journals: memory_journals(),
         middleware: [],
+        backpressure: obzenflow_dsl::dsl::backpressure_clause::enforced(2)
+            .stall_timeout_ms(3_000),
 
         stages: {
             seed = source!(BuildOnlySeed => OneSeedSource::new());
@@ -403,10 +470,11 @@ async fn ai_map_reduce_runtime_commits_framework_internal_transport_events() {
     .await
     .expect("ai_map_reduce runtime flow should build");
 
-    handle
-        .run()
+    let metrics = handle
+        .run_with_metrics()
         .await
-        .expect("ai_map_reduce should commit planning manifests and tagged partials");
+        .expect("ai_map_reduce should commit planning manifests and tagged partials")
+        .expect("test flow should expose its terminal metrics snapshot");
 
     assert_eq!(
         delivered.load(Ordering::SeqCst),
@@ -415,7 +483,213 @@ async fn ai_map_reduce_runtime_commits_framework_internal_transport_events() {
     );
     assert_eq!(
         total.load(Ordering::SeqCst),
-        3,
+        15,
         "collector should route tagged partials and finalise their sum"
     );
+
+    let rendered = metrics
+        .render_metrics()
+        .expect("terminal backpressure metrics should render");
+    let duration_count = rendered
+        .lines()
+        .find_map(|line| {
+            if line.starts_with("obzenflow_composite_boundary_duration_seconds_count{")
+                && line.contains("composite=\"ai_map_reduce:digest\"")
+                && line.contains("entry_port=\"in\"")
+                && line.contains("exit_port=\"out\"")
+            {
+                line.split_whitespace().last()?.parse::<u64>().ok()
+            } else {
+                None
+            }
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "runtime resource wiring must stamp the digest input activation and project its final output:\n{rendered}"
+            )
+        });
+    assert_eq!(
+        duration_count, 1,
+        "one admitted seed and one final output form one paired boundary duration"
+    );
+    assert!(
+        !rendered.lines().any(|line| {
+            line.starts_with("obzenflow_composite_boundary_duration_invalid_total{")
+                && line.contains("composite=\"ai_map_reduce:digest\"")
+        }),
+        "the canonical ai_map_reduce boundary must not produce rejected duration evidence"
+    );
+    let in_flight: Vec<&str> = rendered
+        .lines()
+        .filter(|line| {
+            line.starts_with("obzenflow_backpressure_in_flight{")
+                && line.contains("flow=\"amr_runtime_internal_contracts\"")
+        })
+        .collect();
+    assert!(
+        !in_flight.is_empty(),
+        "window-2 run should export physical edge debt"
+    );
+    for line in in_flight {
+        let debt = line
+            .split_whitespace()
+            .last()
+            .expect("metric value")
+            .parse::<u64>()
+            .expect("integer in-flight value");
+        assert_eq!(debt, 0, "terminal physical debt must be zero: {line}");
+    }
+}
+
+/// FLOWIP-128a D1 diagnostics: a downstream whose type no boundary port
+/// carries binds the default port, and the resulting edge-typing error names
+/// the composite and the port rather than only the mangled member stage.
+#[tokio::test]
+async fn boundary_type_mismatch_diagnostic_names_composite_and_port() {
+    let result = flow! {
+        name: "amr_boundary_mismatch",
+        journals: memory_journals(),
+        middleware: [],
+
+        stages: {
+            seed = source!(BuildOnlySeed => NoEventSource);
+            digest = ai_map_reduce!(
+                chunk: BuildOnlySeed -> BuildOnlyChunk => NoopChunker,
+                map: BuildOnlyChunk -> BuildOnlyPartial => NoopMap,
+                collect: BuildOnlyPartial -> BuildOnlyCollected => CollectByInput::new(
+                    BuildOnlyCollected::default(),
+                    |acc: &mut BuildOnlyCollected, partial: &BuildOnlyPartial| {
+                        acc.values.push(partial.value);
+                    },
+                ),
+                reduce: BuildOnlyCollected -> BuildOnlyOut => NoopFinalize,
+            );
+            // Wrong type: no output port carries BuildOnlySeed, so the edge
+            // binds the default `out` port and must fail edge typing there.
+            sink_stage = sink!(BuildOnlySeed => NoopSink);
+        },
+
+        topology: {
+            seed |> digest;
+            digest |> sink_stage;
+        }
+    }
+    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+    .await;
+
+    let err = match result {
+        Ok(_) => panic!("expected an edge-typing failure at the composite boundary"),
+        Err(err) => err,
+    };
+    let message = format!("{err:?}");
+    assert!(
+        message.contains("digest__finalize"),
+        "error should name the member stage: {message}"
+    );
+    assert!(
+        message.contains("composite 'digest' boundary port 'out'"),
+        "error should name the composite and port (FLOWIP-128a D1): {message}"
+    );
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct JoinStreamP {
+    key: u64,
+}
+impl TypedPayload for JoinStreamP {
+    const EVENT_TYPE: &'static str = "regression.amr.join_stream";
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct JoinedP {
+    key: u64,
+}
+impl TypedPayload for JoinedP {
+    const EVENT_TYPE: &'static str = "regression.amr.joined";
+}
+
+#[derive(Clone, Debug)]
+struct LocalNoopJoin;
+
+#[async_trait]
+impl obzenflow_runtime::stages::common::handlers::JoinHandler for LocalNoopJoin {
+    type State = ();
+
+    fn initial_state(&self) -> Self::State {}
+
+    fn process_event(
+        &self,
+        _state: &mut Self::State,
+        _event: ChainEvent,
+        _source_id: StageId,
+        _writer_id: WriterId,
+    ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
+        Ok(vec![])
+    }
+
+    fn on_source_eof(
+        &self,
+        _state: &mut Self::State,
+        _source_id: StageId,
+        _writer_id: WriterId,
+    ) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
+        Ok(vec![])
+    }
+}
+
+#[derive(Clone, Debug)]
+struct NoStreamSource;
+impl SourceTyping for NoStreamSource {
+    type Output = JoinStreamP;
+}
+impl FiniteSourceHandler for NoStreamSource {
+    fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
+        Ok(None)
+    }
+}
+
+/// FLOWIP-128a A4: a join reference variable naming a composite resolves
+/// through the boundary by the join's declared reference type, with
+/// default-port fallback. Before the fix this build failed with
+/// "references unknown stage variable 'digest'".
+#[tokio::test]
+async fn join_reference_resolves_through_composite_boundary_port() {
+    let result = flow! {
+        name: "amr_join_reference",
+        journals: memory_journals(),
+        middleware: [],
+
+        stages: {
+            seed = source!(BuildOnlySeed => NoEventSource);
+            digest = ai_map_reduce!(
+                chunk: BuildOnlySeed -> BuildOnlyChunk => NoopChunker,
+                map: BuildOnlyChunk -> BuildOnlyPartial => NoopMap,
+                collect: BuildOnlyPartial -> BuildOnlyCollected => CollectByInput::new(
+                    BuildOnlyCollected::default(),
+                    |acc: &mut BuildOnlyCollected, partial: &BuildOnlyPartial| {
+                        acc.values.push(partial.value);
+                    },
+                ),
+                reduce: BuildOnlyCollected -> BuildOnlyOut => NoopFinalize,
+            );
+            stream_src = source!(JoinStreamP => NoStreamSource);
+            enrich = join!(catalog digest: BuildOnlyOut, JoinStreamP -> JoinedP => LocalNoopJoin);
+            joined_sink = sink!(JoinedP => NoopSink);
+        },
+
+        topology: {
+            seed |> digest;
+            stream_src |> enrich;
+            enrich |> joined_sink;
+        }
+    }
+    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+    .await;
+
+    result.unwrap_or_else(|err| {
+        panic!(
+            "FLOWIP-128a A4: a join referencing the composite binding must resolve \
+             through the boundary's typed output port. Error: {err:?}"
+        )
+    });
 }

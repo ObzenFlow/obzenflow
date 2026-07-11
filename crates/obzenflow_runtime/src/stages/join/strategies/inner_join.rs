@@ -6,10 +6,9 @@
 //!
 //! SQL Equivalent: SELECT * FROM stream INNER JOIN reference ON ...
 
-use super::common::{JoinStrategy, JoinWithStrategy};
+use super::common::{JoinStrategy, JoinStrategyOutput, JoinWithStrategy};
 use crate::stages::common::stage_handle::StageHandle;
 use crate::stages::join::config::{JoinReferenceMode, DEFAULT_REFERENCE_BATCH_CAP};
-use obzenflow_core::ChainEvent;
 use obzenflow_core::TypedPayload;
 use obzenflow_core::{StageId, WriterId};
 use std::collections::HashMap;
@@ -304,16 +303,16 @@ where
         stream_data: Self::StreamType,
         stream_key: Self::Key,
         writer_id: WriterId,
-    ) -> Vec<ChainEvent> {
+    ) -> JoinStrategyOutput<Self::Key> {
         match catalog.get(&stream_key) {
             Some(catalog_data) => {
                 tracing::debug!("InnerJoin: Found match for key: {:?}", stream_key);
                 let output = (self.join_fn)(catalog_data.clone(), stream_data);
-                vec![output.to_event(writer_id)]
+                JoinStrategyOutput::new(vec![output.to_event(writer_id)], vec![stream_key])
             }
             None => {
                 tracing::debug!("InnerJoin: No match for key: {:?} (dropping)", stream_key);
-                vec![]
+                JoinStrategyOutput::without_reference(vec![])
             }
         }
     }

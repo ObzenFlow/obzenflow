@@ -1,0 +1,42 @@
+# FLOWIP-128a Studio walkthrough config: select with
+#   --config examples/hn_ai_digest_demo/obzenflow.studio.toml
+# The runtime registers with the phonebook and the browser attaches directly
+# to this process's port; the phonebook never proxies the data path.
+#
+# This is the composite showcase: the `digest` ai_map_reduce! renders as one
+# collapsed node in Studio (FLOWIP-128a), not four `digest__*` member stages.
+#
+# The HN feed is mocked by default (set HN_LIVE=1 for the real API). The AI
+# provider comes from HN_AI_* environment variables and defaults to a local
+# Ollama at http://localhost:11434 with llama3.1:8b; see the example header
+# in main.rs for the full list.
+
+[server]
+enabled = true
+host = "127.0.0.1"
+port = 9094
+startup_mode = "manual"
+# The digest flow completes after one fetch-and-summarise pass; park keeps
+# the control plane and topology inspectable after the terminal event
+# instead of exiting with the run.
+on_terminal = "park"
+
+# The Studio bundle is served from the phonebook origin, so every browser
+# request to this runtime is cross-origin; both spellings are listed because
+# 127.0.0.1 and localhost are different origins.
+[server.cors]
+mode = "allow-list"
+# 7010 = the studiod-served bundle origin; 8080 = the `trunk serve` UI-dev
+# origin. Both loopback; 127.0.0.1 and localhost are distinct origins.
+allow_origins = [
+    "http://127.0.0.1:7010",
+    "http://localhost:7010",
+    "http://127.0.0.1:8080",
+    "http://localhost:8080",
+]
+
+[studio]
+enabled = true
+phonebook_url = "http://127.0.0.1:7010"
+job_id = "hn_ai_digest"
+advertise_url = "http://127.0.0.1:9094"

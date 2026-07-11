@@ -240,6 +240,7 @@ impl Effects {
             instrumentation: self.ctx.instrumentation.as_ref(),
             heartbeat_state: self.ctx.heartbeat_state.as_ref(),
             output_contract: Some(&self.ctx.output_contract),
+            backpressure_writer: Some(&self.ctx.backpressure_writer),
             observers: None,
             observer_scope: obzenflow_core::MiddlewareExecutionScope::LiveEffectBoundary,
         };
@@ -868,6 +869,7 @@ impl Effects {
             instrumentation: self.ctx.instrumentation.clone(),
             heartbeat_state: self.ctx.heartbeat_state.clone(),
             output_contract: self.ctx.output_contract.clone(),
+            backpressure_writer: self.ctx.backpressure_writer.clone(),
             parent: self.ctx.parent.clone(),
             cursor: cursor.clone(),
             descriptor_hash: descriptor_hash.clone(),
@@ -1112,6 +1114,7 @@ impl Effects {
             &self.ctx.parent,
             record,
             self.ctx.lineage,
+            &self.ctx.backpressure_writer,
         )
         .await
     }
@@ -1139,6 +1142,7 @@ impl Effects {
             self.ctx.instrumentation.as_ref(),
             self.ctx.heartbeat_state.as_ref(),
             Some(&self.ctx.output_contract),
+            &self.ctx.backpressure_writer,
             self.ctx.writer_id,
             &self.ctx.parent,
             cursor,

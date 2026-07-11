@@ -118,6 +118,20 @@ async fn poll_live_reference<
 
     match poll {
         PollResult::Event(envelope) => handle_reference_envelope(sup, ctx, envelope, None).await,
+        PollResult::CursorAdvanced {
+            upstream,
+            completed_data_rows,
+        } => {
+            crate::backpressure::complete_filtered_data_rows(
+                &ctx.backpressure_readers,
+                upstream,
+                completed_data_rows,
+            );
+            ctx.instrumentation
+                .event_loops_with_work_total
+                .fetch_add(1, Ordering::Relaxed);
+            Ok(Some(EventLoopDirective::Continue))
+        }
         PollResult::NoEvents => Ok(None),
         PollResult::Error(e) => Ok(Some(EventLoopDirective::Transition(JoinEvent::Error(
             format!("Reference subscription error: {e}"),
@@ -138,7 +152,11 @@ async fn handle_reference_envelope<
     let Some(subscription) = sup.reference_subscription.as_mut() else {
         return Ok(None);
     };
-    ctx.instrumentation.record_consumed(&envelope);
+    let delivered_upstream_stage = subscription
+        .last_delivered_upstream_stage()
+        .expect("delivered event must identify its upstream stage");
+    ctx.instrumentation
+        .record_consumed(&envelope, delivered_upstream_stage);
     ctx.instrumentation
         .event_loops_with_work_total
         .fetch_add(1, Ordering::Relaxed);
@@ -445,6 +463,20 @@ async fn poll_live_stream<
 
     match poll {
         PollResult::Event(envelope) => handle_stream_envelope(sup, ctx, envelope, None).await,
+        PollResult::CursorAdvanced {
+            upstream,
+            completed_data_rows,
+        } => {
+            crate::backpressure::complete_filtered_data_rows(
+                &ctx.backpressure_readers,
+                upstream,
+                completed_data_rows,
+            );
+            ctx.instrumentation
+                .event_loops_with_work_total
+                .fetch_add(1, Ordering::Relaxed);
+            Ok(Some(EventLoopDirective::Continue))
+        }
         PollResult::NoEvents => Ok(None),
         PollResult::Error(e) => Ok(Some(EventLoopDirective::Transition(JoinEvent::Error(
             format!("Stream subscription error: {e}"),
@@ -465,7 +497,11 @@ async fn handle_stream_envelope<
     let Some(subscription) = sup.stream_subscription.as_mut() else {
         return Ok(None);
     };
-    ctx.instrumentation.record_consumed(&envelope);
+    let delivered_upstream_stage = subscription
+        .last_delivered_upstream_stage()
+        .expect("delivered event must identify its upstream stage");
+    ctx.instrumentation
+        .record_consumed(&envelope, delivered_upstream_stage);
     ctx.instrumentation
         .event_loops_with_work_total
         .fetch_add(1, Ordering::Relaxed);
@@ -880,24 +916,62 @@ async fn dispatch_live_canonical<
         );
         if let Some(subscription) = sup.reference_subscription.as_mut() {
             let mut progress = Some(&mut ctx.reference_contract_state[..]);
-            if let Err(e) = subscription
+            match subscription
                 .ensure_merge_candidate("Live", &mut progress)
                 .await
             {
-                return Ok(EventLoopDirective::Transition(JoinEvent::Error(format!(
-                    "Reference subscription error: {e}"
-                ))));
+                Err(e) => {
+                    return Ok(EventLoopDirective::Transition(JoinEvent::Error(format!(
+                        "Reference subscription error: {e}"
+                    ))));
+                }
+                Ok(
+                    crate::messaging::upstream_subscription::MergeCandidateStatus::CursorAdvanced {
+                        upstream,
+                        completed_data_rows,
+                    },
+                ) => {
+                    crate::backpressure::complete_filtered_data_rows(
+                        &ctx.backpressure_readers,
+                        upstream,
+                        completed_data_rows,
+                    );
+                    ctx.instrumentation
+                        .event_loops_with_work_total
+                        .fetch_add(1, Ordering::Relaxed);
+                    return Ok(EventLoopDirective::Continue);
+                }
+                Ok(_) => {}
             }
         }
         if let Some(subscription) = sup.stream_subscription.as_mut() {
             let mut progress = Some(&mut ctx.stream_contract_state[..]);
-            if let Err(e) = subscription
+            match subscription
                 .ensure_merge_candidate("Live", &mut progress)
                 .await
             {
-                return Ok(EventLoopDirective::Transition(JoinEvent::Error(format!(
-                    "Stream subscription error: {e}"
-                ))));
+                Err(e) => {
+                    return Ok(EventLoopDirective::Transition(JoinEvent::Error(format!(
+                        "Stream subscription error: {e}"
+                    ))));
+                }
+                Ok(
+                    crate::messaging::upstream_subscription::MergeCandidateStatus::CursorAdvanced {
+                        upstream,
+                        completed_data_rows,
+                    },
+                ) => {
+                    crate::backpressure::complete_filtered_data_rows(
+                        &ctx.backpressure_readers,
+                        upstream,
+                        completed_data_rows,
+                    );
+                    ctx.instrumentation
+                        .event_loops_with_work_total
+                        .fetch_add(1, Ordering::Relaxed);
+                    return Ok(EventLoopDirective::Continue);
+                }
+                Ok(_) => {}
             }
         }
         let held_after = (
@@ -998,6 +1072,17 @@ async fn dispatch_live_canonical<
                     )
                     .await?
                 }
+                PollResult::CursorAdvanced {
+                    upstream,
+                    completed_data_rows,
+                } => {
+                    crate::backpressure::complete_filtered_data_rows(
+                        &ctx.backpressure_readers,
+                        upstream,
+                        completed_data_rows,
+                    );
+                    Some(EventLoopDirective::Continue)
+                }
                 PollResult::NoEvents => None,
                 PollResult::Error(e) => Some(EventLoopDirective::Transition(JoinEvent::Error(
                     format!("Reference subscription error: {e}"),
@@ -1023,6 +1108,17 @@ async fn dispatch_live_canonical<
                         }),
                     )
                     .await?
+                }
+                PollResult::CursorAdvanced {
+                    upstream,
+                    completed_data_rows,
+                } => {
+                    crate::backpressure::complete_filtered_data_rows(
+                        &ctx.backpressure_readers,
+                        upstream,
+                        completed_data_rows,
+                    );
+                    Some(EventLoopDirective::Continue)
                 }
                 PollResult::NoEvents => None,
                 PollResult::Error(e) => Some(EventLoopDirective::Transition(JoinEvent::Error(

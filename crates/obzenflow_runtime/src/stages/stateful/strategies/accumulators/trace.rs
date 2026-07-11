@@ -2,7 +2,8 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use obzenflow_core::event::context::ReplayContext;
+use obzenflow_core::event::context::composite_activation_context::union_composite_activations;
+use obzenflow_core::event::context::{CompositeActivationContext, ReplayContext};
 use obzenflow_core::event::payloads::correlation_payload::CorrelationPayload;
 use obzenflow_core::event::types::{CorrelationId, EventId};
 use obzenflow_core::ChainEvent;
@@ -23,6 +24,9 @@ pub(crate) struct TraceState {
     correlation_id: Option<CorrelationId>,
     correlation_payload: Option<CorrelationPayload>,
     replay_context: Option<ReplayContext>,
+    /// Exact, untruncated composite inputs that contributed to this state.
+    #[serde(default)]
+    composite_activations: Vec<CompositeActivationContext>,
 }
 
 impl TraceState {
@@ -49,6 +53,20 @@ impl TraceState {
         self.parent_ids.push_back(event.id);
         while self.parent_ids.len() > max_depth {
             self.parent_ids.pop_front();
+        }
+
+        match union_composite_activations(
+            &self.composite_activations,
+            event.composite_activations(),
+        ) {
+            Ok(activations) => self.composite_activations = activations,
+            Err(error) => {
+                tracing::error!(
+                    error = %error,
+                    event_id = %event.id,
+                    "stateful trace rejected conflicting composite activation evidence"
+                );
+            }
         }
 
         if let Some(correlation_ids) = event.correlation_ids() {
@@ -136,6 +154,13 @@ impl TraceState {
     }
 
     pub(crate) fn apply_correlation_to_event(&self, event: &mut ChainEvent) {
+        if let Err(error) = event.try_extend_composite_activations(&self.composite_activations) {
+            tracing::error!(
+                error = %error,
+                event_id = %event.id,
+                "stateful trace could not apply composite activation evidence"
+            );
+        }
         if let Some(ids) = self.mixed_correlation_ids() {
             event.clear_correlation();
             event.replay_context = None;
@@ -160,6 +185,7 @@ mod tests {
     use super::*;
     use obzenflow_core::event::chain_event::ChainEventFactory;
     use obzenflow_core::event::types::WriterId;
+    use obzenflow_core::id::CompositeId;
     use obzenflow_core::StageId;
     use serde_json::json;
     use ulid::Ulid;
@@ -243,5 +269,42 @@ mod tests {
             Some(vec![deterministic_correlation_id(1)])
         );
         assert!(trace.correlation_ids_truncated());
+    }
+
+    #[test]
+    fn composite_activation_union_is_untruncated_and_survives_state_replay() {
+        let writer = WriterId::from(StageId::new());
+        let mut trace = TraceState::default();
+        for index in 0..3 {
+            let input = ChainEventFactory::data_event(writer, "input", json!({}));
+            let input_id = input.id;
+            let input = input
+                .try_with_composite_activations(vec![CompositeActivationContext::new(
+                    CompositeId::new("saga:checkout"),
+                    input_id,
+                    format!("input_{index}"),
+                    100 + index,
+                )])
+                .unwrap();
+            trace.record_event(
+                &input,
+                obzenflow_core::config::LineagePolicy {
+                    max_lineage_depth: 1,
+                },
+            );
+        }
+
+        let encoded = serde_json::to_vec(&trace).unwrap();
+        let replayed: TraceState = serde_json::from_slice(&encoded).unwrap();
+        let mut output = ChainEventFactory::data_event(writer, "output", json!({}));
+        replayed.apply_correlation_to_event(&mut output);
+        assert_eq!(output.composite_activations().len(), 3);
+        let mut ports: Vec<_> = output
+            .composite_activations()
+            .iter()
+            .map(|activation| activation.entry_port.as_str())
+            .collect();
+        ports.sort_unstable();
+        assert_eq!(ports, vec!["input_0", "input_1", "input_2"]);
     }
 }

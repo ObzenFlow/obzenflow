@@ -17,6 +17,13 @@ use tokio_stream::wrappers::UnboundedReceiverStream;
 use warp::sse::Event as SseEvent;
 use warp::{filters::BoxedFilter, Filter, Rejection, Reply};
 
+use crate::web::endpoint_tags::SURFACE_NAME_TAG_PREFIX;
+use crate::web::routing::{matchit_template_to_public, public_template_to_matchit};
+use crate::web::surface_metrics::{HttpSurfaceMetricsCollector, HttpSurfaceObservation};
+use crate::web::RuntimeInstanceId;
+use obzenflow_core::composite::{
+    CompositeDefinition, CompositeLifecycleProjection, CompositeStatus,
+};
 use obzenflow_core::event::event_envelope::SystemEventEnvelope;
 use obzenflow_core::event::SystemEvent;
 use obzenflow_core::journal::Journal;
@@ -25,18 +32,118 @@ use obzenflow_core::web::{
     ManagedRouteInfo, Request, Response, RouteKind, ServerConfig, SseBody, SseFrame, WebError,
     WebServer,
 };
-use obzenflow_core::EventId;
+use obzenflow_core::{EventId, StageId};
 
-use crate::web::endpoint_tags::SURFACE_NAME_TAG_PREFIX;
-use crate::web::routing::{matchit_template_to_public, public_template_to_matchit};
-use crate::web::surface_metrics::{HttpSurfaceMetricsCollector, HttpSurfaceObservation};
-use crate::web::RuntimeInstanceId;
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum ContractBoundaryDirectionV1 {
+    Inbound,
+    Outbound,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
+struct ContractBoundaryAliasV1 {
+    composite_id: String,
+    port: String,
+    direction: ContractBoundaryDirectionV1,
+}
+
+/// Topology-derived aliases for physical contract facts. The physical edge
+/// remains the occurrence identity; these values are read-model keys only.
+#[derive(Clone, Debug, Default)]
+struct ContractBoundaryAliasIndex {
+    by_edge: Arc<HashMap<(StageId, StageId), Vec<ContractBoundaryAliasV1>>>,
+}
+
+impl ContractBoundaryAliasIndex {
+    fn from_topology(topology: &obzenflow_topology::Topology) -> Result<Self, WebError> {
+        topology
+            .validate_composite_boundaries()
+            .map_err(|error| WebError::Implementation {
+                message: format!("invalid composite contract boundary projection: {error}"),
+                source: Some(Box::new(error)),
+            })?;
+
+        let subgraphs = topology
+            .subgraphs()
+            .iter()
+            .map(|subgraph| (subgraph.subgraph_id.as_str(), subgraph))
+            .collect::<HashMap<_, _>>();
+        let mut by_edge = HashMap::new();
+
+        for edge in topology.edges() {
+            let mut aliases = Vec::with_capacity(edge.composite_ports.len());
+            for port_ref in &edge.composite_ports {
+                let subgraph = subgraphs
+                    .get(port_ref.subgraph_id.as_str())
+                    .ok_or_else(|| WebError::Implementation {
+                        message: format!(
+                            "edge {} -> {} references missing composite {}",
+                            edge.from, edge.to, port_ref.subgraph_id
+                        ),
+                        source: None,
+                    })?;
+                let port = subgraph
+                    .boundary_ports
+                    .iter()
+                    .find(|port| port.name == port_ref.port_name)
+                    .ok_or_else(|| WebError::Implementation {
+                        message: format!(
+                            "edge {} -> {} references missing port {}.{}",
+                            edge.from, edge.to, port_ref.subgraph_id, port_ref.port_name
+                        ),
+                        source: None,
+                    })?;
+                let direction = match port.direction {
+                    obzenflow_topology::PortDirection::Input => {
+                        ContractBoundaryDirectionV1::Inbound
+                    }
+                    obzenflow_topology::PortDirection::Output => {
+                        ContractBoundaryDirectionV1::Outbound
+                    }
+                };
+                aliases.push(ContractBoundaryAliasV1 {
+                    composite_id: port_ref.subgraph_id.clone(),
+                    port: port_ref.port_name.clone(),
+                    direction,
+                });
+            }
+
+            aliases.sort();
+            aliases.dedup();
+            if !aliases.is_empty() {
+                by_edge.insert(
+                    (
+                        StageId::from_ulid(edge.from.ulid()),
+                        StageId::from_ulid(edge.to.ulid()),
+                    ),
+                    aliases,
+                );
+            }
+        }
+
+        Ok(Self {
+            by_edge: Arc::new(by_edge),
+        })
+    }
+
+    fn aliases(&self, upstream: StageId, reader: StageId) -> &[ContractBoundaryAliasV1] {
+        self.by_edge
+            .get(&(upstream, reader))
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+    }
+}
 
 /// Warp-based web server implementation
 pub struct WarpServer {
     endpoints: Vec<Arc<dyn HttpEndpoint>>,
     /// Optional system journal for SSE lifecycle events
     system_journal: Option<Arc<dyn Journal<SystemEvent>>>,
+    /// Manifest-derived definitions for the composite lifecycle read model.
+    composite_definitions: Vec<CompositeDefinition>,
+    /// Exact logical aliases for physical contract facts crossing composites.
+    contract_boundary_aliases: ContractBoundaryAliasIndex,
     surface_metrics: Option<Arc<HttpSurfaceMetricsCollector>>,
     /// FLOWIP-114d: per-process incarnation identity stamped into the SSE
     /// bootstrap event so browsers detect generation changes on the data path.
@@ -63,6 +170,8 @@ impl WarpServer {
         Self {
             endpoints: Vec::new(),
             system_journal: None,
+            composite_definitions: Vec::new(),
+            contract_boundary_aliases: ContractBoundaryAliasIndex::default(),
             surface_metrics: None,
             runtime_instance_id: None,
             shutdown: None,
@@ -72,6 +181,21 @@ impl WarpServer {
     /// Attach a system journal to enable SSE lifecycle streaming
     pub fn with_system_journal(&mut self, journal: Arc<dyn Journal<SystemEvent>>) {
         self.system_journal = Some(journal);
+    }
+
+    /// Attach validated composite definitions for lifecycle status projection.
+    pub fn with_composite_definitions(&mut self, definitions: Vec<CompositeDefinition>) {
+        self.composite_definitions = definitions;
+    }
+
+    /// Attach the validated topology projection used to enrich contract SSE
+    /// frames without minting a second occurrence or cursor.
+    pub(crate) fn with_contract_boundary_aliases(
+        &mut self,
+        topology: &obzenflow_topology::Topology,
+    ) -> Result<(), WebError> {
+        self.contract_boundary_aliases = ContractBoundaryAliasIndex::from_topology(topology)?;
+        Ok(())
     }
 
     /// Attach the per-process incarnation identity (FLOWIP-114d).
@@ -289,6 +413,8 @@ impl WarpServer {
         if let Some(journal) = &self.system_journal {
             let sse_route = self.build_flow_events_route(
                 journal.clone(),
+                self.composite_definitions.clone(),
+                self.contract_boundary_aliases.clone(),
                 host_policy.clone(),
                 self.runtime_instance_id.clone(),
                 self.shutdown.clone(),
@@ -395,6 +521,8 @@ impl WarpServer {
     fn build_flow_events_route(
         &self,
         system_journal: Arc<dyn Journal<SystemEvent>>,
+        composite_definitions: Vec<CompositeDefinition>,
+        contract_boundary_aliases: ContractBoundaryAliasIndex,
         host_policy: HostPolicy,
         runtime_instance_id: Option<RuntimeInstanceId>,
         shutdown: Option<tokio::sync::watch::Receiver<bool>>,
@@ -411,6 +539,8 @@ impl WarpServer {
                       last_event_id: Option<String>,
                       journal: Arc<dyn Journal<SystemEvent>>| {
                     let host_policy = host_policy.clone();
+                    let composite_definitions = composite_definitions.clone();
+                    let contract_boundary_aliases = contract_boundary_aliases.clone();
                     let runtime_instance_id = runtime_instance_id.clone();
                     let shutdown = shutdown.clone();
                     async move {
@@ -465,6 +595,8 @@ impl WarpServer {
 
                         let mut middleware_state = MiddlewareSseState::default();
                         let mut stage_lifecycle_state = StageLifecycleSseState::default();
+                        let mut composite_lifecycle_state =
+                            CompositeLifecycleSseState::new(composite_definitions);
                         let mut last_pipeline_event: Option<&'static str> = None;
                         let mut checkpoint_event_id: Option<EventId> = None;
 
@@ -519,7 +651,11 @@ impl WarpServer {
                                 return;
                             }
 
-                            match reader.next().await {
+                            let next = tokio::select! {
+                                _ = tx.closed() => return,
+                                next = reader.next() => next,
+                            };
+                            match next {
                                 Ok(Some(envelope)) => {
                                     checkpoint_event_id = Some(envelope.event.id);
                                     if !ready_to_stream {
@@ -527,11 +663,22 @@ impl WarpServer {
                                             if !resume_seen {
                                                 middleware_state.observe(&envelope);
                                                 stage_lifecycle_state.observe(&envelope);
+                                                composite_lifecycle_state.observe(&envelope);
                                                 last_pipeline_event = last_pipeline_event_name(&envelope)
                                                     .or(last_pipeline_event);
 
                                                 if envelope.event.id == *resume_id {
                                                     resume_seen = true;
+                                                    ready_to_stream = true;
+                                                    // A projected status frame is emitted after its
+                                                    // causative journal frame and has no independent
+                                                    // SSE id. Rebuild and snapshot at the resume
+                                                    // boundary to repair a disconnect between them.
+                                                    for snapshot_ev in composite_lifecycle_state
+                                                        .build_snapshot_sse_events()
+                                                    {
+                                                        let _ = tx.send(Ok(snapshot_ev));
+                                                    }
                                                 }
                                                 continue;
                                             }
@@ -542,6 +689,7 @@ impl WarpServer {
                                             // Fresh connect: discard history until we reach EOF once.
                                             middleware_state.observe(&envelope);
                                             stage_lifecycle_state.observe(&envelope);
+                                            composite_lifecycle_state.observe(&envelope);
                                             last_pipeline_event = last_pipeline_event_name(&envelope)
                                                 .or(last_pipeline_event);
                                             continue;
@@ -549,13 +697,28 @@ impl WarpServer {
                                     }
 
                                     stage_lifecycle_state.observe(&envelope);
+                                    let composite_update =
+                                        composite_lifecycle_state.observe(&envelope);
                                     last_pipeline_event =
                                         last_pipeline_event_name(&envelope).or(last_pipeline_event);
                                     if let Some(ev) =
-                                        map_system_event_to_sse(&envelope, &mut middleware_state)
+                                        map_system_event_to_sse(
+                                            &envelope,
+                                            &mut middleware_state,
+                                            &contract_boundary_aliases,
+                                        )
                                     {
                                         if tx.send(Ok(ev)).is_err() {
                                             break;
+                                        }
+                                    }
+
+                                    if let Some(snapshot) = composite_update {
+                                        if let Some(event) = map_composite_status_to_sse(&snapshot)
+                                        {
+                                            if tx.send(Ok(event)).is_err() {
+                                                break;
+                                            }
                                         }
                                     }
 
@@ -575,6 +738,13 @@ impl WarpServer {
                                         ready_to_stream = true;
 
                                         for snapshot_ev in stage_lifecycle_state
+                                            .build_snapshot_sse_events()
+                                            .into_iter()
+                                        {
+                                            let _ = tx.send(Ok(snapshot_ev));
+                                        }
+
+                                        for snapshot_ev in composite_lifecycle_state
                                             .build_snapshot_sse_events()
                                             .into_iter()
                                         {
@@ -632,6 +802,12 @@ impl WarpServer {
                                             let _ = tx.send(Ok(snapshot_ev));
                                         }
 
+                                        for snapshot_ev in composite_lifecycle_state
+                                            .build_snapshot_sse_events()
+                                        {
+                                            let _ = tx.send(Ok(snapshot_ev));
+                                        }
+
                                         // Best-effort: publish a bootstrap cursor even when we couldn't
                                         // find the requested resume id (the client can treat this as a new base).
                                         {
@@ -651,7 +827,10 @@ impl WarpServer {
                                         }
                                     } else {
                                         // No new events; back off briefly.
-                                        sleep(Duration::from_millis(100)).await;
+                                        tokio::select! {
+                                            _ = tx.closed() => return,
+                                            _ = sleep(Duration::from_millis(100)) => {}
+                                        }
                                     }
                                 }
                                 Err(e) => {
@@ -2650,6 +2829,7 @@ mod tests {
 fn map_system_event_to_sse(
     envelope: &SystemEventEnvelope,
     middleware_state: &mut MiddlewareSseState,
+    contract_boundary_aliases: &ContractBoundaryAliasIndex,
 ) -> Option<SseEvent> {
     use obzenflow_core::event::system_event::StageLifecycleEvent;
     use obzenflow_core::event::SystemEventType;
@@ -3143,6 +3323,12 @@ fn map_system_event_to_sse(
             if let Some(feed_role) = feed_role {
                 data["feed_role"] = serde_json::json!(feed_role);
             }
+            attach_contract_boundary_aliases(
+                &mut data,
+                contract_boundary_aliases,
+                *upstream,
+                *reader,
+            );
             if let Some(vc) = &vector_clock_value {
                 data["vector_clock"] = vc.clone();
             }
@@ -3195,6 +3381,12 @@ fn map_system_event_to_sse(
             if let Some(feed_role) = feed_role {
                 data["feed_role"] = serde_json::json!(feed_role);
             }
+            attach_contract_boundary_aliases(
+                &mut data,
+                contract_boundary_aliases,
+                *upstream,
+                *reader,
+            );
             if let Some(vc) = &vector_clock_value {
                 data["vector_clock"] = vc.clone();
             }
@@ -3334,6 +3526,281 @@ fn map_system_event_to_sse(
     }
 }
 
+fn attach_contract_boundary_aliases(
+    data: &mut serde_json::Value,
+    aliases: &ContractBoundaryAliasIndex,
+    upstream: StageId,
+    reader: StageId,
+) {
+    let aliases = aliases.aliases(upstream, reader);
+    if !aliases.is_empty() {
+        data["composite_boundaries"] = serde_json::json!(aliases);
+    }
+}
+
+#[cfg(test)]
+mod contract_boundary_sse_tests {
+    use super::*;
+    use crate::journal::MemoryJournal;
+    use obzenflow_core::event::system_event::{
+        ContractName, ContractResultStatusLabel, MetricsCoordinationEvent, PipelineLifecycleEvent,
+        SystemFeedRole,
+    };
+    use obzenflow_core::event::types::{EventType, SeqNo, WriterId};
+    use obzenflow_core::event::SystemEventType;
+    use obzenflow_core::id::SystemId;
+    use obzenflow_core::journal::Journal;
+    use obzenflow_core::JournalOwner;
+    use obzenflow_topology::{
+        BoundaryPortSpec, CompositePortRef, DirectedEdge, EdgeKind, PortDirection, StageInfo,
+        StageType, Topology, TopologySubgraphInfo,
+    };
+
+    fn dual_composite_edge() -> (
+        Topology,
+        obzenflow_topology::StageId,
+        obzenflow_topology::StageId,
+    ) {
+        let checkout = obzenflow_topology::StageId::from_bytes(1_u128.to_be_bytes());
+        let audit = obzenflow_topology::StageId::from_bytes(2_u128.to_be_bytes());
+        let checkout_subgraph = TopologySubgraphInfo::new(
+            "saga:checkout",
+            "saga",
+            "checkout",
+            "Checkout",
+            vec![checkout],
+            vec![],
+            vec![checkout],
+            vec![checkout],
+            true,
+        )
+        .with_boundary_ports(vec![BoundaryPortSpec::new(
+            "completed",
+            PortDirection::Output,
+            checkout,
+            vec!["checkout.completed.v1".to_string()],
+            true,
+        )]);
+        let audit_subgraph = TopologySubgraphInfo::new(
+            "audit:orders",
+            "audit",
+            "orders",
+            "Orders audit",
+            vec![audit],
+            vec![],
+            vec![audit],
+            vec![audit],
+            true,
+        )
+        .with_boundary_ports(vec![BoundaryPortSpec::new(
+            "in",
+            PortDirection::Input,
+            audit,
+            vec!["checkout.completed.v1".to_string()],
+            true,
+        )]);
+        let topology = Topology::new_unvalidated(
+            vec![
+                StageInfo::new(checkout, "checkout", StageType::Transform),
+                StageInfo::new(audit, "audit", StageType::Transform),
+            ],
+            vec![
+                DirectedEdge::new(checkout, audit, EdgeKind::Forward).with_composite_ports(vec![
+                    CompositePortRef::new("saga:checkout", "completed"),
+                    CompositePortRef::new("audit:orders", "in"),
+                ]),
+            ],
+        )
+        .unwrap()
+        .with_subgraphs(vec![checkout_subgraph, audit_subgraph]);
+        (topology, checkout, audit)
+    }
+
+    async fn contract_result_envelope(upstream: StageId, reader: StageId) -> SystemEventEnvelope {
+        let system_id = SystemId::new();
+        let journal = MemoryJournal::<SystemEvent>::with_owner(JournalOwner::system(system_id));
+        journal
+            .append(
+                SystemEvent::new(
+                    WriterId::from(system_id),
+                    SystemEventType::ContractResult {
+                        upstream,
+                        reader,
+                        selected_event_type: Some(EventType::from("checkout.completed.v1")),
+                        feed_role: Some(SystemFeedRole::Input),
+                        contract_name: ContractName::from("DeliveryContract"),
+                        status: ContractResultStatusLabel::Pending,
+                        cause: None,
+                        reader_seq: Some(SeqNo(7)),
+                        advertised_writer_seq: Some(SeqNo(9)),
+                    },
+                ),
+                None,
+            )
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn contract_frame_keeps_one_physical_cursor_and_both_composite_aliases() {
+        let (topology, upstream, reader) = dual_composite_edge();
+        topology.validate_composite_boundaries().unwrap();
+        let aliases = ContractBoundaryAliasIndex::from_topology(&topology).unwrap();
+        let upstream = StageId::from_ulid(upstream.ulid());
+        let reader = StageId::from_ulid(reader.ulid());
+        let envelope = contract_result_envelope(upstream, reader).await;
+
+        let event =
+            map_system_event_to_sse(&envelope, &mut MiddlewareSseState::default(), &aliases)
+                .expect("contract result maps to SSE");
+        let wire = event.to_string();
+        assert!(wire.contains("event:contract_result\n"));
+        assert!(wire.contains(&format!("id:{}\n", envelope.event.id)));
+        let payload: serde_json::Value = serde_json::from_str(
+            wire.lines()
+                .find_map(|line| line.strip_prefix("data:"))
+                .expect("data line"),
+        )
+        .unwrap();
+
+        assert_eq!(payload["upstream_stage_id"], upstream.to_string());
+        assert_eq!(payload["reader_stage_id"], reader.to_string());
+        assert_eq!(payload["selected_event_type"], "checkout.completed.v1");
+        assert_eq!(payload["feed_role"], "input");
+        assert_eq!(
+            payload["composite_boundaries"],
+            serde_json::json!([
+                {
+                    "composite_id": "audit:orders",
+                    "port": "in",
+                    "direction": "inbound"
+                },
+                {
+                    "composite_id": "saga:checkout",
+                    "port": "completed",
+                    "direction": "outbound"
+                }
+            ])
+        );
+    }
+
+    #[tokio::test]
+    async fn valid_resume_streams_the_enriched_contract_frame_after_its_cursor() {
+        let (topology, upstream, reader) = dual_composite_edge();
+        let upstream = StageId::from_ulid(upstream.ulid());
+        let reader = StageId::from_ulid(reader.ulid());
+        let system_id = SystemId::new();
+        let writer = WriterId::from(system_id);
+        let journal = Arc::new(MemoryJournal::<SystemEvent>::with_owner(
+            JournalOwner::system(system_id),
+        ));
+        let cursor = journal
+            .append(
+                SystemEvent::new(
+                    writer,
+                    SystemEventType::MetricsCoordination(MetricsCoordinationEvent::Ready),
+                ),
+                None,
+            )
+            .await
+            .unwrap();
+        let contract = journal
+            .append(
+                SystemEvent::new(
+                    writer,
+                    SystemEventType::ContractResult {
+                        upstream,
+                        reader,
+                        selected_event_type: Some(EventType::from("checkout.completed.v1")),
+                        feed_role: Some(SystemFeedRole::Input),
+                        contract_name: ContractName::from("DeliveryContract"),
+                        status: ContractResultStatusLabel::Pending,
+                        cause: None,
+                        reader_seq: Some(SeqNo(7)),
+                        advertised_writer_seq: Some(SeqNo(9)),
+                    },
+                ),
+                None,
+            )
+            .await
+            .unwrap();
+        journal
+            .append(
+                SystemEvent::new(
+                    writer,
+                    SystemEventType::PipelineLifecycle(PipelineLifecycleEvent::Drained),
+                ),
+                None,
+            )
+            .await
+            .unwrap();
+
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let mut server = WarpServer::new();
+        server.with_system_journal(journal);
+        server.with_contract_boundary_aliases(&topology).unwrap();
+        server.with_shutdown(shutdown_rx);
+        let filter = server
+            .build_filter(HostPolicy {
+                max_body_size_bytes: DEFAULT_MAX_BODY_SIZE_BYTES as u64,
+                request_timeout: None,
+                control_plane_auth: None,
+            })
+            .unwrap();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let _ = shutdown_tx.send(true);
+        });
+
+        let response = tokio::time::timeout(
+            Duration::from_secs(2),
+            warp::test::request()
+                .method("GET")
+                .path("/api/flow/events")
+                .header("Last-Event-ID", cursor.event.id.to_string())
+                .reply(&filter),
+        )
+        .await
+        .expect("resumed SSE stream should close after terminal shutdown");
+        assert_eq!(response.status(), 200);
+        let body = std::str::from_utf8(response.body()).unwrap();
+        let frame = body
+            .split("\n\n")
+            .find(|frame| frame.contains("event:contract_result"))
+            .expect("resumed stream contains contract result");
+        assert!(frame.contains(&format!("id:{}", contract.event.id)));
+        assert!(!frame.contains(&format!("id:{}", cursor.event.id)));
+        let payload: serde_json::Value = serde_json::from_str(
+            frame
+                .lines()
+                .find_map(|line| line.strip_prefix("data:"))
+                .expect("contract data line"),
+        )
+        .unwrap();
+        assert_eq!(payload["composite_boundaries"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            payload["composite_boundaries"][0]["composite_id"],
+            "audit:orders"
+        );
+        assert_eq!(
+            payload["composite_boundaries"][1]["composite_id"],
+            "saga:checkout"
+        );
+    }
+
+    #[test]
+    fn ordinary_physical_edge_omits_unavailable_aliases() {
+        let mut payload = serde_json::json!({"system_event_type": "contract_status"});
+        attach_contract_boundary_aliases(
+            &mut payload,
+            &ContractBoundaryAliasIndex::default(),
+            StageId::new(),
+            StageId::new(),
+        );
+        assert!(payload.get("composite_boundaries").is_none());
+    }
+}
+
 fn last_pipeline_event_name(envelope: &SystemEventEnvelope) -> Option<&'static str> {
     match &envelope.event.event {
         obzenflow_core::event::SystemEventType::PipelineLifecycle(event) => Some(match event {
@@ -3445,6 +3912,439 @@ impl StageLifecycleSseState {
             }
         }
         out
+    }
+}
+
+#[derive(Clone, Debug)]
+struct CompositeStatusSnapshot {
+    composite_id: obzenflow_core::id::CompositeId,
+    status: CompositeStatus,
+    revision: u64,
+    as_of_event_id: Option<EventId>,
+    timestamp_ms: u64,
+}
+
+/// Per-SSE-connection Moore projection over the ordered member lifecycle tape.
+///
+/// The state is disposable and rebuilt from the system journal. Projected
+/// frames never become journal events or independent SSE resume cursors.
+struct CompositeLifecycleSseState {
+    projection: CompositeLifecycleProjection,
+    latest_by_composite:
+        std::collections::BTreeMap<obzenflow_core::id::CompositeId, CompositeStatusSnapshot>,
+    /// Raw system-journal position through which this disposable view has been
+    /// rebuilt. This remains a source cursor; projected frames never own one.
+    as_of_event_id: Option<EventId>,
+    as_of_timestamp_ms: u64,
+}
+
+impl CompositeLifecycleSseState {
+    fn new(definitions: Vec<CompositeDefinition>) -> Self {
+        let projection = CompositeLifecycleProjection::new(definitions)
+            .expect("web-server startup validates composite lifecycle definitions");
+        let latest_by_composite = projection
+            .statuses()
+            .into_iter()
+            .map(|(composite_id, status)| {
+                (
+                    composite_id.clone(),
+                    CompositeStatusSnapshot {
+                        composite_id,
+                        status,
+                        revision: 0,
+                        as_of_event_id: None,
+                        timestamp_ms: 0,
+                    },
+                )
+            })
+            .collect();
+
+        Self {
+            projection,
+            latest_by_composite,
+            as_of_event_id: None,
+            as_of_timestamp_ms: 0,
+        }
+    }
+
+    /// Fold one source fact and return a view update only when status changes.
+    fn observe(&mut self, envelope: &SystemEventEnvelope) -> Option<CompositeStatusSnapshot> {
+        use obzenflow_core::event::SystemEventType;
+
+        self.as_of_event_id = Some(envelope.event.id);
+        self.as_of_timestamp_ms = envelope.event.timestamp;
+
+        let SystemEventType::StageLifecycle { stage_id, event } = &envelope.event.event else {
+            return None;
+        };
+        let composite_id = self.projection.composite_for_stage(*stage_id)?.clone();
+        let before = self
+            .projection
+            .status(&composite_id)
+            .expect("indexed composite has projection state");
+        let apply_error = self.projection.apply(*stage_id, event).err();
+        let after = self
+            .projection
+            .status(&composite_id)
+            .expect("indexed composite has projection state");
+
+        if before == after {
+            return None;
+        }
+
+        if let Some(error) = apply_error {
+            tracing::error!(
+                composite = %composite_id,
+                stage = %stage_id,
+                error = %error,
+                "Composite lifecycle projection detected an invalid member history"
+            );
+        }
+
+        let snapshot = self
+            .latest_by_composite
+            .get_mut(&composite_id)
+            .expect("projection snapshot exists for every composite");
+        snapshot.status = after;
+        snapshot.revision = snapshot.revision.saturating_add(1);
+        snapshot.as_of_event_id = Some(envelope.event.id);
+        snapshot.timestamp_ms = envelope.event.timestamp;
+        Some(snapshot.clone())
+    }
+
+    fn snapshots(&self) -> Vec<CompositeStatusSnapshot> {
+        self.latest_by_composite
+            .values()
+            .cloned()
+            .map(|mut snapshot| {
+                snapshot.as_of_event_id = self.as_of_event_id;
+                snapshot.timestamp_ms = self.as_of_timestamp_ms;
+                snapshot
+            })
+            .collect()
+    }
+
+    fn build_snapshot_sse_events(&self) -> Vec<SseEvent> {
+        self.snapshots()
+            .iter()
+            .filter_map(map_composite_status_to_sse)
+            .collect()
+    }
+}
+
+const COMPOSITE_STATUS_SCHEMA_V1: u32 = 1;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum CompositeStatusWireV1 {
+    Waiting,
+    Running,
+    Completed,
+    Cancelled,
+    Failed,
+    Invalid,
+}
+
+/// Typed v1 producer DTO. This is an infra wire adapter, not a core domain
+/// event and not a second journal identity.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+struct CompositeStatusPayloadV1 {
+    schema_version: u32,
+    message_type: &'static str,
+    composite_id: String,
+    status: CompositeStatusWireV1,
+    revision: u64,
+    as_of_event_id: Option<String>,
+    timestamp_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("composite status has no schema-v1 wire representation")]
+struct UnsupportedCompositeStatusV1;
+
+impl TryFrom<&CompositeStatusSnapshot> for CompositeStatusPayloadV1 {
+    type Error = UnsupportedCompositeStatusV1;
+
+    fn try_from(snapshot: &CompositeStatusSnapshot) -> Result<Self, Self::Error> {
+        let (status, reason, at, error) = match &snapshot.status {
+            CompositeStatus::Waiting => (CompositeStatusWireV1::Waiting, None, None, None),
+            CompositeStatus::Running => (CompositeStatusWireV1::Running, None, None, None),
+            CompositeStatus::Completed => (CompositeStatusWireV1::Completed, None, None, None),
+            CompositeStatus::Cancelled { reason } => (
+                CompositeStatusWireV1::Cancelled,
+                Some(reason.clone()),
+                None,
+                None,
+            ),
+            CompositeStatus::Failed { at, error } => (
+                CompositeStatusWireV1::Failed,
+                None,
+                Some(at.to_string()),
+                Some(error.clone()),
+            ),
+            CompositeStatus::Invalid { error } => (
+                CompositeStatusWireV1::Invalid,
+                None,
+                None,
+                Some(error.clone()),
+            ),
+            _ => return Err(UnsupportedCompositeStatusV1),
+        };
+
+        Ok(Self {
+            schema_version: COMPOSITE_STATUS_SCHEMA_V1,
+            message_type: "composite_status",
+            composite_id: snapshot.composite_id.to_string(),
+            status,
+            revision: snapshot.revision,
+            as_of_event_id: snapshot.as_of_event_id.map(|id| id.to_string()),
+            timestamp_ms: snapshot.timestamp_ms,
+            reason,
+            at,
+            error,
+        })
+    }
+}
+
+fn map_composite_status_to_sse(snapshot: &CompositeStatusSnapshot) -> Option<SseEvent> {
+    let payload = match CompositeStatusPayloadV1::try_from(snapshot) {
+        Ok(payload) => payload,
+        Err(error) => {
+            tracing::error!(
+                composite = %snapshot.composite_id,
+                error = %error,
+                "Composite status cannot be exposed on the schema-v1 SSE contract"
+            );
+            return None;
+        }
+    };
+    let data = serde_json::to_string(&payload)
+        .expect("schema-v1 composite status DTO contains only serializable fields");
+    Some(SseEvent::default().event("composite_status").data(data))
+}
+
+#[cfg(test)]
+fn composite_status_payload(
+    snapshot: &CompositeStatusSnapshot,
+) -> Result<serde_json::Value, UnsupportedCompositeStatusV1> {
+    CompositeStatusPayloadV1::try_from(snapshot).map(|payload| {
+        serde_json::to_value(payload)
+            .expect("schema-v1 composite status DTO contains only serializable fields")
+    })
+}
+
+#[cfg(test)]
+mod composite_status_projection_tests {
+    use super::*;
+    use crate::journal::MemoryJournal;
+    use obzenflow_core::event::{StageLifecycleEvent, SystemEventType, WriterId};
+    use obzenflow_core::id::{CompositeId, RoleId, StageId, SystemId};
+    use obzenflow_core::journal::Journal;
+    use obzenflow_core::JournalOwner;
+
+    async fn envelope(stage: StageId, event: StageLifecycleEvent) -> SystemEventEnvelope {
+        let system_id = SystemId::new();
+        let journal = MemoryJournal::<SystemEvent>::with_owner(JournalOwner::system(system_id));
+        journal
+            .append(
+                SystemEvent::new(
+                    WriterId::from(system_id),
+                    SystemEventType::StageLifecycle {
+                        stage_id: stage,
+                        event,
+                    },
+                ),
+                None,
+            )
+            .await
+            .unwrap()
+    }
+
+    fn state(map: StageId, finish: StageId) -> CompositeLifecycleSseState {
+        CompositeLifecycleSseState::new(vec![CompositeDefinition::new(
+            CompositeId::new("ai_map_reduce:digest"),
+            vec![(map, RoleId::new("map")), (finish, RoleId::new("finalize"))],
+        )])
+    }
+
+    #[tokio::test]
+    async fn live_updates_are_state_changes_with_source_identity() {
+        let map = StageId::new();
+        let finish = StageId::new();
+        let mut state = state(map, finish);
+
+        let running_envelope = envelope(map, StageLifecycleEvent::Running).await;
+        let running = state
+            .observe(&running_envelope)
+            .expect("first running changes the view");
+        assert_eq!(running.status, CompositeStatus::Running);
+        assert_eq!(running.revision, 1);
+        assert_eq!(running.as_of_event_id, Some(running_envelope.event.id));
+
+        let sibling_running = envelope(finish, StageLifecycleEvent::Running).await;
+        assert!(state.observe(&sibling_running).is_none());
+        let catch_up_snapshot = state.snapshots().pop().unwrap();
+        assert_eq!(catch_up_snapshot.revision, 1);
+        assert_eq!(
+            catch_up_snapshot.as_of_event_id,
+            Some(sibling_running.event.id)
+        );
+
+        let map_completed = envelope(map, StageLifecycleEvent::Completed { metrics: None }).await;
+        assert!(state.observe(&map_completed).is_none());
+
+        let finish_completed = envelope(finish, StageLifecycleEvent::Drained).await;
+        let completed = state
+            .observe(&finish_completed)
+            .expect("all terminal changes the view");
+        assert_eq!(completed.status, CompositeStatus::Completed);
+        assert_eq!(completed.revision, 2);
+
+        let payload = composite_status_payload(&completed).unwrap();
+        assert_eq!(payload["schema_version"], COMPOSITE_STATUS_SCHEMA_V1);
+        assert_eq!(payload["message_type"], "composite_status");
+        assert_eq!(payload["status"], "completed");
+        assert_eq!(payload["revision"], 2);
+        assert_eq!(
+            payload["as_of_event_id"],
+            finish_completed.event.id.to_string()
+        );
+        assert!(payload.get("system_event_type").is_none());
+    }
+
+    #[tokio::test]
+    async fn contradictory_tape_is_an_explicit_invalid_view() {
+        let map = StageId::new();
+        let finish = StageId::new();
+        let mut state = state(map, finish);
+
+        let completed = envelope(map, StageLifecycleEvent::Completed { metrics: None }).await;
+        assert!(state.observe(&completed).is_none());
+
+        let cancelled = envelope(
+            map,
+            StageLifecycleEvent::Cancelled {
+                reason: "late stop".to_string(),
+                metrics: None,
+            },
+        )
+        .await;
+        let invalid = state
+            .observe(&cancelled)
+            .expect("integrity failure changes the view");
+        assert!(matches!(invalid.status, CompositeStatus::Invalid { .. }));
+        assert_eq!(
+            composite_status_payload(&invalid).unwrap()["status"],
+            "invalid"
+        );
+    }
+
+    #[test]
+    fn fresh_snapshot_includes_waiting_composites_at_revision_zero() {
+        let map = StageId::new();
+        let finish = StageId::new();
+        let state = state(map, finish);
+        let snapshot = state
+            .latest_by_composite
+            .get(&CompositeId::new("ai_map_reduce:digest"))
+            .unwrap();
+
+        assert_eq!(snapshot.status, CompositeStatus::Waiting);
+        assert_eq!(snapshot.revision, 0);
+        assert!(snapshot.as_of_event_id.is_none());
+    }
+
+    #[test]
+    fn schema_v1_golden_covers_the_complete_status_vocabulary() {
+        let cases = [
+            (CompositeStatus::Waiting, "waiting", None, None, None),
+            (CompositeStatus::Running, "running", None, None, None),
+            (CompositeStatus::Completed, "completed", None, None, None),
+            (
+                CompositeStatus::Cancelled {
+                    reason: "operator stop".to_string(),
+                },
+                "cancelled",
+                Some("operator stop"),
+                None,
+                None,
+            ),
+            (
+                CompositeStatus::Failed {
+                    at: RoleId::new("map"),
+                    error: "provider unavailable".to_string(),
+                },
+                "failed",
+                None,
+                Some("map"),
+                Some("provider unavailable"),
+            ),
+            (
+                CompositeStatus::Invalid {
+                    error: "conflicting member terminals".to_string(),
+                },
+                "invalid",
+                None,
+                None,
+                Some("conflicting member terminals"),
+            ),
+        ];
+
+        for (status, expected_status, expected_reason, expected_at, expected_error) in cases {
+            let snapshot = CompositeStatusSnapshot {
+                composite_id: CompositeId::new("ai_map_reduce:digest"),
+                status,
+                revision: 2,
+                as_of_event_id: None,
+                timestamp_ms: 178,
+            };
+            let payload = composite_status_payload(&snapshot).unwrap();
+            assert_eq!(payload["schema_version"], 1);
+            assert_eq!(payload["message_type"], "composite_status");
+            assert_eq!(payload["composite_id"], "ai_map_reduce:digest");
+            assert_eq!(payload["status"], expected_status);
+            assert_eq!(payload["revision"], 2);
+            assert!(payload["as_of_event_id"].is_null());
+            assert_eq!(payload["timestamp_ms"], 178);
+            assert_eq!(
+                payload.get("reason").and_then(|v| v.as_str()),
+                expected_reason
+            );
+            assert_eq!(payload.get("at").and_then(|v| v.as_str()), expected_at);
+            assert_eq!(
+                payload.get("error").and_then(|v| v.as_str()),
+                expected_error
+            );
+            assert!(payload.get("system_event_type").is_none());
+        }
+    }
+
+    #[test]
+    fn composite_status_wire_source_remains_typed_and_cursorless() {
+        let source = include_str!("warp_server.rs");
+        let start = source
+            .find("const COMPOSITE_STATUS_SCHEMA_V1")
+            .expect("schema-v1 contract declaration");
+        let end = source[start..]
+            .find("#[cfg(test)]\nmod composite_status_projection_tests")
+            .map(|offset| start + offset)
+            .expect("composite status test module");
+        let contract = &source[start..end];
+
+        assert!(contract.contains("struct CompositeStatusPayloadV1"));
+        assert!(contract.contains("schema_version: COMPOSITE_STATUS_SCHEMA_V1"));
+        assert!(contract.contains("message_type: \"composite_status\""));
+        assert!(contract.contains(".event(\"composite_status\")"));
+        assert!(
+            !contract.contains(".id("),
+            "projected frames must never acquire an independent SSE cursor"
+        );
     }
 }
 
@@ -4077,4 +4977,422 @@ fn now_timestamp_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
+}
+
+#[cfg(test)]
+mod composite_status_route_acceptance_tests {
+    use super::*;
+    use crate::journal::MemoryJournal;
+    use obzenflow_core::event::event_envelope::EventEnvelope;
+    use obzenflow_core::event::{
+        PipelineLifecycleEvent, StageLifecycleEvent, SystemEventType, WriterId,
+    };
+    use obzenflow_core::id::{CompositeId, JournalId, RoleId, SystemId};
+    use obzenflow_core::journal::{JournalError, JournalReader};
+    use obzenflow_core::JournalOwner;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    fn host_policy() -> HostPolicy {
+        HostPolicy {
+            max_body_size_bytes: 1024,
+            request_timeout: None,
+            control_plane_auth: None,
+        }
+    }
+
+    fn definition(left: StageId, right: StageId) -> Vec<CompositeDefinition> {
+        vec![CompositeDefinition::new(
+            CompositeId::new("test:pair"),
+            vec![(left, RoleId::new("left")), (right, RoleId::new("right"))],
+        )]
+    }
+
+    async fn append(
+        journal: &dyn Journal<SystemEvent>,
+        writer: WriterId,
+        event: SystemEventType,
+    ) -> SystemEventEnvelope {
+        journal
+            .append(SystemEvent::new(writer, event), None)
+            .await
+            .expect("test event appends")
+    }
+
+    async fn request_body(
+        journal: Arc<dyn Journal<SystemEvent>>,
+        definitions: Vec<CompositeDefinition>,
+        last_event_id: Option<EventId>,
+    ) -> String {
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let mut server = WarpServer::new();
+        server.with_system_journal(journal);
+        server.with_composite_definitions(definitions);
+        server.with_shutdown(shutdown_rx);
+        let filter = server.build_filter(host_policy()).expect("route builds");
+
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+            let _ = shutdown_tx.send(true);
+        });
+
+        let request = warp::test::request().method("GET").path("/api/flow/events");
+        let response = tokio::time::timeout(Duration::from_secs(2), async {
+            match last_event_id {
+                Some(id) => {
+                    request
+                        .header("Last-Event-ID", id.to_string())
+                        .reply(&filter)
+                        .await
+                }
+                None => request.reply(&filter).await,
+            }
+        })
+        .await
+        .expect("SSE response closes after terminal shutdown");
+        assert_eq!(response.status(), warp::http::StatusCode::OK);
+        std::str::from_utf8(response.body())
+            .expect("SSE is UTF-8")
+            .to_string()
+    }
+
+    fn frames<'a>(body: &'a str, event_name: &str) -> Vec<&'a str> {
+        let marker = format!("event:{event_name}");
+        body.split("\n\n")
+            .filter(|frame| frame.lines().any(|line| line == marker))
+            .collect()
+    }
+
+    fn frame_payload(frame: &str) -> serde_json::Value {
+        serde_json::from_str(
+            frame
+                .lines()
+                .find_map(|line| line.strip_prefix("data:"))
+                .expect("SSE data line"),
+        )
+        .expect("SSE data is JSON")
+    }
+
+    async fn completed_tape() -> (
+        Arc<MemoryJournal<SystemEvent>>,
+        Vec<CompositeDefinition>,
+        EventId,
+    ) {
+        let system_id = SystemId::new();
+        let writer = WriterId::from(system_id);
+        let journal = Arc::new(MemoryJournal::with_owner(JournalOwner::system(system_id)));
+        let left = StageId::new();
+        let right = StageId::new();
+
+        append(
+            journal.as_ref(),
+            writer,
+            SystemEventType::StageLifecycle {
+                stage_id: left,
+                event: StageLifecycleEvent::Running,
+            },
+        )
+        .await;
+        append(
+            journal.as_ref(),
+            writer,
+            SystemEventType::StageLifecycle {
+                stage_id: left,
+                event: StageLifecycleEvent::Completed { metrics: None },
+            },
+        )
+        .await;
+        let terminal = append(
+            journal.as_ref(),
+            writer,
+            SystemEventType::StageLifecycle {
+                stage_id: right,
+                event: StageLifecycleEvent::Drained,
+            },
+        )
+        .await;
+        append(
+            journal.as_ref(),
+            writer,
+            SystemEventType::PipelineLifecycle(PipelineLifecycleEvent::Drained),
+        )
+        .await;
+
+        (journal, definition(left, right), terminal.event.id)
+    }
+
+    #[tokio::test]
+    async fn fresh_valid_resume_and_missing_cursor_converge_on_terminal_snapshot() {
+        let (journal, definitions, terminal_id) = completed_tape().await;
+
+        let fresh = request_body(journal.clone(), definitions.clone(), None).await;
+        let fresh_status = frames(&fresh, "composite_status");
+        assert_eq!(fresh_status.len(), 1);
+        assert_eq!(frame_payload(fresh_status[0])["status"], "completed");
+        assert!(
+            !fresh_status[0].lines().any(|line| line.starts_with("id:")),
+            "projected status must not mint a resume cursor"
+        );
+
+        let resumed = request_body(journal.clone(), definitions.clone(), Some(terminal_id)).await;
+        let resumed_status = frames(&resumed, "composite_status");
+        assert_eq!(resumed_status.len(), 1);
+        let resumed_payload = frame_payload(resumed_status[0]);
+        assert_eq!(resumed_payload["status"], "completed");
+        assert_eq!(resumed_payload["as_of_event_id"], terminal_id.to_string());
+        assert!(!resumed_status[0]
+            .lines()
+            .any(|line| line.starts_with("id:")));
+
+        let missing = request_body(journal, definitions, Some(EventId::new())).await;
+        let errors = frames(&missing, "error");
+        assert!(errors
+            .iter()
+            .any(|frame| { frame_payload(frame)["error_type"] == "journal_resume_not_found" }));
+        let missing_status = frames(&missing, "composite_status");
+        assert_eq!(missing_status.len(), 1);
+        assert_eq!(frame_payload(missing_status[0])["status"], "completed");
+        assert_eq!(frames(&missing, "bootstrap").len(), 1);
+    }
+
+    async fn terminal_projection_body(
+        events: Vec<(StageId, StageLifecycleEvent)>,
+        definitions: Vec<CompositeDefinition>,
+    ) -> String {
+        let system_id = SystemId::new();
+        let writer = WriterId::from(system_id);
+        let journal = Arc::new(MemoryJournal::with_owner(JournalOwner::system(system_id)));
+        for (stage_id, event) in events {
+            append(
+                journal.as_ref(),
+                writer,
+                SystemEventType::StageLifecycle { stage_id, event },
+            )
+            .await;
+        }
+        append(
+            journal.as_ref(),
+            writer,
+            SystemEventType::PipelineLifecycle(PipelineLifecycleEvent::Drained),
+        )
+        .await;
+        request_body(journal, definitions, None).await
+    }
+
+    #[tokio::test]
+    async fn clean_cancellation_and_contradictory_history_surface_at_the_route() {
+        let left = StageId::new();
+        let right = StageId::new();
+        let cancelled = terminal_projection_body(
+            vec![
+                (
+                    left,
+                    StageLifecycleEvent::Cancelled {
+                        reason: "operator stop".to_string(),
+                        metrics: None,
+                    },
+                ),
+                (
+                    right,
+                    StageLifecycleEvent::Cancelled {
+                        reason: "sibling stop".to_string(),
+                        metrics: None,
+                    },
+                ),
+            ],
+            definition(left, right),
+        )
+        .await;
+        let cancelled_payload = frame_payload(frames(&cancelled, "composite_status")[0]);
+        assert_eq!(cancelled_payload["status"], "cancelled");
+        assert_eq!(cancelled_payload["reason"], "operator stop");
+
+        let left = StageId::new();
+        let right = StageId::new();
+        let contradictory = terminal_projection_body(
+            vec![
+                (left, StageLifecycleEvent::Completed { metrics: None }),
+                (
+                    left,
+                    StageLifecycleEvent::Cancelled {
+                        reason: "late contradiction".to_string(),
+                        metrics: None,
+                    },
+                ),
+            ],
+            definition(left, right),
+        )
+        .await;
+        let invalid_payload = frame_payload(frames(&contradictory, "composite_status")[0]);
+        assert_eq!(invalid_payload["status"], "invalid");
+        assert!(invalid_payload["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("conflicting terminal")));
+    }
+
+    struct ScriptedReader {
+        events: Vec<SystemEventEnvelope>,
+        position: usize,
+        fail_at: Option<usize>,
+        dropped: Arc<AtomicBool>,
+    }
+
+    impl Drop for ScriptedReader {
+        fn drop(&mut self) {
+            self.dropped.store(true, Ordering::SeqCst);
+        }
+    }
+
+    #[async_trait]
+    impl JournalReader<SystemEvent> for ScriptedReader {
+        async fn next(&mut self) -> Result<Option<SystemEventEnvelope>, JournalError> {
+            if self.fail_at == Some(self.position) {
+                return Err(JournalError::SubscriptionClosed);
+            }
+            let next = self.events.get(self.position).cloned();
+            if next.is_some() {
+                self.position += 1;
+            }
+            Ok(next)
+        }
+
+        fn position(&self) -> u64 {
+            self.position as u64
+        }
+    }
+
+    struct ScriptedJournal {
+        inner: MemoryJournal<SystemEvent>,
+        fail_at: Option<usize>,
+        fail_open: bool,
+        reader_dropped: Arc<AtomicBool>,
+    }
+
+    impl ScriptedJournal {
+        fn new(system_id: SystemId) -> Self {
+            Self {
+                inner: MemoryJournal::with_owner(JournalOwner::system(system_id)),
+                fail_at: None,
+                fail_open: false,
+                reader_dropped: Arc::new(AtomicBool::new(false)),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Journal<SystemEvent> for ScriptedJournal {
+        fn id(&self) -> &JournalId {
+            self.inner.id()
+        }
+
+        fn owner(&self) -> Option<&JournalOwner> {
+            self.inner.owner()
+        }
+
+        async fn append(
+            &self,
+            event: SystemEvent,
+            parent: Option<&EventEnvelope<SystemEvent>>,
+        ) -> Result<SystemEventEnvelope, JournalError> {
+            self.inner.append(event, parent).await
+        }
+
+        async fn read_all_unordered(&self) -> Result<Vec<SystemEventEnvelope>, JournalError> {
+            self.inner.read_all_unordered().await
+        }
+
+        async fn read_event(
+            &self,
+            event_id: &EventId,
+        ) -> Result<Option<SystemEventEnvelope>, JournalError> {
+            self.inner.read_event(event_id).await
+        }
+
+        async fn reader_from(
+            &self,
+            position: u64,
+        ) -> Result<Box<dyn JournalReader<SystemEvent>>, JournalError> {
+            if self.fail_open {
+                return Err(JournalError::SubscriptionClosed);
+            }
+            Ok(Box::new(ScriptedReader {
+                events: self.inner.read_all_unordered().await?,
+                position: position as usize,
+                fail_at: self.fail_at,
+                dropped: self.reader_dropped.clone(),
+            }))
+        }
+
+        async fn read_last_n(
+            &self,
+            count: usize,
+        ) -> Result<Vec<SystemEventEnvelope>, JournalError> {
+            self.inner.read_last_n(count).await
+        }
+    }
+
+    #[tokio::test]
+    async fn journal_open_and_read_failures_are_typed_route_errors_only() {
+        let system_id = SystemId::new();
+        let writer = WriterId::from(system_id);
+        let left = StageId::new();
+        let right = StageId::new();
+        let mut read_failure = ScriptedJournal::new(system_id);
+        append(
+            &read_failure,
+            writer,
+            SystemEventType::StageLifecycle {
+                stage_id: left,
+                event: StageLifecycleEvent::Running,
+            },
+        )
+        .await;
+        read_failure.fail_at = Some(1);
+        let read_failure = Arc::new(read_failure);
+        let body = request_body(read_failure.clone(), definition(left, right), None).await;
+        assert_eq!(
+            frame_payload(frames(&body, "error")[0])["error_type"],
+            "journal_read_error"
+        );
+        assert_eq!(read_failure.read_all_unordered().await.unwrap().len(), 1);
+
+        let system_id = SystemId::new();
+        let mut open_failure = ScriptedJournal::new(system_id);
+        open_failure.fail_open = true;
+        let body = request_body(
+            Arc::new(open_failure),
+            definition(StageId::new(), StageId::new()),
+            None,
+        )
+        .await;
+        assert_eq!(
+            frame_payload(frames(&body, "error")[0])["error_type"],
+            "journal_open_error"
+        );
+    }
+
+    #[tokio::test]
+    async fn dropping_the_sse_client_cancels_the_reader_task() {
+        let system_id = SystemId::new();
+        let journal = Arc::new(ScriptedJournal::new(system_id));
+        let reader_dropped = journal.reader_dropped.clone();
+        let mut server = WarpServer::new();
+        server.with_system_journal(journal);
+        let filter = server.build_filter(host_policy()).expect("route builds");
+
+        let reply = warp::test::request()
+            .method("GET")
+            .path("/api/flow/events")
+            .filter(&filter)
+            .await
+            .expect("route accepts request");
+        drop(reply);
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !reader_dropped.load(Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("dropping the response must cancel and drop the journal reader");
+    }
 }

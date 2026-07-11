@@ -14,6 +14,10 @@ use crate::event::system_event::{ContractName, ContractResultStatusLabel, System
 use crate::event::types::EventType;
 use crate::id::{FlowId, StageId};
 use crate::ingress::IngressKey;
+use crate::metrics::composite::{
+    CompositeContract, CompositeDurationHistogram, CompositeDurationInvalid, CompositeMemberHealth,
+    CompositePortTraffic,
+};
 use crate::metrics::Percentile;
 use crate::time::MetricsDuration;
 use serde::{Deserialize, Serialize};
@@ -21,6 +25,7 @@ use std::collections::HashMap;
 
 /// Snapshot of application-level metrics derived from the event stream
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct AppMetricsSnapshot {
     /// Timestamp when this snapshot was created
     pub timestamp: chrono::DateTime<chrono::Utc>,
@@ -214,6 +219,28 @@ pub struct AppMetricsSnapshot {
     /// This mirrors MetricsStore.stage_vector_clocks and is used by exporters
     /// to expose obzenflow_stage_vector_clock metrics.
     pub stage_vector_clocks: HashMap<StageId, u64>,
+
+    /// Exact logical throughput at connected named composite ports
+    /// (FLOWIP-128a B3). Fan-out is counted once per authored output fact.
+    pub composite_port_traffic: Vec<CompositePortTraffic>,
+
+    /// Member error volume per composite. This is component health, not an
+    /// inferred failed-activation count.
+    pub composite_member_health: Vec<CompositeMemberHealth>,
+
+    /// Exact paired boundary duration histograms, reconstructed from durable
+    /// output facts and their propagated activation contexts.
+    pub composite_boundary_durations: Vec<CompositeDurationHistogram>,
+
+    /// Rejected duration evidence, such as an exit timestamp before its exact
+    /// entry timestamp.
+    pub composite_boundary_duration_invalid: Vec<CompositeDurationInvalid>,
+
+    /// Composite boundary contract views (FLOWIP-128a B5). A pure re-key of the
+    /// `contract_metrics` above to the composite boundary; the exporter renders
+    /// these as `obzenflow_composite_contract_*{composite,peer,direction}`
+    /// families.
+    pub composite_contracts: Vec<CompositeContract>,
 }
 
 /// Contract verification metrics per edge.
@@ -547,6 +574,11 @@ impl Default for AppMetricsSnapshot {
             stage_lifecycle_states: HashMap::new(),
             pipeline_state: String::new(),
             stage_vector_clocks: HashMap::new(),
+            composite_port_traffic: Vec::new(),
+            composite_member_health: Vec::new(),
+            composite_boundary_durations: Vec::new(),
+            composite_boundary_duration_invalid: Vec::new(),
+            composite_contracts: Vec::new(),
         }
     }
 }

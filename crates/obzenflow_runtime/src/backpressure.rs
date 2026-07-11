@@ -133,6 +133,14 @@ struct EdgeState {
 
 #[derive(Debug)]
 struct StageState {
+    /// Authoritative physical writer position used by admission and metrics.
+    ///
+    /// A reservation advances this position immediately. Committing keeps the
+    /// used portion in place and releasing removes it. Keeping this separate
+    /// from the diagnostic `writer_seq` and `reserved` counters prevents a
+    /// snapshot from observing the commit handoff as either two rows or no
+    /// row while those counters are updated independently.
+    effective_writer: AtomicU64,
     writer_seq: AtomicU64,
     reserved: AtomicU64,
     wait_nanos_total: AtomicU64,
@@ -215,6 +223,7 @@ impl BackpressureRegistry {
             stages.insert(
                 stage_id,
                 Arc::new(StageState {
+                    effective_writer: AtomicU64::new(0),
                     writer_seq: AtomicU64::new(0),
                     reserved: AtomicU64::new(0),
                     wait_nanos_total: AtomicU64::new(0),
@@ -236,8 +245,7 @@ impl BackpressureRegistry {
             }
 
             let writer_seq = stage.writer_seq.load(Ordering::Acquire);
-            let reserved = stage.reserved.load(Ordering::Acquire);
-            let effective_writer = writer_seq.saturating_add(reserved);
+            let effective_writer = stage.effective_writer.load(Ordering::Acquire);
 
             snapshot.stage_writer_seq.insert(*stage_id, writer_seq);
             snapshot
@@ -252,7 +260,7 @@ impl BackpressureRegistry {
                 min_reader_seq = min_reader_seq.min(reader_seq);
 
                 let allowed = reader_seq.saturating_add(edge.window);
-                let credit = allowed.saturating_sub(effective_writer);
+                let credit = allowed.saturating_sub(effective_writer).min(edge.window);
                 min_credit = min_credit.min(credit);
 
                 let edge_key = (edge.upstream, edge.downstream);
@@ -290,10 +298,7 @@ impl BackpressureRegistry {
         let stage = self.stages.get(&upstream)?;
         let edge = self.edges.get(&(upstream, downstream))?;
 
-        let effective_writer = stage
-            .writer_seq
-            .load(Ordering::Acquire)
-            .saturating_add(stage.reserved.load(Ordering::Acquire));
+        let effective_writer = stage.effective_writer.load(Ordering::Acquire);
         let reader_seq = edge.reader_seq.load(Ordering::Acquire);
         Some(effective_writer.saturating_sub(reader_seq))
     }
@@ -324,10 +329,7 @@ impl BackpressureWriter {
             return u64::MAX;
         }
 
-        let effective_writer = state
-            .writer_seq
-            .load(Ordering::Acquire)
-            .saturating_add(state.reserved.load(Ordering::Acquire));
+        let effective_writer = state.effective_writer.load(Ordering::Acquire);
 
         state
             .downstream_edges
@@ -337,7 +339,7 @@ impl BackpressureWriter {
                     .reader_seq
                     .load(Ordering::Acquire)
                     .saturating_add(edge.window);
-                allowed.saturating_sub(effective_writer)
+                allowed.saturating_sub(effective_writer).min(edge.window)
             })
             .min()
             .unwrap_or(u64::MAX)
@@ -358,10 +360,7 @@ impl BackpressureWriter {
             return None;
         }
 
-        let effective_writer = state
-            .writer_seq
-            .load(Ordering::Acquire)
-            .saturating_add(state.reserved.load(Ordering::Acquire));
+        let effective_writer = state.effective_writer.load(Ordering::Acquire);
 
         state
             .downstream_edges
@@ -370,7 +369,7 @@ impl BackpressureWriter {
                 let reader_seq = edge.reader_seq.load(Ordering::Acquire);
                 let allowed = reader_seq.saturating_add(edge.window);
                 LimitingEdgeDetail {
-                    credit: allowed.saturating_sub(effective_writer),
+                    credit: allowed.saturating_sub(effective_writer).min(edge.window),
                     downstream: edge.downstream,
                     window: edge.window,
                     stall_timeout: edge.stall_timeout,
@@ -386,10 +385,7 @@ impl BackpressureWriter {
             return None;
         }
 
-        let effective_writer = state
-            .writer_seq
-            .load(Ordering::Acquire)
-            .saturating_add(state.reserved.load(Ordering::Acquire));
+        let effective_writer = state.effective_writer.load(Ordering::Acquire);
 
         state
             .downstream_edges
@@ -399,7 +395,7 @@ impl BackpressureWriter {
                     .reader_seq
                     .load(Ordering::Acquire)
                     .saturating_add(edge.window);
-                let credit = allowed.saturating_sub(effective_writer);
+                let credit = allowed.saturating_sub(effective_writer).min(edge.window);
                 (credit, edge.downstream)
             })
             .min_by_key(|(credit, _)| *credit)
@@ -442,6 +438,7 @@ impl BackpressureWriter {
             return BackpressureReservation::noop();
         }
 
+        state.effective_writer.fetch_add(n, Ordering::AcqRel);
         state.reserved.fetch_add(n, Ordering::AcqRel);
         BackpressureReservation {
             state: Some(state.clone()),
@@ -464,30 +461,38 @@ impl BackpressureWriter {
         }
 
         loop {
-            let writer_seq = state.writer_seq.load(Ordering::Acquire);
-            let reserved = state.reserved.load(Ordering::Acquire);
-            let effective_writer = writer_seq.saturating_add(reserved);
+            let effective_writer = state.effective_writer.load(Ordering::Acquire);
 
-            let min_allowed = state
+            let min_credit = state
                 .downstream_edges
                 .iter()
                 .map(|edge| {
                     edge.reader_seq
                         .load(Ordering::Acquire)
                         .saturating_add(edge.window)
+                        .saturating_sub(effective_writer)
+                        .min(edge.window)
                 })
                 .min()
                 .unwrap_or(u64::MAX);
 
-            if effective_writer.saturating_add(n) > min_allowed {
+            if n > min_credit {
                 return None;
             }
 
+            let next_effective_writer = effective_writer.checked_add(n)?;
+
             if state
-                .reserved
-                .compare_exchange(reserved, reserved + n, Ordering::AcqRel, Ordering::Acquire)
+                .effective_writer
+                .compare_exchange(
+                    effective_writer,
+                    next_effective_writer,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
                 .is_ok()
             {
+                state.reserved.fetch_add(n, Ordering::AcqRel);
                 return Some(BackpressureReservation {
                     state: Some(state.clone()),
                     reserved: n,
@@ -541,10 +546,13 @@ impl BackpressureReservation {
 
         let used = used.min(self.reserved);
 
-        // Preserve the invariant that `writer_seq + reserved` is never
-        // transiently lower than the true effective writer position.
+        // `effective_writer` already includes the reservation. A commit keeps
+        // its used rows admitted and removes only the unused remainder.
         state.writer_seq.fetch_add(used, Ordering::AcqRel);
         state.reserved.fetch_sub(self.reserved, Ordering::AcqRel);
+        state
+            .effective_writer
+            .fetch_sub(self.reserved - used, Ordering::AcqRel);
 
         self.committed_or_released = true;
     }
@@ -556,6 +564,9 @@ impl BackpressureReservation {
         };
 
         state.reserved.fetch_sub(self.reserved, Ordering::AcqRel);
+        state
+            .effective_writer
+            .fetch_sub(self.reserved, Ordering::AcqRel);
         self.committed_or_released = true;
     }
 }
@@ -569,6 +580,9 @@ impl Drop for BackpressureReservation {
             return;
         };
         state.reserved.fetch_sub(self.reserved, Ordering::AcqRel);
+        state
+            .effective_writer
+            .fetch_sub(self.reserved, Ordering::AcqRel);
         self.committed_or_released = true;
     }
 }
@@ -604,6 +618,31 @@ impl BackpressureReader {
 impl Default for BackpressureReader {
     fn default() -> Self {
         Self::disabled()
+    }
+}
+
+/// Complete physical `Data` rows consumed by a transport filter.
+///
+/// The map is keyed by upstream stage, which is also the identity of the one
+/// physical stage-journal edge. Logical feed keys never enter this accounting,
+/// so selecting several feeds from the same journal cannot multiply credit.
+pub(crate) fn complete_filtered_data_rows(
+    readers: &HashMap<StageId, BackpressureReader>,
+    upstream: StageId,
+    completed_data_rows: u64,
+) {
+    if completed_data_rows == 0 {
+        return;
+    }
+
+    if let Some(reader) = readers.get(&upstream) {
+        reader.ack_consumed(completed_data_rows);
+    } else {
+        tracing::warn!(
+            ?upstream,
+            completed_data_rows,
+            "filtered Data row has no physical backpressure reader"
+        );
     }
 }
 

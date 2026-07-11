@@ -384,6 +384,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b05b61dc5112cbb17e4b6cd61790d9845d13888356391624cbe7e41efeac1e75"
 
 [[package]]
+name = "console"
+version = "0.16.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4fe5f465a4f6fee88fad41b85d990f84c835335e85b5d9e6e63e0d06d28cba7c"
+dependencies = [
+ "encode_unicode",
+ "libc",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "console-api"
 version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -526,9 +537,9 @@ dependencies = [
 
 [[package]]
 name = "crossbeam-epoch"
-version = "0.9.18"
+version = "0.9.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5b82ac4a3c2ca9c3460964f020e1402edd5753411d7737aa39c3714ad1b5420e"
+checksum = "2d6914041f254d6e9176c01941b21115dcfb7089e55135a35411081bd106ef3f"
 dependencies = [
  "crossbeam-utils",
 ]
@@ -614,6 +625,12 @@ name = "either"
 version = "1.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "48c757948c5ede0e46177b7add2e67155f70e33c07fea8284df6576da70b3719"
+
+[[package]]
+name = "encode_unicode"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "34aa73646ffb006b8f5147f3dc182bd4bcb190227ce861fc4a4844bf8e3cb2c0"
 
 [[package]]
 name = "encoding_rs"
@@ -1255,6 +1272,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "insta"
+version = "1.48.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "86f0f8fee8c926415c58d6ae43a08523a26faccb2323f5e6b644fe7dd4ef6b82"
+dependencies = [
+ "console",
+ "once_cell",
+ "similar",
+ "tempfile",
+]
+
+[[package]]
 name = "ipnet"
 version = "2.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1496,7 +1525,7 @@ dependencies = [
 
 [[package]]
 name = "obzenflow"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1520,6 +1549,7 @@ dependencies = [
  "tokio-test",
  "tracing",
  "tracing-subscriber",
+ "trybuild",
 ]
 
 [[package]]
@@ -1559,9 +1589,9 @@ dependencies = [
 
 [[package]]
 name = "obzenflow-topology"
-version = "0.4.0"
+version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "217303dfeec0df5f65565bc9a7471ddba30d482f62be98d12bb19551c90e9c82"
+checksum = "4257901763cce226c651dc5277e447bff7750f07d69ad3d388c6b8121b270d83"
 dependencies = [
  "obzenflow-idkit",
  "once_cell",
@@ -1572,7 +1602,7 @@ dependencies = [
 
 [[package]]
 name = "obzenflow_adapters"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1593,7 +1623,7 @@ dependencies = [
 
 [[package]]
 name = "obzenflow_benchmarks"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1618,7 +1648,7 @@ dependencies = [
 
 [[package]]
 name = "obzenflow_core"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -1638,7 +1668,7 @@ dependencies = [
 
 [[package]]
 name = "obzenflow_derive"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1647,10 +1677,11 @@ dependencies = [
 
 [[package]]
 name = "obzenflow_dsl"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "indexmap",
+ "insta",
  "obzenflow-topology",
  "obzenflow_adapters",
  "obzenflow_core",
@@ -1665,7 +1696,7 @@ dependencies = [
 
 [[package]]
 name = "obzenflow_infra"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1705,7 +1736,7 @@ dependencies = [
 
 [[package]]
 name = "obzenflow_runtime"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1729,7 +1760,7 @@ dependencies = [
 
 [[package]]
 name = "obzenflow_sketches"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -2580,6 +2611,12 @@ name = "simd-adler32"
 version = "0.3.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e320a6c5ad31d271ad523dcf3ad13e2767ad8b1cb8f047f75a8aeaf8da139da2"
+
+[[package]]
+name = "similar"
+version = "2.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bbbb5d9659141646ae647b42fe094daf6c6192d1620870b449d9557f748b2daa"
 
 [[package]]
 name = "slab"

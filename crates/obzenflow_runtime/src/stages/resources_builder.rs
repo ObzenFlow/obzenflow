@@ -16,8 +16,8 @@ use crate::feed_plan::{FeedPlan, LogicalFeed, StageOutputContract};
 use crate::id_conversions::StageIdExt;
 use crate::message_bus::FsmMessageBus;
 use crate::messaging::upstream_subscription::{
-    ContractsWiring, ReaderSelectionPolicy, SelectedFeedMetadata, SelectedFeedRole,
-    UpstreamSubscription,
+    CompositeEntrySpec, ContractsWiring, ReaderSelectionPolicy, SelectedFeedMetadata,
+    SelectedFeedRole, UpstreamSubscription,
 };
 use crate::replay::ReplayArchive;
 use crate::stages::LivenessSnapshots;
@@ -53,6 +53,7 @@ pub struct BoundSubscriptionFactory {
     pub owner_label: String,
     journals_with_names: Vec<(StageId, String, Arc<dyn Journal<ChainEvent>>)>,
     selected_feeds_by_stage: HashMap<StageId, Vec<SelectedFeedMetadata>>,
+    composite_entries_by_stage: HashMap<StageId, Vec<CompositeEntrySpec>>,
     /// Reader-selection policy for built subscriptions (FLOWIP-095d).
     /// `CanonicalMerge` on stages the flow build marked as deterministic
     /// fan-in orderers; availability-driven round-robin otherwise.
@@ -118,6 +119,7 @@ impl SubscriptionFactory {
             owner_label: "unknown_owner".to_string(),
             journals_with_names,
             selected_feeds_by_stage: HashMap::new(),
+            composite_entries_by_stage: HashMap::new(),
             reader_selection: ReaderSelectionPolicy::default(),
             seq_ordered: false,
             entered_generation: self.entered_generation,
@@ -143,6 +145,7 @@ impl BoundSubscriptionFactory {
             .await
             .map(|sub| {
                 sub.with_selected_feeds(self.selected_feeds_by_stage.clone())
+                    .with_composite_entries(self.composite_entries_by_stage.clone())
                     .with_reader_selection(self.reader_selection)
                     .with_seq_ordered(self.seq_ordered)
                     .with_entered_generation(self.entered_generation)
@@ -161,6 +164,7 @@ impl BoundSubscriptionFactory {
                 .await
                 .map_err(|e| format!("Failed to create subscription: {e:?}"))?
                 .with_selected_feeds(self.selected_feeds_by_stage.clone())
+                .with_composite_entries(self.composite_entries_by_stage.clone())
                 .with_reader_selection(self.reader_selection)
                 .with_seq_ordered(self.seq_ordered)
                 .with_entered_generation(self.entered_generation)
@@ -612,6 +616,83 @@ impl StageResourcesBuilder {
             let seq_ordered_fan_in = self.seq_ordered_fan_ins.contains(&stage_id);
             let mut upstream_subscription_factory = subscription_factory
                 .bind_with_selected_feeds(&upstream_journals, selected_feeds_by_stage);
+            let mut composite_entries_by_stage: HashMap<StageId, Vec<CompositeEntrySpec>> =
+                HashMap::new();
+            for edge in self
+                .topology
+                .edges()
+                .iter()
+                .filter(|edge| edge.to == stage_ulid)
+            {
+                for port_ref in &edge.composite_ports {
+                    let subgraph = self
+                        .topology
+                        .subgraphs()
+                        .iter()
+                        .find(|subgraph| subgraph.subgraph_id == port_ref.subgraph_id)
+                        .ok_or_else(|| {
+                            format!(
+                                "Composite edge {:?} -> {:?} references absent subgraph '{}' while wiring stage '{}'",
+                                edge.from, edge.to, port_ref.subgraph_id, stage_info.name
+                            )
+                        })?;
+                    let port = subgraph
+                        .boundary_ports
+                        .iter()
+                        .find(|port| port.name == port_ref.port_name)
+                        .ok_or_else(|| {
+                            format!(
+                                "Composite edge {:?} -> {:?} references absent port '{}.{}' while wiring stage '{}'",
+                                edge.from,
+                                edge.to,
+                                port_ref.subgraph_id,
+                                port_ref.port_name,
+                                stage_info.name
+                            )
+                        })?;
+
+                    // A composite-to-composite edge legitimately carries the
+                    // upstream output ref beside the downstream input ref.
+                    // Only input refs stamp an activation on this subscriber.
+                    if port.direction != obzenflow_topology::PortDirection::Input {
+                        continue;
+                    }
+                    if port.member_stage_id != stage_ulid {
+                        return Err(format!(
+                            "Composite input port '{}.{}' names member {:?} but edge {:?} -> {:?} is being wired into stage '{}' ({:?})",
+                            port_ref.subgraph_id,
+                            port_ref.port_name,
+                            port.member_stage_id,
+                            edge.from,
+                            edge.to,
+                            stage_info.name,
+                            stage_ulid
+                        ));
+                    }
+                    composite_entries_by_stage
+                        .entry(StageId::from_topology_id(edge.from))
+                        .or_default()
+                        .push(CompositeEntrySpec {
+                            composite_id: obzenflow_core::id::CompositeId::new(
+                                subgraph.subgraph_id.clone(),
+                            ),
+                            port_name: port.name.clone(),
+                            event_types: port
+                                .payload_event_types
+                                .iter()
+                                .cloned()
+                                .map(EventType::from)
+                                .collect(),
+                        });
+                }
+            }
+            for specs in composite_entries_by_stage.values_mut() {
+                specs.sort_by(|left, right| {
+                    (left.composite_id.as_ref(), left.port_name.as_str())
+                        .cmp(&(right.composite_id.as_ref(), right.port_name.as_str()))
+                });
+            }
+            upstream_subscription_factory.composite_entries_by_stage = composite_entries_by_stage;
             upstream_subscription_factory.owner_label = stage_info.name.clone();
             if deterministic_fan_in {
                 upstream_subscription_factory.reader_selection =

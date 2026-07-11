@@ -6,7 +6,7 @@
 //!
 //! The collector is completion-driven and keyed by the outer input event ID (`job_key`).
 //! It consumes framework-internal transport events:
-//! - `AiMapReducePlanningManifest` from the chunk stage
+//! - `AiMapReducePlanningManifest` authored by chunk and forwarded through map
 //! - `AiMapReduceTaggedPartial<serde_json::Value>` from the map stage
 //! - `AiMapReduceChunkFailed` from the map stage on terminal failure
 //!
@@ -411,7 +411,7 @@ where
         };
 
         // --------------------------------------------------------------------
-        // Planning manifest (chunk -> collect)
+        // Planning manifest (chunk -> map -> collect)
         // --------------------------------------------------------------------
         if AiMapReducePlanningManifest::event_type_matches(event_type) {
             let manifest = match AiMapReducePlanningManifest::try_from_event(&event) {

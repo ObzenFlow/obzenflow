@@ -5,6 +5,7 @@
 //! Event context and metadata
 
 pub mod causality_context;
+pub mod composite_activation_context;
 pub mod flow_context;
 pub mod intent_context;
 pub mod middleware_execution_scope;
@@ -14,10 +15,14 @@ pub mod replay_context;
 pub mod runtime_context;
 pub mod stage_type;
 
+pub use composite_activation_context::CompositeActivationContext;
 pub use flow_context::FlowContext;
 pub use intent_context::IntentContext;
 pub use middleware_execution_scope::MiddlewareExecutionScope;
 pub use processing_context::ProcessingContext;
 pub use replay_context::ReplayContext;
-pub use runtime_context::{EffectCircuitBreakerContext, EffectRateLimiterContext, RuntimeContext};
+pub use runtime_context::{
+    EffectCircuitBreakerContext, EffectRateLimiterContext, EventTypeCountContext, RuntimeContext,
+    UpstreamEventTypeCountContext,
+};
 pub use stage_type::{SimpleStageType, StageType};

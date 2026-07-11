@@ -167,15 +167,18 @@ async fn dispatch_running_inner<
                 "transform: poll_next returned Event"
             );
 
-            ctx.instrumentation.record_consumed(&envelope);
-            ctx.instrumentation
-                .event_loops_with_work_total
-                .fetch_add(1, Ordering::Relaxed);
-
             let upstream_stage = sup
                 .subscription
                 .as_ref()
                 .and_then(|subscription| subscription.last_delivered_upstream_stage());
+            ctx.instrumentation.record_consumed(
+                &envelope,
+                upstream_stage.expect("delivered event must identify its upstream stage"),
+            );
+            ctx.instrumentation
+                .event_loops_with_work_total
+                .fetch_add(1, Ordering::Relaxed);
+
             let stage_input_position = sup
                 .subscription
                 .as_ref()
@@ -598,6 +601,7 @@ async fn dispatch_running_inner<
                                             .heartbeat
                                             .as_ref()
                                             .map(|heartbeat| &heartbeat.state),
+                                        backpressure_writer: &ctx.backpressure_writer,
                                         parent: Some(&envelope),
                                         observer_scope: scope,
                                     },
@@ -628,6 +632,7 @@ async fn dispatch_running_inner<
                                                 .heartbeat
                                                 .as_ref()
                                                 .map(|heartbeat| &heartbeat.state),
+                                            backpressure_writer: &ctx.backpressure_writer,
                                             parent: Some(&envelope),
                                             observer_scope: scope,
                                         },
@@ -771,6 +776,20 @@ async fn dispatch_running_inner<
             }
 
             Ok(directive)
+        }
+        PollResult::CursorAdvanced {
+            upstream,
+            completed_data_rows,
+        } => {
+            crate::backpressure::complete_filtered_data_rows(
+                &ctx.backpressure_readers,
+                upstream,
+                completed_data_rows,
+            );
+            ctx.instrumentation
+                .event_loops_with_work_total
+                .fetch_add(1, Ordering::Relaxed);
+            Ok(EventLoopDirective::Continue)
         }
         PollResult::NoEvents => {
             // FLOWIP-095d: a canonical merge that delivered nothing because an

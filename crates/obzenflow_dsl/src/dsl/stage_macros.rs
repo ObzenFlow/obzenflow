@@ -4914,13 +4914,6 @@ macro_rules! __obzenflow_ai_map_reduce_cadillac_typed_default {
         reduce_handler = ($reduce_handler:expr),
         middleware = [ $($mw_role:ident : $mw_expr:expr),* $(,)? ]
     ) => {{
-        let __metadata = $crate::dsl::typing::StageTypingMetadata::transform(
-            $crate::dsl::typing::TypeHint::exact_payload::<$($seed_ty)+>(),
-            $crate::dsl::typing::TypeHint::exact_payload::<$out_ty>(),
-            false,
-            None,
-        );
-
         let __chunk_handler = $chunker;
 
         let __map_handler = $map_handler;
@@ -4972,7 +4965,9 @@ macro_rules! __obzenflow_ai_map_reduce_cadillac_typed_default {
 
         let mut __descriptor = __builder.build();
         __descriptor.set_name($name.to_string());
-        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
+        // FLOWIP-128a: composites are not typed-wrapped; boundary typing is
+        // the CompositeBoundary's job (D1) and members validate post-lowering.
+        __descriptor
     }};
 }
 
@@ -4992,13 +4987,6 @@ macro_rules! __obzenflow_ai_map_reduce_cadillac_typed_collect {
         reduce_handler = ($reduce_handler:expr),
         middleware = [ $($mw_role:ident : $mw_expr:expr),* $(,)? ]
     ) => {{
-        let __metadata = $crate::dsl::typing::StageTypingMetadata::transform(
-            $crate::dsl::typing::TypeHint::exact_payload::<$($seed_ty)+>(),
-            $crate::dsl::typing::TypeHint::exact_payload::<$out_ty>(),
-            false,
-            None,
-        );
-
         let __chunk_handler = $chunker;
 
         let __map_handler = $map_handler;
@@ -5033,7 +5021,9 @@ macro_rules! __obzenflow_ai_map_reduce_cadillac_typed_collect {
 
         let mut __descriptor = __builder.build();
         __descriptor.set_name($name.to_string());
-        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
+        // FLOWIP-128a: composites are not typed-wrapped; boundary typing is
+        // the CompositeBoundary's job (D1) and members validate post-lowering.
+        __descriptor
     }};
 }
 
@@ -5168,13 +5158,6 @@ macro_rules! __obzenflow_ai_map_reduce_typed {
         reduce_handler = ($reduce_handler:expr),
         middleware = [ $($mw_role:ident : $mw_expr:expr),* $(,)? ]
     ) => {{
-        let __metadata = $crate::dsl::typing::StageTypingMetadata::transform(
-            $crate::dsl::typing::TypeHint::exact_payload::<$($in)+>(),
-            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
-            false,
-            None,
-        );
-
         let __chunk_handler = $chunk_handler;
         let __chunk_handler =
             $crate::dsl::typing::BoundTransform::<$($in)+, $chunk_ty, _>::new(__chunk_handler);
@@ -5212,7 +5195,9 @@ macro_rules! __obzenflow_ai_map_reduce_typed {
 
         let mut __descriptor = __builder.build();
         __descriptor.set_name($name.to_string());
-        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
+        // FLOWIP-128a: composites are not typed-wrapped; boundary typing is
+        // the CompositeBoundary's job (D1) and members validate post-lowering.
+        __descriptor
     }};
 }
 

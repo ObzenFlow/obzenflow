@@ -193,6 +193,253 @@ impl PrometheusExporter {
             writeln!(output)?;
         }
 
+        // Exact named graph-cut traffic (FLOWIP-128a B3).
+        if !snapshot.composite_port_traffic.is_empty() {
+            writeln!(
+                output,
+                "# HELP obzenflow_composite_port_events_total Logical Data facts crossing a named composite boundary port"
+            )?;
+            writeln!(
+                output,
+                "# TYPE obzenflow_composite_port_events_total counter"
+            )?;
+            for traffic in &snapshot.composite_port_traffic {
+                writeln!(
+                    output,
+                    "obzenflow_composite_port_events_total{{composite=\"{}\",port=\"{}\",direction=\"{}\"}} {}",
+                    escape_label(traffic.composite.as_ref()),
+                    escape_label(&traffic.port),
+                    traffic.direction.as_str(),
+                    traffic.events_total
+                )?;
+            }
+            writeln!(output)?;
+        }
+
+        if !snapshot.composite_member_health.is_empty() {
+            writeln!(
+                output,
+                "# HELP obzenflow_composite_member_errors_total Errors observed across a composite's member stages"
+            )?;
+            writeln!(
+                output,
+                "# TYPE obzenflow_composite_member_errors_total counter"
+            )?;
+            for health in &snapshot.composite_member_health {
+                writeln!(
+                    output,
+                    "obzenflow_composite_member_errors_total{{composite=\"{}\"}} {}",
+                    escape_label(health.composite.as_ref()),
+                    health.member_errors_total
+                )?;
+            }
+            writeln!(output)?;
+        }
+
+        if !snapshot.composite_boundary_durations.is_empty() {
+            writeln!(
+                output,
+                "# HELP obzenflow_composite_boundary_duration_seconds Exact paired duration from an admitted composite input fact to a committed output fact"
+            )?;
+            writeln!(
+                output,
+                "# TYPE obzenflow_composite_boundary_duration_seconds histogram"
+            )?;
+            for histogram in &snapshot.composite_boundary_durations {
+                let composite = escape_label(histogram.composite.as_ref());
+                let entry_port = escape_label(&histogram.entry_port);
+                let exit_port = escape_label(&histogram.exit_port);
+                for bucket in &histogram.buckets {
+                    writeln!(
+                        output,
+                        "obzenflow_composite_boundary_duration_seconds_bucket{{composite=\"{composite}\",entry_port=\"{entry_port}\",exit_port=\"{exit_port}\",le=\"{}\"}} {}",
+                        bucket.upper_bound_seconds,
+                        bucket.cumulative_count
+                    )?;
+                }
+                writeln!(
+                    output,
+                    "obzenflow_composite_boundary_duration_seconds_bucket{{composite=\"{composite}\",entry_port=\"{entry_port}\",exit_port=\"{exit_port}\",le=\"+Inf\"}} {}",
+                    histogram.count
+                )?;
+                writeln!(
+                    output,
+                    "obzenflow_composite_boundary_duration_seconds_count{{composite=\"{composite}\",entry_port=\"{entry_port}\",exit_port=\"{exit_port}\"}} {}",
+                    histogram.count
+                )?;
+                writeln!(
+                    output,
+                    "obzenflow_composite_boundary_duration_seconds_sum{{composite=\"{composite}\",entry_port=\"{entry_port}\",exit_port=\"{exit_port}\"}} {}",
+                    histogram.sum_seconds
+                )?;
+            }
+            writeln!(output)?;
+        }
+
+        if !snapshot.composite_boundary_duration_invalid.is_empty() {
+            writeln!(
+                output,
+                "# HELP obzenflow_composite_boundary_duration_invalid_total Rejected composite boundary duration evidence"
+            )?;
+            writeln!(
+                output,
+                "# TYPE obzenflow_composite_boundary_duration_invalid_total counter"
+            )?;
+            for invalid in &snapshot.composite_boundary_duration_invalid {
+                if !matches!(
+                    invalid.reason.as_str(),
+                    "unknown_entry_port" | "exit_precedes_entry"
+                ) {
+                    // The label vocabulary is deliberately bounded. A new
+                    // reason requires an explicit exporter contract change.
+                    continue;
+                }
+                writeln!(
+                    output,
+                    "obzenflow_composite_boundary_duration_invalid_total{{composite=\"{}\",entry_port=\"{}\",exit_port=\"{}\",reason=\"{}\"}} {}",
+                    escape_label(invalid.composite.as_ref()),
+                    escape_label(&invalid.entry_port),
+                    escape_label(&invalid.exit_port),
+                    escape_label(&invalid.reason),
+                    invalid.total
+                )?;
+            }
+            writeln!(output)?;
+        }
+
+        // Composite boundary contract views, keyed by composite id (FLOWIP-128a B5).
+        // Re-keyed from the boundary members' contract facts; `peer` is the
+        // external stage on the far side, `direction` inbound/outbound.
+        if !snapshot.composite_contracts.is_empty() {
+            writeln!(
+                output,
+                "# HELP obzenflow_composite_contract_results_total Contract results at a composite's boundary edges, per contract and status"
+            )?;
+            writeln!(
+                output,
+                "# TYPE obzenflow_composite_contract_results_total counter"
+            )?;
+            for cc in &snapshot.composite_contracts {
+                let selected_event_type = cc
+                    .selected_event_type
+                    .as_ref()
+                    .map(|event_type| event_type.as_str())
+                    .unwrap_or("");
+                let feed_role = cc.feed_role.map(|role| role.as_str()).unwrap_or("");
+                for (contract, status, count) in &cc.results {
+                    writeln!(
+                        output,
+                        "obzenflow_composite_contract_results_total{{composite=\"{}\",port=\"{}\",peer=\"{}\",direction=\"{}\",selected_event_type=\"{}\",feed_role=\"{}\",contract=\"{}\",status=\"{}\"}} {}",
+                        escape_label(cc.composite.as_ref()),
+                        escape_label(&cc.port),
+                        escape_label(&cc.peer.to_string()),
+                        cc.direction.as_str(),
+                        escape_label(selected_event_type),
+                        escape_label(feed_role),
+                        escape_label(contract.as_str()),
+                        escape_label(status.as_str()),
+                        count
+                    )?;
+                }
+            }
+            writeln!(output)?;
+
+            writeln!(
+                output,
+                "# HELP obzenflow_composite_contract_violations_total Contract violations at a composite's boundary edges, per contract and cause"
+            )?;
+            writeln!(
+                output,
+                "# TYPE obzenflow_composite_contract_violations_total counter"
+            )?;
+            for cc in &snapshot.composite_contracts {
+                let selected_event_type = cc
+                    .selected_event_type
+                    .as_ref()
+                    .map(|event_type| event_type.as_str())
+                    .unwrap_or("");
+                let feed_role = cc.feed_role.map(|role| role.as_str()).unwrap_or("");
+                for (contract, cause, count) in &cc.violations {
+                    writeln!(
+                        output,
+                        "obzenflow_composite_contract_violations_total{{composite=\"{}\",port=\"{}\",peer=\"{}\",direction=\"{}\",selected_event_type=\"{}\",feed_role=\"{}\",contract=\"{}\",cause=\"{}\"}} {}",
+                        escape_label(cc.composite.as_ref()),
+                        escape_label(&cc.port),
+                        escape_label(&cc.peer.to_string()),
+                        cc.direction.as_str(),
+                        escape_label(selected_event_type),
+                        escape_label(feed_role),
+                        escape_label(contract.as_str()),
+                        escape_label(cause.as_str()),
+                        count
+                    )?;
+                }
+            }
+            writeln!(output)?;
+
+            writeln!(
+                output,
+                "# HELP obzenflow_composite_contract_reader_seq Reader sequence at a composite's boundary edges"
+            )?;
+            writeln!(
+                output,
+                "# TYPE obzenflow_composite_contract_reader_seq gauge"
+            )?;
+            for cc in &snapshot.composite_contracts {
+                if let Some(seq) = cc.reader_seq {
+                    let selected_event_type = cc
+                        .selected_event_type
+                        .as_ref()
+                        .map(|event_type| event_type.as_str())
+                        .unwrap_or("");
+                    let feed_role = cc.feed_role.map(|role| role.as_str()).unwrap_or("");
+                    writeln!(
+                        output,
+                        "obzenflow_composite_contract_reader_seq{{composite=\"{}\",port=\"{}\",peer=\"{}\",direction=\"{}\",selected_event_type=\"{}\",feed_role=\"{}\"}} {}",
+                        escape_label(cc.composite.as_ref()),
+                        escape_label(&cc.port),
+                        escape_label(&cc.peer.to_string()),
+                        cc.direction.as_str(),
+                        escape_label(selected_event_type),
+                        escape_label(feed_role),
+                        seq
+                    )?;
+                }
+            }
+            writeln!(output)?;
+
+            writeln!(
+                output,
+                "# HELP obzenflow_composite_contract_advertised_writer_seq Advertised writer sequence at a composite's boundary edges"
+            )?;
+            writeln!(
+                output,
+                "# TYPE obzenflow_composite_contract_advertised_writer_seq gauge"
+            )?;
+            for cc in &snapshot.composite_contracts {
+                if let Some(seq) = cc.advertised_writer_seq {
+                    let selected_event_type = cc
+                        .selected_event_type
+                        .as_ref()
+                        .map(|event_type| event_type.as_str())
+                        .unwrap_or("");
+                    let feed_role = cc.feed_role.map(|role| role.as_str()).unwrap_or("");
+                    writeln!(
+                        output,
+                        "obzenflow_composite_contract_advertised_writer_seq{{composite=\"{}\",port=\"{}\",peer=\"{}\",direction=\"{}\",selected_event_type=\"{}\",feed_role=\"{}\"}} {}",
+                        escape_label(cc.composite.as_ref()),
+                        escape_label(&cc.port),
+                        escape_label(&cc.peer.to_string()),
+                        cc.direction.as_str(),
+                        escape_label(selected_event_type),
+                        escape_label(feed_role),
+                        seq
+                    )?;
+                }
+            }
+            writeln!(output)?;
+        }
+
         // Live join gauge: how many reference events have been processed since the last stream event.
         if !snapshot.join_reference_since_last_stream.is_empty() {
             writeln!(
@@ -2487,7 +2734,15 @@ mod tests {
     use obzenflow_core::event::observability::{
         HttpPullState, HttpPullTelemetry, HttpSurfaceRouteMetricsSnapshot, WaitReason,
     };
-    use obzenflow_core::metrics::{AiChunkingMetricsSnapshot, InfraMetricsSnapshot};
+    use obzenflow_core::event::system_event::{
+        ContractName, ContractResultStatusLabel, SystemFeedRole,
+    };
+    use obzenflow_core::metrics::{
+        AiChunkingMetricsSnapshot, BoundaryDirection, CompositeContract, CompositeDurationBucket,
+        CompositeDurationHistogram, CompositeDurationInvalid, CompositeMemberHealth,
+        CompositePortTraffic, ContractViolationCauseLabel, InfraMetricsSnapshot,
+    };
+    use obzenflow_core::EventType;
     use std::collections::HashMap;
 
     #[test]
@@ -2512,12 +2767,10 @@ mod tests {
             },
         );
 
-        let snapshot = AppMetricsSnapshot {
-            event_counts,
-            stage_metadata,
-            pipeline_state: "Created".to_string(),
-            ..Default::default()
-        };
+        let mut snapshot = AppMetricsSnapshot::default();
+        snapshot.event_counts = event_counts;
+        snapshot.stage_metadata = stage_metadata;
+        snapshot.pipeline_state = "Created".to_string();
 
         // Update and render
         exporter.update_app_metrics(snapshot).unwrap();
@@ -2680,11 +2933,9 @@ mod tests {
         let mut http_pull_metrics = HashMap::new();
         http_pull_metrics.insert(stage_id, telemetry);
 
-        let snapshot = AppMetricsSnapshot {
-            stage_metadata,
-            http_pull_metrics,
-            ..Default::default()
-        };
+        let mut snapshot = AppMetricsSnapshot::default();
+        snapshot.stage_metadata = stage_metadata;
+        snapshot.http_pull_metrics = http_pull_metrics;
 
         exporter.update_app_metrics(snapshot).unwrap();
         let output = exporter.render_metrics().unwrap();
@@ -2743,11 +2994,9 @@ mod tests {
             },
         );
 
-        let snapshot = AppMetricsSnapshot {
-            stage_metadata,
-            ai_chunking_metrics,
-            ..Default::default()
-        };
+        let mut snapshot = AppMetricsSnapshot::default();
+        snapshot.stage_metadata = stage_metadata;
+        snapshot.ai_chunking_metrics = ai_chunking_metrics;
 
         exporter.update_app_metrics(snapshot).unwrap();
         let output = exporter.render_metrics().unwrap();
@@ -2765,5 +3014,150 @@ mod tests {
         assert!(output.contains(&format!(
             "obzenflow_ai_chunking_budget_overhead_tokens{{flow=\"order_flow\",stage=\"chunk\",stage_id=\"{stage_id}\"}} 123"
         )));
+    }
+
+    #[test]
+    fn exact_composite_boundary_families_render_without_legacy_aliases() {
+        let exporter = PrometheusExporter::new();
+        let composite = obzenflow_core::id::CompositeId::new("saga:checkout");
+        let peer = StageId::new();
+        let mut snapshot = AppMetricsSnapshot::default();
+        snapshot.composite_port_traffic = vec![
+            CompositePortTraffic::new(
+                composite.clone(),
+                "commands",
+                BoundaryDirection::Inbound,
+                10,
+            ),
+            CompositePortTraffic::new(
+                composite.clone(),
+                "completed",
+                BoundaryDirection::Outbound,
+                7,
+            ),
+        ];
+        snapshot.composite_member_health = vec![CompositeMemberHealth::new(composite.clone(), 2)];
+        snapshot.composite_boundary_durations = vec![CompositeDurationHistogram::new(
+            composite.clone(),
+            "commands",
+            "completed",
+            [
+                0.005, 0.010, 0.025, 0.050, 0.100, 0.250, 0.500, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0,
+                300.0,
+            ]
+            .into_iter()
+            .map(|upper_bound| CompositeDurationBucket::new(upper_bound, 3))
+            .collect(),
+            3,
+            0.7,
+        )];
+        snapshot.composite_boundary_duration_invalid = vec![
+            CompositeDurationInvalid::new(
+                composite.clone(),
+                "commands",
+                "failed",
+                "exit_precedes_entry",
+                1,
+            ),
+            CompositeDurationInvalid::new(
+                composite.clone(),
+                "commands",
+                "completed",
+                "unknown_entry_port",
+                4,
+            ),
+            CompositeDurationInvalid::new(
+                composite.clone(),
+                "commands",
+                "failed",
+                "unbounded_user_text",
+                99,
+            ),
+        ];
+        let mut contract = CompositeContract::new(
+            composite,
+            "completed",
+            peer,
+            BoundaryDirection::Outbound,
+            Some(EventType::from("checkout.completed.v1")),
+            Some(SystemFeedRole::Input),
+        );
+        contract.results.push((
+            ContractName::new("SinkContract"),
+            ContractResultStatusLabel::Passed,
+            5,
+        ));
+        contract.violations.push((
+            ContractName::new("TransportContract"),
+            ContractViolationCauseLabel::new("seq_divergence"),
+            2,
+        ));
+        contract.reader_seq = Some(55);
+        contract.advertised_writer_seq = Some(60);
+        let mut dimensionless_contract = CompositeContract::new(
+            obzenflow_core::id::CompositeId::new("saga:checkout"),
+            "failed",
+            peer,
+            BoundaryDirection::Outbound,
+            None,
+            None,
+        );
+        dimensionless_contract.reader_seq = Some(0);
+        snapshot.composite_contracts = vec![contract, dimensionless_contract];
+
+        exporter.update_app_metrics(snapshot).unwrap();
+        let output = exporter.render_metrics().unwrap();
+        assert!(output.contains(
+            "obzenflow_composite_port_events_total{composite=\"saga:checkout\",port=\"completed\",direction=\"outbound\"} 7"
+        ));
+        assert!(output.contains(
+            "obzenflow_composite_port_events_total{composite=\"saga:checkout\",port=\"commands\",direction=\"inbound\"} 10"
+        ));
+        assert!(output
+            .contains("obzenflow_composite_member_errors_total{composite=\"saga:checkout\"} 2"));
+        for upper_bound in [
+            "0.005", "0.01", "0.025", "0.05", "0.1", "0.25", "0.5", "1", "2.5", "5", "10", "30",
+            "60", "300",
+        ] {
+            assert!(output.contains(&format!(
+                "obzenflow_composite_boundary_duration_seconds_bucket{{composite=\"saga:checkout\",entry_port=\"commands\",exit_port=\"completed\",le=\"{upper_bound}\"}} 3"
+            )));
+        }
+        assert!(output.contains(
+            "obzenflow_composite_boundary_duration_seconds_bucket{composite=\"saga:checkout\",entry_port=\"commands\",exit_port=\"completed\",le=\"+Inf\"} 3"
+        ));
+        assert!(output.contains(
+            "obzenflow_composite_boundary_duration_seconds_count{composite=\"saga:checkout\",entry_port=\"commands\",exit_port=\"completed\"} 3"
+        ));
+        assert!(output.contains(
+            "obzenflow_composite_boundary_duration_seconds_sum{composite=\"saga:checkout\",entry_port=\"commands\",exit_port=\"completed\"} 0.7"
+        ));
+        assert!(output.contains(
+            "obzenflow_composite_boundary_duration_invalid_total{composite=\"saga:checkout\",entry_port=\"commands\",exit_port=\"failed\",reason=\"exit_precedes_entry\"} 1"
+        ));
+        assert!(output.contains(
+            "obzenflow_composite_boundary_duration_invalid_total{composite=\"saga:checkout\",entry_port=\"commands\",exit_port=\"completed\",reason=\"unknown_entry_port\"} 4"
+        ));
+        assert!(!output.contains("unbounded_user_text"));
+        let peer = escape_label(&peer.to_string());
+        assert!(output.contains(&format!(
+            "obzenflow_composite_contract_results_total{{composite=\"saga:checkout\",port=\"completed\",peer=\"{peer}\",direction=\"outbound\",selected_event_type=\"checkout.completed.v1\",feed_role=\"input\",contract=\"SinkContract\",status=\"passed\"}} 5"
+        )));
+        assert!(output.contains(&format!(
+            "obzenflow_composite_contract_violations_total{{composite=\"saga:checkout\",port=\"completed\",peer=\"{peer}\",direction=\"outbound\",selected_event_type=\"checkout.completed.v1\",feed_role=\"input\",contract=\"TransportContract\",cause=\"seq_divergence\"}} 2"
+        )));
+        assert!(output.contains(&format!(
+            "obzenflow_composite_contract_reader_seq{{composite=\"saga:checkout\",port=\"completed\",peer=\"{peer}\",direction=\"outbound\",selected_event_type=\"checkout.completed.v1\",feed_role=\"input\"}} 55"
+        )));
+        assert!(output.contains(&format!(
+            "obzenflow_composite_contract_advertised_writer_seq{{composite=\"saga:checkout\",port=\"completed\",peer=\"{peer}\",direction=\"outbound\",selected_event_type=\"checkout.completed.v1\",feed_role=\"input\"}} 60"
+        )));
+        assert!(output.contains(&format!(
+            "obzenflow_composite_contract_reader_seq{{composite=\"saga:checkout\",port=\"failed\",peer=\"{peer}\",direction=\"outbound\",selected_event_type=\"\",feed_role=\"\"}} 0"
+        )));
+        assert!(!output.contains("obzenflow_composite_events_out_total"));
+        assert!(!output.contains("obzenflow_composite_events_in_total"));
+        assert!(!output.contains("obzenflow_composite_errors_total"));
+        assert!(!output.contains("obzenflow_composite_boundary_latency_ms"));
     }
 }

@@ -23,6 +23,7 @@ mod tests {
 
     use crate::dsl::composites::ai_map_reduce;
     use crate::dsl::composites::lower_composites;
+    use crate::dsl::composition::{FlowMember, IntoFlowMember};
     use crate::dsl::stage_descriptor::{StageDescriptor, TransformDescriptor};
     use crate::dsl::typing::TypeHint;
     use obzenflow_core::ai::{
@@ -177,10 +178,13 @@ mod tests {
 
     #[test]
     fn ai_map_reduce_lowering_expands_stages_and_rewrites_edges() {
-        let mut stages: HashMap<String, Box<dyn StageDescriptor>> = HashMap::new();
+        let mut members: HashMap<String, FlowMember> = HashMap::new();
 
-        stages.insert("batch".to_string(), mk_transform("batch"));
-        stages.insert("out".to_string(), mk_transform("out"));
+        members.insert(
+            "batch".to_string(),
+            mk_transform("batch").into_flow_member(),
+        );
+        members.insert("out".to_string(), mk_transform("out").into_flow_member());
 
         let digest =
             ai_map_reduce::map_reduce::<TestIn, TestChunk, TestPartial, TestCollected, TestOut>()
@@ -193,14 +197,14 @@ mod tests {
                 .finalize(NoopAsyncTransform)
                 .build();
 
-        stages.insert("digest".to_string(), digest);
+        members.insert("digest".to_string(), digest.into_flow_member());
 
         let mut connections = vec![
             ("batch".to_string(), "digest".to_string(), EdgeKind::Forward),
             ("digest".to_string(), "out".to_string(), EdgeKind::Forward),
         ];
 
-        let artifacts = lower_composites(&mut stages, &mut connections)
+        let (stages, artifacts) = lower_composites(members, &mut connections)
             .expect("lowering should succeed for ai_map_reduce composite");
 
         // Logical binding removed, internal bindings inserted.
@@ -231,10 +235,14 @@ mod tests {
             "no edge should reference the logical composite binding after lowering"
         );
 
-        // Internal edges include the direct chunk -> collect manifest edge.
+        // The manifest follows the event-sourced data path through map. There
+        // is no direct chunk -> collect fan-in edge.
         assert!(connections.iter().any(|(from, to, kind)| {
-            from == "digest__chunk" && to == "digest__collect" && *kind == EdgeKind::Forward
+            from == "digest__chunk" && to == "digest__map" && *kind == EdgeKind::Forward
         }));
+        assert!(!connections
+            .iter()
+            .any(|(from, to, _)| { from == "digest__chunk" && to == "digest__collect" }));
 
         // Lowering artifacts include subgraph membership + registry entry.
         assert_eq!(artifacts.stage_subgraphs.len(), 4);
@@ -261,15 +269,14 @@ mod tests {
                 "digest__finalize".to_string(),
             ]
         );
-        assert!(
-            subgraph
-                .internal_edges
-                .iter()
-                .any(|edge| edge.from_stage == "digest__chunk"
-                    && edge.to_stage == "digest__collect"
-                    && edge.role == "manifest"),
-            "subgraph internal edges should include the manifest path"
-        );
+        assert!(subgraph.internal_edges.iter().any(|edge| {
+            edge.from_stage == "digest__chunk"
+                && edge.to_stage == "digest__map"
+                && edge.role == "data"
+        }));
+        assert!(!subgraph.internal_edges.iter().any(|edge| {
+            edge.from_stage == "digest__chunk" && edge.to_stage == "digest__collect"
+        }));
     }
 
     #[test]
@@ -288,23 +295,26 @@ mod tests {
             ]
         );
 
-        let metadata = digest
-            .typing_metadata()
-            .expect("ai_map_reduce! should return a typed descriptor wrapper");
-        assert_eq!(metadata.input_type, TypeHint::exact_payload::<TestIn>());
-        assert_eq!(metadata.output_type, TypeHint::exact_payload::<TestOut>());
+        // FLOWIP-128a: the macro returns a composite descriptor; boundary
+        // typing lives on the declared ports, validated at member level
+        // post-lowering.
+        assert_eq!(digest.kind(), "ai_map_reduce");
+        assert_eq!(digest.schema_version(), 1);
 
-        let mut stages: HashMap<String, Box<dyn StageDescriptor>> = HashMap::new();
-        stages.insert("batch".to_string(), mk_transform("batch"));
-        stages.insert("out".to_string(), mk_transform("out"));
-        stages.insert("digest".to_string(), digest);
+        let mut members: HashMap<String, FlowMember> = HashMap::new();
+        members.insert(
+            "batch".to_string(),
+            mk_transform("batch").into_flow_member(),
+        );
+        members.insert("out".to_string(), mk_transform("out").into_flow_member());
+        members.insert("digest".to_string(), digest.into_flow_member());
 
         let mut connections = vec![
             ("batch".to_string(), "digest".to_string(), EdgeKind::Forward),
             ("digest".to_string(), "out".to_string(), EdgeKind::Forward),
         ];
 
-        lower_composites(&mut stages, &mut connections)
+        let (stages, _artifacts) = lower_composites(members, &mut connections)
             .expect("lowering should succeed for ai_map_reduce composite from ai_map_reduce!()");
 
         let map_stage = stages
@@ -348,23 +358,23 @@ mod tests {
             }
         );
 
-        let metadata = digest
-            .typing_metadata()
-            .expect("ai_map_reduce! should return a typed descriptor wrapper");
-        assert_eq!(metadata.input_type, TypeHint::exact_payload::<TestSeed>());
-        assert_eq!(metadata.output_type, TypeHint::exact_payload::<TestOut>());
+        assert_eq!(digest.kind(), "ai_map_reduce");
+        assert_eq!(digest.schema_version(), 1);
 
-        let mut stages: HashMap<String, Box<dyn StageDescriptor>> = HashMap::new();
-        stages.insert("batch".to_string(), mk_transform("batch"));
-        stages.insert("out".to_string(), mk_transform("out"));
-        stages.insert("digest".to_string(), digest);
+        let mut members: HashMap<String, FlowMember> = HashMap::new();
+        members.insert(
+            "batch".to_string(),
+            mk_transform("batch").into_flow_member(),
+        );
+        members.insert("out".to_string(), mk_transform("out").into_flow_member());
+        members.insert("digest".to_string(), digest.into_flow_member());
 
         let mut connections = vec![
             ("batch".to_string(), "digest".to_string(), EdgeKind::Forward),
             ("digest".to_string(), "out".to_string(), EdgeKind::Forward),
         ];
 
-        lower_composites(&mut stages, &mut connections).expect(
+        let (stages, _artifacts) = lower_composites(members, &mut connections).expect(
             "lowering should succeed for ai_map_reduce composite from Cadillac ai_map_reduce!()",
         );
 
@@ -408,11 +418,11 @@ mod tests {
                 .finalize(NoopAsyncTransform)
                 .build();
 
-        let mut stages: HashMap<String, Box<dyn StageDescriptor>> = HashMap::new();
-        stages.insert("digest".to_string(), digest);
+        let mut members: HashMap<String, FlowMember> = HashMap::new();
+        members.insert("digest".to_string(), digest.into_flow_member());
 
         let mut connections: Vec<(String, String, EdgeKind)> = Vec::new();
-        lower_composites(&mut stages, &mut connections)
+        let (stages, _artifacts) = lower_composites(members, &mut connections)
             .expect("ai_map_reduce composite should lower without error");
 
         let entry = stages
@@ -459,6 +469,12 @@ mod tests {
         assert!(
             map_meta
                 .output_contract
+                .contains(&TypeHint::exact_payload::<AiMapReducePlanningManifest>()),
+            "map output contract must include the forwarded planning manifest"
+        );
+        assert!(
+            map_meta
+                .output_contract
                 .contains(&TypeHint::exact_payload::<
                     AiMapReduceTaggedPartial<serde_json::Value>,
                 >()),
@@ -484,19 +500,16 @@ mod tests {
         );
     }
 
-    /// FLOWIP-114c Acceptance #18, success case: an `ai_map_reduce`-using
-    /// flow with external upstream and downstream stages must build clean
-    /// under `validate_edge_typing`. The four composite-internal edges
-    /// (chunk -> map, chunk -> collect manifest, map -> collect, collect ->
-    /// finalize) are skipped because their endpoints share a `subgraph_id`,
-    /// while the two external edges (upstream -> chunk, finalize ->
-    /// downstream) are checked against the composite's outer-boundary types.
-    ///
-    /// The chunk -> collect manifest edge is the one that motivates the
-    /// skip rule: `chunk` emits `TestChunk` while `collect` declares
-    /// `TestPartial` as its input, so without the subgraph-id skip the
-    /// validator would surface a `SingleEdge` mismatch and break every
-    /// composite-using flow.
+    /// FLOWIP-114c Acceptance #18 success case, revised by FLOWIP-128a A6:
+    /// an `ai_map_reduce`-using flow with external upstream and downstream
+    /// stages must build clean under `validate_edge_typing`. Declared-feed
+    /// edges (chunk -> map carries chunks plus manifest; map -> collect carries
+    /// forwarded manifest plus terminal/partial transport) validate their lane
+    /// payloads against the upstream output contract and are exempt from
+    /// downstream-input matching; the ordinary collect -> finalize edge
+    /// type-checks normally; the external boundary edges are checked against
+    /// the composite's outer types.
+    /// Subgraph co-membership alone never skips validation.
     #[test]
     fn ai_map_reduce_external_flow_validates_clean_with_subgraph_attached() {
         use obzenflow_core::id::StageId;
@@ -520,16 +533,16 @@ mod tests {
                 .finalize(NoopAsyncTransform)
                 .build();
 
-        let mut stages: HashMap<String, Box<dyn StageDescriptor>> = HashMap::new();
-        stages.insert(
+        let mut members: HashMap<String, FlowMember> = HashMap::new();
+        members.insert(
             "upstream".to_string(),
-            crate::source!(name: "upstream", TestIn => placeholder!()),
+            crate::source!(name: "upstream", TestIn => placeholder!()).into_flow_member(),
         );
-        stages.insert(
+        members.insert(
             "downstream".to_string(),
-            crate::sink!(name: "downstream", TestOut => placeholder!()),
+            crate::sink!(name: "downstream", TestOut => placeholder!()).into_flow_member(),
         );
-        stages.insert("digest".to_string(), digest);
+        members.insert("digest".to_string(), digest.into_flow_member());
 
         let mut connections = vec![
             (
@@ -544,7 +557,7 @@ mod tests {
             ),
         ];
 
-        let artifacts = lower_composites(&mut stages, &mut connections)
+        let (stages, artifacts) = lower_composites(members, &mut connections)
             .expect("composite lowering succeeds with external upstream and downstream");
 
         // After lowering, "digest" is gone and replaced by four internal
@@ -604,7 +617,7 @@ mod tests {
         let topology = Topology::new_unvalidated(topology_stages, topology_edges)
             .expect("topology construction succeeds");
 
-        validate_edge_typing(&topology, &stages, &name_to_id).expect(
+        validate_edge_typing(&topology, &stages, &name_to_id, &artifacts.internal_feeds).expect(
             "FLOWIP-114c Acceptance #18: ai_map_reduce composite-internal edges must be \
              skipped when subgraph_id is attached to their StageInfo, so a fully-typed \
              external flow builds clean. If this fails, the composite-internal-edge skip \
@@ -640,20 +653,20 @@ mod tests {
                 .finalize(NoopAsyncTransform)
                 .build();
 
-        let mut stages: HashMap<String, Box<dyn StageDescriptor>> = HashMap::new();
+        let mut members: HashMap<String, FlowMember> = HashMap::new();
         // External upstream emits TestOut, which does NOT match the
         // composite's declared outer input (TestIn). The skip rule must
         // not paper over this; the validator must report a SingleEdge
         // mismatch on the upstream -> digest__chunk edge.
-        stages.insert(
+        members.insert(
             "upstream".to_string(),
-            crate::source!(name: "upstream", TestOut => placeholder!()),
+            crate::source!(name: "upstream", TestOut => placeholder!()).into_flow_member(),
         );
-        stages.insert(
+        members.insert(
             "downstream".to_string(),
-            crate::sink!(name: "downstream", TestOut => placeholder!()),
+            crate::sink!(name: "downstream", TestOut => placeholder!()).into_flow_member(),
         );
-        stages.insert("digest".to_string(), digest);
+        members.insert("digest".to_string(), digest.into_flow_member());
 
         let mut connections = vec![
             (
@@ -668,8 +681,8 @@ mod tests {
             ),
         ];
 
-        let artifacts =
-            lower_composites(&mut stages, &mut connections).expect("composite lowering succeeds");
+        let (stages, artifacts) =
+            lower_composites(members, &mut connections).expect("composite lowering succeeds");
 
         let mut name_to_id: StdHashMap<String, StageId> = StdHashMap::new();
         for name in stages.keys() {
@@ -708,10 +721,12 @@ mod tests {
         let topology = Topology::new_unvalidated(topology_stages, topology_edges)
             .expect("topology construction succeeds");
 
-        let errors = validate_edge_typing(&topology, &stages, &name_to_id).expect_err(
-            "expected a SingleEdge error on the external upstream -> digest__chunk \
+        let errors =
+            validate_edge_typing(&topology, &stages, &name_to_id, &artifacts.internal_feeds)
+                .expect_err(
+                    "expected a SingleEdge error on the external upstream -> digest__chunk \
              boundary edge (TestOut -> TestIn mismatch)",
-        );
+                );
 
         let boundary_error = errors
             .iter()
@@ -734,20 +749,18 @@ mod tests {
 
     #[test]
     fn lowering_detects_internal_stage_name_collisions() {
-        let mut stages: HashMap<String, Box<dyn StageDescriptor>> = HashMap::new();
+        let mut members: HashMap<String, FlowMember> = HashMap::new();
 
         // Collision: existing stage has the same binding as the would-be lowered stage.
-        stages.insert(
-            "digest__chunk".to_string(),
-            Box::new(TransformDescriptor {
-                name: "digest__chunk".to_string(),
-                handler: NoopTransform,
-                middleware: vec![],
-                backpressure: None,
-            }),
-        );
+        let existing: Box<dyn StageDescriptor> = Box::new(TransformDescriptor {
+            name: "digest__chunk".to_string(),
+            handler: NoopTransform,
+            middleware: vec![],
+            backpressure: None,
+        });
+        members.insert("digest__chunk".to_string(), existing.into_flow_member());
 
-        stages.insert(
+        members.insert(
             "digest".to_string(),
             ai_map_reduce::map_reduce::<TestIn, TestChunk, TestPartial, TestCollected, TestOut>()
                 .chunker(NoopTransform)
@@ -757,16 +770,256 @@ mod tests {
                     |acc, partial: &TestPartial| acc.values.push(partial.value),
                 ))
                 .finalize(NoopAsyncTransform)
-                .build(),
+                .build()
+                .into_flow_member(),
         );
 
         let mut connections = vec![("digest".to_string(), "out".to_string(), EdgeKind::Forward)];
 
-        let err = lower_composites(&mut stages, &mut connections)
-            .expect_err("expected name collision error from composite lowering");
+        let err = match lower_composites(members, &mut connections) {
+            Ok(_) => panic!("expected name collision error from composite lowering"),
+            Err(err) => err,
+        };
         assert!(
             err.to_string().contains("lowering collision"),
             "unexpected error: {err}"
         );
+    }
+
+    fn render_visibility(visibility: obzenflow_runtime::feed_plan::FactVisibility) -> &'static str {
+        match visibility {
+            obzenflow_runtime::feed_plan::FactVisibility::Routable => "routable",
+            obzenflow_runtime::feed_plan::FactVisibility::Unrouted => "unrouted",
+        }
+    }
+
+    /// FLOWIP-128a regression snapshots for the reference `ai_map_reduce`
+    /// lowering. Feed keys and visibility changing here means journal routing
+    /// changed and requires an explicit Insta snapshot review.
+    #[test]
+    fn lowering_feed_plan_and_artifacts_match_snapshots() {
+        let mut members: HashMap<String, FlowMember> = HashMap::new();
+        members.insert(
+            "batch".to_string(),
+            mk_transform("batch").into_flow_member(),
+        );
+        members.insert("out".to_string(), mk_transform("out").into_flow_member());
+        members.insert(
+            "digest".to_string(),
+            ai_map_reduce::map_reduce::<TestIn, TestChunk, TestPartial, TestCollected, TestOut>()
+                .chunker(NoopTransform)
+                .map(NoopAsyncTransform)
+                .collect(obzenflow_runtime::stages::stateful::CollectByInput::new(
+                    TestCollected::default(),
+                    |acc, partial: &TestPartial| acc.values.push(partial.value),
+                ))
+                .finalize(NoopAsyncTransform)
+                .build()
+                .into_flow_member(),
+        );
+
+        let mut connections = vec![
+            ("batch".to_string(), "digest".to_string(), EdgeKind::Forward),
+            ("digest".to_string(), "out".to_string(), EdgeKind::Forward),
+        ];
+
+        let (stages, artifacts) =
+            lower_composites(members, &mut connections).expect("lowering succeeds");
+
+        // Membership snapshot: serialized shape must stay byte-identical for
+        // flows that declare no new manifest annotations.
+        let membership: std::collections::BTreeMap<_, _> =
+            artifacts.stage_subgraphs.iter().collect();
+        let membership_json =
+            serde_json::to_string_pretty(&membership).expect("membership serializes");
+        insta::assert_snapshot!(membership_json, @r###"
+        {
+          "digest__chunk": {
+            "subgraph_id": "ai_map_reduce:digest",
+            "kind": "ai_map_reduce",
+            "binding": "digest",
+            "role": "chunk",
+            "order": 0,
+            "is_entry": true,
+            "is_exit": false
+          },
+          "digest__collect": {
+            "subgraph_id": "ai_map_reduce:digest",
+            "kind": "ai_map_reduce",
+            "binding": "digest",
+            "role": "collect",
+            "order": 2,
+            "is_entry": false,
+            "is_exit": false
+          },
+          "digest__finalize": {
+            "subgraph_id": "ai_map_reduce:digest",
+            "kind": "ai_map_reduce",
+            "binding": "digest",
+            "role": "finalize",
+            "order": 3,
+            "is_entry": false,
+            "is_exit": true
+          },
+          "digest__map": {
+            "subgraph_id": "ai_map_reduce:digest",
+            "kind": "ai_map_reduce",
+            "binding": "digest",
+            "role": "map",
+            "order": 1,
+            "is_entry": false,
+            "is_exit": false
+          }
+        }
+        "###);
+
+        // Subgraph registry snapshot (name-keyed spec; rendered because the
+        // spec type is not serde).
+        let mut spec_lines = Vec::new();
+        for spec in &artifacts.subgraphs {
+            spec_lines.push(format!(
+                "subgraph id={} kind={} binding={} label={} collapsible={}",
+                spec.subgraph_id, spec.kind, spec.binding, spec.label, spec.collapsible
+            ));
+            spec_lines.push(format!("  members={:?}", spec.member_stage_names));
+            spec_lines.push(format!(
+                "  entry={:?} exit={:?} parent={:?}",
+                spec.entry_stage_names, spec.exit_stage_names, spec.parent_subgraph_id
+            ));
+            for edge in &spec.internal_edges {
+                spec_lines.push(format!(
+                    "  edge {} -> {} role={}",
+                    edge.from_stage, edge.to_stage, edge.role
+                ));
+            }
+        }
+        let mut spec_text = spec_lines.join("\n");
+        spec_text.push('\n');
+        insta::assert_snapshot!(spec_text, @r###"
+        subgraph id=ai_map_reduce:digest kind=ai_map_reduce binding=digest label=digest collapsible=true
+          members=["digest__chunk", "digest__map", "digest__collect", "digest__finalize"]
+          entry=["digest__chunk"] exit=["digest__finalize"] parent=None
+          edge digest__chunk -> digest__map role=data
+          edge digest__map -> digest__collect role=data
+          edge digest__collect -> digest__finalize role=data
+        "###);
+
+        // Feed-plan snapshot: build the topology the way the flow build seam
+        // does (StageInfo + subgraph membership), then render feeds and
+        // contracts keyed by stage NAME so the snapshot survives fresh ULIDs.
+        fn to_topology_stage_type(
+            core: obzenflow_core::event::context::StageType,
+        ) -> obzenflow_topology::StageType {
+            use obzenflow_core::event::context::StageType as S;
+            use obzenflow_topology::StageType as T;
+            match core {
+                S::FiniteSource => T::FiniteSource,
+                S::InfiniteSource => T::InfiniteSource,
+                S::Transform => T::Transform,
+                S::Sink => T::Sink,
+                S::Stateful => T::Stateful,
+                S::Join => T::Join,
+            }
+        }
+
+        let mut name_to_id: HashMap<String, obzenflow_core::StageId> = HashMap::new();
+        for name in stages.keys() {
+            name_to_id.insert(name.clone(), obzenflow_core::StageId::new());
+        }
+
+        let mut topo_stages = Vec::new();
+        for (name, descriptor) in &stages {
+            let core_id = name_to_id[name];
+            // Topology validation needs a source and sink; the outer fixture
+            // stages play those roles for the graph without affecting feeds.
+            let stage_type = match name.as_str() {
+                "batch" => obzenflow_topology::StageType::FiniteSource,
+                "out" => obzenflow_topology::StageType::Sink,
+                _ => to_topology_stage_type(descriptor.stage_type()),
+            };
+            let mut info = obzenflow_topology::StageInfo::new(
+                obzenflow_topology::StageId::from_ulid(core_id.as_ulid()),
+                descriptor.name().to_string(),
+                stage_type,
+            );
+            if let Some(membership) = artifacts.stage_subgraphs.get(name) {
+                info = info.with_subgraph(membership.clone());
+            }
+            topo_stages.push(info);
+        }
+        let topo_edges: Vec<obzenflow_topology::DirectedEdge> = connections
+            .iter()
+            .map(|(from, to, kind)| {
+                obzenflow_topology::DirectedEdge::new(
+                    obzenflow_topology::StageId::from_ulid(name_to_id[from].as_ulid()),
+                    obzenflow_topology::StageId::from_ulid(name_to_id[to].as_ulid()),
+                    *kind,
+                )
+            })
+            .collect();
+        let topology = obzenflow_topology::Topology::new(topo_stages, topo_edges)
+            .expect("fixture topology is valid");
+
+        // The plan must come from the generic declared-feed path. The snapshot
+        // pins the complete selected-feed and output-contract inventory.
+        let plan = crate::dsl::typing::derive_feed_plan(
+            &topology,
+            &stages,
+            &name_to_id,
+            &artifacts.internal_feeds,
+        );
+
+        let id_to_name: HashMap<obzenflow_core::StageId, &String> =
+            name_to_id.iter().map(|(name, id)| (*id, name)).collect();
+
+        let mut feed_lines: Vec<String> = plan
+            .all_feeds()
+            .iter()
+            .map(|feed| {
+                format!(
+                    "feed {} -> {} role={} key={} visibility={}",
+                    id_to_name[&feed.key.upstream_stage],
+                    id_to_name[&feed.key.downstream_stage],
+                    feed.key.role.as_str(),
+                    feed.key.selected_payload_key,
+                    render_visibility(feed.selected_payload.visibility),
+                )
+            })
+            .collect();
+        feed_lines.sort();
+
+        let mut contract_lines: Vec<String> = Vec::new();
+        for (stage_id, contract) in &plan.stage_output_contracts {
+            for output in &contract.outputs {
+                contract_lines.push(format!(
+                    "contract {} key={} visibility={}",
+                    id_to_name[stage_id],
+                    output.payload_key(),
+                    render_visibility(output.visibility),
+                ));
+            }
+        }
+        contract_lines.sort();
+
+        let mut plan_text = feed_lines.join("\n");
+        plan_text.push('\n');
+        plan_text.push_str(&contract_lines.join("\n"));
+        plan_text.push('\n');
+        insta::assert_snapshot!(plan_text, @r###"
+        feed digest__chunk -> digest__map role=input key=ai.map_reduce.planning_manifest.v1 visibility=routable
+        feed digest__chunk -> digest__map role=input key=test.ai_map_reduce.chunk.v1 visibility=routable
+        feed digest__collect -> digest__finalize role=input key=test.ai_map_reduce.collected.v1 visibility=routable
+        feed digest__map -> digest__collect role=input key=ai.map_reduce.chunk_failed.v1 visibility=routable
+        feed digest__map -> digest__collect role=input key=ai.map_reduce.planning_manifest.v1 visibility=routable
+        feed digest__map -> digest__collect role=input key=ai.map_reduce.tagged_partial.v1 visibility=routable
+        contract digest__chunk key=ai.map_reduce.planning_manifest.v1 visibility=routable
+        contract digest__chunk key=test.ai_map_reduce.chunk.v1 visibility=routable
+        contract digest__collect key=test.ai_map_reduce.collected.v1 visibility=routable
+        contract digest__finalize key=test.ai_map_reduce.out.v1 visibility=unrouted
+        contract digest__map key=ai.map_reduce.chunk_failed.v1 visibility=routable
+        contract digest__map key=ai.map_reduce.planning_manifest.v1 visibility=routable
+        contract digest__map key=ai.map_reduce.tagged_partial.v1 visibility=routable
+        contract digest__map key=test.ai_map_reduce.partial.v1 visibility=unrouted
+        "###);
     }
 }

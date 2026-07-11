@@ -137,6 +137,7 @@ async fn contract_state_tracks_seq_and_emits_final() {
                 // keep looping until EOF has been consumed
                 continue;
             }
+            PollResult::CursorAdvanced { .. } => continue,
             PollResult::NoEvents => break,
             PollResult::Error(e) => {
                 panic!("subscription error: {e}");
@@ -232,6 +233,7 @@ async fn contract_seq_divergence_missing_events_emits_gap_and_violation() {
             .await
         {
             PollResult::Event(_env) => continue,
+            PollResult::CursorAdvanced { .. } => continue,
             PollResult::NoEvents => break,
             PollResult::Error(e) => panic!("subscription error: {e}"),
         }
@@ -394,6 +396,7 @@ async fn contract_seq_divergence_overconsumption_sets_violation_without_gap() {
             .await
         {
             PollResult::Event(_env) => continue,
+            PollResult::CursorAdvanced { .. } => continue,
             PollResult::NoEvents => break,
             PollResult::Error(e) => panic!("subscription error: {e}"),
         }

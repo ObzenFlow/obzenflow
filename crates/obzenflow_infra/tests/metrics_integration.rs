@@ -17,7 +17,7 @@ use obzenflow_core::metrics::{
 use obzenflow_core::EventEnvelope;
 use obzenflow_fsm::FsmAction;
 use obzenflow_infra::journal::MemoryJournal;
-use obzenflow_runtime::metrics::fsm::build_metrics_aggregator_fsm;
+use obzenflow_runtime::metrics::fsm::{build_metrics_aggregator_fsm, MetricsJournalKind};
 use obzenflow_runtime::metrics::{
     MetricsAggregatorAction, MetricsAggregatorContext, MetricsAggregatorEvent,
     MetricsAggregatorState, MetricsStore, StageMetrics,
@@ -93,6 +93,8 @@ fn make_empty_context(
         export_interval_secs: 60,
         system_id,
         stage_metadata: single_stage_metadata(stage_id),
+        composite_boundaries: Vec::new(),
+        composite_durations: obzenflow_core::metrics::CompositeDurationAccumulator::default(),
     }
 }
 
@@ -215,6 +217,8 @@ async fn running_state_process_batch_transitions() {
         .handle(
             MetricsAggregatorEvent::ProcessBatch {
                 events: vec![envelope],
+                journal_kind: MetricsJournalKind::Data,
+                journal_stage: stage_id,
             },
             &mut ctx,
         )

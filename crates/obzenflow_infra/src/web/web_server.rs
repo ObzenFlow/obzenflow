@@ -6,6 +6,8 @@
 //!
 //! Provides a simple way to start a web server with topology, metrics, and health endpoints
 
+use obzenflow_core::composite::{CompositeDefinition, CompositeLifecycleProjection};
+use obzenflow_core::id::{CompositeId, RoleId};
 use obzenflow_core::metrics::MetricsExporter;
 use obzenflow_core::web::{HttpEndpoint, HttpMethod, ServerConfig, WebError, WebServer};
 use obzenflow_core::StageId;
@@ -46,6 +48,58 @@ pub struct WebServerResources {
     /// FLOWIP-114d gap 8: fires after the terminal pipeline state; the
     /// listener then closes gracefully and SSE producers end their streams.
     pub shutdown: Option<tokio::sync::watch::Receiver<bool>>,
+}
+
+fn composite_definitions_from_topology(
+    topology: &Topology,
+) -> Result<Vec<CompositeDefinition>, WebError> {
+    let mut definitions = Vec::with_capacity(topology.subgraphs().len());
+
+    for subgraph in topology.subgraphs() {
+        let mut members = Vec::with_capacity(subgraph.member_stage_ids.len());
+        for member_id in &subgraph.member_stage_ids {
+            let stage = topology
+                .stages()
+                .find(|stage| stage.id == *member_id)
+                .ok_or_else(|| WebError::Implementation {
+                    message: format!(
+                        "composite {} references missing member stage {}",
+                        subgraph.subgraph_id, member_id
+                    ),
+                    source: None,
+                })?;
+            let membership = stage
+                .subgraph
+                .as_ref()
+                .filter(|membership| membership.subgraph_id == subgraph.subgraph_id)
+                .ok_or_else(|| WebError::Implementation {
+                    message: format!(
+                        "composite {} member {} has no matching subgraph membership",
+                        subgraph.subgraph_id, member_id
+                    ),
+                    source: None,
+                })?;
+
+            members.push((
+                StageId::from_ulid(stage.id.ulid()),
+                RoleId::new(membership.role.clone()),
+            ));
+        }
+
+        definitions.push(CompositeDefinition::new(
+            CompositeId::new(subgraph.subgraph_id.clone()),
+            members,
+        ));
+    }
+
+    CompositeLifecycleProjection::new(definitions.clone()).map_err(|error| {
+        WebError::Implementation {
+            message: format!("invalid composite lifecycle projection: {error}"),
+            source: Some(Box::new(error)),
+        }
+    })?;
+
+    Ok(definitions)
 }
 
 fn is_reserved_built_in_path(path: &str) -> bool {
@@ -191,6 +245,8 @@ pub async fn start_web_server_with_config(
     validate_extra_endpoints(&extra_endpoints)?;
 
     let mut server = super::warp::WarpServer::new();
+    server.with_composite_definitions(composite_definitions_from_topology(&topology)?);
+    server.with_contract_boundary_aliases(&topology)?;
     if let Some(collector) = surface_metrics {
         server.with_surface_metrics(collector);
     }
@@ -394,6 +450,8 @@ impl HttpEndpoint for PipelineReadyEndpoint {
 mod tests {
     use super::*;
     use async_trait::async_trait;
+    use obzenflow_core::event::StageLifecycleEvent;
+    use obzenflow_topology::{StageSubgraphMembership, TopologyBuilder, TopologySubgraphInfo};
 
     struct TestEndpoint {
         path: String,
@@ -422,6 +480,74 @@ mod tests {
         async fn handle(&self, _request: Request) -> Result<ManagedResponse, WebError> {
             Ok(Response::ok().into())
         }
+    }
+
+    #[test]
+    fn topology_builds_lifecycle_definitions_for_every_composite() {
+        let mut builder = TopologyBuilder::new();
+        let map = builder.add_stage(Some("map".to_string()));
+        builder.reset_current();
+        let finish = builder.add_stage(Some("finish".to_string()));
+        builder.reset_current();
+        builder.add_edge(map, finish);
+
+        let topology = builder.build_unchecked().unwrap();
+        let stages = topology
+            .stages()
+            .cloned()
+            .map(|mut stage| {
+                let (role, order, is_entry, is_exit) = if stage.id == map {
+                    ("map", 0, true, false)
+                } else {
+                    ("finalize", 1, false, true)
+                };
+                stage.subgraph = Some(StageSubgraphMembership::new(
+                    "ai_map_reduce:digest",
+                    "ai_map_reduce",
+                    "digest",
+                    role,
+                    order,
+                    is_entry,
+                    is_exit,
+                ));
+                stage
+            })
+            .collect();
+        let subgraph = TopologySubgraphInfo::new(
+            "ai_map_reduce:digest",
+            "ai_map_reduce",
+            "digest",
+            "digest",
+            vec![map, finish],
+            Vec::new(),
+            vec![map],
+            vec![finish],
+            false,
+        );
+        let topology = Topology::new_unvalidated(stages, topology.edges().to_vec())
+            .unwrap()
+            .with_subgraphs(vec![subgraph]);
+
+        let definitions = composite_definitions_from_topology(&topology).unwrap();
+        let mut projection = CompositeLifecycleProjection::new(definitions).unwrap();
+        let map = StageId::from_ulid(map.ulid());
+        let finish = StageId::from_ulid(finish.ulid());
+        let composite = CompositeId::new("ai_map_reduce:digest");
+
+        projection
+            .apply(map, &StageLifecycleEvent::Running)
+            .unwrap();
+        projection
+            .apply(map, &StageLifecycleEvent::Completed { metrics: None })
+            .unwrap();
+        projection
+            .apply(finish, &StageLifecycleEvent::Completed { metrics: None })
+            .unwrap();
+
+        assert_eq!(
+            projection.status(&composite),
+            Some(obzenflow_core::composite::CompositeStatus::Completed)
+        );
     }
 
     #[test]

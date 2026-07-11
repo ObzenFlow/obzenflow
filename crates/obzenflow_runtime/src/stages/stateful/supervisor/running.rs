@@ -135,6 +135,11 @@ pub(super) async fn dispatch_accumulating<
                 .subscription
                 .as_ref()
                 .and_then(|subscription| subscription.last_delivered_generation());
+            let delivered_upstream_stage = sup
+                .subscription
+                .as_ref()
+                .and_then(|subscription| subscription.last_delivered_upstream_stage())
+                .expect("delivered event must identify its upstream stage");
             if envelope.event.is_data() {
                 ctx.last_input_position = stage_input_position;
             }
@@ -162,7 +167,8 @@ pub(super) async fn dispatch_accumulating<
                 }
                 None => ctx.last_consumed_envelope = Some(envelope.clone()),
             }
-            ctx.instrumentation.record_consumed(&envelope);
+            ctx.instrumentation
+                .record_consumed(&envelope, delivered_upstream_stage);
 
             // We have work - increment loops with work
             ctx.instrumentation
@@ -427,6 +433,7 @@ pub(super) async fn dispatch_accumulating<
                                     .heartbeat
                                     .as_ref()
                                     .map(|heartbeat| &heartbeat.state),
+                                backpressure_writer: &ctx.backpressure_writer,
                                 parent: Some(&envelope),
                                 observer_scope: scope,
                             },
@@ -570,6 +577,20 @@ pub(super) async fn dispatch_accumulating<
             }
 
             Ok(directive)
+        }
+        PollResult::CursorAdvanced {
+            upstream,
+            completed_data_rows,
+        } => {
+            crate::backpressure::complete_filtered_data_rows(
+                &ctx.backpressure_readers,
+                upstream,
+                completed_data_rows,
+            );
+            ctx.instrumentation
+                .event_loops_with_work_total
+                .fetch_add(1, Ordering::Relaxed);
+            Ok(EventLoopDirective::Continue)
         }
         PollResult::NoEvents => {
             // FLOWIP-095d: a canonical merge that delivered nothing because an
@@ -813,6 +834,7 @@ pub(super) async fn dispatch_emitting<
                                 .heartbeat
                                 .as_ref()
                                 .map(|heartbeat| &heartbeat.state),
+                            backpressure_writer: &ctx.backpressure_writer,
                             parent: ctx.last_consumed_envelope.as_ref(),
                             observer_scope,
                         },
@@ -831,7 +853,8 @@ pub(super) async fn dispatch_emitting<
 
                     // Error events are still data for output accounting.
                     if event.is_data() {
-                        ctx.instrumentation.record_output_event(&event);
+                        ctx.instrumentation
+                            .record_error_journal_output_event(&event);
                         if let Some(subscription) = sup.subscription.as_mut() {
                             subscription.track_output_event();
                         }

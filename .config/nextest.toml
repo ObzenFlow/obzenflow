@@ -22,18 +22,24 @@ filter = "binary(/metrics/)"
 test-group = "metrics-exporter-port"
 
 [[profile.default.overrides]]
-filter = "binary(/compile_fail_tests$/)"
+filter = "binary(/compile_fail/)"
 test-group = "trybuild-compile-fail"
 slow-timeout = { period = "180s", terminate-after = 1 }
 
 [[profile.ci-fast.overrides]]
-filter = "binary(/compile_fail_tests$/)"
+filter = "binary(/compile_fail/)"
 test-group = "trybuild-compile-fail"
 slow-timeout = { period = "180s", terminate-after = 1 }
 
 [[profile.ci-full.overrides]]
-filter = "binary(/compile_fail_tests$/)"
+filter = "binary(/compile_fail/)"
 test-group = "trybuild-compile-fail"
+
+# Scale tests do five-figure event runs; 52s observed on shared runners
+# against the 60s default is a retry tax, not a regression signal.
+[[profile.ci-fast.overrides]]
+filter = "binary(/scale_test/)"
+slow-timeout = { period = "120s", terminate-after = 1 }
 
 [[profile.ci-fast.overrides]]
 filter = "binary(/^(basic_streaming|advanced_tests|cycle_unified_guard_test|dropped_events_test|placeholder_handlers_lifecycle_test|prometheus_100k_error_kinds_test|stage_metrics_test|circuit_breaker_metrics_e2e_test|circuit_breaker_shutdown_contracts_test|stateless_simple_test|stateful_patterns_test|stateful_primitives_test)$/)"
@@ -46,6 +52,9 @@ test-group = "disk-journal-paths"
 [test-groups.metrics-exporter-port]
 max-threads = 1
 
+# Every binary that uses trybuild::TestCases must match the group's
+# binary(/compile_fail/) filter, or it escapes serialization and the
+# cargo-in-cargo timeout budget and times out under build-dir lock contention.
 [test-groups.trybuild-compile-fail]
 max-threads = 1
 

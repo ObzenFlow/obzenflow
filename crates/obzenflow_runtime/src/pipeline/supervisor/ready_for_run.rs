@@ -69,7 +69,7 @@ pub(super) async fn dispatch_ready_for_run(
                 }
             }
         }
-        PollResult::NoEvents => {}
+        PollResult::CursorAdvanced { .. } | PollResult::NoEvents => {}
         PollResult::Error(e) => {
             tracing::error!("Error polling system journal in ReadyForRun: {}", e);
             return Ok(EventLoopDirective::Transition(PipelineEvent::Error {

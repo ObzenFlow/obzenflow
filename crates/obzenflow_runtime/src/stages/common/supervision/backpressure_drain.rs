@@ -185,6 +185,7 @@ pub(crate) async fn drain_one_pending_resolve(
         instrumentation: Some(instrumentation),
         heartbeat_state: heartbeat_state.as_ref(),
         output_contract,
+        backpressure_writer: None,
         observers,
         observer_scope: pending.scope,
     };

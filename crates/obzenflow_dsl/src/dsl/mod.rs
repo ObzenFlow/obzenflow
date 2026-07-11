@@ -224,6 +224,10 @@
 pub mod backpressure_clause;
 mod binder;
 pub mod composites;
+/// FLOWIP-128a composite substrate. Public for macro reachability only;
+/// not a stability surface (D9). A plugin FLOWIP de-hides it deliberately.
+#[doc(hidden)]
+pub mod composition;
 #[path = "dsl.rs"]
 mod dsl_impl;
 pub mod error;
