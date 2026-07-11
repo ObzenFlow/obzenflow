@@ -25,6 +25,7 @@ use std::collections::HashMap;
 
 /// Snapshot of application-level metrics derived from the event stream
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct AppMetricsSnapshot {
     /// Timestamp when this snapshot was created
     pub timestamp: chrono::DateTime<chrono::Utc>,

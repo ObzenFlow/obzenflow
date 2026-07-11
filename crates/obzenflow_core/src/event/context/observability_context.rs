@@ -10,6 +10,7 @@ use serde_json::Value;
 
 /// Observability context that can be attached to any event
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct ObservabilityContext {
     /// Composite input facts that causally contribute to this event.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

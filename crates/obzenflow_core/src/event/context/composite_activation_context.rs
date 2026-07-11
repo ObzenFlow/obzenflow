@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 /// fact. Derived events carry it so an output boundary fact can be paired with
 /// the exact entry fact under fan-out and fan-in.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct CompositeActivationContext {
     pub composite_id: CompositeId,
     pub activation: EventId,

@@ -151,6 +151,24 @@ mod composite_activation_tests {
             json["observability"]["composite_activations"][0]["entry_port"],
             "in"
         );
+        assert_eq!(
+            json["observability"]["composite_activations"][0],
+            serde_json::json!({
+                "composite_id": "test:composite",
+                "activation": entry.id,
+                "entry_port": "in",
+                "entered_at_ms": 100,
+            })
+        );
+
+        let mut legacy = json;
+        legacy["observability"]
+            .as_object_mut()
+            .expect("observability object")
+            .remove("composite_activations");
+        let legacy: crate::event::ChainEvent =
+            serde_json::from_value(legacy).expect("pre-activation ChainEvent remains decodable");
+        assert!(legacy.composite_activations().is_empty());
     }
 
     #[test]

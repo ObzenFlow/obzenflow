@@ -24,7 +24,7 @@ default-members = [
 ]
 
 [workspace.package]
-version = "0.1.2"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.93.0"
 license = "MIT OR Apache-2.0"
@@ -33,14 +33,14 @@ homepage = "https://obzenflow.dev"
 
 [workspace.dependencies]
 # Workspace crates
-obzenflow_derive = { version = "0.1.2", path = "crates/obzenflow_derive" }
-obzenflow_core = { version = "0.1.2", path = "crates/obzenflow_core" }
-obzenflow_runtime = { version = "0.1.2", path = "crates/obzenflow_runtime" }
-obzenflow_adapters = { version = "0.1.2", path = "crates/obzenflow_adapters" }
-obzenflow_dsl = { version = "0.1.2", path = "crates/obzenflow_dsl" }
-obzenflow_infra = { version = "0.1.2", path = "crates/obzenflow_infra" }
-obzenflow_benchmarks = { version = "0.1.2", path = "crates/obzenflow_benchmarks" }
-obzenflow_sketches = { version = "0.1.2", path = "crates/obzenflow_sketches" }
+obzenflow_derive = { version = "0.2.0", path = "crates/obzenflow_derive" }
+obzenflow_core = { version = "0.2.0", path = "crates/obzenflow_core" }
+obzenflow_runtime = { version = "0.2.0", path = "crates/obzenflow_runtime" }
+obzenflow_adapters = { version = "0.2.0", path = "crates/obzenflow_adapters" }
+obzenflow_dsl = { version = "0.2.0", path = "crates/obzenflow_dsl" }
+obzenflow_infra = { version = "0.2.0", path = "crates/obzenflow_infra" }
+obzenflow_benchmarks = { version = "0.2.0", path = "crates/obzenflow_benchmarks" }
+obzenflow_sketches = { version = "0.2.0", path = "crates/obzenflow_sketches" }
 
 # External ObzenFlow crates
 obzenflow-topology = { version = "0.5.1", path = "../obzenflow-topology" }

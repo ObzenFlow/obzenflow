@@ -1093,7 +1093,7 @@ where
                     error = %e,
                     "canonical merge: reader.next() returned Error"
                 );
-                return Err(Box::new(e));
+                Err(Box::new(e))
             }
             Ok(ReadStep::Filtered {
                 upstream,

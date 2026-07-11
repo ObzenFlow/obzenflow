@@ -36,6 +36,7 @@ impl BoundaryDirection {
 }
 
 /// One declared named boundary port.
+#[doc(hidden)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompositeBoundaryPort {
     pub name: String,
@@ -53,6 +54,7 @@ impl CompositeBoundaryPort {
 }
 
 /// One physical graph-cut edge bound to a named port.
+#[doc(hidden)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompositeBoundaryEdge {
     pub port: String,
@@ -65,6 +67,7 @@ pub struct CompositeBoundaryEdge {
 
 /// A composite's exact named graph cut, derived from the topology manifest and
 /// persisted edge-port bindings.
+#[doc(hidden)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompositeBoundary {
     pub composite_id: CompositeId,
@@ -76,6 +79,7 @@ pub struct CompositeBoundary {
 /// Read-only view of the cumulative Data counters needed by the graph-cut
 /// projection. Inputs retain the physical upstream dimension so internal
 /// member traffic cannot leak into an input-port count.
+#[doc(hidden)]
 pub trait BoundaryMetricsView {
     fn data_inputs(&self, member: StageId, upstream: StageId, event_type: &EventType) -> u64;
     fn data_outputs(&self, member: StageId, event_type: &EventType) -> u64;
@@ -84,6 +88,7 @@ pub trait BoundaryMetricsView {
 
 /// Logical throughput at one named boundary port.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct CompositePortTraffic {
     pub composite: CompositeId,
     pub port: String,
@@ -92,8 +97,24 @@ pub struct CompositePortTraffic {
 }
 
 impl CompositePortTraffic {
+    /// Construct one exporter-facing named-port traffic snapshot.
+    pub fn new(
+        composite: CompositeId,
+        port: impl Into<String>,
+        direction: BoundaryDirection,
+        events_total: u64,
+    ) -> Self {
+        Self {
+            composite,
+            port: port.into(),
+            direction,
+            events_total,
+        }
+    }
+
     /// Project one counter per connected named port. Fan-out does not multiply
     /// output traffic: the member/event-type counter is read once per port.
+    #[doc(hidden)]
     pub fn project(boundary: &CompositeBoundary, metrics: &impl BoundaryMetricsView) -> Vec<Self> {
         let mut projected = Vec::new();
 
@@ -152,12 +173,22 @@ impl CompositePortTraffic {
 /// Component-health volume for all members of one composite. This is not an
 /// inferred failed-activation count.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct CompositeMemberHealth {
     pub composite: CompositeId,
     pub member_errors_total: u64,
 }
 
 impl CompositeMemberHealth {
+    /// Construct one exporter-facing member-health snapshot.
+    pub fn new(composite: CompositeId, member_errors_total: u64) -> Self {
+        Self {
+            composite,
+            member_errors_total,
+        }
+    }
+
+    #[doc(hidden)]
     pub fn project(boundary: &CompositeBoundary, metrics: &impl BoundaryMetricsView) -> Self {
         Self {
             composite: boundary.composite_id.clone(),
@@ -173,6 +204,7 @@ impl CompositeMemberHealth {
 /// One composite boundary edge's contract facts, re-keyed without discarding
 /// its named port, selected event type, or logical feed role.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct CompositeContract {
     pub composite: CompositeId,
     pub port: String,
@@ -197,6 +229,31 @@ type ContractProjectionKey = (
 );
 
 impl CompositeContract {
+    /// Construct an empty exporter-facing contract view for one exact boundary
+    /// edge/feed identity. Result, violation, and sequence evidence may then be
+    /// populated through the public fields or serde.
+    pub fn new(
+        composite: CompositeId,
+        port: impl Into<String>,
+        peer: StageId,
+        direction: BoundaryDirection,
+        selected_event_type: Option<EventType>,
+        feed_role: Option<SystemFeedRole>,
+    ) -> Self {
+        Self {
+            composite,
+            port: port.into(),
+            peer,
+            direction,
+            selected_event_type,
+            feed_role,
+            results: Vec::new(),
+            violations: Vec::new(),
+            reader_seq: None,
+            advertised_writer_seq: None,
+        }
+    }
+
     fn empty(composite: CompositeId, key: &ContractProjectionKey) -> Self {
         Self {
             composite,
@@ -214,6 +271,7 @@ impl CompositeContract {
 
     /// Relabel only exact physical edges in the durable graph cut. Internal
     /// member edges and unrelated edges cannot be classified accidentally.
+    #[doc(hidden)]
     pub fn project(boundary: &CompositeBoundary, contracts: &ContractMetricsSnapshot) -> Vec<Self> {
         let classify = |upstream: StageId, downstream: StageId| {
             boundary
@@ -310,13 +368,24 @@ impl CompositeContract {
 
 /// One cumulative Prometheus histogram bucket.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct CompositeDurationBucket {
     pub upper_bound_seconds: f64,
     pub cumulative_count: u64,
 }
 
+impl CompositeDurationBucket {
+    pub fn new(upper_bound_seconds: f64, cumulative_count: u64) -> Self {
+        Self {
+            upper_bound_seconds,
+            cumulative_count,
+        }
+    }
+}
+
 /// Exact paired boundary-duration histogram for one entry-port/exit-port pair.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct CompositeDurationHistogram {
     pub composite: CompositeId,
     pub entry_port: String,
@@ -326,15 +395,54 @@ pub struct CompositeDurationHistogram {
     pub sum_seconds: f64,
 }
 
+impl CompositeDurationHistogram {
+    pub fn new(
+        composite: CompositeId,
+        entry_port: impl Into<String>,
+        exit_port: impl Into<String>,
+        buckets: Vec<CompositeDurationBucket>,
+        count: u64,
+        sum_seconds: f64,
+    ) -> Self {
+        Self {
+            composite,
+            entry_port: entry_port.into(),
+            exit_port: exit_port.into(),
+            buckets,
+            count,
+            sum_seconds,
+        }
+    }
+}
+
 /// Rejected duration evidence. Reasons are a fixed vocabulary and all identity
 /// labels come from the topology manifest.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct CompositeDurationInvalid {
     pub composite: CompositeId,
     pub entry_port: String,
     pub exit_port: String,
     pub reason: String,
     pub total: u64,
+}
+
+impl CompositeDurationInvalid {
+    pub fn new(
+        composite: CompositeId,
+        entry_port: impl Into<String>,
+        exit_port: impl Into<String>,
+        reason: impl Into<String>,
+        total: u64,
+    ) -> Self {
+        Self {
+            composite,
+            entry_port: entry_port.into(),
+            exit_port: exit_port.into(),
+            reason: reason.into(),
+            total,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -370,6 +478,7 @@ struct DurationHistogramState {
 /// no entry waits in memory for an exit. Every observation is self-contained
 /// on the durable exit fact through `CompositeActivationContext`.
 #[derive(Debug, Clone)]
+#[doc(hidden)]
 pub struct CompositeDurationAccumulator {
     bucket_upper_bounds_seconds: Vec<f64>,
     histograms: HashMap<DurationSeriesKey, DurationHistogramState>,
@@ -876,6 +985,28 @@ mod tests {
         assert_eq!(invalid[0].exit_port, "failed");
         assert_eq!(invalid[0].reason, "exit_precedes_entry");
         assert_eq!(invalid[0].total, 1);
+    }
+
+    #[test]
+    fn default_duration_buckets_are_the_stable_prometheus_contract() {
+        let (boundary, _, success, _, _, _) = boundary();
+        let valid = exit_event(&boundary, success, "checkout.completed.v1", 1_000, 1_250);
+        let mut accumulator = CompositeDurationAccumulator::default();
+        accumulator.observe_event(std::slice::from_ref(&boundary), success, &valid);
+
+        let histograms = accumulator.histograms();
+        let bounds: Vec<_> = histograms[0]
+            .buckets
+            .iter()
+            .map(|bucket| bucket.upper_bound_seconds)
+            .collect();
+        assert_eq!(
+            bounds,
+            vec![
+                0.005, 0.010, 0.025, 0.050, 0.100, 0.250, 0.500, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0,
+                300.0,
+            ]
+        );
     }
 
     #[test]

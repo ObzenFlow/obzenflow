@@ -18,9 +18,11 @@ pub mod tail_read;
 // Note: MetricsAggregatorSupervisor is intentionally NOT exported - use MetricsAggregatorBuilder
 pub use builder::MetricsAggregatorBuilder;
 pub use config::DefaultMetricsConfig;
+#[doc(hidden)]
+pub use fsm::MetricsStore;
 pub use fsm::{
     MetricsAggregatorAction, MetricsAggregatorContext, MetricsAggregatorEvent,
-    MetricsAggregatorState, MetricsStore, StageMetrics,
+    MetricsAggregatorState, StageMetrics,
 };
 pub use handle::{MetricsHandle, MetricsHandleExt};
 pub use inputs::MetricsInputs;

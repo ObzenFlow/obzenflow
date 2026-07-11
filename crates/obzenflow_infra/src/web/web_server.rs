@@ -6,11 +6,11 @@
 //!
 //! Provides a simple way to start a web server with topology, metrics, and health endpoints
 
+use obzenflow_core::composite::{CompositeDefinition, CompositeLifecycleProjection};
 use obzenflow_core::id::{CompositeId, RoleId};
 use obzenflow_core::metrics::MetricsExporter;
 use obzenflow_core::web::{HttpEndpoint, HttpMethod, ServerConfig, WebError, WebServer};
 use obzenflow_core::StageId;
-use obzenflow_runtime::composite::{CompositeDefinition, CompositeLifecycleProjection};
 use obzenflow_runtime::pipeline::FlowHandle;
 use obzenflow_runtime::pipeline::PipelineState;
 use obzenflow_topology::Topology;
@@ -545,7 +545,7 @@ mod tests {
 
         assert_eq!(
             projection.status(&composite),
-            Some(obzenflow_runtime::composite::CompositeStatus::Completed)
+            Some(obzenflow_core::composite::CompositeStatus::Completed)
         );
     }
 

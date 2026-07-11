@@ -169,9 +169,11 @@ pub struct MetricsAggregatorContext {
     pub stage_metadata: HashMap<StageId, StageMetadata>,
     /// Composite boundaries (FLOWIP-128a B4), built once from the subgraph
     /// registry; each export projects composite RED metrics from them.
+    #[doc(hidden)]
     pub composite_boundaries: Vec<obzenflow_core::metrics::CompositeBoundary>,
 
     /// Replayable exact paired boundary-duration projection.
+    #[doc(hidden)]
     pub composite_durations: CompositeDurationAccumulator,
 }
 
@@ -187,6 +189,7 @@ pub(crate) struct MetricsAggregatorIo {
 
 /// Simple metrics storage
 #[derive(Default)]
+#[doc(hidden)]
 pub struct MetricsStore {
     pub stage_metrics: std::collections::HashMap<StageId, StageMetrics>,
     pub last_event_id: Option<EventId>,

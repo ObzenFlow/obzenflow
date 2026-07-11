@@ -286,6 +286,14 @@ impl PrometheusExporter {
                 "# TYPE obzenflow_composite_boundary_duration_invalid_total counter"
             )?;
             for invalid in &snapshot.composite_boundary_duration_invalid {
+                if !matches!(
+                    invalid.reason.as_str(),
+                    "unknown_entry_port" | "exit_precedes_entry"
+                ) {
+                    // The label vocabulary is deliberately bounded. A new
+                    // reason requires an explicit exporter contract change.
+                    continue;
+                }
                 writeln!(
                     output,
                     "obzenflow_composite_boundary_duration_invalid_total{{composite=\"{}\",entry_port=\"{}\",exit_port=\"{}\",reason=\"{}\"}} {}",
@@ -2726,11 +2734,15 @@ mod tests {
     use obzenflow_core::event::observability::{
         HttpPullState, HttpPullTelemetry, HttpSurfaceRouteMetricsSnapshot, WaitReason,
     };
-    use obzenflow_core::metrics::{
-        AiChunkingMetricsSnapshot, BoundaryDirection, CompositeDurationBucket,
-        CompositeDurationHistogram, CompositeMemberHealth, CompositePortTraffic,
-        InfraMetricsSnapshot,
+    use obzenflow_core::event::system_event::{
+        ContractName, ContractResultStatusLabel, SystemFeedRole,
     };
+    use obzenflow_core::metrics::{
+        AiChunkingMetricsSnapshot, BoundaryDirection, CompositeContract, CompositeDurationBucket,
+        CompositeDurationHistogram, CompositeDurationInvalid, CompositeMemberHealth,
+        CompositePortTraffic, ContractViolationCauseLabel, InfraMetricsSnapshot,
+    };
+    use obzenflow_core::EventType;
     use std::collections::HashMap;
 
     #[test]
@@ -2755,12 +2767,10 @@ mod tests {
             },
         );
 
-        let snapshot = AppMetricsSnapshot {
-            event_counts,
-            stage_metadata,
-            pipeline_state: "Created".to_string(),
-            ..Default::default()
-        };
+        let mut snapshot = AppMetricsSnapshot::default();
+        snapshot.event_counts = event_counts;
+        snapshot.stage_metadata = stage_metadata;
+        snapshot.pipeline_state = "Created".to_string();
 
         // Update and render
         exporter.update_app_metrics(snapshot).unwrap();
@@ -2923,11 +2933,9 @@ mod tests {
         let mut http_pull_metrics = HashMap::new();
         http_pull_metrics.insert(stage_id, telemetry);
 
-        let snapshot = AppMetricsSnapshot {
-            stage_metadata,
-            http_pull_metrics,
-            ..Default::default()
-        };
+        let mut snapshot = AppMetricsSnapshot::default();
+        snapshot.stage_metadata = stage_metadata;
+        snapshot.http_pull_metrics = http_pull_metrics;
 
         exporter.update_app_metrics(snapshot).unwrap();
         let output = exporter.render_metrics().unwrap();
@@ -2986,11 +2994,9 @@ mod tests {
             },
         );
 
-        let snapshot = AppMetricsSnapshot {
-            stage_metadata,
-            ai_chunking_metrics,
-            ..Default::default()
-        };
+        let mut snapshot = AppMetricsSnapshot::default();
+        snapshot.stage_metadata = stage_metadata;
+        snapshot.ai_chunking_metrics = ai_chunking_metrics;
 
         exporter.update_app_metrics(snapshot).unwrap();
         let output = exporter.render_metrics().unwrap();
@@ -3014,52 +3020,144 @@ mod tests {
     fn exact_composite_boundary_families_render_without_legacy_aliases() {
         let exporter = PrometheusExporter::new();
         let composite = obzenflow_core::id::CompositeId::new("saga:checkout");
+        let peer = StageId::new();
         let mut snapshot = AppMetricsSnapshot::default();
-        snapshot.composite_port_traffic = vec![CompositePortTraffic {
-            composite: composite.clone(),
-            port: "completed".to_string(),
-            direction: BoundaryDirection::Outbound,
-            events_total: 7,
-        }];
-        snapshot.composite_member_health = vec![CompositeMemberHealth {
-            composite: composite.clone(),
-            member_errors_total: 2,
-        }];
-        snapshot.composite_boundary_durations = vec![CompositeDurationHistogram {
+        snapshot.composite_port_traffic = vec![
+            CompositePortTraffic::new(
+                composite.clone(),
+                "commands",
+                BoundaryDirection::Inbound,
+                10,
+            ),
+            CompositePortTraffic::new(
+                composite.clone(),
+                "completed",
+                BoundaryDirection::Outbound,
+                7,
+            ),
+        ];
+        snapshot.composite_member_health = vec![CompositeMemberHealth::new(composite.clone(), 2)];
+        snapshot.composite_boundary_durations = vec![CompositeDurationHistogram::new(
+            composite.clone(),
+            "commands",
+            "completed",
+            [
+                0.005, 0.010, 0.025, 0.050, 0.100, 0.250, 0.500, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0,
+                300.0,
+            ]
+            .into_iter()
+            .map(|upper_bound| CompositeDurationBucket::new(upper_bound, 3))
+            .collect(),
+            3,
+            0.7,
+        )];
+        snapshot.composite_boundary_duration_invalid = vec![
+            CompositeDurationInvalid::new(
+                composite.clone(),
+                "commands",
+                "failed",
+                "exit_precedes_entry",
+                1,
+            ),
+            CompositeDurationInvalid::new(
+                composite.clone(),
+                "commands",
+                "completed",
+                "unknown_entry_port",
+                4,
+            ),
+            CompositeDurationInvalid::new(
+                composite.clone(),
+                "commands",
+                "failed",
+                "unbounded_user_text",
+                99,
+            ),
+        ];
+        let mut contract = CompositeContract::new(
             composite,
-            entry_port: "commands".to_string(),
-            exit_port: "completed".to_string(),
-            buckets: vec![
-                CompositeDurationBucket {
-                    upper_bound_seconds: 0.1,
-                    cumulative_count: 1,
-                },
-                CompositeDurationBucket {
-                    upper_bound_seconds: 0.5,
-                    cumulative_count: 3,
-                },
-            ],
-            count: 3,
-            sum_seconds: 0.7,
-        }];
+            "completed",
+            peer,
+            BoundaryDirection::Outbound,
+            Some(EventType::from("checkout.completed.v1")),
+            Some(SystemFeedRole::Input),
+        );
+        contract.results.push((
+            ContractName::new("SinkContract"),
+            ContractResultStatusLabel::Passed,
+            5,
+        ));
+        contract.violations.push((
+            ContractName::new("TransportContract"),
+            ContractViolationCauseLabel::new("seq_divergence"),
+            2,
+        ));
+        contract.reader_seq = Some(55);
+        contract.advertised_writer_seq = Some(60);
+        let mut dimensionless_contract = CompositeContract::new(
+            obzenflow_core::id::CompositeId::new("saga:checkout"),
+            "failed",
+            peer,
+            BoundaryDirection::Outbound,
+            None,
+            None,
+        );
+        dimensionless_contract.reader_seq = Some(0);
+        snapshot.composite_contracts = vec![contract, dimensionless_contract];
 
         exporter.update_app_metrics(snapshot).unwrap();
         let output = exporter.render_metrics().unwrap();
         assert!(output.contains(
             "obzenflow_composite_port_events_total{composite=\"saga:checkout\",port=\"completed\",direction=\"outbound\"} 7"
         ));
+        assert!(output.contains(
+            "obzenflow_composite_port_events_total{composite=\"saga:checkout\",port=\"commands\",direction=\"inbound\"} 10"
+        ));
         assert!(output
             .contains("obzenflow_composite_member_errors_total{composite=\"saga:checkout\"} 2"));
-        assert!(output.contains(
-            "obzenflow_composite_boundary_duration_seconds_bucket{composite=\"saga:checkout\",entry_port=\"commands\",exit_port=\"completed\",le=\"0.5\"} 3"
-        ));
+        for upper_bound in [
+            "0.005", "0.01", "0.025", "0.05", "0.1", "0.25", "0.5", "1", "2.5", "5", "10", "30",
+            "60", "300",
+        ] {
+            assert!(output.contains(&format!(
+                "obzenflow_composite_boundary_duration_seconds_bucket{{composite=\"saga:checkout\",entry_port=\"commands\",exit_port=\"completed\",le=\"{upper_bound}\"}} 3"
+            )));
+        }
         assert!(output.contains(
             "obzenflow_composite_boundary_duration_seconds_bucket{composite=\"saga:checkout\",entry_port=\"commands\",exit_port=\"completed\",le=\"+Inf\"} 3"
         ));
         assert!(output.contains(
             "obzenflow_composite_boundary_duration_seconds_count{composite=\"saga:checkout\",entry_port=\"commands\",exit_port=\"completed\"} 3"
         ));
+        assert!(output.contains(
+            "obzenflow_composite_boundary_duration_seconds_sum{composite=\"saga:checkout\",entry_port=\"commands\",exit_port=\"completed\"} 0.7"
+        ));
+        assert!(output.contains(
+            "obzenflow_composite_boundary_duration_invalid_total{composite=\"saga:checkout\",entry_port=\"commands\",exit_port=\"failed\",reason=\"exit_precedes_entry\"} 1"
+        ));
+        assert!(output.contains(
+            "obzenflow_composite_boundary_duration_invalid_total{composite=\"saga:checkout\",entry_port=\"commands\",exit_port=\"completed\",reason=\"unknown_entry_port\"} 4"
+        ));
+        assert!(!output.contains("unbounded_user_text"));
+        let peer = escape_label(&peer.to_string());
+        assert!(output.contains(&format!(
+            "obzenflow_composite_contract_results_total{{composite=\"saga:checkout\",port=\"completed\",peer=\"{peer}\",direction=\"outbound\",selected_event_type=\"checkout.completed.v1\",feed_role=\"input\",contract=\"SinkContract\",status=\"passed\"}} 5"
+        )));
+        assert!(output.contains(&format!(
+            "obzenflow_composite_contract_violations_total{{composite=\"saga:checkout\",port=\"completed\",peer=\"{peer}\",direction=\"outbound\",selected_event_type=\"checkout.completed.v1\",feed_role=\"input\",contract=\"TransportContract\",cause=\"seq_divergence\"}} 2"
+        )));
+        assert!(output.contains(&format!(
+            "obzenflow_composite_contract_reader_seq{{composite=\"saga:checkout\",port=\"completed\",peer=\"{peer}\",direction=\"outbound\",selected_event_type=\"checkout.completed.v1\",feed_role=\"input\"}} 55"
+        )));
+        assert!(output.contains(&format!(
+            "obzenflow_composite_contract_advertised_writer_seq{{composite=\"saga:checkout\",port=\"completed\",peer=\"{peer}\",direction=\"outbound\",selected_event_type=\"checkout.completed.v1\",feed_role=\"input\"}} 60"
+        )));
+        assert!(output.contains(&format!(
+            "obzenflow_composite_contract_reader_seq{{composite=\"saga:checkout\",port=\"failed\",peer=\"{peer}\",direction=\"outbound\",selected_event_type=\"\",feed_role=\"\"}} 0"
+        )));
         assert!(!output.contains("obzenflow_composite_events_out_total"));
+        assert!(!output.contains("obzenflow_composite_events_in_total"));
+        assert!(!output.contains("obzenflow_composite_errors_total"));
         assert!(!output.contains("obzenflow_composite_boundary_latency_ms"));
     }
 }

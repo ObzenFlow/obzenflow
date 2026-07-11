@@ -4,11 +4,12 @@
 
 //! Composite identifier - the manifest identity of a first-class composite.
 //!
-//! The value is the topology `subgraph_id` (`{kind}:{binding}`), one per
-//! composite binding in a flow. It keys the composite lifecycle view and its
-//! metrics on the rail. String backed because the durable identity is a string
-//! at every boundary (topology membership, Studio, diagnostics), per
-//! FLOWIP-128a D2/B1.
+//! The value is the topology `subgraph_id`, one per composite binding in a
+//! flow. It keys the composite lifecycle view and its metrics on the rail.
+//! The string is deliberately opaque: consumers compare and display it but
+//! never parse a `{kind}:{binding}` convention. String backed because the
+//! durable identity is a string at every boundary (topology membership,
+//! Studio, diagnostics), per FLOWIP-128a D2/B4.
 
 use serde::{Deserialize, Serialize};
 
@@ -17,7 +18,7 @@ use serde::{Deserialize, Serialize};
 pub struct CompositeId(String);
 
 impl CompositeId {
-    /// Create from the manifest subgraph id (`{kind}:{binding}`).
+    /// Create from an opaque manifest subgraph id.
     pub fn new(id: impl Into<String>) -> Self {
         CompositeId(id.into())
     }

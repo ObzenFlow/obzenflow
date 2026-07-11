@@ -7,6 +7,7 @@
 //! This module defines abstract interfaces for metrics collection
 //! and export, using the wide events approach.
 
+#[doc(hidden)]
 pub mod composite;
 pub mod exporter;
 pub mod observer;
@@ -15,10 +16,13 @@ pub mod primitives;
 pub mod snapshots;
 
 pub use composite::{
-    BoundaryDirection, BoundaryMetricsView, CompositeBoundary, CompositeBoundaryEdge,
-    CompositeBoundaryPort, CompositeContract, CompositeDurationAccumulator,
-    CompositeDurationBucket, CompositeDurationHistogram, CompositeDurationInvalid,
-    CompositeMemberHealth, CompositePortTraffic,
+    BoundaryDirection, CompositeContract, CompositeDurationBucket, CompositeDurationHistogram,
+    CompositeDurationInvalid, CompositeMemberHealth, CompositePortTraffic,
+};
+#[doc(hidden)]
+pub use composite::{
+    BoundaryMetricsView, CompositeBoundary, CompositeBoundaryEdge, CompositeBoundaryPort,
+    CompositeDurationAccumulator,
 };
 pub use exporter::{MetricsExporter, NoOpMetricsExporter};
 pub use percentile::{Percentile, PercentileExt};

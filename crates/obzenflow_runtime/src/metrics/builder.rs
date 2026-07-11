@@ -84,6 +84,7 @@ impl MetricsAggregatorBuilder {
     }
 
     /// Set composite boundaries for composite RED projection (FLOWIP-128a B4).
+    #[doc(hidden)]
     pub fn with_composite_boundaries(mut self, boundaries: Vec<CompositeBoundary>) -> Self {
         self.composite_boundaries = boundaries;
         self

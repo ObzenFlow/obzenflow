@@ -17,6 +17,13 @@ use tokio_stream::wrappers::UnboundedReceiverStream;
 use warp::sse::Event as SseEvent;
 use warp::{filters::BoxedFilter, Filter, Rejection, Reply};
 
+use crate::web::endpoint_tags::SURFACE_NAME_TAG_PREFIX;
+use crate::web::routing::{matchit_template_to_public, public_template_to_matchit};
+use crate::web::surface_metrics::{HttpSurfaceMetricsCollector, HttpSurfaceObservation};
+use crate::web::RuntimeInstanceId;
+use obzenflow_core::composite::{
+    CompositeDefinition, CompositeLifecycleProjection, CompositeStatus,
+};
 use obzenflow_core::event::event_envelope::SystemEventEnvelope;
 use obzenflow_core::event::SystemEvent;
 use obzenflow_core::journal::Journal;
@@ -26,14 +33,6 @@ use obzenflow_core::web::{
     WebServer,
 };
 use obzenflow_core::EventId;
-use obzenflow_runtime::composite::{
-    CompositeDefinition, CompositeLifecycleProjection, CompositeStatus,
-};
-
-use crate::web::endpoint_tags::SURFACE_NAME_TAG_PREFIX;
-use crate::web::routing::{matchit_template_to_public, public_template_to_matchit};
-use crate::web::surface_metrics::{HttpSurfaceMetricsCollector, HttpSurfaceObservation};
-use crate::web::RuntimeInstanceId;
 
 /// Warp-based web server implementation
 pub struct WarpServer {
@@ -590,11 +589,11 @@ impl WarpServer {
                                     }
 
                                     if let Some(snapshot) = composite_update {
-                                        if tx
-                                            .send(Ok(map_composite_status_to_sse(&snapshot)))
-                                            .is_err()
+                                        if let Some(event) = map_composite_status_to_sse(&snapshot)
                                         {
-                                            break;
+                                            if tx.send(Ok(event)).is_err() {
+                                                break;
+                                            }
                                         }
                                     }
 
@@ -3612,50 +3611,116 @@ impl CompositeLifecycleSseState {
     fn build_snapshot_sse_events(&self) -> Vec<SseEvent> {
         self.snapshots()
             .iter()
-            .map(map_composite_status_to_sse)
+            .filter_map(map_composite_status_to_sse)
             .collect()
     }
 }
 
-fn map_composite_status_to_sse(snapshot: &CompositeStatusSnapshot) -> SseEvent {
-    SseEvent::default()
-        .event("composite_status")
-        .data(composite_status_payload(snapshot).to_string())
+const COMPOSITE_STATUS_SCHEMA_V1: u32 = 1;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum CompositeStatusWireV1 {
+    Waiting,
+    Running,
+    Completed,
+    Cancelled,
+    Failed,
+    Invalid,
 }
 
-fn composite_status_payload(snapshot: &CompositeStatusSnapshot) -> serde_json::Value {
-    use serde_json::json;
+/// Typed v1 producer DTO. This is an infra wire adapter, not a core domain
+/// event and not a second journal identity.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+struct CompositeStatusPayloadV1 {
+    schema_version: u32,
+    message_type: &'static str,
+    composite_id: String,
+    status: CompositeStatusWireV1,
+    revision: u64,
+    as_of_event_id: Option<String>,
+    timestamp_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
 
-    let (status, reason, error, at) = match &snapshot.status {
-        CompositeStatus::Waiting => ("waiting", None, None, None),
-        CompositeStatus::Running => ("running", None, None, None),
-        CompositeStatus::Completed => ("completed", None, None, None),
-        CompositeStatus::Cancelled { reason } => ("cancelled", Some(reason.clone()), None, None),
-        CompositeStatus::Failed { at, error } => {
-            ("failed", None, Some(error.clone()), Some(at.to_string()))
+#[derive(Debug, thiserror::Error)]
+#[error("composite status has no schema-v1 wire representation")]
+struct UnsupportedCompositeStatusV1;
+
+impl TryFrom<&CompositeStatusSnapshot> for CompositeStatusPayloadV1 {
+    type Error = UnsupportedCompositeStatusV1;
+
+    fn try_from(snapshot: &CompositeStatusSnapshot) -> Result<Self, Self::Error> {
+        let (status, reason, at, error) = match &snapshot.status {
+            CompositeStatus::Waiting => (CompositeStatusWireV1::Waiting, None, None, None),
+            CompositeStatus::Running => (CompositeStatusWireV1::Running, None, None, None),
+            CompositeStatus::Completed => (CompositeStatusWireV1::Completed, None, None, None),
+            CompositeStatus::Cancelled { reason } => (
+                CompositeStatusWireV1::Cancelled,
+                Some(reason.clone()),
+                None,
+                None,
+            ),
+            CompositeStatus::Failed { at, error } => (
+                CompositeStatusWireV1::Failed,
+                None,
+                Some(at.to_string()),
+                Some(error.clone()),
+            ),
+            CompositeStatus::Invalid { error } => (
+                CompositeStatusWireV1::Invalid,
+                None,
+                None,
+                Some(error.clone()),
+            ),
+            _ => return Err(UnsupportedCompositeStatusV1),
+        };
+
+        Ok(Self {
+            schema_version: COMPOSITE_STATUS_SCHEMA_V1,
+            message_type: "composite_status",
+            composite_id: snapshot.composite_id.to_string(),
+            status,
+            revision: snapshot.revision,
+            as_of_event_id: snapshot.as_of_event_id.map(|id| id.to_string()),
+            timestamp_ms: snapshot.timestamp_ms,
+            reason,
+            at,
+            error,
+        })
+    }
+}
+
+fn map_composite_status_to_sse(snapshot: &CompositeStatusSnapshot) -> Option<SseEvent> {
+    let payload = match CompositeStatusPayloadV1::try_from(snapshot) {
+        Ok(payload) => payload,
+        Err(error) => {
+            tracing::error!(
+                composite = %snapshot.composite_id,
+                error = %error,
+                "Composite status cannot be exposed on the schema-v1 SSE contract"
+            );
+            return None;
         }
-        CompositeStatus::Invalid { error } => ("invalid", None, Some(error.clone()), None),
     };
+    let data = serde_json::to_string(&payload)
+        .expect("schema-v1 composite status DTO contains only serializable fields");
+    Some(SseEvent::default().event("composite_status").data(data))
+}
 
-    let mut data = json!({
-        "message_type": "composite_status",
-        "composite_id": snapshot.composite_id.to_string(),
-        "status": status,
-        "revision": snapshot.revision,
-        "as_of_event_id": snapshot.as_of_event_id.map(|id| id.to_string()),
-        "timestamp_ms": snapshot.timestamp_ms,
-    });
-    if let Some(reason) = reason {
-        data["reason"] = serde_json::Value::String(reason);
-    }
-    if let Some(error) = error {
-        data["error"] = serde_json::Value::String(error);
-    }
-    if let Some(at) = at {
-        data["at"] = serde_json::Value::String(at);
-    }
-
-    data
+#[cfg(test)]
+fn composite_status_payload(
+    snapshot: &CompositeStatusSnapshot,
+) -> Result<serde_json::Value, UnsupportedCompositeStatusV1> {
+    CompositeStatusPayloadV1::try_from(snapshot).map(|payload| {
+        serde_json::to_value(payload)
+            .expect("schema-v1 composite status DTO contains only serializable fields")
+    })
 }
 
 #[cfg(test)]
@@ -3725,7 +3790,8 @@ mod composite_status_projection_tests {
         assert_eq!(completed.status, CompositeStatus::Completed);
         assert_eq!(completed.revision, 2);
 
-        let payload = composite_status_payload(&completed);
+        let payload = composite_status_payload(&completed).unwrap();
+        assert_eq!(payload["schema_version"], COMPOSITE_STATUS_SCHEMA_V1);
         assert_eq!(payload["message_type"], "composite_status");
         assert_eq!(payload["status"], "completed");
         assert_eq!(payload["revision"], 2);
@@ -3757,7 +3823,10 @@ mod composite_status_projection_tests {
             .observe(&cancelled)
             .expect("integrity failure changes the view");
         assert!(matches!(invalid.status, CompositeStatus::Invalid { .. }));
-        assert_eq!(composite_status_payload(&invalid)["status"], "invalid");
+        assert_eq!(
+            composite_status_payload(&invalid).unwrap()["status"],
+            "invalid"
+        );
     }
 
     #[test]
@@ -3773,6 +3842,93 @@ mod composite_status_projection_tests {
         assert_eq!(snapshot.status, CompositeStatus::Waiting);
         assert_eq!(snapshot.revision, 0);
         assert!(snapshot.as_of_event_id.is_none());
+    }
+
+    #[test]
+    fn schema_v1_golden_covers_the_complete_status_vocabulary() {
+        let cases = [
+            (CompositeStatus::Waiting, "waiting", None, None, None),
+            (CompositeStatus::Running, "running", None, None, None),
+            (CompositeStatus::Completed, "completed", None, None, None),
+            (
+                CompositeStatus::Cancelled {
+                    reason: "operator stop".to_string(),
+                },
+                "cancelled",
+                Some("operator stop"),
+                None,
+                None,
+            ),
+            (
+                CompositeStatus::Failed {
+                    at: RoleId::new("map"),
+                    error: "provider unavailable".to_string(),
+                },
+                "failed",
+                None,
+                Some("map"),
+                Some("provider unavailable"),
+            ),
+            (
+                CompositeStatus::Invalid {
+                    error: "conflicting member terminals".to_string(),
+                },
+                "invalid",
+                None,
+                None,
+                Some("conflicting member terminals"),
+            ),
+        ];
+
+        for (status, expected_status, expected_reason, expected_at, expected_error) in cases {
+            let snapshot = CompositeStatusSnapshot {
+                composite_id: CompositeId::new("ai_map_reduce:digest"),
+                status,
+                revision: 2,
+                as_of_event_id: None,
+                timestamp_ms: 178,
+            };
+            let payload = composite_status_payload(&snapshot).unwrap();
+            assert_eq!(payload["schema_version"], 1);
+            assert_eq!(payload["message_type"], "composite_status");
+            assert_eq!(payload["composite_id"], "ai_map_reduce:digest");
+            assert_eq!(payload["status"], expected_status);
+            assert_eq!(payload["revision"], 2);
+            assert!(payload["as_of_event_id"].is_null());
+            assert_eq!(payload["timestamp_ms"], 178);
+            assert_eq!(
+                payload.get("reason").and_then(|v| v.as_str()),
+                expected_reason
+            );
+            assert_eq!(payload.get("at").and_then(|v| v.as_str()), expected_at);
+            assert_eq!(
+                payload.get("error").and_then(|v| v.as_str()),
+                expected_error
+            );
+            assert!(payload.get("system_event_type").is_none());
+        }
+    }
+
+    #[test]
+    fn composite_status_wire_source_remains_typed_and_cursorless() {
+        let source = include_str!("warp_server.rs");
+        let start = source
+            .find("const COMPOSITE_STATUS_SCHEMA_V1")
+            .expect("schema-v1 contract declaration");
+        let end = source[start..]
+            .find("#[cfg(test)]\nmod composite_status_projection_tests")
+            .map(|offset| start + offset)
+            .expect("composite status test module");
+        let contract = &source[start..end];
+
+        assert!(contract.contains("struct CompositeStatusPayloadV1"));
+        assert!(contract.contains("schema_version: COMPOSITE_STATUS_SCHEMA_V1"));
+        assert!(contract.contains("message_type: \"composite_status\""));
+        assert!(contract.contains(".event(\"composite_status\")"));
+        assert!(
+            !contract.contains(".id("),
+            "projected frames must never acquire an independent SSE cursor"
+        );
     }
 }
 

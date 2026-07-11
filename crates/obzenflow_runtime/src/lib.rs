@@ -14,7 +14,6 @@ pub use obzenflow_core;
 // Core modules
 pub mod backpressure;
 pub mod bootstrap;
-pub mod composite;
 pub mod contracts;
 pub mod control_plane;
 pub mod effects;

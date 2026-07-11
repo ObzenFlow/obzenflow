@@ -4,8 +4,8 @@
 
 //! Ordered, rebuildable lifecycle view for first-class composites.
 
-use obzenflow_core::event::StageLifecycleEvent;
-use obzenflow_core::id::{CompositeId, RoleId, StageId};
+use crate::event::StageLifecycleEvent;
+use crate::id::{CompositeId, RoleId, StageId};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// One composite's manifest-derived lifecycle definition.
@@ -32,6 +32,7 @@ impl CompositeDefinition {
 
 /// State-derived lifecycle output for a composite binding.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum CompositeStatus {
     Waiting,
     Running,
@@ -43,6 +44,7 @@ pub enum CompositeStatus {
 
 /// A malformed definition or contradictory member lifecycle tape.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum CompositeProjectionError {
     #[error("composite {composite} has no lifecycle members")]
     EmptyComposite { composite: CompositeId },

@@ -1496,7 +1496,7 @@ dependencies = [
 
 [[package]]
 name = "obzenflow"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1571,7 +1571,7 @@ dependencies = [
 
 [[package]]
 name = "obzenflow_adapters"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1592,7 +1592,7 @@ dependencies = [
 
 [[package]]
 name = "obzenflow_benchmarks"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1617,7 +1617,7 @@ dependencies = [
 
 [[package]]
 name = "obzenflow_core"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -1637,7 +1637,7 @@ dependencies = [
 
 [[package]]
 name = "obzenflow_derive"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1646,7 +1646,7 @@ dependencies = [
 
 [[package]]
 name = "obzenflow_dsl"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "indexmap",
@@ -1664,7 +1664,7 @@ dependencies = [
 
 [[package]]
 name = "obzenflow_infra"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1704,7 +1704,7 @@ dependencies = [
 
 [[package]]
 name = "obzenflow_runtime"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1728,7 +1728,7 @@ dependencies = [
 
 [[package]]
 name = "obzenflow_sketches"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
