@@ -487,6 +487,26 @@ async fn ai_map_reduce_runtime_commits_framework_internal_transport_events() {
         "collector should route tagged partials and finalise their sum"
     );
 
+    let duration = metrics
+        .composite_boundary_durations
+        .iter()
+        .find(|duration| {
+            duration.composite.as_ref() == "ai_map_reduce:digest"
+                && duration.entry_port == "in"
+                && duration.exit_port == "out"
+        })
+        .expect(
+            "runtime resource wiring must stamp the digest input activation and project its final output",
+        );
+    assert_eq!(
+        duration.count, 1,
+        "one admitted seed and one final output form one paired boundary duration"
+    );
+    assert!(
+        metrics.composite_boundary_duration_invalid.is_empty(),
+        "the canonical ai_map_reduce boundary must not produce rejected duration evidence"
+    );
+
     let rendered = metrics
         .render_metrics()
         .expect("terminal backpressure metrics should render");

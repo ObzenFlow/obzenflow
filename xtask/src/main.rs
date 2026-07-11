@@ -3,6 +3,7 @@
 // https://obzenflow.dev
 
 use std::{
+    collections::{BTreeMap, BTreeSet},
     env,
     error::Error,
     fmt,
@@ -12,7 +13,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Command, Stdio},
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
@@ -22,6 +23,7 @@ const STATE_DIR: &str = "target/studio-jobs";
 const STATE_FILE: &str = "target/studio-jobs/state.tsv";
 const PHONEBOOK_PORT: u16 = 7010;
 const TERMINATE_WAIT: Duration = Duration::from_secs(30);
+const FORCE_KILL_WAIT: Duration = Duration::from_secs(5);
 
 const JOBS: &[JobSpec] = &[
     JobSpec {
@@ -161,7 +163,7 @@ fn studio_jobs_up(flags: &[String]) -> Result<()> {
 
     let root = workspace_root()?;
     if force {
-        stop_jobs_from_state(&root)?;
+        force_stop_jobs_and_release_ports(&root)?;
     } else {
         let existing = read_state(&root)?;
         let live = existing
@@ -186,6 +188,14 @@ fn studio_jobs_up(flags: &[String]) -> Result<()> {
     }
 
     build_examples(&root)?;
+    if force {
+        // A detached supervisor or stale `cargo run` parent can recreate a
+        // listener while the examples build. Reclaim the authoritative job
+        // ports once more immediately before spawning replacements.
+        force_release_required_ports()?;
+    } else {
+        ensure_ports_free()?;
+    }
     fs::create_dir_all(root.join(STATE_DIR))?;
 
     let mut started = Vec::new();
@@ -375,6 +385,64 @@ fn stop_jobs_from_state(root: &Path) -> Result<()> {
     }
 }
 
+/// Force mode is deliberately stronger than `down`: the state file is only a
+/// hint, while the configured runtime ports are authoritative. This recovers
+/// detached example children whose recorded cargo/parent PID is stale.
+fn force_stop_jobs_and_release_ports(root: &Path) -> Result<()> {
+    let states = read_state(root)?;
+    if states.is_empty() {
+        println!("no studio jobs state found; checking required ports for orphan listeners");
+    }
+
+    let mut tracked_pids = BTreeSet::new();
+    let mut failures = Vec::new();
+    for state in &states {
+        if !process_exists(state.pid) {
+            println!("already stopped {:<16} pid={}", state.job_id, state.pid);
+            continue;
+        }
+        tracked_pids.insert(state.pid);
+        println!(
+            "force-killing tracked {:<16} pid={}",
+            state.job_id, state.pid
+        );
+        match force_kill_process(state.pid) {
+            Ok(true) => {}
+            Ok(false) if !process_exists(state.pid) => {}
+            Ok(false) => failures.push(format!(
+                "{} pid {} rejected SIGKILL",
+                state.job_id, state.pid
+            )),
+            Err(error) => failures.push(format!("{} pid {}: {error}", state.job_id, state.pid)),
+        }
+    }
+
+    if let Err(error) = force_release_required_ports() {
+        failures.push(error.to_string());
+    }
+
+    let still_running = wait_until_all_stopped(&tracked_pids, FORCE_KILL_WAIT);
+    if !still_running.is_empty() {
+        failures.push(format!(
+            "tracked PIDs still alive after SIGKILL: {}",
+            join_pids(&still_running)
+        ));
+    }
+
+    if failures.is_empty() {
+        remove_state_file(root)?;
+        if !states.is_empty() {
+            println!("logs remain under {STATE_DIR}");
+        }
+        Ok(())
+    } else {
+        Err(error(format!(
+            "failed to force-stop all studio jobs: {}",
+            failures.join("; ")
+        )))
+    }
+}
+
 fn stop_started_jobs(states: &[JobState]) {
     for state in states {
         if process_exists(state.pid) {
@@ -384,22 +452,100 @@ fn stop_started_jobs(states: &[JobState]) {
 }
 
 fn ensure_ports_free() -> Result<()> {
-    let occupied = JOBS
-        .iter()
-        .filter_map(|job| match port_is_available(job.port) {
-            Ok(true) => None,
-            Ok(false) => Some(Ok(format!("{} ({})", job.port, job.job_id))),
-            Err(error) => Some(Err(error)),
-        })
-        .collect::<io::Result<Vec<_>>>()?;
+    let occupied = occupied_required_ports()?;
 
     if occupied.is_empty() {
         Ok(())
     } else {
         Err(error(format!(
             "required runtime ports are already occupied: {}",
-            occupied.join(", ")
+            describe_ports(&occupied)
         )))
+    }
+}
+
+fn occupied_required_ports() -> io::Result<Vec<JobSpec>> {
+    JOBS.iter()
+        .filter_map(|job| match port_is_available(job.port) {
+            Ok(true) => None,
+            Ok(false) => Some(Ok(*job)),
+            Err(error) => Some(Err(error)),
+        })
+        .collect()
+}
+
+fn describe_ports(jobs: &[JobSpec]) -> String {
+    jobs.iter()
+        .map(|job| format!("{} ({})", job.port, job.job_id))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Repeatedly discover and SIGKILL listeners on Studio's configured runtime
+/// ports until every port can be bound or the bounded cleanup window expires.
+/// Repeating matters when a detached parent races by respawning its child.
+fn force_release_required_ports() -> Result<()> {
+    let deadline = Instant::now() + FORCE_KILL_WAIT;
+    let mut announced = BTreeSet::new();
+
+    loop {
+        let occupied = occupied_required_ports()?;
+        if occupied.is_empty() {
+            return Ok(());
+        }
+
+        let mut owners = BTreeMap::<u32, Vec<JobSpec>>::new();
+        for job in &occupied {
+            for pid in listener_pids_for_port(job.port)? {
+                owners.entry(pid).or_default().push(*job);
+            }
+        }
+
+        if owners.is_empty() {
+            if Instant::now() >= deadline {
+                return Err(error(format!(
+                    "required runtime ports remain occupied but no listener PID could be identified: {}",
+                    describe_ports(&occupied)
+                )));
+            }
+            thread::sleep(Duration::from_millis(100));
+            continue;
+        }
+
+        let mut kill_failures = Vec::new();
+        for (pid, jobs) in owners {
+            if announced.insert(pid) {
+                println!(
+                    "force-killing orphan listener pid={} on {}",
+                    pid,
+                    describe_ports(&jobs)
+                );
+            }
+            match force_kill_process(pid) {
+                Ok(true) => {}
+                Ok(false) if !process_exists(pid) => {}
+                Ok(false) => kill_failures.push(format!("pid {pid} rejected SIGKILL")),
+                Err(error) => kill_failures.push(format!("pid {pid}: {error}")),
+            }
+        }
+        if !kill_failures.is_empty() {
+            return Err(error(format!(
+                "failed to SIGKILL Studio port owners: {}",
+                kill_failures.join("; ")
+            )));
+        }
+
+        if Instant::now() >= deadline {
+            let occupied = occupied_required_ports()?;
+            if occupied.is_empty() {
+                return Ok(());
+            }
+            return Err(error(format!(
+                "required runtime ports remain occupied after SIGKILL: {}",
+                describe_ports(&occupied)
+            )));
+        }
+        thread::sleep(Duration::from_millis(100));
     }
 }
 
@@ -412,6 +558,89 @@ fn port_is_available(port: u16) -> io::Result<bool> {
         Err(error) if error.kind() == io::ErrorKind::AddrInUse => Ok(false),
         Err(error) => Err(error),
     }
+}
+
+#[cfg(unix)]
+fn listener_pids_for_port(port: u16) -> io::Result<Vec<u32>> {
+    let selector = format!("-iTCP:{port}");
+    let output = Command::new("lsof")
+        .args(["-nP", "-t", &selector, "-sTCP:LISTEN"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .map_err(|error| {
+            if error.kind() == io::ErrorKind::NotFound {
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "`lsof` is required for `studio-jobs up --force` to identify orphan port owners",
+                )
+            } else {
+                error
+            }
+        })?;
+
+    // `lsof` uses exit 1 for an empty selection. That is a valid race: the
+    // bind probe observed the listener just before it exited.
+    if !output.status.success() && output.status.code() != Some(1) {
+        return Err(io::Error::other(format!(
+            "lsof failed while inspecting port {port}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    parse_pid_lines(&String::from_utf8_lossy(&output.stdout))
+}
+
+#[cfg(unix)]
+fn parse_pid_lines(output: &str) -> io::Result<Vec<u32>> {
+    output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .try_fold(BTreeSet::new(), |mut pids, line| {
+            let pid = line.parse::<u32>().map_err(|error| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("lsof returned invalid PID '{line}': {error}"),
+                )
+            })?;
+            pids.insert(pid);
+            Ok(pids)
+        })
+        .map(|pids| pids.into_iter().collect())
+}
+
+#[cfg(windows)]
+fn listener_pids_for_port(port: u16) -> io::Result<Vec<u32>> {
+    let output = Command::new("netstat")
+        .args(["-ano", "-p", "tcp"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()?;
+    if !output.status.success() {
+        return Err(io::Error::other(format!(
+            "netstat failed while inspecting port {port}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+
+    let pids = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| {
+            let fields = line.split_whitespace().collect::<Vec<_>>();
+            if fields.len() < 5
+                || !fields[0].eq_ignore_ascii_case("TCP")
+                || !fields[3].eq_ignore_ascii_case("LISTENING")
+                || fields[1]
+                    .rsplit_once(':')
+                    .and_then(|(_, value)| value.parse::<u16>().ok())
+                    != Some(port)
+            {
+                return None;
+            }
+            fields[4].parse::<u32>().ok()
+        })
+        .collect::<BTreeSet<_>>();
+    Ok(pids.into_iter().collect())
 }
 
 fn phonebook_is_listening() -> bool {
@@ -541,6 +770,7 @@ fn print_studio_jobs_help() {
     println!("  cargo xtask studio-jobs status");
     println!("  cargo xtask studio-jobs down");
     println!();
+    println!("up --force SIGKILLs tracked jobs and any listener occupying a configured job port");
     println!("jobs inherit the environment; hn_ai_digest honours HN_* / HN_AI_* vars");
     println!("(mock HN feed by default; AI provider defaults to local Ollama)");
 }
@@ -558,6 +788,28 @@ fn wait_until_stopped(pid: u32) -> bool {
         thread::sleep(Duration::from_millis(100));
     }
     !process_exists(pid)
+}
+
+fn wait_until_all_stopped(pids: &BTreeSet<u32>, timeout: Duration) -> Vec<u32> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let alive = pids
+            .iter()
+            .copied()
+            .filter(|pid| process_exists(*pid))
+            .collect::<Vec<_>>();
+        if alive.is_empty() || Instant::now() >= deadline {
+            return alive;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+}
+
+fn join_pids(pids: &[u32]) -> String {
+    pids.iter()
+        .map(u32::to_string)
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 #[cfg(unix)]
@@ -602,6 +854,102 @@ fn terminate_process(pid: u32) -> io::Result<bool> {
         .map(|status| status.success())
 }
 
+#[cfg(unix)]
+fn force_kill_process(pid: u32) -> io::Result<bool> {
+    validate_kill_pid(pid)?;
+    Command::new("kill")
+        .arg("-KILL")
+        .arg(pid.to_string())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|status| status.success())
+}
+
+#[cfg(windows)]
+fn force_kill_process(pid: u32) -> io::Result<bool> {
+    validate_kill_pid(pid)?;
+    Command::new("taskkill")
+        .args(["/PID", &pid.to_string(), "/T", "/F"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|status| status.success())
+}
+
+fn validate_kill_pid(pid: u32) -> io::Result<()> {
+    if pid <= 1 || pid == std::process::id() {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("refusing to signal protected pid {pid}"),
+        ))
+    } else {
+        Ok(())
+    }
+}
+
 fn error(message: impl Into<String>) -> Box<dyn Error> {
     Box::new(XtaskError(message.into()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn parses_and_deduplicates_lsof_pid_output() {
+        assert_eq!(
+            parse_pid_lines("4242\n  17 \n4242\n\n").expect("valid lsof output"),
+            vec![17, 4242]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_malformed_lsof_pid_output() {
+        let error = parse_pid_lines("4242\nnot-a-pid\n").expect_err("invalid PID must fail");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("not-a-pid"));
+    }
+
+    #[test]
+    fn refuses_to_signal_protected_pids() {
+        assert_eq!(
+            validate_kill_pid(0)
+                .expect_err("process group must be protected")
+                .kind(),
+            io::ErrorKind::InvalidInput
+        );
+        assert_eq!(
+            validate_kill_pid(1)
+                .expect_err("init must be protected")
+                .kind(),
+            io::ErrorKind::InvalidInput
+        );
+        assert_eq!(
+            validate_kill_pid(std::process::id())
+                .expect_err("xtask itself must be protected")
+                .kind(),
+            io::ErrorKind::InvalidInput
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn force_kill_process_sends_an_uncatchable_signal() {
+        let mut child = Command::new("sleep")
+            .arg("60")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn disposable child");
+        let pid = child.id();
+
+        assert!(force_kill_process(pid).expect("send SIGKILL"));
+        let status = child.wait().expect("reap killed child");
+        assert!(!status.success());
+        assert!(!process_exists(pid));
+    }
 }

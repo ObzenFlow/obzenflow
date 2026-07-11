@@ -625,21 +625,50 @@ impl StageResourcesBuilder {
                 .filter(|edge| edge.to == stage_ulid)
             {
                 for port_ref in &edge.composite_ports {
-                    let Some(subgraph) = self
+                    let subgraph = self
                         .topology
                         .subgraphs()
                         .iter()
                         .find(|subgraph| subgraph.subgraph_id == port_ref.subgraph_id)
-                    else {
+                        .ok_or_else(|| {
+                            format!(
+                                "Composite edge {:?} -> {:?} references absent subgraph '{}' while wiring stage '{}'",
+                                edge.from, edge.to, port_ref.subgraph_id, stage_info.name
+                            )
+                        })?;
+                    let port = subgraph
+                        .boundary_ports
+                        .iter()
+                        .find(|port| port.name == port_ref.port_name)
+                        .ok_or_else(|| {
+                            format!(
+                                "Composite edge {:?} -> {:?} references absent port '{}.{}' while wiring stage '{}'",
+                                edge.from,
+                                edge.to,
+                                port_ref.subgraph_id,
+                                port_ref.port_name,
+                                stage_info.name
+                            )
+                        })?;
+
+                    // A composite-to-composite edge legitimately carries the
+                    // upstream output ref beside the downstream input ref.
+                    // Only input refs stamp an activation on this subscriber.
+                    if port.direction != obzenflow_topology::PortDirection::Input {
                         continue;
-                    };
-                    let Some(port) = subgraph.boundary_ports.iter().find(|port| {
-                        port.name == port_ref.port_name
-                            && port.direction == obzenflow_topology::PortDirection::Input
-                            && port.member_stage_id == stage_ulid
-                    }) else {
-                        continue;
-                    };
+                    }
+                    if port.member_stage_id != stage_ulid {
+                        return Err(format!(
+                            "Composite input port '{}.{}' names member {:?} but edge {:?} -> {:?} is being wired into stage '{}' ({:?})",
+                            port_ref.subgraph_id,
+                            port_ref.port_name,
+                            port.member_stage_id,
+                            edge.from,
+                            edge.to,
+                            stage_info.name,
+                            stage_ulid
+                        ));
+                    }
                     composite_entries_by_stage
                         .entry(StageId::from_topology_id(edge.from))
                         .or_default()

@@ -1332,6 +1332,22 @@ macro_rules! build_typed_flow {
             subgraphs.push(info);
         }
 
+        // Runtime resource wiring consumes the composite graph cut too: input
+        // subscriptions use it to stamp durable activation provenance at the
+        // exact boundary edge. Attach and validate the structural manifest
+        // before StageResourcesBuilder sees the topology. The later topology
+        // pass enriches this same structure with middleware and derived typing;
+        // it must not be the first place where subgraphs become visible.
+        let topology = Arc::new(
+            topology
+                .as_ref()
+                .clone()
+                .with_subgraphs(subgraphs.clone()),
+        );
+        topology
+            .validate_composite_boundaries()
+            .map_err(FlowBuildError::TopologyValidationFailed)?;
+
         // Create services
         use obzenflow_runtime::pipeline::config::StageConfig;
         use obzenflow_runtime::metrics::DefaultMetricsConfig;
