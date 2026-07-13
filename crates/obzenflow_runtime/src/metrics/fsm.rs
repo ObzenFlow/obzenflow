@@ -12,7 +12,7 @@ use obzenflow_core::event::chain_event::ChainEventContent;
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::observability::{HttpPullTelemetry, HttpSurfaceRouteMetricsSnapshot};
 use obzenflow_core::event::payloads::observability_payload::{
-    CircuitBreakerEvent, MetricsLifecycle, MiddlewareLifecycle, ObservabilityPayload,
+    CircuitBreakerEvent, MetricsLifecycle, MiddlewareLifecycle, ObservabilityPayload, RetryEvent,
 };
 use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
 use obzenflow_core::event::{JournalEvent, WriterId};
@@ -21,7 +21,8 @@ use obzenflow_core::ingress::IngressKey;
 use obzenflow_core::metrics::{
     BoundaryMetricsView, CompositeDurationAccumulator, ContractMetricEdgeKey,
     ContractMetricResultKey, ContractMetricViolationKey, ContractMetricsSnapshot,
-    ContractViolationCauseLabel, Percentile, StageMetadata,
+    ContractViolationCauseLabel, Percentile, RetryAttemptsPerInvocationSnapshot, RetryMetricKey,
+    RetryMetricSurface, StageMetadata,
 };
 use obzenflow_core::time::MetricsDuration;
 use obzenflow_core::web::HttpMethod;
@@ -233,6 +234,11 @@ pub struct MetricsStore {
     // Bucket state for gauge metrics (FLOWIP-059a-3 Issue 3)
     pub rate_limiter_bucket_tokens: HashMap<StageId, f64>,
     pub rate_limiter_bucket_capacity: HashMap<StageId, f64>,
+
+    // Logical retry metrics projected only from terminal lifecycle summaries.
+    pub retry_attempts_per_invocation: HashMap<RetryMetricKey, RetryAttemptsPerInvocationSnapshot>,
+    pub retry_recovered_total: HashMap<RetryMetricKey, u64>,
+    pub retry_exhausted_total: HashMap<RetryMetricKey, u64>,
 
     // Contract metrics accumulation (FLOWIP-059a)
     pub contract_metrics: ContractMetricsSnapshot,
@@ -938,6 +944,9 @@ impl MetricsAggregatorContext {
         snapshot.rate_limiter_delay_seconds_total = store.rate_limiter_delay_seconds_total.clone();
         snapshot.rate_limiter_bucket_tokens = store.rate_limiter_bucket_tokens.clone();
         snapshot.rate_limiter_bucket_capacity = store.rate_limiter_bucket_capacity.clone();
+        snapshot.retry_attempts_per_invocation = store.retry_attempts_per_invocation.clone();
+        snapshot.retry_recovered_total = store.retry_recovered_total.clone();
+        snapshot.retry_exhausted_total = store.retry_exhausted_total.clone();
 
         // FLOWIP-086k: Backpressure metrics (registry snapshot, not event-derived).
         snapshot.backpressure_bypass_enabled =
@@ -1187,6 +1196,56 @@ impl MetricsStore {
 
         self.circuit_breaker_last_state
             .insert(stage_id, next_state.to_string());
+    }
+
+    fn observe_retry_terminal(&mut self, retry: &RetryEvent) {
+        let (context, total_attempts, error_kind, exhaustion_cause, recovered) = match retry {
+            RetryEvent::SucceededAfterRetry {
+                context: Some(context),
+                total_attempts,
+                ..
+            } => (context, *total_attempts, None, None, true),
+            RetryEvent::Exhausted {
+                context: Some(context),
+                total_attempts,
+                exhaustion_cause: Some(exhaustion_cause),
+                last_error_kind,
+                ..
+            } => (
+                context,
+                *total_attempts,
+                last_error_kind.clone(),
+                Some(*exhaustion_cause),
+                false,
+            ),
+            // Attempt rows are deliberately ignored. Legacy terminal rows without
+            // typed context/cause cannot safely contribute bounded labels.
+            _ => return,
+        };
+
+        let key = RetryMetricKey {
+            stage_id: context.stage_id,
+            attachment_id: context.attachment_id,
+            surface: RetryMetricSurface::from(&context.protected_unit),
+            error_kind,
+            exhaustion_cause,
+        };
+
+        let attempts = self
+            .retry_attempts_per_invocation
+            .entry(key.clone())
+            .or_default();
+        attempts.invocations_total = attempts.invocations_total.saturating_add(1);
+        attempts.attempts_total = attempts
+            .attempts_total
+            .saturating_add(u64::from(total_attempts));
+
+        let terminal_total = if recovered {
+            self.retry_recovered_total.entry(key).or_insert(0)
+        } else {
+            self.retry_exhausted_total.entry(key).or_insert(0)
+        };
+        *terminal_total = terminal_total.saturating_add(1);
     }
 
     fn update_control_metrics_from_runtime_context(
@@ -1816,6 +1875,13 @@ impl FsmAction for MetricsAggregatorAction {
                     }
                 }
 
+                if let ChainEventContent::Observability(ObservabilityPayload::Middleware(
+                    MiddlewareLifecycle::Retry(retry),
+                )) = &event.content
+                {
+                    store.observe_retry_terminal(retry);
+                }
+
                 // Track flow timing for rate calculation based on any non-system event.
                 let now = std::time::Instant::now();
                 if store.first_event_time.is_none() {
@@ -2381,6 +2447,9 @@ mod tests {
     use obzenflow_core::event::identity::JournalWriterId;
     use obzenflow_core::event::payloads::correlation_payload::CorrelationPayload;
     use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
+    use obzenflow_core::event::payloads::observability_payload::{
+        RetryExhaustionCause, RetryInvocation, RetryLifecycleContext, RetryProtectedUnit,
+    };
     use obzenflow_core::event::status::processing_status::ErrorKind;
     use obzenflow_core::event::ChainEventFactory;
     use obzenflow_core::event::CorrelationId;
@@ -2390,7 +2459,7 @@ mod tests {
     use obzenflow_core::journal::journal_reader::JournalReader;
     use obzenflow_core::journal::Journal;
     use obzenflow_core::metrics::StageMetadata;
-    use obzenflow_core::{EventEnvelope, JournalId};
+    use obzenflow_core::{EventEnvelope, JournalId, Ulid};
     use std::collections::VecDeque;
     use std::marker::PhantomData;
 
@@ -2469,6 +2538,92 @@ mod tests {
             )),
             Some(&1)
         );
+    }
+
+    #[test]
+    fn retry_metrics_fold_only_typed_terminal_summaries() {
+        let stage_id = StageId::new();
+        let attachment_id = Ulid::new();
+        let context = RetryLifecycleContext {
+            stage_id,
+            attachment_id,
+            protected_unit: RetryProtectedUnit::SourcePoll,
+            invocation: RetryInvocation::SourcePoll {
+                poll_id: EventId::new(),
+            },
+        };
+        let mut store = MetricsStore::default();
+
+        let recovered = RetryEvent::SucceededAfterRetry {
+            context: Some(context.clone()),
+            total_attempts: 3,
+            total_duration_ms: 50,
+        };
+        store.observe_retry_terminal(&recovered);
+        store.observe_retry_terminal(&RetryEvent::SucceededAfterRetry {
+            context: Some(context.clone()),
+            total_attempts: 2,
+            total_duration_ms: 25,
+        });
+
+        let recovered_key = RetryMetricKey {
+            stage_id,
+            attachment_id,
+            surface: RetryMetricSurface::SourcePoll,
+            error_kind: None,
+            exhaustion_cause: None,
+        };
+        assert_eq!(
+            store.retry_attempts_per_invocation.get(&recovered_key),
+            Some(&RetryAttemptsPerInvocationSnapshot {
+                invocations_total: 2,
+                attempts_total: 5,
+            })
+        );
+        assert_eq!(store.retry_recovered_total.get(&recovered_key), Some(&2));
+
+        store.observe_retry_terminal(&RetryEvent::Exhausted {
+            context: Some(context.clone()),
+            total_attempts: 3,
+            exhaustion_cause: Some(RetryExhaustionCause::MaxAttempts),
+            last_error_kind: Some(ErrorKind::Remote),
+            last_error: None,
+            total_duration_ms: 75,
+        });
+        let exhausted_key = RetryMetricKey {
+            stage_id,
+            attachment_id,
+            surface: RetryMetricSurface::SourcePoll,
+            error_kind: Some(ErrorKind::Remote),
+            exhaustion_cause: Some(RetryExhaustionCause::MaxAttempts),
+        };
+        assert_eq!(
+            store.retry_attempts_per_invocation.get(&exhausted_key),
+            Some(&RetryAttemptsPerInvocationSnapshot {
+                invocations_total: 1,
+                attempts_total: 3,
+            })
+        );
+        assert_eq!(store.retry_exhausted_total.get(&exhausted_key), Some(&1));
+
+        store.observe_retry_terminal(&RetryEvent::AttemptFailed {
+            context: Some(context),
+            attempt_number: 1,
+            max_attempts: 3,
+            error_kind: Some(ErrorKind::Remote),
+            delay_ms: Some(10),
+            elapsed_ms: Some(1),
+            remaining_wall_ms: Some(99),
+        });
+        store.observe_retry_terminal(&RetryEvent::SucceededAfterRetry {
+            context: None,
+            total_attempts: 2,
+            total_duration_ms: 20,
+        });
+
+        assert_eq!(store.retry_attempts_per_invocation.len(), 2);
+        assert_eq!(store.retry_recovered_total.len(), 1);
+        assert_eq!(store.retry_exhausted_total.len(), 1);
     }
 
     #[tokio::test]
@@ -2625,6 +2780,21 @@ mod tests {
             ..Default::default()
         };
         store.stage_metrics.insert(stage_id, stage_metrics);
+        let retry_key = RetryMetricKey {
+            stage_id,
+            attachment_id: Ulid::new(),
+            surface: RetryMetricSurface::SinkDelivery,
+            error_kind: Some(ErrorKind::Timeout),
+            exhaustion_cause: Some(RetryExhaustionCause::TotalWallTime),
+        };
+        store.retry_attempts_per_invocation.insert(
+            retry_key.clone(),
+            RetryAttemptsPerInvocationSnapshot {
+                invocations_total: 1,
+                attempts_total: 2,
+            },
+        );
+        store.retry_exhausted_total.insert(retry_key.clone(), 1);
 
         // Minimal stage metadata so flow aggregation can classify the stage.
         let mut stage_metadata = std::collections::HashMap::new();
@@ -2778,5 +2948,13 @@ mod tests {
         assert_eq!(snapshot.composite_port_traffic[0].events_total, 5);
         assert_eq!(snapshot.composite_member_health.len(), 1);
         assert_eq!(snapshot.composite_member_health[0].member_errors_total, 3);
+        assert_eq!(
+            snapshot.retry_attempts_per_invocation.get(&retry_key),
+            Some(&RetryAttemptsPerInvocationSnapshot {
+                invocations_total: 1,
+                attempts_total: 2,
+            })
+        );
+        assert_eq!(snapshot.retry_exhausted_total.get(&retry_key), Some(&1));
     }
 }

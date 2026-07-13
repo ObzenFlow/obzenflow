@@ -216,6 +216,9 @@ pub enum FiniteSourceAction<H> {
     /// Send EOF event downstream to signal completion
     SendEOF,
 
+    /// Commit retry lifecycle rows buffered until after terminal EOF.
+    FlushPostEofControlEvents,
+
     /// Send error event to journal for diagnostics
     SendError { message: String },
 
@@ -306,6 +309,10 @@ pub struct FiniteSourceContext<H> {
     pub(crate) pending_outputs:
         VecDeque<crate::stages::common::supervision::backpressure_drain::PendingOutput>,
 
+    /// Boundary retry rows whose logical poll terminated as EOF or rejection.
+    /// `SendEOF` must commit terminal source truth before these rows flush.
+    pub(crate) post_eof_control_events: Vec<ChainEvent>,
+
     /// Backpressure activity pulse accumulator (Hz UI animation driver).
     pub(crate) backpressure_pulse: BackpressureActivityPulse,
 
@@ -355,6 +362,7 @@ impl<H> FiniteSourceContext<H> {
             backpressure_writer: init.backpressure_writer,
             output_contract: init.output_contract,
             pending_outputs: VecDeque::new(),
+            post_eof_control_events: Vec::new(),
             backpressure_pulse: BackpressureActivityPulse::new(),
             backpressure_stall: None,
             _marker: PhantomData,
@@ -374,6 +382,7 @@ impl<H> Clone for FiniteSourceAction<H> {
         match self {
             Self::AllocateResources => Self::AllocateResources,
             Self::SendEOF => Self::SendEOF,
+            Self::FlushPostEofControlEvents => Self::FlushPostEofControlEvents,
             Self::SendError { message } => Self::SendError {
                 message: message.clone(),
             },
@@ -390,6 +399,7 @@ impl<H> std::fmt::Debug for FiniteSourceAction<H> {
         match self {
             Self::AllocateResources => write!(f, "AllocateResources"),
             Self::SendEOF => write!(f, "SendEOF"),
+            Self::FlushPostEofControlEvents => write!(f, "FlushPostEofControlEvents"),
             Self::SendError { message } => write!(f, "SendError({message:?})"),
             Self::PublishRunning => write!(f, "PublishRunning"),
             Self::WriteStageCompleted => write!(f, "WriteStageCompleted"),
@@ -528,6 +538,32 @@ impl<H: Send + Sync + 'static> FsmAction for FiniteSourceAction<H> {
                     "Finite source sent EOF and consumption_final"
                 );
                 Ok(())
+            }
+
+            FiniteSourceAction::FlushPostEofControlEvents => {
+                let flow_context = FlowContext {
+                    flow_name: ctx.flow_name.clone(),
+                    flow_id: ctx.flow_id.to_string(),
+                    stage_name: ctx.stage_name.clone(),
+                    stage_id: ctx.stage_id,
+                    stage_type: StageType::FiniteSource,
+                };
+                crate::stages::source::supervision::commit_post_eof_control_events(
+                    &mut ctx.post_eof_control_events,
+                    &flow_context,
+                    &ctx.data_journal,
+                    &ctx.system_journal,
+                    &ctx.instrumentation,
+                    &ctx.output_contract,
+                    &ctx.observers,
+                    ctx.runtime_execution.stage_scope(ctx.stage_id),
+                )
+                .await
+                .map_err(|error| {
+                    obzenflow_fsm::FsmError::HandlerError(format!(
+                        "Failed to flush post-EOF retry lifecycle events: {error}"
+                    ))
+                })
             }
 
             FiniteSourceAction::SendError { message } => {
@@ -770,13 +806,18 @@ mod tests {
     use obzenflow_core::event::event_envelope::EventEnvelope;
     use obzenflow_core::event::identity::JournalWriterId;
     use obzenflow_core::event::journal_event::JournalEvent;
+    use obzenflow_core::event::payloads::observability_payload::{
+        MiddlewareLifecycle, ObservabilityPayload, RetryEvent, RetryExhaustionCause,
+        RetryInvocation, RetryLifecycleContext, RetryProtectedUnit,
+    };
     use obzenflow_core::event::system_event::SystemEvent;
+    use obzenflow_core::event::RetryExhaustedEventParams;
     use obzenflow_core::id::JournalId;
     use obzenflow_core::journal::journal_error::JournalError;
     use obzenflow_core::journal::journal_owner::JournalOwner;
     use obzenflow_core::journal::journal_reader::JournalReader;
     use obzenflow_core::journal::Journal;
-    use obzenflow_core::StageId as CoreStageId;
+    use obzenflow_core::{EventId, StageId as CoreStageId, Ulid};
     use serde_json::json;
     use std::sync::atomic::AtomicU8;
     use std::sync::{Arc, Mutex};
@@ -929,8 +970,7 @@ mod tests {
         let flow_name = "test_flow".to_string();
         let stage_name = "finite_source".to_string();
 
-        let data_journal: Arc<dyn Journal<ChainEvent>> =
-            Arc::new(TestJournal::new(JournalOwner::stage(stage_id)));
+        let data_journal = Arc::new(TestJournal::new(JournalOwner::stage(stage_id)));
         let error_journal: Arc<dyn Journal<ChainEvent>> =
             Arc::new(TestJournal::new(JournalOwner::stage(stage_id)));
         let system_journal: Arc<dyn Journal<SystemEvent>> =
@@ -1129,5 +1169,108 @@ mod tests {
                 "recorded {recorded_kind:?} must synthesize {expected:?}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn rejected_zero_execution_exhaustion_flushes_after_terminal_source_facts() {
+        let stage_id = CoreStageId::new();
+        let data_journal: Arc<dyn Journal<ChainEvent>> =
+            Arc::new(TestJournal::new(JournalOwner::stage(stage_id)));
+        let mut ctx = FiniteSourceContext::<DummySource>::new(FiniteSourceContextInit {
+            stage_id,
+            stage_name: "finite_source".to_string(),
+            observers: crate::stages::observer::StageObserverBundle::default(),
+            flow_name: "test_flow".to_string(),
+            flow_id: FlowId::new(),
+            data_journal: data_journal.clone(),
+            error_journal: Arc::new(TestJournal::new(JournalOwner::stage(stage_id))),
+            system_journal: Arc::new(TestJournal::new(JournalOwner::stage(stage_id))),
+            runtime_execution: crate::execution::RuntimeExecution::new(
+                crate::execution::RuntimeMode::Live,
+                None,
+            ),
+            bus: Arc::new(FsmMessageBus::new()),
+            instrumentation: Arc::new(StageInstrumentation::new()),
+            control_strategy: Arc::new(FlagPoisonStrategy {
+                state: Arc::new(AtomicU8::new(0)),
+            }),
+            backpressure_writer: crate::backpressure::BackpressureWriter::disabled(),
+            output_contract: StageOutputContract::empty(),
+        });
+
+        FiniteSourceAction::<DummySource>::AllocateResources
+            .execute(&mut ctx)
+            .await
+            .expect("source allocates its writer");
+
+        let report = crate::stages::source::SourceBoundaryReport {
+            outcome: crate::stages::source::SourceBoundaryOutcome::Rejected {
+                reason: "admission rejected before execution".to_string(),
+            },
+            control_events: vec![ChainEventFactory::retry_exhausted(
+                WriterId::from(stage_id),
+                RetryExhaustedEventParams {
+                    context: RetryLifecycleContext {
+                        stage_id,
+                        attachment_id: Ulid::from(115_u128),
+                        protected_unit: RetryProtectedUnit::SourcePoll,
+                        invocation: RetryInvocation::SourcePoll {
+                            poll_id: EventId::new(),
+                        },
+                    },
+                    total_attempts: 0,
+                    exhaustion_cause: RetryExhaustionCause::PolicyRejected,
+                    last_error_kind: None,
+                    total_duration_ms: 0,
+                    cause: None,
+                },
+            )],
+        };
+        assert!(matches!(
+            report.outcome,
+            crate::stages::source::SourceBoundaryOutcome::Rejected { .. }
+        ));
+        ctx.post_eof_control_events = report.control_events;
+        assert_eq!(ctx.post_eof_control_events.len(), 1);
+
+        FiniteSourceAction::<DummySource>::SendEOF
+            .execute(&mut ctx)
+            .await
+            .expect("terminal source facts commit");
+        FiniteSourceAction::<DummySource>::FlushPostEofControlEvents
+            .execute(&mut ctx)
+            .await
+            .expect("rejected retry evidence flushes");
+
+        let events = data_journal
+            .read_all_unordered()
+            .await
+            .expect("source journal reads");
+        assert!(matches!(
+            events[0].event.content,
+            ChainEventContent::FlowControl(FlowControlPayload::Eof { .. })
+        ));
+        assert!(matches!(
+            events[1].event.content,
+            ChainEventContent::FlowControl(FlowControlPayload::ConsumptionFinal { .. })
+        ));
+        match &events[2].event.content {
+            ChainEventContent::Observability(ObservabilityPayload::Middleware(
+                MiddlewareLifecycle::Retry(RetryEvent::Exhausted {
+                    total_attempts,
+                    exhaustion_cause,
+                    ..
+                }),
+            )) => {
+                assert_eq!(*total_attempts, 0);
+                assert_eq!(
+                    *exhaustion_cause,
+                    Some(RetryExhaustionCause::PolicyRejected)
+                );
+            }
+            other => panic!("expected zero-execution retry exhaustion after EOF, got {other:?}"),
+        }
+        assert_eq!(events.len(), 3);
+        assert!(ctx.post_eof_control_events.is_empty());
     }
 }

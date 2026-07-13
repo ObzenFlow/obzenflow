@@ -337,6 +337,10 @@ pub struct StatefulContext<H: UnifiedStatefulHandler> {
     /// Runtime execution strategy (FLOWIP-120r).
     pub runtime_execution: crate::execution::RuntimeExecution,
 
+    /// Ephemeral live-boundary stop channel. It is not replay state.
+    pub boundary_stop_controller: crate::stages::common::BoundaryStopController,
+    pub boundary_stop: crate::stages::common::BoundaryStopReceiver,
+
     /// Flow-scoped typed ports available to replay-safe effects.
     pub effect_ports: EffectPortRegistry,
 

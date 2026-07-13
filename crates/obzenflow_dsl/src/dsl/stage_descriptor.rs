@@ -325,6 +325,7 @@ fn plan_stage_middleware(
 fn build_source_middleware_and_register_policies(
     config: &StageConfig,
     stage_type: StageType,
+    retry_evidence: crate::dsl::binder::SourcePollRetryEvidence,
     writer_id: WriterId,
     resolved: crate::middleware_resolution::ResolvedMiddleware,
     hosted_ingress_slot: Option<obzenflow_core::ingress::HostedIngressBindingSlot>,
@@ -341,6 +342,7 @@ fn build_source_middleware_and_register_policies(
     });
 
     let mut completion_gate: Option<Arc<dyn CompletionGate>> = None;
+    let mut retry_owner_seen = false;
     // FLOWIP-115d: the ingress boundary materialized for a source-backed hosted
     // ingress source, filled into the shared binding slot below.
     let mut ingress_boundary: Option<Arc<dyn obzenflow_core::ingress::IngressBoundaryMiddleware>> =
@@ -407,11 +409,18 @@ fn build_source_middleware_and_register_policies(
         // it composes with any still-legacy source policy (the rate limiter), and
         // it supplies the completion-gate companion that shares its state view.
         if declaration.is_control() && declaration.supports(MiddlewareSurfaceKind::SourcePoll) {
+            crate::dsl::binder::register_retry_enabled_breaker(
+                spec.factory.as_ref(),
+                &mut retry_owner_seen,
+                "source-poll",
+                &config.name,
+            )?;
             let origin = crate::dsl::binder::middleware_origin_from_source(&spec.source);
             let binding = crate::dsl::binder::materialize_source_poll(
                 spec.factory.as_ref(),
                 config,
                 stage_type,
+                retry_evidence,
                 control_middleware,
                 &origin,
                 MiddlewareDeclarationIndex::resolved(middleware_index),
@@ -799,6 +808,7 @@ impl<H: FiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> S
         let source_binding = build_source_middleware_and_register_policies(
             &config,
             StageType::FiniteSource,
+            crate::dsl::binder::SourcePollRetryEvidence::synchronous(),
             writer_id,
             resolved,
             None,
@@ -941,6 +951,16 @@ impl<H: AsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
     ) -> StageCreationResult<BoxedStageHandle> {
         let writer_id = WriterId::from(config.stage_id);
         let poll_timeout = self.poll_timeout;
+        let retry_safety = self.handler.poll_retry_safety();
+        let retry_ownership = self.handler.poll_retry_ownership();
+        let retry_evidence = if self.handler.poll_retry_safety_is_request_level() {
+            crate::dsl::binder::SourcePollRetryEvidence::asynchronous_request_level(
+                retry_safety,
+                retry_ownership,
+            )
+        } else {
+            crate::dsl::binder::SourcePollRetryEvidence::asynchronous(retry_safety, retry_ownership)
+        };
 
         // Create instrumentation configuration
         let instrumentation_config = InstrumentationConfig::default();
@@ -960,6 +980,7 @@ impl<H: AsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
         let source_binding = build_source_middleware_and_register_policies(
             &config,
             StageType::FiniteSource,
+            retry_evidence,
             writer_id,
             resolved,
             None,
@@ -1087,6 +1108,7 @@ impl<H: InfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
         let source_binding = build_source_middleware_and_register_policies(
             &config,
             StageType::InfiniteSource,
+            crate::dsl::binder::SourcePollRetryEvidence::synchronous(),
             writer_id,
             resolved,
             None,
@@ -1229,6 +1251,17 @@ impl<H: AsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
     ) -> StageCreationResult<BoxedStageHandle> {
         let writer_id = WriterId::from(config.stage_id);
         let poll_timeout = self.poll_timeout;
+        let retry_safety = self.handler.poll_retry_safety();
+        let retry_ownership = self.handler.poll_retry_ownership();
+        let retry_evidence = if self.handler.poll_retry_safety_is_request_level() {
+            crate::dsl::binder::SourcePollRetryEvidence::asynchronous_request_level(
+                retry_safety,
+                retry_ownership,
+            )
+        } else {
+            crate::dsl::binder::SourcePollRetryEvidence::asynchronous(retry_safety, retry_ownership)
+        };
+        let hosted_ingress_slot = self.handler.hosted_ingress_slot();
 
         let instrumentation_config = InstrumentationConfig::default();
         let mut instrumentation = StageInstrumentation::new_with_config(instrumentation_config);
@@ -1243,15 +1276,10 @@ impl<H: AsyncInfiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'st
 
         crate::middleware_resolution::log_resolved_middleware(&config.name, &resolved);
 
-        // FLOWIP-115d: a source-backed hosted ingress source (e.g. http_ingress)
-        // exposes its binding slot here; the DSL fills it during this source
-        // stage's materialization with the stage id, replay-stable key, and the
-        // materialized ingress boundary.
-        let hosted_ingress_slot = self.handler.hosted_ingress_slot();
-
         let source_binding = build_source_middleware_and_register_policies(
             &config,
             StageType::InfiniteSource,
+            retry_evidence,
             writer_id,
             resolved,
             hosted_ingress_slot,
@@ -1756,8 +1784,16 @@ impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
             &'static str,
             Vec<obzenflow_adapters::middleware::EffectPolicyAttachment>,
         > = std::collections::HashMap::new();
+        let mut effect_retry_owner_seen: std::collections::HashMap<&'static str, bool> =
+            std::collections::HashMap::new();
 
         if !transitional_policy_specs.is_empty() {
+            // Retry has a locked placement diagnostic independent of how many
+            // effects the stage declares. Reject it before the transitional
+            // single-effect compatibility check can mask that diagnostic.
+            for (_, spec) in &transitional_policy_specs {
+                crate::dsl::binder::reject_handler_shell_retry(spec.factory.as_ref())?;
+            }
             if effect_declarations.len() != 1 {
                 return Err(format!(
                     "Stage '{}' declares policy middleware in `middleware:` but {} effects; \
@@ -1767,15 +1803,22 @@ impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
                 )
                 .into());
             }
-            let effect_type = effect_declarations[0].effect_type;
+            let effect_declaration = &effect_declarations[0];
+            let effect_type = effect_declaration.effect_type;
             for (middleware_index, spec) in transitional_policy_specs {
+                crate::dsl::binder::register_retry_enabled_breaker(
+                    spec.factory.as_ref(),
+                    effect_retry_owner_seen.entry(effect_type).or_default(),
+                    "effect",
+                    effect_type,
+                )?;
                 let origin = crate::dsl::binder::middleware_origin_from_source(&spec.source);
                 let policy = crate::dsl::binder::bind_effect_policy(
                     spec.factory.as_ref(),
                     &config,
                     StageType::Transform,
                     &control_middleware,
-                    effect_type,
+                    effect_declaration,
                     &origin,
                     MiddlewareDeclarationIndex::resolved(middleware_index),
                 )?;
@@ -1784,13 +1827,30 @@ impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
         }
 
         for attachment in &self.effect_policies {
+            let effect_declaration = effect_declarations
+                .iter()
+                .find(|declaration| declaration.effect_type == attachment.effect_type)
+                .ok_or_else(|| {
+                    format!(
+                        "Effectful stage '{}' attaches middleware to undeclared effect '{}'",
+                        self.name, attachment.effect_type
+                    )
+                })?;
             for (middleware_index, factory) in attachment.factories.iter().enumerate() {
+                crate::dsl::binder::register_retry_enabled_breaker(
+                    factory.as_ref(),
+                    effect_retry_owner_seen
+                        .entry(attachment.effect_type)
+                        .or_default(),
+                    "effect",
+                    attachment.effect_type,
+                )?;
                 let policy = crate::dsl::binder::bind_effect_policy(
                     factory.as_ref(),
                     &config,
                     StageType::Transform,
                     &control_middleware,
-                    attachment.effect_type,
+                    effect_declaration,
                     &obzenflow_adapters::middleware::MiddlewareOrigin::Stage,
                     MiddlewareDeclarationIndex::effect_policy(middleware_index),
                 )?;
@@ -1929,6 +1989,8 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
         flow_middleware: Vec<Box<dyn MiddlewareFactory>>,
         control_middleware: Arc<ControlMiddlewareAggregator>,
     ) -> StageCreationResult<BoxedStageHandle> {
+        let delivery_safety = self.handler.delivery_safety();
+
         // Validate middleware safety
         for factory in &self.middleware {
             // Validate safety
@@ -1976,6 +2038,7 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
         // the delivery boundary; everything else stays on the handler shell.
         let mut sink_policies: Vec<Arc<dyn SinkPolicy>> = Vec::new();
         let mut observers = StageObserverSet::default();
+        let mut retry_owner_seen = false;
         for (middleware_index, spec) in resolved.middleware.into_iter().enumerate() {
             let declaration = spec.factory.declaration();
             if declaration.is_observer() {
@@ -2009,11 +2072,18 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
             } else if declaration.is_control()
                 && declaration.supports(MiddlewareSurfaceKind::SinkDelivery)
             {
+                crate::dsl::binder::register_retry_enabled_breaker(
+                    spec.factory.as_ref(),
+                    &mut retry_owner_seen,
+                    "sink-delivery",
+                    &config.name,
+                )?;
                 let origin = crate::dsl::binder::middleware_origin_from_source(&spec.source);
                 let policy = crate::dsl::binder::materialize_sink_delivery(
                     spec.factory.as_ref(),
                     &config,
                     StageType::Sink,
+                    delivery_safety,
                     &control_middleware,
                     &origin,
                     MiddlewareDeclarationIndex::resolved(middleware_index),
@@ -3165,6 +3235,10 @@ mod tests {
         build_source_middleware_and_register_policies(
             &config,
             StageType::InfiniteSource,
+            crate::dsl::binder::SourcePollRetryEvidence::asynchronous(
+                None,
+                obzenflow_runtime::stages::common::handlers::SourcePollRetryOwnership::NoNestedRetry,
+            ),
             WriterId::from(stage_id),
             resolved,
             Some(slot.clone()),
@@ -3343,6 +3417,10 @@ mod tests {
         build_source_middleware_and_register_policies(
             &config,
             StageType::InfiniteSource,
+            crate::dsl::binder::SourcePollRetryEvidence::asynchronous(
+                None,
+                obzenflow_runtime::stages::common::handlers::SourcePollRetryOwnership::NoNestedRetry,
+            ),
             WriterId::from(stage_id),
             resolved,
             Some(slot.clone()),

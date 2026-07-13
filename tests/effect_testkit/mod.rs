@@ -117,6 +117,7 @@ impl EffectInvocationContextBuilder {
             backpressure_writer: BackpressureWriter::disabled(),
             emit_enabled: self.emit_enabled,
             effect_boundary: None,
+            boundary_stop: obzenflow_runtime::stages::common::boundary_stop_channel().1,
             observers: None,
             boundary_control_events: Arc::new(Mutex::new(Vec::new())),
         }

@@ -2,10 +2,10 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Middleware adapter for SinkHandler
+//! Middleware adapter for SinkHandler.
 //!
-//! This module provides middleware capabilities for SinkHandler implementations,
-//! with special focus on error handling and retry logic.
+//! This compatibility shell provides error handling and recovery hooks. Live
+//! delivery retry is owned exclusively by the sink-delivery boundary.
 
 use crate::middleware::{ErrorAction, Middleware, MiddlewareAction, MiddlewareContext};
 use async_trait::async_trait;
@@ -114,8 +114,11 @@ impl<H: SinkHandler> MiddlewareSink<H> {
                             )));
                         }
                         ErrorAction::Retry => {
-                            // Simple retry once - in production, might want exponential backoff
-                            return self.inner.consume_report(event).await;
+                            // Handler-shell retry is retired by FLOWIP-115h. A
+                            // retry action on this compatibility surface cannot
+                            // re-invoke delivery; only a live sink boundary may
+                            // do so after proving delivery safety.
+                            continue;
                         }
                     }
                 }
@@ -242,7 +245,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_sink_retry_middleware() {
+    async fn handler_retry_action_does_not_reinvoke_sink_delivery() {
         let consumed = Arc::new(Mutex::new(Vec::new()));
         let fail_count = Arc::new(Mutex::new(1)); // Fail once
 
@@ -260,11 +263,11 @@ mod tests {
             json!({"data": "test"}),
         );
 
-        // Should succeed after retry
-        handler
+        let err = handler
             .consume_report(event.clone(), None, MiddlewareExecutionScope::LiveHandler)
             .await
-            .expect("retry middleware should recover the failed consume");
-        assert_eq!(consumed.lock().unwrap().len(), 1);
+            .expect_err("handler-shell retry must not re-invoke sink delivery");
+        assert!(matches!(err, HandlerError::Other(_)));
+        assert!(consumed.lock().unwrap().is_empty());
     }
 }

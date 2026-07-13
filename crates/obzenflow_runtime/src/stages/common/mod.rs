@@ -5,6 +5,7 @@
 //! Common components shared across all stage types
 
 pub(crate) mod backpressure_activity_pulse;
+pub mod boundary_stop;
 pub mod control_strategies;
 pub(crate) mod cycle_guard;
 pub mod handler_error;
@@ -15,6 +16,9 @@ pub mod source_handle;
 pub mod stage_handle;
 pub(crate) mod supervision;
 
+pub use boundary_stop::{
+    boundary_stop_channel, BoundaryStopController, BoundaryStopIntent, BoundaryStopReceiver,
+};
 pub use heartbeat::new_liveness_snapshots;
 pub use heartbeat::HeartbeatConfig;
 pub use heartbeat::LivenessSnapshots;
@@ -22,8 +26,8 @@ pub use heartbeat::LivenessSnapshots;
 // Re-export handler traits for convenience
 pub use handlers::{
     EffectfulStatefulHandler, EffectfulTransformHandler, FiniteSourceHandler,
-    InfiniteSourceHandler, ObserverHandler, ResourceManaged, SinkHandler, StatefulHandler,
-    TransformHandler,
+    InfiniteSourceHandler, ObserverHandler, ResourceManaged, SinkHandler, SourcePollRetryOwnership,
+    SourcePollRetrySafety, StatefulHandler, TransformHandler,
 };
 
 // Re-export handler error type so stage code can depend on a single error enum

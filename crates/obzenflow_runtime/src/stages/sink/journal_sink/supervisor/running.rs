@@ -20,24 +20,28 @@ use crate::stages::common::supervision::control_resolution::{
 use crate::stages::common::supervision::error_routing::route_to_error_journal;
 use crate::stages::common::supervision::flow_context_factory::make_flow_context;
 use crate::stages::common::supervision::forward_control_event::forward_control_event as forward_control_event_helper;
+use crate::stages::common::BoundaryStopReceiver;
 use crate::stages::observer::dispatch::run_sink_delivery_observers;
 use crate::stages::observer::SinkDeliveryObserverOutcome;
 use crate::supervised_base::EventLoopDirective;
 use futures::FutureExt;
 use obzenflow_core::event::context::causality_context::CausalityContext;
 use obzenflow_core::event::context::StageType;
-use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
+use obzenflow_core::event::payloads::delivery_payload::{
+    DeliveryMethod, DeliveryPayload, DeliveryResult,
+};
 use obzenflow_core::event::payloads::flow_control_payload::FlowControlPayload;
 use obzenflow_core::event::{ChainEventFactory, EventEnvelope, JournalEvent};
 use obzenflow_core::ChainEvent;
 use obzenflow_core::WriterId;
 use obzenflow_fsm::StateVariant;
 use std::panic::AssertUnwindSafe;
-use std::sync::atomic::Ordering;
+use std::sync::{atomic::Ordering, Arc};
 use std::time::Duration;
 
 use super::super::boundary::{
-    SinkDeliveryAttemptOutcome, SinkDeliveryBoundaryOutcome, SinkDeliveryExecutor,
+    SinkDeliveryAttemptOutcome, SinkDeliveryBoundary, SinkDeliveryBoundaryOutcome,
+    SinkDeliveryBoundaryReport, SinkDeliveryExecutor,
 };
 use super::super::fsm::{JournalSinkContext, JournalSinkEvent, JournalSinkState};
 use super::JournalSinkSupervisor;
@@ -110,7 +114,6 @@ pub(super) async fn dispatch_running<
                 .event_loops_with_work_total
                 .fetch_add(1, Ordering::Relaxed);
 
-            let is_data = envelope.event.is_data();
             let stage_input_position = subscription.last_delivered_stage_input_position();
             let directive =
                 dispatch_event(ctx, subscription, &envelope, stage_input_position).await?;
@@ -118,15 +121,6 @@ pub(super) async fn dispatch_running<
                 directive,
                 EventLoopDirective::Transition(JournalSinkEvent::ReceivedEOF)
             );
-
-            // Backpressure ack: upstream input was consumed by sink handler.
-            if is_data && !received_eof {
-                if let Some(upstream) = subscription.last_delivered_upstream_stage() {
-                    if let Some(reader) = ctx.backpressure_readers.get(&upstream) {
-                        reader.ack_consumed(1);
-                    }
-                }
-            }
 
             if !received_eof {
                 if let Some(status) = subscription
@@ -537,19 +531,24 @@ async fn dispatch_control_event<
 /// re-invokable shape lets FLOWIP-115h reintroduce boundary-owned retry.
 struct ConsumeExecutor<'h, H> {
     handler: &'h mut H,
-    event: Option<ChainEvent>,
+    event: ChainEvent,
     effect_context: Option<EffectInvocationContext>,
     scope: MiddlewareExecutionScope,
 }
 
 #[async_trait::async_trait]
 impl<H: UnifiedSinkHandler + Send + Sync> SinkDeliveryExecutor for ConsumeExecutor<'_, H> {
+    fn parent_event_id(&self) -> obzenflow_core::EventId {
+        *self.event.id()
+    }
+
     async fn attempt(&mut self) -> SinkDeliveryAttemptOutcome {
-        let event = self
-            .event
-            .take()
-            .expect("sink delivery executor attempted more than once");
-        let effect_context = self.effect_context.take();
+        // A boundary retry is a fresh physical future over the same logical
+        // delivery identity. The handler receives owned values, so clone the
+        // immutable invocation seed for every call rather than consuming it on
+        // the first attempt.
+        let event = self.event.clone();
+        let effect_context = self.effect_context.clone();
         let result = AssertUnwindSafe(self.handler.consume_report(
             event,
             effect_context,
@@ -571,6 +570,51 @@ impl<H: UnifiedSinkHandler + Send + Sync> SinkDeliveryExecutor for ConsumeExecut
     }
 }
 
+async fn execute_sink_delivery(
+    scope: MiddlewareExecutionScope,
+    boundary: Option<&Arc<dyn SinkDeliveryBoundary>>,
+    stop: BoundaryStopReceiver,
+    executor: &mut dyn SinkDeliveryExecutor,
+) -> SinkDeliveryBoundaryReport {
+    // Reconstruction preserves the existing one-call sink contract while
+    // structurally suppressing all live policy and retry machinery.
+    if scope.is_deterministic_replay() {
+        return SinkDeliveryBoundaryReport {
+            outcome: SinkDeliveryBoundaryOutcome::Attempted(executor.attempt().await),
+            control_events: Vec::new(),
+        };
+    }
+
+    match boundary {
+        Some(boundary) => {
+            boundary
+                .around_retryable_sink_delivery(executor, stop)
+                .await
+        }
+        None => SinkDeliveryBoundaryReport {
+            outcome: SinkDeliveryBoundaryOutcome::Attempted(executor.attempt().await),
+            control_events: Vec::new(),
+        },
+    }
+}
+
+fn deadline_outcome_unknown_report(
+    message: String,
+    receipt_destination: &str,
+) -> crate::stages::common::handlers::SinkConsumeReport {
+    let mut payload = DeliveryPayload::failed(
+        DeliveryMethod::Noop,
+        "sink_error",
+        message,
+        /* final_attempt */ true,
+    );
+    if let DeliveryResult::Failed { error_code, .. } = &mut payload.result {
+        *error_code = Some("deadline_outcome_unknown".to_string());
+    }
+    payload.destination = receipt_destination.to_string();
+    crate::stages::common::handlers::SinkConsumeReport::new(payload)
+}
+
 async fn dispatch_data_event<
     H: UnifiedSinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
 >(
@@ -586,6 +630,7 @@ async fn dispatch_data_event<
     let receipt_destination = ctx.receipt_destination.clone();
     let heartbeat_state = ctx.heartbeat.as_ref().map(|h| h.state.clone());
     let upstream_stage = subscription.last_delivered_upstream_stage();
+    let boundary_stop = ctx.boundary_stop.clone();
     let effect_context = stage_input_position.and_then(|input_seq| {
         ctx.writer_id.map(|writer_id| EffectInvocationContext {
             flow_id: ctx.flow_id,
@@ -611,6 +656,7 @@ async fn dispatch_data_event<
             backpressure_writer: BackpressureWriter::disabled(),
             emit_enabled: false,
             effect_boundary: None,
+            boundary_stop: boundary_stop.clone(),
             boundary_control_events: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         })
     });
@@ -630,14 +676,14 @@ async fn dispatch_data_event<
 
     // Use instrumentation wrapper but keep handler-level failures as per-record
     // outcomes instead of stage-fatal errors.
-    let ack_result = process_with_instrumentation(&ctx.instrumentation, || async {
+    let delivery_result = process_with_instrumentation(&ctx.instrumentation, || async {
         let _processing = heartbeat_state
             .as_ref()
             .map(|state| HeartbeatProcessingGuard::new(state.clone(), upstream_stage, event_id));
 
         let mut executor = ConsumeExecutor {
             handler: &mut ctx.handler,
-            event: Some(envelope_event),
+            event: envelope_event,
             effect_context,
             scope,
         };
@@ -653,20 +699,13 @@ async fn dispatch_data_event<
         // FLOWIP-120n owns the future resume phase predicate that will split a
         // replayed prefix from a live tail by `StageInputPosition`. Until then,
         // `ResumeIncomplete` is treated as deterministic reconstruction here.
-        let (outcome, control_events) = if scope.is_deterministic_replay() {
-            (
-                SinkDeliveryBoundaryOutcome::Attempted(executor.attempt().await),
-                Vec::new(),
-            )
-        } else if let Some(boundary) = &sink_boundary {
-            let report = boundary.around_sink_delivery(&mut executor).await;
-            (report.outcome, report.control_events)
-        } else {
-            (
-                SinkDeliveryBoundaryOutcome::Attempted(executor.attempt().await),
-                Vec::new(),
-            )
-        };
+        let boundary_report =
+            execute_sink_delivery(scope, sink_boundary.as_ref(), boundary_stop, &mut executor)
+                .await;
+        let SinkDeliveryBoundaryReport {
+            outcome,
+            control_events,
+        } = boundary_report;
 
         let observer_outcome = match &outcome {
             SinkDeliveryBoundaryOutcome::Attempted(SinkDeliveryAttemptOutcome::Delivered(Ok(
@@ -687,28 +726,12 @@ async fn dispatch_data_event<
                     reason: format!("{}: {}", rejection.policy, rejection.reason),
                 }
             }
+            SinkDeliveryBoundaryOutcome::DeadlineOutcomeUnknown { message } => {
+                SinkDeliveryObserverOutcome::Failed {
+                    message: message.clone(),
+                }
+            }
         };
-        let flow_context = make_flow_context(
-            &ctx.flow_name,
-            &ctx.flow_id.to_string(),
-            &ctx.stage_name,
-            ctx.stage_id,
-            StageType::Sink,
-        );
-        run_sink_delivery_observers(
-            &ctx.observers,
-            ctx.stage_id,
-            &ctx.stage_name,
-            &flow_context,
-            scope,
-            &envelope.event,
-            stage_input_position.map(|position| position.0),
-            observer_outcome,
-            &ctx.data_journal,
-            &ctx.instrumentation,
-            envelope,
-        )
-        .await?;
 
         let mapped = match outcome {
             SinkDeliveryBoundaryOutcome::Attempted(SinkDeliveryAttemptOutcome::Delivered(Ok(
@@ -795,6 +818,18 @@ async fn dispatch_data_event<
                     false,
                 )
             }
+            SinkDeliveryBoundaryOutcome::DeadlineOutcomeUnknown { message } => {
+                tracing::warn!(
+                    stage_name = %stage_name,
+                    parent_event_id = %event_id,
+                    "Sink delivery deadline elapsed with external completion in doubt"
+                );
+                (
+                    deadline_outcome_unknown_report(message, &receipt_destination),
+                    None,
+                    false,
+                )
+            }
         };
 
         if let Some(state) = &heartbeat_state {
@@ -806,14 +841,25 @@ async fn dispatch_data_event<
             report,
             maybe_err,
             panicked,
+            observer_outcome,
             control_events,
         ))
     })
     .await;
 
-    match ack_result {
-        Ok((report, maybe_err, panicked, control_events)) => {
+    match delivery_result {
+        Ok((report, maybe_err, panicked, observer_outcome, control_events)) => {
+            // The primary and any commit receipts are authoritative terminal
+            // truth. No retry attempt is visible here: a retry-capable boundary
+            // has already reduced all physical calls to this one report.
             journal_delivery_receipt(ctx, subscription, envelope, report.primary).await?;
+
+            // The current input's authoritative terminal receipt is committed.
+            // Release its one held credit before commit receipts for older
+            // buffered inputs or any non-authoritative evidence can fail.
+            // Physical retry attempts never reach this supervisor and
+            // therefore cannot acknowledge independently.
+            acknowledge_sink_input(ctx, upstream_stage);
 
             for commit in report.commit_receipts {
                 if let Some((_upstream_stage, parent_envelope)) = subscription
@@ -830,13 +876,53 @@ async fn dispatch_data_event<
                 }
             }
 
-            // FLOWIP-115b: sink-policy observability/control rows are journalled
-            // but do not advance receipt progress (AC17).
+            // Observer diagnostics and retry/policy rows are non-authoritative
+            // evidence. They run only after terminal receipts commit. A failed
+            // evidence append is visible to operators, but must not turn a
+            // committed external delivery back into an input redelivery.
             for control_event in control_events {
-                ctx.data_journal
-                    .append(control_event, Some(envelope))
-                    .await
-                    .map_err(|je| format!("Failed to journal sink boundary control event: {je}"))?;
+                if let Err(error) = ctx.data_journal.append(control_event, Some(envelope)).await {
+                    tracing::error!(
+                        stage_name = %ctx.stage_name,
+                        parent_event_id = %event_id,
+                        error = %error,
+                        "Failed to append sink boundary evidence after terminal receipt; delivery remains committed"
+                    );
+                    // Preserve the occurrence-ordered outbox as a durable
+                    // prefix. Appending later rows after a missing earlier row
+                    // would manufacture a misleadingly complete trace.
+                    break;
+                }
+            }
+
+            let flow_context = make_flow_context(
+                &ctx.flow_name,
+                &ctx.flow_id.to_string(),
+                &ctx.stage_name,
+                ctx.stage_id,
+                StageType::Sink,
+            );
+            if let Err(error) = run_sink_delivery_observers(
+                &ctx.observers,
+                ctx.stage_id,
+                &ctx.stage_name,
+                &flow_context,
+                scope,
+                &envelope.event,
+                stage_input_position.map(|position| position.0),
+                observer_outcome,
+                &ctx.data_journal,
+                &ctx.instrumentation,
+                envelope,
+            )
+            .await
+            {
+                tracing::error!(
+                    stage_name = %ctx.stage_name,
+                    parent_event_id = %event_id,
+                    error = %error,
+                    "Failed to append sink observer evidence after terminal receipt; delivery remains committed"
+                );
             }
 
             // Per-record handler errors are not stage-fatal. Surface them as
@@ -910,8 +996,23 @@ async fn dispatch_data_event<
                 .await
                 .map_err(|je| format!("Failed to journal sink failure: {je}"))?;
 
+            acknowledge_sink_input(ctx, upstream_stage);
+
             Err(format!("Sink consume failed: {e}").into())
         }
+    }
+}
+
+fn acknowledge_sink_input<
+    H: UnifiedSinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
+>(
+    ctx: &JournalSinkContext<H>,
+    upstream_stage: Option<obzenflow_core::StageId>,
+) {
+    if let Some(reader) =
+        upstream_stage.and_then(|stage_id| ctx.backpressure_readers.get(&stage_id))
+    {
+        reader.ack_consumed(1);
     }
 }
 
@@ -965,4 +1066,252 @@ async fn journal_delivery_receipt<
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::stages::common::handler_error::HandlerError;
+    use crate::stages::common::handlers::{SinkConsumeReport, SinkLifecycleReport};
+    use obzenflow_core::event::payloads::delivery_payload::DeliveryMethod;
+    use obzenflow_core::{EventId, StageId};
+    use serde_json::json;
+    use std::collections::VecDeque;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::Mutex;
+
+    #[derive(Clone, Debug)]
+    struct ScriptedSink {
+        calls: Arc<Mutex<Vec<EventId>>>,
+        results: Arc<Mutex<VecDeque<Result<SinkConsumeReport, HandlerError>>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl UnifiedSinkHandler for ScriptedSink {
+        async fn consume_report(
+            &mut self,
+            event: ChainEvent,
+            _effect_context: Option<EffectInvocationContext>,
+            _scope: MiddlewareExecutionScope,
+        ) -> Result<SinkConsumeReport, HandlerError> {
+            self.calls
+                .lock()
+                .expect("calls lock poisoned")
+                .push(event.id);
+            self.results
+                .lock()
+                .expect("results lock poisoned")
+                .pop_front()
+                .expect("scripted sink exhausted")
+        }
+
+        async fn flush_report(&mut self) -> Result<SinkLifecycleReport, HandlerError> {
+            Ok(SinkLifecycleReport::default())
+        }
+
+        async fn drain_report(&mut self) -> Result<SinkLifecycleReport, HandlerError> {
+            Ok(SinkLifecycleReport::default())
+        }
+    }
+
+    struct RetryOnceBoundary {
+        calls: Arc<AtomicUsize>,
+    }
+
+    struct StopAwareBoundary {
+        observed: Arc<Mutex<Vec<crate::stages::common::BoundaryStopIntent>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl SinkDeliveryBoundary for RetryOnceBoundary {
+        async fn around_sink_delivery(
+            &self,
+            execute: &mut dyn SinkDeliveryExecutor,
+        ) -> SinkDeliveryBoundaryReport {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            assert!(matches!(
+                execute.attempt().await,
+                SinkDeliveryAttemptOutcome::Delivered(Err(HandlerError::Remote(_)))
+            ));
+            SinkDeliveryBoundaryReport {
+                outcome: SinkDeliveryBoundaryOutcome::Attempted(execute.attempt().await),
+                control_events: Vec::new(),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl SinkDeliveryBoundary for StopAwareBoundary {
+        async fn around_sink_delivery(
+            &self,
+            _execute: &mut dyn SinkDeliveryExecutor,
+        ) -> SinkDeliveryBoundaryReport {
+            panic!("retry-aware sink entry point must be used for live delivery")
+        }
+
+        async fn around_retryable_sink_delivery(
+            &self,
+            execute: &mut dyn SinkDeliveryExecutor,
+            stop: BoundaryStopReceiver,
+        ) -> SinkDeliveryBoundaryReport {
+            self.observed
+                .lock()
+                .expect("observed lock poisoned")
+                .push(stop.intent());
+            SinkDeliveryBoundaryReport {
+                outcome: SinkDeliveryBoundaryOutcome::Attempted(execute.attempt().await),
+                control_events: Vec::new(),
+            }
+        }
+    }
+
+    fn success_report() -> SinkConsumeReport {
+        SinkConsumeReport::new(DeliveryPayload::success(DeliveryMethod::Noop, None))
+    }
+
+    fn input_event() -> ChainEvent {
+        ChainEventFactory::data_event(
+            WriterId::from(StageId::new()),
+            "test.sink.retry_input",
+            json!({ "value": 1 }),
+        )
+    }
+
+    #[tokio::test]
+    async fn live_boundary_can_reinvoke_the_same_logical_delivery() {
+        let event = input_event();
+        let event_id = event.id;
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let mut handler = ScriptedSink {
+            calls: calls.clone(),
+            results: Arc::new(Mutex::new(VecDeque::from([
+                Err(HandlerError::Remote("retry me".to_string())),
+                Ok(success_report()),
+            ]))),
+        };
+        let mut executor = ConsumeExecutor {
+            handler: &mut handler,
+            event,
+            effect_context: None,
+            scope: MiddlewareExecutionScope::LiveSinkDeliveryBoundary,
+        };
+        let boundary_calls = Arc::new(AtomicUsize::new(0));
+        let boundary: Arc<dyn SinkDeliveryBoundary> = Arc::new(RetryOnceBoundary {
+            calls: boundary_calls.clone(),
+        });
+
+        let report = execute_sink_delivery(
+            MiddlewareExecutionScope::LiveSinkDeliveryBoundary,
+            Some(&boundary),
+            BoundaryStopReceiver::default(),
+            &mut executor,
+        )
+        .await;
+
+        assert!(matches!(
+            report.outcome,
+            SinkDeliveryBoundaryOutcome::Attempted(SinkDeliveryAttemptOutcome::Delivered(Ok(_)))
+        ));
+        assert_eq!(boundary_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            calls.lock().expect("calls lock poisoned").as_slice(),
+            &[event_id, event_id],
+            "every physical attempt must retain the same parent identity"
+        );
+    }
+
+    #[tokio::test]
+    async fn deterministic_replay_bypasses_boundary_and_executes_once() {
+        let event = input_event();
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let mut handler = ScriptedSink {
+            calls: calls.clone(),
+            results: Arc::new(Mutex::new(VecDeque::from([Ok(success_report())]))),
+        };
+        let mut executor = ConsumeExecutor {
+            handler: &mut handler,
+            event,
+            effect_context: None,
+            scope: MiddlewareExecutionScope::StrictReplayHandler,
+        };
+        let boundary_calls = Arc::new(AtomicUsize::new(0));
+        let boundary: Arc<dyn SinkDeliveryBoundary> = Arc::new(RetryOnceBoundary {
+            calls: boundary_calls.clone(),
+        });
+
+        let report = execute_sink_delivery(
+            MiddlewareExecutionScope::StrictReplayHandler,
+            Some(&boundary),
+            BoundaryStopReceiver::default(),
+            &mut executor,
+        )
+        .await;
+
+        assert!(matches!(
+            report.outcome,
+            SinkDeliveryBoundaryOutcome::Attempted(SinkDeliveryAttemptOutcome::Delivered(Ok(_)))
+        ));
+        assert_eq!(boundary_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(calls.lock().expect("calls lock poisoned").len(), 1);
+        assert!(report.control_events.is_empty());
+    }
+
+    #[tokio::test]
+    async fn live_boundary_receives_runtime_stop_intent() {
+        let event = input_event();
+        let mut handler = ScriptedSink {
+            calls: Arc::new(Mutex::new(Vec::new())),
+            results: Arc::new(Mutex::new(VecDeque::from([Ok(success_report())]))),
+        };
+        let mut executor = ConsumeExecutor {
+            handler: &mut handler,
+            event,
+            effect_context: None,
+            scope: MiddlewareExecutionScope::LiveSinkDeliveryBoundary,
+        };
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let boundary: Arc<dyn SinkDeliveryBoundary> = Arc::new(StopAwareBoundary {
+            observed: observed.clone(),
+        });
+        let (controller, stop) = crate::stages::common::boundary_stop_channel();
+        controller.request_drain();
+
+        let report = execute_sink_delivery(
+            MiddlewareExecutionScope::LiveSinkDeliveryBoundary,
+            Some(&boundary),
+            stop,
+            &mut executor,
+        )
+        .await;
+
+        assert!(matches!(
+            report.outcome,
+            SinkDeliveryBoundaryOutcome::Attempted(SinkDeliveryAttemptOutcome::Delivered(Ok(_)))
+        ));
+        assert_eq!(
+            observed.lock().expect("observed lock poisoned").as_slice(),
+            &[crate::stages::common::BoundaryStopIntent::Drain]
+        );
+    }
+
+    #[test]
+    fn deadline_outcome_unknown_maps_to_an_in_doubt_terminal_receipt() {
+        let report = deadline_outcome_unknown_report(
+            "deadline elapsed while delivery was active".to_string(),
+            "payments",
+        );
+
+        assert_eq!(report.primary.destination, "payments");
+        match report.primary.result {
+            DeliveryResult::Failed {
+                error_code,
+                final_attempt,
+                ..
+            } => {
+                assert_eq!(error_code.as_deref(), Some("deadline_outcome_unknown"));
+                assert!(final_attempt);
+            }
+            other => panic!("expected failed delivery receipt, got {other:?}"),
+        }
+    }
 }

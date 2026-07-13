@@ -22,7 +22,7 @@ pub use sink::{
 };
 pub use source::{
     AsyncFiniteSourceHandler, AsyncInfiniteSourceHandler, FiniteSourceHandler,
-    InfiniteSourceHandler,
+    InfiniteSourceHandler, SourcePollRetryOwnership, SourcePollRetrySafety,
 };
 pub use stateful::{
     EffectfulStatefulHandler, EffectfulStatefulHandlerAdapter, StatefulHandler, StatefulHandlerExt,

@@ -112,6 +112,8 @@ impl<H: UnifiedSinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Su
             .delivery_type
             .map(str::to_owned)
             .unwrap_or_else(|| self.config.stage_name.clone());
+        let (boundary_stop_controller, boundary_stop) =
+            crate::stages::common::boundary_stop_channel();
 
         let context = JournalSinkContext {
             handler: self.handler,
@@ -123,6 +125,8 @@ impl<H: UnifiedSinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Su
             data_journal: self.resources.data_journal.clone(),
             effect_history: None,
             runtime_execution: self.resources.runtime_execution.clone(),
+            boundary_stop_controller,
+            boundary_stop,
             effect_ports: self.resources.effect_ports.clone(),
             effect_declarations: self.resources.effect_declarations.clone(),
             error_journal: self.resources.error_journal.clone(),

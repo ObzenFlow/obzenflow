@@ -166,11 +166,12 @@ pub use carrier::{
 };
 pub use context::MiddlewareContext;
 pub use control::policy::{
-    effect_policy_from_middleware, EffectAttemptOutcome, EffectPolicy, EffectPolicyAttachment,
-    EventAwareEffectPolicy, PerEffectPolicyBoundary, PerSinkDeliveryPolicyBoundary,
-    PerSourcePolicyBoundary, PolicyAdmission, SinkAdmission, SinkAdmissionGuard,
-    SinkDeliveryPolicyOutcome, SinkPolicy, SinkPolicyCtx, SourceAdmission, SourceAdmissionGuard,
-    SourceAfterPoll, SourceBatchFacts, SourcePolicy, SourcePolicyCtx, SourcePollOutcome,
+    effect_policy_from_middleware, AttemptDisposition, BoundaryRetryOwner, BoundaryRetryPolicy,
+    EffectAttemptOutcome, EffectPolicy, EffectPolicyAttachment, EventAwareEffectPolicy,
+    PerEffectPolicyBoundary, PerSinkDeliveryPolicyBoundary, PerSourcePolicyBoundary,
+    PolicyAdmission, SinkAdmission, SinkAdmissionGuard, SinkDeliveryPolicyOutcome, SinkPolicy,
+    SinkPolicyCtx, SourceAdmission, SourceAdmissionGuard, SourceAfterPoll, SourceBatchFacts,
+    SourcePolicy, SourcePolicyCtx, SourcePollOutcome,
 };
 pub use function::{middleware_fn, FnMiddleware};
 pub use hints::{Attempts, BackoffKind, BatchingHint, MiddlewareHints, RetryHint};

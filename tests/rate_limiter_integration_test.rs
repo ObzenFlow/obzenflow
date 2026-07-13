@@ -67,6 +67,28 @@ async fn rate_limiter_delayed_total_from_runtime_context(
     }
 }
 
+async fn rate_limiter_tokens_consumed_from_runtime_context(
+    stage_journal: &Arc<dyn Journal<ChainEvent>>,
+) -> Result<f64> {
+    let mut reader = stage_journal
+        .reader()
+        .await
+        .map_err(|e| anyhow!("failed to create stage journal reader: {e}"))?;
+
+    let mut tokens_consumed = 0.0_f64;
+    loop {
+        match reader.next().await {
+            Ok(Some(envelope)) => {
+                if let Some(runtime_context) = &envelope.event.runtime_context {
+                    tokens_consumed = tokens_consumed.max(runtime_context.rl_tokens_consumed_total);
+                }
+            }
+            Ok(None) => return Ok(tokens_consumed),
+            Err(e) => return Err(anyhow!("failed to read stage journal: {e}")),
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 struct SequenceSource {
     total: usize,
@@ -509,6 +531,10 @@ async fn rate_limiter_source_stage_limits_per_poll_and_documents_batching() -> R
 // seconds, and a `Delayed` event would be journaled. The assertions
 // `count == expected_admission_count && delayed == 0` therefore fail under
 // the buggy path.
+//
+// Async source errors are terminal under FLOWIP-115h, so that case cannot use
+// a later successful poll as its probe. It instead asserts the durable
+// `rl_tokens_consumed_total` remains exactly one for the preceding data poll.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rate_limiter_async_finite_does_not_charge_eof_poll() -> Result<()> {
@@ -694,7 +720,7 @@ async fn rate_limiter_sync_finite_does_not_charge_empty_batch() -> Result<()> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rate_limiter_async_finite_does_not_charge_source_error() -> Result<()> {
-    let (sink, count) = CountingSink::new();
+    let sink = CountingSink::new().0;
     let test_handle = test_flow! {
         name: "rate_limiter_async_error_no_charge",
         journals: disk_journals(unique_journal_dir("rate_limiter_async_error_no_charge")),
@@ -723,12 +749,19 @@ async fn rate_limiter_async_finite_does_not_charge_source_error() -> Result<()> 
         .stage_journal_for_test("src")
         .map_err(|e| anyhow!("failed to look up src stage journal: {e}"))?;
 
-    tokio::time::timeout(Duration::from_secs(4), test_handle.into_inner().run())
+    let run_result = tokio::time::timeout(Duration::from_secs(4), test_handle.into_inner().run())
         .await
-        .map_err(|_| anyhow!("async error no-charge flow run timed out"))?
-        .map_err(|e| anyhow!("async error no-charge flow run failed: {e}"))?;
+        .map_err(|_| anyhow!("async error no-charge flow run timed out"))?;
+    assert!(
+        run_result.is_err(),
+        "an async finite source error is a terminal stage failure"
+    );
 
-    assert_eq!(count.load(Ordering::Relaxed), 2);
+    let tokens_consumed = rate_limiter_tokens_consumed_from_runtime_context(&src_journal).await?;
+    assert_eq!(
+        tokens_consumed, 1.0,
+        "FLOWIP-114m: the successful data poll is charged, but the terminal async source error is not"
+    );
     let delayed = rate_limiter_delayed_total_from_runtime_context(&src_journal).await?;
     assert_eq!(
         delayed, 0,

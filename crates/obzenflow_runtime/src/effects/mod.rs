@@ -56,7 +56,7 @@ mod tests;
 
 pub use boundary::{
     EffectAbortReason, EffectBoundary, EffectBoundaryOutcome, EffectBoundaryReport,
-    EffectExecution, EffectIdentity,
+    EffectExecution, EffectExecutor, EffectIdentity,
 };
 pub use commit::EffectCommitHandle;
 pub use context::{

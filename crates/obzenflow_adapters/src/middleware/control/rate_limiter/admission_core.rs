@@ -15,7 +15,8 @@
 //! (FLOWIP-115d AC20). It returns plain data; the adapters turn that data into
 //! lifecycle/control facts.
 
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::time::Instant;
 use tracing::{info, trace};
@@ -75,6 +76,12 @@ impl TokenBucket {
             trace!("try_consume: FAILED, insufficient tokens");
             false
         }
+    }
+
+    /// Release a token reservation that never reached executor start.
+    fn refund(&mut self, tokens: f64, now: Instant) {
+        self.refill(now);
+        self.tokens = (self.tokens + tokens).min(self.capacity);
     }
 
     /// Get time until enough tokens are available.
@@ -179,8 +186,9 @@ impl RateLimiterStats {
 /// Non-waiting admission decision returned by [`RateLimiterCore::try_admit_at`].
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum AdmissionDecision {
-    /// A token was consumed; the caller must call
-    /// [`RateLimiterCore::record_admitted`] to account for it.
+    /// A token was removed from available capacity as a reservation. An
+    /// execution-based caller must retain it until executor start or refund it;
+    /// ingress may commit it immediately.
     Admitted,
     /// No token was available. `retry_after` is the deadline from `now`. A
     /// waiting-capable surface derives its absolute wake instant as
@@ -238,6 +246,75 @@ pub(crate) struct RateLimiterCore {
     limit_rate: f64,
 }
 
+const RESERVATION_PENDING: u8 = 0;
+const RESERVATION_COMMITTED: u8 = 1;
+const RESERVATION_RELEASED: u8 = 2;
+
+/// One execution-based limiter charge reserved during policy admission.
+///
+/// Acquiring this value removes capacity from the token bucket so concurrent
+/// invocations cannot overbook it, but it does not increment physical-call or
+/// token-consumption accounting. The boundary commits it in the same
+/// non-awaiting transition that starts the executor. Dropping it before that
+/// transition refunds the bucket exactly once.
+#[derive(Debug)]
+pub(crate) struct RateLimitReservation {
+    core: Arc<RateLimiterCore>,
+    cost: f64,
+    state: AtomicU8,
+}
+
+impl RateLimitReservation {
+    fn new(core: Arc<RateLimiterCore>, cost: f64) -> Self {
+        Self {
+            core,
+            cost,
+            state: AtomicU8::new(RESERVATION_PENDING),
+        }
+    }
+
+    /// Commit this reservation as one started physical executor call.
+    ///
+    /// Idempotent so defensive repeated boundary notification cannot double
+    /// charge. Once committed, cancellation and failure remain charged.
+    pub(crate) fn commit_execution(&self) {
+        if self
+            .state
+            .compare_exchange(
+                RESERVATION_PENDING,
+                RESERVATION_COMMITTED,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+        {
+            self.core.record_admitted(self.cost);
+        }
+    }
+
+    #[cfg(test)]
+    fn is_committed(&self) -> bool {
+        self.state.load(Ordering::Acquire) == RESERVATION_COMMITTED
+    }
+}
+
+impl Drop for RateLimitReservation {
+    fn drop(&mut self) {
+        if self
+            .state
+            .compare_exchange(
+                RESERVATION_PENDING,
+                RESERVATION_RELEASED,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+        {
+            self.core.refund_reserved(self.cost);
+        }
+    }
+}
+
 impl RateLimiterCore {
     pub(crate) fn new(config: ValidatedRateLimiterConfig) -> Self {
         let now = Instant::now();
@@ -262,10 +339,10 @@ impl RateLimiterCore {
         self.limit_rate
     }
 
-    /// Non-waiting admission. Consumes one charge of `cost` when a token is
-    /// available (returning [`AdmissionDecision::Admitted`]); otherwise returns
-    /// the wait deadline without consuming. This is the ingress fast path and a
-    /// unit-testable primitive, not the whole waiting contract.
+    /// Non-waiting reservation. Removes `cost` from available capacity when a
+    /// token is available (returning [`AdmissionDecision::Admitted`]); otherwise
+    /// returns the wait deadline without reserving. The caller decides whether
+    /// that reservation commits or refunds.
     pub(crate) fn try_admit_at(&self, cost: f64, now: Instant) -> AdmissionDecision {
         let mut bucket = self.bucket.lock().unwrap();
         if bucket.try_consume(cost, now) {
@@ -278,7 +355,9 @@ impl RateLimiterCore {
         }
     }
 
-    /// Account for one admitted charge (FLOWIP-114m: at admission, not output).
+    /// Account for one execution-based charge at executor start. Ingress calls
+    /// this immediately because accepting the listener event is its execution
+    /// boundary; finite after-poll pacing calls it after a delivered batch.
     pub(crate) fn record_admitted(&self, cost: f64) {
         if let Ok(mut stats) = self.stats.lock() {
             stats.events_total += 1;
@@ -286,6 +365,13 @@ impl RateLimiterCore {
             stats.events_window += 1;
             stats.tokens_consumed_window += cost;
         }
+    }
+
+    fn refund_reserved(&self, cost: f64) {
+        self.bucket
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .refund(cost, Instant::now());
     }
 
     /// Record that this acquire was delayed for the first time, returning the
@@ -479,15 +565,20 @@ impl RateLimiterCore {
 /// Both the effect-boundary and source-boundary paths (and any future
 /// waiting-capable surface) delegate here, so the live I/O surfaces share one
 /// accounting and lifecycle implementation. It awaits its permit with
-/// `tokio::time::sleep` (a cancellable future) and returns once a token has
-/// been consumed.
+/// `tokio::time::sleep` (a cancellable future) and returns a reversible token
+/// reservation. Physical-call accounting begins only when the boundary commits
+/// that reservation at executor start.
 ///
 /// Invariants: it holds no bucket, stats, or lifecycle lock across `await`; it
 /// emits the one-shot `Delayed` fact through `on_first_delay` before the first
 /// sleep; and if the future is dropped before admission completes, no token is
 /// consumed after the drop and no terminal accounting beyond the already-emitted
-/// delay fact occurs.
-pub(crate) async fn acquire_admission<F>(core: &RateLimiterCore, mut on_first_delay: F)
+/// delay fact occurs. If the returned reservation is dropped before executor
+/// start, its token is refunded and no admitted/physical-call counter moves.
+pub(crate) async fn acquire_admission<F>(
+    core: &Arc<RateLimiterCore>,
+    mut on_first_delay: F,
+) -> RateLimitReservation
 where
     F: FnMut(RateLimitDelayEvent),
 {
@@ -496,8 +587,7 @@ where
     loop {
         match core.try_admit_at(cost, Instant::now()) {
             AdmissionDecision::Admitted => {
-                core.record_admitted(cost);
-                return;
+                return RateLimitReservation::new(core.clone(), cost);
             }
             AdmissionDecision::WouldWait { retry_after } => {
                 if !delayed_this_acquire {
@@ -521,6 +611,51 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn reservation_test_core() -> Arc<RateLimiterCore> {
+        Arc::new(RateLimiterCore::new(
+            super::super::config::validated_rate_limiter_config(10.0, Some(2.0), 1.0)
+                .expect("reservation test configuration"),
+        ))
+    }
+
+    #[tokio::test]
+    async fn uncommitted_reservation_refunds_without_physical_call_accounting() {
+        let core = reservation_test_core();
+        let reservation = acquire_admission(&core, |_| {}).await;
+
+        assert_eq!(core.bucket_for_test().lock().unwrap().tokens, 1.0);
+        {
+            let stats = core.stats_for_test().lock().unwrap();
+            assert_eq!(stats.events_total, 0);
+            assert_eq!(stats.tokens_consumed_total, 0.0);
+        }
+
+        drop(reservation);
+
+        assert_eq!(core.bucket_for_test().lock().unwrap().tokens, 2.0);
+        let stats = core.stats_for_test().lock().unwrap();
+        assert_eq!(stats.events_total, 0);
+        assert_eq!(stats.tokens_consumed_total, 0.0);
+    }
+
+    #[tokio::test]
+    async fn executor_start_commit_is_idempotent_and_never_refunds() {
+        let core = reservation_test_core();
+        let reservation = acquire_admission(&core, |_| {}).await;
+
+        reservation.commit_execution();
+        reservation.commit_execution();
+        assert!(reservation.is_committed());
+        drop(reservation);
+
+        assert_eq!(core.bucket_for_test().lock().unwrap().tokens, 1.0);
+        let stats = core.stats_for_test().lock().unwrap();
+        assert_eq!(stats.events_total, 1);
+        assert_eq!(stats.events_window, 1);
+        assert_eq!(stats.tokens_consumed_total, 1.0);
+        assert_eq!(stats.tokens_consumed_window, 1.0);
+    }
 
     #[test]
     fn test_token_bucket_basic() {

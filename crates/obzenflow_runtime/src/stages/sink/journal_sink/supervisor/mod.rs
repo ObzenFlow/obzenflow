@@ -427,4 +427,24 @@ impl<H: UnifiedSinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Ex
             ))
         }
     }
+
+    fn boundary_stop_controller(
+        context: &Self::Context,
+    ) -> Option<crate::stages::common::BoundaryStopController> {
+        Some(context.boundary_stop_controller.clone())
+    }
+
+    fn boundary_stop_intent(
+        event: &Self::Event,
+    ) -> Option<crate::stages::common::BoundaryStopIntent> {
+        match event {
+            JournalSinkEvent::BeginFlush
+            | JournalSinkEvent::BeginDrain
+            | JournalSinkEvent::ReceivedEOF => {
+                Some(crate::stages::common::BoundaryStopIntent::Drain)
+            }
+            JournalSinkEvent::Error(_) => Some(crate::stages::common::BoundaryStopIntent::Abort),
+            _ => None,
+        }
+    }
 }

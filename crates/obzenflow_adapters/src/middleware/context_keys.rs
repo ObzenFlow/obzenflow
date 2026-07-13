@@ -25,13 +25,7 @@ impl MiddlewareContextKey for EffectCallDurationNanos {
     const LABEL: &'static str = "effect.call_duration_nanos";
 }
 
-// ---- Circuit breaker integrated retry ------------------------------------
-
-pub(crate) struct CircuitBreakerAttempt;
-impl MiddlewareContextKey for CircuitBreakerAttempt {
-    type Value = u32;
-    const LABEL: &'static str = "circuit_breaker.attempt";
-}
+// ---- Circuit breaker boundary state --------------------------------------
 
 pub(crate) struct CircuitBreakerIsProbe;
 impl MiddlewareContextKey for CircuitBreakerIsProbe {
@@ -91,28 +85,10 @@ impl MiddlewareContextKey for CircuitBreakerProbeSlot {
     const LABEL: &'static str = "circuit_breaker.probe_slot_guard";
 }
 
-pub(crate) struct CircuitBreakerShouldRetry;
-impl MiddlewareContextKey for CircuitBreakerShouldRetry {
-    type Value = bool;
-    const LABEL: &'static str = "circuit_breaker.should_retry";
-}
-
-pub(crate) struct CircuitBreakerRetryDelayMs;
-impl MiddlewareContextKey for CircuitBreakerRetryDelayMs {
-    type Value = u64;
-    const LABEL: &'static str = "circuit_breaker.retry_delay_ms";
-}
-
 pub(crate) struct CircuitBreakerRetryAfterMs;
 impl MiddlewareContextKey for CircuitBreakerRetryAfterMs {
     type Value = u64;
     const LABEL: &'static str = "circuit_breaker.retry_after_ms";
-}
-
-pub(crate) struct CircuitBreakerTotalRetryWallMs;
-impl MiddlewareContextKey for CircuitBreakerTotalRetryWallMs {
-    type Value = u64;
-    const LABEL: &'static str = "circuit_breaker.total_retry_wall_ms";
 }
 
 // ---- AI map-reduce --------------------------------------------------------

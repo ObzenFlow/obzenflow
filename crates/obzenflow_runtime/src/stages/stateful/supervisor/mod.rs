@@ -411,6 +411,22 @@ impl<H: UnifiedStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static
             ))
         }
     }
+
+    fn boundary_stop_controller(
+        context: &Self::Context,
+    ) -> Option<crate::stages::common::BoundaryStopController> {
+        Some(context.boundary_stop_controller.clone())
+    }
+
+    fn boundary_stop_intent(
+        event: &Self::Event,
+    ) -> Option<crate::stages::common::BoundaryStopIntent> {
+        match event {
+            StatefulEvent::BeginDrain => Some(crate::stages::common::BoundaryStopIntent::Drain),
+            StatefulEvent::Error(_) => Some(crate::stages::common::BoundaryStopIntent::Abort),
+            _ => None,
+        }
+    }
 }
 
 impl<H: UnifiedStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static>

@@ -171,6 +171,7 @@ pub(super) async fn dispatch_draining<
                             backpressure_writer: ctx.backpressure_writer.clone(),
                             emit_enabled: true,
                             effect_boundary: None,
+                            boundary_stop: ctx.boundary_stop.clone(),
                             boundary_control_events: std::sync::Arc::new(std::sync::Mutex::new(
                                 Vec::new(),
                             )),

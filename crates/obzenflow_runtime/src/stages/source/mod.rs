@@ -18,7 +18,7 @@ pub mod typed;
 
 pub use boundary::{
     SourceBoundary, SourceBoundaryFuture, SourceBoundaryOutcome, SourceBoundaryReport,
-    SourcePollCompletion, SourcePollExecution, SourcePollReport,
+    SourcePollCompletion, SourcePollExecution, SourcePollExecutor, SourcePollReport,
 };
 pub use typed::{
     AsyncFiniteSourceTyped, AsyncInfiniteSourceTyped, FallibleAsyncFiniteSourceTyped,

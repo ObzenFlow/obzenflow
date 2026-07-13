@@ -9,6 +9,7 @@ use super::builder::{EventReceiver, StateWatcher};
 use super::handler_supervised::HandlerSupervised;
 use super::self_supervised::SelfSupervised;
 use super::EventLoopDirective;
+use crate::stages::common::{BoundaryStopController, BoundaryStopIntent};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ExternalEventMode {
@@ -23,6 +24,16 @@ pub(crate) enum ExternalEventMode {
 pub(crate) trait ExternalEventPolicy: Supervisor {
     fn external_event_mode(state: &Self::State) -> ExternalEventMode;
     fn on_external_event_channel_closed(state: &Self::State) -> Option<Self::Event>;
+
+    /// Optional ephemeral stop controller for an active live-I/O boundary.
+    fn boundary_stop_controller(_context: &Self::Context) -> Option<BoundaryStopController> {
+        None
+    }
+
+    /// Classify an external stage event as graceful drain or force abort.
+    fn boundary_stop_intent(_event: &Self::Event) -> Option<BoundaryStopIntent> {
+        None
+    }
 }
 
 pub(crate) struct HandlerSupervisedWithExternalEvents<S>
@@ -106,17 +117,87 @@ where
                     }
                 }
             },
-            ExternalEventMode::Poll => match self.external_events.try_recv() {
-                Ok(event) => return Ok(EventLoopDirective::Transition(event)),
-                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {}
-                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
-                    if let Some(event) =
-                        <S as ExternalEventPolicy>::on_external_event_channel_closed(state)
-                    {
+            ExternalEventMode::Poll => {
+                let stop_controller = <S as ExternalEventPolicy>::boundary_stop_controller(context);
+
+                // A drain already queued at dispatch entry starts no new
+                // handler or live-boundary attempt.
+                match self.external_events.try_recv() {
+                    Ok(event) => {
+                        if let (Some(controller), Some(intent)) = (
+                            &stop_controller,
+                            <S as ExternalEventPolicy>::boundary_stop_intent(&event),
+                        ) {
+                            match intent {
+                                BoundaryStopIntent::Running => {}
+                                BoundaryStopIntent::Drain => controller.request_drain(),
+                                BoundaryStopIntent::Abort => controller.request_abort(),
+                            }
+                        }
                         return Ok(EventLoopDirective::Transition(event));
                     }
+                    Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {}
+                    Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                        if let Some(controller) = &stop_controller {
+                            controller.request_abort();
+                        }
+                        if let Some(event) =
+                            <S as ExternalEventPolicy>::on_external_event_channel_closed(state)
+                        {
+                            return Ok(EventLoopDirective::Transition(event));
+                        }
+                    }
                 }
-            },
+
+                let dispatch = self.inner.dispatch_state(state, context);
+                tokio::pin!(dispatch);
+
+                return tokio::select! {
+                    biased;
+                    maybe_event = self.external_events.recv() => {
+                        match maybe_event {
+                            Some(event) => match <S as ExternalEventPolicy>::boundary_stop_intent(&event) {
+                                Some(BoundaryStopIntent::Drain) => {
+                                    if let Some(controller) = &stop_controller {
+                                        controller.request_drain();
+                                    }
+                                    // Graceful drain lets an active call settle. If normal
+                                    // dispatch itself reached a transition, preserve that
+                                    // terminal truth; otherwise apply the pending drain.
+                                    match dispatch.await? {
+                                        EventLoopDirective::Continue => {
+                                            Ok(EventLoopDirective::Transition(event))
+                                        }
+                                        directive => Ok(directive),
+                                    }
+                                }
+                                Some(BoundaryStopIntent::Abort) => {
+                                    if let Some(controller) = &stop_controller {
+                                        controller.request_abort();
+                                    }
+                                    // Dropping `dispatch` promptly drops the live boundary
+                                    // future. No surface outcome is manufactured here.
+                                    Ok(EventLoopDirective::Transition(event))
+                                }
+                                Some(BoundaryStopIntent::Running) | None => {
+                                    Ok(EventLoopDirective::Transition(event))
+                                }
+                            },
+                            None => {
+                                if let Some(controller) = &stop_controller {
+                                    controller.request_abort();
+                                }
+                                if let Some(event) = <S as ExternalEventPolicy>::on_external_event_channel_closed(state) {
+                                    Ok(EventLoopDirective::Transition(event))
+                                } else {
+                                    dispatch.await
+                                }
+                            }
+                        }
+                    }
+                    directive = &mut dispatch => directive,
+                };
+            }
         }
 
         self.inner.dispatch_state(state, context).await

@@ -3,13 +3,15 @@
 // https://obzenflow.dev
 
 use super::ChainEventFactory;
-use crate::event::chain_event::{ChainEvent, CircuitBreakerSummaryEventParams};
+use crate::event::chain_event::{
+    ChainEvent, CircuitBreakerSummaryEventParams, RetryAttemptFailedEventParams,
+    RetryExhaustedEventParams, RetrySucceededAfterRetryEventParams,
+};
 use crate::event::context::causality_context::CausalityContext;
 use crate::event::payloads::observability_payload::{
     CircuitBreakerEvent, MiddlewareLifecycle, ObservabilityPayload, RetryEvent,
 };
-use crate::event::status::processing_status::ErrorKind;
-use crate::event::types::{EventId, WriterId};
+use crate::event::types::WriterId;
 
 impl ChainEventFactory {
     /// Create a circuit breaker opened event
@@ -75,18 +77,23 @@ impl ChainEventFactory {
     /// When `cause` is provided the control event is linked to the input event
     /// that triggered the retry sequence, establishing causal lineage for
     /// downstream observability tooling.
-    pub fn retry_exhausted(
-        writer_id: WriterId,
-        total_attempts: u32,
-        last_error: String,
-        total_duration_ms: u64,
-        cause: Option<EventId>,
-    ) -> ChainEvent {
+    pub fn retry_exhausted(writer_id: WriterId, params: RetryExhaustedEventParams) -> ChainEvent {
+        let RetryExhaustedEventParams {
+            context,
+            total_attempts,
+            exhaustion_cause,
+            last_error_kind,
+            total_duration_ms,
+            cause,
+        } = params;
         let mut evt = Self::observability_event(
             writer_id,
             ObservabilityPayload::Middleware(MiddlewareLifecycle::Retry(RetryEvent::Exhausted {
+                context: Some(context),
                 total_attempts,
-                last_error,
+                exhaustion_cause: Some(exhaustion_cause),
+                last_error_kind,
+                last_error: None,
                 total_duration_ms,
             })),
         );
@@ -102,20 +109,29 @@ impl ChainEventFactory {
     /// that triggered the retry sequence.
     pub fn retry_attempt_failed(
         writer_id: WriterId,
-        attempt_number: u32,
-        max_attempts: u32,
-        error_kind: Option<ErrorKind>,
-        delay_ms: Option<u64>,
-        cause: Option<EventId>,
+        params: RetryAttemptFailedEventParams,
     ) -> ChainEvent {
+        let RetryAttemptFailedEventParams {
+            context,
+            attempt_number,
+            max_attempts,
+            error_kind,
+            delay_ms,
+            elapsed_ms,
+            remaining_wall_ms,
+            cause,
+        } = params;
         let mut evt = Self::observability_event(
             writer_id,
             ObservabilityPayload::Middleware(MiddlewareLifecycle::Retry(
                 RetryEvent::AttemptFailed {
+                    context: Some(context),
                     attempt_number,
                     max_attempts,
-                    error_kind,
-                    delay_ms,
+                    error_kind: Some(error_kind),
+                    delay_ms: Some(delay_ms),
+                    elapsed_ms: Some(elapsed_ms),
+                    remaining_wall_ms: Some(remaining_wall_ms),
                 },
             )),
         );
@@ -131,14 +147,19 @@ impl ChainEventFactory {
     /// that triggered the retry sequence.
     pub fn retry_succeeded_after_retry(
         writer_id: WriterId,
-        total_attempts: u32,
-        total_duration_ms: u64,
-        cause: Option<EventId>,
+        params: RetrySucceededAfterRetryEventParams,
     ) -> ChainEvent {
+        let RetrySucceededAfterRetryEventParams {
+            context,
+            total_attempts,
+            total_duration_ms,
+            cause,
+        } = params;
         let mut evt = Self::observability_event(
             writer_id,
             ObservabilityPayload::Middleware(MiddlewareLifecycle::Retry(
                 RetryEvent::SucceededAfterRetry {
+                    context: Some(context),
                     total_attempts,
                     total_duration_ms,
                 },

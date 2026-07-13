@@ -11,7 +11,8 @@ use obzenflow_core::event::ChainEventFactory;
 use obzenflow_core::http_client::{HeaderMap, HttpClient, HttpClientError};
 use obzenflow_core::{ChainEvent, WriterId};
 use obzenflow_runtime::stages::common::handlers::{
-    AsyncFiniteSourceHandler, AsyncInfiniteSourceHandler,
+    AsyncFiniteSourceHandler, AsyncInfiniteSourceHandler, SourcePollRetryOwnership,
+    SourcePollRetrySafety,
 };
 use obzenflow_runtime::stages::SourceError;
 use obzenflow_runtime::typing::SourceTyping;
@@ -66,6 +67,16 @@ pub trait PullDecoder: Clone + Debug + Send + Sync + 'static {
     /// Event type for all decoded items.
     /// MUST be stable for the lifetime of this decoder instance.
     fn event_type(&self) -> String;
+
+    /// Declare that every request this decoder can build for every cursor is
+    /// repeatable after a returned error, timeout, or cancellation.
+    ///
+    /// This is an author assertion, not an HTTP-method heuristic. The
+    /// fail-closed default prevents a boundary retry policy from assuming that
+    /// an arbitrary request-producing closure is safe to repeat.
+    fn request_retry_safety(&self) -> Option<SourcePollRetrySafety> {
+        None
+    }
 
     /// Build the next HTTP request.
     ///
@@ -138,6 +149,13 @@ pub trait CursorlessPullDecoder: Clone + Debug + Send + Sync + 'static {
     type Item: Serialize + Send;
 
     fn event_type(&self) -> String;
+
+    /// Declare that the request produced by this decoder is repeatable after
+    /// a returned error, timeout, or cancellation.
+    fn request_retry_safety(&self) -> Option<SourcePollRetrySafety> {
+        None
+    }
+
     fn request_spec(&self) -> RequestSpec;
 
     fn decode_success(&self, response: &HttpResponse) -> Result<Vec<Self::Item>, DecodeError>;
@@ -181,6 +199,10 @@ where
         CursorlessPullDecoder::event_type(self)
     }
 
+    fn request_retry_safety(&self) -> Option<SourcePollRetrySafety> {
+        CursorlessPullDecoder::request_retry_safety(self)
+    }
+
     fn request_spec(&self, _cursor: Option<&Self::Cursor>) -> RequestSpec {
         CursorlessPullDecoder::request_spec(self)
     }
@@ -215,6 +237,7 @@ pub struct FnPullDecoder<C, T> {
     event_type: String,
     request_spec: RequestSpecFn<C>,
     decode_success: DecodeSuccessFn<C, T>,
+    retry_safe_requests: bool,
 }
 
 impl<C, T> Clone for FnPullDecoder<C, T> {
@@ -223,6 +246,7 @@ impl<C, T> Clone for FnPullDecoder<C, T> {
             event_type: self.event_type.clone(),
             request_spec: self.request_spec.clone(),
             decode_success: self.decode_success.clone(),
+            retry_safe_requests: self.retry_safe_requests,
         }
     }
 }
@@ -241,7 +265,15 @@ impl<C, T> FnPullDecoder<C, T> {
             event_type: event_type.into(),
             request_spec: Arc::new(build_request),
             decode_success: Arc::new(decode_success),
+            retry_safe_requests: false,
         }
+    }
+
+    /// Assert that every request constructed by this decoder is repeatable
+    /// after a returned error, timeout, or cancellation.
+    pub fn retry_safe_requests(mut self) -> Self {
+        self.retry_safe_requests = true;
+        self
     }
 }
 
@@ -251,6 +283,7 @@ impl<C, T> Debug for FnPullDecoder<C, T> {
             .field("event_type", &self.event_type)
             .field("cursor_type", &std::any::type_name::<C>())
             .field("item_type", &std::any::type_name::<T>())
+            .field("retry_safe_requests", &self.retry_safe_requests)
             .finish()
     }
 }
@@ -265,6 +298,11 @@ where
 
     fn event_type(&self) -> String {
         self.event_type.clone()
+    }
+
+    fn request_retry_safety(&self) -> Option<SourcePollRetrySafety> {
+        self.retry_safe_requests
+            .then_some(SourcePollRetrySafety::RetrySafeAfterErrorOrCancellation)
     }
 
     fn request_spec(&self, cursor: Option<&Self::Cursor>) -> RequestSpec {
@@ -311,6 +349,7 @@ pub struct ListDetailDecoderBuilder<K, T> {
     parse_item: Option<ItemParseFn<T>>,
     max_list_items: Option<usize>,
     on_skip: Option<OnSkipFn<K>>,
+    retry_safe_requests: bool,
 }
 
 impl<K, T> Debug for ListDetailDecoderBuilder<K, T> {
@@ -328,6 +367,7 @@ impl<K, T> Debug for ListDetailDecoderBuilder<K, T> {
             .field("has_parse_item", &self.parse_item.is_some())
             .field("max_list_items", &self.max_list_items)
             .field("has_on_skip", &self.on_skip.is_some())
+            .field("retry_safe_requests", &self.retry_safe_requests)
             .finish()
     }
 }
@@ -345,6 +385,7 @@ impl<K: 'static, T> ListDetailDecoderBuilder<K, T> {
             parse_item: None,
             max_list_items: None,
             on_skip: None,
+            retry_safe_requests: false,
         }
     }
 
@@ -437,6 +478,13 @@ impl<K: 'static, T> ListDetailDecoderBuilder<K, T> {
         self
     }
 
+    /// Assert that both the list request and every detail request are
+    /// repeatable after a returned error, timeout, or cancellation.
+    pub fn retry_safe_requests(mut self) -> Self {
+        self.retry_safe_requests = true;
+        self
+    }
+
     /// Build the decoder.
     pub fn build(self) -> anyhow::Result<ListDetailDecoder<K, T>> {
         let list_request = match (self.list_request, self.list_path) {
@@ -484,6 +532,7 @@ impl<K: 'static, T> ListDetailDecoderBuilder<K, T> {
                 .ok_or_else(|| anyhow::anyhow!("parse_item required"))?,
             max_list_items: self.max_list_items,
             on_skip: self.on_skip,
+            retry_safe_requests: self.retry_safe_requests,
         })
     }
 }
@@ -501,6 +550,7 @@ pub struct ListDetailDecoder<K, T> {
     parse_item: ItemParseFn<T>,
     max_list_items: Option<usize>,
     on_skip: Option<OnSkipFn<K>>,
+    retry_safe_requests: bool,
 }
 
 impl<K, T> Clone for ListDetailDecoder<K, T> {
@@ -513,6 +563,7 @@ impl<K, T> Clone for ListDetailDecoder<K, T> {
             parse_item: self.parse_item.clone(),
             max_list_items: self.max_list_items,
             on_skip: self.on_skip.clone(),
+            retry_safe_requests: self.retry_safe_requests,
         }
     }
 }
@@ -587,6 +638,13 @@ impl<K: 'static, T> ListDetailDecoder<K, T> {
         self.on_skip = Some(Arc::new(on_skip));
         self
     }
+
+    /// Assert that both the list request and every detail request are
+    /// repeatable after a returned error, timeout, or cancellation.
+    pub fn retry_safe_requests(mut self) -> Self {
+        self.retry_safe_requests = true;
+        self
+    }
 }
 
 impl<K, T> Debug for ListDetailDecoder<K, T> {
@@ -597,6 +655,7 @@ impl<K, T> Debug for ListDetailDecoder<K, T> {
             .field("item_type", &std::any::type_name::<T>())
             .field("max_list_items", &self.max_list_items)
             .field("has_on_skip", &self.on_skip.is_some())
+            .field("retry_safe_requests", &self.retry_safe_requests)
             .finish()
     }
 }
@@ -611,6 +670,11 @@ where
 
     fn event_type(&self) -> String {
         self.event_type.clone()
+    }
+
+    fn request_retry_safety(&self) -> Option<SourcePollRetrySafety> {
+        self.retry_safe_requests
+            .then_some(SourcePollRetrySafety::RetrySafeAfterErrorOrCancellation)
     }
 
     fn request_spec(&self, cursor: Option<&Self::Cursor>) -> RequestSpec {
@@ -717,6 +781,7 @@ where
             })
         },
     )
+    .retry_safe_requests()
 }
 
 /// Retry configuration for HTTP pull/poll sources (FLOWIP-084e OT-9).
@@ -745,6 +810,26 @@ impl Default for HttpRetryConfig {
             ],
             rate_limit_max_wait: Duration::from_secs(60),
         }
+    }
+}
+
+impl HttpRetryConfig {
+    /// Configure exactly one HTTP call per source poll. No transient backoff
+    /// or in-handler rate-limit wait is scheduled.
+    pub fn disabled() -> Self {
+        Self {
+            transient_max_retries: 0,
+            transient_backoff: Vec::new(),
+            rate_limit_max_wait: Duration::ZERO,
+        }
+    }
+
+    /// Whether this configuration performs no native transient or rate-limit
+    /// recovery and therefore leaves retry ownership to the outer boundary.
+    pub fn is_disabled(&self) -> bool {
+        self.transient_max_retries == 0
+            && self.transient_backoff.is_empty()
+            && self.rate_limit_max_wait.is_zero()
     }
 }
 
@@ -1253,12 +1338,10 @@ impl FetchError {
                         retry_after,
                     },
                 ..
-            } => {
-                let retry_hint = retry_after
-                    .map(|d| format!(" (retry_after_ms={})", d.as_millis()))
-                    .unwrap_or_default();
-                SourceError::Transport(format!("rate_limited{retry_hint}: {message}"))
-            }
+            } => SourceError::RateLimited {
+                message,
+                retry_after,
+            },
             FetchError::Decode {
                 error: DecodeError::Fatal(msg),
                 ..
@@ -1318,6 +1401,31 @@ impl<D: PullDecoder> AsyncFiniteSourceHandler for HttpPullSource<D> {
 
     fn suggested_poll_timeout(&self) -> Option<Duration> {
         self.config.poll_timeout
+    }
+
+    fn poll_retry_ownership(&self) -> SourcePollRetryOwnership {
+        if self.config.retry.is_disabled() {
+            SourcePollRetryOwnership::NoNestedRetry
+        } else {
+            SourcePollRetryOwnership::HandlerOwned {
+                owner: "HttpRetryConfig",
+            }
+        }
+    }
+
+    fn poll_retry_safety(&self) -> Option<SourcePollRetrySafety> {
+        if matches!(
+            self.poll_retry_ownership(),
+            SourcePollRetryOwnership::HandlerOwned { .. }
+        ) {
+            Some(SourcePollRetrySafety::NonRetrySafe)
+        } else {
+            self.decoder.request_retry_safety()
+        }
+    }
+
+    fn poll_retry_safety_is_request_level(&self) -> bool {
+        true
     }
 
     async fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
@@ -1389,6 +1497,15 @@ impl<D: PullDecoder> AsyncFiniteSourceHandler for HttpPullSource<D> {
                             telemetry_to_observability_event(writer_id, &inner.telemetry)?;
                         inner.buffer.push_back(telemetry_event);
                     }
+
+                    // `HttpRetryConfig::disabled()` is the boundary-retry
+                    // composition seam: one source invocation owns exactly
+                    // one HTTP request, even when a decoder advances from a
+                    // list request to a detail cursor without producing an
+                    // item. The next boundary invocation resumes that cursor.
+                    if self.config.retry.is_disabled() {
+                        break;
+                    }
                 }
 
                 Err(FetchError::Validation { status, message }) => {
@@ -1432,6 +1549,13 @@ impl<D: PullDecoder> AsyncFiniteSourceHandler for HttpPullSource<D> {
                     observe_http_status(&mut inner.telemetry, status);
                     inner.telemetry.rate_limited_total =
                         inner.telemetry.rate_limited_total.saturating_add(1);
+
+                    if self.config.retry.is_disabled() {
+                        return Err(SourceError::RateLimited {
+                            message,
+                            retry_after,
+                        });
+                    }
 
                     let delay = retry_after.unwrap_or(Duration::from_secs(5));
 
@@ -1498,6 +1622,31 @@ impl<D: PullDecoder> AsyncInfiniteSourceHandler for HttpPollSource<D> {
 
     fn suggested_poll_timeout(&self) -> Option<Duration> {
         self.config.poll_timeout
+    }
+
+    fn poll_retry_ownership(&self) -> SourcePollRetryOwnership {
+        if self.config.retry.is_disabled() {
+            SourcePollRetryOwnership::NoNestedRetry
+        } else {
+            SourcePollRetryOwnership::HandlerOwned {
+                owner: "HttpRetryConfig",
+            }
+        }
+    }
+
+    fn poll_retry_safety(&self) -> Option<SourcePollRetrySafety> {
+        if matches!(
+            self.poll_retry_ownership(),
+            SourcePollRetryOwnership::HandlerOwned { .. }
+        ) {
+            Some(SourcePollRetrySafety::NonRetrySafe)
+        } else {
+            self.decoder.request_retry_safety()
+        }
+    }
+
+    fn poll_retry_safety_is_request_level(&self) -> bool {
+        true
     }
 
     async fn next(&mut self) -> Result<Vec<ChainEvent>, SourceError> {
@@ -1570,6 +1719,9 @@ impl<D: PullDecoder> AsyncInfiniteSourceHandler for HttpPollSource<D> {
                         .saturating_add(result.items.len() as u64);
 
                     inner.apply_decode_result(writer_id, &self.decoder, result)?;
+                    if self.config.retry.is_disabled() {
+                        return Ok(inner.drain_batch(self.config.max_batch_size));
+                    }
                 }
 
                 Err(FetchError::Validation { status, message }) => {
@@ -1611,6 +1763,13 @@ impl<D: PullDecoder> AsyncInfiniteSourceHandler for HttpPollSource<D> {
                     observe_http_status(&mut inner.telemetry, status);
                     inner.telemetry.rate_limited_total =
                         inner.telemetry.rate_limited_total.saturating_add(1);
+
+                    if self.config.retry.is_disabled() {
+                        return Err(SourceError::RateLimited {
+                            message,
+                            retry_after,
+                        });
+                    }
 
                     let delay = retry_after.unwrap_or(Duration::from_secs(5));
 
@@ -1898,6 +2057,98 @@ mod tests {
         }
     }
 
+    #[derive(Debug, Clone)]
+    struct RetrySafeCursorlessDecoder;
+
+    impl CursorlessPullDecoder for RetrySafeCursorlessDecoder {
+        type Item = serde_json::Value;
+
+        fn event_type(&self) -> String {
+            "test.cursorless.v1".to_string()
+        }
+
+        fn request_retry_safety(&self) -> Option<SourcePollRetrySafety> {
+            Some(SourcePollRetrySafety::RetrySafeAfterErrorOrCancellation)
+        }
+
+        fn request_spec(&self) -> RequestSpec {
+            RequestSpec::get("http://example.invalid/latest".parse().unwrap())
+        }
+
+        fn decode_success(&self, response: &HttpResponse) -> Result<Vec<Self::Item>, DecodeError> {
+            Ok(response.json()?)
+        }
+    }
+
+    struct CancellationProbeClient {
+        calls: std::sync::atomic::AtomicUsize,
+        started: tokio::sync::Semaphore,
+        requests: std::sync::Mutex<Vec<RequestSpec>>,
+    }
+
+    impl CancellationProbeClient {
+        fn new() -> Self {
+            Self {
+                calls: std::sync::atomic::AtomicUsize::new(0),
+                started: tokio::sync::Semaphore::new(0),
+                requests: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl HttpClient for CancellationProbeClient {
+        async fn execute(&self, request: RequestSpec) -> Result<HttpResponse, HttpClientError> {
+            self.requests.lock().unwrap().push(request);
+            let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if call == 0 {
+                self.started.add_permits(1);
+                return std::future::pending().await;
+            }
+
+            Ok(HttpResponse::new(
+                200,
+                HeaderMap::new(),
+                serde_json::to_vec(&serde_json::json!({
+                    "items": [{"n": 7}],
+                    "next": null
+                }))
+                .unwrap(),
+            ))
+        }
+    }
+
+    struct ListDetailCancellationProbeClient {
+        calls: std::sync::atomic::AtomicUsize,
+        detail_started: tokio::sync::Semaphore,
+        requests: std::sync::Mutex<Vec<RequestSpec>>,
+    }
+
+    impl ListDetailCancellationProbeClient {
+        fn new() -> Self {
+            Self {
+                calls: std::sync::atomic::AtomicUsize::new(0),
+                detail_started: tokio::sync::Semaphore::new(0),
+                requests: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl HttpClient for ListDetailCancellationProbeClient {
+        async fn execute(&self, request: RequestSpec) -> Result<HttpResponse, HttpClientError> {
+            self.requests.lock().unwrap().push(request);
+            match self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) {
+                0 => Ok(HttpResponse::new(200, HeaderMap::new(), "[7]")),
+                1 => {
+                    self.detail_started.add_permits(1);
+                    std::future::pending().await
+                }
+                _ => Ok(HttpResponse::new(200, HeaderMap::new(), r#"{"n": 7}"#)),
+            }
+        }
+    }
+
     #[tokio::test]
     async fn http_pull_source_paginates_using_mock_http_client() {
         let (mock, client) = mock_client();
@@ -2149,6 +2400,337 @@ mod tests {
         assert_eq!(config.max_batch_size, 10);
         assert_eq!(config.poll_timeout, Some(Duration::from_secs(120)));
         assert_eq!(config.retry.transient_max_retries, 2);
+    }
+
+    #[test]
+    fn decoder_retry_safety_is_fail_closed_and_helpers_opt_in_explicitly() {
+        let fn_decoder = FnPullDecoder::new(
+            "test.item.v1",
+            |_cursor: Option<&()>| {
+                RequestSpec::post("http://example.invalid/items".parse().unwrap())
+            },
+            |_cursor: Option<&()>, _response: &HttpResponse| {
+                Ok(DecodeResult::<(), serde_json::Value> {
+                    items: Vec::new(),
+                    next_cursor: None,
+                })
+            },
+        );
+        assert_eq!(fn_decoder.request_retry_safety(), None);
+        assert_eq!(
+            fn_decoder.retry_safe_requests().request_retry_safety(),
+            Some(SourcePollRetrySafety::RetrySafeAfterErrorOrCancellation)
+        );
+
+        let poll = simple_poll::<serde_json::Value, _>(
+            "test.item.v1",
+            "http://example.invalid/items".parse().unwrap(),
+            |_response| Ok(Vec::new()),
+        );
+        assert_eq!(
+            poll.request_retry_safety(),
+            Some(SourcePollRetrySafety::RetrySafeAfterErrorOrCancellation)
+        );
+
+        let list_detail = test_list_detail_decoder();
+        assert_eq!(list_detail.request_retry_safety(), None);
+        assert_eq!(
+            list_detail.retry_safe_requests().request_retry_safety(),
+            Some(SourcePollRetrySafety::RetrySafeAfterErrorOrCancellation)
+        );
+    }
+
+    #[test]
+    fn cursorless_blanket_impl_forwards_retry_safety_declaration() {
+        let decoder = RetrySafeCursorlessDecoder;
+        assert_eq!(
+            PullDecoder::request_retry_safety(&decoder),
+            Some(SourcePollRetrySafety::RetrySafeAfterErrorOrCancellation)
+        );
+        assert_eq!(
+            PullDecoder::request_spec(&decoder, None).url.as_str(),
+            "http://example.invalid/latest"
+        );
+    }
+
+    #[test]
+    fn disabled_http_retry_config_is_the_one_call_ownership_spelling() {
+        let retry = HttpRetryConfig::disabled();
+        assert!(retry.is_disabled());
+        assert_eq!(retry.transient_max_retries, 0);
+        assert!(retry.transient_backoff.is_empty());
+        assert!(retry.rate_limit_max_wait.is_zero());
+
+        let mut almost_disabled = retry;
+        almost_disabled.rate_limit_max_wait = Duration::from_millis(1);
+        assert!(!almost_disabled.is_disabled());
+    }
+
+    #[tokio::test]
+    async fn disabled_http_retry_returns_typed_rate_limit_without_scheduling_wait() {
+        let (mock, client) = mock_client();
+        let mut headers = HeaderMap::new();
+        headers.insert("Retry-After", "0".parse().unwrap());
+        mock.enqueue(HttpResponse::new(429, headers, ""));
+
+        let decoder = TestDecoder::new("http://example.invalid/items".parse().unwrap());
+        let config = HttpPullConfig {
+            client,
+            default_headers: HeaderMap::new(),
+            max_batch_size: 10,
+            retry: HttpRetryConfig::disabled(),
+            poll_timeout: None,
+        };
+        let mut source = HttpPullSource::new(decoder, config);
+        source.bind_writer_id(WriterId::from(StageId::new()));
+
+        let error = source
+            .next()
+            .await
+            .expect_err("429 must escape to boundary");
+        assert!(matches!(
+            error,
+            SourceError::RateLimited {
+                retry_after: Some(delay),
+                ..
+            } if delay.is_zero()
+        ));
+        let inner = source.inner.lock().await;
+        assert!(inner.scheduled_wait.is_none());
+        assert_eq!(inner.transient_attempts, 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cancelled_pull_preserves_cursor_and_next_call_reuses_identical_request() {
+        let client = Arc::new(CancellationProbeClient::new());
+        let decoder = TestDecoder::new("http://example.invalid/items".parse().unwrap());
+        let config = HttpPullConfig {
+            client: client.clone(),
+            default_headers: HeaderMap::new(),
+            max_batch_size: 10,
+            retry: HttpRetryConfig::disabled(),
+            poll_timeout: None,
+        };
+        let mut source = HttpPullSource::new(decoder, config);
+        source.bind_writer_id(WriterId::from(StageId::new()));
+
+        {
+            let mut inner = source.inner.lock().await;
+            inner.cursor = Some(7);
+        }
+
+        let mut cancelled_attempt = source.clone();
+        let task = tokio::spawn(async move { cancelled_attempt.next().await });
+        let permit = client.started.acquire().await.expect("client stays live");
+        permit.forget();
+        task.abort();
+        let cancelled = task.await.expect_err("first client await is cancelled");
+        assert!(cancelled.is_cancelled());
+
+        {
+            let inner = source.inner.lock().await;
+            assert_eq!(inner.cursor, Some(7));
+            assert!(inner.buffer.is_empty(), "cancelled poll emits no batch");
+            assert!(!inner.exhausted, "cancelled poll does not manufacture EOF");
+            assert!(inner.pending_error.is_none());
+            assert!(inner.scheduled_wait.is_none());
+        }
+
+        let batch = source
+            .next()
+            .await
+            .expect("second physical poll succeeds")
+            .expect("second physical poll emits a terminal batch");
+        assert!(batch
+            .iter()
+            .any(|event| event.event_type() == "test.item.v1"));
+
+        let requests = client.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].method, HttpMethod::Get);
+        assert_eq!(requests[0].url, requests[1].url);
+        assert_eq!(
+            requests[0].url.as_str(),
+            "http://example.invalid/items?page=7"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn disabled_retry_splits_list_and_detail_requests_and_preserves_detail_on_cancel() {
+        let client = Arc::new(ListDetailCancellationProbeClient::new());
+        let decoder = test_list_detail_path_decoder().retry_safe_requests();
+        let config = HttpPullConfig {
+            client: client.clone(),
+            default_headers: HeaderMap::new(),
+            max_batch_size: 10,
+            retry: HttpRetryConfig::disabled(),
+            poll_timeout: None,
+        };
+        let mut source = HttpPullSource::new(decoder, config);
+        source.bind_writer_id(WriterId::from(StageId::new()));
+
+        let list_result = source
+            .next()
+            .await
+            .expect("list request succeeds")
+            .expect("cursor advance is a completed empty poll");
+        assert!(list_result.is_empty());
+        assert_eq!(
+            client.calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "disabled native retry permits one HTTP request per boundary invocation"
+        );
+
+        let mut cancelled_attempt = source.clone();
+        let task = tokio::spawn(async move { cancelled_attempt.next().await });
+        let permit = client
+            .detail_started
+            .acquire()
+            .await
+            .expect("client stays live");
+        permit.forget();
+        task.abort();
+        assert!(task
+            .await
+            .expect_err("detail await is cancelled")
+            .is_cancelled());
+
+        {
+            let inner = source.inner.lock().await;
+            let cursor = inner.cursor.as_ref().expect("detail cursor is retained");
+            assert_eq!(cursor.pending.iter().copied().collect::<Vec<_>>(), vec![7]);
+            assert!(inner.buffer.is_empty(), "cancelled detail emits no batch");
+            assert!(
+                !inner.exhausted,
+                "cancelled detail does not manufacture EOF"
+            );
+        }
+
+        let batch = source
+            .next()
+            .await
+            .expect("repeated detail succeeds")
+            .expect("detail produces a terminal batch");
+        assert!(batch
+            .iter()
+            .any(|event| event.event_type() == "test.item.v1"));
+
+        let requests = client.requests.lock().unwrap();
+        assert_eq!(requests.len(), 3);
+        assert_eq!(requests[0].url.as_str(), "http://example.invalid/api/list");
+        assert_eq!(requests[1].method, HttpMethod::Get);
+        assert_eq!(requests[1].url, requests[2].url);
+        assert_eq!(
+            requests[1].url.as_str(),
+            "http://example.invalid/api/item/7"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn disabled_poll_retry_also_splits_list_and_detail_and_preserves_cancelled_detail() {
+        let client = Arc::new(ListDetailCancellationProbeClient::new());
+        let decoder = test_list_detail_path_decoder().retry_safe_requests();
+        let config = HttpPollConfig {
+            client: client.clone(),
+            default_headers: HeaderMap::new(),
+            max_batch_size: 10,
+            retry: HttpRetryConfig::disabled(),
+            poll_timeout: None,
+            poll_interval: Duration::from_secs(60),
+        };
+        let mut source = HttpPollSource::new(decoder, config);
+        source.bind_writer_id(WriterId::from(StageId::new()));
+
+        let list_result = source.next().await.expect("list request succeeds");
+        assert!(list_result.is_empty());
+        assert_eq!(
+            client.calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "disabled native retry permits one HTTP request per boundary invocation"
+        );
+
+        let mut cancelled_attempt = source.clone();
+        let task = tokio::spawn(async move { cancelled_attempt.next().await });
+        let permit = client
+            .detail_started
+            .acquire()
+            .await
+            .expect("client stays live");
+        permit.forget();
+        task.abort();
+        assert!(task
+            .await
+            .expect_err("detail await is cancelled")
+            .is_cancelled());
+
+        {
+            let inner = source.inner.lock().await;
+            let cursor = inner.cursor.as_ref().expect("detail cursor is retained");
+            assert_eq!(cursor.pending.iter().copied().collect::<Vec<_>>(), vec![7]);
+            assert!(inner.buffer.is_empty(), "cancelled detail emits no batch");
+            assert!(!inner.cycle_exhausted);
+        }
+
+        let batch = source.next().await.expect("repeated detail succeeds");
+        assert!(batch
+            .iter()
+            .any(|event| event.event_type() == "test.item.v1"));
+
+        let requests = client.requests.lock().unwrap();
+        assert_eq!(requests.len(), 3);
+        assert_eq!(requests[0].url.as_str(), "http://example.invalid/api/list");
+        assert_eq!(requests[1].url, requests[2].url);
+        assert_eq!(
+            requests[1].url.as_str(),
+            "http://example.invalid/api/item/7"
+        );
+    }
+
+    #[test]
+    fn http_source_retry_ownership_and_safety_are_independent_proofs() {
+        let (_mock, client) = mock_client();
+        let undeclared = TestDecoder::new("http://example.invalid/items".parse().unwrap());
+        let source = HttpPullSource::new(
+            undeclared,
+            HttpPullConfig {
+                client: client.clone(),
+                default_headers: HeaderMap::new(),
+                max_batch_size: 10,
+                retry: HttpRetryConfig::disabled(),
+                poll_timeout: None,
+            },
+        );
+        assert_eq!(
+            source.poll_retry_ownership(),
+            SourcePollRetryOwnership::NoNestedRetry
+        );
+        assert_eq!(source.poll_retry_safety(), None);
+
+        let safe = simple_poll::<serde_json::Value, _>(
+            "test.item.v1",
+            "http://example.invalid/items".parse().unwrap(),
+            |_response| Ok(Vec::new()),
+        );
+        let native_retry = HttpPullSource::new(
+            safe,
+            HttpPullConfig {
+                client,
+                default_headers: HeaderMap::new(),
+                max_batch_size: 10,
+                retry: HttpRetryConfig::default(),
+                poll_timeout: None,
+            },
+        );
+        assert_eq!(
+            native_retry.poll_retry_ownership(),
+            SourcePollRetryOwnership::HandlerOwned {
+                owner: "HttpRetryConfig"
+            }
+        );
+        assert_eq!(
+            native_retry.poll_retry_safety(),
+            Some(SourcePollRetrySafety::NonRetrySafe)
+        );
     }
 
     #[test]

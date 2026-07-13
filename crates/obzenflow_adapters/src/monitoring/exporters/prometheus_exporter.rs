@@ -9,10 +9,11 @@
 //! No collection logic, no dependencies on aggregators - pure export functionality.
 
 use obzenflow_core::event::observability::{HttpPullState, WaitReason};
+use obzenflow_core::event::payloads::observability_payload::RetryExhaustionCause;
 use obzenflow_core::event::status::processing_status::ErrorKind;
 use obzenflow_core::metrics::{
     AppMetricsSnapshot, ContractMetricEdgeKey, HistogramSnapshot, InfraMetricsSnapshot,
-    MetricsExporter, StageMetadata,
+    MetricsExporter, RetryMetricKey, StageMetadata,
 };
 use obzenflow_core::{FlowId, StageId};
 use std::error::Error;
@@ -1177,6 +1178,73 @@ impl PrometheusExporter {
                         "obzenflow_rate_limiter_bucket_capacity{{{}}} {}",
                         format_stage_labels(stage_id, metadata),
                         capacity
+                    )?;
+                }
+            }
+            writeln!(output)?;
+        }
+
+        // Logical retry attempts per terminal invocation. The journal terminal
+        // summary supplies exact count and sum without an invocation-ID label.
+        if !snapshot.retry_attempts_per_invocation.is_empty() {
+            writeln!(
+                output,
+                "# HELP obzenflow_retry_attempts_per_invocation Physical attempts per completed logical retry invocation"
+            )?;
+            writeln!(
+                output,
+                "# TYPE obzenflow_retry_attempts_per_invocation summary"
+            )?;
+            for (key, attempts) in &snapshot.retry_attempts_per_invocation {
+                if let Some(metadata) = snapshot.stage_metadata.get(&key.stage_id) {
+                    let labels = format_retry_labels(key, metadata);
+                    writeln!(
+                        output,
+                        "obzenflow_retry_attempts_per_invocation_sum{{{labels}}} {}",
+                        attempts.attempts_total
+                    )?;
+                    writeln!(
+                        output,
+                        "obzenflow_retry_attempts_per_invocation_count{{{labels}}} {}",
+                        attempts.invocations_total
+                    )?;
+                }
+            }
+            writeln!(output)?;
+        }
+
+        if !snapshot.retry_recovered_total.is_empty() {
+            writeln!(
+                output,
+                "# HELP obzenflow_retry_recovered_total Logical invocations that succeeded after retry"
+            )?;
+            writeln!(output, "# TYPE obzenflow_retry_recovered_total counter")?;
+            for (key, count) in &snapshot.retry_recovered_total {
+                if let Some(metadata) = snapshot.stage_metadata.get(&key.stage_id) {
+                    writeln!(
+                        output,
+                        "obzenflow_retry_recovered_total{{{}}} {}",
+                        format_retry_labels(key, metadata),
+                        count
+                    )?;
+                }
+            }
+            writeln!(output)?;
+        }
+
+        if !snapshot.retry_exhausted_total.is_empty() {
+            writeln!(
+                output,
+                "# HELP obzenflow_retry_exhausted_total Logical retry invocations that exhausted recovery"
+            )?;
+            writeln!(output, "# TYPE obzenflow_retry_exhausted_total counter")?;
+            for (key, count) in &snapshot.retry_exhausted_total {
+                if let Some(metadata) = snapshot.stage_metadata.get(&key.stage_id) {
+                    writeln!(
+                        output,
+                        "obzenflow_retry_exhausted_total{{{}}} {}",
+                        format_retry_labels(key, metadata),
+                        count
                     )?;
                 }
             }
@@ -2660,6 +2728,43 @@ fn format_stage_labels(stage_id: &StageId, metadata: &StageMetadata) -> String {
     }
 }
 
+fn format_retry_labels(key: &RetryMetricKey, metadata: &StageMetadata) -> String {
+    format!(
+        "{},attachment_id=\"{}\",surface=\"{}\",error_kind=\"{}\",exhaustion_cause=\"{}\"",
+        format_stage_labels(&key.stage_id, metadata),
+        escape_label(&key.attachment_id.to_string()),
+        key.surface.as_str(),
+        retry_error_kind_label(key.error_kind.as_ref()),
+        retry_exhaustion_cause_label(key.exhaustion_cause),
+    )
+}
+
+fn retry_error_kind_label(kind: Option<&ErrorKind>) -> &'static str {
+    match kind {
+        None => "none",
+        Some(ErrorKind::Timeout) => "timeout",
+        Some(ErrorKind::Remote) => "remote",
+        Some(ErrorKind::RateLimited) => "rate_limited",
+        Some(ErrorKind::PermanentFailure) => "permanent_failure",
+        Some(ErrorKind::Deserialization) => "deserialization",
+        Some(ErrorKind::Validation) => "validation",
+        Some(ErrorKind::Domain) => "domain",
+        Some(ErrorKind::Unknown) => "unknown",
+    }
+}
+
+fn retry_exhaustion_cause_label(cause: Option<RetryExhaustionCause>) -> &'static str {
+    match cause {
+        None => "none",
+        Some(RetryExhaustionCause::MaxAttempts) => "max_attempts",
+        Some(RetryExhaustionCause::TotalWallTime) => "total_wall_time",
+        Some(RetryExhaustionCause::DrainRequested) => "drain_requested",
+        Some(RetryExhaustionCause::RetryHintExceedsLimit) => "retry_hint_exceeds_limit",
+        Some(RetryExhaustionCause::PolicyRejected) => "policy_rejected",
+        Some(RetryExhaustionCause::TerminalFailure) => "terminal_failure",
+    }
+}
+
 /// Format label pairs for Prometheus
 fn format_labels(labels: &[(&str, &str)]) -> String {
     labels
@@ -2741,8 +2846,9 @@ mod tests {
         AiChunkingMetricsSnapshot, BoundaryDirection, CompositeContract, CompositeDurationBucket,
         CompositeDurationHistogram, CompositeDurationInvalid, CompositeMemberHealth,
         CompositePortTraffic, ContractViolationCauseLabel, InfraMetricsSnapshot,
+        RetryAttemptsPerInvocationSnapshot, RetryMetricSurface,
     };
-    use obzenflow_core::EventType;
+    use obzenflow_core::{EventType, Ulid};
     use std::collections::HashMap;
 
     #[test]
@@ -2783,6 +2889,87 @@ mod tests {
             escape_label(&stage_id.to_string())
         );
         assert!(output.contains(&expected));
+    }
+
+    #[test]
+    fn retry_terminal_aggregates_render_with_bounded_labels() {
+        let exporter = PrometheusExporter::new();
+        let stage_id = StageId::new();
+        let attachment_id = Ulid::new();
+        let metadata = StageMetadata {
+            name: "authorize".to_string(),
+            flow_name: "checkout".to_string(),
+            stage_type: obzenflow_core::event::context::StageType::Transform,
+            reference_mode: None,
+            flow_id: None,
+        };
+
+        let recovered_key = RetryMetricKey {
+            stage_id,
+            attachment_id,
+            surface: RetryMetricSurface::Effect,
+            error_kind: None,
+            exhaustion_cause: None,
+        };
+        let exhausted_key = RetryMetricKey {
+            stage_id,
+            attachment_id,
+            surface: RetryMetricSurface::Effect,
+            error_kind: Some(ErrorKind::RateLimited),
+            exhaustion_cause: Some(RetryExhaustionCause::MaxAttempts),
+        };
+
+        let mut snapshot = AppMetricsSnapshot::default();
+        snapshot.stage_metadata.insert(stage_id, metadata.clone());
+        snapshot.retry_attempts_per_invocation.insert(
+            recovered_key.clone(),
+            RetryAttemptsPerInvocationSnapshot {
+                invocations_total: 2,
+                attempts_total: 5,
+            },
+        );
+        snapshot.retry_attempts_per_invocation.insert(
+            exhausted_key.clone(),
+            RetryAttemptsPerInvocationSnapshot {
+                invocations_total: 1,
+                attempts_total: 3,
+            },
+        );
+        snapshot
+            .retry_recovered_total
+            .insert(recovered_key.clone(), 2);
+        snapshot
+            .retry_exhausted_total
+            .insert(exhausted_key.clone(), 1);
+
+        exporter.update_app_metrics(snapshot).unwrap();
+        let output = exporter.render_metrics().unwrap();
+        let recovered_labels = format_retry_labels(&recovered_key, &metadata);
+        let exhausted_labels = format_retry_labels(&exhausted_key, &metadata);
+
+        assert!(output.contains("# TYPE obzenflow_retry_attempts_per_invocation summary"));
+        assert!(output.contains(&format!(
+            "obzenflow_retry_attempts_per_invocation_sum{{{recovered_labels}}} 5"
+        )));
+        assert!(output.contains(&format!(
+            "obzenflow_retry_attempts_per_invocation_count{{{recovered_labels}}} 2"
+        )));
+        assert!(output.contains(&format!(
+            "obzenflow_retry_attempts_per_invocation_sum{{{exhausted_labels}}} 3"
+        )));
+        assert!(output.contains(&format!(
+            "obzenflow_retry_recovered_total{{{recovered_labels}}} 2"
+        )));
+        assert!(output.contains(&format!(
+            "obzenflow_retry_exhausted_total{{{exhausted_labels}}} 1"
+        )));
+        assert!(recovered_labels.contains("surface=\"effect\""));
+        assert!(recovered_labels.contains("error_kind=\"none\""));
+        assert!(exhausted_labels.contains("error_kind=\"rate_limited\""));
+        assert!(exhausted_labels.contains("exhaustion_cause=\"max_attempts\""));
+        assert!(!output.contains("effect_type="));
+        assert!(!output.contains("invocation="));
+        assert!(!output.contains("last_error="));
     }
 
     #[test]

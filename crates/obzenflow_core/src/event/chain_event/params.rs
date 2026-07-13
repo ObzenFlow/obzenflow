@@ -2,6 +2,8 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
+use crate::event::payloads::observability_payload::{RetryExhaustionCause, RetryLifecycleContext};
+use crate::event::status::processing_status::ErrorKind;
 use crate::event::types::{
     Count, DurationMs, EventId, JournalIndex, JournalPath, RouteKey, SeqNo, ViolationCause,
 };
@@ -59,4 +61,37 @@ pub struct CircuitBreakerSummaryEventParams {
     pub time_in_closed_seconds: f64,
     pub time_in_open_seconds: f64,
     pub time_in_half_open_seconds: f64,
+}
+
+/// Payload and lineage inputs for one scheduled retry after a failed attempt.
+#[derive(Debug, Clone)]
+pub struct RetryAttemptFailedEventParams {
+    pub context: RetryLifecycleContext,
+    pub attempt_number: u32,
+    pub max_attempts: u32,
+    pub error_kind: ErrorKind,
+    pub delay_ms: u64,
+    pub elapsed_ms: u64,
+    pub remaining_wall_ms: u64,
+    pub cause: Option<EventId>,
+}
+
+/// Payload and lineage inputs for a logical invocation that eventually succeeded.
+#[derive(Debug, Clone)]
+pub struct RetrySucceededAfterRetryEventParams {
+    pub context: RetryLifecycleContext,
+    pub total_attempts: u32,
+    pub total_duration_ms: u64,
+    pub cause: Option<EventId>,
+}
+
+/// Payload and lineage inputs for a logical invocation that could not continue.
+#[derive(Debug, Clone)]
+pub struct RetryExhaustedEventParams {
+    pub context: RetryLifecycleContext,
+    pub total_attempts: u32,
+    pub exhaustion_cause: RetryExhaustionCause,
+    pub last_error_kind: Option<ErrorKind>,
+    pub total_duration_ms: u64,
+    pub cause: Option<EventId>,
 }

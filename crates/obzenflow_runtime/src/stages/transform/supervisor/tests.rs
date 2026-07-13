@@ -105,6 +105,7 @@ async fn build_cycle_entry_harness<
     };
 
     let handler = handler_factory(t);
+    let (boundary_stop_controller, boundary_stop) = crate::stages::common::boundary_stop_channel();
     let mut ctx = TransformContext {
         handler,
         stage_id: t,
@@ -118,6 +119,8 @@ async fn build_cycle_entry_harness<
             crate::execution::RuntimeMode::Live,
             None,
         ),
+        boundary_stop_controller,
+        boundary_stop,
         effect_ports: EffectPortRegistry::new(),
         effect_declarations: Vec::new(),
         synthesized_outcomes: Vec::new(),
@@ -397,6 +400,7 @@ async fn build_transform_harness<
     backpressure_readers.insert(s, registry.reader(s, t));
 
     let handler = handler_factory(t);
+    let (boundary_stop_controller, boundary_stop) = crate::stages::common::boundary_stop_channel();
     let mut ctx = TransformContext {
         handler,
         stage_id: t,
@@ -410,6 +414,8 @@ async fn build_transform_harness<
             crate::execution::RuntimeMode::Live,
             None,
         ),
+        boundary_stop_controller,
+        boundary_stop,
         effect_ports: EffectPortRegistry::new(),
         effect_declarations: Vec::new(),
         synthesized_outcomes: Vec::new(),
@@ -793,9 +799,9 @@ async fn queued_external_event_is_observed_within_one_cap_while_wedged() {
         tokio_test::task::spawn(async { wrapped.dispatch_state(&state, &mut ctx).await });
     assert_pending!(task.poll());
 
-    // A control event arrives mid-wait. The chunk boundary returns the loop
-    // to dispatch_state, and the next entry delivers the queued event, so
-    // observation latency is at most one control cap plus one dispatch.
+    // A control event arrives mid-wait. The external-event wrapper now races
+    // active dispatch so a live boundary can observe stop intent immediately;
+    // older non-boundary waits may still return one chunk before transition.
     sender
         .send(TransformEvent::BeginDrain)
         .await
@@ -806,8 +812,19 @@ async fn queued_external_event_is_observed_within_one_cap_while_wedged() {
     )
     .await;
     let result = assert_ready!(task.poll());
-    assert!(matches!(result, Ok(EventLoopDirective::Continue)));
+    let transitioned_immediately = matches!(
+        &result,
+        Ok(EventLoopDirective::Transition(TransformEvent::BeginDrain))
+    );
+    assert!(
+        transitioned_immediately || matches!(&result, Ok(EventLoopDirective::Continue)),
+        "external drain is observed immediately or after at most one bounded chunk"
+    );
     drop(task);
+
+    if transitioned_immediately {
+        return;
+    }
 
     let mut task =
         tokio_test::task::spawn(async { wrapped.dispatch_state(&state, &mut ctx).await });

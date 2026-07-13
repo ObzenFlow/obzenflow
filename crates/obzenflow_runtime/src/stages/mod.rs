@@ -19,7 +19,8 @@ pub use common::{new_liveness_snapshots, LivenessSnapshots};
 pub use common::{
     EffectfulStatefulHandler, EffectfulTransformHandler, FiniteSourceHandler, HeartbeatConfig,
     InfiniteSourceHandler, ObserverHandler, ProcessingContext, ResourceManaged, SignalDecision,
-    SignalGate, SinkHandler, StatefulHandler, TransformHandler,
+    SignalGate, SinkHandler, SourcePollRetryOwnership, SourcePollRetrySafety, StatefulHandler,
+    TransformHandler,
 };
 
 // FLOWIP-115c runtime control-strategy hooks.

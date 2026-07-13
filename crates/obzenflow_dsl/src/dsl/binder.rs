@@ -20,14 +20,199 @@ use obzenflow_adapters::middleware::{
     MiddlewareOrigin, MiddlewareSurface, MiddlewareSurfaceAttachment, MiddlewareSurfaceKind,
     ProtectedUnit, ProtectedUnitId, SinkDeliverySurface, SinkDeliveryTarget, SinkDeliveryUnitId,
     SinkPolicy, SourcePolicy, SourcePollSurface, SourcePollUnitId, SourceStageIngressOwner,
+    TopologyMiddlewareConfigSlot,
 };
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::ingress::IngressBoundaryMiddleware;
 use obzenflow_core::ingress::IngressKey;
 use obzenflow_core::StageKey;
+use obzenflow_runtime::effects::{EffectDeclaration, EffectSafety, SinkDeliverySafety};
 use obzenflow_runtime::pipeline::config::StageConfig;
+use obzenflow_runtime::stages::common::handlers::{
+    SourcePollRetryOwnership, SourcePollRetrySafety,
+};
 use obzenflow_runtime::stages::source::strategies::CompletionGate;
 use std::sync::Arc;
+
+/// Whether the raw source handler executes a blocking or cancellable async poll.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SourcePollExecutionKind {
+    Synchronous,
+    Asynchronous,
+}
+
+/// Retry evidence captured from the concrete source handler before middleware
+/// wrapping erases its trait methods.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct SourcePollRetryEvidence {
+    pub execution_kind: SourcePollExecutionKind,
+    pub safety: Option<SourcePollRetrySafety>,
+    pub ownership: SourcePollRetryOwnership,
+    /// The declaration originates at an adapter request decoder. This affects
+    /// only the remediation shown for an absent proof; it cannot grant retry.
+    pub request_level_safety: bool,
+}
+
+impl SourcePollRetryEvidence {
+    pub(crate) const fn synchronous() -> Self {
+        Self {
+            execution_kind: SourcePollExecutionKind::Synchronous,
+            safety: None,
+            ownership: SourcePollRetryOwnership::NoNestedRetry,
+            request_level_safety: false,
+        }
+    }
+
+    pub(crate) const fn asynchronous(
+        safety: Option<SourcePollRetrySafety>,
+        ownership: SourcePollRetryOwnership,
+    ) -> Self {
+        Self {
+            execution_kind: SourcePollExecutionKind::Asynchronous,
+            safety,
+            ownership,
+            request_level_safety: false,
+        }
+    }
+
+    pub(crate) const fn asynchronous_request_level(
+        safety: Option<SourcePollRetrySafety>,
+        ownership: SourcePollRetryOwnership,
+    ) -> Self {
+        Self {
+            execution_kind: SourcePollExecutionKind::Asynchronous,
+            safety,
+            ownership,
+            request_level_safety: true,
+        }
+    }
+}
+
+pub(crate) fn is_retry_enabled_circuit_breaker(factory: &dyn MiddlewareFactory) -> bool {
+    factory.topology_config_slot() == Some(TopologyMiddlewareConfigSlot::CircuitBreaker)
+        && factory.hints().retry.is_some()
+}
+
+pub(crate) fn reject_handler_shell_retry(factory: &dyn MiddlewareFactory) -> Result<(), String> {
+    if is_retry_enabled_circuit_breaker(factory) {
+        return Err(
+            "circuit_breaker retry requires a source-poll, declared-effect, or sink-delivery attachment; handler-shell retry is not supported"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+pub(crate) fn register_retry_enabled_breaker(
+    factory: &dyn MiddlewareFactory,
+    already_seen: &mut bool,
+    surface: &str,
+    protected_unit: &str,
+) -> Result<(), String> {
+    if !is_retry_enabled_circuit_breaker(factory) {
+        return Ok(());
+    }
+    if *already_seen {
+        return Err(format!(
+            "circuit_breaker retry rejected for {surface} '{protected_unit}': multiple retry-enabled circuit breakers resolve to this protected unit; keep exactly one recovery owner"
+        ));
+    }
+    *already_seen = true;
+    Ok(())
+}
+
+fn validate_source_retry_attachment(
+    factory: &dyn MiddlewareFactory,
+    config: &StageConfig,
+    stage_type: StageType,
+    evidence: SourcePollRetryEvidence,
+) -> Result<(), String> {
+    if !is_retry_enabled_circuit_breaker(factory) {
+        return Ok(());
+    }
+
+    let (sync_trait, async_trait) = match stage_type {
+        StageType::FiniteSource => ("FiniteSourceHandler", "AsyncFiniteSourceHandler"),
+        StageType::InfiniteSource => ("InfiniteSourceHandler", "AsyncInfiniteSourceHandler"),
+        _ => ("SourceHandler", "AsyncSourceHandler"),
+    };
+
+    if evidence.execution_kind == SourcePollExecutionKind::Synchronous {
+        return Err(format!(
+            "circuit_breaker retry rejected for synchronous source '{}': max_total_wall_time and force-abort cannot pre-empt {sync_trait}::next(); use an async source with a poll timeout, or keep retry inside the handler",
+            config.name
+        ));
+    }
+
+    if let SourcePollRetryOwnership::HandlerOwned { owner } = evidence.ownership {
+        let remedy = if owner == "HttpRetryConfig" {
+            "use HttpRetryConfig::disabled() so the circuit-breaker boundary is the single retry owner".to_string()
+        } else {
+            format!(
+                "disable handler-owned retry '{owner}' so the circuit-breaker boundary is the single retry owner"
+            )
+        };
+        return Err(format!(
+            "circuit_breaker retry rejected for source-poll '{}': observed SourcePollRetryOwnership::HandlerOwned {{ owner: \"{owner}\" }}; {remedy}",
+            config.name
+        ));
+    }
+
+    match evidence.safety {
+        None if evidence.request_level_safety => Err(format!(
+            "circuit_breaker retry rejected for source-poll '{}': observed retry safety 'undeclared' because PullDecoder does not declare every generated request repeatable; call retry_safe_requests() after verifying the request contract, implement PullDecoder::request_retry_safety(), or remove retry",
+            config.name
+        )),
+        None => Err(format!(
+            "circuit_breaker retry rejected for source-poll '{}': retry safety is undeclared; implement {async_trait}::poll_retry_safety() returning Some(SourcePollRetrySafety::RetrySafeAfterErrorOrCancellation), or remove breaker retry",
+            config.name
+        )),
+        Some(SourcePollRetrySafety::NonRetrySafe) => Err(format!(
+            "circuit_breaker retry rejected for source-poll '{}': retry safety is SourcePollRetrySafety::NonRetrySafe; remove breaker retry or provide a different source whose poll is repeatable after error and cancellation",
+            config.name
+        )),
+        Some(SourcePollRetrySafety::RetrySafeAfterErrorOrCancellation) => Ok(()),
+    }
+}
+
+fn validate_effect_retry_attachment(
+    factory: &dyn MiddlewareFactory,
+    declaration: &EffectDeclaration,
+) -> Result<(), String> {
+    if !is_retry_enabled_circuit_breaker(factory) {
+        return Ok(());
+    }
+
+    match declaration.safety {
+        EffectSafety::Idempotent | EffectSafety::NonIdempotentRequiresKey => Ok(()),
+        EffectSafety::Transactional => Err(format!(
+            "circuit_breaker retry rejected for effect '{}': EffectSafety::Transactional commits inside the protected attempt and has no rollback-proof retry contract; remove retry or use an idempotent/keyed effect",
+            declaration.effect_type
+        )),
+    }
+}
+
+fn validate_sink_retry_attachment(
+    factory: &dyn MiddlewareFactory,
+    config: &StageConfig,
+    safety: Option<SinkDeliverySafety>,
+) -> Result<(), String> {
+    if !is_retry_enabled_circuit_breaker(factory) {
+        return Ok(());
+    }
+
+    match safety {
+        None => Err(format!(
+            "circuit_breaker retry rejected for sink-delivery '{}': delivery safety is undeclared; add delivery: idempotent, implement SinkHandler::delivery_safety(), or remove breaker retry",
+            config.name
+        )),
+        Some(SinkDeliverySafety::NonIdempotentExternal) => Err(format!(
+            "circuit_breaker retry rejected for sink-delivery '{}': delivery safety is SinkDeliverySafety::NonIdempotentExternal; declare idempotent delivery only if repeated delivery is absorbed, or remove breaker retry",
+            config.name
+        )),
+        Some(SinkDeliverySafety::IdempotentProjection) => Ok(()),
+    }
+}
 
 /// Map the DSL's middleware resolution provenance into the adapter-owned
 /// `MiddlewareOrigin`, dropping the DSL-only `overrode_config` detail so adapter
@@ -63,10 +248,12 @@ pub(crate) fn materialize_source_poll(
     factory: &dyn MiddlewareFactory,
     config: &StageConfig,
     stage_type: StageType,
+    retry_evidence: SourcePollRetryEvidence,
     control_middleware: &Arc<ControlMiddlewareAggregator>,
     origin: &MiddlewareOrigin,
     declaration_index: MiddlewareDeclarationIndex,
 ) -> Result<SourcePollBinding, String> {
+    validate_source_retry_attachment(factory, config, stage_type, retry_evidence)?;
     let surface = MiddlewareSurface::SourcePoll(SourcePollSurface {
         stage_id: config.stage_id,
     });
@@ -112,10 +299,12 @@ pub(crate) fn bind_effect_policy(
     config: &StageConfig,
     stage_type: StageType,
     control_middleware: &Arc<ControlMiddlewareAggregator>,
-    effect_type: &'static str,
+    effect_declaration: &EffectDeclaration,
     origin: &MiddlewareOrigin,
     declaration_index: MiddlewareDeclarationIndex,
 ) -> Result<EffectPolicyAttachment, String> {
+    validate_effect_retry_attachment(factory, effect_declaration)?;
+    let effect_type = effect_declaration.effect_type;
     let declaration = factory.declaration();
     if declaration.is_observer() {
         return Err(format!(
@@ -293,10 +482,12 @@ pub(crate) fn materialize_sink_delivery(
     factory: &dyn MiddlewareFactory,
     config: &StageConfig,
     stage_type: StageType,
+    delivery_safety: Option<SinkDeliverySafety>,
     control_middleware: &Arc<ControlMiddlewareAggregator>,
     origin: &MiddlewareOrigin,
     declaration_index: MiddlewareDeclarationIndex,
 ) -> Result<Arc<dyn SinkPolicy>, String> {
+    validate_sink_retry_attachment(factory, config, delivery_safety)?;
     let surface = MiddlewareSurface::SinkDelivery(SinkDeliverySurface {
         stage_id: config.stage_id,
         configured_target: None,

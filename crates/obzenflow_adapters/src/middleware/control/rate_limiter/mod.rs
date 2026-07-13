@@ -44,15 +44,17 @@
 //! deliberately no process-wide shared bucket. Quotas are per protected
 //! dependency, matching the FLOWIP-120c per-effect model.
 //!
-//! ## Admission accounting (FLOWIP-114m, FLOWIP-114o)
+//! ## Execution accounting (FLOWIP-114m, FLOWIP-114o, FLOWIP-115h)
 //!
-//! Counters increment at admission, not at committed output. On finite sources
-//! the limiter charges only successful non-empty batches; EOF, empty batches,
-//! and source errors consume no token, increment no admission counter, and emit
-//! no `Delayed` event. On async sources a drain may abandon an in-flight wait
-//! after the one-shot `Delayed` event has been emitted but before a token is
-//! consumed, so the abandoned poll charges no token; `delayed_total` and
-//! `events_total` are independent counters.
+//! Effect, pre-poll source, and sink admission reserve bucket capacity after any
+//! wait, but counters increment only in the non-awaiting executor-start
+//! transition. A later-policy rejection, cancellation before start, or
+//! `NotExecuted` settlement drops the reservation and refunds the token. Once
+//! execution starts, cancellation and failure remain charged. A finite source
+//! without boundary retry retains its established after-poll output-pacing
+//! rule. When boundary retry is enabled, the same finite-source limiter moves
+//! to executor-start accounting so every physical poll, including a failed
+//! attempt, is charged exactly once.
 
 mod admission_core;
 mod config;
@@ -60,12 +62,16 @@ mod factory;
 mod hook_adapters;
 mod telemetry;
 
-use admission_core::{acquire_admission, AdmissionDecision, RateLimitDelayEvent, RateLimiterCore};
+use admission_core::{
+    acquire_admission, AdmissionDecision, RateLimitDelayEvent, RateLimitReservation,
+    RateLimiterCore,
+};
 use config::ValidatedRateLimiterConfig;
 use telemetry::{delayed_event, rate_limiter_event};
 
 use crate::middleware::{EffectTypeKey, MiddlewareContext};
 use obzenflow_core::event::payloads::observability_payload::RateLimiterEvent;
+use obzenflow_core::MiddlewareContextKey;
 use obzenflow_core::{StageId, WriterId};
 use obzenflow_runtime::control_plane::{RateLimiterMetrics, RateLimiterSnapshotter};
 use std::sync::Arc;
@@ -82,6 +88,16 @@ pub use factory::{rate_limit, rate_limit_with_burst, RateLimiterBuilder, RateLim
 /// so its type path (and the derived family label) is stable across the
 /// FLOWIP-115d decomposition.
 pub struct RateLimiterFamily;
+
+/// Invocation-local reservations held between policy admission and the
+/// boundary executor-start transition. A vector keeps the slot correct even
+/// if a future composition permits more than one limiter in one policy onion.
+struct RateLimitReservationSlot;
+
+impl MiddlewareContextKey for RateLimitReservationSlot {
+    type Value = Vec<RateLimitReservation>;
+    const LABEL: &'static str = "rate_limit_execution_reservations";
+}
 
 /// Rate limiting middleware using token bucket algorithm.
 ///
@@ -213,18 +229,47 @@ impl RateLimiterMiddleware {
         }
     }
 
-    /// Shared async token-bucket acquisition. The effect-boundary
+    /// Shared async token-bucket reservation. The effect-boundary
     /// `EffectPolicy::admit`, the source-boundary `SourcePolicy` path, and the
     /// sink-delivery `SinkPolicy::admit` all delegate here through
     /// [`admission_core::acquire_admission`], so the live-I/O surfaces share one
-    /// accounting and lifecycle-event implementation. It awaits its permit with
-    /// a cancellable future instead of blocking the worker thread.
-    async fn acquire_permit_async(&self, ctx: &mut MiddlewareContext) {
+    /// wait and lifecycle-event implementation. It awaits capacity with a
+    /// cancellable future, then stores a reversible reservation in the
+    /// invocation-local context until executor start.
+    async fn reserve_permit_async(&self, ctx: &mut MiddlewareContext) {
         let writer_id = self.writer_id;
-        acquire_admission(&self.core, |info: RateLimitDelayEvent| {
+        let reservation = acquire_admission(&self.core, |info: RateLimitDelayEvent| {
             ctx.write_control_event(delayed_event(writer_id, info));
         })
         .await;
+        if let Some(reservations) = ctx.get_mut::<RateLimitReservationSlot>() {
+            reservations.push(reservation);
+        } else {
+            ctx.insert::<RateLimitReservationSlot>(vec![reservation]);
+        }
+    }
+
+    /// Commit all limiter reservations in this physical-attempt context.
+    /// This method does not await and is called immediately before executor
+    /// start. Removing the slot drops committed reservations harmlessly.
+    fn commit_permit_reservations(&self, ctx: &mut MiddlewareContext) {
+        if let Some(reservations) = ctx.remove::<RateLimitReservationSlot>() {
+            for reservation in reservations {
+                reservation.commit_execution();
+            }
+        }
+    }
+
+    /// Post-execution acquisition used only by finite source output pacing.
+    /// The physical poll has already happened, so this path commits its token
+    /// immediately and never leaves a pre-execution reservation behind.
+    async fn acquire_committed_permit_async(&self, ctx: &mut MiddlewareContext) {
+        let writer_id = self.writer_id;
+        let reservation = acquire_admission(&self.core, |info: RateLimitDelayEvent| {
+            ctx.write_control_event(delayed_event(writer_id, info));
+        })
+        .await;
+        reservation.commit_execution();
     }
 
     /// FLOWIP-115d: fail-fast ingress admission. Non-blocking: it never waits for

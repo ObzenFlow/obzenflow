@@ -214,6 +214,9 @@ pub enum InfiniteSourceAction<H> {
     /// Send EOF event downstream to signal completion
     SendEOF,
 
+    /// Commit retry lifecycle rows buffered until after terminal EOF.
+    FlushPostEofControlEvents,
+
     /// Send error event to journal for diagnostics
     SendError { message: String },
 
@@ -304,6 +307,10 @@ pub struct InfiniteSourceContext<H> {
     pub(crate) pending_outputs:
         VecDeque<crate::stages::common::supervision::backpressure_drain::PendingOutput>,
 
+    /// Boundary retry rows whose logical poll terminated as EOF or rejection.
+    /// `SendEOF` must commit terminal source truth before these rows flush.
+    pub(crate) post_eof_control_events: Vec<ChainEvent>,
+
     /// Backpressure activity pulse accumulator (Hz UI animation driver).
     pub(crate) backpressure_pulse: BackpressureActivityPulse,
 
@@ -353,6 +360,7 @@ impl<H> InfiniteSourceContext<H> {
             backpressure_writer: init.backpressure_writer,
             output_contract: init.output_contract,
             pending_outputs: VecDeque::new(),
+            post_eof_control_events: Vec::new(),
             backpressure_pulse: BackpressureActivityPulse::new(),
             backpressure_stall: None,
             _marker: PhantomData,
@@ -372,6 +380,7 @@ impl<H> Clone for InfiniteSourceAction<H> {
         match self {
             Self::AllocateResources => Self::AllocateResources,
             Self::SendEOF => Self::SendEOF,
+            Self::FlushPostEofControlEvents => Self::FlushPostEofControlEvents,
             Self::SendError { message } => Self::SendError {
                 message: message.clone(),
             },
@@ -388,6 +397,7 @@ impl<H> std::fmt::Debug for InfiniteSourceAction<H> {
         match self {
             Self::AllocateResources => write!(f, "AllocateResources"),
             Self::SendEOF => write!(f, "SendEOF"),
+            Self::FlushPostEofControlEvents => write!(f, "FlushPostEofControlEvents"),
             Self::SendError { message } => write!(f, "SendError({message:?})"),
             Self::PublishRunning => write!(f, "PublishRunning"),
             Self::WriteStageCompleted => write!(f, "WriteStageCompleted"),
@@ -529,6 +539,32 @@ impl<H: Send + Sync + 'static> FsmAction for InfiniteSourceAction<H> {
                     "Infinite source sent EOF and consumption_final"
                 );
                 Ok(())
+            }
+
+            InfiniteSourceAction::FlushPostEofControlEvents => {
+                let flow_context = FlowContext {
+                    flow_name: ctx.flow_name.clone(),
+                    flow_id: ctx.flow_id.to_string(),
+                    stage_name: ctx.stage_name.clone(),
+                    stage_id: ctx.stage_id,
+                    stage_type: StageType::InfiniteSource,
+                };
+                crate::stages::source::supervision::commit_post_eof_control_events(
+                    &mut ctx.post_eof_control_events,
+                    &flow_context,
+                    &ctx.data_journal,
+                    &ctx.system_journal,
+                    &ctx.instrumentation,
+                    &ctx.output_contract,
+                    &ctx.observers,
+                    ctx.runtime_execution.stage_scope(ctx.stage_id),
+                )
+                .await
+                .map_err(|error| {
+                    obzenflow_fsm::FsmError::HandlerError(format!(
+                        "Failed to flush post-EOF retry lifecycle events: {error}"
+                    ))
+                })
             }
 
             InfiniteSourceAction::SendError { message } => {

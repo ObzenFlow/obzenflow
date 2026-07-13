@@ -97,6 +97,15 @@ pub enum EffectError {
     #[error("effect execution failed: {0}")]
     Execution(String),
 
+    #[error("transient effect execution failed: {0}")]
+    TransientExecution(String),
+
+    #[error("effect rate limited: {message}")]
+    RateLimited {
+        message: String,
+        retry_after: Option<Duration>,
+    },
+
     #[error("effect replay archive failed: {0}")]
     ReplayArchive(String),
 }
@@ -106,6 +115,7 @@ impl EffectError {
         match self {
             EffectError::RecordedFailure { retry, .. }
             | EffectError::BoundaryRejected { retry, .. } => retry.is_retryable(),
+            EffectError::TransientExecution(_) | EffectError::RateLimited { .. } => true,
             EffectError::EffectProvenanceMismatch(_) => false,
             EffectError::IncompleteOutcomeGroup { .. } => false,
             EffectError::MissingRecordedEffect { .. }
@@ -121,7 +131,7 @@ impl EffectError {
             EffectError::Serialization(_)
             | EffectError::Journal(_)
             | EffectError::Execution(_)
-            | EffectError::ReplayArchive(_) => true,
+            | EffectError::ReplayArchive(_) => false,
         }
     }
 
@@ -148,6 +158,8 @@ impl EffectError {
             EffectError::TypedOutcomeCoordination { .. } => "typed_outcome_coordination",
             EffectError::TransactionalCommitMissing { .. } => "transactional_commit_missing",
             EffectError::Execution(_) => "execution",
+            EffectError::TransientExecution(_) => "transient_execution",
+            EffectError::RateLimited { .. } => "rate_limited",
             EffectError::ReplayArchive(_) => "replay_archive",
         }
         .into()
@@ -165,10 +177,12 @@ impl EffectError {
     pub fn semantic_reason(&self) -> std::borrow::Cow<'_, str> {
         match self {
             EffectError::Execution(message)
+            | EffectError::TransientExecution(message)
             | EffectError::Serialization(message)
             | EffectError::Journal(message)
             | EffectError::ReplayArchive(message)
             | EffectError::EffectProvenanceMismatch(message) => std::borrow::Cow::Borrowed(message),
+            EffectError::RateLimited { message, .. } => std::borrow::Cow::Borrowed(message),
             EffectError::RecordedFailure { error_message, .. } => {
                 std::borrow::Cow::Borrowed(error_message)
             }
@@ -279,5 +293,34 @@ mod tests {
             effect_type: "demo.effect".to_string(),
         };
         assert_eq!(infra.semantic_reason(), infra.to_string());
+    }
+
+    #[test]
+    fn only_typed_live_execution_failures_are_newly_retryable() {
+        assert!(EffectError::TransientExecution("temporary".to_string()).retryable());
+        assert!(EffectError::RateLimited {
+            message: "slow down".to_string(),
+            retry_after: Some(Duration::from_secs(2)),
+        }
+        .retryable());
+
+        assert!(!EffectError::Execution("unclassified".to_string()).retryable());
+        assert!(!EffectError::Serialization("bad input".to_string()).retryable());
+        assert!(!EffectError::Journal("offline".to_string()).retryable());
+        assert!(!EffectError::ReplayArchive("corrupt".to_string()).retryable());
+    }
+
+    #[test]
+    fn typed_live_failures_keep_stable_recorded_kind_and_reason() {
+        let transient = EffectError::TransientExecution("gateway reset".to_string());
+        assert_eq!(transient.error_type().as_ref(), "transient_execution");
+        assert_eq!(transient.semantic_reason(), "gateway reset");
+
+        let limited = EffectError::RateLimited {
+            message: "quota".to_string(),
+            retry_after: None,
+        };
+        assert_eq!(limited.error_type().as_ref(), "rate_limited");
+        assert_eq!(limited.semantic_reason(), "quota");
     }
 }

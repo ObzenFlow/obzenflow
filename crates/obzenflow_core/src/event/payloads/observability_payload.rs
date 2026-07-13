@@ -12,9 +12,13 @@
 //! • Top‑level enum uses `observability_type` (mirrors `content_type` in ChainEvent).
 //! • Sub‑enums use `stage_state`, `metrics_event`, `middleware_event`, and `action`.
 
+use crate::event::payloads::effect_payload::{EffectCursor, EffectType};
+use crate::event::status::processing_status::ErrorKind;
+use crate::event::types::EventId;
 use crate::id::StageId;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use ulid::Ulid;
 
 // =============================================================================
 //  Top‑level wrapper: what kind of observability fact is this?
@@ -263,30 +267,92 @@ pub enum BackpressureEvent {
 }
 
 // ---- Retry ---------------------------------------------------------------
+
+/// Stable identity shared by every lifecycle row for one logical retry invocation.
+///
+/// `attachment_id` is the core ULID projection of the middleware attachment identity.
+/// Adapter-owned attachment and protected-unit carrier types deliberately do not cross
+/// into this durable payload.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RetryLifecycleContext {
+    pub stage_id: StageId,
+    pub attachment_id: Ulid,
+    pub protected_unit: RetryProtectedUnit,
+    pub invocation: RetryInvocation,
+}
+
+/// Surface-native identity of one logical retry invocation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RetryInvocation {
+    SourcePoll { poll_id: EventId },
+    Effect { cursor: EffectCursor },
+    SinkDelivery { parent_event_id: EventId },
+}
+
+/// Durable identity of the live I/O unit protected by retry recovery.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RetryProtectedUnit {
+    SourcePoll,
+    Effect { effect_type: EffectType },
+    SinkDelivery { configured_target_id: Option<Ulid> },
+}
+
+/// Bounded reason that a logical retry invocation could not continue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RetryExhaustionCause {
+    MaxAttempts,
+    TotalWallTime,
+    DrainRequested,
+    RetryHintExceedsLimit,
+    PolicyRejected,
+    TerminalFailure,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum RetryEvent {
+    /// Legacy archive shape. New retry recovery does not construct or emit this action.
     AttemptStarted {
         attempt_number: u32,
         max_attempts: u32,
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         backoff_ms: Option<u64>,
     },
     AttemptFailed {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        context: Option<RetryLifecycleContext>,
         attempt_number: u32,
         max_attempts: u32,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        error_kind: Option<crate::event::status::processing_status::ErrorKind>,
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error_kind: Option<ErrorKind>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         delay_ms: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        elapsed_ms: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        remaining_wall_ms: Option<u64>,
     },
     SucceededAfterRetry {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        context: Option<RetryLifecycleContext>,
         total_attempts: u32,
         total_duration_ms: u64,
     },
     Exhausted {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        context: Option<RetryLifecycleContext>,
         total_attempts: u32,
-        last_error: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        exhaustion_cause: Option<RetryExhaustionCause>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        last_error_kind: Option<ErrorKind>,
+        /// Legacy unbounded error text retained only so old archive rows decode.
+        /// New constructors always leave this field absent.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        last_error: Option<String>,
         total_duration_ms: u64,
     },
 }

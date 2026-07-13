@@ -5,9 +5,13 @@
 use super::*;
 use crate::backpressure::{BackpressurePlan, BackpressureRegistry};
 use crate::id_conversions::StageIdExt;
+use obzenflow_core::event::chain_event::RetrySucceededAfterRetryEventParams;
+use obzenflow_core::event::payloads::observability_payload::{
+    RetryInvocation, RetryLifecycleContext, RetryProtectedUnit,
+};
 use obzenflow_core::event::{EventEnvelope, JournalEvent};
 use obzenflow_core::journal::{JournalError, JournalReader};
-use obzenflow_core::{JournalId, JournalOwner, JournalWriterId, TypedPayload};
+use obzenflow_core::{JournalId, JournalOwner, JournalWriterId, TypedPayload, Ulid};
 use obzenflow_topology::{TopologyBuilder, TypeHintInfo};
 use serde_json::json;
 use std::num::NonZeroU64;
@@ -102,6 +106,61 @@ impl<T: JournalEvent + 'static> Journal<T> for MemoryJournal<T> {
         let events = self.events();
         let start = events.len().saturating_sub(count);
         Ok(events[start..].iter().rev().cloned().collect())
+    }
+}
+
+struct FailAppendJournal {
+    id: JournalId,
+    owner: JournalOwner,
+}
+
+#[async_trait]
+impl Journal<ChainEvent> for FailAppendJournal {
+    fn id(&self) -> &JournalId {
+        &self.id
+    }
+
+    fn owner(&self) -> Option<&JournalOwner> {
+        Some(&self.owner)
+    }
+
+    async fn append(
+        &self,
+        _event: ChainEvent,
+        _parent: Option<&EventEnvelope<ChainEvent>>,
+    ) -> Result<EventEnvelope<ChainEvent>, JournalError> {
+        Err(JournalError::Implementation {
+            message: "injected terminal effect append failure".to_string(),
+            source: "test journal rejected terminal effect record".into(),
+        })
+    }
+
+    async fn read_all_unordered(&self) -> Result<Vec<EventEnvelope<ChainEvent>>, JournalError> {
+        Ok(Vec::new())
+    }
+
+    async fn read_event(
+        &self,
+        _event_id: &EventId,
+    ) -> Result<Option<EventEnvelope<ChainEvent>>, JournalError> {
+        Ok(None)
+    }
+
+    async fn reader_from(
+        &self,
+        _position: u64,
+    ) -> Result<Box<dyn JournalReader<ChainEvent>>, JournalError> {
+        Err(JournalError::Implementation {
+            message: "failing append journal has no reader".to_string(),
+            source: "test-only journal".into(),
+        })
+    }
+
+    async fn read_last_n(
+        &self,
+        _count: usize,
+    ) -> Result<Vec<EventEnvelope<ChainEvent>>, JournalError> {
+        Ok(Vec::new())
     }
 }
 
@@ -597,6 +656,7 @@ fn invocation_context_with_mode(
         backpressure_writer: BackpressureWriter::disabled(),
         emit_enabled: false,
         effect_boundary: None,
+        boundary_stop: crate::stages::common::BoundaryStopReceiver::default(),
         boundary_control_events: Arc::new(Mutex::new(Vec::new())),
     }
 }
@@ -2380,6 +2440,8 @@ async fn capture_replays_recorded_value_without_using_live_value() {
 
 struct AbortingBoundary;
 
+struct PanicOnReplayBoundary;
+
 #[async_trait]
 impl EffectBoundary for AbortingBoundary {
     async fn around_effect(
@@ -2399,6 +2461,32 @@ impl EffectBoundary for AbortingBoundary {
             }),
             control_events: Vec::new(),
         }
+    }
+}
+
+#[async_trait]
+impl EffectBoundary for PanicOnReplayBoundary {
+    async fn around_effect(
+        &self,
+        _identity: &EffectIdentity,
+        _event: &ChainEvent,
+        _execute: EffectExecution,
+    ) -> EffectBoundaryReport {
+        panic!("strict replay must not invoke the one-shot effect boundary")
+    }
+
+    async fn around_retryable_effect(
+        &self,
+        _identity: &EffectIdentity,
+        _event: &ChainEvent,
+        _execute: &mut dyn EffectExecutor,
+        _stop: crate::stages::common::BoundaryStopReceiver,
+    ) -> EffectBoundaryReport {
+        panic!("strict replay must not invoke effect retry machinery")
+    }
+
+    fn retry_enabled(&self, _identity: &EffectIdentity) -> bool {
+        panic!("strict replay must not query effect-boundary retry policy")
     }
 }
 
@@ -2485,11 +2573,13 @@ async fn boundary_abort_records_failure_with_cause_and_replays_deterministically
     );
     let replay_journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
     let replay_calls = Arc::new(AtomicUsize::new(0));
-    let mut replay = Effects::new(invocation_context(
+    let mut replay_ctx = invocation_context(
         replay_journal.clone(),
         parent_envelope(WriterId::from(stage_id)),
         Some(replay_history),
-    ));
+    );
+    replay_ctx.effect_boundary = Some(Arc::new(PanicOnReplayBoundary));
+    let mut replay = Effects::new(replay_ctx);
 
     let replay_err = replay
         .perform(CountingEffect {
@@ -2754,6 +2844,169 @@ struct CountingBoundary {
     consults: Arc<AtomicUsize>,
 }
 
+#[derive(Clone, Debug)]
+struct RetrySafeKeyedEffect {
+    calls: Arc<AtomicUsize>,
+    key_reads: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl Effect for RetrySafeKeyedEffect {
+    const EFFECT_TYPE: &'static str = "test.retry_safe_keyed";
+    const SCHEMA_VERSION: u32 = 1;
+    const SAFETY: EffectSafety = EffectSafety::NonIdempotentRequiresKey;
+
+    type Outcome = CountingOutput;
+
+    fn label(&self) -> &str {
+        "retry_safe_keyed"
+    }
+
+    fn canonical_input(&self) -> Value {
+        json!({ "id": 7 })
+    }
+
+    fn idempotency_key(&self) -> Option<IdempotencyKey> {
+        self.key_reads.fetch_add(1, Ordering::SeqCst);
+        Some(IdempotencyKey("stable-key".to_string()))
+    }
+
+    async fn execute(&self, _ctx: &mut EffectContext) -> Result<Self::Outcome, EffectError> {
+        let attempt = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+        if attempt == 1 {
+            Err(EffectError::TransientExecution("try again".to_string()))
+        } else {
+            Ok(CountingOutput { value: 8 })
+        }
+    }
+}
+
+struct RetryOnceBoundary;
+
+struct RetryOnceWithLifecycleBoundary {
+    stage_id: StageId,
+}
+
+#[async_trait]
+impl EffectBoundary for RetryOnceBoundary {
+    async fn around_effect(
+        &self,
+        _identity: &EffectIdentity,
+        _event: &ChainEvent,
+        execute: EffectExecution,
+    ) -> EffectBoundaryReport {
+        EffectBoundaryReport {
+            outcome: EffectBoundaryOutcome::Executed(execute.await),
+            control_events: Vec::new(),
+        }
+    }
+
+    async fn around_retryable_effect(
+        &self,
+        _identity: &EffectIdentity,
+        _event: &ChainEvent,
+        execute: &mut dyn EffectExecutor,
+        _stop: crate::stages::common::BoundaryStopReceiver,
+    ) -> EffectBoundaryReport {
+        let first = execute.attempt(std::num::NonZeroU32::MIN).await;
+        assert!(matches!(first, Err(EffectError::TransientExecution(_))));
+        let second = execute.attempt(std::num::NonZeroU32::new(2).unwrap()).await;
+        EffectBoundaryReport {
+            outcome: EffectBoundaryOutcome::Executed(second),
+            control_events: Vec::new(),
+        }
+    }
+}
+
+#[async_trait]
+impl EffectBoundary for RetryOnceWithLifecycleBoundary {
+    async fn around_effect(
+        &self,
+        _identity: &EffectIdentity,
+        _event: &ChainEvent,
+        execute: EffectExecution,
+    ) -> EffectBoundaryReport {
+        EffectBoundaryReport {
+            outcome: EffectBoundaryOutcome::Executed(execute.await),
+            control_events: Vec::new(),
+        }
+    }
+
+    async fn around_retryable_effect(
+        &self,
+        identity: &EffectIdentity,
+        event: &ChainEvent,
+        execute: &mut dyn EffectExecutor,
+        _stop: crate::stages::common::BoundaryStopReceiver,
+    ) -> EffectBoundaryReport {
+        let first = execute.attempt(std::num::NonZeroU32::MIN).await;
+        assert!(matches!(first, Err(EffectError::TransientExecution(_))));
+        let second = execute.attempt(std::num::NonZeroU32::new(2).unwrap()).await;
+        let lifecycle = ChainEventFactory::retry_succeeded_after_retry(
+            WriterId::from(self.stage_id),
+            RetrySucceededAfterRetryEventParams {
+                context: RetryLifecycleContext {
+                    stage_id: self.stage_id,
+                    attachment_id: Ulid::new(),
+                    protected_unit: RetryProtectedUnit::Effect {
+                        effect_type: identity.effect_type.to_string().into(),
+                    },
+                    invocation: RetryInvocation::Effect {
+                        cursor: identity.cursor.clone(),
+                    },
+                },
+                total_attempts: 2,
+                total_duration_ms: 1,
+                cause: Some(*event.id()),
+            },
+        );
+        EffectBoundaryReport {
+            outcome: EffectBoundaryOutcome::Executed(second),
+            control_events: vec![lifecycle],
+        }
+    }
+
+    fn retry_enabled(&self, identity: &EffectIdentity) -> bool {
+        matches!(identity.safety, EffectSafety::NonIdempotentRequiresKey)
+    }
+}
+
+struct RetryEnabledTransactionalBoundary;
+
+struct RetryEnabledKeyBoundary;
+
+#[async_trait]
+impl EffectBoundary for RetryEnabledKeyBoundary {
+    async fn around_effect(
+        &self,
+        _identity: &EffectIdentity,
+        _event: &ChainEvent,
+        _execute: EffectExecution,
+    ) -> EffectBoundaryReport {
+        panic!("missing retry key must reject before boundary execution")
+    }
+
+    fn retry_enabled(&self, identity: &EffectIdentity) -> bool {
+        matches!(identity.safety, EffectSafety::NonIdempotentRequiresKey)
+    }
+}
+
+#[async_trait]
+impl EffectBoundary for RetryEnabledTransactionalBoundary {
+    async fn around_effect(
+        &self,
+        _identity: &EffectIdentity,
+        _event: &ChainEvent,
+        _execute: EffectExecution,
+    ) -> EffectBoundaryReport {
+        panic!("transactional retry must reject before boundary execution")
+    }
+
+    fn retry_enabled(&self, identity: &EffectIdentity) -> bool {
+        matches!(identity.safety, EffectSafety::Transactional)
+    }
+}
+
 #[async_trait]
 impl EffectBoundary for CountingBoundary {
     async fn around_effect(
@@ -2804,6 +3057,138 @@ async fn missing_idempotency_key_is_unrecorded_and_unadmitted() {
         effect_records(&journal).is_empty(),
         "a deterministic validation error records nothing under the cursor"
     );
+}
+
+#[tokio::test]
+async fn retry_missing_idempotency_key_uses_locked_diagnostic_before_admission() {
+    let stage_id = StageId::new();
+    let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut ctx = invocation_context(
+        journal.clone(),
+        parent_envelope(WriterId::from(stage_id)),
+        None,
+    );
+    ctx.effect_boundary = Some(Arc::new(RetryEnabledKeyBoundary));
+    let mut effects = Effects::new(ctx);
+
+    let err = effects
+        .perform(KeylessEffect {
+            calls: calls.clone(),
+        })
+        .await
+        .expect_err("missing retry key must fail before execution");
+
+    assert_eq!(
+        err.semantic_reason(),
+        "circuit_breaker retry rejected for effect 'test.keyless': \
+         EffectSafety::NonIdempotentRequiresKey produced a missing or empty idempotency key; \
+         return a stable non-empty key from idempotency_key()"
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert!(effect_records(&journal).is_empty());
+}
+
+#[tokio::test]
+async fn live_retry_reinvokes_effect_with_one_key_read_and_one_terminal_record() {
+    let stage_id = StageId::new();
+    let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let key_reads = Arc::new(AtomicUsize::new(0));
+    let mut ctx = invocation_context(
+        journal.clone(),
+        parent_envelope(WriterId::from(stage_id)),
+        None,
+    );
+    ctx.effect_declarations
+        .push(EffectDeclaration::of::<RetrySafeKeyedEffect>());
+    ctx.effect_boundary = Some(Arc::new(RetryOnceBoundary));
+    let mut effects = Effects::new(ctx);
+
+    let output = effects
+        .perform(RetrySafeKeyedEffect {
+            calls: calls.clone(),
+            key_reads: key_reads.clone(),
+        })
+        .await
+        .expect("second physical attempt should succeed");
+
+    assert_eq!(output, CountingOutput { value: 8 });
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert_eq!(key_reads.load(Ordering::SeqCst), 1);
+    assert_eq!(effect_records(&journal).len(), 1);
+}
+
+#[tokio::test]
+async fn terminal_effect_append_failure_discards_buffered_retry_lifecycle() {
+    let stage_id = StageId::new();
+    let journal: Arc<dyn Journal<ChainEvent>> = Arc::new(FailAppendJournal {
+        id: JournalId::new(),
+        owner: JournalOwner::stage(stage_id),
+    });
+    let calls = Arc::new(AtomicUsize::new(0));
+    let key_reads = Arc::new(AtomicUsize::new(0));
+    let mut ctx = invocation_context(journal, parent_envelope(WriterId::from(stage_id)), None);
+    ctx.effect_declarations
+        .push(EffectDeclaration::of::<RetrySafeKeyedEffect>());
+    ctx.effect_boundary = Some(Arc::new(RetryOnceWithLifecycleBoundary { stage_id }));
+    let lifecycle_outbox = ctx.boundary_control_events.clone();
+    let mut effects = Effects::new(ctx);
+
+    let err = effects
+        .perform(RetrySafeKeyedEffect {
+            calls: calls.clone(),
+            key_reads: key_reads.clone(),
+        })
+        .await
+        .expect_err("terminal effect record append must fail");
+
+    assert!(matches!(err, EffectError::Journal(_)));
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert_eq!(key_reads.load(Ordering::SeqCst), 1);
+    assert!(
+        lifecycle_outbox
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_empty(),
+        "retry lifecycle must remain invocation-local when terminal effect truth did not commit"
+    );
+}
+
+#[tokio::test]
+async fn transactional_retry_is_rejected_before_port_or_boundary_execution() {
+    let stage_id = StageId::new();
+    let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut ports = EffectPortRegistry::new();
+    ports.insert::<dyn TransactionalEffectPort<TransactionalCountingEffect>>(
+        "tx",
+        Arc::new(TransactionalCountingPort {
+            calls: calls.clone(),
+            commit: true,
+        }),
+    );
+    let mut ctx = invocation_context_with_mode(
+        journal.clone(),
+        parent_envelope(WriterId::from(stage_id)),
+        None,
+        EffectRuntimeMode::Live,
+        ports,
+    );
+    ctx.effect_boundary = Some(Arc::new(RetryEnabledTransactionalBoundary));
+    let mut effects = Effects::new(ctx);
+
+    let err = effects
+        .perform(TransactionalCountingEffect {
+            value: 1,
+            normal_calls: Arc::new(AtomicUsize::new(0)),
+        })
+        .await
+        .expect_err("transactional retry must fail closed");
+
+    assert!(matches!(err, EffectError::BoundaryRejected { .. }));
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert!(effect_records(&journal).is_empty());
 }
 
 #[tokio::test]
@@ -3052,6 +3437,7 @@ async fn transactional_boundary_abort_restores_output_ordinal() {
         backpressure_writer: BackpressureWriter::disabled(),
         emit_enabled: false,
         effect_boundary: boundary,
+        boundary_stop: crate::stages::common::BoundaryStopReceiver::default(),
         boundary_control_events: Arc::new(Mutex::new(Vec::new())),
     };
 

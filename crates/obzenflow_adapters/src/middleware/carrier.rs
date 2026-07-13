@@ -422,6 +422,20 @@ impl MiddlewareAttachmentId {
     pub fn as_ulid(&self) -> obzenflow_core::Ulid {
         self.0
     }
+
+    pub(crate) fn retry_sink_target_projection(
+        &self,
+        target: &SinkConfiguredTargetKey,
+    ) -> obzenflow_core::Ulid {
+        let mut context = Context::new(&SHA256);
+        push_field(&mut context, "domain", "retry-sink-target:v1");
+        push_field(&mut context, "attachment_id", &self.as_ulid().to_string());
+        push_field(&mut context, "configured_target", &target.0);
+        let hash = context.finish();
+        let mut id_bytes = [0u8; 16];
+        id_bytes.copy_from_slice(&hash.as_ref()[..16]);
+        obzenflow_core::Ulid(u128::from_be_bytes(id_bytes))
+    }
 }
 
 fn push_field(context: &mut Context, label: &str, value: &str) {
@@ -1044,6 +1058,16 @@ mod tests {
 
         assert_eq!(first, second);
         assert_eq!(first.as_ulid(), second.as_ulid());
+
+        let sink_target = SinkConfiguredTargetKey("warehouse".to_string());
+        assert_eq!(
+            first.retry_sink_target_projection(&sink_target),
+            second.retry_sink_target_projection(&sink_target)
+        );
+        assert_ne!(
+            first.retry_sink_target_projection(&sink_target),
+            first.retry_sink_target_projection(&SinkConfiguredTargetKey("archive".to_string()))
+        );
 
         let other_origin = MiddlewareOrigin::Flow;
         let other_origin_request = MiddlewareAttachmentRequest {

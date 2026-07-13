@@ -9,12 +9,12 @@ use crate::stages::common::handlers::AsyncFiniteSourceHandler;
 use crate::stages::common::supervision::flow_context_factory::make_flow_context;
 use crate::stages::source::replay_lifecycle::ReplayCompletionGuard;
 use crate::stages::source::supervision::{
-    around_source_boundary, drain_pending_outputs_async, emit_batch_to_pending_outputs,
-    observe_source_boundary_rejection, stage_boundary_control_events, stage_source_poll_outputs,
-    SourcePollObservation,
+    around_retryable_source_boundary, drain_pending_outputs_async, emit_batch_to_pending_outputs,
+    observe_source_boundary_rejection, stage_source_poll_outputs, SourcePollObservation,
 };
 use crate::stages::source::{
-    SourceBoundary, SourceBoundaryOutcome, SourcePollCompletion, SourcePollReport,
+    SourceBoundary, SourceBoundaryOutcome, SourcePollCompletion, SourcePollExecution,
+    SourcePollExecutor, SourcePollReport,
 };
 use crate::supervised_base::base::Supervisor;
 use crate::supervised_base::{EventLoopDirective, EventReceiver, HandlerSupervised, StateWatcher};
@@ -31,6 +31,26 @@ use super::fsm::{
     FiniteSourceAction, FiniteSourceContext, FiniteSourceEvent, FiniteSourceState,
     SourceCompletionOrigin,
 };
+
+struct AsyncFinitePollExecutor<'a, H> {
+    handler: &'a mut H,
+}
+
+impl<H: AsyncFiniteSourceHandler + Send> SourcePollExecutor for AsyncFinitePollExecutor<'_, H> {
+    fn attempt<'a>(&'a mut self, _attempt: std::num::NonZeroU32) -> SourcePollExecution<'a> {
+        Box::pin(async move {
+            let poll_started_at = Instant::now();
+            let result = self.handler.next().await.map(|next| match next {
+                Some(events) => SourcePollCompletion::Batch(events),
+                None => SourcePollCompletion::Eof,
+            });
+            SourcePollReport {
+                result,
+                poll_duration: poll_started_at.elapsed(),
+            }
+        })
+    }
+}
 
 /// Supervisor for async finite source stages
 pub(crate) struct AsyncFiniteSourceSupervisor<
@@ -69,17 +89,13 @@ pub(crate) struct AsyncFiniteSourceSupervisor<
     /// Runtime-neutral source boundary seam (FLOWIP-115a).
     pub(crate) source_boundary: Option<Arc<dyn SourceBoundary>>,
 
-    /// EOF was observed by the source boundary after emitting control events;
-    /// drain those events before transitioning to completion.
-    pub(crate) pending_boundary_eof: bool,
+    /// A graceful drain arrived while a live boundary invocation was active.
+    /// The attempt may settle, then staged outputs drain before this transition.
+    pub(crate) pending_external_drain: bool,
 
-    /// Error was observed by the source boundary after emitting control events;
-    /// drain those events before transitioning to failure.
+    /// A terminal source error has been staged as normal surface truth. Fail
+    /// the stage only after that output has crossed the ordinary committer.
     pub(crate) pending_boundary_error: Option<String>,
-
-    /// Rejection was observed by the source boundary after emitting control
-    /// events; drain those events before transitioning to completion.
-    pub(crate) pending_boundary_rejected: bool,
 }
 
 impl<H: AsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Supervisor
@@ -237,6 +253,7 @@ impl<H: AsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
                             next_state: FiniteSourceState::Drained,
                             actions: vec![
                                 FiniteSourceAction::SendEOF,
+                                FiniteSourceAction::FlushPostEofControlEvents,
                                 FiniteSourceAction::WriteStageCompleted,
                                 FiniteSourceAction::Cleanup,
                             ],
@@ -402,18 +419,16 @@ impl<H: AsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
                     return Ok(directive);
                 }
 
-                if self.pending_boundary_eof {
-                    self.pending_boundary_eof = false;
-                    return Ok(EventLoopDirective::Transition(FiniteSourceEvent::Completed));
-                }
                 if let Some(error) = self.pending_boundary_error.take() {
                     return Ok(EventLoopDirective::Transition(FiniteSourceEvent::Error(
                         error,
                     )));
                 }
-                if self.pending_boundary_rejected {
-                    self.pending_boundary_rejected = false;
-                    return Ok(EventLoopDirective::Transition(FiniteSourceEvent::Completed));
+                if self.pending_external_drain {
+                    self.pending_external_drain = false;
+                    return Ok(EventLoopDirective::Transition(
+                        FiniteSourceEvent::BeginDrain,
+                    ));
                 }
 
                 ctx.instrumentation
@@ -567,34 +582,45 @@ impl<H: AsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
                     }
                 } else {
                     let source_boundary = self.source_boundary.clone();
-                    let boundary_future = around_source_boundary(
-                        source_boundary,
-                        Box::pin(async {
-                            let poll_started_at = Instant::now();
-                            let result = self.handler.next().await.map(|next| match next {
-                                Some(events) => SourcePollCompletion::Batch(events),
-                                None => SourcePollCompletion::Eof,
-                            });
-                            SourcePollReport {
-                                result,
-                                poll_duration: poll_started_at.elapsed(),
-                            }
-                        }),
-                    );
+                    let settle_active_attempt = source_boundary
+                        .as_ref()
+                        .is_some_and(|boundary| boundary.graceful_drain_settles_active_attempt());
+                    let (stop_controller, stop) = crate::stages::common::boundary_stop_channel();
+                    let mut executor = AsyncFinitePollExecutor {
+                        handler: &mut self.handler,
+                    };
+                    let boundary_future =
+                        around_retryable_source_boundary(source_boundary, &mut executor, stop);
+                    tokio::pin!(boundary_future);
 
-                    let report = tokio::select! {
-                        biased;
-                        maybe_event = self.external_events.recv() => {
-                            match maybe_event {
-                                Some(event) => return Ok(EventLoopDirective::Transition(event)),
-                                None => {
-                                    return Ok(EventLoopDirective::Transition(FiniteSourceEvent::Error(
-                                        "External control channel closed".to_string(),
-                                    )));
+                    let report = loop {
+                        tokio::select! {
+                            biased;
+                            maybe_event = self.external_events.recv() => {
+                                match maybe_event {
+                                    Some(FiniteSourceEvent::BeginDrain) => {
+                                        if !settle_active_attempt {
+                                            return Ok(EventLoopDirective::Transition(
+                                                FiniteSourceEvent::BeginDrain,
+                                            ));
+                                        }
+                                        stop_controller.request_drain();
+                                        self.pending_external_drain = true;
+                                    }
+                                    Some(event) => {
+                                        stop_controller.request_abort();
+                                        return Ok(EventLoopDirective::Transition(event));
+                                    }
+                                    None => {
+                                        stop_controller.request_abort();
+                                        return Ok(EventLoopDirective::Transition(FiniteSourceEvent::Error(
+                                            "External control channel closed".to_string(),
+                                        )));
+                                    }
                                 }
                             }
+                            report = &mut boundary_future => break report,
                         }
-                        report = boundary_future => report,
                     };
 
                     let source_poll_observation = SourcePollObservation::new(
@@ -619,18 +645,8 @@ impl<H: AsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
                                 &reason,
                             )
                             .await?;
-                            if stage_boundary_control_events(
-                                control_events,
-                                &stage_flow_context,
-                                &ctx.instrumentation,
-                                observer_scope,
-                                &mut ctx.pending_outputs,
-                            ) {
-                                self.pending_boundary_rejected = true;
-                                Ok(EventLoopDirective::Continue)
-                            } else {
-                                Ok(EventLoopDirective::Transition(FiniteSourceEvent::Completed))
-                            }
+                            ctx.post_eof_control_events = control_events;
+                            Ok(EventLoopDirective::Transition(FiniteSourceEvent::Completed))
                         }
                         SourceBoundaryOutcome::Polled(poll) => match poll.result {
                             Ok(SourcePollCompletion::Batch(mut events)) if !events.is_empty() => {
@@ -702,16 +718,8 @@ impl<H: AsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
                                             crate::stages::observer::SourcePollObserverOutcome::Eof,
                                         )
                                         .await?;
-                                    stage_source_poll_outputs(
-                                        control_events,
-                                        &stage_flow_context,
-                                        &ctx.instrumentation,
-                                        Duration::from_nanos(0),
-                                        observer_scope,
-                                        &mut ctx.pending_outputs,
-                                    );
-                                    self.pending_boundary_eof = true;
-                                    Ok(EventLoopDirective::Continue)
+                                    ctx.post_eof_control_events = control_events;
+                                    Ok(EventLoopDirective::Transition(FiniteSourceEvent::Completed))
                                 }
                             }
                             Err(e) => {
@@ -721,40 +729,33 @@ impl<H: AsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
                                     "Async finite source handler.next() returned error"
                                 );
                                 let error = e.to_string();
-                                if report.control_events.is_empty() {
-                                    source_poll_observation
-                                        .observe_empty(
-                                            poll.poll_duration,
-                                            crate::stages::observer::SourcePollObserverOutcome::Error {
-                                                message: error.clone(),
-                                            },
-                                        )
-                                        .await?;
-                                    Ok(EventLoopDirective::Transition(FiniteSourceEvent::Error(
-                                        error,
-                                    )))
-                                } else {
-                                    let mut control_events = report.control_events;
-                                    source_poll_observation
-                                        .observe(
-                                            control_events.as_mut_slice(),
-                                            Duration::from_nanos(0),
-                                            crate::stages::observer::SourcePollObserverOutcome::Error {
-                                                message: error.clone(),
-                                            },
-                                        )
-                                        .await?;
-                                    stage_source_poll_outputs(
-                                        control_events,
-                                        &stage_flow_context,
-                                        &ctx.instrumentation,
-                                        Duration::from_nanos(0),
-                                        observer_scope,
-                                        &mut ctx.pending_outputs,
-                                    );
-                                    self.pending_boundary_error = Some(error);
-                                    Ok(EventLoopDirective::Continue)
-                                }
+                                let mut outputs = vec![
+                                    crate::stages::source::supervision::terminal_source_error_event(
+                                        WriterId::from(self.stage_id),
+                                        "async_finite",
+                                        &e,
+                                    ),
+                                ];
+                                outputs.extend(report.control_events);
+                                source_poll_observation
+                                    .observe(
+                                        outputs.as_mut_slice(),
+                                        poll.poll_duration,
+                                        crate::stages::observer::SourcePollObserverOutcome::Error {
+                                            message: error.clone(),
+                                        },
+                                    )
+                                    .await?;
+                                stage_source_poll_outputs(
+                                    outputs,
+                                    &stage_flow_context,
+                                    &ctx.instrumentation,
+                                    poll.poll_duration,
+                                    observer_scope,
+                                    &mut ctx.pending_outputs,
+                                );
+                                self.pending_boundary_error = Some(error);
+                                Ok(EventLoopDirective::Continue)
                             }
                         },
                     }
@@ -778,5 +779,45 @@ impl<H: AsyncFiniteSourceHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
                 unreachable!("PhantomData variant should never be instantiated")
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod retry_executor_tests {
+    use super::*;
+    use crate::stages::common::handlers::source::SourceError;
+
+    #[derive(Clone, Debug, Default)]
+    struct FailThenEof {
+        calls: usize,
+    }
+
+    #[async_trait::async_trait]
+    impl AsyncFiniteSourceHandler for FailThenEof {
+        async fn next(&mut self) -> Result<Option<Vec<obzenflow_core::ChainEvent>>, SourceError> {
+            self.calls += 1;
+            if self.calls == 1 {
+                Err(SourceError::Transport("temporary".to_string()))
+            } else {
+                Ok(None)
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn executor_reinvokes_the_same_async_handler_serially() {
+        let mut handler = FailThenEof::default();
+        let mut executor = AsyncFinitePollExecutor {
+            handler: &mut handler,
+        };
+
+        let first = executor.attempt(std::num::NonZeroU32::MIN).await;
+        assert!(matches!(first.result, Err(SourceError::Transport(_))));
+
+        let second = executor
+            .attempt(std::num::NonZeroU32::new(2).unwrap())
+            .await;
+        assert!(matches!(second.result, Ok(SourcePollCompletion::Eof)));
+        assert_eq!(handler.calls, 2);
     }
 }

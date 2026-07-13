@@ -107,6 +107,7 @@ pub struct SynthesizedOutcomeRegistration {
     pub kind: SynthesizedOutcomeKind,
 }
 
+#[derive(Clone)]
 pub struct EffectInvocationContext {
     pub flow_id: FlowId,
     pub stage_id: StageId,
@@ -132,6 +133,9 @@ pub struct EffectInvocationContext {
     pub backpressure_writer: BackpressureWriter,
     pub emit_enabled: bool,
     pub effect_boundary: Option<Arc<dyn EffectBoundary>>,
+    /// Ephemeral runtime stop intent for the active live boundary invocation.
+    /// It is never persisted and replay returns before consulting it.
+    pub boundary_stop: crate::stages::common::BoundaryStopReceiver,
     pub boundary_control_events: Arc<Mutex<Vec<ChainEvent>>>,
     /// FLOWIP-010 §7: build-resolved lineage policy from stage resources,
     /// consumed as data when effect facts derive from the parent event.

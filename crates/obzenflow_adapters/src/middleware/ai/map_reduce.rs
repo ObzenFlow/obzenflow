@@ -11,9 +11,7 @@
 //!   marker when a chunk produces no partial output.
 
 use crate::middleware::{
-    context_keys::{
-        AiMapReduceChunkContext, AiMapReduceChunkContextKey, CircuitBreakerShouldRetry,
-    },
+    context_keys::{AiMapReduceChunkContext, AiMapReduceChunkContextKey},
     ControlMiddlewareRole, Middleware, MiddlewareAction, MiddlewareContext, MiddlewareFactory,
     MiddlewareOverrideKey, MiddlewarePlanContribution, SourceMiddlewarePhase,
     TopologyMiddlewareConfigSlot,
@@ -506,17 +504,6 @@ where
         outputs: &[ChainEvent],
         ctx: &mut MiddlewareContext,
     ) {
-        // Integrated retry: do not surface chunk_failed markers until the terminal attempt.
-        if ctx
-            .get::<CircuitBreakerShouldRetry>()
-            .copied()
-            .unwrap_or(false)
-        {
-            remove_control_events_by_type(ctx, CHUNK_FAILED_EVENT_TYPE);
-            remove_control_events_by_type(ctx, MAP_FAILURE_EVENT_TYPE);
-            return;
-        }
-
         if has_typed_output::<Partial>(outputs) {
             // We observed at least one partial output, so clear the pre-allocated
             // failure markers for this attempt.
@@ -996,41 +983,6 @@ mod tests {
         assert_eq!(decoded.job_key, job_key);
         assert_eq!(decoded.chunk_index, 1);
         assert_eq!(decoded.chunk_count, 3);
-    }
-
-    #[test]
-    fn map_wrapper_clears_failure_markers_when_retry_will_happen() {
-        let middleware = mk_map_middleware();
-        let mut ctx = MiddlewareContext::live_handler();
-
-        let parent = ChainEventFactory::data_event(writer_id(), "job", json!({}));
-        let chunk_payload = TestChunkEnvelope {
-            chunk_index: 0,
-            chunk_count: 1,
-            planning: ChunkPlanningSummary {
-                input_items_total: 0,
-                planned_items_total: 0,
-                excluded_items_total: 0,
-            },
-        };
-
-        let chunk_event = ChainEventFactory::derived_data_event(
-            writer_id(),
-            &parent,
-            TestChunkEnvelope::versioned_event_type(),
-            serde_json::to_value(chunk_payload).expect("chunk should serialize"),
-            obzenflow_core::config::LineagePolicy::default(),
-        );
-
-        assert!(matches!(
-            middleware.pre_handle(&chunk_event, &mut ctx),
-            MiddlewareAction::Continue
-        ));
-        assert_eq!(ctx.control_events().len(), 2);
-
-        ctx.insert::<CircuitBreakerShouldRetry>(true);
-        middleware.post_handle(&chunk_event, &[], &mut ctx);
-        assert!(ctx.control_events().is_empty());
     }
 
     #[test]

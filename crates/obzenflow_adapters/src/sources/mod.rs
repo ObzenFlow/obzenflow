@@ -14,5 +14,7 @@ pub use http::{HttpSource, HttpSourceConfig};
 pub use http_pull::{
     simple_poll, CursorlessPullDecoder, DecodeError, DecodeResult, FnPullDecoder, HttpPollConfig,
     HttpPollConfigBuilder, HttpPollSource, HttpPullConfig, HttpPullConfigBuilder, HttpPullSource,
-    HttpResponse, ListDetailDecoder, ListDetailDecoderBuilder, PullDecoder,
+    HttpResponse, HttpRetryConfig, ListDetailDecoder, ListDetailDecoderBuilder, PullDecoder,
 };
+
+pub use obzenflow_runtime::stages::{SourcePollRetryOwnership, SourcePollRetrySafety};

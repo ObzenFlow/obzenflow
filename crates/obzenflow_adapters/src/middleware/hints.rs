@@ -31,18 +31,18 @@ pub struct MiddlewareHints {
 /// Hints about retry behavior
 #[derive(Debug, Clone)]
 pub struct RetryHint {
-    /// Maximum number of retry attempts
+    /// Maximum total physical executions, including the initial attempt.
     pub max_attempts: Attempts,
     /// Backoff strategy for retries
     pub backoff: BackoffKind,
 }
 
-/// Number of retry attempts
+/// Total physical execution budget, including the initial attempt.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Attempts {
     /// A specific finite number of attempts
     Finite(usize),
-    /// Infinite retries (dangerous!)
+    /// Unbounded physical executions (dangerous!).
     Infinite,
 }
 

@@ -119,6 +119,8 @@ impl<H: UnifiedStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static
             .emit_interval
             .or_else(|| handler.emit_interval_hint());
         let initial_state = handler.initial_state();
+        let (boundary_stop_controller, boundary_stop) =
+            crate::stages::common::boundary_stop_channel();
         let context = StatefulContext {
             handler: Arc::new(handler),
             stage_id: self.config.stage_id,
@@ -130,6 +132,8 @@ impl<H: UnifiedStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static
             data_journal: self.resources.data_journal.clone(),
             effect_history: None,
             runtime_execution: self.resources.runtime_execution.clone(),
+            boundary_stop_controller,
+            boundary_stop,
             effect_ports: self.resources.effect_ports.clone(),
             effect_declarations: self.resources.effect_declarations.clone(),
             last_input_position: None,

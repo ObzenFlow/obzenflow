@@ -3,6 +3,8 @@
 // https://obzenflow.dev
 
 use super::*;
+use crate::stages::common::BoundaryStopReceiver;
+use std::num::NonZeroU32;
 
 /// Identity of the effect a boundary policy guards (FLOWIP-120c gap G3).
 ///
@@ -30,6 +32,15 @@ pub struct EffectIdentity {
 pub type EffectExecution = std::pin::Pin<
     Box<dyn std::future::Future<Output = Result<Vec<ChainEvent>, EffectError>> + Send>,
 >;
+
+/// Re-invokable execution seam for one live declared-effect invocation.
+///
+/// Each returned future owns its attempt captures, allowing a retry-aware
+/// boundary to execute attempts serially while the outer `Effects::perform`
+/// call retains the cursor and terminal commit authority.
+pub trait EffectExecutor: Send {
+    fn attempt(&mut self, attempt: NonZeroU32) -> EffectExecution;
+}
 
 /// Structured, policy-neutral reason carried by a boundary abort so the
 /// rejection is recorded under the effect cursor and replays deterministically.
@@ -82,4 +93,27 @@ pub trait EffectBoundary: Send + Sync {
         event: &ChainEvent,
         execute: EffectExecution,
     ) -> EffectBoundaryReport;
+
+    /// Retry-aware entry point. Existing implementations remain source
+    /// compatible and execute once through `around_effect`; retry-owning
+    /// boundaries override this method and may call the executor again.
+    async fn around_retryable_effect(
+        &self,
+        identity: &EffectIdentity,
+        event: &ChainEvent,
+        execute: &mut dyn EffectExecutor,
+        _stop: BoundaryStopReceiver,
+    ) -> EffectBoundaryReport {
+        self.around_effect(identity, event, execute.attempt(NonZeroU32::MIN))
+            .await
+    }
+
+    /// Whether this boundary has live retry enabled for the protected effect.
+    ///
+    /// Materialisation is the primary safety gate. This defaulted query gives
+    /// the runtime a defensive rejection for transactional effects when a
+    /// custom caller bypasses ordinary materialisation.
+    fn retry_enabled(&self, _identity: &EffectIdentity) -> bool {
+        false
+    }
 }

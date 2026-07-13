@@ -9,6 +9,7 @@
 
 use crate::event::context::StageType;
 use crate::event::observability::HttpSurfaceRouteMetricsSnapshot;
+use crate::event::payloads::observability_payload::{RetryExhaustionCause, RetryProtectedUnit};
 use crate::event::status::processing_status::ErrorKind;
 use crate::event::system_event::{ContractName, ContractResultStatusLabel, SystemFeedRole};
 use crate::event::types::EventType;
@@ -22,6 +23,7 @@ use crate::metrics::Percentile;
 use crate::time::MetricsDuration;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use ulid::Ulid;
 
 /// Snapshot of application-level metrics derived from the event stream
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -142,6 +144,19 @@ pub struct AppMetricsSnapshot {
     /// Rate limiter bucket capacity by stage (FLOWIP-059a-3 Issue 3).
     pub rate_limiter_bucket_capacity: HashMap<StageId, f64>,
 
+    /// Exact logical retry-invocation count and attempt sum projected from
+    /// terminal retry lifecycle summaries.
+    #[serde(default)]
+    pub retry_attempts_per_invocation: HashMap<RetryMetricKey, RetryAttemptsPerInvocationSnapshot>,
+
+    /// Logical invocations that succeeded after at least one retry.
+    #[serde(default)]
+    pub retry_recovered_total: HashMap<RetryMetricKey, u64>,
+
+    /// Logical invocations that emitted a typed exhaustion summary.
+    #[serde(default)]
+    pub retry_exhausted_total: HashMap<RetryMetricKey, u64>,
+
     /// Backpressure window per edge (upstream, downstream) (FLOWIP-086k).
     pub backpressure_window: HashMap<(StageId, StageId), u64>,
 
@@ -256,6 +271,57 @@ pub struct ContractMetricEdgeKey {
     pub selected_event_type: Option<EventType>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub feed_role: Option<SystemFeedRole>,
+}
+
+/// Bounded live-I/O surface used as a retry metric label.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RetryMetricSurface {
+    SourcePoll,
+    Effect,
+    SinkDelivery,
+}
+
+impl RetryMetricSurface {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::SourcePoll => "source_poll",
+            Self::Effect => "effect",
+            Self::SinkDelivery => "sink_delivery",
+        }
+    }
+}
+
+impl From<&RetryProtectedUnit> for RetryMetricSurface {
+    fn from(value: &RetryProtectedUnit) -> Self {
+        match value {
+            RetryProtectedUnit::SourcePoll => Self::SourcePoll,
+            RetryProtectedUnit::Effect { .. } => Self::Effect,
+            RetryProtectedUnit::SinkDelivery { .. } => Self::SinkDelivery,
+        }
+    }
+}
+
+/// Bounded dimensions for logical retry metrics.
+///
+/// Invocation IDs, protected-unit names, effect cursors, sink targets, and raw
+/// error text are deliberately excluded from this key.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct RetryMetricKey {
+    pub stage_id: StageId,
+    pub attachment_id: Ulid,
+    pub surface: RetryMetricSurface,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_kind: Option<ErrorKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exhaustion_cause: Option<RetryExhaustionCause>,
+}
+
+/// Exact aggregate behind the attempts-per-invocation Prometheus summary.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RetryAttemptsPerInvocationSnapshot {
+    pub invocations_total: u64,
+    pub attempts_total: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -553,6 +619,9 @@ impl Default for AppMetricsSnapshot {
             rate_limiter_delay_seconds_total: HashMap::new(),
             rate_limiter_bucket_tokens: HashMap::new(),
             rate_limiter_bucket_capacity: HashMap::new(),
+            retry_attempts_per_invocation: HashMap::new(),
+            retry_recovered_total: HashMap::new(),
+            retry_exhausted_total: HashMap::new(),
             backpressure_window: HashMap::new(),
             backpressure_in_flight: HashMap::new(),
             backpressure_credits: HashMap::new(),

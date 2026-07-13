@@ -34,6 +34,7 @@ pub use factory::ChainEventFactory;
 pub use model::{ChainEvent, ChainEventContent, CorrelationContext, ReplayDisposition};
 pub use params::{
     CircuitBreakerSummaryEventParams, ConsumptionFinalEventParams, ConsumptionProgressEventParams,
+    RetryAttemptFailedEventParams, RetryExhaustedEventParams, RetrySucceededAfterRetryEventParams,
     SourceContractEventParams,
 };
 

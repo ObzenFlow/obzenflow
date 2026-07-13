@@ -11,29 +11,90 @@ use crate::backpressure::BackpressureWriter;
 use crate::feed_plan::StageOutputContract;
 use crate::metrics::instrumentation::StageInstrumentation;
 use crate::stages::common::backpressure_activity_pulse::BackpressureActivityPulse;
+use crate::stages::common::handlers::source::SourceError;
 use crate::stages::common::heartbeat::HeartbeatState;
 use crate::stages::common::supervision::backpressure_drain::{
     drain_one_pending, drain_one_pending_resolve, DrainAttempt, DrainOutcome,
 };
+use crate::stages::common::supervision::output_committer::{CommitOptions, OutputCommitter};
+use crate::stages::common::BoundaryStopReceiver;
 use crate::stages::observer::dispatch::run_source_poll_observers;
 use crate::stages::observer::{
     SourcePollObserverContext, SourcePollObserverOutcome, StageObserverBundle,
 };
 use crate::stages::source::boundary::{
     SourceBoundary, SourceBoundaryOutcome, SourceBoundaryReport, SourcePollExecution,
+    SourcePollExecutor,
 };
 use crate::supervised_base::{EventLoopDirective, EventReceiver};
 use obzenflow_core::event::context::{FlowContext, MiddlewareExecutionScope};
+use obzenflow_core::event::payloads::observability_payload::{
+    MetricsLifecycle, ObservabilityPayload,
+};
 use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
-use obzenflow_core::event::SystemEvent;
+use obzenflow_core::event::{ChainEventFactory, SystemEvent};
 use obzenflow_core::journal::Journal;
-use obzenflow_core::{ChainEvent, StageId};
+use obzenflow_core::{ChainEvent, StageId, WriterId};
+use serde_json::json;
 use std::collections::VecDeque;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub(crate) type BoxError = Box<dyn std::error::Error + Send + Sync>;
+
+fn source_error_kind(error: &SourceError) -> ErrorKind {
+    match error {
+        SourceError::Timeout(_) => ErrorKind::Timeout,
+        SourceError::Transport(_) => ErrorKind::Remote,
+        SourceError::RateLimited { .. } => ErrorKind::RateLimited,
+        SourceError::Deserialization(_) => ErrorKind::Deserialization,
+        SourceError::PermanentFailure(_) => ErrorKind::PermanentFailure,
+        SourceError::Other(_) => ErrorKind::Unknown,
+    }
+}
+
+fn source_error_type(error: &SourceError) -> &'static str {
+    match error {
+        SourceError::Timeout(_) => "timeout",
+        SourceError::Transport(_) => "transport",
+        SourceError::RateLimited { .. } => "rate_limited",
+        SourceError::Deserialization(_) => "deserialization",
+        SourceError::PermanentFailure(_) => "permanent_failure",
+        SourceError::Other(_) => "other",
+    }
+}
+
+/// Materialise the terminal truth for an async source poll only after the live
+/// boundary has finished classifying and, when configured, retrying its typed
+/// error. Keeping this outside the handler wrapper lets the boundary see the
+/// original `SourceError`; placing the event before boundary control rows keeps
+/// normal truth ahead of the buffered retry lifecycle sequence.
+pub(crate) fn terminal_source_error_event(
+    writer_id: WriterId,
+    source_type: &'static str,
+    error: &SourceError,
+) -> ChainEvent {
+    let timestamp_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+
+    ChainEventFactory::observability_event(
+        writer_id,
+        ObservabilityPayload::Metrics(MetricsLifecycle::Custom {
+            name: "source.poll_error".to_string(),
+            value: json!({
+                "source_type": source_type,
+                "error_type": source_error_type(error),
+                "message": error.to_string(),
+                "timestamp_ms": timestamp_ms,
+            }),
+            tags: None,
+        }),
+    )
+    .mark_as_error(error.to_string(), source_error_kind(error))
+}
 
 pub(crate) async fn around_source_boundary<'a>(
     boundary: Option<Arc<dyn SourceBoundary>>,
@@ -43,6 +104,22 @@ pub(crate) async fn around_source_boundary<'a>(
         Some(boundary) => boundary.around_poll(execute).await,
         None => SourceBoundaryReport {
             outcome: SourceBoundaryOutcome::Polled(execute.await),
+            control_events: Vec::new(),
+        },
+    }
+}
+
+pub(crate) async fn around_retryable_source_boundary(
+    boundary: Option<Arc<dyn SourceBoundary>>,
+    execute: &mut dyn SourcePollExecutor,
+    stop: BoundaryStopReceiver,
+) -> SourceBoundaryReport {
+    match boundary {
+        Some(boundary) => boundary.around_retryable_poll(execute, stop).await,
+        None => SourceBoundaryReport {
+            outcome: SourceBoundaryOutcome::Polled(
+                execute.attempt(std::num::NonZeroU32::MIN).await,
+            ),
             control_events: Vec::new(),
         },
     }
@@ -223,6 +300,51 @@ pub(crate) fn stage_boundary_control_events(
         pending_outputs,
     );
     true
+}
+
+/// Commit retry lifecycle rows held back by a terminal source outcome.
+///
+/// EOF and its source completion facts are authored by the FSM first. These
+/// non-data rows then use the ordinary output committer before stage-completed
+/// metrics are snapshotted, preserving both durable ordering and middleware
+/// mirroring without exposing the rows to handler input positions.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn commit_post_eof_control_events(
+    control_events: &mut Vec<ChainEvent>,
+    stage_flow_context: &FlowContext,
+    data_journal: &Arc<dyn Journal<ChainEvent>>,
+    system_journal: &Arc<dyn Journal<SystemEvent>>,
+    instrumentation: &Arc<StageInstrumentation>,
+    output_contract: &StageOutputContract,
+    observers: &StageObserverBundle,
+    scope: MiddlewareExecutionScope,
+) -> Result<(), BoxError> {
+    let committer = OutputCommitter {
+        data_journal,
+        flow_context: Some(stage_flow_context),
+        system_journal: Some(system_journal),
+        instrumentation: Some(instrumentation),
+        heartbeat_state: None,
+        output_contract: Some(output_contract),
+        backpressure_writer: None,
+        observers: Some(observers),
+        observer_scope: scope,
+    };
+
+    for event in std::mem::take(control_events) {
+        committer
+            .commit_prebuilt(
+                event.with_flow_context(stage_flow_context.clone()),
+                None,
+                CommitOptions {
+                    count_output: false,
+                    validate_output_contract: false,
+                },
+            )
+            .await
+            .map_err(|error| format!("Failed to write post-EOF retry lifecycle event: {error}"))?;
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -406,6 +528,17 @@ mod tests {
     use obzenflow_topology::TopologyBuilder;
     use std::marker::PhantomData;
     use std::num::NonZeroU64;
+
+    #[test]
+    fn source_error_type_is_a_bounded_variant_label() {
+        let error = SourceError::RateLimited {
+            message: "tenant/customer/secret".to_string(),
+            retry_after: Some(Duration::from_secs(3)),
+        };
+
+        assert_eq!(source_error_type(&error), "rate_limited");
+        assert!(!source_error_type(&error).contains("tenant"));
+    }
 
     struct EmptyReader<T> {
         position: u64,

@@ -124,6 +124,8 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
         // build-resolved lineage policy before the handler is boxed away.
         let mut handler = self.handler;
         handler.install_lineage_policy(self.resources.lineage_policy);
+        let (boundary_stop_controller, boundary_stop) =
+            crate::stages::common::boundary_stop_channel();
         let context = TransformContext {
             handler,
             stage_id: self.config.stage_id,
@@ -134,6 +136,8 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
             data_journal: self.resources.data_journal.clone(),
             effect_history: None,
             runtime_execution: self.resources.runtime_execution.clone(),
+            boundary_stop_controller,
+            boundary_stop,
             effect_ports: self.resources.effect_ports.clone(),
             effect_declarations: self.resources.effect_declarations.clone(),
             synthesized_outcomes: self.resources.synthesized_outcomes.clone(),

@@ -91,6 +91,38 @@ No features are enabled by default. `--features obzenflow_infra/warp-server` ena
 
 An optional Prometheus + Grafana monitoring stack is available in `monitoring/` (see `monitoring/README.md`).
 
+## Boundary-owned circuit-breaker retry
+
+Retry is an optional recovery policy on the existing circuit breaker, not a
+standalone middleware or handler-shell loop. Attach the breaker to an eligible
+async source poll, declared effect, or sink delivery:
+
+```rust,ignore
+use obzenflow_adapters::middleware::CircuitBreakerBuilder;
+use obzenflow_adapters::middleware::control::circuit_breaker::RetryLimits;
+use std::time::Duration;
+
+let dependency_breaker = CircuitBreakerBuilder::new(3)
+    .with_retry_fixed(Duration::from_millis(250), 3)
+    .with_retry_limits(RetryLimits {
+        max_single_delay: Duration::from_secs(5),
+        max_total_wall_time: Duration::from_secs(20),
+    })
+    .build();
+```
+
+`max_attempts` counts total physical executions, including the initial call.
+Async sources must explicitly declare repeatability after error or cancellation;
+effects and sinks use their existing typed safety declarations. Undeclared,
+transactional, synchronous, non-idempotent, or nested-retry attachments fail at
+materialisation. Strict replay performs no live retry calls or sleeps.
+
+For `HttpPullSource`, boundary retry requires
+`HttpRetryConfig::disabled()` plus the decoder's explicit
+`retry_safe_requests()` proof. A client or SDK whose internal retry cannot be
+disabled remains opaque inside one framework attempt; its request timeout must
+therefore fit inside the outer boundary's total-wall deadline.
+
 ## Project organization
 
 ObzenFlow follows an onion architecture: `obzenflow_core` defines the business domain and “ports” (traits), and outer layers provide implementations, orchestration, wiring, and concrete integrations.

@@ -13,8 +13,9 @@
 
 use crate::stages::common::handler_error::HandlerError;
 use crate::stages::common::handlers::SinkConsumeReport;
+use crate::stages::common::BoundaryStopReceiver;
 use async_trait::async_trait;
-use obzenflow_core::ChainEvent;
+use obzenflow_core::{ChainEvent, EventId};
 
 /// How one sink-delivery attempt ended once the boundary admitted it.
 pub enum SinkDeliveryAttemptOutcome {
@@ -38,11 +39,22 @@ pub struct SinkDeliveryRejection {
 pub enum SinkDeliveryBoundaryOutcome {
     Attempted(SinkDeliveryAttemptOutcome),
     Rejected(SinkDeliveryRejection),
+    /// The hard boundary deadline cancelled an active delivery future. The local
+    /// future is gone, but the external destination may still complete the
+    /// request, so the supervisor must commit an explicitly in-doubt receipt
+    /// rather than claiming rollback or adapting this into a handler error.
+    DeadlineOutcomeUnknown {
+        message: String,
+    },
 }
 
-/// The boundary's report consumed by the journal sink supervisor: the outcome
-/// plus any observability/control events policies emitted. Control events do not
-/// advance sink receipt progress.
+/// The boundary's terminal report consumed by the journal sink supervisor.
+///
+/// A retry-capable boundary may invoke [`SinkDeliveryExecutor::attempt`] more
+/// than once, but it returns only the logical invocation's terminal outcome.
+/// `control_events` is an invocation-ordered, buffered evidence outbox. The
+/// supervisor commits the terminal delivery receipt before appending this
+/// evidence, and the evidence never advances sink receipt progress.
 pub struct SinkDeliveryBoundaryReport {
     pub outcome: SinkDeliveryBoundaryOutcome,
     pub control_events: Vec<ChainEvent>,
@@ -52,10 +64,14 @@ pub struct SinkDeliveryBoundaryReport {
 ///
 /// Deliberately re-invokable rather than a single future: FLOWIP-115h
 /// reintroduces breaker retry as boundary-owned recovery by calling `attempt`
-/// more than once, without changing this seam. FLOWIP-115b calls it exactly
-/// once.
+/// more than once. Each call receives the same logical input identity and
+/// creates one fresh physical handler future. Strict replay bypasses the
+/// boundary and calls it exactly once.
 #[async_trait]
 pub trait SinkDeliveryExecutor: Send {
+    /// Stable logical delivery identity reused by every physical attempt.
+    fn parent_event_id(&self) -> EventId;
+
     async fn attempt(&mut self) -> SinkDeliveryAttemptOutcome;
 }
 
@@ -72,4 +88,19 @@ pub trait SinkDeliveryBoundary: Send + Sync {
         &self,
         execute: &mut dyn SinkDeliveryExecutor,
     ) -> SinkDeliveryBoundaryReport;
+
+    /// Retry-aware entry point with an explicit runtime stop signal.
+    ///
+    /// The additive default preserves existing one-attempt boundaries. A
+    /// retry-capable implementation overrides this method so drain can cancel
+    /// admission/backoff without starting another attempt and abort can drop
+    /// active asynchronous work promptly.
+    async fn around_retryable_sink_delivery(
+        &self,
+        execute: &mut dyn SinkDeliveryExecutor,
+        stop: BoundaryStopReceiver,
+    ) -> SinkDeliveryBoundaryReport {
+        drop(stop);
+        self.around_sink_delivery(execute).await
+    }
 }

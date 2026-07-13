@@ -28,6 +28,7 @@ pub mod utils;
 pub use chain_event::{
     ChainEvent, ChainEventContent, ChainEventFactory, CircuitBreakerSummaryEventParams,
     ConsumptionFinalEventParams, ConsumptionProgressEventParams, CorrelationContext,
+    RetryAttemptFailedEventParams, RetryExhaustedEventParams, RetrySucceededAfterRetryEventParams,
     SourceContractEventParams,
 };
 pub use event_envelope::EventEnvelope;

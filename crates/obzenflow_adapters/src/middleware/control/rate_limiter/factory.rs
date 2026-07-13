@@ -368,11 +368,11 @@ impl MiddlewareFactory for RateLimiterFactory {
 ///
 /// Each attachment owns its own bucket: flow-level `rate_limit(N)` materialises
 /// one instance per stage (FLOWIP-050d), and there is no process-wide shared
-/// bucket (FLOWIP-114o Q6). On async sources and the effect boundary the limiter
-/// awaits its permit as a cancellable future; on sync sources and handler chains
-/// it blocks. Counters increment at admission with no refund on a downstream
-/// `Skip`/`Abort` (FLOWIP-114m, FLOWIP-114o). See the module docs for the full
-/// wait, bucket, and accounting contract.
+/// bucket (FLOWIP-114o Q6). At live source/effect/sink boundaries it awaits a
+/// cancellable reservation and commits physical-call accounting at executor
+/// start; a downstream pre-execution rejection refunds the reservation. Legacy
+/// synchronous handler paths retain their existing blocking behaviour. See the
+/// module docs for the full wait, bucket, and accounting contract.
 pub fn rate_limit(events_per_second: f64) -> Box<dyn MiddlewareFactory> {
     RateLimiterBuilder::new(events_per_second).build()
 }

@@ -2,16 +2,13 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! Middleware adapter for TransformHandler
+//! Middleware adapter for TransformHandler.
 //!
-//! This module provides the ability to wrap TransformHandler implementations
-//! with middleware for cross-cutting concerns like logging, monitoring, and retry logic.
+//! This module wraps TransformHandler implementations with handler-shell
+//! concerns such as logging and monitoring. Live-I/O retry is owned by source,
+//! declared-effect, and sink-delivery boundaries.
 
 use crate::middleware::{
-    context_keys::{
-        CircuitBreakerAttempt, CircuitBreakerRetryAfterMs, CircuitBreakerRetryDelayMs,
-        CircuitBreakerShouldRetry, CircuitBreakerTotalRetryWallMs,
-    },
     observation_short_circuit, Middleware, MiddlewareAction, MiddlewareContext,
 };
 use async_trait::async_trait;
@@ -24,7 +21,6 @@ use obzenflow_runtime::stages::common::handlers::transform::traits::UnifiedTrans
 use obzenflow_runtime::stages::common::handlers::{AsyncTransformHandler, TransformHandler};
 use std::future::Future;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 
 /// A TransformHandler wrapper that applies middleware to transform operations.
 ///
@@ -120,17 +116,14 @@ impl<H: TransformHandler> MiddlewareTransform<H> {
         // If the handler returns `Err(HandlerError)`, convert it into an
         // error-marked event so middleware (e.g., circuit breaker) can still
         // observe the ErrorKind-driven outcome.
-        // TODO(051c): When sync retry is added, extract `retry_after` from
-        // `HandlerError::RateLimited { retry_after, .. }` into the typed middleware context so the
-        // circuit breaker can honour provider back-off hints (mirrors the async path).
-        //
         // TODO(D2/051c): The sync transform path catches `HandlerError` and converts
         // it to an error-marked event, but never calls `Middleware::on_error` on the
         // middleware chain.  This means any middleware relying on `on_error` (e.g.,
         // for cleanup or observability) will not fire in the sync path.  The circuit
         // breaker currently observes failures via `post_handle` + `ErrorKind` on the
         // marked event, so this is not a correctness issue today, but it violates the
-        // middleware contract and should be reconciled when the sync retry loop is added.
+        // middleware contract and should be reconciled independently. A generic
+        // transform-shell retry loop is intentionally outside this contract.
         let mut results = match transform_fn(event.clone()) {
             Ok(results) => results,
             Err(err) => {
@@ -277,15 +270,12 @@ impl<H: AsyncTransformHandler> AsyncMiddlewareTransform<H> {
         Fut: Future<Output = Result<Vec<ChainEvent>, HandlerError>>,
     {
         let original = event.clone();
-        let retry_start = Instant::now();
-        let mut attempt: u32 = 0;
         let mut accumulated_control_events: Vec<ChainEvent> = Vec::new();
 
-        loop {
-            // Create a fresh ephemeral context per attempt so timing/observability middleware
-            // can record per-attempt processing metadata cleanly.
+        {
+            // Handler-shell retry is intentionally absent. Live-I/O recovery is
+            // owned by source, effect, and sink boundaries (FLOWIP-115h).
             let mut ctx = MiddlewareContext::with_scope(scope);
-            ctx.insert::<CircuitBreakerAttempt>(attempt);
 
             // Pre-processing phase
             let mut short_circuit: Option<Vec<ChainEvent>> = None;
@@ -304,9 +294,6 @@ impl<H: AsyncTransformHandler> AsyncMiddlewareTransform<H> {
                             mw.on_rejected(&original, cause.as_ref(), &mut ctx);
                         }
                         accumulated_control_events.extend(ctx.take_control_events());
-                        ctx.insert::<CircuitBreakerTotalRetryWallMs>(
-                            retry_start.elapsed().as_millis() as u64,
-                        );
 
                         for result in &mut results {
                             for mw in self.middleware_chain.iter() {
@@ -327,9 +314,6 @@ impl<H: AsyncTransformHandler> AsyncMiddlewareTransform<H> {
                             mw.on_rejected(&original, cause.as_ref(), &mut ctx);
                         }
                         accumulated_control_events.extend(ctx.take_control_events());
-                        ctx.insert::<CircuitBreakerTotalRetryWallMs>(
-                            retry_start.elapsed().as_millis() as u64,
-                        );
 
                         let mut err = original.clone();
                         err.processing_info.status =
@@ -364,13 +348,6 @@ impl<H: AsyncTransformHandler> AsyncMiddlewareTransform<H> {
             let mut results = match transform_fn(original.clone()).await {
                 Ok(results) => results,
                 Err(err) => {
-                    if let HandlerError::RateLimited {
-                        retry_after: Some(wait),
-                        ..
-                    } = &err
-                    {
-                        ctx.insert::<CircuitBreakerRetryAfterMs>(wait.as_millis() as u64);
-                    }
                     let reason = format!("Transform handler error: {err:?}");
                     vec![original.clone().mark_as_error(reason, err.kind())]
                 }
@@ -382,27 +359,6 @@ impl<H: AsyncTransformHandler> AsyncMiddlewareTransform<H> {
             }
 
             accumulated_control_events.extend(ctx.take_control_events());
-
-            // Ask middleware (circuit breaker) if we should retry.
-            let should_retry = ctx
-                .get::<CircuitBreakerShouldRetry>()
-                .copied()
-                .unwrap_or(false);
-
-            if should_retry {
-                let delay_ms = ctx
-                    .get::<CircuitBreakerRetryDelayMs>()
-                    .copied()
-                    .unwrap_or(0);
-                attempt = attempt.saturating_add(1);
-                if delay_ms > 0 {
-                    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-                }
-                continue;
-            }
-
-            // Final attempt: record total wall time across all attempts (including backoff).
-            ctx.insert::<CircuitBreakerTotalRetryWallMs>(retry_start.elapsed().as_millis() as u64);
 
             // Pre-write phase: allow middleware to enrich each result event.
             for result in &mut results {
@@ -419,7 +375,7 @@ impl<H: AsyncTransformHandler> AsyncMiddlewareTransform<H> {
             }
             results.append(&mut accumulated_control_events);
 
-            return Ok(results);
+            Ok(results)
         }
     }
 }
@@ -1310,19 +1266,18 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn async_middleware_transform_retry_config_is_ignored() {
-        // FLOWIP-115b: production retry is removed (warn-and-ignore). A breaker
-        // built with a retry policy binds and runs, but the transform is invoked
-        // exactly once; a handler error surfaces immediately with no retry
-        // lifecycle events. FLOWIP-115h reintroduces boundary-owned retry.
+    #[test]
+    fn async_middleware_transform_retry_config_is_rejected_on_the_handler_shell() {
+        // FLOWIP-115h: retry is owned by a physical source, effect, or sink
+        // boundary. A retry-enabled breaker must fail closed before it can be
+        // attached to the transform handler shell.
         use crate::middleware::control::{CircuitBreakerBuilder, ControlMiddlewareAggregator};
         use crate::middleware::MiddlewareFactory;
         use obzenflow_core::StageId;
         use obzenflow_runtime::pipeline::config::StageConfig;
 
         let calls = Arc::new(AtomicUsize::new(0));
-        let handler = FlakyAsyncTransform {
+        let _handler = FlakyAsyncTransform {
             calls: calls.clone(),
             fail_times: 2,
         };
@@ -1340,44 +1295,27 @@ mod tests {
             resolved_policies: Default::default(),
         };
         let control = Arc::new(ControlMiddlewareAggregator::new());
-        let cb = factory
-            .create(&config, control)
-            .expect("circuit breaker should materialize for async transform test");
+        let err = match factory.create(&config, control) {
+            Ok(_) => panic!("handler-shell retry must fail closed"),
+            Err(err) => err,
+        };
 
-        let wrapped = handler.middleware().with(cb).build();
-
-        let event = ChainEventFactory::data_event(
-            obzenflow_core::WriterId::from(StageId::new()),
-            "test",
-            json!({}),
+        assert_eq!(
+            err.to_string(),
+            "Invalid configuration for middleware 'circuit_breaker' on stage 'test': circuit_breaker retry requires a source-poll, declared-effect, or sink-delivery attachment; handler-shell retry is not supported"
         );
-
-        let results = wrapped
-            .process(event, None, MiddlewareExecutionScope::LiveHandler)
-            .await
-            .expect("a handler error surfaces as an error event, not a process error");
-
-        // No retry: the transform is invoked once and the first failure surfaces.
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
-
-        let error_events = results
-            .iter()
-            .filter(|e| matches!(e.processing_info.status, ProcessingStatus::Error { .. }))
-            .count();
-        let control_events = results.iter().filter(|e| e.is_lifecycle()).count();
-        assert_eq!(error_events, 1);
-        assert_eq!(control_events, 0);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 
-    #[tokio::test]
-    async fn async_middleware_transform_permanent_failure_returns_error_event_without_retry() {
+    #[test]
+    fn async_middleware_transform_retry_rejection_precedes_permanent_failure_execution() {
         use crate::middleware::control::{CircuitBreakerBuilder, ControlMiddlewareAggregator};
         use crate::middleware::MiddlewareFactory;
         use obzenflow_core::StageId;
         use obzenflow_runtime::pipeline::config::StageConfig;
 
         let calls = Arc::new(AtomicUsize::new(0));
-        let handler = FlakyAsyncTransform {
+        let _handler = FlakyAsyncTransform {
             calls: calls.clone(),
             fail_times: usize::MAX,
         };
@@ -1395,34 +1333,16 @@ mod tests {
             resolved_policies: Default::default(),
         };
         let control = Arc::new(ControlMiddlewareAggregator::new());
-        let cb = factory
-            .create(&config, control)
-            .expect("circuit breaker should materialize for async transform exhaustion test");
+        let err = match factory.create(&config, control) {
+            Ok(_) => panic!("handler-shell retry must fail before handler execution"),
+            Err(err) => err,
+        };
 
-        let wrapped = handler.middleware().with(cb).build();
-
-        let event = ChainEventFactory::data_event(
-            obzenflow_core::WriterId::from(StageId::new()),
-            "test",
-            json!({}),
+        assert_eq!(
+            err.to_string(),
+            "Invalid configuration for middleware 'circuit_breaker' on stage 'test': circuit_breaker retry requires a source-poll, declared-effect, or sink-delivery attachment; handler-shell retry is not supported"
         );
-
-        let results = wrapped
-            .process(event, None, MiddlewareExecutionScope::LiveHandler)
-            .await
-            .expect("handler errors should be converted into error events");
-
-        // No retry: the transform is invoked once; the permanent failure
-        // surfaces immediately as a single error event with no retry events.
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
-
-        let error_events = results
-            .iter()
-            .filter(|e| matches!(e.processing_info.status, ProcessingStatus::Error { .. }))
-            .count();
-        let control_events = results.iter().filter(|e| e.is_lifecycle()).count();
-        assert_eq!(error_events, 1);
-        assert_eq!(control_events, 0);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 
     /// FLOWIP-114q transitional hook: middleware that returned `Continue`

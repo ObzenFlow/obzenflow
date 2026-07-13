@@ -76,6 +76,7 @@ pub struct CircuitBreakerBuilder {
     unknown_error_kind_policy: UnknownErrorKindPolicy,
     retry_policy: Option<CircuitBreakerRetryPolicy>,
     retry_limits: RetryLimits,
+    retry_limits_explicit: bool,
     failure_classification_policy: FailureClassificationPolicy,
 }
 
@@ -98,6 +99,7 @@ impl CircuitBreakerBuilder {
             unknown_error_kind_policy: UnknownErrorKindPolicy::TreatAsInfraFailure,
             retry_policy: None,
             retry_limits: RetryLimits::default(),
+            retry_limits_explicit: false,
             failure_classification_policy: FailureClassificationPolicy::default(),
         }
     }
@@ -134,6 +136,7 @@ impl CircuitBreakerBuilder {
     /// Configure hard caps for integrated retry (max single delay and max total wall time).
     pub fn with_retry_limits(mut self, limits: RetryLimits) -> Self {
         self.retry_limits = limits;
+        self.retry_limits_explicit = true;
         self
     }
 
@@ -518,13 +521,6 @@ impl CircuitBreakerBuilder {
 
     /// Build the circuit breaker middleware factory
     pub fn build(self) -> Box<dyn MiddlewareFactory> {
-        // FLOWIP-115b: production retry is removed. A configured retry policy
-        // binds successfully but is ignored with a one-time compatibility
-        // warning; FLOWIP-115h reintroduces retry as boundary-owned recovery, so
-        // the breaker never receives a retry policy on the production path.
-        if self.retry_policy.is_some() {
-            warn_circuit_breaker_retry_ignored();
-        }
         Box::new(CircuitBreakerFactory {
             threshold: self.threshold,
             cooldown: self.cooldown,
@@ -536,25 +532,12 @@ impl CircuitBreakerBuilder {
             open_policy: self.open_policy,
             half_open_policy: self.half_open_policy,
             unknown_error_kind_policy: self.unknown_error_kind_policy,
-            retry_policy: None,
+            retry_policy: self.retry_policy,
             retry_limits: self.retry_limits,
+            retry_limits_explicit: self.retry_limits_explicit,
             failure_classification_policy: self.failure_classification_policy,
         })
     }
-}
-
-/// FLOWIP-115b: production circuit-breaker retry is removed; FLOWIP-115h
-/// reintroduces it as boundary-owned recovery. A retry policy on a built factory
-/// is ignored with this one-time, process-wide compatibility warning.
-fn warn_circuit_breaker_retry_ignored() {
-    static WARNED: std::sync::Once = std::sync::Once::new();
-    WARNED.call_once(|| {
-        tracing::warn!(
-            "Circuit breaker retry configuration is ignored: FLOWIP-115b removed \
-             production retry and FLOWIP-115h reintroduces it as boundary-owned \
-             recovery. Remove the retry policy to silence this warning."
-        );
-    });
 }
 
 /// Factory for creating circuit breaker middleware
@@ -571,6 +554,7 @@ pub struct CircuitBreakerFactory {
     unknown_error_kind_policy: UnknownErrorKindPolicy,
     retry_policy: Option<CircuitBreakerRetryPolicy>,
     retry_limits: RetryLimits,
+    retry_limits_explicit: bool,
     failure_classification_policy: FailureClassificationPolicy,
 }
 
@@ -590,6 +574,7 @@ impl CircuitBreakerFactory {
             unknown_error_kind_policy: UnknownErrorKindPolicy::TreatAsInfraFailure,
             retry_policy: None,
             retry_limits: RetryLimits::default(),
+            retry_limits_explicit: false,
             failure_classification_policy: FailureClassificationPolicy::default(),
         }
     }
@@ -777,6 +762,41 @@ impl CircuitBreakerFactory {
 }
 
 impl CircuitBreakerFactory {
+    fn validate_retry_configuration(
+        &self,
+        stage_name: &str,
+    ) -> crate::middleware::MiddlewareFactoryResult<()> {
+        let error = match self.retry_policy.as_ref() {
+            None if self.retry_limits_explicit => Some(
+                "CircuitBreakerBuilder::with_retry_limits requires with_retry_fixed or with_retry_exponential"
+                    .to_string(),
+            ),
+            Some(policy) if policy.max_attempts == 0 => {
+                let method = match policy.backoff {
+                    BackoffStrategy::Fixed { .. } => "with_retry_fixed",
+                    BackoffStrategy::Exponential { .. } => "with_retry_exponential",
+                };
+                Some(format!(
+                    "CircuitBreakerBuilder::{method}: max_attempts must be greater than zero"
+                ))
+            }
+            Some(_) if self.retry_limits.max_total_wall_time.is_zero() => Some(
+                "CircuitBreakerBuilder::with_retry_limits: max_total_wall_time must be greater than zero"
+                    .to_string(),
+            ),
+            _ => None,
+        };
+
+        match error {
+            Some(message) => Err(MiddlewareFactoryError::invalid_configuration(
+                self.label(),
+                stage_name,
+                std::io::Error::new(std::io::ErrorKind::InvalidInput, message),
+            )),
+            None => Ok(()),
+        }
+    }
+
     /// Shared materialization for stage-level and per-effect instances
     /// (FLOWIP-120c): the key decides where the snapshotter registers.
     fn build_middleware_keyed(
@@ -784,7 +804,13 @@ impl CircuitBreakerFactory {
         config: &StageConfig,
         control_middleware: std::sync::Arc<ControlMiddlewareAggregator>,
         effect_type: Option<EffectTypeKey>,
+        attachment_id: Option<crate::middleware::MiddlewareAttachmentId>,
     ) -> crate::middleware::MiddlewareFactoryResult<CircuitBreakerMiddleware> {
+        self.validate_retry_configuration(&config.name)?;
+        let protected_unit_label = effect_type
+            .as_ref()
+            .map(|effect_type| effect_type.as_str().to_string())
+            .unwrap_or_else(|| config.name.clone());
         // FLOWIP-010: the build-resolved `effects.circuit_breaker.threshold`
         // winner overrides the DSL-declared parameter (the ladder already
         // ranked the sources; absence means the DSL value stands).
@@ -854,6 +880,8 @@ impl CircuitBreakerFactory {
             self.failure_classification_classifier.clone();
         middleware.retry_policy = self.retry_policy.clone();
         middleware.retry_limits = self.retry_limits.clone();
+        middleware.attachment_id = attachment_id;
+        middleware.protected_unit_label = protected_unit_label;
         middleware.failure_classification_policy = self.failure_classification_policy.clone();
 
         // Register circuit breaker snapshotter/state with the flow-scoped
@@ -943,6 +971,7 @@ impl CircuitBreakerFactory {
             config,
             control_middleware,
             effect_type,
+            None,
         )?))
     }
 }
@@ -979,6 +1008,17 @@ impl MiddlewareFactory for CircuitBreakerFactory {
         config: &StageConfig,
         control_middleware: std::sync::Arc<ControlMiddlewareAggregator>,
     ) -> crate::middleware::MiddlewareFactoryResult<Box<dyn Middleware>> {
+        self.validate_retry_configuration(&config.name)?;
+        if self.retry_policy.is_some() {
+            return Err(MiddlewareFactoryError::invalid_configuration(
+                self.label(),
+                &config.name,
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "circuit_breaker retry requires a source-poll, declared-effect, or sink-delivery attachment; handler-shell retry is not supported",
+                ),
+            ));
+        }
         self.create_keyed(config, control_middleware, None)
     }
 
@@ -1034,14 +1074,9 @@ impl MiddlewareFactory for CircuitBreakerFactory {
         context: &MiddlewareMaterializationContext<'_>,
     ) -> crate::middleware::MiddlewareFactoryResult<MiddlewareSurfaceAttachment> {
         let declaration = self.declaration();
-        let _attachment_id =
-            validate_attachment_request(&declaration, &request).map_err(|err| {
-                MiddlewareFactoryError::materialization_failed(
-                    self.label(),
-                    &context.config.name,
-                    err,
-                )
-            })?;
+        let attachment_id = validate_attachment_request(&declaration, &request).map_err(|err| {
+            MiddlewareFactoryError::materialization_failed(self.label(), &context.config.name, err)
+        })?;
 
         match request.surface {
             MiddlewareSurface::SourcePoll(_) => {
@@ -1053,6 +1088,7 @@ impl MiddlewareFactory for CircuitBreakerFactory {
                     context.config,
                     context.control_middleware.clone(),
                     None,
+                    Some(attachment_id),
                 )?;
                 let breaker = Arc::new(middleware);
                 let view = context
@@ -1079,19 +1115,25 @@ impl MiddlewareFactory for CircuitBreakerFactory {
                     context.config,
                     context.control_middleware.clone(),
                     Some(effect_surface.effect_type.clone()),
+                    Some(attachment_id),
                 )?;
                 Ok(MiddlewareSurfaceAttachment::Effect(
                     crate::middleware::EffectPolicyAttachment::event_aware(Arc::new(middleware)),
                 ))
             }
-            MiddlewareSurface::SinkDelivery(_) => {
+            MiddlewareSurface::SinkDelivery(sink_surface) => {
                 // One breaker guards the sink stage's delivery unit, registered
                 // stage-level. It fails fast when open via `CircuitBreakerSinkPolicy`.
-                let middleware = self.build_middleware_keyed(
+                let mut middleware = self.build_middleware_keyed(
                     context.config,
                     context.control_middleware.clone(),
                     None,
+                    Some(attachment_id),
                 )?;
+                middleware.retry_sink_configured_target_id = sink_surface
+                    .configured_target
+                    .as_ref()
+                    .map(|target| attachment_id.retry_sink_target_projection(target));
                 let breaker = Arc::new(middleware);
                 let policy: Arc<dyn SinkPolicy> = Arc::new(CircuitBreakerSinkPolicy { breaker });
                 Ok(MiddlewareSurfaceAttachment::SinkDelivery(policy))
@@ -1130,7 +1172,7 @@ impl MiddlewareFactory for CircuitBreakerFactory {
             };
 
             RetryHint {
-                max_attempts: Attempts::Finite(policy.max_attempts.max(1) as usize),
+                max_attempts: Attempts::Finite(policy.max_attempts as usize),
                 backoff,
             }
         });
@@ -1204,8 +1246,141 @@ pub fn circuit_breaker(threshold: usize) -> Box<dyn MiddlewareFactory> {
 
 /// Create a circuit breaker factory with defaults tuned for AI provider calls.
 pub fn ai_circuit_breaker() -> Box<dyn MiddlewareFactory> {
-    CircuitBreakerBuilder::new(5)
-        .with_retry_exponential(3)
-        .with_retry_limits(RetryLimits::default())
-        .build()
+    CircuitBreakerBuilder::new(5).build()
+}
+
+#[cfg(test)]
+mod retry_configuration_tests {
+    use super::*;
+    use obzenflow_core::StageId;
+
+    fn config() -> StageConfig {
+        StageConfig {
+            stage_id: StageId::new(),
+            name: "retry_test".to_string(),
+            flow_name: "test".to_string(),
+            cycle_guard: None,
+            lineage: Default::default(),
+            resolved_policies: Default::default(),
+        }
+    }
+
+    fn create_error(factory: Box<dyn MiddlewareFactory>) -> String {
+        match factory.create(&config(), Arc::new(ControlMiddlewareAggregator::new())) {
+            Ok(_) => panic!("invalid retry configuration must fail"),
+            Err(error) => error.to_string(),
+        }
+    }
+
+    #[test]
+    fn builder_preserves_retry_hint_and_locked_snapshot_shape() {
+        let factory = CircuitBreakerBuilder::new(3)
+            .with_retry_fixed(Duration::from_millis(250), 3)
+            .with_retry_limits(RetryLimits {
+                max_single_delay: Duration::from_secs(5),
+                max_total_wall_time: Duration::from_secs(20),
+            })
+            .build();
+
+        let retry = factory.hints().retry.expect("retry hint must be active");
+        assert_eq!(retry.max_attempts, crate::middleware::Attempts::Finite(3));
+        let snapshot = factory.config_snapshot().expect("snapshot");
+        assert_eq!(
+            snapshot["retry"],
+            serde_json::json!({
+                "max_attempts": 3,
+                "backoff": { "kind": "fixed", "delay_ms": 250 },
+                "max_single_delay_ms": 5000,
+                "max_total_wall_ms": 20000,
+            })
+        );
+    }
+
+    #[test]
+    fn invalid_retry_builder_inputs_use_locked_diagnostics() {
+        assert!(create_error(
+            CircuitBreakerBuilder::new(3)
+                .with_retry_fixed(Duration::ZERO, 0)
+                .build()
+        )
+        .contains(
+            "CircuitBreakerBuilder::with_retry_fixed: max_attempts must be greater than zero"
+        ));
+
+        assert!(create_error(
+            CircuitBreakerBuilder::new(3)
+                .with_retry_exponential(0)
+                .build()
+        )
+        .contains(
+            "CircuitBreakerBuilder::with_retry_exponential: max_attempts must be greater than zero"
+        ));
+
+        assert!(create_error(
+            CircuitBreakerBuilder::new(3)
+                .with_retry_limits(RetryLimits::default())
+                .build()
+        )
+        .contains("CircuitBreakerBuilder::with_retry_limits requires with_retry_fixed or with_retry_exponential"));
+
+        assert!(create_error(
+            CircuitBreakerBuilder::new(3)
+                .with_retry_fixed(Duration::ZERO, 1)
+                .with_retry_limits(RetryLimits {
+                    max_single_delay: Duration::from_secs(1),
+                    max_total_wall_time: Duration::ZERO,
+                })
+                .build()
+        )
+        .contains("CircuitBreakerBuilder::with_retry_limits: max_total_wall_time must be greater than zero"));
+    }
+
+    #[test]
+    fn ai_helper_is_health_only_during_the_legacy_transform_interval() {
+        let factory = ai_circuit_breaker();
+        assert!(factory.hints().retry.is_none());
+        assert!(factory.config_snapshot().expect("snapshot")["retry"].is_null());
+    }
+}
+
+#[cfg(test)]
+mod retry_protected_unit_label_tests {
+    use super::*;
+
+    fn config(name: &str) -> StageConfig {
+        StageConfig {
+            stage_id: obzenflow_core::StageId::new(),
+            name: name.to_string(),
+            flow_name: "retry_label_test".to_string(),
+            cycle_guard: None,
+            lineage: obzenflow_core::config::LineagePolicy::default(),
+            resolved_policies: Default::default(),
+        }
+    }
+
+    #[test]
+    fn materialized_breaker_uses_effect_type_or_stage_name_as_protected_unit_label() {
+        let factory = CircuitBreakerFactory::new(3);
+        let effect_config = config("payments_stage");
+        let effect = factory
+            .build_middleware_keyed(
+                &effect_config,
+                Arc::new(ControlMiddlewareAggregator::new()),
+                Some(EffectTypeKey::from("AuthorizePayment")),
+                None,
+            )
+            .expect("effect breaker materializes");
+        assert_eq!(effect.protected_unit_label, "AuthorizePayment");
+
+        let source_config = config("orders_source");
+        let source = factory
+            .build_middleware_keyed(
+                &source_config,
+                Arc::new(ControlMiddlewareAggregator::new()),
+                None,
+                None,
+            )
+            .expect("stage breaker materializes");
+        assert_eq!(source.protected_unit_label, "orders_source");
+    }
 }

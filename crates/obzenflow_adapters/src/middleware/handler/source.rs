@@ -17,7 +17,7 @@ use obzenflow_core::event::ChainEventFactory;
 use obzenflow_core::{ChainEvent, WriterId};
 use obzenflow_runtime::stages::common::handlers::{
     AsyncFiniteSourceHandler, AsyncInfiniteSourceHandler, FiniteSourceHandler,
-    InfiniteSourceHandler,
+    InfiniteSourceHandler, SourcePollRetryOwnership, SourcePollRetrySafety,
 };
 use obzenflow_runtime::stages::SourceError;
 use serde_json::json;
@@ -61,8 +61,21 @@ fn source_error_kind(err: &SourceError) -> ErrorKind {
     match err {
         SourceError::Timeout(_) => ErrorKind::Timeout,
         SourceError::Transport(_) => ErrorKind::Remote,
+        SourceError::RateLimited { .. } => ErrorKind::RateLimited,
         SourceError::Deserialization(_) => ErrorKind::Deserialization,
+        SourceError::PermanentFailure(_) => ErrorKind::PermanentFailure,
         SourceError::Other(_) => ErrorKind::Unknown,
+    }
+}
+
+fn source_error_type(err: &SourceError) -> &'static str {
+    match err {
+        SourceError::Timeout(_) => "timeout",
+        SourceError::Transport(_) => "transport",
+        SourceError::RateLimited { .. } => "rate_limited",
+        SourceError::Deserialization(_) => "deserialization",
+        SourceError::PermanentFailure(_) => "permanent_failure",
+        SourceError::Other(_) => "other",
     }
 }
 
@@ -83,7 +96,7 @@ fn source_error_event(
             name: "source.poll_error".to_string(),
             value: json!({
                 "source_type": source_type,
-                "error_type": format!("{err:?}").split('(').next().unwrap_or("unknown"),
+                "error_type": source_error_type(err),
                 "message": err.to_string(),
                 "timestamp_ms": timestamp_ms,
             }),
@@ -152,6 +165,18 @@ impl<H: AsyncFiniteSourceHandler> AsyncFiniteSourceHandler for MiddlewareAsyncFi
         self.inner.bind_writer_id(id);
     }
 
+    fn poll_retry_safety(&self) -> Option<SourcePollRetrySafety> {
+        self.inner.poll_retry_safety()
+    }
+
+    fn poll_retry_safety_is_request_level(&self) -> bool {
+        self.inner.poll_retry_safety_is_request_level()
+    }
+
+    fn poll_retry_ownership(&self) -> SourcePollRetryOwnership {
+        self.inner.poll_retry_ownership()
+    }
+
     async fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
         let synthetic_event = ChainEventFactory::data_event(
             self.writer_id,
@@ -179,8 +204,13 @@ impl<H: AsyncFiniteSourceHandler> AsyncFiniteSourceHandler for MiddlewareAsyncFi
             None => self.inner.next().await,
         };
 
+        // Preserve typed live failures for the source boundary. Converting
+        // them into error-marked batches here would erase retry eligibility
+        // before the boundary-owned coordinator can classify the attempt.
+        let inner_result = inner_result?;
+
         // Completion short-circuit: do not run handler middleware on the final completion poll.
-        if matches!(inner_result, Ok(None)) {
+        if inner_result.is_none() {
             return Ok(None);
         }
 
@@ -228,9 +258,8 @@ impl<H: AsyncFiniteSourceHandler> AsyncFiniteSourceHandler for MiddlewareAsyncFi
         }
 
         let mut results = match inner_result {
-            Ok(Some(events)) => events,
-            Ok(None) => unreachable!("handled in completion short-circuit above"),
-            Err(err) => vec![source_error_event(self.writer_id, "async_finite", &err)],
+            Some(events) => events,
+            None => unreachable!("handled in completion short-circuit above"),
         };
 
         // Post-processing phase (observation)
@@ -342,6 +371,18 @@ impl<H: AsyncInfiniteSourceHandler> AsyncInfiniteSourceHandler
         self.inner.bind_writer_id(id);
     }
 
+    fn poll_retry_safety(&self) -> Option<SourcePollRetrySafety> {
+        self.inner.poll_retry_safety()
+    }
+
+    fn poll_retry_safety_is_request_level(&self) -> bool {
+        self.inner.poll_retry_safety_is_request_level()
+    }
+
+    fn poll_retry_ownership(&self) -> SourcePollRetryOwnership {
+        self.inner.poll_retry_ownership()
+    }
+
     // Forwarded so the supervisor's resume-live flip reaches the hosted
     // surface; the trait default is None and would swallow it (FLOWIP-120n F12).
     fn hosted_ingress_slot(&self) -> Option<obzenflow_core::ingress::HostedIngressBindingSlot> {
@@ -374,6 +415,9 @@ impl<H: AsyncInfiniteSourceHandler> AsyncInfiniteSourceHandler
             },
             None => self.inner.next().await,
         };
+
+        // Keep the typed failure intact for boundary retry classification.
+        let inner_result = inner_result?;
 
         // Handler middleware remains ordinary-only. Source policies are composed
         // by the adapter-owned source boundary outside this wrapper.
@@ -418,10 +462,7 @@ impl<H: AsyncInfiniteSourceHandler> AsyncInfiniteSourceHandler
             }
         }
 
-        let mut results = match inner_result {
-            Ok(events) => events,
-            Err(err) => vec![source_error_event(self.writer_id, "async_infinite", &err)],
-        };
+        let mut results = inner_result;
 
         // Post-processing phase (observation)
         for middleware in self.middleware_chain.iter() {
@@ -1090,6 +1131,20 @@ mod tests {
 
     #[async_trait]
     impl AsyncFiniteSourceHandler for ErringAsyncFiniteSource {
+        fn poll_retry_safety(&self) -> Option<SourcePollRetrySafety> {
+            Some(SourcePollRetrySafety::RetrySafeAfterErrorOrCancellation)
+        }
+
+        fn poll_retry_safety_is_request_level(&self) -> bool {
+            true
+        }
+
+        fn poll_retry_ownership(&self) -> SourcePollRetryOwnership {
+            SourcePollRetryOwnership::HandlerOwned {
+                owner: "finite_test_owner",
+            }
+        }
+
         async fn next(&mut self) -> Result<Option<Vec<ChainEvent>>, SourceError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Err(SourceError::Timeout("boom".to_string()))
@@ -1113,25 +1168,35 @@ mod tests {
         let mut wrapped =
             MiddlewareAsyncFiniteSource::new(inner, writer_id).with_middleware(Box::new(cb));
 
+        assert_eq!(
+            wrapped.poll_retry_safety(),
+            Some(SourcePollRetrySafety::RetrySafeAfterErrorOrCancellation),
+            "finite wrapper must not erase the raw handler safety proof"
+        );
+        assert_eq!(
+            wrapped.poll_retry_ownership(),
+            SourcePollRetryOwnership::HandlerOwned {
+                owner: "finite_test_owner"
+            },
+            "finite wrapper must not hide a nested retry owner"
+        );
+        assert!(
+            wrapped.poll_retry_safety_is_request_level(),
+            "finite wrapper must preserve request-level diagnostic provenance"
+        );
+
         let first = wrapped
             .next()
             .await
-            .expect("async finite source wrapper should not propagate SourceError");
+            .expect_err("typed source failures must reach the retry-aware boundary");
         assert_eq!(calls.load(Ordering::SeqCst), 1);
-
-        let results = first.expect("first call should return error event(s)");
-        assert!(
-            results
-                .iter()
-                .any(|e| matches!(e.processing_info.status, ProcessingStatus::Error { .. })),
-            "expected an error-marked event"
-        );
+        assert!(matches!(first, SourceError::Timeout(_)));
 
         // A policy inserted directly into the wrapper does not gate the poll.
         let _ = wrapped
             .next()
             .await
-            .expect("async finite source wrapper should not propagate SourceError");
+            .expect_err("typed source failures stay typed on every physical poll");
         assert_eq!(
             calls.load(Ordering::SeqCst),
             2,
@@ -1211,6 +1276,20 @@ mod tests {
 
     #[async_trait]
     impl AsyncInfiniteSourceHandler for ErringAsyncInfiniteSource {
+        fn poll_retry_safety(&self) -> Option<SourcePollRetrySafety> {
+            Some(SourcePollRetrySafety::NonRetrySafe)
+        }
+
+        fn poll_retry_safety_is_request_level(&self) -> bool {
+            true
+        }
+
+        fn poll_retry_ownership(&self) -> SourcePollRetryOwnership {
+            SourcePollRetryOwnership::HandlerOwned {
+                owner: "infinite_test_owner",
+            }
+        }
+
         async fn next(&mut self) -> Result<Vec<ChainEvent>, SourceError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Err(SourceError::Timeout("boom".to_string()))
@@ -1234,23 +1313,35 @@ mod tests {
         let mut wrapped =
             MiddlewareAsyncInfiniteSource::new(inner, writer_id).with_middleware(Box::new(cb));
 
+        assert_eq!(
+            wrapped.poll_retry_safety(),
+            Some(SourcePollRetrySafety::NonRetrySafe),
+            "infinite wrapper must not erase the raw handler safety declaration"
+        );
+        assert_eq!(
+            wrapped.poll_retry_ownership(),
+            SourcePollRetryOwnership::HandlerOwned {
+                owner: "infinite_test_owner"
+            },
+            "infinite wrapper must not hide a nested retry owner"
+        );
+        assert!(
+            wrapped.poll_retry_safety_is_request_level(),
+            "infinite wrapper must preserve request-level diagnostic provenance"
+        );
+
         let first = wrapped
             .next()
             .await
-            .expect("async infinite source wrapper should not propagate SourceError");
+            .expect_err("typed source failures must reach the retry-aware boundary");
         assert_eq!(calls.load(Ordering::SeqCst), 1);
-        assert!(
-            first
-                .iter()
-                .any(|e| matches!(e.processing_info.status, ProcessingStatus::Error { .. })),
-            "expected an error-marked event"
-        );
+        assert!(matches!(first, SourceError::Timeout(_)));
 
         // A policy inserted directly into the wrapper does not gate the poll.
         let _ = wrapped
             .next()
             .await
-            .expect("async infinite source wrapper should not propagate SourceError");
+            .expect_err("typed source failures stay typed on every physical poll");
         assert_eq!(
             calls.load(Ordering::SeqCst),
             2,

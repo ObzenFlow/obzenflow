@@ -444,7 +444,9 @@ pub(crate) fn is_framework_middleware_observability_event(event: &ChainEvent) ->
     matches!(
         &event.content,
         ChainEventContent::Observability(ObservabilityPayload::Middleware(
-            MiddlewareLifecycle::CircuitBreaker(_) | MiddlewareLifecycle::RateLimiter(_)
+            MiddlewareLifecycle::CircuitBreaker(_)
+                | MiddlewareLifecycle::RateLimiter(_)
+                | MiddlewareLifecycle::Retry(_)
         ))
     )
 }
@@ -533,5 +535,40 @@ fn apply_runtime_journey_identity(event: &mut ChainEvent, flow: &FlowContext) {
             stage_name = %flow.stage_name,
             "Non-source derived data event missing correlation_id"
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use obzenflow_core::event::chain_event::{
+        ChainEventFactory, RetrySucceededAfterRetryEventParams,
+    };
+    use obzenflow_core::event::payloads::observability_payload::{
+        RetryInvocation, RetryLifecycleContext, RetryProtectedUnit,
+    };
+    use obzenflow_core::{EventId, StageId, Ulid, WriterId};
+
+    #[test]
+    fn retry_lifecycle_is_framework_middleware_observability() {
+        let stage_id = StageId::new();
+        let event = ChainEventFactory::retry_succeeded_after_retry(
+            WriterId::from(stage_id),
+            RetrySucceededAfterRetryEventParams {
+                context: RetryLifecycleContext {
+                    stage_id,
+                    attachment_id: Ulid::new(),
+                    protected_unit: RetryProtectedUnit::SourcePoll,
+                    invocation: RetryInvocation::SourcePoll {
+                        poll_id: EventId::new(),
+                    },
+                },
+                total_attempts: 2,
+                total_duration_ms: 10,
+                cause: None,
+            },
+        );
+
+        assert!(is_framework_middleware_observability_event(&event));
     }
 }

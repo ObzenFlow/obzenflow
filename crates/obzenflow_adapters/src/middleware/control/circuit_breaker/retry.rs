@@ -2,10 +2,10 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use super::FailureClassification;
-use obzenflow_core::event::status::processing_status::ErrorKind;
+use crate::middleware::BoundaryRetryPolicy;
 use obzenflow_runtime::stages::common::control_strategies::BackoffStrategy;
-use std::time::{Duration, Instant};
+use std::num::NonZeroU32;
+use std::time::Duration;
 
 /// Retry limits enforced by the circuit breaker.
 #[derive(Debug, Clone)]
@@ -23,19 +23,25 @@ impl Default for RetryLimits {
     }
 }
 
-/// Configuration for integrated per-event retry inside the circuit breaker.
+/// Circuit-breaker recovery policy executed by the live source, effect, or
+/// sink boundary. The breaker owns the policy; the boundary owns reinvocation.
 #[derive(Debug, Clone)]
 pub struct CircuitBreakerRetryPolicy {
+    /// Maximum total physical executions, including the initial attempt.
     pub max_attempts: u32,
     pub backoff: BackoffStrategy,
 }
 
-#[derive(Debug, Clone)]
-pub(super) struct RetryState {
-    pub(super) attempts: u32,
-    pub(super) first_attempt: Instant,
-    pub(super) last_attempt: Instant,
-    pub(super) last_error: Option<String>,
-    pub(super) last_kind: Option<ErrorKind>,
-    pub(super) classification: FailureClassification,
+impl CircuitBreakerRetryPolicy {
+    pub(crate) fn validated(
+        policy: &CircuitBreakerRetryPolicy,
+        limits: &RetryLimits,
+    ) -> Option<BoundaryRetryPolicy> {
+        Some(BoundaryRetryPolicy {
+            max_attempts: NonZeroU32::new(policy.max_attempts)?,
+            backoff: policy.backoff.clone(),
+            max_single_delay: limits.max_single_delay,
+            max_total_wall_time: limits.max_total_wall_time,
+        })
+    }
 }

@@ -402,6 +402,22 @@ impl<H: UnifiedTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'stati
             ))
         }
     }
+
+    fn boundary_stop_controller(
+        context: &Self::Context,
+    ) -> Option<crate::stages::common::BoundaryStopController> {
+        Some(context.boundary_stop_controller.clone())
+    }
+
+    fn boundary_stop_intent(
+        event: &Self::Event,
+    ) -> Option<crate::stages::common::BoundaryStopIntent> {
+        match event {
+            TransformEvent::BeginDrain => Some(crate::stages::common::BoundaryStopIntent::Drain),
+            TransformEvent::Error(_) => Some(crate::stages::common::BoundaryStopIntent::Abort),
+            _ => None,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
