@@ -10,7 +10,9 @@
 use super::builder::{EventSender, HandleError, StateWatcher, SupervisorHandle};
 use std::fmt::Debug;
 use std::marker::PhantomData;
-use tokio::task::JoinHandle;
+use tokio::task::{AbortHandle, JoinHandle};
+
+type SupervisorTask = JoinHandle<Result<(), Box<dyn std::error::Error + Send + Sync>>>;
 
 /// Builder for creating supervisor handles with proper trait implementation
 ///
@@ -19,7 +21,7 @@ use tokio::task::JoinHandle;
 pub struct HandleBuilder<E, S> {
     event_sender: Option<EventSender<E>>,
     state_watcher: Option<StateWatcher<S>>,
-    supervisor_task: Option<JoinHandle<Result<(), Box<dyn std::error::Error + Send + Sync>>>>,
+    supervisor_task: Option<SupervisorTask>,
     _phantom: PhantomData<(E, S)>,
 }
 
@@ -57,10 +59,7 @@ where
     }
 
     /// Set the supervisor task
-    pub fn with_supervisor_task(
-        mut self,
-        task: JoinHandle<Result<(), Box<dyn std::error::Error + Send + Sync>>>,
-    ) -> Self {
+    pub fn with_supervisor_task(mut self, task: SupervisorTask) -> Self {
         self.supervisor_task = Some(task);
         self
     }
@@ -74,18 +73,15 @@ where
         Ok(StandardHandle {
             event_sender,
             state_watcher,
-            supervisor_task: Some(supervisor_task),
+            supervisor_abort: supervisor_task.abort_handle(),
+            supervisor_task: tokio::sync::Mutex::new(Some(supervisor_task)),
         })
     }
 
     /// Build a custom handle with error conversion
     pub fn build_custom<H, F>(self, constructor: F) -> Result<H, &'static str>
     where
-        F: FnOnce(
-            EventSender<E>,
-            StateWatcher<S>,
-            JoinHandle<Result<(), Box<dyn std::error::Error + Send + Sync>>>,
-        ) -> H,
+        F: FnOnce(EventSender<E>, StateWatcher<S>, SupervisorTask) -> H,
     {
         let event_sender = self.event_sender.ok_or("Event sender is required")?;
         let state_watcher = self.state_watcher.ok_or("State watcher is required")?;
@@ -99,7 +95,8 @@ where
 pub struct StandardHandle<E, S> {
     event_sender: EventSender<E>,
     state_watcher: StateWatcher<S>,
-    supervisor_task: Option<JoinHandle<Result<(), Box<dyn std::error::Error + Send + Sync>>>>,
+    supervisor_abort: AbortHandle,
+    supervisor_task: tokio::sync::Mutex<Option<SupervisorTask>>,
 }
 
 impl<E, S> StandardHandle<E, S>
@@ -114,10 +111,7 @@ where
 
     /// Check if the supervisor is still running
     pub fn is_running(&self) -> bool {
-        self.supervisor_task
-            .as_ref()
-            .map(|task| !task.is_finished())
-            .unwrap_or(false)
+        !self.supervisor_abort.is_finished()
     }
 
     /// Abort the supervisor task (best-effort).
@@ -125,9 +119,7 @@ where
     /// This does not await completion; callers should follow with
     /// `wait_for_completion` when they need deterministic teardown.
     pub(crate) fn abort(&self) {
-        if let Some(task) = self.supervisor_task.as_ref() {
-            task.abort();
-        }
+        self.supervisor_abort.abort();
     }
 
     /// Best-effort bounded wait for supervisor completion.
@@ -140,7 +132,7 @@ where
         &mut self,
         timeout: std::time::Duration,
     ) -> Result<bool, HandleError> {
-        let Some(mut task) = self.supervisor_task.take() else {
+        let Some(mut task) = self.supervisor_task.get_mut().take() else {
             return Err(HandleError::SupervisorNotRunning);
         };
 
@@ -152,7 +144,7 @@ where
             },
             Err(_) => {
                 // Timed out. Put the JoinHandle back so callers can abort/await later.
-                self.supervisor_task = Some(task);
+                *self.supervisor_task.get_mut() = Some(task);
                 Ok(false)
             }
         }
@@ -177,8 +169,8 @@ where
         self.state_watcher.current()
     }
 
-    async fn wait_for_completion(mut self) -> Result<(), Self::Error> {
-        if let Some(task) = self.supervisor_task.take() {
+    async fn wait_for_completion(self) -> Result<(), Self::Error> {
+        if let Some(task) = self.supervisor_task.into_inner() {
             match task.await {
                 Ok(Ok(())) => Ok(()),
                 Ok(Err(e)) => Err(HandleError::SupervisorFailed(e.to_string())),
@@ -186,6 +178,19 @@ where
             }
         } else {
             Err(HandleError::SupervisorNotRunning)
+        }
+    }
+
+    async fn abort_and_wait(&self) -> Result<(), Self::Error> {
+        self.abort();
+        let Some(task) = self.supervisor_task.lock().await.take() else {
+            return Err(HandleError::SupervisorNotRunning);
+        };
+        match task.await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(error)) => Err(HandleError::SupervisorFailed(error.to_string())),
+            Err(error) if error.is_cancelled() => Ok(()),
+            Err(error) => Err(HandleError::SupervisorPanicked(error.to_string())),
         }
     }
 }
@@ -209,10 +214,7 @@ where
     }
 
     /// Spawn the supervisor task
-    pub fn spawn<F, Fut>(
-        self,
-        supervisor_fn: F,
-    ) -> JoinHandle<Result<(), Box<dyn std::error::Error + Send + Sync>>>
+    pub fn spawn<F, Fut>(self, supervisor_fn: F) -> SupervisorTask
     where
         F: FnOnce() -> Fut + Send + 'static,
         Fut: std::future::Future<Output = Result<(), Box<dyn std::error::Error + Send + Sync>>>
@@ -262,5 +264,51 @@ where
             name_clone4
         );
         handle
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::supervised_base::ChannelBuilder;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    struct DropFlag(Arc<AtomicBool>);
+
+    impl Drop for DropFlag {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    #[tokio::test]
+    async fn abort_and_wait_joins_the_cancelled_supervisor_task() {
+        let (event_sender, _event_receiver, state_watcher) =
+            ChannelBuilder::<(), bool>::new().build(false);
+        let dropped = Arc::new(AtomicBool::new(false));
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let task = {
+            let dropped = dropped.clone();
+            tokio::spawn(async move {
+                let _flag = DropFlag(dropped);
+                let _ = started_tx.send(());
+                std::future::pending::<()>().await;
+                #[allow(unreachable_code)]
+                Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+            })
+        };
+        let handle = HandleBuilder::new()
+            .with_event_sender(event_sender)
+            .with_state_watcher(state_watcher)
+            .with_supervisor_task(task)
+            .build_standard()
+            .expect("standard handle");
+
+        started_rx.await.expect("supervisor task should start");
+        handle.abort_and_wait().await.expect("abort and join");
+
+        assert!(dropped.load(Ordering::SeqCst));
+        assert!(!handle.is_running());
     }
 }

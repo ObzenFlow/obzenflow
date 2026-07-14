@@ -924,8 +924,19 @@ impl FsmAction for PipelineAction {
                     if elapsed >= timeout {
                         tracing::warn!(
                             stage_id = %stage_id,
-                            "Pipeline cleanup: timeout budget exhausted before waiting on stage"
+                            "Pipeline cleanup: timeout budget exhausted; aborting stage supervisor"
                         );
+                        match handle.abort_and_join().await {
+                            Ok(()) => tracing::debug!(
+                                stage_id = %stage_id,
+                                "Stage supervisor aborted and joined during cleanup"
+                            ),
+                            Err(error) => tracing::warn!(
+                                stage_id = %stage_id,
+                                error = ?error,
+                                "Stage supervisor abort-and-join failed during cleanup"
+                            ),
+                        }
                         return;
                     }
 
@@ -939,14 +950,36 @@ impl FsmAction for PipelineAction {
                             tracing::warn!(
                                 stage_id = %stage_id,
                                 error = ?e,
-                                "Stage failed during shutdown cleanup"
+                                "Stage did not complete during shutdown cleanup; aborting supervisor"
                             );
+                            match handle.abort_and_join().await {
+                                Ok(()) => tracing::debug!(
+                                    stage_id = %stage_id,
+                                    "Stage supervisor aborted and joined during cleanup"
+                                ),
+                                Err(error) => tracing::warn!(
+                                    stage_id = %stage_id,
+                                    error = ?error,
+                                    "Stage supervisor abort-and-join failed during cleanup"
+                                ),
+                            }
                         }
                         Err(_) => {
                             tracing::warn!(
                                 stage_id = %stage_id,
-                                "Timeout waiting for stage during cleanup"
+                                "Timeout waiting for stage during cleanup; aborting supervisor"
                             );
+                            match handle.abort_and_join().await {
+                                Ok(()) => tracing::debug!(
+                                    stage_id = %stage_id,
+                                    "Stage supervisor aborted and joined during cleanup"
+                                ),
+                                Err(error) => tracing::warn!(
+                                    stage_id = %stage_id,
+                                    error = ?error,
+                                    "Stage supervisor abort-and-join failed during cleanup"
+                                ),
+                            }
                         }
                     }
                 }

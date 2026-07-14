@@ -167,4 +167,13 @@ where
             }
         }
     }
+
+    async fn abort_and_join(&self) -> Result<(), StageError> {
+        self.inner.abort_and_wait().await.map_err(|error| {
+            StageError::Other(format!(
+                "Failed to abort and join stage {}: {error:?}",
+                self.stage_name
+            ))
+        })
+    }
 }

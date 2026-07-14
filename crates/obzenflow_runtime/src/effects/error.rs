@@ -94,8 +94,37 @@ pub enum EffectError {
         executor: String,
     },
 
+    /// Legacy opaque call failure. Circuit-breaker recovery treats it as
+    /// permanent and ineligible; effect ports should author a typed variant.
     #[error("effect execution failed: {0}")]
     Execution(String),
+
+    /// The physical call exceeded its operation timeout.
+    #[error("effect call timed out: {0}")]
+    Timeout(String),
+
+    /// The physical call failed at the transport boundary.
+    #[error("effect call transport failed: {0}")]
+    Transport(String),
+
+    /// The dependency refused the call and supplied a minimum retry delay.
+    #[error("effect call was rate limited: {message}")]
+    RateLimited {
+        message: String,
+        retry_after: Duration,
+    },
+
+    /// The physical call failed in a way another call cannot repair.
+    #[error("effect call failed permanently: {0}")]
+    Permanent(String),
+
+    /// The dependency rejected invalid call input.
+    #[error("effect call validation failed: {0}")]
+    Validation(String),
+
+    /// The dependency returned a domain-level failure.
+    #[error("effect call domain failure: {0}")]
+    Domain(String),
 
     #[error("effect replay archive failed: {0}")]
     ReplayArchive(String),
@@ -118,10 +147,16 @@ impl EffectError {
             | EffectError::MissingEffectPort { .. }
             | EffectError::TypedOutcomeCoordination { .. }
             | EffectError::TransactionalCommitMissing { .. } => false,
-            EffectError::Serialization(_)
+            EffectError::Timeout(_)
+            | EffectError::Transport(_)
+            | EffectError::RateLimited { .. }
+            | EffectError::Serialization(_)
             | EffectError::Journal(_)
             | EffectError::Execution(_)
             | EffectError::ReplayArchive(_) => true,
+            EffectError::Permanent(_) | EffectError::Validation(_) | EffectError::Domain(_) => {
+                false
+            }
         }
     }
 
@@ -148,6 +183,12 @@ impl EffectError {
             EffectError::TypedOutcomeCoordination { .. } => "typed_outcome_coordination",
             EffectError::TransactionalCommitMissing { .. } => "transactional_commit_missing",
             EffectError::Execution(_) => "execution",
+            EffectError::Timeout(_) => "timeout",
+            EffectError::Transport(_) => "transport",
+            EffectError::RateLimited { .. } => "rate_limited",
+            EffectError::Permanent(_) => "permanent",
+            EffectError::Validation(_) => "validation",
+            EffectError::Domain(_) => "domain",
             EffectError::ReplayArchive(_) => "replay_archive",
         }
         .into()
@@ -165,6 +206,11 @@ impl EffectError {
     pub fn semantic_reason(&self) -> std::borrow::Cow<'_, str> {
         match self {
             EffectError::Execution(message)
+            | EffectError::Timeout(message)
+            | EffectError::Transport(message)
+            | EffectError::Permanent(message)
+            | EffectError::Validation(message)
+            | EffectError::Domain(message)
             | EffectError::Serialization(message)
             | EffectError::Journal(message)
             | EffectError::ReplayArchive(message)
@@ -172,6 +218,7 @@ impl EffectError {
             EffectError::RecordedFailure { error_message, .. } => {
                 std::borrow::Cow::Borrowed(error_message)
             }
+            EffectError::RateLimited { message, .. } => std::borrow::Cow::Borrowed(message),
             EffectError::BoundaryRejected { message, .. } => std::borrow::Cow::Borrowed(message),
             EffectError::TypedOutcomeCoordination { message, .. } => {
                 std::borrow::Cow::Borrowed(message)

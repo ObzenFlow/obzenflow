@@ -48,18 +48,39 @@ use super::domain::{
     ValidatedOrder,
 };
 use super::fixtures;
-use super::gateway::{self, AuthorizePayment, GatewayTransform};
+use super::gateway::{self, AuthorizePayment, GatewayRetryProof, GatewayTransform};
 use super::validation;
 use obzenflow::typed::sources as typed_sources;
-use obzenflow_adapters::middleware::circuit_breaker::{HalfOpenPolicy, OpenPolicy};
+use obzenflow_adapters::middleware::circuit_breaker::{HalfOpenPolicy, OpenPolicy, RetryLimits};
 use obzenflow_adapters::middleware::observability::{indicator, log, IndicatorKind};
 use obzenflow_adapters::middleware::{CircuitBreakerBuilder, RateLimiterBuilder};
 use obzenflow_dsl::{effectful_transform, flow, sink, source};
 use obzenflow_infra::journal::disk_journals;
 use std::num::NonZeroU32;
+use std::sync::Arc;
+use std::time::Duration;
 
 const SOURCE_RATE_LIMIT_EVENTS_PER_SECOND: f64 = 20.0;
 const SOURCE_RATE_LIMIT_BURST: f64 = 1.0;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum RetryProofProfile {
+    Control,
+    Treatment,
+}
+
+fn retry_proof_profile() -> Option<RetryProofProfile> {
+    let profile = std::env::var("PAYMENT_DEMO_RETRY_PROOF"); // allow-replay-ambient: build-time acceptance-test profile only
+    match profile {
+        Err(std::env::VarError::NotPresent) => None,
+        Err(error) => panic!("PAYMENT_DEMO_RETRY_PROOF could not be read: {error}"),
+        Ok(value) if value == "control" => Some(RetryProofProfile::Control),
+        Ok(value) if value == "treatment" => Some(RetryProofProfile::Treatment),
+        Ok(value) => panic!(
+            "unknown PAYMENT_DEMO_RETRY_PROOF value '{value}'; expected 'control' or 'treatment'"
+        ),
+    }
+}
 
 /// Build the demo flow.
 ///
@@ -94,14 +115,40 @@ fn demo_jitter(channel: &str, index: usize) {
 }
 
 pub fn build_flow() -> obzenflow_dsl::FlowDefinition {
-    let scripted_web_orders = fixtures::scripted_web_orders();
-    let scripted_store_orders = fixtures::scripted_store_orders();
+    let retry_proof_profile = retry_proof_profile();
+    let replay_requested = std::env::args().any(|argument| argument == "--replay-from");
+    let retry_proof =
+        retry_proof_profile.map(|_| Arc::new(GatewayRetryProof::new(replay_requested)));
+    build_flow_for_profile(
+        retry_proof_profile,
+        retry_proof,
+        std::path::PathBuf::from("target/payment-gateway-logs"),
+    )
+}
+
+pub(super) fn build_flow_for_profile(
+    retry_proof_profile: Option<RetryProofProfile>,
+    retry_proof: Option<Arc<GatewayRetryProof>>,
+    journal_root: std::path::PathBuf,
+) -> obzenflow_dsl::FlowDefinition {
+    let (scripted_web_orders, scripted_store_orders) = if retry_proof_profile.is_some() {
+        (vec![fixtures::retry_proof_order()], Vec::new())
+    } else {
+        (
+            fixtures::scripted_web_orders(),
+            fixtures::scripted_store_orders(),
+        )
+    };
+    let gateway_transform = retry_proof
+        .clone()
+        .map(GatewayTransform::with_retry_proof)
+        .unwrap_or_default();
 
     // The gateway breaker attaches inline to the effect it guards
     // (FLOWIP-120c H7, `AuthorizePayment with [gateway_breaker]`): one
     // policy instance per protected dependency. Hoisted to a named binding
     // so the `effects:` entry reads as a declaration.
-    let gateway_breaker = CircuitBreakerBuilder::new(3)
+    let mut gateway_breaker = CircuitBreakerBuilder::new(3)
         .cooldown(std::time::Duration::from_secs(5))
         .rate_based_over_last_n_calls(5, 0.6)
         .slow_call(std::time::Duration::from_millis(250), 0.5)
@@ -128,13 +175,27 @@ pub fn build_flow() -> obzenflow_dsl::FlowDefinition {
         .half_open_policy(HalfOpenPolicy::new(
             NonZeroU32::new(1).expect("permitted_probes must be non-zero"),
             OpenPolicy::EmitFallback,
-        ))
-        .build_typed::<GatewayPaymentFallback, GatewayPaymentRejected>();
-    let gateway_limiter = RateLimiterBuilder::new(1.0).build();
+        ));
+    if matches!(retry_proof_profile, Some(RetryProofProfile::Treatment)) {
+        gateway_breaker = gateway_breaker
+            .with_retry_fixed(Duration::from_millis(1), 3)
+            .with_retry_limits(RetryLimits {
+                max_single_delay: Duration::from_millis(10),
+                max_attempt_start_window: Duration::from_secs(1),
+            });
+    }
+    let gateway_breaker =
+        gateway_breaker.build_typed::<GatewayPaymentFallback, GatewayPaymentRejected>();
+    let gateway_limiter = RateLimiterBuilder::new(if retry_proof_profile.is_some() {
+        1_000.0
+    } else {
+        1.0
+    })
+    .build();
 
     flow! {
         name: "payment_gateway_resilience_demo",
-        journals: disk_journals(std::path::PathBuf::from("target/payment-gateway-logs")),
+        journals: disk_journals(journal_root),
         middleware: [],
 
         stages: {
@@ -221,7 +282,7 @@ pub fn build_flow() -> obzenflow_dsl::FlowDefinition {
                     GatewayPaymentRejected,
                     OrderCancelled,
                     PaymentAuthorizationUnavailable
-                } => GatewayTransform,
+                } => gateway_transform,
                 effects: [AuthorizePayment with [gateway_breaker, gateway_limiter]],
                 // Record a per-execution service-level-indicator sample for the
                 // authorization operation: the raw wall-clock latency of the live

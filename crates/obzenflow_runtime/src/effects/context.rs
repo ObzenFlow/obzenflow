@@ -4,6 +4,7 @@
 
 use super::*;
 
+#[derive(Clone)]
 pub struct EffectContext {
     pub(super) is_replaying: bool,
     pub(super) flow_id: FlowId,

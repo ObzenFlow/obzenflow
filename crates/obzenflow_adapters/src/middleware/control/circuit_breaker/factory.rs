@@ -35,6 +35,7 @@ use obzenflow_runtime::control_plane::{
     CircuitBreakerMetrics, CircuitBreakerSnapshotter, CircuitBreakerState, CircuitBreakerStateView,
     ControlPlaneProvider,
 };
+use obzenflow_runtime::effects::EffectSafety;
 use obzenflow_runtime::pipeline::config::StageConfig;
 use obzenflow_runtime::stages::common::control_strategies::BackoffStrategy;
 use obzenflow_runtime::stages::source::strategies::CompletionGate;
@@ -110,15 +111,25 @@ impl CircuitBreakerBuilder {
 
     /// Enable integrated retry with a fixed backoff delay.
     pub fn with_retry_fixed(mut self, delay: Duration, max_attempts: u32) -> Self {
+        assert!(
+            max_attempts > 0,
+            "circuit-breaker max_attempts must be greater than zero"
+        );
         self.retry_policy = Some(CircuitBreakerRetryPolicy {
             max_attempts,
             backoff: BackoffStrategy::Fixed { delay },
+            #[cfg(test)]
+            deterministic_jitter_samples: None,
         });
         self
     }
 
     /// Enable integrated retry with exponential backoff.
     pub fn with_retry_exponential(mut self, max_attempts: u32) -> Self {
+        assert!(
+            max_attempts > 0,
+            "circuit-breaker max_attempts must be greater than zero"
+        );
         self.retry_policy = Some(CircuitBreakerRetryPolicy {
             max_attempts,
             backoff: BackoffStrategy::Exponential {
@@ -127,11 +138,22 @@ impl CircuitBreakerBuilder {
                 factor: 2.0,
                 jitter: true,
             },
+            #[cfg(test)]
+            deterministic_jitter_samples: None,
         });
         self
     }
 
-    /// Configure hard caps for integrated retry (max single delay and max total wall time).
+    #[cfg(test)]
+    pub(crate) fn with_retry_jitter_samples(mut self, samples: Vec<f64>) -> Self {
+        self.retry_policy
+            .as_mut()
+            .expect("retry must be configured before deterministic jitter")
+            .use_deterministic_jitter_samples(samples);
+        self
+    }
+
+    /// Configure hard caps for effect-bound recovery.
     pub fn with_retry_limits(mut self, limits: RetryLimits) -> Self {
         self.retry_limits = limits;
         self
@@ -358,6 +380,10 @@ impl CircuitBreakerBuilder {
     /// Configure a custom failure classifier used to decide whether a given
     /// call should be treated as a breaker failure based on the input event
     /// and the outputs produced by the handler.
+    ///
+    /// For effect recovery this classification may veto a retry that the raw
+    /// typed failure permits. It cannot make another failure retry-eligible or
+    /// cause a successful physical call to be executed again.
     pub fn with_failure_classifier<F>(mut self, f: F) -> Self
     where
         F: Fn(&ChainEvent, &[ChainEvent]) -> bool + Send + Sync + 'static,
@@ -369,7 +395,9 @@ impl CircuitBreakerBuilder {
     /// Configure a custom classifier that can return a rich `FailureClassification`.
     ///
     /// When set, this overrides the default classification derived from output
-    /// `ProcessingStatus` values.
+    /// `ProcessingStatus` values. For effect recovery it may veto a retry that
+    /// the raw typed failure permits, but it cannot promote an ineligible raw
+    /// failure or cause a successful physical call to be executed again.
     pub fn with_failure_classification_classifier<F>(mut self, f: F) -> Self
     where
         F: Fn(&ChainEvent, &[ChainEvent]) -> FailureClassification + Send + Sync + 'static,
@@ -518,13 +546,6 @@ impl CircuitBreakerBuilder {
 
     /// Build the circuit breaker middleware factory
     pub fn build(self) -> Box<dyn MiddlewareFactory> {
-        // FLOWIP-115b: production retry is removed. A configured retry policy
-        // binds successfully but is ignored with a one-time compatibility
-        // warning; FLOWIP-115h reintroduces retry as boundary-owned recovery, so
-        // the breaker never receives a retry policy on the production path.
-        if self.retry_policy.is_some() {
-            warn_circuit_breaker_retry_ignored();
-        }
         Box::new(CircuitBreakerFactory {
             threshold: self.threshold,
             cooldown: self.cooldown,
@@ -536,25 +557,11 @@ impl CircuitBreakerBuilder {
             open_policy: self.open_policy,
             half_open_policy: self.half_open_policy,
             unknown_error_kind_policy: self.unknown_error_kind_policy,
-            retry_policy: None,
+            retry_policy: self.retry_policy,
             retry_limits: self.retry_limits,
             failure_classification_policy: self.failure_classification_policy,
         })
     }
-}
-
-/// FLOWIP-115b: production circuit-breaker retry is removed; FLOWIP-115h
-/// reintroduces it as boundary-owned recovery. A retry policy on a built factory
-/// is ignored with this one-time, process-wide compatibility warning.
-fn warn_circuit_breaker_retry_ignored() {
-    static WARNED: std::sync::Once = std::sync::Once::new();
-    WARNED.call_once(|| {
-        tracing::warn!(
-            "Circuit breaker retry configuration is ignored: FLOWIP-115b removed \
-             production retry and FLOWIP-115h reintroduces it as boundary-owned \
-             recovery. Remove the retry policy to silence this warning."
-        );
-    });
 }
 
 /// Factory for creating circuit breaker middleware
@@ -616,6 +623,10 @@ impl CircuitBreakerFactory {
     /// Configure a custom failure classifier used to decide whether a given
     /// call should be treated as a breaker failure based on the input event
     /// and the outputs produced by the handler.
+    ///
+    /// For effect recovery this classification may veto a retry that the raw
+    /// typed failure permits. It cannot make another failure retry-eligible or
+    /// cause a successful physical call to be executed again.
     pub fn with_failure_classifier<F>(mut self, f: F) -> Self
     where
         F: Fn(&ChainEvent, &[ChainEvent]) -> bool + Send + Sync + 'static,
@@ -627,7 +638,9 @@ impl CircuitBreakerFactory {
     /// Configure a custom classifier that can return a rich `FailureClassification`.
     ///
     /// When set, this overrides the default classification derived from output
-    /// `ProcessingStatus` values.
+    /// `ProcessingStatus` values. For effect recovery it may veto a retry that
+    /// the raw typed failure permits, but it cannot promote an ineligible raw
+    /// failure or cause a successful physical call to be executed again.
     pub fn with_failure_classification_classifier<F>(mut self, f: F) -> Self
     where
         F: Fn(&ChainEvent, &[ChainEvent]) -> FailureClassification + Send + Sync + 'static,
@@ -913,7 +926,7 @@ impl CircuitBreakerFactory {
             }
         });
 
-        match effect_type {
+        let registration = match effect_type {
             Some(effect_type) => control_middleware.register_circuit_breaker_for_effect(
                 config.stage_id,
                 effect_type,
@@ -925,7 +938,14 @@ impl CircuitBreakerFactory {
                 snapshotter,
                 cb_state_view,
             ),
-        }
+        };
+        registration.map_err(|message| {
+            MiddlewareFactoryError::invalid_configuration(
+                self.label(),
+                &config.name,
+                std::io::Error::other(message),
+            )
+        })?;
 
         Ok(middleware)
     }
@@ -979,6 +999,15 @@ impl MiddlewareFactory for CircuitBreakerFactory {
         config: &StageConfig,
         control_middleware: std::sync::Arc<ControlMiddlewareAggregator>,
     ) -> crate::middleware::MiddlewareFactoryResult<Box<dyn Middleware>> {
+        if self.retry_policy.is_some() {
+            return Err(MiddlewareFactoryError::invalid_configuration(
+                self.label(),
+                &config.name,
+                std::io::Error::other(
+                    "circuit-breaker retry is supported only on declared effects",
+                ),
+            ));
+        }
         self.create_keyed(config, control_middleware, None)
     }
 
@@ -1043,6 +1072,36 @@ impl MiddlewareFactory for CircuitBreakerFactory {
                 )
             })?;
 
+        if self.retry_policy.is_some() {
+            match request.surface {
+                MiddlewareSurface::Effect(surface)
+                    if matches!(
+                        surface.safety,
+                        EffectSafety::Idempotent | EffectSafety::NonIdempotentRequiresKey
+                    ) => {}
+                MiddlewareSurface::Effect(surface) => {
+                    return Err(MiddlewareFactoryError::invalid_configuration(
+                        self.label(),
+                        &context.config.name,
+                        std::io::Error::other(format!(
+                            "circuit-breaker retry is not eligible for effect '{}' with safety {:?}",
+                            surface.effect_type.as_str(),
+                            surface.safety
+                        )),
+                    ));
+                }
+                _ => {
+                    return Err(MiddlewareFactoryError::invalid_configuration(
+                        self.label(),
+                        &context.config.name,
+                        std::io::Error::other(
+                            "circuit-breaker retry is supported only on declared effects",
+                        ),
+                    ));
+                }
+            }
+        }
+
         match request.surface {
             MiddlewareSurface::SourcePoll(_) => {
                 // Build one breaker (registering its state view and snapshotter),
@@ -1081,7 +1140,9 @@ impl MiddlewareFactory for CircuitBreakerFactory {
                     Some(effect_surface.effect_type.clone()),
                 )?;
                 Ok(MiddlewareSurfaceAttachment::Effect(
-                    crate::middleware::EffectPolicyAttachment::event_aware(Arc::new(middleware)),
+                    crate::middleware::EffectPolicyAttachment::circuit_breaker(Arc::new(
+                        middleware,
+                    )),
                 ))
             }
             MiddlewareSurface::SinkDelivery(_) => {
@@ -1183,7 +1244,7 @@ impl MiddlewareFactory for CircuitBreakerFactory {
                 "max_attempts": policy.max_attempts,
                 "backoff": backoff,
                 "max_single_delay_ms": self.retry_limits.max_single_delay.as_millis() as u64,
-                "max_total_wall_ms": self.retry_limits.max_total_wall_time.as_millis() as u64,
+                "max_attempt_start_window_ms": self.retry_limits.max_attempt_start_window.as_millis() as u64,
             })
         });
 
@@ -1204,8 +1265,5 @@ pub fn circuit_breaker(threshold: usize) -> Box<dyn MiddlewareFactory> {
 
 /// Create a circuit breaker factory with defaults tuned for AI provider calls.
 pub fn ai_circuit_breaker() -> Box<dyn MiddlewareFactory> {
-    CircuitBreakerBuilder::new(5)
-        .with_retry_exponential(3)
-        .with_retry_limits(RetryLimits::default())
-        .build()
+    CircuitBreakerBuilder::new(5).build()
 }

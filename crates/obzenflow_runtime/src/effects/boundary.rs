@@ -18,18 +18,43 @@ pub struct EffectIdentity {
     pub idempotency_key: Option<IdempotencyKey>,
 }
 
-/// The live execution of an effect, handed to the boundary as a future so
-/// per-effect policies compose as wrappers around it (FLOWIP-120c).
-///
-/// The future is built by `Effects::perform` and owns everything it needs;
-/// the boundary decides whether to poll it. On success it yields
-/// observation-grade `derived_data_event` copies of the authored facts, the
-/// same shape policy middleware observed through `after_effect` before this
-/// seam (FLOWIP-120c gap G7: authored facts commit inside `perform` and the
-/// boundary never sees the committed originals).
-pub type EffectExecution = std::pin::Pin<
+type EffectCall = std::pin::Pin<
     Box<dyn std::future::Future<Output = Result<Vec<ChainEvent>, EffectError>> + Send>,
 >;
+
+/// A policy-neutral callable for one live physical effect call.
+///
+/// The runtime constructs one operation per logical invocation. A boundary
+/// may call it more than once, but each call requires an exclusive reference,
+/// so calls belonging to one invocation cannot overlap. The operation owns
+/// the effect value and creates a fresh [`EffectContext`] for every call.
+/// Terminal outcome recording remains outside this callable and happens only
+/// after the boundary returns.
+pub struct EffectOperation {
+    call: Box<dyn FnMut() -> EffectCall + Send>,
+}
+
+impl EffectOperation {
+    /// Construct a neutral physical-call operation.
+    ///
+    /// Framework runtimes create this around an effect and its pristine call
+    /// context. The public constructor also supports trusted custom boundary
+    /// implementations and boundary-focused tests.
+    pub fn new<F, Fut>(mut call: F) -> Self
+    where
+        F: FnMut() -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = Result<Vec<ChainEvent>, EffectError>> + Send + 'static,
+    {
+        Self {
+            call: Box::new(move || Box::pin(call())),
+        }
+    }
+
+    /// Perform one physical call.
+    pub async fn execute(&mut self) -> Result<Vec<ChainEvent>, EffectError> {
+        (self.call)().await
+    }
+}
 
 /// Structured, policy-neutral reason carried by a boundary abort so the
 /// rejection is recorded under the effect cursor and replays deterministically.
@@ -80,6 +105,6 @@ pub trait EffectBoundary: Send + Sync {
         &self,
         identity: &EffectIdentity,
         event: &ChainEvent,
-        execute: EffectExecution,
+        operation: EffectOperation,
     ) -> EffectBoundaryReport;
 }

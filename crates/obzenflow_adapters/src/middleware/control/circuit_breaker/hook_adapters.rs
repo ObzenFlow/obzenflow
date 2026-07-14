@@ -3,12 +3,11 @@
 // https://obzenflow.dev
 
 use super::classifier::FailureClassification;
-use super::retry::RetryState;
 use super::state::CircuitState;
 use super::CircuitBreakerMiddleware;
 use crate::middleware::context_keys::{
-    CircuitBreakerAttempt, CircuitBreakerIsProbe, CircuitBreakerProbeGeneration,
-    CircuitBreakerProbeSlot, CircuitBreakerProbeSlotGuard,
+    CircuitBreakerIsProbe, CircuitBreakerProbeGeneration, CircuitBreakerProbeSlot,
+    CircuitBreakerProbeSlotGuard,
 };
 use crate::middleware::{
     EventAwareEffectPolicy, SinkAdmission, SinkAdmissionGuard, SinkDeliveryPolicyOutcome,
@@ -19,7 +18,6 @@ use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::event::payloads::observability_payload::{
     CircuitBreakerEvent, CircuitBreakerRejectionReason, MiddlewareLifecycle, ObservabilityPayload,
 };
-use obzenflow_core::event::status::processing_status::ErrorKind;
 use obzenflow_core::event::ChainEventFactory;
 use obzenflow_runtime::control_plane::CircuitBreakerStateView;
 use obzenflow_runtime::stages::source::strategies::{
@@ -383,7 +381,6 @@ impl Middleware for CircuitBreakerMiddleware {
 
         let now = Instant::now();
 
-        let attempt = ctx.get::<CircuitBreakerAttempt>().copied().unwrap_or(0);
         let is_probe = ctx.get::<CircuitBreakerIsProbe>().copied().unwrap_or(false);
 
         // Track allowed calls (i.e. calls that reached the wrapped handler), regardless of
@@ -392,99 +389,8 @@ impl Middleware for CircuitBreakerMiddleware {
             stats.requests_processed += 1;
         }
 
-        let (classification, error_kind, error_message) = self.classify_call(event, outputs, ctx);
+        let (classification, _error_kind, _error_message) = self.classify_call(event, outputs, ctx);
         let is_success = matches!(classification, FailureClassification::Success);
-        let retry_enabled = self.retry_policy.is_some();
-
-        if retry_enabled {
-            self.maybe_cleanup_retry_state(now);
-        }
-
-        /// Hard cap on `retry_state` entries to prevent unbounded growth
-        /// during sustained failure spikes. Existing entries (retries in
-        /// progress) are always updated; only brand-new entries are refused.
-        const MAX_RETRY_STATE_ENTRIES: usize = 10_000;
-
-        if retry_enabled && !is_success {
-            if let Ok(mut states) = self.retry_state.lock() {
-                // Refuse brand-new entries when at capacity to prevent
-                // unbounded growth during sustained failure spikes.
-                // Existing entries (retries in progress) are always updated.
-                let at_capacity =
-                    states.len() >= MAX_RETRY_STATE_ENTRIES && !states.contains_key(&event.id);
-
-                if at_capacity {
-                    tracing::warn!(
-                        "retry_state at capacity ({}), dropping new entry for event {:?}",
-                        MAX_RETRY_STATE_ENTRIES,
-                        event.id,
-                    );
-                } else {
-                    let entry = states.entry(event.id).or_insert_with(|| RetryState {
-                        attempts: 0,
-                        first_attempt: now,
-                        last_attempt: now,
-                        last_error: None,
-                        last_kind: None,
-                        classification: FailureClassification::TransientFailure,
-                    });
-
-                    entry.attempts = attempt.saturating_add(1);
-                    entry.last_attempt = now;
-                    if let Some(msg) = error_message.as_ref() {
-                        entry.last_error = Some(msg.clone());
-                    }
-                    if error_kind.is_some() {
-                        entry.last_kind = error_kind.clone();
-                    }
-                    entry.classification = classification.clone();
-                }
-            }
-        }
-
-        // Final outcome: clear retry state and emit a final retry lifecycle event if needed.
-        let mut retry_state = if retry_enabled {
-            match self.retry_state.lock() {
-                Ok(mut states) => states.remove(&event.id),
-                Err(_) => None,
-            }
-        } else {
-            None
-        };
-
-        if let Some(state) = retry_state.as_mut() {
-            if is_success {
-                state.attempts = attempt.saturating_add(1);
-                state.last_attempt = now;
-                state.classification = FailureClassification::Success;
-            }
-
-            if state.attempts > 1 {
-                let total_duration_ms = now.duration_since(state.first_attempt).as_millis() as u64;
-                if is_success {
-                    self.retry_successes_total.fetch_add(1, Ordering::Relaxed);
-                    ctx.write_control_event(ChainEventFactory::retry_succeeded_after_retry(
-                        self.writer_id,
-                        state.attempts,
-                        total_duration_ms,
-                        Some(event.id),
-                    ));
-                } else {
-                    self.retry_exhaustions_total.fetch_add(1, Ordering::Relaxed);
-                    let last_error = state
-                        .last_error
-                        .clone()
-                        .unwrap_or_else(|| "retry_exhausted".to_string());
-                    ctx.write_control_event(ChainEventFactory::retry_exhausted(
-                        self.writer_id,
-                        state.attempts,
-                        last_error,
-                        total_duration_ms,
-                        Some(event.id),
-                    ));
-                }
-            }
-        }
 
         let counted_as_failure = self.counts_as_failure(&classification);
         if counted_as_failure {
@@ -597,9 +503,8 @@ impl EventAwareEffectPolicy for CircuitBreakerMiddleware {
                 self.post_handle(event, outputs, ctx);
             }
             crate::middleware::EffectAttemptOutcome::Executed(Err(err)) => {
-                let error_event = event
-                    .clone()
-                    .mark_as_error(err.to_string(), ErrorKind::Remote);
+                let error_event =
+                    crate::middleware::control::policy::effect::effect_error_event(event, err);
                 self.post_handle(event, std::slice::from_ref(&error_event), ctx);
             }
             crate::middleware::EffectAttemptOutcome::SkippedBy(_)

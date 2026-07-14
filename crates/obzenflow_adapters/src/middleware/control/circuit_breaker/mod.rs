@@ -25,7 +25,6 @@ use obzenflow_core::MiddlewareExecutionScope;
 use obzenflow_core::{StageId, WriterId};
 use obzenflow_runtime::control_plane::cb_state;
 use serde_json::json;
-use std::collections::HashMap;
 use std::num::NonZeroU32;
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -45,14 +44,14 @@ pub use config::{HalfOpenPolicy, OpenPolicy};
 pub use factory::{
     ai_circuit_breaker, circuit_breaker, CircuitBreakerBuilder, CircuitBreakerFactory,
 };
-pub use retry::{CircuitBreakerRetryPolicy, RetryLimits};
+pub use retry::RetryLimits;
 
 use classifier::{FailureClassificationClassifier, FailureClassifier};
 use config::CircuitBreakerFailureMode;
 #[cfg(test)]
 use hook_adapters::CircuitBreakerSourcePolicy;
 use hook_adapters::{SourceAdmit, SourceOutcome, SourceProbeGuard};
-use retry::RetryState;
+use retry::CircuitBreakerRetryPolicy;
 use state::CircuitState;
 use window::{CallSample, FailureWindow, FailureWindowState};
 
@@ -201,14 +200,10 @@ pub struct CircuitBreakerMiddleware {
     /// Policy for how Unknown/None ErrorKind should be treated.
     unknown_error_kind_policy: UnknownErrorKindPolicy,
 
-    // ---- Integrated per-event retry (FLOWIP-051c) ----
+    // ---- Effect-bound recovery configuration (FLOWIP-115h) ----
     retry_policy: Option<CircuitBreakerRetryPolicy>,
     retry_limits: RetryLimits,
     failure_classification_policy: FailureClassificationPolicy,
-    retry_state: Arc<Mutex<HashMap<obzenflow_core::event::types::EventId, RetryState>>>,
-    last_retry_cleanup: Arc<Mutex<Instant>>,
-    retry_successes_total: Arc<AtomicU64>,
-    retry_exhaustions_total: Arc<AtomicU64>,
 }
 
 #[derive(Debug)]
@@ -302,15 +297,29 @@ impl CircuitBreakerMiddleware {
             retry_policy: None,
             retry_limits: RetryLimits::default(),
             failure_classification_policy: FailureClassificationPolicy::default(),
-            retry_state: Arc::new(Mutex::new(HashMap::new())),
-            last_retry_cleanup: Arc::new(Mutex::new(Instant::now())),
-            retry_successes_total: Arc::new(AtomicU64::new(0)),
-            retry_exhaustions_total: Arc::new(AtomicU64::new(0)),
         }
     }
 
     fn current_state(&self) -> CircuitState {
         CircuitState::from(self.state.load(Ordering::SeqCst))
+    }
+
+    pub(crate) fn effect_retry_config(&self) -> Option<(CircuitBreakerRetryPolicy, RetryLimits)> {
+        self.retry_policy
+            .clone()
+            .map(|policy| (policy, self.retry_limits.clone()))
+    }
+
+    pub(crate) fn is_closed_for_effect_recovery(&self) -> bool {
+        matches!(self.current_state(), CircuitState::Closed)
+    }
+
+    pub(crate) fn is_effect_probe(&self, ctx: &MiddlewareContext) -> bool {
+        ctx.get::<CircuitBreakerIsProbe>().copied().unwrap_or(false)
+    }
+
+    pub(crate) fn evidence_writer_id(&self) -> WriterId {
+        self.writer_id
     }
 
     fn record_closed_outcome(
@@ -440,30 +449,7 @@ impl CircuitBreakerMiddleware {
         }
     }
 
-    fn maybe_cleanup_retry_state(&self, now: Instant) {
-        let mut should_cleanup = false;
-        if let Ok(mut last) = self.last_retry_cleanup.lock() {
-            if now.duration_since(*last) >= Duration::from_secs(60) {
-                *last = now;
-                should_cleanup = true;
-            }
-        }
-
-        if !should_cleanup {
-            return;
-        }
-
-        let stale_after = self
-            .retry_limits
-            .max_total_wall_time
-            .saturating_add(Duration::from_secs(60));
-
-        if let Ok(mut states) = self.retry_state.lock() {
-            states.retain(|_, state| now.duration_since(state.last_attempt) <= stale_after);
-        }
-    }
-
-    fn classify_call(
+    pub(crate) fn classify_call(
         &self,
         event: &ChainEvent,
         outputs: &[ChainEvent],
@@ -628,12 +614,6 @@ impl CircuitBreakerMiddleware {
             self.opened_total.fetch_add(1, Ordering::Relaxed);
             if let Ok(mut opened_at) = self.opened_at.lock() {
                 *opened_at = Some(now);
-            }
-            if let Ok(mut states) = self.retry_state.lock() {
-                states.clear();
-            }
-            if let Ok(mut last_cleanup) = self.last_retry_cleanup.lock() {
-                *last_cleanup = now;
             }
         }
 
@@ -879,7 +859,7 @@ impl CircuitBreakerMiddleware {
 
     /// Settle an admitted effect probe whose protected call was skipped or
     /// rejected by a later policy. No breaker outcome is classified.
-    fn settle_not_executed(&self, ctx: &mut MiddlewareContext) {
+    pub(crate) fn settle_not_executed(&self, ctx: &mut MiddlewareContext) {
         if ctx.get::<CircuitBreakerIsProbe>().copied().unwrap_or(false) {
             let _probe_gate = self.probe_gate.lock().ok();
             drop(ctx.remove::<CircuitBreakerProbeSlot>());
@@ -1092,7 +1072,6 @@ mod tests {
     use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
     use obzenflow_core::TypedPayload;
     use obzenflow_runtime::control_plane::ControlPlaneProvider;
-    use obzenflow_runtime::stages::transform::BackoffStrategy;
     use std::num::NonZeroU32;
     use std::time::Duration as StdDuration;
 
@@ -2108,50 +2087,6 @@ mod tests {
             classification,
             FailureClassification::PermanentFailure,
             "Deserialization should be classified as PermanentFailure"
-        );
-    }
-
-    // -----------------------------------------------------------------------
-    // T4: retry_state capacity cap is enforced
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn retry_state_cap_prevents_unbounded_growth() {
-        let mut cb = CircuitBreakerMiddleware::with_cooldown_and_fallback(
-            100_000, // very high threshold so the breaker stays Closed
-            StdDuration::from_secs(60),
-            None,
-            None,
-            None,
-            None,
-        );
-        cb.retry_policy = Some(CircuitBreakerRetryPolicy {
-            max_attempts: 3,
-            backoff: BackoffStrategy::Fixed {
-                delay: StdDuration::from_millis(1),
-            },
-        });
-        cb.retry_limits = RetryLimits {
-            max_single_delay: StdDuration::from_secs(30),
-            max_total_wall_time: StdDuration::from_secs(120),
-        };
-
-        // Pump 10,500 unique failing events — 500 more than the cap (10,000).
-        for _ in 0..10_500 {
-            let event = create_test_event(); // each has a unique EventId
-            let mut ctx = MiddlewareContext::live_handler();
-            cb.pre_handle(&event, &mut ctx);
-            let mut failed = create_test_event();
-            failed.processing_info.status =
-                ProcessingStatus::error_with_kind("infra_fail", Some(ErrorKind::Timeout));
-            cb.post_handle(&event, &[failed], &mut ctx);
-        }
-
-        let states = cb.retry_state.lock().unwrap();
-        assert!(
-            states.len() <= 10_000,
-            "retry_state exceeded cap: {} entries",
-            states.len()
         );
     }
 

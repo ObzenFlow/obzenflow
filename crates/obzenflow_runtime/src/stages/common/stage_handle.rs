@@ -140,6 +140,9 @@ pub trait StageHandle: Send + Sync {
     /// - Treat terminal states (e.g., Drained/Failed) as completion
     /// - Respect the same shutdown timeout used by the pipeline cleanup path
     async fn wait_for_completion(&self) -> Result<(), StageError>;
+
+    /// Abort the underlying supervisor task and join it deterministically.
+    async fn abort_and_join(&self) -> Result<(), StageError>;
 }
 
 /// Type-erased stage handle for pipeline storage

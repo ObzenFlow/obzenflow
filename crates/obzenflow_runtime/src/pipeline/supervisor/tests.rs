@@ -362,6 +362,10 @@ impl StageHandle for TestPipelineStageHandle {
     async fn wait_for_completion(&self) -> Result<(), StageError> {
         Ok(())
     }
+
+    async fn abort_and_join(&self) -> Result<(), StageError> {
+        Ok(())
+    }
 }
 
 fn test_supervisor(

@@ -204,7 +204,7 @@ fn materialize_effect_observers_for_declarations(
             materialization.config,
             materialization.stage_type,
             materialization.control_middleware,
-            effect.effect_type,
+            effect,
             materialization.origin,
             materialization.declaration_index,
         )?;
@@ -1775,7 +1775,7 @@ impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
                     &config,
                     StageType::Transform,
                     &control_middleware,
-                    effect_type,
+                    &effect_declarations[0],
                     &origin,
                     MiddlewareDeclarationIndex::resolved(middleware_index),
                 )?;
@@ -1790,7 +1790,10 @@ impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
                     &config,
                     StageType::Transform,
                     &control_middleware,
-                    attachment.effect_type,
+                    effect_declarations
+                        .iter()
+                        .find(|effect| effect.effect_type == attachment.effect_type)
+                        .expect("effect policy attachment names a declared effect"),
                     &obzenflow_adapters::middleware::MiddlewareOrigin::Stage,
                     MiddlewareDeclarationIndex::effect_policy(middleware_index),
                 )?;

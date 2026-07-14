@@ -613,6 +613,12 @@ impl SupervisorHandle for FlowHandle {
                 _ => FlowError::ExecutionFailed(Box::new(std::io::Error::other(e.to_string()))),
             })
     }
+
+    async fn abort_and_wait(&self) -> Result<(), Self::Error> {
+        self.handle.abort_and_wait().await.map_err(|error| {
+            FlowError::ExecutionFailed(Box::new(std::io::Error::other(error.to_string())))
+        })
+    }
 }
 
 #[cfg(test)]

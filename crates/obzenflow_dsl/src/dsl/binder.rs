@@ -25,6 +25,7 @@ use obzenflow_core::event::context::StageType;
 use obzenflow_core::ingress::IngressBoundaryMiddleware;
 use obzenflow_core::ingress::IngressKey;
 use obzenflow_core::StageKey;
+use obzenflow_runtime::effects::EffectDeclaration;
 use obzenflow_runtime::pipeline::config::StageConfig;
 use obzenflow_runtime::stages::source::strategies::CompletionGate;
 use std::sync::Arc;
@@ -112,10 +113,11 @@ pub(crate) fn bind_effect_policy(
     config: &StageConfig,
     stage_type: StageType,
     control_middleware: &Arc<ControlMiddlewareAggregator>,
-    effect_type: &'static str,
+    effect: &EffectDeclaration,
     origin: &MiddlewareOrigin,
     declaration_index: MiddlewareDeclarationIndex,
 ) -> Result<EffectPolicyAttachment, String> {
+    let effect_type = effect.effect_type;
     let declaration = factory.declaration();
     if declaration.is_observer() {
         return Err(format!(
@@ -127,6 +129,7 @@ pub(crate) fn bind_effect_policy(
         let surface = MiddlewareSurface::Effect(EffectSurface {
             stage_id: config.stage_id,
             effect_type: EffectTypeKey::from(effect_type),
+            safety: effect.safety,
         });
         let protected_unit = ProtectedUnitId {
             stage_id: config.stage_id,
@@ -171,13 +174,15 @@ pub(crate) fn materialize_effect_observer(
     config: &StageConfig,
     stage_type: StageType,
     control_middleware: &Arc<ControlMiddlewareAggregator>,
-    effect_type: &'static str,
+    effect: &EffectDeclaration,
     origin: &MiddlewareOrigin,
     declaration_index: MiddlewareDeclarationIndex,
 ) -> Result<MiddlewareSurfaceAttachment, String> {
+    let effect_type = effect.effect_type;
     let surface = MiddlewareSurface::Effect(EffectSurface {
         stage_id: config.stage_id,
         effect_type: EffectTypeKey::from(effect_type),
+        safety: effect.safety,
     });
     let protected_unit = ProtectedUnitId {
         stage_id: config.stage_id,

@@ -590,6 +590,7 @@ fn invocation_context_with_mode(
             EffectDeclaration::of::<FailingEffect>(),
             EffectDeclaration::of::<MultiFactEffect>(),
             EffectDeclaration::of::<KeylessEffect>(),
+            EffectDeclaration::of::<KeyedEffect>(),
             EffectDeclaration::transactional_effect::<TransactionalCountingEffect>("tx"),
         ],
         synthesized_outcomes: Vec::new(),
@@ -2386,7 +2387,7 @@ impl EffectBoundary for AbortingBoundary {
         &self,
         _identity: &EffectIdentity,
         _event: &ChainEvent,
-        _execute: EffectExecution,
+        _operation: EffectOperation,
     ) -> EffectBoundaryReport {
         EffectBoundaryReport {
             outcome: EffectBoundaryOutcome::Aborted(EffectAbortReason {
@@ -2410,7 +2411,7 @@ impl EffectBoundary for EmptySkipBoundary {
         &self,
         _identity: &EffectIdentity,
         _event: &ChainEvent,
-        _execute: EffectExecution,
+        _operation: EffectOperation,
     ) -> EffectBoundaryReport {
         EffectBoundaryReport {
             outcome: EffectBoundaryOutcome::Skipped {
@@ -2750,6 +2751,41 @@ impl Effect for KeylessEffect {
     }
 }
 
+#[derive(Clone, Debug)]
+struct KeyedEffect {
+    key: IdempotencyKey,
+    seen_keys: Arc<Mutex<Vec<IdempotencyKey>>>,
+}
+
+#[async_trait]
+impl Effect for KeyedEffect {
+    const EFFECT_TYPE: &'static str = "test.keyed";
+    const SCHEMA_VERSION: u32 = 1;
+    const SAFETY: EffectSafety = EffectSafety::NonIdempotentRequiresKey;
+
+    type Outcome = CountingOutput;
+
+    fn label(&self) -> &str {
+        "keyed"
+    }
+
+    fn canonical_input(&self) -> Value {
+        json!({ "key": self.key.0 })
+    }
+
+    async fn execute(&self, _ctx: &mut EffectContext) -> Result<Self::Outcome, EffectError> {
+        self.seen_keys
+            .lock()
+            .expect("seen keys lock poisoned")
+            .push(self.key.clone());
+        Ok(CountingOutput { value: 1 })
+    }
+
+    fn idempotency_key(&self) -> Option<IdempotencyKey> {
+        Some(self.key.clone())
+    }
+}
+
 struct CountingBoundary {
     consults: Arc<AtomicUsize>,
 }
@@ -2760,14 +2796,119 @@ impl EffectBoundary for CountingBoundary {
         &self,
         _identity: &EffectIdentity,
         _event: &ChainEvent,
-        execute: EffectExecution,
+        mut operation: EffectOperation,
     ) -> EffectBoundaryReport {
         self.consults.fetch_add(1, Ordering::SeqCst);
         EffectBoundaryReport {
-            outcome: EffectBoundaryOutcome::Executed(execute.await),
+            outcome: EffectBoundaryOutcome::Executed(operation.execute().await),
             control_events: Vec::new(),
         }
     }
+}
+
+struct ThreeCallBoundary {
+    consults: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl EffectBoundary for ThreeCallBoundary {
+    async fn around_effect(
+        &self,
+        _identity: &EffectIdentity,
+        _event: &ChainEvent,
+        mut operation: EffectOperation,
+    ) -> EffectBoundaryReport {
+        self.consults.fetch_add(1, Ordering::SeqCst);
+        operation.execute().await.expect("first physical call");
+        operation.execute().await.expect("second physical call");
+        EffectBoundaryReport {
+            outcome: EffectBoundaryOutcome::Executed(operation.execute().await),
+            control_events: Vec::new(),
+        }
+    }
+}
+
+struct KeyCheckingThreeCallBoundary {
+    expected_key: IdempotencyKey,
+}
+
+#[async_trait]
+impl EffectBoundary for KeyCheckingThreeCallBoundary {
+    async fn around_effect(
+        &self,
+        identity: &EffectIdentity,
+        _event: &ChainEvent,
+        mut operation: EffectOperation,
+    ) -> EffectBoundaryReport {
+        assert_eq!(identity.idempotency_key.as_ref(), Some(&self.expected_key));
+        operation.execute().await.expect("first physical call");
+        operation.execute().await.expect("second physical call");
+        EffectBoundaryReport {
+            outcome: EffectBoundaryOutcome::Executed(operation.execute().await),
+            control_events: Vec::new(),
+        }
+    }
+}
+
+#[tokio::test]
+async fn runtime_enters_the_boundary_once_and_commits_only_the_terminal_call() {
+    let stage_id = StageId::new();
+    let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
+    let consults = Arc::new(AtomicUsize::new(0));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut ctx = invocation_context(
+        journal.clone(),
+        parent_envelope(WriterId::from(stage_id)),
+        None,
+    );
+    ctx.effect_boundary = Some(Arc::new(ThreeCallBoundary {
+        consults: consults.clone(),
+    }));
+    let mut effects = Effects::new(ctx);
+
+    let outcome = effects
+        .perform(CountingEffect {
+            value: 41,
+            label: "three physical calls",
+            calls: calls.clone(),
+        })
+        .await
+        .expect("terminal physical call should succeed");
+
+    assert_eq!(outcome, CountingOutput { value: 42 });
+    assert_eq!(consults.load(Ordering::SeqCst), 1);
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
+    assert_eq!(
+        effect_records(&journal).len(),
+        1,
+        "intermediate physical calls must not commit effect records"
+    );
+}
+
+#[tokio::test]
+async fn repeated_physical_calls_preserve_the_invocations_idempotency_key() {
+    let stage_id = StageId::new();
+    let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
+    let key = IdempotencyKey("stable-key".to_string());
+    let seen_keys = Arc::new(Mutex::new(Vec::new()));
+    let mut ctx = invocation_context(journal, parent_envelope(WriterId::from(stage_id)), None);
+    ctx.effect_boundary = Some(Arc::new(KeyCheckingThreeCallBoundary {
+        expected_key: key.clone(),
+    }));
+    let mut effects = Effects::new(ctx);
+
+    effects
+        .perform(KeyedEffect {
+            key: key.clone(),
+            seen_keys: seen_keys.clone(),
+        })
+        .await
+        .expect("terminal physical call should succeed");
+
+    assert_eq!(
+        *seen_keys.lock().expect("seen keys lock poisoned"),
+        vec![key; 3]
+    );
 }
 
 #[tokio::test]
@@ -2899,7 +3040,7 @@ impl EffectBoundary for TransactionalOnlyAbortBoundary {
         &self,
         identity: &EffectIdentity,
         _event: &ChainEvent,
-        execute: EffectExecution,
+        mut operation: EffectOperation,
     ) -> EffectBoundaryReport {
         if matches!(identity.safety, EffectSafety::Transactional) {
             return EffectBoundaryReport {
@@ -2915,7 +3056,7 @@ impl EffectBoundary for TransactionalOnlyAbortBoundary {
             };
         }
         EffectBoundaryReport {
-            outcome: EffectBoundaryOutcome::Executed(execute.await),
+            outcome: EffectBoundaryOutcome::Executed(operation.execute().await),
             control_events: Vec::new(),
         }
     }
