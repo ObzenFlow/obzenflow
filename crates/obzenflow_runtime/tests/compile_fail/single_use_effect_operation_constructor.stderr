@@ -1,0 +1,13 @@
+error[E0624]: associated function `new` is private
+ --> tests/compile_fail/single_use_effect_operation_constructor.rs:9:48
+  |
+9 |       let _operation = SingleUseEffectOperation::new(|| async {
+  |                                                  ^^^ private associated function
+  |
+ ::: src/effects/boundary.rs
+  |
+  | /     pub(super) fn new<F, Fut>(call: F) -> Self
+  | |     where
+  | |         F: FnOnce() -> Fut + Send + 'static,
+  | |         Fut: std::future::Future<Output = Result<Vec<ChainEvent>, EffectError>> + Send + 'static,
+  | |_________________________________________________________________________________________________- private associated function defined here

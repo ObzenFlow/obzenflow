@@ -752,7 +752,9 @@ mod tests {
         ChainEventFactory, EffectFailureCode, EffectFailureSource, RetryDisposition,
     };
     use obzenflow_core::StageId;
-    use obzenflow_runtime::effects::{EffectBoundaryOutcome, EffectIdentity, EffectOperation};
+    use obzenflow_runtime::effects::{
+        EffectBoundaryOutcome, EffectIdentity, RepeatableEffectOperation,
+    };
     use serde_json::json;
     use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -1231,12 +1233,12 @@ mod tests {
         let event = ChainEventFactory::data_event(writer_id, "test.input", json!({}));
         let output = ChainEventFactory::data_event(writer_id, "test.output", json!({}));
 
-        let execute = EffectOperation::new(move || {
+        let execute = RepeatableEffectOperation::new(move || {
             let output = output.clone();
             async move { Ok(vec![output]) }
         });
         let report = boundary
-            .around_effect(&test_effect_identity(), &event, execute)
+            .around_repeatable_effect(&test_effect_identity(), &event, execute)
             .await;
 
         assert!(matches!(
@@ -1262,7 +1264,7 @@ mod tests {
 
         let polled = Arc::new(AtomicBool::new(false));
         let polled_probe = polled.clone();
-        let execute = EffectOperation::new(move || {
+        let execute = RepeatableEffectOperation::new(move || {
             let polled_probe = polled_probe.clone();
             async move {
                 polled_probe.store(true, Ordering::SeqCst);
@@ -1271,7 +1273,7 @@ mod tests {
         });
 
         let report = boundary
-            .around_effect(&test_effect_identity(), &event, execute)
+            .around_repeatable_effect(&test_effect_identity(), &event, execute)
             .await;
 
         match report.outcome {

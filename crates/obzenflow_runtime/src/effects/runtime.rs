@@ -420,7 +420,7 @@ impl Effects {
             let parent_event = self.ctx.parent.event.clone();
             let lineage = self.ctx.lineage;
             let base_context = self.live_effect_context();
-            EffectOperation::new(move || {
+            RepeatableEffectOperation::new(move || {
                 let effect = effect.clone();
                 let mut effect_ctx = base_context.clone();
                 let slot = slot.clone();
@@ -447,7 +447,7 @@ impl Effects {
         };
 
         let report = boundary
-            .around_effect(&identity, &self.ctx.parent.event, operation)
+            .around_repeatable_effect(&identity, &self.ctx.parent.event, operation)
             .await;
         self.ctx.push_boundary_control_events(report.control_events);
 
@@ -909,18 +909,8 @@ impl Effects {
             let slot = settle_slot.clone();
             let observer = commit_observer.clone();
             let executor_name = executor.to_string();
-            let mut captures = Some((port, effect, effect_ctx, commit));
-            EffectOperation::new(move || {
-                let captures = captures.take();
-                let slot = slot.clone();
-                let observer = observer.clone();
-                let executor_name = executor_name.clone();
+            SingleUseEffectOperation::new(move || {
                 async move {
-                    let Some((port, effect, mut effect_ctx, commit)) = captures else {
-                        return Err(EffectError::Execution(
-                            "transactional effect operation was called more than once".to_string(),
-                        ));
-                    };
                     let port_result = port
                         .execute_and_commit(effect, &mut effect_ctx, commit)
                         .await
@@ -953,14 +943,49 @@ impl Effects {
                 }
             })
         };
+        let expected_provenance = operation.provenance();
 
         let report = boundary
-            .around_effect(&identity, &self.ctx.parent.event, operation)
+            .around_single_use_effect(&identity, &self.ctx.parent.event, operation)
             .await;
-        self.ctx.push_boundary_control_events(report.control_events);
+        let (outcome, control_events) = match report.into_parts(&expected_provenance) {
+            Ok(parts) => parts,
+            Err(err) => {
+                // A report for another capability has no authority over this
+                // invocation, including no authority to inject control
+                // events. If this operation nevertheless reached its settle
+                // slot, the committed outcome remains terminal and must win;
+                // an already-committed transaction cannot be reclassified by
+                // a boundary contract violation.
+                let settled = settle_slot
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .take();
+                if let Some((port_result, outcome)) = settled {
+                    let result = self.settle_transactional::<E>(
+                        executor,
+                        output_ordinal,
+                        port_result,
+                        outcome,
+                    );
+                    self.observe_effect_result(E::EFFECT_TYPE, &result).await?;
+                    return result;
+                }
 
-        match report.outcome {
-            EffectBoundaryOutcome::Executed(_) => {
+                // No transaction ran. Record the fail-closed provenance error
+                // under this cursor so strict replay reproduces the rejection.
+                self.restore_output_ordinal(output_ordinal);
+                self.append_failed_record(cursor, descriptor_hash, descriptor, &err)
+                    .await?;
+                let result: Result<E::Outcome, EffectError> = Err(err);
+                self.observe_effect_result(E::EFFECT_TYPE, &result).await?;
+                return result;
+            }
+        };
+        self.ctx.push_boundary_control_events(control_events);
+
+        match outcome {
+            SingleUseEffectBoundaryOutcome::Executed(_execution) => {
                 let (port_result, outcome) = settle_slot
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -976,7 +1001,7 @@ impl Effects {
                 self.observe_effect_result(E::EFFECT_TYPE, &result).await?;
                 result
             }
-            EffectBoundaryOutcome::Skipped { source, .. } => {
+            SingleUseEffectBoundaryOutcome::FallbackRejected { source } => {
                 // H5 v1: no fallback synthesis for transactional effects; the
                 // skip is recorded as a failed outcome so replay reproduces it.
                 self.restore_output_ordinal(output_ordinal);
@@ -1000,7 +1025,7 @@ impl Effects {
                 .await?;
                 Err(err)
             }
-            EffectBoundaryOutcome::Aborted(reason) => {
+            SingleUseEffectBoundaryOutcome::Aborted(reason) => {
                 self.restore_output_ordinal(output_ordinal);
                 let result = self
                     .record_boundary_abort(cursor, descriptor_hash, descriptor, reason)

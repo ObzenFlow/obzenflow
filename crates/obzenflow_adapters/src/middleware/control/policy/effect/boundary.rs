@@ -13,7 +13,7 @@ use obzenflow_core::event::EffectFailureCause;
 use obzenflow_core::{ChainEvent, MiddlewareExecutionScope};
 use obzenflow_runtime::effects::{
     EffectAbortReason, EffectBoundary, EffectBoundaryOutcome, EffectBoundaryReport, EffectIdentity,
-    EffectOperation,
+    RepeatableEffectOperation, SingleUseEffectBoundaryReport, SingleUseEffectOperation,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -25,6 +25,7 @@ use std::time::Instant as StdInstant;
 enum CompiledEffectChain {
     Plain(Arc<Vec<EffectPolicyAttachment>>),
     Recovering {
+        chain: Arc<Vec<EffectPolicyAttachment>>,
         outer: Vec<EffectPolicyAttachment>,
         breaker: Arc<CircuitBreakerMiddleware>,
         inner: Vec<EffectPolicyAttachment>,
@@ -53,6 +54,7 @@ impl CompiledEffectChain {
         match breaker {
             None => Self::Plain(chain),
             Some(breaker) => Self::Recovering {
+                chain,
                 outer,
                 breaker,
                 inner,
@@ -103,7 +105,7 @@ fn observe_reverse(
 pub(in crate::middleware::control) async fn execute_chain_once(
     chain: &[EffectPolicyAttachment],
     event: &ChainEvent,
-    operation: &mut EffectOperation,
+    operation: &mut RepeatableEffectOperation,
 ) -> EffectBoundaryReport {
     let mut ctx = MiddlewareContext::with_scope(MiddlewareExecutionScope::LiveEffectBoundary);
     let mut admitted: Vec<&EffectPolicyAttachment> = Vec::new();
@@ -146,13 +148,49 @@ pub(in crate::middleware::control) async fn execute_chain_once(
     }
 }
 
+async fn execute_single_use_chain_once(
+    chain: &[EffectPolicyAttachment],
+    event: &ChainEvent,
+    operation: SingleUseEffectOperation,
+) -> SingleUseEffectBoundaryReport {
+    let mut ctx = MiddlewareContext::with_scope(MiddlewareExecutionScope::LiveEffectBoundary);
+    let mut admitted: Vec<&EffectPolicyAttachment> = Vec::new();
+
+    for policy in chain {
+        match policy.admit(event, &mut ctx).await {
+            PolicyAdmission::Admit => admitted.push(policy),
+            PolicyAdmission::Synthesize { .. } => {
+                let source = policy.label();
+                let attempt = EffectAttemptOutcome::SkippedBy(source);
+                observe_reverse(&admitted, event, &attempt, &mut ctx);
+                return operation
+                    .reject_fallback(Some(source.to_string()), ctx.take_control_events());
+            }
+            PolicyAdmission::Reject(cause) => {
+                let attempt = EffectAttemptOutcome::RejectedBy(&cause);
+                observe_reverse(&admitted, event, &attempt, &mut ctx);
+                return operation.abort(abort_reason_from_cause(cause), ctx.take_control_events());
+            }
+        }
+    }
+
+    let call_started = StdInstant::now();
+    let execution = operation.execute().await;
+    ctx.insert::<crate::middleware::context_keys::EffectCallDurationNanos>(
+        call_started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
+    );
+    let attempt = EffectAttemptOutcome::Executed(execution.result());
+    observe_reverse(&admitted, event, &attempt, &mut ctx);
+    execution.into_report(ctx.take_control_events())
+}
+
 #[async_trait]
 impl EffectBoundary for PerEffectPolicyBoundary {
-    async fn around_effect(
+    async fn around_repeatable_effect(
         &self,
         identity: &EffectIdentity,
         event: &ChainEvent,
-        mut operation: EffectOperation,
+        mut operation: RepeatableEffectOperation,
     ) -> EffectBoundaryReport {
         let (outer, breaker, inner) = match self.chains.get(identity.effect_type) {
             None => {
@@ -165,6 +203,7 @@ impl EffectBoundary for PerEffectPolicyBoundary {
                 return execute_chain_once(chain, event, &mut operation).await;
             }
             Some(CompiledEffectChain::Recovering {
+                chain: _,
                 outer,
                 breaker,
                 inner,
@@ -250,5 +289,20 @@ impl EffectBoundary for PerEffectPolicyBoundary {
         }
         report.control_events.extend(ctx.take_control_events());
         report
+    }
+
+    async fn around_single_use_effect(
+        &self,
+        identity: &EffectIdentity,
+        event: &ChainEvent,
+        operation: SingleUseEffectOperation,
+    ) -> SingleUseEffectBoundaryReport {
+        let chain = match self.chains.get(identity.effect_type) {
+            None => return operation.execute().await.into_report(Vec::new()),
+            Some(CompiledEffectChain::Plain(chain))
+            | Some(CompiledEffectChain::Recovering { chain, .. }) => chain,
+        };
+
+        execute_single_use_chain_once(chain, event, operation).await
     }
 }

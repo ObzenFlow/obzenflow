@@ -30,7 +30,7 @@ async fn retrying_breaker_recovers_inside_one_boundary_invocation() {
     });
 
     let report = boundary
-        .around_effect(&identity_for("effect.retry"), &data_event(), operation)
+        .around_repeatable_effect(&identity_for("effect.retry"), &data_event(), operation)
         .await;
 
     assert!(matches!(
@@ -74,7 +74,7 @@ async fn stateful_classifier_runs_once_per_attempt_and_one_result_drives_settlem
     );
     let calls = Arc::new(AtomicUsize::new(0));
     let report = boundary_with_chain(vec![breaker])
-        .around_effect(
+        .around_repeatable_effect(
             &identity_for("effect.retry"),
             &data_event(),
             scripted_operation(calls.clone(), |call| {
@@ -128,7 +128,7 @@ async fn opaque_execution_failure_is_never_promoted_to_retry() {
     });
 
     let report = boundary
-        .around_effect(&identity_for("effect.retry"), &data_event(), operation)
+        .around_repeatable_effect(&identity_for("effect.retry"), &data_event(), operation)
         .await;
 
     assert!(matches!(
@@ -152,7 +152,7 @@ async fn raw_success_is_not_reexecuted_when_classifier_marks_it_transient() {
     let operation = scripted_operation(calls.clone(), |_| Ok(Vec::new()));
 
     let report = boundary
-        .around_effect(&identity_for("effect.retry"), &data_event(), operation)
+        .around_repeatable_effect(&identity_for("effect.retry"), &data_event(), operation)
         .await;
 
     assert!(matches!(
@@ -177,7 +177,7 @@ async fn retry_exhaustion_returns_the_exact_last_failure() {
     });
 
     let report = boundary
-        .around_effect(&identity_for("effect.retry"), &data_event(), operation)
+        .around_repeatable_effect(&identity_for("effect.retry"), &data_event(), operation)
         .await;
 
     assert!(matches!(
@@ -214,7 +214,7 @@ async fn later_permanent_failure_stops_recovery() {
     });
 
     let report = boundary
-        .around_effect(&identity_for("effect.retry"), &data_event(), operation)
+        .around_repeatable_effect(&identity_for("effect.retry"), &data_event(), operation)
         .await;
 
     assert!(matches!(
@@ -246,7 +246,7 @@ async fn custom_classifier_can_veto_but_not_promote_recovery() {
                 .build(),
         );
         let veto_report = boundary_with_chain(vec![vetoing_breaker])
-            .around_effect(
+            .around_repeatable_effect(
                 &identity_for("effect.retry"),
                 &data_event(),
                 scripted_operation(timeout_calls.clone(), |_| {
@@ -273,7 +273,7 @@ async fn custom_classifier_can_veto_but_not_promote_recovery() {
         );
         let slot = Arc::new(Mutex::new(Some(error)));
         let report = boundary_with_chain(vec![breaker])
-            .around_effect(
+            .around_repeatable_effect(
                 &identity_for("effect.retry"),
                 &data_event(),
                 scripted_operation(calls.clone(), move |_| {

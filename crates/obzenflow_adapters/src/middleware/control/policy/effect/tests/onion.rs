@@ -72,7 +72,7 @@ async fn admitted_policies_observe_rejection_by_later_policy() {
     let boundary = PerEffectPolicyBoundary::new(chains);
 
     let report = boundary
-        .around_effect(&identity_for("effect.a"), &data_event(), ok_execute())
+        .around_repeatable_effect(&identity_for("effect.a"), &data_event(), ok_execute())
         .await;
 
     assert!(matches!(
@@ -106,7 +106,7 @@ async fn per_effect_breakers_do_not_cross_trip() {
 
     // One failure opens effect A's breaker (threshold 1).
     let report = boundary
-        .around_effect(&identity_for("effect.a"), &data_event(), failing_execute())
+        .around_repeatable_effect(&identity_for("effect.a"), &data_event(), failing_execute())
         .await;
     assert!(matches!(
         report.outcome,
@@ -115,7 +115,7 @@ async fn per_effect_breakers_do_not_cross_trip() {
 
     // Effect A is now rejected at admission.
     let report = boundary
-        .around_effect(&identity_for("effect.a"), &data_event(), ok_execute())
+        .around_repeatable_effect(&identity_for("effect.a"), &data_event(), ok_execute())
         .await;
     assert!(
         matches!(report.outcome, EffectBoundaryOutcome::Aborted(_)),
@@ -124,7 +124,7 @@ async fn per_effect_breakers_do_not_cross_trip() {
 
     // Effect B's breaker never saw A's failure and still admits.
     let report = boundary
-        .around_effect(&identity_for("effect.b"), &data_event(), ok_execute())
+        .around_repeatable_effect(&identity_for("effect.b"), &data_event(), ok_execute())
         .await;
     assert!(
         matches!(report.outcome, EffectBoundaryOutcome::Executed(Ok(_))),
@@ -133,7 +133,7 @@ async fn per_effect_breakers_do_not_cross_trip() {
 
     // An effect with no declared policies executes unguarded.
     let report = boundary
-        .around_effect(&identity_for("effect.c"), &data_event(), ok_execute())
+        .around_repeatable_effect(&identity_for("effect.c"), &data_event(), ok_execute())
         .await;
     assert!(matches!(
         report.outcome,
@@ -151,7 +151,7 @@ async fn policy_position_controls_logical_vs_physical_admission_count() {
     );
     let (inner_limiter, inner_control, inner_stage) = rate_limiter_fixture();
     let report = boundary_with_chain(vec![breaker, inner_limiter])
-        .around_effect(
+        .around_repeatable_effect(
             &identity_for("effect.retry"),
             &data_event(),
             scripted_operation(inner_calls.clone(), |call| {
@@ -177,7 +177,7 @@ async fn policy_position_controls_logical_vs_physical_admission_count() {
             .build(),
     );
     let report = boundary_with_chain(vec![outer_limiter, breaker])
-        .around_effect(
+        .around_repeatable_effect(
             &identity_for("effect.retry"),
             &data_event(),
             scripted_operation(outer_calls.clone(), |call| {
@@ -201,7 +201,7 @@ async fn health_only_breaker_calls_a_failing_effect_once() {
     let calls = Arc::new(AtomicUsize::new(0));
     let breaker = retrying_breaker_attachment(CircuitBreaker::opens_after(3).build());
     let report = boundary_with_chain(vec![breaker])
-        .around_effect(
+        .around_repeatable_effect(
             &identity_for("effect.retry"),
             &data_event(),
             scripted_operation(calls.clone(), |_| {
@@ -229,7 +229,7 @@ async fn open_circuit_makes_no_call_and_half_open_probe_never_retries() {
     let open_boundary = boundary_with_chain(vec![open_breaker]);
     let first_calls = Arc::new(AtomicUsize::new(0));
     open_boundary
-        .around_effect(
+        .around_repeatable_effect(
             &identity_for("effect.retry"),
             &data_event(),
             scripted_operation(first_calls, |_| {
@@ -239,7 +239,7 @@ async fn open_circuit_makes_no_call_and_half_open_probe_never_retries() {
         .await;
     let rejected_calls = Arc::new(AtomicUsize::new(0));
     let report = open_boundary
-        .around_effect(
+        .around_repeatable_effect(
             &identity_for("effect.retry"),
             &data_event(),
             scripted_operation(rejected_calls.clone(), |_| Ok(Vec::new())),
@@ -256,7 +256,7 @@ async fn open_circuit_makes_no_call_and_half_open_probe_never_retries() {
     );
     let half_open_boundary = boundary_with_chain(vec![half_open_breaker]);
     half_open_boundary
-        .around_effect(
+        .around_repeatable_effect(
             &identity_for("effect.retry"),
             &data_event(),
             scripted_operation(Arc::new(AtomicUsize::new(0)), |_| {
@@ -266,7 +266,7 @@ async fn open_circuit_makes_no_call_and_half_open_probe_never_retries() {
         .await;
     let probe_calls = Arc::new(AtomicUsize::new(0));
     let report = half_open_boundary
-        .around_effect(
+        .around_repeatable_effect(
             &identity_for("effect.retry"),
             &data_event(),
             scripted_operation(probe_calls.clone(), |_| {

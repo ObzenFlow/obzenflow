@@ -475,6 +475,32 @@ impl TransactionalEffectPort<TransactionalCountingEffect> for DivergentTransacti
     }
 }
 
+/// Commits a failure but returns an ordinary success value, proving that the
+/// committed failure remains authoritative through a single-use boundary.
+struct CommittedFailureTransactionalPort {
+    calls: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl TransactionalEffectPort<TransactionalCountingEffect> for CommittedFailureTransactionalPort {
+    async fn execute_and_commit(
+        &self,
+        effect: TransactionalCountingEffect,
+        _ctx: &mut EffectContext,
+        commit: EffectCommitHandle<CountingOutput>,
+    ) -> Result<CountingOutput, EffectError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        commit
+            .commit_failure(&EffectError::Timeout(
+                "committed transactional timeout".to_string(),
+            ))
+            .await?;
+        Ok(CountingOutput {
+            value: effect.value + 9_999,
+        })
+    }
+}
+
 /// A carrier with a non-empty synthesized set, standing in for a `Guarded`
 /// lifted carrier without depending on the adapters crate (FLOWIP-120m
 /// coordination tests).
@@ -2383,11 +2409,11 @@ struct AbortingBoundary;
 
 #[async_trait]
 impl EffectBoundary for AbortingBoundary {
-    async fn around_effect(
+    async fn around_repeatable_effect(
         &self,
         _identity: &EffectIdentity,
         _event: &ChainEvent,
-        _operation: EffectOperation,
+        _operation: RepeatableEffectOperation,
     ) -> EffectBoundaryReport {
         EffectBoundaryReport {
             outcome: EffectBoundaryOutcome::Aborted(EffectAbortReason {
@@ -2401,17 +2427,36 @@ impl EffectBoundary for AbortingBoundary {
             control_events: Vec::new(),
         }
     }
+
+    async fn around_single_use_effect(
+        &self,
+        _identity: &EffectIdentity,
+        _event: &ChainEvent,
+        operation: SingleUseEffectOperation,
+    ) -> SingleUseEffectBoundaryReport {
+        operation.abort(
+            EffectAbortReason {
+                cause: EffectFailureCause {
+                    source: "circuit_breaker".into(),
+                    code: "rejected_circuit_open".into(),
+                },
+                message: "circuit breaker rejected effect execution".to_string(),
+                retry: RetryDisposition::Retryable,
+            },
+            Vec::new(),
+        )
+    }
 }
 
 struct EmptySkipBoundary;
 
 #[async_trait]
 impl EffectBoundary for EmptySkipBoundary {
-    async fn around_effect(
+    async fn around_repeatable_effect(
         &self,
         _identity: &EffectIdentity,
         _event: &ChainEvent,
-        _operation: EffectOperation,
+        _operation: RepeatableEffectOperation,
     ) -> EffectBoundaryReport {
         EffectBoundaryReport {
             outcome: EffectBoundaryOutcome::Skipped {
@@ -2420,6 +2465,15 @@ impl EffectBoundary for EmptySkipBoundary {
             },
             control_events: Vec::new(),
         }
+    }
+
+    async fn around_single_use_effect(
+        &self,
+        _identity: &EffectIdentity,
+        _event: &ChainEvent,
+        operation: SingleUseEffectOperation,
+    ) -> SingleUseEffectBoundaryReport {
+        operation.reject_fallback(None, Vec::new())
     }
 }
 
@@ -2792,17 +2846,106 @@ struct CountingBoundary {
 
 #[async_trait]
 impl EffectBoundary for CountingBoundary {
-    async fn around_effect(
+    async fn around_repeatable_effect(
         &self,
         _identity: &EffectIdentity,
         _event: &ChainEvent,
-        mut operation: EffectOperation,
+        mut operation: RepeatableEffectOperation,
     ) -> EffectBoundaryReport {
         self.consults.fetch_add(1, Ordering::SeqCst);
         EffectBoundaryReport {
             outcome: EffectBoundaryOutcome::Executed(operation.execute().await),
             control_events: Vec::new(),
         }
+    }
+
+    async fn around_single_use_effect(
+        &self,
+        _identity: &EffectIdentity,
+        _event: &ChainEvent,
+        operation: SingleUseEffectOperation,
+    ) -> SingleUseEffectBoundaryReport {
+        self.consults.fetch_add(1, Ordering::SeqCst);
+        operation.execute().await.into_report(Vec::new())
+    }
+}
+
+/// Deliberately violates the boundary contract: it executes the supplied
+/// transaction, discards that receipt, then returns an abort report minted by
+/// another operation. The runtime must preserve the committed outcome.
+struct ExecutedThenForeignAbortBoundary;
+
+#[async_trait]
+impl EffectBoundary for ExecutedThenForeignAbortBoundary {
+    async fn around_repeatable_effect(
+        &self,
+        _identity: &EffectIdentity,
+        _event: &ChainEvent,
+        mut operation: RepeatableEffectOperation,
+    ) -> EffectBoundaryReport {
+        EffectBoundaryReport {
+            outcome: EffectBoundaryOutcome::Executed(operation.execute().await),
+            control_events: Vec::new(),
+        }
+    }
+
+    async fn around_single_use_effect(
+        &self,
+        _identity: &EffectIdentity,
+        event: &ChainEvent,
+        operation: SingleUseEffectOperation,
+    ) -> SingleUseEffectBoundaryReport {
+        let _supplied_execution = operation.execute().await;
+        SingleUseEffectOperation::new(|| async { Ok(Vec::new()) }).abort(
+            EffectAbortReason {
+                cause: EffectFailureCause {
+                    source: "foreign_boundary_report".into(),
+                    code: "foreign_abort".into(),
+                },
+                message: "abort report belongs to another operation".to_string(),
+                retry: RetryDisposition::NotRetryable,
+            },
+            vec![event.clone()],
+        )
+    }
+}
+
+/// Deliberately drops the supplied transaction and returns an execution
+/// receipt minted by another operation. With no settled supplied operation,
+/// the runtime must fail closed and journal the provenance violation.
+struct ForeignExecutionBoundary {
+    foreign_calls: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl EffectBoundary for ForeignExecutionBoundary {
+    async fn around_repeatable_effect(
+        &self,
+        _identity: &EffectIdentity,
+        _event: &ChainEvent,
+        mut operation: RepeatableEffectOperation,
+    ) -> EffectBoundaryReport {
+        EffectBoundaryReport {
+            outcome: EffectBoundaryOutcome::Executed(operation.execute().await),
+            control_events: Vec::new(),
+        }
+    }
+
+    async fn around_single_use_effect(
+        &self,
+        _identity: &EffectIdentity,
+        event: &ChainEvent,
+        operation: SingleUseEffectOperation,
+    ) -> SingleUseEffectBoundaryReport {
+        drop(operation);
+        let calls = self.foreign_calls.clone();
+        SingleUseEffectOperation::new(move || async move {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Ok(Vec::new())
+        })
+        .execute()
+        .await
+        .into_report(vec![event.clone()])
     }
 }
 
@@ -2812,11 +2955,11 @@ struct ThreeCallBoundary {
 
 #[async_trait]
 impl EffectBoundary for ThreeCallBoundary {
-    async fn around_effect(
+    async fn around_repeatable_effect(
         &self,
         _identity: &EffectIdentity,
         _event: &ChainEvent,
-        mut operation: EffectOperation,
+        mut operation: RepeatableEffectOperation,
     ) -> EffectBoundaryReport {
         self.consults.fetch_add(1, Ordering::SeqCst);
         operation.execute().await.expect("first physical call");
@@ -2826,6 +2969,16 @@ impl EffectBoundary for ThreeCallBoundary {
             control_events: Vec::new(),
         }
     }
+
+    async fn around_single_use_effect(
+        &self,
+        _identity: &EffectIdentity,
+        _event: &ChainEvent,
+        operation: SingleUseEffectOperation,
+    ) -> SingleUseEffectBoundaryReport {
+        self.consults.fetch_add(1, Ordering::SeqCst);
+        operation.execute().await.into_report(Vec::new())
+    }
 }
 
 struct KeyCheckingThreeCallBoundary {
@@ -2834,11 +2987,11 @@ struct KeyCheckingThreeCallBoundary {
 
 #[async_trait]
 impl EffectBoundary for KeyCheckingThreeCallBoundary {
-    async fn around_effect(
+    async fn around_repeatable_effect(
         &self,
         identity: &EffectIdentity,
         _event: &ChainEvent,
-        mut operation: EffectOperation,
+        mut operation: RepeatableEffectOperation,
     ) -> EffectBoundaryReport {
         assert_eq!(identity.idempotency_key.as_ref(), Some(&self.expected_key));
         operation.execute().await.expect("first physical call");
@@ -2847,6 +3000,16 @@ impl EffectBoundary for KeyCheckingThreeCallBoundary {
             outcome: EffectBoundaryOutcome::Executed(operation.execute().await),
             control_events: Vec::new(),
         }
+    }
+
+    async fn around_single_use_effect(
+        &self,
+        identity: &EffectIdentity,
+        _event: &ChainEvent,
+        operation: SingleUseEffectOperation,
+    ) -> SingleUseEffectBoundaryReport {
+        assert_eq!(identity.idempotency_key.as_ref(), Some(&self.expected_key));
+        operation.execute().await.into_report(Vec::new())
     }
 }
 
@@ -3036,30 +3199,298 @@ struct TransactionalOnlyAbortBoundary;
 
 #[async_trait]
 impl EffectBoundary for TransactionalOnlyAbortBoundary {
-    async fn around_effect(
+    async fn around_repeatable_effect(
         &self,
-        identity: &EffectIdentity,
+        _identity: &EffectIdentity,
         _event: &ChainEvent,
-        mut operation: EffectOperation,
+        mut operation: RepeatableEffectOperation,
     ) -> EffectBoundaryReport {
-        if matches!(identity.safety, EffectSafety::Transactional) {
-            return EffectBoundaryReport {
-                outcome: EffectBoundaryOutcome::Aborted(EffectAbortReason {
-                    cause: EffectFailureCause {
-                        source: "circuit_breaker".into(),
-                        code: "rejected_circuit_open".into(),
-                    },
-                    message: "circuit breaker rejected transactional effect".to_string(),
-                    retry: RetryDisposition::Retryable,
-                }),
-                control_events: Vec::new(),
-            };
-        }
         EffectBoundaryReport {
             outcome: EffectBoundaryOutcome::Executed(operation.execute().await),
             control_events: Vec::new(),
         }
     }
+
+    async fn around_single_use_effect(
+        &self,
+        identity: &EffectIdentity,
+        _event: &ChainEvent,
+        operation: SingleUseEffectOperation,
+    ) -> SingleUseEffectBoundaryReport {
+        assert!(matches!(identity.safety, EffectSafety::Transactional));
+        operation.abort(
+            EffectAbortReason {
+                cause: EffectFailureCause {
+                    source: "circuit_breaker".into(),
+                    code: "rejected_circuit_open".into(),
+                },
+                message: "circuit breaker rejected transactional effect".to_string(),
+                retry: RetryDisposition::Retryable,
+            },
+            Vec::new(),
+        )
+    }
+}
+
+#[tokio::test]
+async fn transactional_boundary_executes_and_commits_the_single_use_operation_once() {
+    let stage_id = StageId::new();
+    let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
+    let normal_calls = Arc::new(AtomicUsize::new(0));
+    let transactional_calls = Arc::new(AtomicUsize::new(0));
+    let boundary_consults = Arc::new(AtomicUsize::new(0));
+    let mut ports = EffectPortRegistry::new();
+    ports.insert::<dyn TransactionalEffectPort<TransactionalCountingEffect>>(
+        "tx",
+        Arc::new(TransactionalCountingPort {
+            calls: transactional_calls.clone(),
+            commit: true,
+        }),
+    );
+    let mut ctx = invocation_context_with_mode(
+        journal.clone(),
+        parent_envelope(WriterId::from(stage_id)),
+        None,
+        EffectRuntimeMode::Live,
+        ports,
+    );
+    ctx.effect_boundary = Some(Arc::new(CountingBoundary {
+        consults: boundary_consults.clone(),
+    }));
+    let mut effects = Effects::new(ctx);
+
+    let output = effects
+        .perform(TransactionalCountingEffect {
+            value: 7,
+            normal_calls: normal_calls.clone(),
+        })
+        .await
+        .expect("single-use boundary execution should commit");
+
+    assert_eq!(output, CountingOutput { value: 1_007 });
+    assert_eq!(boundary_consults.load(Ordering::SeqCst), 1);
+    assert_eq!(transactional_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(normal_calls.load(Ordering::SeqCst), 0);
+    let records = effect_records(&journal);
+    assert_eq!(records.len(), 1);
+    assert!(matches!(
+        records[0].outcome,
+        EffectOutcomePayload::SucceededFact { .. }
+    ));
+}
+
+#[tokio::test]
+async fn transactional_boundary_committed_failure_overrides_port_return_and_replays() {
+    let stage_id = StageId::new();
+    let live_journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
+    let normal_calls = Arc::new(AtomicUsize::new(0));
+    let port_calls = Arc::new(AtomicUsize::new(0));
+    let live_boundary_consults = Arc::new(AtomicUsize::new(0));
+    let mut ports = EffectPortRegistry::new();
+    ports.insert::<dyn TransactionalEffectPort<TransactionalCountingEffect>>(
+        "tx",
+        Arc::new(CommittedFailureTransactionalPort {
+            calls: port_calls.clone(),
+        }),
+    );
+    let mut live_ctx = invocation_context_with_mode(
+        live_journal.clone(),
+        parent_envelope(WriterId::from(stage_id)),
+        None,
+        EffectRuntimeMode::Live,
+        ports,
+    );
+    live_ctx.effect_boundary = Some(Arc::new(CountingBoundary {
+        consults: live_boundary_consults.clone(),
+    }));
+    let mut live = Effects::new(live_ctx);
+
+    let live_err = live
+        .perform(TransactionalCountingEffect {
+            value: 7,
+            normal_calls: normal_calls.clone(),
+        })
+        .await
+        .expect_err("the committed failure must override the port's success return");
+
+    assert!(matches!(live_err, EffectError::RecordedFailure { .. }));
+    assert_eq!(port_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(live_boundary_consults.load(Ordering::SeqCst), 1);
+    assert_eq!(normal_calls.load(Ordering::SeqCst), 0);
+    let records = effect_records(&live_journal);
+    assert_eq!(records.len(), 1);
+    assert!(matches!(
+        records[0].outcome,
+        EffectOutcomePayload::Failed { .. }
+    ));
+
+    let history = Arc::new(
+        EffectHistory::from_records(
+            records[0].cursor.recorded_flow_id.as_str().to_string(),
+            records,
+        )
+        .expect("committed transactional failure indexes"),
+    );
+    let replay_boundary_consults = Arc::new(AtomicUsize::new(0));
+    let mut replay_ctx = invocation_context_with_mode(
+        Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id))),
+        parent_envelope(WriterId::from(stage_id)),
+        Some(history),
+        EffectRuntimeMode::ReplayStrict,
+        EffectPortRegistry::new(),
+    );
+    replay_ctx.effect_boundary = Some(Arc::new(CountingBoundary {
+        consults: replay_boundary_consults.clone(),
+    }));
+    let mut replay = Effects::new(replay_ctx);
+
+    let replay_err = replay
+        .perform(TransactionalCountingEffect {
+            value: 7,
+            normal_calls,
+        })
+        .await
+        .expect_err("strict replay must return the recorded committed failure");
+
+    assert!(matches!(replay_err, EffectError::RecordedFailure { .. }));
+    assert_eq!(port_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(replay_boundary_consults.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn transactional_boundary_foreign_abort_cannot_reclassify_a_committed_operation() {
+    let stage_id = StageId::new();
+    let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
+    let normal_calls = Arc::new(AtomicUsize::new(0));
+    let transactional_calls = Arc::new(AtomicUsize::new(0));
+    let mut ports = EffectPortRegistry::new();
+    ports.insert::<dyn TransactionalEffectPort<TransactionalCountingEffect>>(
+        "tx",
+        Arc::new(TransactionalCountingPort {
+            calls: transactional_calls.clone(),
+            commit: true,
+        }),
+    );
+    let mut ctx = invocation_context_with_mode(
+        journal.clone(),
+        parent_envelope(WriterId::from(stage_id)),
+        None,
+        EffectRuntimeMode::Live,
+        ports,
+    );
+    ctx.effect_boundary = Some(Arc::new(ExecutedThenForeignAbortBoundary));
+    let boundary_control_events = ctx.boundary_control_events.clone();
+    let mut effects = Effects::new(ctx);
+
+    let output = effects
+        .perform(TransactionalCountingEffect {
+            value: 7,
+            normal_calls: normal_calls.clone(),
+        })
+        .await
+        .expect("the supplied operation's committed outcome must remain terminal");
+
+    assert_eq!(output, CountingOutput { value: 1_007 });
+    assert_eq!(transactional_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(normal_calls.load(Ordering::SeqCst), 0);
+    assert!(
+        EffectInvocationContext::drain_boundary_control_event_buffer(&boundary_control_events)
+            .is_empty()
+    );
+    let records = effect_records(&journal);
+    assert_eq!(records.len(), 1);
+    assert!(matches!(
+        records[0].outcome,
+        EffectOutcomePayload::SucceededFact { .. }
+    ));
+}
+
+#[tokio::test]
+async fn transactional_boundary_foreign_execution_fails_closed_and_replays() {
+    let stage_id = StageId::new();
+    let live_journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
+    let normal_calls = Arc::new(AtomicUsize::new(0));
+    let transactional_calls = Arc::new(AtomicUsize::new(0));
+    let foreign_calls = Arc::new(AtomicUsize::new(0));
+    let mut ports = EffectPortRegistry::new();
+    ports.insert::<dyn TransactionalEffectPort<TransactionalCountingEffect>>(
+        "tx",
+        Arc::new(TransactionalCountingPort {
+            calls: transactional_calls.clone(),
+            commit: true,
+        }),
+    );
+    let mut live_ctx = invocation_context_with_mode(
+        live_journal.clone(),
+        parent_envelope(WriterId::from(stage_id)),
+        None,
+        EffectRuntimeMode::Live,
+        ports,
+    );
+    live_ctx.effect_boundary = Some(Arc::new(ForeignExecutionBoundary {
+        foreign_calls: foreign_calls.clone(),
+    }));
+    let boundary_control_events = live_ctx.boundary_control_events.clone();
+    let mut live = Effects::new(live_ctx);
+
+    let live_err = live
+        .perform(TransactionalCountingEffect {
+            value: 7,
+            normal_calls: normal_calls.clone(),
+        })
+        .await
+        .expect_err("a foreign execution report must fail closed");
+
+    assert!(matches!(live_err, EffectError::EffectProvenanceMismatch(_)));
+    assert_eq!(transactional_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(foreign_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(normal_calls.load(Ordering::SeqCst), 0);
+    assert!(
+        EffectInvocationContext::drain_boundary_control_event_buffer(&boundary_control_events)
+            .is_empty()
+    );
+    let records = effect_records(&live_journal);
+    assert_eq!(records.len(), 1);
+    assert!(matches!(
+        records[0].outcome,
+        EffectOutcomePayload::Failed { .. }
+    ));
+
+    let replay_journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
+    let history = Arc::new(
+        EffectHistory::from_records(
+            records[0].cursor.recorded_flow_id.as_str().to_string(),
+            records,
+        )
+        .expect("recorded provenance failure indexes"),
+    );
+    let replay_port_calls = Arc::new(AtomicUsize::new(0));
+    let mut replay_ports = EffectPortRegistry::new();
+    replay_ports.insert::<dyn TransactionalEffectPort<TransactionalCountingEffect>>(
+        "tx",
+        Arc::new(TransactionalCountingPort {
+            calls: replay_port_calls.clone(),
+            commit: true,
+        }),
+    );
+    let mut replay = Effects::new(invocation_context_with_mode(
+        replay_journal,
+        parent_envelope(WriterId::from(stage_id)),
+        Some(history),
+        EffectRuntimeMode::ReplayStrict,
+        replay_ports,
+    ));
+
+    let replay_err = replay
+        .perform(TransactionalCountingEffect {
+            value: 7,
+            normal_calls,
+        })
+        .await
+        .expect_err("strict replay returns the recorded provenance failure");
+    assert!(matches!(replay_err, EffectError::RecordedFailure { .. }));
+    assert_eq!(replay_port_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(foreign_calls.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]

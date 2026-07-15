@@ -1,0 +1,15 @@
+error[E0382]: use of moved value: `operation`
+ --> tests/compile_fail/single_use_effect_operation_twice.rs:9:19
+  |
+7 | async fn execute_twice(operation: SingleUseEffectOperation) {
+  |                        --------- move occurs because `operation` has type `SingleUseEffectOperation`, which does not implement the `Copy` trait
+8 |     let _first = operation.execute().await;
+  |                            --------- `operation` moved due to this method call
+9 |     let _second = operation.execute().await;
+  |                   ^^^^^^^^^ value used here after move
+  |
+note: `SingleUseEffectOperation::execute` takes ownership of the receiver `self`, which moves `operation`
+ --> src/effects/boundary.rs
+  |
+  |     pub async fn execute(self) -> SingleUseEffectExecution {
+  |                          ^^^^

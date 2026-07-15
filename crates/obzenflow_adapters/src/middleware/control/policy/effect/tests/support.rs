@@ -26,7 +26,7 @@ pub(super) use obzenflow_core::{ChainEvent, StageId, WriterId};
 pub(super) use obzenflow_runtime::control_plane::ControlPlaneProvider;
 pub(super) use obzenflow_runtime::effects::{
     EffectBoundary, EffectBoundaryOutcome, EffectBoundaryReport, EffectCursor, EffectError,
-    EffectIdentity, EffectOperation, EffectSafety,
+    EffectIdentity, EffectSafety, RepeatableEffectOperation,
 };
 pub(super) use std::collections::HashMap;
 pub(super) use std::sync::atomic::{AtomicUsize, Ordering};
@@ -57,12 +57,14 @@ pub(super) fn data_event() -> ChainEvent {
     ChainEventFactory::data_event(WriterId::from(StageId::new()), "test.input", json!({}))
 }
 
-pub(super) fn ok_execute() -> EffectOperation {
-    EffectOperation::new(|| async { Ok(Vec::new()) })
+pub(super) fn ok_execute() -> RepeatableEffectOperation {
+    RepeatableEffectOperation::new(|| async { Ok(Vec::new()) })
 }
 
-pub(super) fn failing_execute() -> EffectOperation {
-    EffectOperation::new(|| async { Err(EffectError::Execution("simulated_failure".to_string())) })
+pub(super) fn failing_execute() -> RepeatableEffectOperation {
+    RepeatableEffectOperation::new(|| async {
+        Err(EffectError::Execution("simulated_failure".to_string()))
+    })
 }
 
 pub(super) fn test_stage_config() -> StageConfig {
@@ -216,9 +218,9 @@ pub(super) fn effect_limiter_events(
 pub(super) fn scripted_operation(
     calls: Arc<AtomicUsize>,
     result_for_call: impl Fn(usize) -> Result<Vec<ChainEvent>, EffectError> + Send + Sync + 'static,
-) -> EffectOperation {
+) -> RepeatableEffectOperation {
     let result_for_call = Arc::new(result_for_call);
-    EffectOperation::new(move || {
+    RepeatableEffectOperation::new(move || {
         let call = calls.fetch_add(1, Ordering::SeqCst) + 1;
         let result_for_call = result_for_call.clone();
         async move { result_for_call(call) }

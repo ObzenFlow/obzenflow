@@ -54,9 +54,11 @@ mod runtime;
 #[cfg(test)]
 mod tests;
 
+pub(crate) use boundary::SingleUseEffectBoundaryOutcome;
 pub use boundary::{
     EffectAbortReason, EffectBoundary, EffectBoundaryOutcome, EffectBoundaryReport, EffectIdentity,
-    EffectOperation,
+    RepeatableEffectOperation, SingleUseEffectBoundaryReport, SingleUseEffectExecution,
+    SingleUseEffectOperation,
 };
 pub use commit::EffectCommitHandle;
 pub use context::{

@@ -17,7 +17,7 @@ use obzenflow_core::event::types::EventId;
 use obzenflow_core::event::ChainEventFactory;
 use obzenflow_runtime::effects::{
     EffectBoundaryOutcome, EffectBoundaryReport, EffectCursor, EffectError, EffectIdentity,
-    EffectOperation,
+    RepeatableEffectOperation,
 };
 use obzenflow_runtime::stages::common::control_strategies::BackoffStrategy;
 use std::time::Duration;
@@ -430,7 +430,7 @@ impl CircuitBreakerMiddleware {
         identity: &EffectIdentity,
         event: &ChainEvent,
         ctx: &mut MiddlewareContext,
-        operation: &mut EffectOperation,
+        operation: &mut RepeatableEffectOperation,
         inner: &[EffectPolicyAttachment],
     ) -> EffectBoundaryReport {
         let mut control_events = ctx.take_control_events();

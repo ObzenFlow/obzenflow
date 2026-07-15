@@ -31,7 +31,7 @@ async fn fixed_backoff_waits_exactly_before_each_continuation() {
     });
 
     let report = boundary
-        .around_effect(&identity_for("effect.retry"), &data_event(), operation)
+        .around_repeatable_effect(&identity_for("effect.retry"), &data_event(), operation)
         .await;
 
     assert!(matches!(
@@ -67,7 +67,7 @@ async fn exponential_backoff_applies_jitter_before_the_single_delay_cap() {
     });
 
     let report = boundary
-        .around_effect(&identity_for("effect.retry"), &data_event(), operation)
+        .around_repeatable_effect(&identity_for("effect.retry"), &data_event(), operation)
         .await;
 
     let delays = scheduled_delays(&report);
@@ -105,7 +105,7 @@ async fn raw_rate_limit_floor_cannot_be_shortened_by_classifier_or_backoff_cap()
     });
 
     let report = boundary
-        .around_effect(&identity_for("effect.retry"), &data_event(), operation)
+        .around_repeatable_effect(&identity_for("effect.retry"), &data_event(), operation)
         .await;
 
     assert!(matches!(
@@ -138,7 +138,7 @@ async fn rate_limit_floor_at_start_window_prevents_another_attempt() {
     });
 
     let report = boundary
-        .around_effect(&identity_for("effect.retry"), &data_event(), operation)
+        .around_repeatable_effect(&identity_for("effect.retry"), &data_event(), operation)
         .await;
 
     assert_eq!(calls.load(Ordering::SeqCst), 1);
@@ -172,7 +172,7 @@ async fn cancelling_during_backoff_drops_the_sequence_without_a_later_call() {
     };
     let task = tokio::spawn(async move {
         boundary
-            .around_effect(&identity_for("effect.retry"), &data_event(), operation)
+            .around_repeatable_effect(&identity_for("effect.retry"), &data_event(), operation)
             .await
     });
 
@@ -198,7 +198,7 @@ async fn recovered_session_settles_breaker_health_once_and_can_be_slow() {
         .build(),
     );
     let report = boundary_with_chain(vec![breaker])
-        .around_effect(
+        .around_repeatable_effect(
             &identity_for("effect.retry"),
             &data_event(),
             scripted_operation(calls.clone(), |call| {

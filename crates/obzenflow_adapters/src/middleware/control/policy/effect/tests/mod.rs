@@ -8,5 +8,6 @@
 mod concurrency;
 mod onion;
 mod recovery;
+mod single_use;
 mod support;
 mod timing;

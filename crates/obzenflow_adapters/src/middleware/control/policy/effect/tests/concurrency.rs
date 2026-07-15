@@ -26,7 +26,7 @@ async fn concurrent_effect_cursors_keep_independent_attempt_state() {
     let second_event = data_event();
 
     let (first_report, second_report) = tokio::join!(
-        boundary.around_effect(
+        boundary.around_repeatable_effect(
             &first_identity,
             &first_event,
             scripted_operation(first_calls.clone(), |call| {
@@ -37,7 +37,7 @@ async fn concurrent_effect_cursors_keep_independent_attempt_state() {
                 }
             }),
         ),
-        boundary.around_effect(
+        boundary.around_repeatable_effect(
             &second_identity,
             &second_event,
             scripted_operation(second_calls.clone(), |call| {
@@ -97,7 +97,7 @@ async fn pending_continuation_stops_when_another_invocation_opens_the_circuit() 
         let pending_calls = pending_calls.clone();
         tokio::spawn(async move {
             boundary
-                .around_effect(
+                .around_repeatable_effect(
                     &identity_for("effect.retry"),
                     &data_event(),
                     scripted_operation(pending_calls, move |_| {
@@ -114,7 +114,7 @@ async fn pending_continuation_stops_when_another_invocation_opens_the_circuit() 
 
     let opening_calls = Arc::new(AtomicUsize::new(0));
     let opening_report = boundary
-        .around_effect(
+        .around_repeatable_effect(
             &identity_for("effect.retry"),
             &data_event(),
             scripted_operation(opening_calls.clone(), |_| {
@@ -174,7 +174,7 @@ async fn pending_continuation_stops_after_open_half_open_closed_epoch() {
         let pending_calls = pending_calls.clone();
         tokio::spawn(async move {
             boundary
-                .around_effect(
+                .around_repeatable_effect(
                     &identity_for("effect.retry"),
                     &data_event(),
                     scripted_operation(pending_calls, move |_| {
@@ -191,7 +191,7 @@ async fn pending_continuation_stops_after_open_half_open_closed_epoch() {
 
     let opening_calls = Arc::new(AtomicUsize::new(0));
     let opening_report = boundary
-        .around_effect(
+        .around_repeatable_effect(
             &identity_for("effect.retry"),
             &data_event(),
             scripted_operation(opening_calls.clone(), |_| {
@@ -209,7 +209,7 @@ async fn pending_continuation_stops_after_open_half_open_closed_epoch() {
     // Closed before the original invocation wakes.
     let probe_calls = Arc::new(AtomicUsize::new(0));
     let probe_report = boundary
-        .around_effect(
+        .around_repeatable_effect(
             &identity_for("effect.retry"),
             &data_event(),
             scripted_operation(probe_calls.clone(), |_| Ok(Vec::new())),
@@ -265,7 +265,7 @@ async fn post_sleep_window_exhaustion_settles_breaker_health() {
         let calls = calls.clone();
         tokio::spawn(async move {
             boundary
-                .around_effect(
+                .around_repeatable_effect(
                     &identity_for("effect.retry"),
                     &data_event(),
                     scripted_operation(calls, move |_| {
@@ -350,7 +350,7 @@ async fn continuation_already_admitted_by_an_inner_policy_completes_after_openin
         let recovering_calls = recovering_calls.clone();
         tokio::spawn(async move {
             boundary
-                .around_effect(
+                .around_repeatable_effect(
                     &identity_for("effect.retry"),
                     &data_event(),
                     scripted_operation(recovering_calls, |call| {
@@ -368,7 +368,7 @@ async fn continuation_already_admitted_by_an_inner_policy_completes_after_openin
     second_admitted.notified().await;
     let opening_calls = Arc::new(AtomicUsize::new(0));
     let opening_report = boundary
-        .around_effect(
+        .around_repeatable_effect(
             &identity_for("effect.retry"),
             &data_event(),
             scripted_operation(opening_calls.clone(), |_| {

@@ -2,9 +2,9 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-use obzenflow_runtime::effects::EffectOperation;
+use obzenflow_runtime::effects::RepeatableEffectOperation;
 
-fn overlap(mut operation: EffectOperation) {
+fn overlap(mut operation: RepeatableEffectOperation) {
     let first = operation.execute();
     let second = operation.execute();
     drop((first, second));

@@ -1,0 +1,5 @@
+error[E0599]: no method named `clone` found for struct `SingleUseEffectOperation` in the current scope
+ --> tests/compile_fail/single_use_effect_operation_clone.rs:8:27
+  |
+8 |     let _copy = operation.clone();
+  |                           ^^^^^ method not found in `SingleUseEffectOperation`
