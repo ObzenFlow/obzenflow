@@ -4,15 +4,21 @@
 
 use super::classifier::{effect_error_event, FailureClassification};
 use super::CircuitBreakerMiddleware;
-use crate::middleware::context_keys::{CircuitBreakerRetryAfterMs, EffectCallDurationNanos};
-use crate::middleware::{Middleware, MiddlewareContext};
+use crate::middleware::context_keys::{
+    CircuitBreakerRecoveryOpenEpoch, CircuitBreakerRetryAfterMs, EffectCallDurationNanos,
+};
+use crate::middleware::control::policy::effect::{execute_chain_once, EffectPolicyAttachment};
+use crate::middleware::MiddlewareContext;
 use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::event::payloads::observability_payload::{
     CircuitBreakerHealthClassification, CircuitBreakerRetryStopReason,
 };
 use obzenflow_core::event::types::EventId;
 use obzenflow_core::event::ChainEventFactory;
-use obzenflow_runtime::effects::{EffectCursor, EffectError};
+use obzenflow_runtime::effects::{
+    EffectBoundaryOutcome, EffectBoundaryReport, EffectCursor, EffectError, EffectIdentity,
+    EffectOperation,
+};
 use obzenflow_runtime::stages::common::control_strategies::BackoffStrategy;
 use std::time::Duration;
 
@@ -89,7 +95,7 @@ impl Retry {
 
 /// Retry limits enforced by the circuit breaker.
 #[derive(Debug, Clone)]
-pub(crate) struct RetryLimits {
+pub(super) struct RetryLimits {
     /// Maximum breaker-generated delay between physical calls. A provider's
     /// rate-limit floor may be longer and is never shortened by this cap.
     pub max_single_delay: Duration,
@@ -108,7 +114,7 @@ impl Default for RetryLimits {
 
 /// Configuration for integrated per-event retry inside the circuit breaker.
 #[derive(Debug, Clone)]
-pub(crate) struct CircuitBreakerRetryPolicy {
+pub(super) struct CircuitBreakerRetryPolicy {
     pub max_attempts: u32,
     pub backoff: BackoffStrategy,
     #[cfg(test)]
@@ -137,7 +143,7 @@ impl CircuitBreakerRetryPolicy {
 }
 
 /// What the breaker directs the boundary to do with one executed attempt.
-pub(crate) enum RecoveryDirective {
+enum RecoveryDirective {
     Return,
     RetryAfter(Duration),
 }
@@ -229,24 +235,25 @@ fn effect_observation(
 
 /// One logical invocation's recovery decisions (FLOWIP-115h AR1): attempt
 /// state, both eligibility gates, delay and floor arithmetic, evidence, and
-/// terminal settlement. The boundary owns only the attempt bracket, the
-/// sleep, and outer observation.
-pub(crate) struct EffectRecoverySession<'a> {
+/// terminal settlement. Breaker-owned orchestration owns the delay/loop; the
+/// boundary supplies only the neutral physical-attempt bracket and performs
+/// outer observation after the terminal report.
+struct EffectRecoverySession<'a> {
     breaker: &'a CircuitBreakerMiddleware,
     cursor: EffectCursor,
     cause: EventId,
     started: tokio::time::Instant,
     config: Option<(CircuitBreakerRetryPolicy, RetryLimits)>,
     recovery_allowed: bool,
+    admitted_open_epoch: Option<u64>,
     attempts: u32,
     circuit_open_stop: bool,
-    last_observation: Vec<ChainEvent>,
     last_classification: FailureClassification,
     last_result_ok: bool,
 }
 
 impl<'a> EffectRecoverySession<'a> {
-    pub(super) fn new(
+    fn new(
         breaker: &'a CircuitBreakerMiddleware,
         ctx: &MiddlewareContext,
         cursor: EffectCursor,
@@ -259,9 +266,9 @@ impl<'a> EffectRecoverySession<'a> {
             started: tokio::time::Instant::now(),
             config: breaker.effect_retry_config(),
             recovery_allowed: !breaker.is_effect_probe(ctx),
+            admitted_open_epoch: ctx.get::<CircuitBreakerRecoveryOpenEpoch>().copied(),
             attempts: 0,
             circuit_open_stop: false,
-            last_observation: Vec::new(),
             last_classification: FailureClassification::Success,
             last_result_ok: false,
         }
@@ -269,7 +276,7 @@ impl<'a> EffectRecoverySession<'a> {
 
     /// Assess one executed attempt: classify it, then either direct another
     /// continuation after a delay or settle with this result.
-    pub(crate) fn assess(
+    fn assess(
         &mut self,
         event: &ChainEvent,
         result: &Result<Vec<ChainEvent>, EffectError>,
@@ -277,10 +284,8 @@ impl<'a> EffectRecoverySession<'a> {
     ) -> RecoveryDirective {
         self.attempts = self.attempts.saturating_add(1);
         prepare_classification_context(result, ctx);
-        self.last_observation = effect_observation(event, result);
-        let (classification, _, _) = self
-            .breaker
-            .classify_call(event, &self.last_observation, ctx);
+        let observation = effect_observation(event, result);
+        let (classification, _, _) = self.breaker.classify_call(event, &observation, ctx);
         self.last_classification = classification;
         self.last_result_ok = result.is_ok();
 
@@ -315,7 +320,7 @@ impl<'a> EffectRecoverySession<'a> {
             self.write_exhausted(CircuitBreakerRetryStopReason::AttemptLimit, ctx);
             return RecoveryDirective::Return;
         }
-        if !self.breaker.is_closed_for_effect_recovery() {
+        if !self.circuit_allows_continuation() {
             self.write_exhausted(CircuitBreakerRetryStopReason::CircuitNoLongerClosed, ctx);
             self.circuit_open_stop = true;
             return RecoveryDirective::Return;
@@ -348,7 +353,7 @@ impl<'a> EffectRecoverySession<'a> {
     }
 
     /// Post-sleep re-check; `true` means the next attempt may start.
-    pub(crate) fn recheck_after_delay(&mut self, ctx: &mut MiddlewareContext) -> bool {
+    fn recheck_after_delay(&mut self, ctx: &mut MiddlewareContext) -> bool {
         let window = self
             .config
             .as_ref()
@@ -357,7 +362,7 @@ impl<'a> EffectRecoverySession<'a> {
             .max_attempt_start_window;
         let stop_reason = if self.started.elapsed() >= window {
             Some(CircuitBreakerRetryStopReason::AttemptStartWindow)
-        } else if !self.breaker.is_closed_for_effect_recovery() {
+        } else if !self.circuit_allows_continuation() {
             Some(CircuitBreakerRetryStopReason::CircuitNoLongerClosed)
         } else {
             None
@@ -375,12 +380,13 @@ impl<'a> EffectRecoverySession<'a> {
     /// terminal tail so evidence and outer observation cannot depend on where
     /// the stop was detected; a circuit-open stop settles no health, because
     /// the invocation that opened the circuit already counted.
-    pub(crate) fn settle(&self, event: &ChainEvent, ctx: &mut MiddlewareContext) {
+    fn settle(&self, ctx: &mut MiddlewareContext) {
         if !self.circuit_open_stop {
             ctx.insert::<EffectCallDurationNanos>(
                 self.started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
             );
-            self.breaker.post_handle(event, &self.last_observation, ctx);
+            self.breaker
+                .settle_classified_call(&self.last_classification, ctx);
         }
         if self.attempts > 1 && self.last_result_ok {
             ctx.write_control_event(ChainEventFactory::circuit_breaker_retry_succeeded(
@@ -395,8 +401,13 @@ impl<'a> EffectRecoverySession<'a> {
 
     /// Settle an attempt whose protected call never went out because an inner
     /// policy skipped or rejected it.
-    pub(crate) fn settle_not_executed(&self, ctx: &mut MiddlewareContext) {
+    fn settle_not_executed(&self, ctx: &mut MiddlewareContext) {
         self.breaker.settle_not_executed(ctx);
+    }
+
+    fn circuit_allows_continuation(&self) -> bool {
+        self.admitted_open_epoch
+            .is_some_and(|epoch| self.breaker.effect_recovery_epoch_is_current(epoch))
     }
 
     fn write_exhausted(&self, reason: CircuitBreakerRetryStopReason, ctx: &mut MiddlewareContext) {
@@ -407,6 +418,66 @@ impl<'a> EffectRecoverySession<'a> {
             reason,
             self.cause,
         ));
+    }
+}
+
+impl CircuitBreakerMiddleware {
+    /// The breaker's single concrete orchestration seam. The boundary supplies
+    /// its neutral inner attachment slice; no executor/coordinator trait or
+    /// recovery session is exposed outside this module.
+    pub(in crate::middleware::control) async fn execute_effect_with_recovery(
+        &self,
+        identity: &EffectIdentity,
+        event: &ChainEvent,
+        ctx: &mut MiddlewareContext,
+        operation: &mut EffectOperation,
+        inner: &[EffectPolicyAttachment],
+    ) -> EffectBoundaryReport {
+        let mut control_events = ctx.take_control_events();
+        let mut session = EffectRecoverySession::new(self, ctx, identity.cursor.clone(), event.id);
+
+        loop {
+            let EffectBoundaryReport {
+                outcome,
+                control_events: attempt_events,
+            } = execute_chain_once(inner, event, operation).await;
+            control_events.extend(attempt_events);
+
+            let result = match outcome {
+                EffectBoundaryOutcome::Executed(result) => result,
+                EffectBoundaryOutcome::Skipped { results, source } => {
+                    session.settle_not_executed(ctx);
+                    control_events.extend(ctx.take_control_events());
+                    return EffectBoundaryReport {
+                        outcome: EffectBoundaryOutcome::Skipped { results, source },
+                        control_events,
+                    };
+                }
+                EffectBoundaryOutcome::Aborted(reason) => {
+                    session.settle_not_executed(ctx);
+                    control_events.extend(ctx.take_control_events());
+                    return EffectBoundaryReport {
+                        outcome: EffectBoundaryOutcome::Aborted(reason),
+                        control_events,
+                    };
+                }
+            };
+
+            if let RecoveryDirective::RetryAfter(delay) = session.assess(event, &result, ctx) {
+                control_events.extend(ctx.take_control_events());
+                tokio::time::sleep(delay).await;
+                if session.recheck_after_delay(ctx) {
+                    continue;
+                }
+            }
+
+            session.settle(ctx);
+            control_events.extend(ctx.take_control_events());
+            return EffectBoundaryReport {
+                outcome: EffectBoundaryOutcome::Executed(result),
+                control_events,
+            };
+        }
     }
 }
 

@@ -153,6 +153,98 @@ async fn pending_continuation_stops_when_another_invocation_opens_the_circuit() 
 }
 
 #[tokio::test(start_paused = true)]
+async fn pending_continuation_stops_after_open_half_open_closed_epoch() {
+    let breaker = retrying_breaker_attachment(
+        CircuitBreaker::opens_after(1)
+            .cooldown(Duration::ZERO)
+            .retry(
+                Retry::fixed(Duration::from_secs(1))
+                    .attempts(2)
+                    .max_delay(Duration::from_secs(1))
+                    .start_window(Duration::from_secs(5)),
+            )
+            .build(),
+    );
+    let boundary = Arc::new(boundary_with_chain(vec![breaker]));
+    let first_attempt_finished = Arc::new(tokio::sync::Notify::new());
+    let pending_calls = Arc::new(AtomicUsize::new(0));
+    let pending_task = {
+        let boundary = boundary.clone();
+        let first_attempt_finished = first_attempt_finished.clone();
+        let pending_calls = pending_calls.clone();
+        tokio::spawn(async move {
+            boundary
+                .around_effect(
+                    &identity_for("effect.retry"),
+                    &data_event(),
+                    scripted_operation(pending_calls, move |_| {
+                        first_attempt_finished.notify_one();
+                        Err(EffectError::Timeout("pending".to_string()))
+                    }),
+                )
+                .await
+        })
+    };
+
+    first_attempt_finished.notified().await;
+    tokio::task::yield_now().await;
+
+    let opening_calls = Arc::new(AtomicUsize::new(0));
+    let opening_report = boundary
+        .around_effect(
+            &identity_for("effect.retry"),
+            &data_event(),
+            scripted_operation(opening_calls.clone(), |_| {
+                Err(EffectError::Permanent("open now".to_string()))
+            }),
+        )
+        .await;
+    assert!(matches!(
+        opening_report.outcome,
+        EffectBoundaryOutcome::Executed(Err(EffectError::Permanent(_)))
+    ));
+    assert_eq!(opening_calls.load(Ordering::SeqCst), 1);
+
+    // A zero-cooldown probe moves the breaker through HalfOpen and back to
+    // Closed before the original invocation wakes.
+    let probe_calls = Arc::new(AtomicUsize::new(0));
+    let probe_report = boundary
+        .around_effect(
+            &identity_for("effect.retry"),
+            &data_event(),
+            scripted_operation(probe_calls.clone(), |_| Ok(Vec::new())),
+        )
+        .await;
+    assert!(matches!(
+        probe_report.outcome,
+        EffectBoundaryOutcome::Executed(Ok(_))
+    ));
+    assert_eq!(probe_calls.load(Ordering::SeqCst), 1);
+
+    tokio::time::advance(Duration::from_secs(1)).await;
+    let pending_report = pending_task
+        .await
+        .expect("pending invocation should finish");
+    assert!(matches!(
+        pending_report.outcome,
+        EffectBoundaryOutcome::Executed(Err(EffectError::Timeout(_)))
+    ));
+    assert_eq!(
+        pending_calls.load(Ordering::SeqCst),
+        1,
+        "an intervening Open epoch permanently revokes this continuation"
+    );
+    assert!(retry_events(&pending_report).iter().any(|event| matches!(
+        event,
+        CircuitBreakerEvent::RetryExhausted {
+            total_attempts: 1,
+            reason: CircuitBreakerRetryStopReason::CircuitNoLongerClosed,
+            ..
+        }
+    )));
+}
+
+#[tokio::test(start_paused = true)]
 async fn post_sleep_window_exhaustion_settles_breaker_health() {
     let (breaker, control, stage_id) = retrying_breaker_fixture(
         CircuitBreaker::opens_after(5)

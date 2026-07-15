@@ -80,7 +80,13 @@ impl StopIntent {
         match mode.clone() {
             FlowStopMode::Cancel => {
                 self.mode = Some(FlowStopMode::Cancel);
-                self.deadline = None;
+                // A stop-timeout escalation is still governed by the original
+                // graceful-stop deadline. Preserve that absolute deadline so
+                // cleanup cannot start a fresh shutdown budget after the
+                // operator's requested bound has already expired.
+                if self.reason.as_deref() != Some(STOP_REASON_TIMEOUT) {
+                    self.deadline = None;
+                }
                 StopRequestOutcome::Applied {
                     mode,
                     reason_label: self.reason_label(),
@@ -842,89 +848,100 @@ impl FsmAction for PipelineAction {
             PipelineAction::Cleanup => {
                 tracing::info!("Pipeline cleanup: signaling stages to shut down");
 
-                // Signal all non-source stages to shut down
-                for (stage_id, handle) in context.stage_supervisors.iter() {
-                    // If the stage has already reached a terminal drained state, a force shutdown
-                    // is unnecessary and may fail because the supervisor has already stopped.
+                use std::time::{Duration, Instant};
+
+                // Graceful stop owns one absolute deadline across draining and
+                // cleanup. Other termination paths retain the configured
+                // cleanup budget.
+                let cleanup_deadline = context
+                    .stop_intent
+                    .deadline
+                    .unwrap_or_else(|| Instant::now() + stop_drain_timeout());
+                async fn signal_handle_until_deadline(
+                    stage_id: StageId,
+                    handle: &crate::stages::common::stage_handle::BoxedStageHandle,
+                    deadline: Instant,
+                    kind: &'static str,
+                ) -> bool {
                     if handle.is_drained() {
-                        continue;
+                        return true;
                     }
-                    if let Err(e) = handle.force_shutdown().await {
-                        let supervisor_not_running = matches!(
-                            &e,
-                            StageError::EventSendFailed(msg)
-                                if msg.contains("SupervisorNotRunning")
-                                    || msg.contains("Supervisor is not running")
+
+                    let now = Instant::now();
+                    if now >= deadline {
+                        tracing::warn!(
+                            stage_id = %stage_id,
+                            "Pipeline cleanup: deadline exhausted before force shutdown"
                         );
-                        if supervisor_not_running {
-                            tracing::debug!(
-                                stage_id = %stage_id,
-                                error = ?e,
-                                "force_shutdown skipped: supervisor already stopped"
+                        return false;
+                    }
+
+                    let remaining = deadline.saturating_duration_since(now);
+                    match tokio::time::timeout(remaining, handle.force_shutdown()).await {
+                        Ok(Ok(())) => true,
+                        Ok(Err(e)) => {
+                            let supervisor_not_running = matches!(
+                                &e,
+                                StageError::EventSendFailed(msg)
+                                    if msg.contains("SupervisorNotRunning")
+                                        || msg.contains("Supervisor is not running")
                             );
-                        } else {
+                            if supervisor_not_running {
+                                tracing::debug!(
+                                    stage_id = %stage_id,
+                                    error = ?e,
+                                    "force_shutdown skipped: supervisor already stopped"
+                                );
+                            } else {
+                                tracing::warn!(
+                                    stage_id = %stage_id,
+                                    error = ?e,
+                                    kind,
+                                    "Failed to send force_shutdown"
+                                );
+                            }
+                            true
+                        }
+                        Err(_) => {
                             tracing::warn!(
                                 stage_id = %stage_id,
-                                error = ?e,
-                                "Failed to send force_shutdown to stage"
+                                kind,
+                                "Pipeline cleanup: deadline expired while sending force shutdown"
                             );
+                            false
                         }
                     }
                 }
 
-                // Signal all source stages to shut down
-                for (stage_id, handle) in context.source_supervisors.iter() {
-                    if handle.is_drained() {
-                        continue;
+                // Signal stages cooperatively while the shared deadline permits.
+                for (stage_id, handle) in context.stage_supervisors.iter() {
+                    if !signal_handle_until_deadline(*stage_id, handle, cleanup_deadline, "stage")
+                        .await
+                    {
+                        break;
                     }
-                    if let Err(e) = handle.force_shutdown().await {
-                        let supervisor_not_running = matches!(
-                            &e,
-                            StageError::EventSendFailed(msg)
-                                if msg.contains("SupervisorNotRunning")
-                                    || msg.contains("Supervisor is not running")
-                        );
-                        if supervisor_not_running {
-                            tracing::debug!(
-                                stage_id = %stage_id,
-                                error = ?e,
-                                "force_shutdown skipped: supervisor already stopped"
-                            );
-                        } else {
-                            tracing::warn!(
-                                stage_id = %stage_id,
-                                error = ?e,
-                                "Failed to send force_shutdown to source"
-                            );
-                        }
+                }
+                for (stage_id, handle) in context.source_supervisors.iter() {
+                    if !signal_handle_until_deadline(*stage_id, handle, cleanup_deadline, "source")
+                        .await
+                    {
+                        break;
                     }
                 }
 
                 tracing::info!("Pipeline cleanup: waiting for stages to complete");
 
-                // Wait for all stages to complete (with timeout)
-                //
-                // Timeout comes from the resolved runtime bootstrap config.
-                // (default: 30 seconds) so operators can tune shutdown behavior
-                // without code changes.
-                use std::time::{Duration, Instant};
-
-                let timeout = stop_drain_timeout();
-
-                let start = Instant::now();
-
-                // Helper closure to wait on a single handle with the remaining time budget
-                async fn wait_handle_with_budget(
+                // Wait on one handle using the shared absolute cleanup deadline.
+                async fn wait_handle_until_deadline(
                     stage_id: StageId,
                     handle: &crate::stages::common::stage_handle::BoxedStageHandle,
-                    timeout: Duration,
-                    start: Instant,
+                    deadline: Instant,
                 ) {
-                    let elapsed = start.elapsed();
-                    if elapsed >= timeout {
+                    let now = Instant::now();
+                    if now >= deadline {
                         tracing::warn!(
                             stage_id = %stage_id,
-                            "Pipeline cleanup: timeout budget exhausted; aborting stage supervisor"
+                            "Pipeline cleanup: deadline exhausted; aborting stage supervisor"
                         );
                         match handle.abort_and_join().await {
                             Ok(()) => tracing::debug!(
@@ -940,7 +957,7 @@ impl FsmAction for PipelineAction {
                         return;
                     }
 
-                    let remaining = timeout.saturating_sub(elapsed);
+                    let remaining = deadline.saturating_duration_since(now);
 
                     match tokio::time::timeout(remaining, handle.wait_for_completion()).await {
                         Ok(Ok(())) => {
@@ -986,12 +1003,12 @@ impl FsmAction for PipelineAction {
 
                 // Wait for non-source stages
                 for (stage_id, handle) in context.stage_supervisors.iter() {
-                    wait_handle_with_budget(*stage_id, handle, timeout, start).await;
+                    wait_handle_until_deadline(*stage_id, handle, cleanup_deadline).await;
                 }
 
                 // Wait for source stages
                 for (stage_id, handle) in context.source_supervisors.iter() {
-                    wait_handle_with_budget(*stage_id, handle, timeout, start).await;
+                    wait_handle_until_deadline(*stage_id, handle, cleanup_deadline).await;
                 }
 
                 // Ensure the metrics aggregator is terminated before the pipeline returns.
@@ -2473,9 +2490,14 @@ mod tests {
             Some("first_reason".to_string()),
         );
         assert_eq!(intent.reason.as_deref(), Some("first_reason"));
+        let original_deadline = intent.deadline;
 
         let _ = intent.apply_request(FlowStopMode::Cancel, Some(STOP_REASON_TIMEOUT.to_string()));
         assert_eq!(intent.reason.as_deref(), Some(STOP_REASON_TIMEOUT));
+        assert_eq!(
+            intent.deadline, original_deadline,
+            "timeout escalation must preserve the graceful-stop deadline"
+        );
     }
 
     #[test]

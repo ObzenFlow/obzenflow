@@ -57,6 +57,63 @@ async fn retrying_breaker_recovers_inside_one_boundary_invocation() {
 }
 
 #[tokio::test]
+async fn stateful_classifier_runs_once_per_attempt_and_one_result_drives_settlement() {
+    let classifier_calls = Arc::new(AtomicUsize::new(0));
+    let classifier_calls_for_breaker = classifier_calls.clone();
+    let (breaker, control, stage_id) = retrying_breaker_fixture(
+        CircuitBreaker::opens_after(1)
+            .retry(Retry::fixed(Duration::ZERO).attempts(2))
+            .with_failure_classification(move |_, _| {
+                match classifier_calls_for_breaker.fetch_add(1, Ordering::SeqCst) {
+                    0 => FailureClassification::TransientFailure,
+                    1 => FailureClassification::Success,
+                    _ => FailureClassification::PermanentFailure,
+                }
+            })
+            .build(),
+    );
+    let calls = Arc::new(AtomicUsize::new(0));
+    let report = boundary_with_chain(vec![breaker])
+        .around_effect(
+            &identity_for("effect.retry"),
+            &data_event(),
+            scripted_operation(calls.clone(), |call| {
+                if call == 1 {
+                    Err(EffectError::Timeout("retry once".to_string()))
+                } else {
+                    Ok(Vec::new())
+                }
+            }),
+        )
+        .await;
+
+    assert!(matches!(
+        report.outcome,
+        EffectBoundaryOutcome::Executed(Ok(_))
+    ));
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        classifier_calls.load(Ordering::SeqCst),
+        2,
+        "the terminal result must not be classified again during settlement"
+    );
+    assert!(retry_events(&report).iter().any(|event| matches!(
+        event,
+        CircuitBreakerEvent::RetrySucceeded {
+            total_attempts: 2,
+            terminal_classification: CircuitBreakerHealthClassification::Success,
+            ..
+        }
+    )));
+
+    let snapshots = control.effect_circuit_breaker_snapshotters(&stage_id);
+    let metrics = snapshots[0].1();
+    assert_eq!(metrics.requests_total, 1);
+    assert_eq!(metrics.successes_total, 1);
+    assert_eq!(metrics.failures_total, 0);
+}
+
+#[tokio::test]
 async fn opaque_execution_failure_is_never_promoted_to_retry() {
     let calls = Arc::new(AtomicUsize::new(0));
     let breaker = retrying_breaker_attachment(

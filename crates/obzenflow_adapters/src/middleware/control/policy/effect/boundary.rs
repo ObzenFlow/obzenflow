@@ -4,7 +4,7 @@
 
 use super::attachment::EffectPolicyAttachment;
 use super::contract::{EffectAttemptOutcome, PolicyAdmission};
-use crate::middleware::control::circuit_breaker::{CircuitBreakerMiddleware, RecoveryDirective};
+use crate::middleware::control::circuit_breaker::CircuitBreakerMiddleware;
 use crate::middleware::{
     EventAwareEffectPolicy, Middleware, MiddlewareAbortCause, MiddlewareContext,
 };
@@ -100,7 +100,7 @@ fn observe_reverse(
     }
 }
 
-async fn execute_chain_once(
+pub(in crate::middleware::control) async fn execute_chain_once(
     chain: &[EffectPolicyAttachment],
     event: &ChainEvent,
     operation: &mut EffectOperation,
@@ -222,60 +222,33 @@ impl EffectBoundary for PerEffectPolicyBoundary {
             }
         }
 
-        let mut control_events = ctx.take_control_events();
-        let mut session = breaker.begin_effect_recovery(&ctx, identity.cursor.clone(), event.id);
+        let mut report = breaker
+            .execute_effect_with_recovery(identity, event, &mut ctx, &mut operation, inner)
+            .await;
 
-        loop {
-            let attempt_report = execute_chain_once(inner, event, &mut operation).await;
-            control_events.extend(attempt_report.control_events);
-            let result = match attempt_report.outcome {
-                EffectBoundaryOutcome::Executed(result) => result,
-                EffectBoundaryOutcome::Skipped { results, source } => {
-                    session.settle_not_executed(&mut ctx);
-                    let label = source.as_deref().unwrap_or("inner_effect_policy");
-                    let attempt = EffectAttemptOutcome::SkippedBy(label);
-                    observe_reverse(&admitted_outer, event, &attempt, &mut ctx);
-                    control_events.extend(ctx.take_control_events());
-                    return EffectBoundaryReport {
-                        outcome: EffectBoundaryOutcome::Skipped { results, source },
-                        control_events,
-                    };
-                }
-                EffectBoundaryOutcome::Aborted(reason) => {
-                    session.settle_not_executed(&mut ctx);
-                    let cause = MiddlewareAbortCause {
-                        source: reason.cause.source.clone(),
-                        code: reason.cause.code.clone(),
-                        message: reason.message.clone(),
-                        retry: reason.retry,
-                        event: None,
-                    };
-                    let attempt = EffectAttemptOutcome::RejectedBy(&cause);
-                    observe_reverse(&admitted_outer, event, &attempt, &mut ctx);
-                    control_events.extend(ctx.take_control_events());
-                    return EffectBoundaryReport {
-                        outcome: EffectBoundaryOutcome::Aborted(reason),
-                        control_events,
-                    };
-                }
-            };
-
-            if let RecoveryDirective::RetryAfter(delay) = session.assess(event, &result, &mut ctx) {
-                control_events.extend(ctx.take_control_events());
-                tokio::time::sleep(delay).await;
-                if session.recheck_after_delay(&mut ctx) {
-                    continue;
-                }
+        match &report.outcome {
+            EffectBoundaryOutcome::Executed(result) => {
+                let attempt = EffectAttemptOutcome::Executed(result);
+                observe_reverse(&admitted_outer, event, &attempt, &mut ctx);
             }
-
-            session.settle(event, &mut ctx);
-            let attempt = EffectAttemptOutcome::Executed(&result);
-            observe_reverse(&admitted_outer, event, &attempt, &mut ctx);
-            control_events.extend(ctx.take_control_events());
-            return EffectBoundaryReport {
-                outcome: EffectBoundaryOutcome::Executed(result),
-                control_events,
-            };
+            EffectBoundaryOutcome::Skipped { source, .. } => {
+                let label = source.as_deref().unwrap_or("inner_effect_policy");
+                let attempt = EffectAttemptOutcome::SkippedBy(label);
+                observe_reverse(&admitted_outer, event, &attempt, &mut ctx);
+            }
+            EffectBoundaryOutcome::Aborted(reason) => {
+                let cause = MiddlewareAbortCause {
+                    source: reason.cause.source.clone(),
+                    code: reason.cause.code.clone(),
+                    message: reason.message.clone(),
+                    retry: reason.retry,
+                    event: None,
+                };
+                let attempt = EffectAttemptOutcome::RejectedBy(&cause);
+                observe_reverse(&admitted_outer, event, &attempt, &mut ctx);
+            }
         }
+        report.control_events.extend(ctx.take_control_events());
+        report
     }
 }

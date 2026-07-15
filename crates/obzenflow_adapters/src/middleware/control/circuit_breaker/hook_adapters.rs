@@ -262,15 +262,23 @@ impl Middleware for CircuitBreakerMiddleware {
 
         match self.current_state() {
             CircuitState::Closed => {
-                // Normal operation
-                MiddlewareAction::Continue
+                // Linearise Closed admission with transitions into Open and
+                // capture the epoch that owns any later effect recovery.
+                if self.effect_recovery_open_epoch_at_admission(ctx) {
+                    MiddlewareAction::Continue
+                } else {
+                    self.pre_handle(event, ctx)
+                }
             }
 
             CircuitState::Open => {
                 // Check if we should transition to half-open
                 if self.should_attempt_reset() {
                     {
-                        let _probe_gate = self.probe_gate.lock().ok();
+                        let _probe_gate = self
+                            .probe_gate
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner());
                         let transitioned = self.transition_to(CircuitState::HalfOpen, ctx);
                         if transitioned {
                             // Start a new half-open epoch. Do not reset
@@ -319,7 +327,22 @@ impl Middleware for CircuitBreakerMiddleware {
 
             CircuitState::HalfOpen => {
                 // Allow up to `permitted_probes` concurrent probe requests.
-                let _probe_gate = self.probe_gate.lock().ok();
+                #[cfg(test)]
+                if let Some(hook) = &self.half_open_race_test_hook {
+                    hook.waiter_observed_half_open.wait();
+                }
+                let _probe_gate = self
+                    .probe_gate
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                // The state read that selected this branch can become stale
+                // while waiting for a settling probe. Never reserve from that
+                // stale observation: release the gate and re-enter the current
+                // state path instead.
+                if !matches!(self.current_state(), CircuitState::HalfOpen) {
+                    drop(_probe_gate);
+                    return self.pre_handle(event, ctx);
+                }
                 let probe_generation = self.probe_generation.load(Ordering::SeqCst);
                 let permitted = self.half_open_policy.permitted_probes.get();
                 let mut current = self.probe_in_flight.load(Ordering::SeqCst);
@@ -379,8 +402,22 @@ impl Middleware for CircuitBreakerMiddleware {
             return;
         }
 
-        let now = Instant::now();
+        let (classification, _error_kind, _error_message) = self.classify_call(event, outputs, ctx);
+        self.settle_classified_call(&classification, ctx);
+    }
+}
 
+impl CircuitBreakerMiddleware {
+    /// Settle breaker health from an already final classification. Recovery
+    /// uses this path so a stateful custom classifier is invoked exactly once
+    /// per physical result and that same value drives retry, health, and
+    /// terminal evidence.
+    pub(super) fn settle_classified_call(
+        &self,
+        classification: &FailureClassification,
+        ctx: &mut MiddlewareContext,
+    ) {
+        let now = Instant::now();
         let is_probe = ctx.get::<CircuitBreakerIsProbe>().copied().unwrap_or(false);
 
         // Track allowed calls (i.e. calls that reached the wrapped handler), regardless of
@@ -389,10 +426,9 @@ impl Middleware for CircuitBreakerMiddleware {
             stats.requests_processed += 1;
         }
 
-        let (classification, _error_kind, _error_message) = self.classify_call(event, outputs, ctx);
         let is_success = matches!(classification, FailureClassification::Success);
 
-        let counted_as_failure = self.counts_as_failure(&classification);
+        let counted_as_failure = self.counts_as_failure(classification);
         if counted_as_failure {
             self.failures_total.fetch_add(1, Ordering::Relaxed);
         } else {
@@ -410,7 +446,15 @@ impl Middleware for CircuitBreakerMiddleware {
 
         if is_probe {
             let probe_generation = ctx.get::<CircuitBreakerProbeGeneration>().copied();
-            let _probe_gate = self.probe_gate.lock().ok();
+            let _probe_gate = self
+                .probe_gate
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            #[cfg(test)]
+            if let Some(hook) = &self.half_open_race_test_hook {
+                hook.settlement_holds_probe_gate.wait();
+                hook.release_settlement.wait();
+            }
             drop(ctx.remove::<CircuitBreakerProbeSlot>());
 
             if probe_generation == Some(self.probe_generation.load(Ordering::SeqCst))

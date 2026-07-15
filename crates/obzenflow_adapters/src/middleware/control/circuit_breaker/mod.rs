@@ -9,7 +9,10 @@
 //! monitoring and SLI middleware.
 
 use crate::middleware::{
-    context_keys::{CircuitBreakerIsProbe, CircuitBreakerProbeSlot, CircuitBreakerRetryAfterMs},
+    context_keys::{
+        CircuitBreakerIsProbe, CircuitBreakerProbeSlot, CircuitBreakerRecoveryOpenEpoch,
+        CircuitBreakerRetryAfterMs,
+    },
     MiddlewareAbortCause, MiddlewareAction, MiddlewareContext,
 };
 use obzenflow_core::event::chain_event::ChainEvent;
@@ -50,7 +53,7 @@ pub use factory::{
     CircuitBreakerFactory,
 };
 pub use retry::Retry;
-pub(crate) use retry::{EffectRecoverySession, RecoveryDirective, RetryLimits};
+use retry::RetryLimits;
 
 use classifier::FailureClassificationClassifier;
 use config::CircuitBreakerFailureMode;
@@ -153,6 +156,16 @@ pub struct CircuitBreakerMiddleware {
     probe_gate: Arc<Mutex<()>>,
     /// Monotonic epoch for half-open probe outcomes.
     probe_generation: Arc<AtomicU64>,
+    #[cfg(test)]
+    half_open_race_test_hook: Option<HalfOpenRaceTestHook>,
+    /// Serialises breaker transitions with recovery admission/continuation
+    /// checks. This makes the open epoch and state one logical snapshot for
+    /// effect recovery without changing the externally shared state view.
+    effect_recovery_state_gate: Mutex<()>,
+    /// Monotonic count of successful transitions into Open. Recovery sessions
+    /// capture the value at initial admission and reject any later physical
+    /// continuation after it changes, even if the circuit is Closed again.
+    effect_recovery_open_epoch: AtomicU64,
     /// FLOWIP-115a: the probe generation reserved by the source boundary policy,
     /// read by observation to classify the probe. The RAII guard releases the
     /// slot and clears this marker on cancellation.
@@ -215,6 +228,15 @@ struct CircuitBreakerStats {
     last_summary: Instant,
 }
 
+/// Deterministic coordination points for the stale half-open waiter
+/// regression. Absent from non-test builds.
+#[cfg(test)]
+struct HalfOpenRaceTestHook {
+    waiter_observed_half_open: Arc<std::sync::Barrier>,
+    settlement_holds_probe_gate: Arc<std::sync::Barrier>,
+    release_settlement: Arc<std::sync::Barrier>,
+}
+
 impl Default for CircuitBreakerStats {
     fn default() -> Self {
         Self {
@@ -269,6 +291,10 @@ impl CircuitBreakerMiddleware {
             probe_in_flight: Arc::new(AtomicU32::new(0)),
             probe_gate: Arc::new(Mutex::new(())),
             probe_generation: Arc::new(AtomicU64::new(0)),
+            #[cfg(test)]
+            half_open_race_test_hook: None,
+            effect_recovery_state_gate: Mutex::new(()),
+            effect_recovery_open_epoch: AtomicU64::new(0),
             source_pending_probe: Arc::new(Mutex::new(None)),
             stats: Arc::new(Mutex::new(CircuitBreakerStats {
                 requests_processed: 0,
@@ -304,26 +330,33 @@ impl CircuitBreakerMiddleware {
         CircuitState::from(self.state.load(Ordering::SeqCst))
     }
 
-    /// Open one logical invocation's recovery session (FLOWIP-115h AR1). The
-    /// session is the boundary's whole seam into recovery: every gate, delay,
-    /// evidence, and settlement decision lives behind it.
-    pub(crate) fn begin_effect_recovery<'a>(
-        &'a self,
-        ctx: &MiddlewareContext,
-        cursor: obzenflow_runtime::effects::EffectCursor,
-        cause: obzenflow_core::event::types::EventId,
-    ) -> EffectRecoverySession<'a> {
-        EffectRecoverySession::new(self, ctx, cursor, cause)
-    }
-
     fn effect_retry_config(&self) -> Option<(CircuitBreakerRetryPolicy, RetryLimits)> {
         self.retry_policy
             .clone()
             .map(|policy| (policy, self.retry_limits.clone()))
     }
 
-    fn is_closed_for_effect_recovery(&self) -> bool {
+    fn effect_recovery_open_epoch_at_admission(&self, ctx: &mut MiddlewareContext) -> bool {
+        let _state_gate = self
+            .effect_recovery_state_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !matches!(self.current_state(), CircuitState::Closed) {
+            return false;
+        }
+        ctx.insert::<CircuitBreakerRecoveryOpenEpoch>(
+            self.effect_recovery_open_epoch.load(Ordering::SeqCst),
+        );
+        true
+    }
+
+    fn effect_recovery_epoch_is_current(&self, admitted_epoch: u64) -> bool {
+        let _state_gate = self
+            .effect_recovery_state_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         matches!(self.current_state(), CircuitState::Closed)
+            && self.effect_recovery_open_epoch.load(Ordering::SeqCst) == admitted_epoch
     }
 
     fn is_effect_probe(&self, ctx: &MiddlewareContext) -> bool {
@@ -557,6 +590,10 @@ impl CircuitBreakerMiddleware {
     /// the CAS race and the transition was applied, `false` if another thread
     /// already moved the state (or old == new).
     fn transition_to_inner(&self, new_state: CircuitState) -> (bool, Option<ChainEvent>) {
+        let _recovery_state_gate = self
+            .effect_recovery_state_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let old_state = self.current_state();
         if old_state == new_state {
             return (false, None);
@@ -608,6 +645,8 @@ impl CircuitBreakerMiddleware {
 
         // Track when we open the circuit
         if new_state == CircuitState::Open {
+            self.effect_recovery_open_epoch
+                .fetch_add(1, Ordering::SeqCst);
             self.opened_total.fetch_add(1, Ordering::Relaxed);
             if let Ok(mut opened_at) = self.opened_at.lock() {
                 *opened_at = Some(now);
@@ -1626,6 +1665,75 @@ mod tests {
             cb.pre_handle(&event, &mut ctx2),
             MiddlewareAction::Continue
         ));
+    }
+
+    #[test]
+    fn halfopen_waiter_rechecks_state_after_active_probe_reopens() {
+        let mut cb = CircuitBreakerMiddleware::new(1);
+        cb.open_policy = OpenPolicy::Skip;
+        cb.half_open_policy = HalfOpenPolicy::new(NonZeroU32::new(2).unwrap(), OpenPolicy::Skip);
+        cb.state
+            .store(CircuitState::HalfOpen as u8, Ordering::SeqCst);
+
+        // Admit the active probe before enabling the race coordination hook.
+        let active_event = create_test_event();
+        let mut active_ctx = MiddlewareContext::live_handler();
+        assert!(matches!(
+            cb.pre_handle(&active_event, &mut active_ctx),
+            MiddlewareAction::Continue
+        ));
+        assert_eq!(cb.probe_in_flight.load(Ordering::SeqCst), 1);
+
+        let waiter_observed_half_open = Arc::new(std::sync::Barrier::new(2));
+        let settlement_holds_probe_gate = Arc::new(std::sync::Barrier::new(2));
+        let release_settlement = Arc::new(std::sync::Barrier::new(2));
+        cb.half_open_race_test_hook = Some(HalfOpenRaceTestHook {
+            waiter_observed_half_open: waiter_observed_half_open.clone(),
+            settlement_holds_probe_gate: settlement_holds_probe_gate.clone(),
+            release_settlement: release_settlement.clone(),
+        });
+        let cb = Arc::new(cb);
+
+        let settling_cb = cb.clone();
+        let settling = std::thread::spawn(move || {
+            let mut failed = create_test_event();
+            failed.processing_info.status = ProcessingStatus::error("probe failed");
+            settling_cb.post_handle(&active_event, &[failed], &mut active_ctx);
+        });
+
+        // The active probe owns probe_gate but has not transitioned yet.
+        settlement_holds_probe_gate.wait();
+
+        let waiting_cb = cb.clone();
+        let waiting = std::thread::spawn(move || {
+            let event = create_test_event();
+            let mut ctx = MiddlewareContext::live_handler();
+            let action = waiting_cb.pre_handle(&event, &mut ctx);
+            let reserved_probe = ctx.get::<CircuitBreakerIsProbe>().copied().unwrap_or(false);
+            (action, reserved_probe)
+        });
+
+        // The waiter selected HalfOpen and is now queued behind probe_gate.
+        waiter_observed_half_open.wait();
+        release_settlement.wait();
+
+        settling
+            .join()
+            .expect("active probe settlement should finish");
+        let (action, reserved_probe) = waiting.join().expect("waiting admission should finish");
+        assert!(
+            matches!(
+                action,
+                MiddlewareAction::Skip { .. } | MiddlewareAction::Abort { .. }
+            ),
+            "the stale waiter must be rejected without reaching a backend"
+        );
+        assert!(
+            !reserved_probe,
+            "the stale waiter must not reserve a probe slot"
+        );
+        assert_eq!(cb.current_state(), CircuitState::Open);
+        assert_eq!(cb.probe_in_flight.load(Ordering::SeqCst), 0);
     }
 
     #[test]

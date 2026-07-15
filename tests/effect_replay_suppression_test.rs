@@ -4,7 +4,7 @@
 
 use async_trait::async_trait;
 use obzenflow_adapters::effects::{CircuitBreakerOutcome, GuardedEffectExt};
-use obzenflow_adapters::middleware::control::circuit_breaker::{CircuitBreaker, OpenPolicy};
+use obzenflow_adapters::middleware::control::circuit_breaker::{CircuitBreaker, OpenPolicy, Retry};
 use obzenflow_adapters::middleware::RateLimiterBuilder;
 use obzenflow_core::{
     event::chain_event::{ChainEvent, ChainEventFactory},
@@ -34,6 +34,7 @@ use obzenflow_runtime::stages::common::handlers::{
     TransformHandler,
 };
 use obzenflow_runtime::stages::SourceError;
+use obzenflow_runtime::supervised_base::SupervisorHandle;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::ffi::OsString;
@@ -224,6 +225,29 @@ struct BlockingEffect {
     value: u64,
     calls: Arc<AtomicUsize>,
     release: Arc<Semaphore>,
+    cancelled_futures: Arc<AtomicUsize>,
+    invocations: Arc<Mutex<Vec<BlockingInvocation>>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct BlockingInvocation {
+    runtime_flow_id: String,
+    stage_key: String,
+    input_seq: u64,
+    idempotency_key: String,
+}
+
+struct PendingEffectGuard {
+    cancelled_futures: Arc<AtomicUsize>,
+    completed: bool,
+}
+
+impl Drop for PendingEffectGuard {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.cancelled_futures.fetch_add(1, Ordering::SeqCst);
+        }
+    }
 }
 
 #[async_trait]
@@ -242,13 +266,25 @@ impl Effect for BlockingEffect {
         json!({ "value": self.value })
     }
 
-    async fn execute(&self, _ctx: &mut EffectContext) -> Result<Self::Outcome, EffectError> {
+    async fn execute(&self, ctx: &mut EffectContext) -> Result<Self::Outcome, EffectError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
-        let permit = self
-            .release
-            .acquire()
-            .await
-            .map_err(|_| EffectError::Execution("blocking gate closed".to_string()))?;
+        self.invocations
+            .lock()
+            .expect("blocking invocation lock poisoned")
+            .push(BlockingInvocation {
+                runtime_flow_id: ctx.flow_id().to_string(),
+                stage_key: ctx.stage_key().to_string(),
+                input_seq: ctx.now(),
+                idempotency_key: format!("blocking:{}", self.value),
+            });
+        let mut pending = PendingEffectGuard {
+            cancelled_futures: self.cancelled_futures.clone(),
+            completed: false,
+        };
+        let permit = self.release.acquire().await;
+        pending.completed = true;
+        let permit =
+            permit.map_err(|_| EffectError::Execution("blocking gate closed".to_string()))?;
         drop(permit);
         Ok(ReplayEffectValue {
             effect_value: self.value + 100,
@@ -296,6 +332,8 @@ impl EffectfulTransformHandler for ReplayTransform {
 struct BlockingTransform {
     calls: Arc<AtomicUsize>,
     release: Arc<Semaphore>,
+    cancelled_futures: Arc<AtomicUsize>,
+    invocations: Arc<Mutex<Vec<BlockingInvocation>>>,
 }
 
 #[async_trait]
@@ -308,6 +346,8 @@ impl EffectfulTransformHandler for BlockingTransform {
                 value: input.value,
                 calls: self.calls.clone(),
                 release: self.release.clone(),
+                cancelled_futures: self.cancelled_futures.clone(),
+                invocations: self.invocations.clone(),
             })
             .await
             .map_err(|e| HandlerError::Other(e.to_string()))?;
@@ -871,6 +911,8 @@ fn build_blocking_flow(
     journal_base: PathBuf,
     calls: Arc<AtomicUsize>,
     release: Arc<Semaphore>,
+    cancelled_futures: Arc<AtomicUsize>,
+    invocations: Arc<Mutex<Vec<BlockingInvocation>>>,
     outputs: Arc<Mutex<Vec<ReplayOutput>>>,
 ) -> FlowDefinition {
     flow! {
@@ -881,8 +923,17 @@ fn build_blocking_flow(
         stages: {
             inputs = source!(ReplayInput => SingleReplaySource::new());
             effectful = effectful_transform!(
-                ReplayInput -> { ReplayOutput, ReplayEffectValue } => BlockingTransform { calls, release },
-                effects: [BlockingEffect],
+                ReplayInput -> { ReplayOutput, ReplayEffectValue } => BlockingTransform {
+                    calls,
+                    release,
+                    cancelled_futures,
+                    invocations
+                },
+                effects: [BlockingEffect with [
+                    CircuitBreaker::opens_after(1)
+                        .retry(Retry::fixed(Duration::ZERO).attempts(2))
+                        .build()
+                ]],
                 middleware: []
             );
             collector = sink!(ReplayOutput => CollectSink { outputs });
@@ -1430,6 +1481,26 @@ async fn circuit_breaker_events_in_stage(run_dir: &Path, stage_key: &str) -> usi
         .count()
 }
 
+async fn circuit_breaker_retry_events_in_stage(run_dir: &Path, stage_key: &str) -> usize {
+    read_stage_events(run_dir, stage_key)
+        .await
+        .into_iter()
+        .filter(|event| {
+            matches!(
+                event.content,
+                ChainEventContent::Observability(ObservabilityPayload::Middleware(
+                    MiddlewareLifecycle::CircuitBreaker(
+                        CircuitBreakerEvent::RetryScheduled { .. }
+                            | CircuitBreakerEvent::RetrySucceeded { .. }
+                            | CircuitBreakerEvent::RetryExhausted { .. }
+                            | CircuitBreakerEvent::RetryStoppedNonRetryable { .. }
+                    )
+                ))
+            )
+        })
+        .count()
+}
+
 async fn mirrored_circuit_breaker_events_in_system(run_dir: &Path, stage_name: &str) -> usize {
     let manifest = archive_manifest(run_dir);
     let system_journal = manifest["system_journal_file"]
@@ -1762,6 +1833,8 @@ async fn drain_waits_for_in_flight_effect_before_outputs_and_eof_complete() {
 
     let calls = Arc::new(AtomicUsize::new(0));
     let release = Arc::new(Semaphore::new(0));
+    let cancelled_futures = Arc::new(AtomicUsize::new(0));
+    let invocations = Arc::new(Mutex::new(Vec::new()));
     let outputs = Arc::new(Mutex::new(Vec::new()));
 
     let run_calls = calls.clone();
@@ -1774,6 +1847,8 @@ async fn drain_waits_for_in_flight_effect_before_outputs_and_eof_complete() {
                 journal_base,
                 run_calls,
                 run_release,
+                cancelled_futures,
+                invocations,
                 run_outputs,
             ))
             .await
@@ -1810,6 +1885,208 @@ async fn drain_waits_for_in_flight_effect_before_outputs_and_eof_complete() {
             value: 1,
             effect_value: 101
         }]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn graceful_timeout_aborts_pending_recovery_and_resume_reuses_effect_identity() {
+    let _guard = effect_replay_test_guard().await;
+    let temp = tempfile::tempdir().expect("tempdir");
+    let journal_base = temp.path().join("journals");
+
+    let cancelled_calls = Arc::new(AtomicUsize::new(0));
+    let cancelled_release = Arc::new(Semaphore::new(0));
+    let cancelled_futures = Arc::new(AtomicUsize::new(0));
+    let invocations = Arc::new(Mutex::new(Vec::new()));
+    let cancelled_outputs = Arc::new(Mutex::new(Vec::new()));
+    let flow_handle = build_blocking_flow(
+        journal_base.clone(),
+        cancelled_calls.clone(),
+        cancelled_release,
+        cancelled_futures.clone(),
+        invocations.clone(),
+        cancelled_outputs.clone(),
+    )
+    .build(obzenflow_runtime::run_context::FlowBuildContext::for_tests())
+    .await
+    .expect("blocking flow should build");
+
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while cancelled_calls.load(Ordering::SeqCst) == 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("blocking effect should start");
+
+    let graceful_bound = Duration::from_millis(100);
+    let stop_started = tokio::time::Instant::now();
+    flow_handle
+        .stop_graceful(graceful_bound)
+        .await
+        .expect("graceful stop request should be accepted");
+
+    tokio::time::timeout(graceful_bound + Duration::from_millis(900), async {
+        while cancelled_futures.load(Ordering::SeqCst) == 0 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the pending effect must be aborted at the original graceful deadline");
+    let stop_elapsed = stop_started.elapsed();
+    assert!(
+        stop_elapsed <= graceful_bound + Duration::from_millis(900),
+        "the effect future should be dropped promptly at the original graceful deadline; elapsed {stop_elapsed:?}"
+    );
+    // Metrics teardown has its own pre-existing bounded drain and is outside
+    // FLOWIP-115h. The stage future above is the deadline authority under test;
+    // wait for the rest of the pipeline only after proving its prompt abort.
+    tokio::time::timeout(Duration::from_secs(5), flow_handle.wait_for_completion())
+        .await
+        .expect("cancelled flow should finish its bounded ancillary cleanup")
+        .expect("cancelled flow should resolve");
+    assert_eq!(cancelled_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        cancelled_futures.load(Ordering::SeqCst),
+        1,
+        "timeout escalation must drop the pending physical effect future"
+    );
+    assert!(
+        cancelled_outputs
+            .lock()
+            .expect("outputs lock poisoned")
+            .is_empty(),
+        "a cancelled invocation must not emit an output"
+    );
+
+    let cancelled_archive = latest_run_dir(&journal_base);
+    let original_flow_id = archive_manifest(&cancelled_archive)["flow_id"]
+        .as_str()
+        .expect("cancelled manifest should contain its flow id")
+        .to_string();
+    let cancelled_stage_events = read_stage_events(&cancelled_archive, "effectful").await;
+    assert_eq!(
+        cancelled_stage_events
+            .iter()
+            .filter(|event| {
+                framework_effect_record(event).is_some() || is_domain_effect_outcome_fact(event)
+            })
+            .count(),
+        0,
+        "the aborted invocation must commit no terminal effect record or outcome fact"
+    );
+    assert_eq!(
+        circuit_breaker_retry_events_in_stage(&cancelled_archive, "effectful").await,
+        0,
+        "the aborted recovery session must commit no retry evidence"
+    );
+
+    let cancelled_invocation = invocations
+        .lock()
+        .expect("blocking invocation lock poisoned")
+        .first()
+        .cloned()
+        .expect("cancelled physical call should have recorded its identity");
+    assert_eq!(cancelled_invocation.runtime_flow_id, original_flow_id);
+
+    // Force the cancelled run through the same explicitly incomplete archive
+    // path used by the other resume tests in this suite.
+    mark_archive_incomplete(&cancelled_archive);
+
+    let resume_calls = Arc::new(AtomicUsize::new(0));
+    let resume_release = Arc::new(Semaphore::new(1));
+    let resume_outputs = Arc::new(Mutex::new(Vec::new()));
+    FlowApplication::builder()
+        .with_cli_args(vec![
+            OsString::from("obzenflow"),
+            OsString::from("--replay-from"),
+            cancelled_archive.as_os_str().to_os_string(),
+            OsString::from("--allow-incomplete-archive"),
+        ])
+        .run_async(build_blocking_flow(
+            journal_base.clone(),
+            resume_calls.clone(),
+            resume_release,
+            cancelled_futures.clone(),
+            invocations.clone(),
+            resume_outputs.clone(),
+        ))
+        .await
+        .expect("incomplete resume should re-execute the missing effect");
+
+    assert_eq!(resume_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        cancelled_futures.load(Ordering::SeqCst),
+        1,
+        "the resumed effect should complete instead of being cancelled"
+    );
+    assert_eq!(
+        resume_outputs
+            .lock()
+            .expect("outputs lock poisoned")
+            .clone(),
+        vec![ReplayOutput {
+            value: 1,
+            effect_value: 101,
+        }],
+        "resume must commit exactly one domain output"
+    );
+
+    let observed_invocations = invocations
+        .lock()
+        .expect("blocking invocation lock poisoned")
+        .clone();
+    assert_eq!(observed_invocations.len(), 2);
+    let resumed_invocation = &observed_invocations[1];
+    assert_eq!(
+        resumed_invocation.stage_key, cancelled_invocation.stage_key,
+        "resume must re-enter the same effectful stage"
+    );
+    assert_eq!(
+        resumed_invocation.input_seq, cancelled_invocation.input_seq,
+        "resume must re-enter the same archived input position"
+    );
+    assert_eq!(
+        resumed_invocation.idempotency_key, cancelled_invocation.idempotency_key,
+        "resume must reuse the same stable provider idempotency key"
+    );
+
+    let resume_archive = latest_run_dir(&journal_base);
+    let resumed_stage_events = read_stage_events(&resume_archive, "effectful").await;
+    let outcome_events: Vec<&ChainEvent> = resumed_stage_events
+        .iter()
+        .filter(|event| is_domain_effect_outcome_fact(event))
+        .collect();
+    assert_eq!(
+        outcome_events.len(),
+        1,
+        "resume must commit exactly one terminal effect outcome fact"
+    );
+    assert_eq!(
+        resumed_stage_events
+            .iter()
+            .filter(|event| event.event_type() == ReplayOutput::versioned_event_type())
+            .count(),
+        1,
+        "resume must journal exactly one emitted output"
+    );
+
+    let resumed_cursor = recorded_effect_cursor(outcome_events[0])
+        .expect("the resumed effect outcome should carry its archived cursor");
+    assert_eq!(
+        resumed_cursor,
+        EffectCursor::new(
+            original_flow_id,
+            cancelled_invocation.stage_key,
+            cancelled_invocation.input_seq,
+            0u32,
+        ),
+        "resume must commit under the cursor derived by the cancelled invocation"
+    );
+    assert_eq!(
+        circuit_breaker_retry_events_in_stage(&resume_archive, "effectful").await,
+        0,
+        "a first-attempt resume success should not fabricate retry evidence"
     );
 }
 
