@@ -1,5 +1,5 @@
 error[E0624]: associated function `circuit_breaker` is private
-  --> tests/ui/flowip_115h/private_breaker_attachment.rs:10:37
+  --> tests/ui/effect_recovery/private_breaker_attachment.rs:10:37
    |
 10 |     let _ = EffectPolicyAttachment::circuit_breaker(policy);
    |                                     ^^^^^^^^^^^^^^^ private associated function

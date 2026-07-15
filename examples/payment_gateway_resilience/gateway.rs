@@ -45,9 +45,10 @@ pub struct AuthorizePayment {
     retry_proof: Option<Arc<GatewayRetryProof>>,
 }
 
-/// Shared deterministic backend script used by the FLOWIP-115h acceptance
-/// profile. Effect clones share this counter, so physical calls observe the
-/// sequence timeout, timeout, success under one logical effect cursor.
+/// Shared deterministic backend script used by the circuit-breaker retry
+/// acceptance profile. Effect clones share this counter, so physical calls
+/// observe the sequence timeout, timeout, success under one logical effect
+/// cursor.
 #[derive(Debug, Default)]
 pub struct GatewayRetryProof {
     calls: AtomicUsize,
@@ -304,7 +305,7 @@ fn authorization_unavailable_reason(err: EffectError) -> String {
 /// covers the scripted outage. Breaker-synthesized fallback facts never reach
 /// `post_handle` (the boundary short-circuits), so degraded outputs do not
 /// re-count as failures. The classification is health authority plus recovery
-/// veto only (FLOWIP-115h): returning `TransientFailure` cannot make an
+/// veto only: returning `TransientFailure` cannot make an
 /// ineligible raw failure retry.
 pub fn classify_simulated_gateway_unavailability(
     event: &ChainEvent,

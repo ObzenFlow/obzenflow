@@ -300,7 +300,7 @@ On replay, none of this resilience machinery runs: replay performs no live
 effect, so the breaker and the rate limiter stay quiet and only the recorded
 outcomes drive the result.
 
-### Circuit-breaker retry proof (FLOWIP-115h)
+### Circuit-breaker retry proof
 
 The same binary contains a small, opt-in control/treatment fixture. Each
 profile admits one valid order. Its gateway returns typed timeouts on the first

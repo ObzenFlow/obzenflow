@@ -1,11 +1,11 @@
 error[E0451]: field `kind` of struct `EffectPolicyAttachment` is private
- --> tests/ui/flowip_115h/private_breaker_attachment_match.rs:8:34
+ --> tests/ui/effect_recovery/private_breaker_attachment_match.rs:8:34
   |
 8 |     let EffectPolicyAttachment { kind: _ } = attachment;
   |                                  ^^^^ private field
 
 error: type `effect::attachment::EffectPolicyAttachmentKind` is private
- --> tests/ui/flowip_115h/private_breaker_attachment_match.rs:8:40
+ --> tests/ui/effect_recovery/private_breaker_attachment_match.rs:8:40
   |
 8 |     let EffectPolicyAttachment { kind: _ } = attachment;
   |                                        ^ private type

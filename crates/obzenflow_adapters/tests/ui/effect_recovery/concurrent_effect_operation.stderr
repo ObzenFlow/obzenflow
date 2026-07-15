@@ -1,5 +1,5 @@
 error[E0499]: cannot borrow `operation` as mutable more than once at a time
-  --> tests/ui/flowip_115h/concurrent_effect_operation.rs:9:18
+  --> tests/ui/effect_recovery/concurrent_effect_operation.rs:9:18
    |
  8 |     let first = operation.execute();
    |                 --------- first mutable borrow occurs here

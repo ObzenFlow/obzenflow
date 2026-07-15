@@ -1938,8 +1938,8 @@ async fn graceful_timeout_aborts_pending_recovery_and_resume_reuses_effect_ident
         stop_elapsed <= graceful_bound + Duration::from_millis(900),
         "the effect future should be dropped promptly at the original graceful deadline; elapsed {stop_elapsed:?}"
     );
-    // Metrics teardown has its own pre-existing bounded drain and is outside
-    // FLOWIP-115h. The stage future above is the deadline authority under test;
+    // Metrics teardown has its own pre-existing bounded drain. The stage future
+    // above is the deadline authority under test;
     // wait for the rest of the pipeline only after proving its prompt abort.
     tokio::time::timeout(Duration::from_secs(5), flow_handle.wait_for_completion())
         .await

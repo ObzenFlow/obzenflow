@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-//! FLOWIP-115h acceptance rigging: the retry-proof profiles.
+//! Circuit-breaker retry acceptance profiles.
 //!
 //! The proof runs one scripted order against a gateway whose backend fails
 //! twice and then succeeds. The control profile disables breaker retry (one
