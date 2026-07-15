@@ -13,15 +13,10 @@
 //! rather than a hook each middleware must remember (gap G8).
 
 use crate::middleware::control::circuit_breaker::{
-    CircuitBreakerMiddleware, FailureClassification,
+    effect_error_event, CircuitBreakerMiddleware, RecoveryDirective,
 };
 use crate::middleware::{Middleware, MiddlewareAbortCause, MiddlewareAction, MiddlewareContext};
 use async_trait::async_trait;
-use obzenflow_core::event::payloads::observability_payload::{
-    CircuitBreakerHealthClassification, CircuitBreakerRetryStopReason,
-};
-use obzenflow_core::event::status::processing_status::ErrorKind;
-use obzenflow_core::event::ChainEventFactory;
 use obzenflow_core::event::EffectFailureCause;
 use obzenflow_core::{ChainEvent, MiddlewareExecutionScope};
 use obzenflow_runtime::effects::{
@@ -30,7 +25,7 @@ use obzenflow_runtime::effects::{
 };
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{Duration, Instant as StdInstant};
+use std::time::Instant as StdInstant;
 
 /// Admission decision from one per-effect policy.
 pub enum PolicyAdmission {
@@ -248,128 +243,6 @@ fn abort_reason_from_cause(cause: MiddlewareAbortCause) -> EffectAbortReason {
     }
 }
 
-#[derive(Clone, Copy)]
-enum RawRecoveryEligibility {
-    Eligible { rate_limit_floor: Duration },
-    Ineligible,
-}
-
-fn raw_recovery_eligibility(error: &EffectError) -> RawRecoveryEligibility {
-    match error {
-        EffectError::Timeout(_) | EffectError::Transport(_) => RawRecoveryEligibility::Eligible {
-            rate_limit_floor: Duration::ZERO,
-        },
-        EffectError::RateLimited { retry_after, .. } => RawRecoveryEligibility::Eligible {
-            rate_limit_floor: *retry_after,
-        },
-        EffectError::Serialization(_)
-        | EffectError::Journal(_)
-        | EffectError::MissingRecordedEffect { .. }
-        | EffectError::DuplicateRecordedEffect { .. }
-        | EffectError::DescriptorMismatch { .. }
-        | EffectError::RecordedFailure { .. }
-        | EffectError::BoundaryRejected { .. }
-        | EffectError::TypedOutcomeCoordination { .. }
-        | EffectError::EffectProvenanceMismatch(_)
-        | EffectError::IncompleteOutcomeGroup { .. }
-        | EffectError::MissingIdempotencyKey { .. }
-        | EffectError::UndeclaredEffect { .. }
-        | EffectError::UndeclaredOutput { .. }
-        | EffectError::EmitUnsupported { .. }
-        | EffectError::MissingEffectPort { .. }
-        | EffectError::TransactionalCommitMissing { .. }
-        | EffectError::Execution(_)
-        | EffectError::Permanent(_)
-        | EffectError::Validation(_)
-        | EffectError::Domain(_)
-        | EffectError::ReplayArchive(_) => RawRecoveryEligibility::Ineligible,
-    }
-}
-
-fn effect_error_kind(error: &EffectError) -> ErrorKind {
-    match error {
-        EffectError::Timeout(_) => ErrorKind::Timeout,
-        EffectError::Transport(_) => ErrorKind::Remote,
-        EffectError::RateLimited { .. } => ErrorKind::RateLimited,
-        EffectError::Validation(_) => ErrorKind::Validation,
-        EffectError::Domain(_) => ErrorKind::Domain,
-        EffectError::Serialization(_)
-        | EffectError::Journal(_)
-        | EffectError::MissingRecordedEffect { .. }
-        | EffectError::DuplicateRecordedEffect { .. }
-        | EffectError::DescriptorMismatch { .. }
-        | EffectError::RecordedFailure { .. }
-        | EffectError::BoundaryRejected { .. }
-        | EffectError::TypedOutcomeCoordination { .. }
-        | EffectError::EffectProvenanceMismatch(_)
-        | EffectError::IncompleteOutcomeGroup { .. }
-        | EffectError::MissingIdempotencyKey { .. }
-        | EffectError::UndeclaredEffect { .. }
-        | EffectError::UndeclaredOutput { .. }
-        | EffectError::EmitUnsupported { .. }
-        | EffectError::MissingEffectPort { .. }
-        | EffectError::TransactionalCommitMissing { .. }
-        | EffectError::Execution(_)
-        | EffectError::Permanent(_)
-        | EffectError::ReplayArchive(_) => ErrorKind::PermanentFailure,
-    }
-}
-
-pub(crate) fn effect_error_event(event: &ChainEvent, error: &EffectError) -> ChainEvent {
-    event
-        .clone()
-        .mark_as_error(error.to_string(), effect_error_kind(error))
-}
-
-fn effect_observation(
-    event: &ChainEvent,
-    result: &Result<Vec<ChainEvent>, EffectError>,
-) -> Vec<ChainEvent> {
-    match result {
-        Ok(outputs) => outputs.clone(),
-        Err(error) => vec![effect_error_event(event, error)],
-    }
-}
-
-fn prepare_classification_context(
-    result: &Result<Vec<ChainEvent>, EffectError>,
-    ctx: &mut MiddlewareContext,
-) {
-    use crate::middleware::context_keys::CircuitBreakerRetryAfterMs;
-
-    ctx.remove::<CircuitBreakerRetryAfterMs>();
-    if let Err(EffectError::RateLimited { retry_after, .. }) = result {
-        ctx.insert::<CircuitBreakerRetryAfterMs>(
-            retry_after.as_millis().min(u64::MAX as u128) as u64
-        );
-    }
-}
-
-fn retry_classification_allows(classification: &FailureClassification) -> bool {
-    matches!(
-        classification,
-        FailureClassification::TransientFailure | FailureClassification::RateLimited(_)
-    )
-}
-
-fn evidence_classification(
-    classification: &FailureClassification,
-) -> CircuitBreakerHealthClassification {
-    match classification {
-        FailureClassification::Success => CircuitBreakerHealthClassification::Success,
-        FailureClassification::TransientFailure => {
-            CircuitBreakerHealthClassification::TransientFailure
-        }
-        FailureClassification::PermanentFailure => {
-            CircuitBreakerHealthClassification::PermanentFailure
-        }
-        FailureClassification::RateLimited(_) => CircuitBreakerHealthClassification::RateLimited,
-        FailureClassification::PartialSuccess { .. } => {
-            CircuitBreakerHealthClassification::PartialSuccess
-        }
-    }
-}
-
 fn observe_reverse(
     policies: &[&EffectPolicyAttachment],
     event: &ChainEvent,
@@ -515,10 +388,7 @@ impl EffectBoundary for PerEffectPolicyBoundary {
         }
 
         let mut control_events = ctx.take_control_events();
-        let session_started = tokio::time::Instant::now();
-        let retry_config = breaker.effect_retry_config();
-        let recovery_allowed = !breaker.is_effect_probe(&ctx);
-        let mut attempts = 0u32;
+        let mut session = breaker.begin_effect_recovery(&ctx, identity.cursor.clone(), event.id);
 
         loop {
             let attempt_report = execute_chain_once(inner, event, &mut operation).await;
@@ -526,7 +396,7 @@ impl EffectBoundary for PerEffectPolicyBoundary {
             let result = match attempt_report.outcome {
                 EffectBoundaryOutcome::Executed(result) => result,
                 EffectBoundaryOutcome::Skipped { results, source } => {
-                    breaker.settle_not_executed(&mut ctx);
+                    session.settle_not_executed(&mut ctx);
                     let label = source.as_deref().unwrap_or("inner_effect_policy");
                     let attempt = EffectAttemptOutcome::SkippedBy(label);
                     observe_reverse(&admitted_outer, event, &attempt, &mut ctx);
@@ -537,7 +407,7 @@ impl EffectBoundary for PerEffectPolicyBoundary {
                     };
                 }
                 EffectBoundaryOutcome::Aborted(reason) => {
-                    breaker.settle_not_executed(&mut ctx);
+                    session.settle_not_executed(&mut ctx);
                     let cause = MiddlewareAbortCause {
                         source: reason.cause.source.clone(),
                         code: reason.cause.code.clone(),
@@ -554,157 +424,17 @@ impl EffectBoundary for PerEffectPolicyBoundary {
                     };
                 }
             };
-            attempts = attempts.saturating_add(1);
 
-            prepare_classification_context(&result, &mut ctx);
-            let observation = effect_observation(event, &result);
-            let (classification, _, _) = breaker.classify_call(event, &observation, &ctx);
-
-            let terminal = match &result {
-                Ok(_) => true,
-                Err(error) => match retry_config.as_ref() {
-                    None => true,
-                    Some(_) if !recovery_allowed => true,
-                    Some((retry_policy, retry_limits)) => {
-                        let eligibility = raw_recovery_eligibility(error);
-                        let allows = retry_classification_allows(&classification);
-                        if !matches!(eligibility, RawRecoveryEligibility::Eligible { .. })
-                            || !allows
-                        {
-                            if attempts > 1 {
-                                ctx.write_control_event(
-                                    ChainEventFactory::circuit_breaker_retry_stopped_non_retryable(
-                                        breaker.evidence_writer_id(),
-                                        identity.cursor.clone(),
-                                        attempts,
-                                        event.id,
-                                    ),
-                                );
-                            }
-                            true
-                        } else if attempts >= retry_policy.max_attempts {
-                            ctx.write_control_event(
-                                ChainEventFactory::circuit_breaker_retry_exhausted(
-                                    breaker.evidence_writer_id(),
-                                    identity.cursor.clone(),
-                                    attempts,
-                                    CircuitBreakerRetryStopReason::AttemptLimit,
-                                    event.id,
-                                ),
-                            );
-                            true
-                        } else if !breaker.is_closed_for_effect_recovery() {
-                            ctx.write_control_event(
-                                ChainEventFactory::circuit_breaker_retry_exhausted(
-                                    breaker.evidence_writer_id(),
-                                    identity.cursor.clone(),
-                                    attempts,
-                                    CircuitBreakerRetryStopReason::CircuitNoLongerClosed,
-                                    event.id,
-                                ),
-                            );
-                            control_events.extend(ctx.take_control_events());
-                            let attempt = EffectAttemptOutcome::Executed(&result);
-                            observe_reverse(&admitted_outer, event, &attempt, &mut ctx);
-                            control_events.extend(ctx.take_control_events());
-                            return EffectBoundaryReport {
-                                outcome: EffectBoundaryOutcome::Executed(result),
-                                control_events,
-                            };
-                        } else {
-                            let generated = retry_policy
-                                .calculate_delay(attempts.saturating_sub(1) as usize)
-                                .min(retry_limits.max_single_delay);
-                            let raw_floor = match eligibility {
-                                RawRecoveryEligibility::Eligible { rate_limit_floor } => {
-                                    rate_limit_floor
-                                }
-                                RawRecoveryEligibility::Ineligible => Duration::ZERO,
-                            };
-                            let classification_floor = match &classification {
-                                FailureClassification::RateLimited(delay) => *delay,
-                                _ => Duration::ZERO,
-                            };
-                            let delay = generated.max(raw_floor).max(classification_floor);
-                            if session_started.elapsed().saturating_add(delay)
-                                >= retry_limits.max_attempt_start_window
-                            {
-                                ctx.write_control_event(
-                                    ChainEventFactory::circuit_breaker_retry_exhausted(
-                                        breaker.evidence_writer_id(),
-                                        identity.cursor.clone(),
-                                        attempts,
-                                        CircuitBreakerRetryStopReason::AttemptStartWindow,
-                                        event.id,
-                                    ),
-                                );
-                                true
-                            } else {
-                                ctx.write_control_event(
-                                    ChainEventFactory::circuit_breaker_retry_scheduled(
-                                        breaker.evidence_writer_id(),
-                                        identity.cursor.clone(),
-                                        attempts.saturating_add(1),
-                                        delay.as_millis().min(u64::MAX as u128) as u64,
-                                        event.id,
-                                    ),
-                                );
-                                control_events.extend(ctx.take_control_events());
-                                tokio::time::sleep(delay).await;
-
-                                let stop_reason = if session_started.elapsed()
-                                    >= retry_limits.max_attempt_start_window
-                                {
-                                    Some(CircuitBreakerRetryStopReason::AttemptStartWindow)
-                                } else if !breaker.is_closed_for_effect_recovery() {
-                                    Some(CircuitBreakerRetryStopReason::CircuitNoLongerClosed)
-                                } else {
-                                    None
-                                };
-                                if let Some(reason) = stop_reason {
-                                    ctx.write_control_event(
-                                        ChainEventFactory::circuit_breaker_retry_exhausted(
-                                            breaker.evidence_writer_id(),
-                                            identity.cursor.clone(),
-                                            attempts,
-                                            reason,
-                                            event.id,
-                                        ),
-                                    );
-                                    control_events.extend(ctx.take_control_events());
-                                    let attempt = EffectAttemptOutcome::Executed(&result);
-                                    observe_reverse(&admitted_outer, event, &attempt, &mut ctx);
-                                    control_events.extend(ctx.take_control_events());
-                                    return EffectBoundaryReport {
-                                        outcome: EffectBoundaryOutcome::Executed(result),
-                                        control_events,
-                                    };
-                                }
-                                false
-                            }
-                        }
-                    }
-                },
-            };
-
-            if !terminal {
-                continue;
+            if let RecoveryDirective::RetryAfter(delay) = session.assess(event, &result, &mut ctx)
+            {
+                control_events.extend(ctx.take_control_events());
+                tokio::time::sleep(delay).await;
+                if session.recheck_after_delay(&mut ctx) {
+                    continue;
+                }
             }
 
-            ctx.insert::<crate::middleware::context_keys::EffectCallDurationNanos>(
-                session_started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
-            );
-            breaker.post_handle(event, &observation, &mut ctx);
-            if attempts > 1 && result.is_ok() {
-                ctx.write_control_event(ChainEventFactory::circuit_breaker_retry_succeeded(
-                    breaker.evidence_writer_id(),
-                    identity.cursor.clone(),
-                    attempts,
-                    evidence_classification(&classification),
-                    event.id,
-                ));
-            }
-
+            session.settle(event, &mut ctx);
             let attempt = EffectAttemptOutcome::Executed(&result);
             observe_reverse(&admitted_outer, event, &attempt, &mut ctx);
             control_events.extend(ctx.take_control_events());
@@ -720,8 +450,12 @@ impl EffectBoundary for PerEffectPolicyBoundary {
 mod tests {
     use super::*;
     use crate::middleware::control::circuit_breaker::{
-        CircuitBreakerBuilder, CircuitBreakerMiddleware, RetryLimits,
+        CircuitBreakerBuilder, CircuitBreakerMiddleware, FailureClassification, RetryLimits,
     };
+    use obzenflow_core::event::payloads::observability_payload::{
+        CircuitBreakerHealthClassification, CircuitBreakerRetryStopReason,
+    };
+    use std::time::Duration;
     use crate::middleware::control::rate_limiter::RateLimiterBuilder;
     use crate::middleware::control::ControlMiddlewareAggregator;
     use crate::middleware::{
@@ -1352,41 +1086,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn typed_effect_failures_map_to_structured_breaker_kinds() {
-        assert_eq!(
-            effect_error_kind(&EffectError::Timeout("timeout".to_string())),
-            ErrorKind::Timeout
-        );
-        assert_eq!(
-            effect_error_kind(&EffectError::Transport("offline".to_string())),
-            ErrorKind::Remote
-        );
-        assert_eq!(
-            effect_error_kind(&EffectError::RateLimited {
-                message: "quota".to_string(),
-                retry_after: Duration::from_secs(1),
-            }),
-            ErrorKind::RateLimited
-        );
-        assert_eq!(
-            effect_error_kind(&EffectError::Permanent("denied".to_string())),
-            ErrorKind::PermanentFailure
-        );
-        assert_eq!(
-            effect_error_kind(&EffectError::Validation("invalid".to_string())),
-            ErrorKind::Validation
-        );
-        assert_eq!(
-            effect_error_kind(&EffectError::Domain("declined".to_string())),
-            ErrorKind::Domain
-        );
-        assert_eq!(
-            effect_error_kind(&EffectError::Execution("opaque".to_string())),
-            ErrorKind::PermanentFailure
-        );
-    }
-
     #[tokio::test]
     async fn cancelling_during_backoff_drops_the_sequence_without_a_later_call() {
         let calls = Arc::new(AtomicUsize::new(0));
@@ -1481,6 +1180,65 @@ mod tests {
             CircuitBreakerEvent::RetryExhausted {
                 total_attempts: 1,
                 reason: CircuitBreakerRetryStopReason::CircuitNoLongerClosed,
+                ..
+            }
+        )));
+
+        let snapshots = control.effect_circuit_breaker_snapshotters(&stage_id);
+        let metrics = snapshots[0].1();
+        assert_eq!(metrics.requests_total, 1);
+        assert_eq!(metrics.failures_total, 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn post_sleep_window_exhaustion_settles_breaker_health() {
+        let (breaker, control, stage_id) = retrying_breaker_fixture(
+            CircuitBreakerBuilder::new(5)
+                .with_retry_fixed(Duration::from_millis(100), 3)
+                .with_retry_limits(RetryLimits {
+                    max_single_delay: Duration::from_secs(1),
+                    max_attempt_start_window: Duration::from_millis(150),
+                }),
+        );
+        let boundary = Arc::new(boundary_with_chain(vec![breaker]));
+        let first_attempt_finished = Arc::new(tokio::sync::Notify::new());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let task = {
+            let boundary = boundary.clone();
+            let first_attempt_finished = first_attempt_finished.clone();
+            let calls = calls.clone();
+            tokio::spawn(async move {
+                boundary
+                    .around_effect(
+                        &identity_for("effect.retry"),
+                        &data_event(),
+                        scripted_operation(calls, move |_| {
+                            first_attempt_finished.notify_one();
+                            Err(EffectError::Timeout("late".to_string()))
+                        }),
+                    )
+                    .await
+            })
+        };
+
+        first_attempt_finished.notified().await;
+        tokio::task::yield_now().await;
+        // The 100ms delay passed the pre-sleep check (0 + 100 < 150); jumping
+        // to 200ms fires the sleep with the window already exceeded, which is
+        // the overshoot the post-sleep re-check exists for.
+        tokio::time::advance(Duration::from_millis(200)).await;
+
+        let report = task.await.expect("invocation should finish");
+        assert!(matches!(
+            report.outcome,
+            EffectBoundaryOutcome::Executed(Err(EffectError::Timeout(_)))
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(retry_events(&report).iter().any(|event| matches!(
+            event,
+            CircuitBreakerEvent::RetryExhausted {
+                total_attempts: 1,
+                reason: CircuitBreakerRetryStopReason::AttemptStartWindow,
                 ..
             }
         )));

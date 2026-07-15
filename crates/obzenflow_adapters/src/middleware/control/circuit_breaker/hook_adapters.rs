@@ -503,8 +503,7 @@ impl EventAwareEffectPolicy for CircuitBreakerMiddleware {
                 self.post_handle(event, outputs, ctx);
             }
             crate::middleware::EffectAttemptOutcome::Executed(Err(err)) => {
-                let error_event =
-                    crate::middleware::control::policy::effect::effect_error_event(event, err);
+                let error_event = super::classifier::effect_error_event(event, err);
                 self.post_handle(event, std::slice::from_ref(&error_event), ctx);
             }
             crate::middleware::EffectAttemptOutcome::SkippedBy(_)

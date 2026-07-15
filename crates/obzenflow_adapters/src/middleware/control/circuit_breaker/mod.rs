@@ -45,6 +45,8 @@ pub use factory::{
     ai_circuit_breaker, circuit_breaker, CircuitBreakerBuilder, CircuitBreakerFactory,
 };
 pub use retry::RetryLimits;
+pub(crate) use classifier::effect_error_event;
+pub(crate) use retry::{EffectRecoverySession, RecoveryDirective};
 
 use classifier::{FailureClassificationClassifier, FailureClassifier};
 use config::CircuitBreakerFailureMode;
@@ -304,21 +306,33 @@ impl CircuitBreakerMiddleware {
         CircuitState::from(self.state.load(Ordering::SeqCst))
     }
 
-    pub(crate) fn effect_retry_config(&self) -> Option<(CircuitBreakerRetryPolicy, RetryLimits)> {
+    /// Open one logical invocation's recovery session (FLOWIP-115h AR1). The
+    /// session is the boundary's whole seam into recovery: every gate, delay,
+    /// evidence, and settlement decision lives behind it.
+    pub(crate) fn begin_effect_recovery<'a>(
+        &'a self,
+        ctx: &MiddlewareContext,
+        cursor: obzenflow_runtime::effects::EffectCursor,
+        cause: obzenflow_core::event::types::EventId,
+    ) -> EffectRecoverySession<'a> {
+        EffectRecoverySession::new(self, ctx, cursor, cause)
+    }
+
+    fn effect_retry_config(&self) -> Option<(CircuitBreakerRetryPolicy, RetryLimits)> {
         self.retry_policy
             .clone()
             .map(|policy| (policy, self.retry_limits.clone()))
     }
 
-    pub(crate) fn is_closed_for_effect_recovery(&self) -> bool {
+    fn is_closed_for_effect_recovery(&self) -> bool {
         matches!(self.current_state(), CircuitState::Closed)
     }
 
-    pub(crate) fn is_effect_probe(&self, ctx: &MiddlewareContext) -> bool {
+    fn is_effect_probe(&self, ctx: &MiddlewareContext) -> bool {
         ctx.get::<CircuitBreakerIsProbe>().copied().unwrap_or(false)
     }
 
-    pub(crate) fn evidence_writer_id(&self) -> WriterId {
+    fn evidence_writer_id(&self) -> WriterId {
         self.writer_id
     }
 
@@ -449,7 +463,7 @@ impl CircuitBreakerMiddleware {
         }
     }
 
-    pub(crate) fn classify_call(
+    fn classify_call(
         &self,
         event: &ChainEvent,
         outputs: &[ChainEvent],
@@ -859,7 +873,7 @@ impl CircuitBreakerMiddleware {
 
     /// Settle an admitted effect probe whose protected call was skipped or
     /// rejected by a later policy. No breaker outcome is classified.
-    pub(crate) fn settle_not_executed(&self, ctx: &mut MiddlewareContext) {
+    fn settle_not_executed(&self, ctx: &mut MiddlewareContext) {
         if ctx.get::<CircuitBreakerIsProbe>().copied().unwrap_or(false) {
             let _probe_gate = self.probe_gate.lock().ok();
             drop(ctx.remove::<CircuitBreakerProbeSlot>());

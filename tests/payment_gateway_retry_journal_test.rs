@@ -2,22 +2,10 @@
 // SPDX-FileCopyrightText: 2025-2026 ObzenFlow Contributors
 // https://obzenflow.dev
 
-#![allow(dead_code)]
+#[path = "../examples/payment_gateway_resilience/support.rs"]
+pub mod support;
 
-#[path = "../examples/payment_gateway_resilience/console.rs"]
-mod console;
-#[path = "../examples/payment_gateway_resilience/deliveries.rs"]
-mod deliveries;
-#[path = "../examples/payment_gateway_resilience/domain.rs"]
-mod domain;
-#[path = "../examples/payment_gateway_resilience/fixtures.rs"]
-mod fixtures;
-#[path = "../examples/payment_gateway_resilience/flow.rs"]
-mod flow;
-#[path = "../examples/payment_gateway_resilience/gateway.rs"]
-mod gateway;
-#[path = "../examples/payment_gateway_resilience/validation.rs"]
-mod validation;
+use support::{flow, gateway};
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

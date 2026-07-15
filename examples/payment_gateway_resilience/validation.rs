@@ -120,13 +120,13 @@ fn invalid_reason_for(order: &CustomerOrderPlaced) -> Option<InvalidOrderReason>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::TrafficPhase;
+    use super::super::domain::{OrderChannel, TrafficPhase};
 
     fn order(payment_method_state: PaymentMethodState, amount_cents: u64) -> CustomerOrderPlaced {
         CustomerOrderPlaced {
             order_id: "order-1".to_string(),
             customer_id: "customer-1".to_string(),
-            channel: crate::domain::OrderChannel::Web,
+            channel: OrderChannel::Web,
             amount_cents,
             payment_method_state,
             phase: TrafficPhase::Warmup,

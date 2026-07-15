@@ -64,7 +64,7 @@ const SOURCE_RATE_LIMIT_EVENTS_PER_SECOND: f64 = 20.0;
 const SOURCE_RATE_LIMIT_BURST: f64 = 1.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum RetryProofProfile {
+pub enum RetryProofProfile {
     Control,
     Treatment,
 }
@@ -126,7 +126,7 @@ pub fn build_flow() -> obzenflow_dsl::FlowDefinition {
     )
 }
 
-pub(super) fn build_flow_for_profile(
+pub fn build_flow_for_profile(
     retry_proof_profile: Option<RetryProofProfile>,
     retry_proof: Option<Arc<GatewayRetryProof>>,
     journal_root: std::path::PathBuf,

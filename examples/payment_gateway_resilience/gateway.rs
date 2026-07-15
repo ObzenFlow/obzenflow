@@ -62,7 +62,6 @@ impl GatewayRetryProof {
     }
 
     #[cfg(test)]
-    #[allow(dead_code)]
     pub fn calls(&self) -> usize {
         self.calls.load(Ordering::SeqCst)
     }
@@ -341,7 +340,7 @@ async fn emit_authorization_unavailable(
 
 #[cfg(test)]
 mod tests {
-    use super::{authorization_unavailable_reason, EffectError};
+    use super::{authorization_unavailable_reason, EffectError, GatewayRetryProof};
     use obzenflow_runtime::effects::RetryDisposition;
 
     /// FLOWIP-120i: the recorded payload carries the semantic reason, never
@@ -361,5 +360,19 @@ mod tests {
 
         assert_eq!(live_reason, "gateway_timeout_simulated");
         assert_eq!(replay_reason, live_reason);
+    }
+
+    #[test]
+    fn retry_proof_counts_physical_calls() {
+        let proof = GatewayRetryProof::new(false);
+        assert_eq!(proof.record_call(), 1);
+        assert_eq!(proof.record_call(), 2);
+        assert_eq!(proof.calls(), 2);
+    }
+
+    #[test]
+    #[should_panic(expected = "strict replay attempted a live payment gateway call")]
+    fn retry_proof_panics_on_replay_call() {
+        GatewayRetryProof::new(true).record_call();
     }
 }
