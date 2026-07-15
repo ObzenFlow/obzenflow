@@ -180,8 +180,9 @@ pub use type_shaping::{IntoEffectPolicyParts, OutcomeShapingMiddleware, TypeShap
 
 // Control middleware
 pub use control::{
-    circuit_breaker, rate_limit, rate_limit_with_burst, CircuitBreakerBuilder,
-    CircuitBreakerMiddleware, RateLimiterBuilder, RateLimiterFactory, RateLimiterMiddleware,
+    circuit_breaker, failure_rate, rate_limit, rate_limit_with_burst, CircuitBreaker,
+    CircuitBreakerBuilder, CircuitBreakerMiddleware, RateLimiterBuilder, RateLimiterFactory,
+    RateLimiterMiddleware, Retry,
 };
 
 pub use observability::{log, LoggingMiddleware, LoggingMiddlewareFactory};

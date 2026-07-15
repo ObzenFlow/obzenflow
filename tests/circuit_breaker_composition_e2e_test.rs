@@ -23,7 +23,7 @@
 
 use async_trait::async_trait;
 use obzenflow_adapters::middleware::circuit_breaker;
-use obzenflow_adapters::middleware::control::circuit_breaker::{CircuitBreakerBuilder, OpenPolicy};
+use obzenflow_adapters::middleware::control::circuit_breaker::{CircuitBreaker, OpenPolicy};
 use obzenflow_core::{
     event::chain_event::{ChainEvent, ChainEventFactory},
     event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload},
@@ -276,9 +276,9 @@ fn build_flow(
                 CompInput -> { CompOutput, CompEffectValue } => FallbackTransform { calls },
                 effects: [AlwaysFailingEffect],
                 middleware: [
-                    CircuitBreakerBuilder::new(1)
-                        .open_policy(OpenPolicy::EmitFallback)
-                        .with_fallback_fact::<CompInput, CompEffectValue, _>(|input| CompEffectValue {
+                    CircuitBreaker::opens_after(1)
+                        .when_open(OpenPolicy::EmitFallback)
+                        .transitional_fallback_fact(|input: &CompInput| CompEffectValue {
                             effect_value: input.value + 900,
                         })
                         .build()

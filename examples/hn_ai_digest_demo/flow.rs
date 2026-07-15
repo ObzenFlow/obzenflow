@@ -11,7 +11,7 @@ use obzenflow::ai::{ChunkInfo, EstimateSource, Prompt, SystemPrompt, TokenCount,
 use obzenflow::sources::{http_pull_config, HttpPullSource};
 use obzenflow::typed::{sinks, stateful as typed_stateful, transforms as typed_transforms};
 use obzenflow_adapters::middleware::control::ai_circuit_breaker;
-use obzenflow_adapters::middleware::{CircuitBreakerBuilder, RateLimiterBuilder};
+use obzenflow_adapters::middleware::{CircuitBreaker, RateLimiterBuilder};
 use obzenflow_core::ai::ChatResponse;
 use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{ai_map_reduce, async_source, flow, sink, stateful, transform};
@@ -21,7 +21,7 @@ use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
-const HN_SOURCE_BREAKER_FAILURES: usize = 3;
+const HN_SOURCE_BREAKER_FAILURES: u32 = 3;
 const HN_SOURCE_BREAKER_COOLDOWN_SECS: u64 = 2;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -261,7 +261,7 @@ pub async fn run_example(config: DemoConfig, presentation: Presentation) -> Resu
                 // the external HN HTTP dependency; the limiter paces API reads.
                 // Replay reconstructs archived stories and suppresses both.
                 hn_stories = async_source!(HnStory => HttpPullSource::new(decoder, config), [
-                    CircuitBreakerBuilder::new(HN_SOURCE_BREAKER_FAILURES)
+                    CircuitBreaker::opens_after(HN_SOURCE_BREAKER_FAILURES)
                         .cooldown(Duration::from_secs(HN_SOURCE_BREAKER_COOLDOWN_SECS))
                         .build(),
                     RateLimiterBuilder::new(source_rate_limit).build()

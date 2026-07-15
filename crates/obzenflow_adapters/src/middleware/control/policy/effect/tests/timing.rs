@@ -11,12 +11,14 @@ use super::support::*;
 async fn fixed_backoff_waits_exactly_before_each_continuation() {
     let calls = Arc::new(AtomicUsize::new(0));
     let breaker = retrying_breaker_attachment(
-        CircuitBreakerBuilder::new(3)
-            .with_retry_fixed(Duration::from_millis(7), 3)
-            .with_retry_limits(RetryLimits {
-                max_single_delay: Duration::from_secs(1),
-                max_attempt_start_window: Duration::from_secs(1),
-            }),
+        CircuitBreaker::opens_after(3)
+            .retry(
+                Retry::fixed(Duration::from_millis(7))
+                    .attempts(3)
+                    .max_delay(Duration::from_secs(1))
+                    .start_window(Duration::from_secs(1)),
+            )
+            .build(),
     );
     let boundary = boundary_with_chain(vec![breaker]);
     let started = tokio::time::Instant::now();
@@ -45,13 +47,15 @@ async fn fixed_backoff_waits_exactly_before_each_continuation() {
 async fn exponential_backoff_applies_jitter_before_the_single_delay_cap() {
     let calls = Arc::new(AtomicUsize::new(0));
     let breaker = retrying_breaker_attachment(
-        CircuitBreakerBuilder::new(5)
-            .with_retry_exponential(4)
-            .with_retry_jitter_samples(vec![0.0, 0.0, 0.5])
-            .with_retry_limits(RetryLimits {
-                max_single_delay: Duration::from_millis(500),
-                max_attempt_start_window: Duration::from_secs(5),
-            }),
+        CircuitBreaker::opens_after(5)
+            .retry(
+                Retry::exponential()
+                    .attempts(4)
+                    .jitter_samples(vec![0.0, 0.0, 0.5])
+                    .max_delay(Duration::from_millis(500))
+                    .start_window(Duration::from_secs(5)),
+            )
+            .build(),
     );
     let boundary = boundary_with_chain(vec![breaker]);
     let operation = scripted_operation(calls.clone(), |call| {
@@ -76,15 +80,17 @@ async fn exponential_backoff_applies_jitter_before_the_single_delay_cap() {
 async fn raw_rate_limit_floor_cannot_be_shortened_by_classifier_or_backoff_cap() {
     let calls = Arc::new(AtomicUsize::new(0));
     let breaker = retrying_breaker_attachment(
-        CircuitBreakerBuilder::new(3)
-            .with_retry_fixed(Duration::from_millis(1), 2)
-            .with_retry_limits(RetryLimits {
-                max_single_delay: Duration::from_millis(5),
-                max_attempt_start_window: Duration::from_secs(1),
-            })
-            .with_failure_classification_classifier(|_, _| {
+        CircuitBreaker::opens_after(3)
+            .retry(
+                Retry::fixed(Duration::from_millis(1))
+                    .attempts(2)
+                    .max_delay(Duration::from_millis(5))
+                    .start_window(Duration::from_secs(1)),
+            )
+            .with_failure_classification(|_, _| {
                 FailureClassification::RateLimited(Duration::from_millis(10))
-            }),
+            })
+            .build(),
     );
     let boundary = boundary_with_chain(vec![breaker]);
     let operation = scripted_operation(calls.clone(), |call| {
@@ -114,12 +120,14 @@ async fn raw_rate_limit_floor_cannot_be_shortened_by_classifier_or_backoff_cap()
 async fn rate_limit_floor_at_start_window_prevents_another_attempt() {
     let calls = Arc::new(AtomicUsize::new(0));
     let breaker = retrying_breaker_attachment(
-        CircuitBreakerBuilder::new(3)
-            .with_retry_fixed(Duration::ZERO, 2)
-            .with_retry_limits(RetryLimits {
-                max_single_delay: Duration::from_millis(1),
-                max_attempt_start_window: Duration::from_millis(100),
-            }),
+        CircuitBreaker::opens_after(3)
+            .retry(
+                Retry::fixed(Duration::ZERO)
+                    .attempts(2)
+                    .max_delay(Duration::from_millis(1))
+                    .start_window(Duration::from_millis(100)),
+            )
+            .build(),
     );
     let boundary = boundary_with_chain(vec![breaker]);
     let operation = scripted_operation(calls.clone(), |_| {
@@ -150,7 +158,9 @@ async fn cancelling_during_backoff_drops_the_sequence_without_a_later_call() {
     let calls = Arc::new(AtomicUsize::new(0));
     let first_call = Arc::new(tokio::sync::Notify::new());
     let breaker = retrying_breaker_attachment(
-        CircuitBreakerBuilder::new(3).with_retry_fixed(Duration::from_secs(60), 2),
+        CircuitBreaker::opens_after(3)
+            .retry(Retry::fixed(Duration::from_secs(60)).attempts(2))
+            .build(),
     );
     let boundary = boundary_with_chain(vec![breaker]);
     let operation = {
@@ -179,10 +189,13 @@ async fn cancelling_during_backoff_drops_the_sequence_without_a_later_call() {
 async fn recovered_session_settles_breaker_health_once_and_can_be_slow() {
     let calls = Arc::new(AtomicUsize::new(0));
     let (breaker, control, stage_id) = retrying_breaker_fixture(
-        CircuitBreakerBuilder::new(3)
-            .rate_based_over_last_n_calls(1, 1.0)
-            .slow_call(Duration::from_millis(5), 1.0)
-            .with_retry_fixed(Duration::from_millis(10), 2),
+        CircuitBreaker::opens_when(
+            failure_rate(1.0)
+                .over_last_calls(1)
+                .or_slow_calls_over(Duration::from_millis(5), 1.0),
+        )
+        .retry(Retry::fixed(Duration::from_millis(10)).attempts(2))
+        .build(),
     );
     let report = boundary_with_chain(vec![breaker])
         .around_effect(

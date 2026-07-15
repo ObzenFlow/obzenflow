@@ -11,12 +11,14 @@ use super::support::*;
 async fn retrying_breaker_recovers_inside_one_boundary_invocation() {
     let calls = Arc::new(AtomicUsize::new(0));
     let breaker = retrying_breaker_attachment(
-        CircuitBreakerBuilder::new(3)
-            .with_retry_fixed(Duration::ZERO, 3)
-            .with_retry_limits(RetryLimits {
-                max_single_delay: Duration::from_secs(1),
-                max_attempt_start_window: Duration::from_secs(5),
-            }),
+        CircuitBreaker::opens_after(3)
+            .retry(
+                Retry::fixed(Duration::ZERO)
+                    .attempts(3)
+                    .max_delay(Duration::from_secs(1))
+                    .start_window(Duration::from_secs(5)),
+            )
+            .build(),
     );
     let boundary = boundary_with_chain(vec![breaker]);
     let operation = scripted_operation(calls.clone(), |call| {
@@ -58,9 +60,10 @@ async fn retrying_breaker_recovers_inside_one_boundary_invocation() {
 async fn opaque_execution_failure_is_never_promoted_to_retry() {
     let calls = Arc::new(AtomicUsize::new(0));
     let breaker = retrying_breaker_attachment(
-        CircuitBreakerBuilder::new(3)
-            .with_retry_fixed(Duration::ZERO, 3)
-            .with_failure_classification_classifier(|_, _| FailureClassification::TransientFailure),
+        CircuitBreaker::opens_after(3)
+            .retry(Retry::fixed(Duration::ZERO).attempts(3))
+            .with_failure_classification(|_, _| FailureClassification::TransientFailure)
+            .build(),
     );
     let boundary = boundary_with_chain(vec![breaker]);
     let operation = scripted_operation(calls.clone(), |_| {
@@ -83,9 +86,10 @@ async fn opaque_execution_failure_is_never_promoted_to_retry() {
 async fn raw_success_is_not_reexecuted_when_classifier_marks_it_transient() {
     let calls = Arc::new(AtomicUsize::new(0));
     let breaker = retrying_breaker_attachment(
-        CircuitBreakerBuilder::new(1)
-            .with_retry_fixed(Duration::ZERO, 3)
-            .with_failure_classification_classifier(|_, _| FailureClassification::TransientFailure),
+        CircuitBreaker::opens_after(1)
+            .retry(Retry::fixed(Duration::ZERO).attempts(3))
+            .with_failure_classification(|_, _| FailureClassification::TransientFailure)
+            .build(),
     );
     let boundary = boundary_with_chain(vec![breaker]);
     let operation = scripted_operation(calls.clone(), |_| Ok(Vec::new()));
@@ -106,7 +110,9 @@ async fn raw_success_is_not_reexecuted_when_classifier_marks_it_transient() {
 async fn retry_exhaustion_returns_the_exact_last_failure() {
     let calls = Arc::new(AtomicUsize::new(0));
     let breaker = retrying_breaker_attachment(
-        CircuitBreakerBuilder::new(3).with_retry_fixed(Duration::ZERO, 3),
+        CircuitBreaker::opens_after(3)
+            .retry(Retry::fixed(Duration::ZERO).attempts(3))
+            .build(),
     );
     let boundary = boundary_with_chain(vec![breaker]);
     let operation = scripted_operation(calls.clone(), |call| {
@@ -137,7 +143,9 @@ async fn retry_exhaustion_returns_the_exact_last_failure() {
 async fn later_permanent_failure_stops_recovery() {
     let calls = Arc::new(AtomicUsize::new(0));
     let breaker = retrying_breaker_attachment(
-        CircuitBreakerBuilder::new(3).with_retry_fixed(Duration::ZERO, 3),
+        CircuitBreaker::opens_after(3)
+            .retry(Retry::fixed(Duration::ZERO).attempts(3))
+            .build(),
     );
     let boundary = boundary_with_chain(vec![breaker]);
     let operation = scripted_operation(calls.clone(), |call| {
@@ -175,9 +183,10 @@ async fn custom_classifier_can_veto_but_not_promote_recovery() {
     ] {
         let timeout_calls = Arc::new(AtomicUsize::new(0));
         let vetoing_breaker = retrying_breaker_attachment(
-            CircuitBreakerBuilder::new(3)
-                .with_retry_fixed(Duration::ZERO, 3)
-                .with_failure_classification_classifier(move |_, _| classification.clone()),
+            CircuitBreaker::opens_after(3)
+                .retry(Retry::fixed(Duration::ZERO).attempts(3))
+                .with_failure_classification(move |_, _| classification.clone())
+                .build(),
         );
         let veto_report = boundary_with_chain(vec![vetoing_breaker])
             .around_effect(
@@ -200,11 +209,10 @@ async fn custom_classifier_can_veto_but_not_promote_recovery() {
     ] {
         let calls = Arc::new(AtomicUsize::new(0));
         let breaker = retrying_breaker_attachment(
-            CircuitBreakerBuilder::new(3)
-                .with_retry_fixed(Duration::ZERO, 3)
-                .with_failure_classification_classifier(|_, _| {
-                    FailureClassification::TransientFailure
-                }),
+            CircuitBreaker::opens_after(3)
+                .retry(Retry::fixed(Duration::ZERO).attempts(3))
+                .with_failure_classification(|_, _| FailureClassification::TransientFailure)
+                .build(),
         );
         let slot = Arc::new(Mutex::new(Some(error)));
         let report = boundary_with_chain(vec![breaker])

@@ -10,7 +10,9 @@ use super::support::*;
 #[tokio::test]
 async fn concurrent_effect_cursors_keep_independent_attempt_state() {
     let breaker = retrying_breaker_attachment(
-        CircuitBreakerBuilder::new(10).with_retry_fixed(Duration::ZERO, 2),
+        CircuitBreaker::opens_after(10)
+            .retry(Retry::fixed(Duration::ZERO).attempts(2))
+            .build(),
     );
     let boundary = boundary_with_chain(vec![breaker]);
     let first_identity = identity_for("effect.retry");
@@ -77,12 +79,14 @@ async fn concurrent_effect_cursors_keep_independent_attempt_state() {
 #[tokio::test(start_paused = true)]
 async fn pending_continuation_stops_when_another_invocation_opens_the_circuit() {
     let (breaker, control, stage_id) = retrying_breaker_fixture(
-        CircuitBreakerBuilder::new(1)
-            .with_retry_fixed(Duration::from_secs(1), 2)
-            .with_retry_limits(RetryLimits {
-                max_single_delay: Duration::from_secs(1),
-                max_attempt_start_window: Duration::from_secs(5),
-            }),
+        CircuitBreaker::opens_after(1)
+            .retry(
+                Retry::fixed(Duration::from_secs(1))
+                    .attempts(2)
+                    .max_delay(Duration::from_secs(1))
+                    .start_window(Duration::from_secs(5)),
+            )
+            .build(),
     );
     let boundary = Arc::new(boundary_with_chain(vec![breaker]));
     let first_attempt_finished = Arc::new(tokio::sync::Notify::new());
@@ -151,12 +155,14 @@ async fn pending_continuation_stops_when_another_invocation_opens_the_circuit() 
 #[tokio::test(start_paused = true)]
 async fn post_sleep_window_exhaustion_settles_breaker_health() {
     let (breaker, control, stage_id) = retrying_breaker_fixture(
-        CircuitBreakerBuilder::new(5)
-            .with_retry_fixed(Duration::from_millis(100), 3)
-            .with_retry_limits(RetryLimits {
-                max_single_delay: Duration::from_secs(1),
-                max_attempt_start_window: Duration::from_millis(150),
-            }),
+        CircuitBreaker::opens_after(5)
+            .retry(
+                Retry::fixed(Duration::from_millis(100))
+                    .attempts(3)
+                    .max_delay(Duration::from_secs(1))
+                    .start_window(Duration::from_millis(150)),
+            )
+            .build(),
     );
     let boundary = Arc::new(boundary_with_chain(vec![breaker]));
     let first_attempt_finished = Arc::new(tokio::sync::Notify::new());
@@ -233,7 +239,9 @@ impl EffectPolicy for GateSecondAdmission {
 #[tokio::test]
 async fn continuation_already_admitted_by_an_inner_policy_completes_after_opening() {
     let breaker = retrying_breaker_attachment(
-        CircuitBreakerBuilder::new(1).with_retry_fixed(Duration::ZERO, 2),
+        CircuitBreaker::opens_after(1)
+            .retry(Retry::fixed(Duration::ZERO).attempts(2))
+            .build(),
     );
     let second_admitted = Arc::new(tokio::sync::Notify::new());
     let release_second = Arc::new(tokio::sync::Notify::new());

@@ -145,7 +145,9 @@ async fn per_effect_breakers_do_not_cross_trip() {
 async fn policy_position_controls_logical_vs_physical_admission_count() {
     let inner_calls = Arc::new(AtomicUsize::new(0));
     let breaker = retrying_breaker_attachment(
-        CircuitBreakerBuilder::new(3).with_retry_fixed(Duration::ZERO, 3),
+        CircuitBreaker::opens_after(3)
+            .retry(Retry::fixed(Duration::ZERO).attempts(3))
+            .build(),
     );
     let (inner_limiter, inner_control, inner_stage) = rate_limiter_fixture();
     let report = boundary_with_chain(vec![breaker, inner_limiter])
@@ -170,7 +172,9 @@ async fn policy_position_controls_logical_vs_physical_admission_count() {
     let outer_calls = Arc::new(AtomicUsize::new(0));
     let (outer_limiter, outer_control, outer_stage) = rate_limiter_fixture();
     let breaker = retrying_breaker_attachment(
-        CircuitBreakerBuilder::new(3).with_retry_fixed(Duration::ZERO, 3),
+        CircuitBreaker::opens_after(3)
+            .retry(Retry::fixed(Duration::ZERO).attempts(3))
+            .build(),
     );
     let report = boundary_with_chain(vec![outer_limiter, breaker])
         .around_effect(
@@ -195,7 +199,7 @@ async fn policy_position_controls_logical_vs_physical_admission_count() {
 #[tokio::test]
 async fn health_only_breaker_calls_a_failing_effect_once() {
     let calls = Arc::new(AtomicUsize::new(0));
-    let breaker = retrying_breaker_attachment(CircuitBreakerBuilder::new(3));
+    let breaker = retrying_breaker_attachment(CircuitBreaker::opens_after(3).build());
     let report = boundary_with_chain(vec![breaker])
         .around_effect(
             &identity_for("effect.retry"),
@@ -217,9 +221,10 @@ async fn health_only_breaker_calls_a_failing_effect_once() {
 #[tokio::test]
 async fn open_circuit_makes_no_call_and_half_open_probe_never_retries() {
     let (open_breaker, _, _) = retrying_breaker_fixture(
-        CircuitBreakerBuilder::new(1)
+        CircuitBreaker::opens_after(1)
             .cooldown(Duration::from_secs(60))
-            .with_retry_fixed(Duration::ZERO, 3),
+            .retry(Retry::fixed(Duration::ZERO).attempts(3))
+            .build(),
     );
     let open_boundary = boundary_with_chain(vec![open_breaker]);
     let first_calls = Arc::new(AtomicUsize::new(0));
@@ -244,9 +249,10 @@ async fn open_circuit_makes_no_call_and_half_open_probe_never_retries() {
     assert_eq!(rejected_calls.load(Ordering::SeqCst), 0);
 
     let (half_open_breaker, _, _) = retrying_breaker_fixture(
-        CircuitBreakerBuilder::new(1)
+        CircuitBreaker::opens_after(1)
             .cooldown(Duration::ZERO)
-            .with_retry_fixed(Duration::ZERO, 3),
+            .retry(Retry::fixed(Duration::ZERO).attempts(3))
+            .build(),
     );
     let half_open_boundary = boundary_with_chain(vec![half_open_breaker]);
     half_open_boundary

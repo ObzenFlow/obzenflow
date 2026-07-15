@@ -24,5 +24,8 @@ pub mod flow;
 #[path = "gateway.rs"]
 pub mod gateway;
 
+#[path = "proof.rs"]
+pub mod proof;
+
 #[path = "validation.rs"]
 pub mod validation;

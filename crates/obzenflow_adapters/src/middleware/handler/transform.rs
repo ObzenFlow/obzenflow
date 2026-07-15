@@ -1296,13 +1296,13 @@ mod tests {
 
     #[test]
     fn retrying_breaker_cannot_materialize_on_the_legacy_handler_surface() {
-        use crate::middleware::control::{CircuitBreakerBuilder, ControlMiddlewareAggregator};
+        use crate::middleware::control::{CircuitBreaker, ControlMiddlewareAggregator, Retry};
         use crate::middleware::MiddlewareFactory;
         use obzenflow_core::StageId;
         use obzenflow_runtime::pipeline::config::StageConfig;
 
-        let factory = CircuitBreakerBuilder::new(5)
-            .with_retry_fixed(StdDuration::from_millis(1), 3)
+        let factory = CircuitBreaker::opens_after(5)
+            .retry(Retry::fixed(StdDuration::from_millis(1)).attempts(3))
             .build();
         let config = StageConfig {
             stage_id: StageId::new(),

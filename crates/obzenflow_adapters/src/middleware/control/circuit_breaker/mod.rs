@@ -32,6 +32,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 mod classifier;
 mod config;
+mod criteria;
 mod factory;
 mod fallback;
 mod hook_adapters;
@@ -41,14 +42,17 @@ mod window;
 
 pub(crate) use classifier::effect_error_event;
 pub use classifier::{FailureClassification, FailureClassificationPolicy, UnknownErrorKindPolicy};
-pub use config::{HalfOpenPolicy, OpenPolicy};
+use config::HalfOpenPolicy;
+pub use config::OpenPolicy;
+pub use criteria::{failure_rate, FailureRateCriteria, RateCriteria};
 pub use factory::{
-    ai_circuit_breaker, circuit_breaker, CircuitBreakerBuilder, CircuitBreakerFactory,
+    ai_circuit_breaker, circuit_breaker, shape, CircuitBreaker, CircuitBreakerBuilder,
+    CircuitBreakerFactory,
 };
-pub use retry::RetryLimits;
-pub(crate) use retry::{EffectRecoverySession, RecoveryDirective};
+pub use retry::Retry;
+pub(crate) use retry::{EffectRecoverySession, RecoveryDirective, RetryLimits};
 
-use classifier::{FailureClassificationClassifier, FailureClassifier};
+use classifier::FailureClassificationClassifier;
 use config::CircuitBreakerFailureMode;
 #[cfg(test)]
 use hook_adapters::CircuitBreakerSourcePolicy;
@@ -186,10 +190,6 @@ pub struct CircuitBreakerMiddleware {
     /// FLOWIP-010 §7: build-resolved lineage policy, set by the factory from
     /// `StageConfig.lineage`; consumed by the typed fallback builders.
     lineage: obzenflow_core::config::LineagePolicy,
-    /// Optional classifier that decides whether a given call should be counted
-    /// as a failure for breaker purposes based on the input event and the
-    /// outputs produced by the handler.
-    failure_classifier: Option<FailureClassifier>,
     /// Optional classifier that can fully classify a call outcome.
     ///
     /// When set, this overrides the default classification derived from output
@@ -228,12 +228,12 @@ impl Default for CircuitBreakerStats {
 impl CircuitBreakerMiddleware {
     /// Create a new circuit breaker with the given failure threshold
     pub fn new(threshold: usize) -> Self {
-        Self::with_cooldown_and_fallback(threshold, Duration::from_secs(60), None, None, None, None)
+        Self::with_cooldown_and_fallback(threshold, Duration::from_secs(60), None, None, None)
     }
 
     /// Create a circuit breaker with custom cooldown duration
     pub fn with_cooldown(threshold: usize, cooldown: Duration) -> Self {
-        Self::with_cooldown_and_fallback(threshold, cooldown, None, None, None, None)
+        Self::with_cooldown_and_fallback(threshold, cooldown, None, None, None)
     }
 
     /// Create a circuit breaker with custom cooldown and optional fallback.
@@ -248,7 +248,6 @@ impl CircuitBreakerMiddleware {
         threshold: usize,
         cooldown: Duration,
         fallback: Option<FallbackFn>,
-        failure_classifier: Option<FailureClassifier>,
         stage_id: Option<StageId>,
         shared_state: Option<Arc<AtomicU8>>,
     ) -> Self {
@@ -290,7 +289,6 @@ impl CircuitBreakerMiddleware {
             fallback,
             typed_outcome: None,
             lineage: obzenflow_core::config::LineagePolicy::default(),
-            failure_classifier,
             failure_classification_classifier: None,
             open_policy: OpenPolicy::default(),
             half_open_policy: HalfOpenPolicy::default(),
@@ -552,22 +550,7 @@ impl CircuitBreakerMiddleware {
             FailureClassification::Success
         };
 
-        let classification = if let Some(classifier) = &self.failure_classifier {
-            let is_failure = classifier(event, outputs);
-            if is_failure {
-                if matches!(base_classification, FailureClassification::Success) {
-                    FailureClassification::TransientFailure
-                } else {
-                    base_classification
-                }
-            } else {
-                FailureClassification::Success
-            }
-        } else {
-            base_classification
-        };
-
-        (classification, first_error_kind, first_error_message)
+        (base_classification, first_error_kind, first_error_message)
     }
 
     /// Attempt an atomic state transition. Returns `true` if this call won
@@ -1159,93 +1142,10 @@ mod tests {
         }
     }
 
-    #[test]
-    fn build_outcome_requires_outcome_fallback_producer() {
-        let (_, registration, config_error) = CircuitBreakerBuilder::new(1)
-            .open_policy(OpenPolicy::EmitFallback)
-            .build_outcome::<DemoOutcomeEffect>()
-            .into_registration_parts();
-
-        assert_eq!(
-            registration.kind,
-            obzenflow_runtime::effects::SynthesizedOutcomeKind::OutcomeShaped
-        );
-        let error = config_error.expect("missing producer must be a config error");
-        assert!(error.contains("with_outcome_fallback"), "got: {error}");
-    }
-
-    #[test]
-    fn build_outcome_rejects_effect_type_mismatch() {
-        #[derive(Clone, Debug)]
-        struct OtherEffect;
-
-        #[async_trait::async_trait]
-        impl obzenflow_runtime::effects::Effect for OtherEffect {
-            const EFFECT_TYPE: &'static str = "cb_outcome.other";
-            const SCHEMA_VERSION: u32 = 1;
-            const SAFETY: obzenflow_runtime::effects::EffectSafety =
-                obzenflow_runtime::effects::EffectSafety::Idempotent;
-
-            type Outcome = OutcomeFirst;
-
-            fn label(&self) -> &str {
-                "other"
-            }
-
-            fn canonical_input(&self) -> serde_json::Value {
-                json!({})
-            }
-
-            async fn execute(
-                &self,
-                _ctx: &mut obzenflow_runtime::effects::EffectContext,
-            ) -> Result<Self::Outcome, obzenflow_runtime::effects::EffectError> {
-                Ok(OutcomeFirst { value: 1 })
-            }
-        }
-
-        let (_, _, config_error) = CircuitBreakerBuilder::new(1)
-            .open_policy(OpenPolicy::EmitFallback)
-            .with_outcome_fallback::<DemoOutcomeEffect, OutcomeInput, _>(|input| {
-                DemoProductOutcome {
-                    first: OutcomeFirst {
-                        value: input.value + 900,
-                    },
-                    second: OutcomeSecond {
-                        value: input.value + 1900,
-                    },
-                }
-            })
-            .build_outcome::<OtherEffect>()
-            .into_registration_parts();
-
-        let error = config_error.expect("effect-type mismatch must be a config error");
-        assert!(error.contains("targets effect"), "got: {error}");
-    }
-
-    #[test]
-    fn build_outcome_rejects_mixed_shape_builder() {
-        let (_, _, config_error) = CircuitBreakerBuilder::new(1)
-            .open_policy(OpenPolicy::EmitFallback)
-            .with_fallback_fact::<OutcomeInput, OutcomeFirst, _>(|input| OutcomeFirst {
-                value: input.value + 900,
-            })
-            .with_outcome_fallback::<DemoOutcomeEffect, OutcomeInput, _>(|input| {
-                DemoProductOutcome {
-                    first: OutcomeFirst {
-                        value: input.value + 900,
-                    },
-                    second: OutcomeSecond {
-                        value: input.value + 1900,
-                    },
-                }
-            })
-            .build_outcome::<DemoOutcomeEffect>()
-            .into_registration_parts();
-
-        let error = config_error.expect("mixing fallback shapes must be a config error");
-        assert!(error.contains("one fallback shape"), "got: {error}");
-    }
+    // The former build_typed/build_outcome misconfigurations (missing
+    // producer, effect-type mismatch, mixed shapes) are unrepresentable under
+    // the typestate builder; a compile-fail fixture in
+    // breaker_builder_compile_fail_tests locks that in.
 
     #[test]
     fn outcome_fallback_builds_one_derived_event_per_fact() {
@@ -1378,80 +1278,8 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn builder_rate_based_over_last_n_calls_configures_mode() {
-        let builder = CircuitBreakerBuilder::new(3).rate_based_over_last_n_calls(100, 0.5);
-
-        match builder.failure_mode {
-            Some(CircuitBreakerFailureMode::RateBased {
-                window,
-                failure_rate_threshold,
-                minimum_calls,
-                ..
-            }) => {
-                match window {
-                    FailureWindow::Count { size } => assert_eq!(size, 100),
-                    _ => panic!("expected count-based window"),
-                }
-                assert!(
-                    (failure_rate_threshold - 0.5).abs() < f32::EPSILON,
-                    "unexpected failure_rate_threshold: {failure_rate_threshold}"
-                );
-                assert_eq!(minimum_calls.get(), 100);
-            }
-            other => panic!("expected rate-based mode, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn builder_open_and_half_open_policies_configure() {
-        let half_open = HalfOpenPolicy::new(NonZeroU32::new(2).unwrap(), OpenPolicy::Skip);
-
-        let builder = CircuitBreakerBuilder::new(3)
-            .open_policy(OpenPolicy::FailFast)
-            .half_open_policy(half_open);
-
-        match builder.open_policy {
-            Some(OpenPolicy::FailFast) => {}
-            other => panic!("expected FailFast open policy, got {other:?}"),
-        }
-
-        match builder.half_open_policy {
-            Some(policy) => {
-                assert_eq!(policy.permitted_probes.get(), 2);
-                assert!(matches!(policy.on_rejected, OpenPolicy::Skip));
-            }
-            None => panic!("expected HalfOpenPolicy to be set"),
-        }
-    }
-
-    #[test]
-    fn builder_rate_based_over_duration_configures_mode_with_default_min_calls() {
-        let duration = StdDuration::from_secs(60);
-        let builder = CircuitBreakerBuilder::new(3).rate_based_over_duration(duration, 0.5);
-
-        match builder.failure_mode {
-            Some(CircuitBreakerFailureMode::RateBased {
-                window,
-                failure_rate_threshold,
-                minimum_calls,
-                ..
-            }) => {
-                match window {
-                    FailureWindow::Time { duration: win_dur } => {
-                        assert_eq!(win_dur, duration);
-                    }
-                    _ => panic!("expected time-based window"),
-                }
-                assert!(
-                    (failure_rate_threshold - 0.5).abs() < f32::EPSILON,
-                    "unexpected failure_rate_threshold: {failure_rate_threshold}"
-                );
-                assert_eq!(minimum_calls.get(), 10);
-            }
-            other => panic!("expected rate-based mode, got {other:?}"),
-        }
-    }
+    // Criteria-to-failure-mode lowering is tested beside the criteria types
+    // in `criteria.rs`; the builder no longer exposes internal fields.
 
     #[test]
     fn factory_does_not_export_control_strategy() {
@@ -1469,7 +1297,7 @@ mod tests {
             lineage: obzenflow_core::config::LineagePolicy::default(),
             resolved_policies: Default::default(),
         };
-        let factory = CircuitBreakerFactory::new(3);
+        let factory = circuit_breaker(3);
         assert!(
             !factory.control_points().signal,
             "circuit breaker should not register a signal control point"
@@ -1495,7 +1323,6 @@ mod tests {
         let mut cb = CircuitBreakerMiddleware::with_cooldown_and_fallback(
             1,
             StdDuration::from_secs(60),
-            None,
             None,
             None,
             None,
@@ -1550,7 +1377,6 @@ mod tests {
             None,
             None,
             None,
-            None,
         );
 
         cb.failure_mode = CircuitBreakerFailureMode::RateBased {
@@ -1602,7 +1428,6 @@ mod tests {
             None,
             None,
             None,
-            None,
         );
         cb.failure_mode = CircuitBreakerFailureMode::RateBased {
             window: FailureWindow::Count { size: 5 },
@@ -1637,7 +1462,6 @@ mod tests {
         let mut cb = CircuitBreakerMiddleware::with_cooldown_and_fallback(
             1,
             StdDuration::from_secs(60),
-            None,
             None,
             None,
             None,
@@ -1812,7 +1636,6 @@ mod tests {
             None,
             None,
             None,
-            None,
         );
         cb.open_policy = OpenPolicy::Skip;
         cb.half_open_policy = HalfOpenPolicy::new(NonZeroU32::new(1).unwrap(), OpenPolicy::Skip);
@@ -1875,7 +1698,6 @@ mod tests {
         let mut cb = CircuitBreakerMiddleware::with_cooldown_and_fallback(
             2,
             StdDuration::from_millis(0), // instant cooldown
-            None,
             None,
             None,
             None,
@@ -1965,7 +1787,6 @@ mod tests {
             None,
             None,
             None,
-            None,
         );
         cb.open_policy = OpenPolicy::EmitFallback;
 
@@ -2018,7 +1839,6 @@ mod tests {
             let mut cb = CircuitBreakerMiddleware::with_cooldown_and_fallback(
                 1,
                 StdDuration::from_millis(0),
-                None,
                 None,
                 None,
                 None,
@@ -2272,7 +2092,6 @@ mod tests {
         let mut cb = CircuitBreakerMiddleware::with_cooldown_and_fallback(
             1,
             StdDuration::from_millis(0),
-            None,
             None,
             None,
             None,

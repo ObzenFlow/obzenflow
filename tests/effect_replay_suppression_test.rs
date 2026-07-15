@@ -4,7 +4,7 @@
 
 use async_trait::async_trait;
 use obzenflow_adapters::effects::{CircuitBreakerOutcome, GuardedEffectExt};
-use obzenflow_adapters::middleware::control::circuit_breaker::{CircuitBreakerBuilder, OpenPolicy};
+use obzenflow_adapters::middleware::control::circuit_breaker::{CircuitBreaker, OpenPolicy};
 use obzenflow_adapters::middleware::RateLimiterBuilder;
 use obzenflow_core::{
     event::chain_event::{ChainEvent, ChainEventFactory},
@@ -940,9 +940,9 @@ fn build_breaker_fallback_flow(
                 ReplayInput -> { ReplayOutput, ReplayEffectValue } => FallbackTransform { calls },
                 effects: [AlwaysFailingEffect],
                 middleware: [
-                CircuitBreakerBuilder::new(1)
-                    .open_policy(OpenPolicy::EmitFallback)
-                    .with_fallback_fact::<ReplayInput, ReplayEffectValue, _>(|input| ReplayEffectValue {
+                CircuitBreaker::opens_after(1)
+                    .when_open(OpenPolicy::EmitFallback)
+                    .transitional_fallback_fact(|input: &ReplayInput| ReplayEffectValue {
                         effect_value: input.value + 900,
                     })
                     .build()
@@ -973,8 +973,8 @@ fn build_skip_policy_breaker_flow(
                 ReplayInput -> { ReplayOutput, ReplayEffectValue } => FallbackTransform { calls },
                 effects: [AlwaysFailingEffect],
                 middleware: [
-                CircuitBreakerBuilder::new(1)
-                    .open_policy(OpenPolicy::Skip)
+                CircuitBreaker::opens_after(1)
+                    .when_open(OpenPolicy::Skip)
                     .build()
             ]);
             collector = sink!(ReplayOutput => CollectSink { outputs });
@@ -1079,9 +1079,9 @@ fn build_outcome_fallback_flow(
             effectful = effectful_transform!(
                 ReplayInput -> { ReplayOutput, ProductFirst, ProductSecond } => OutcomeFallbackTransform { calls },
                 effects: [FailingProductEffect with [
-                CircuitBreakerBuilder::new(1)
-                    .open_policy(OpenPolicy::EmitFallback)
-                    .with_outcome_fallback::<FailingProductEffect, ReplayInput, _>(|input| ProductOutcome {
+                CircuitBreaker::opens_after(1)
+                    .when_open(OpenPolicy::EmitFallback)
+                    .outcome_fallback::<FailingProductEffect, _, _>(|input: &ReplayInput| ProductOutcome {
                         first: ProductFirst {
                             value: input.value + 900,
                         },
@@ -1089,7 +1089,7 @@ fn build_outcome_fallback_flow(
                             value: input.value + 1900,
                         },
                     })
-                    .build_outcome::<FailingProductEffect>()
+                    .build()
             ]],
                 middleware: []);
             collector = sink!(ReplayOutput => CollectSink { outputs });
@@ -1117,14 +1117,14 @@ fn build_either_fallback_flow(
             effectful = effectful_transform!(
                 ReplayInput -> { ReplayOutput, ProductFirst, ProductSecond } => EitherFallbackTransform { calls },
                 effects: [FailingEitherEffect with [
-                CircuitBreakerBuilder::new(1)
-                    .open_policy(OpenPolicy::EmitFallback)
-                    .with_outcome_fallback::<FailingEitherEffect, ReplayInput, _>(|input| {
+                CircuitBreaker::opens_after(1)
+                    .when_open(OpenPolicy::EmitFallback)
+                    .outcome_fallback::<FailingEitherEffect, _, _>(|input: &ReplayInput| {
                         EitherOutcome::Second(ProductSecond {
                             value: input.value + 900,
                         })
                     })
-                    .build_outcome::<FailingEitherEffect>()
+                    .build()
             ]],
                 middleware: []);
             collector = sink!(ReplayOutput => CollectSink { outputs });
@@ -1137,47 +1137,10 @@ fn build_either_fallback_flow(
     }
 }
 
-/// One breaker configured with both shapes: the branch-shaped producers and
-/// an outcome-shaped fallback. (Two separate breakers on one stage are
-/// already rejected by the middleware override-family check, so the
-/// single-builder config error is the reachable mixing path; the
-/// `MixedFallbackShapesOnStage` validator stays as defence for future
-/// non-breaker type-shaping middleware.)
-fn build_mixed_fallback_shapes_flow(
-    journal_base: PathBuf,
-    calls: Arc<AtomicUsize>,
-    outputs: Arc<Mutex<Vec<ReplayOutput>>>,
-) -> FlowDefinition {
-    flow! {
-        name: "effect_replay_mixed_fallback_shapes",
-        journals: disk_journals(journal_base),
-        middleware: [],
-
-        stages: {
-            inputs = source!(ReplayInput => ReplaySource::new());
-            effectful = effectful_transform!(
-                ReplayInput -> { ReplayOutput, ReplayEffectValue, ReplayFallback, ReplayRejected } => GuardedTransform { calls },
-                effects: [AlwaysFailingEffect with [
-                CircuitBreakerBuilder::new(1)
-                    .open_policy(OpenPolicy::EmitFallback)
-                    .with_fallback_fact::<ReplayInput, ReplayFallback, _>(|input| ReplayFallback {
-                        effect_value: input.value + 900,
-                    })
-                    .with_outcome_fallback::<AlwaysFailingEffect, ReplayInput, _>(|input| ReplayEffectValue {
-                        effect_value: input.value + 900,
-                    })
-                    .build_outcome::<AlwaysFailingEffect>()
-            ]],
-                middleware: []);
-            collector = sink!(ReplayOutput => CollectSink { outputs });
-        },
-
-        topology: {
-            inputs |> effectful;
-            effectful |> collector;
-        }
-    }
-}
+// Mixing branch-shaped and outcome-shaped producers on one breaker is
+// unrepresentable under the typestate builder (see
+// breaker_builder_compile_fail_tests); the `MixedFallbackShapesOnStage`
+// validator stays as defence for future non-breaker type-shaping middleware.
 
 fn build_undeclared_outcome_target_flow(
     journal_base: PathBuf,
@@ -1194,12 +1157,12 @@ fn build_undeclared_outcome_target_flow(
             effectful = effectful_transform!(
                 ReplayInput -> { ReplayOutput, ReplayEffectValue } => FallbackTransform { calls },
                 effects: [AlwaysFailingEffect with [
-                CircuitBreakerBuilder::new(1)
-                    .open_policy(OpenPolicy::EmitFallback)
-                    .with_outcome_fallback::<CountingEffect, ReplayInput, _>(|input| ReplayEffectValue {
+                CircuitBreaker::opens_after(1)
+                    .when_open(OpenPolicy::EmitFallback)
+                    .outcome_fallback::<CountingEffect, _, _>(|input: &ReplayInput| ReplayEffectValue {
                         effect_value: input.value + 900,
                     })
-                    .build_outcome::<CountingEffect>()
+                    .build()
             ]],
                 middleware: []);
             collector = sink!(ReplayOutput => CollectSink { outputs });
@@ -2395,31 +2358,6 @@ async fn outcome_shaped_fallback_with_sum_carrier_resumes_handler_with_variant()
     );
 }
 
-/// FLOWIP-120m: one fallback shape per stage; mixing branch-shaped and
-/// outcome-shaped registrations has no coherent perform signature.
-#[tokio::test]
-async fn mixing_fallback_shapes_on_one_stage_is_rejected_at_build() {
-    let _guard = effect_replay_test_guard().await;
-    let temp = tempfile::tempdir().expect("tempdir");
-    let journal_base = temp.path().join("journals");
-
-    let err = FlowApplication::builder()
-        .with_cli_args(["obzenflow"])
-        .run_async(build_mixed_fallback_shapes_flow(
-            journal_base,
-            Arc::new(AtomicUsize::new(0)),
-            Arc::new(Mutex::new(Vec::new())),
-        ))
-        .await
-        .expect_err("mixing fallback shapes on one stage must fail the build");
-
-    let message = err.to_string();
-    assert!(
-        message.contains("one fallback shape"),
-        "expected the FLOWIP-120m mixed-shapes rejection, got: {message}"
-    );
-}
-
 /// FLOWIP-120m: an outcome-shaped fallback must target the stage's declared
 /// effect; producing another effect's facts is rejected at build time.
 #[tokio::test]
@@ -3102,16 +3040,16 @@ fn build_typed_rejection_flow(
             effectful = effectful_transform!(
                 ReplayInput -> { ReplayOutput, ReplayEffectValue, ReplayFallback, ReplayRejected } => GuardedTransform { calls },
                 effects: [AlwaysFailingEffect with [
-                CircuitBreakerBuilder::new(1)
-                    .open_policy(OpenPolicy::FailFast)
-                    .with_fallback_fact::<ReplayInput, ReplayFallback, _>(|input| ReplayFallback {
+                CircuitBreaker::opens_after(1)
+                    .when_open(OpenPolicy::FailFast)
+                    .fallback_fact(|input: &ReplayInput| ReplayFallback {
                         effect_value: input.value + 900,
                     })
-                    .with_rejection_fact::<ReplayInput, ReplayRejected, _>(|input, reason| ReplayRejected {
+                    .rejection_fact(|input, reason| ReplayRejected {
                         value: input.value,
                         reason: format!("{reason:?}"),
                     })
-                    .build_typed::<ReplayFallback, ReplayRejected>()
+                    .build()
             ]],
                 middleware: []);
             collector = sink!(ReplayOutput => CollectSink { outputs });
@@ -3139,16 +3077,16 @@ fn build_multi_effect_typed_outcome_flow(
             effectful = effectful_transform!(
                 ReplayInput -> { ReplayOutput, ReplayEffectValue, ReplayFallback, ReplayRejected } => GuardedTransform { calls },
                 effects: [AlwaysFailingEffect with [
-                CircuitBreakerBuilder::new(1)
-                    .open_policy(OpenPolicy::FailFast)
-                    .with_fallback_fact::<ReplayInput, ReplayFallback, _>(|input| ReplayFallback {
+                CircuitBreaker::opens_after(1)
+                    .when_open(OpenPolicy::FailFast)
+                    .fallback_fact(|input: &ReplayInput| ReplayFallback {
                         effect_value: input.value + 900,
                     })
-                    .with_rejection_fact::<ReplayInput, ReplayRejected, _>(|input, reason| ReplayRejected {
+                    .rejection_fact(|input, reason| ReplayRejected {
                         value: input.value,
                         reason: format!("{reason:?}"),
                     })
-                    .build_typed::<ReplayFallback, ReplayRejected>()
+                    .build()
             ], CountingEffect],
                 middleware: []);
             collector = sink!(ReplayOutput => CollectSink { outputs });

@@ -29,6 +29,7 @@ mod domain;
 mod fixtures;
 mod flow;
 mod gateway;
+mod proof;
 mod validation;
 
 use obzenflow_infra::application::{
@@ -106,7 +107,7 @@ fn main() -> std::process::ExitCode {
         .with_log_level(LogLevel::Info)
         .with_presentation(presentation)
         .with_config_file(config_file)
-        .run_blocking(flow::build_flow());
+        .run_blocking(proof::build_flow());
 
     match result {
         Ok(()) => std::process::ExitCode::SUCCESS,

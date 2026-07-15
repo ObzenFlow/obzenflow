@@ -16,9 +16,80 @@ use obzenflow_runtime::effects::{EffectCursor, EffectError};
 use obzenflow_runtime::stages::common::control_strategies::BackoffStrategy;
 use std::time::Duration;
 
+/// Recovery configuration for a breaker guarding a declared effect
+/// (FLOWIP-115h). `attempts` counts every physical call including the first
+/// and defaults to 3; eligibility stays gated by effect safety and the typed
+/// failure allowlist at materialisation and in the recovery session.
+#[derive(Debug, Clone)]
+pub struct Retry {
+    pub(super) policy: CircuitBreakerRetryPolicy,
+    pub(super) limits: RetryLimits,
+}
+
+impl Retry {
+    /// Retry with a fixed delay before every later attempt.
+    pub fn fixed(delay: Duration) -> Self {
+        Self::with_backoff(BackoffStrategy::Fixed { delay })
+    }
+
+    /// Retry with the default exponential backoff (250 ms initial, factor
+    /// 2.0, 4 s strategy cap, jitter).
+    pub fn exponential() -> Self {
+        Self::with_backoff(BackoffStrategy::Exponential {
+            initial: Duration::from_millis(250),
+            max: Duration::from_secs(4),
+            factor: 2.0,
+            jitter: true,
+        })
+    }
+
+    fn with_backoff(backoff: BackoffStrategy) -> Self {
+        Self {
+            policy: CircuitBreakerRetryPolicy {
+                max_attempts: 3,
+                backoff,
+                #[cfg(test)]
+                deterministic_jitter_samples: None,
+            },
+            limits: RetryLimits::default(),
+        }
+    }
+
+    /// Total physical calls, including the first. Zero is invalid.
+    pub fn attempts(mut self, attempts: u32) -> Self {
+        assert!(
+            attempts > 0,
+            "circuit-breaker max_attempts must be greater than zero"
+        );
+        self.policy.max_attempts = attempts;
+        self
+    }
+
+    /// Cap the breaker-generated delay between calls. A provider's rate-limit
+    /// floor may be longer and is never shortened by this cap.
+    pub fn max_delay(mut self, delay: Duration) -> Self {
+        self.limits.max_single_delay = delay;
+        self
+    }
+
+    /// The window, measured from the first call, in which another physical
+    /// call may start. It gates attempt starts; it does not cancel a call
+    /// already in flight.
+    pub fn start_window(mut self, window: Duration) -> Self {
+        self.limits.max_attempt_start_window = window;
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn jitter_samples(mut self, samples: Vec<f64>) -> Self {
+        self.policy.use_deterministic_jitter_samples(samples);
+        self
+    }
+}
+
 /// Retry limits enforced by the circuit breaker.
 #[derive(Debug, Clone)]
-pub struct RetryLimits {
+pub(crate) struct RetryLimits {
     /// Maximum breaker-generated delay between physical calls. A provider's
     /// rate-limit floor may be longer and is never shortened by this cap.
     pub max_single_delay: Duration,

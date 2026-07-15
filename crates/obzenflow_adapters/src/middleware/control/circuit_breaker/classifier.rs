@@ -8,7 +8,6 @@ use obzenflow_runtime::effects::EffectError;
 use std::sync::Arc;
 use std::time::Duration;
 
-pub(super) type FailureClassifier = Arc<dyn Fn(&ChainEvent, &[ChainEvent]) -> bool + Send + Sync>;
 pub(super) type FailureClassificationClassifier =
     Arc<dyn Fn(&ChainEvent, &[ChainEvent]) -> FailureClassification + Send + Sync>;
 

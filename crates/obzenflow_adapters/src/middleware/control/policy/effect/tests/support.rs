@@ -6,7 +6,7 @@
 //! to `effect::tests`; production code never sees these helpers.
 
 pub(super) use crate::middleware::control::circuit_breaker::{
-    CircuitBreakerBuilder, CircuitBreakerMiddleware, FailureClassification, RetryLimits,
+    failure_rate, CircuitBreaker, CircuitBreakerMiddleware, FailureClassification, Retry,
 };
 pub(super) use crate::middleware::control::policy::effect::{
     EffectAttemptOutcome, EffectPolicy, EffectPolicyAttachment, PerEffectPolicyBoundary,
@@ -116,13 +116,12 @@ pub(super) fn materialize_effect_attachment(
 }
 
 pub(super) fn retrying_breaker_fixture(
-    builder: CircuitBreakerBuilder,
+    factory: Box<dyn MiddlewareFactory>,
 ) -> (
     EffectPolicyAttachment,
     Arc<ControlMiddlewareAggregator>,
     StageId,
 ) {
-    let factory = builder.build();
     let config = test_stage_config();
     let stage_id = config.stage_id;
     let control = Arc::new(ControlMiddlewareAggregator::new());
@@ -138,9 +137,9 @@ pub(super) fn retrying_breaker_fixture(
 }
 
 pub(super) fn retrying_breaker_attachment(
-    builder: CircuitBreakerBuilder,
+    factory: Box<dyn MiddlewareFactory>,
 ) -> EffectPolicyAttachment {
-    retrying_breaker_fixture(builder).0
+    retrying_breaker_fixture(factory).0
 }
 
 pub(super) fn rate_limiter_fixture() -> (

@@ -5,7 +5,7 @@
 #[path = "../examples/payment_gateway_resilience/support.rs"]
 pub mod support;
 
-use support::{flow, gateway};
+use support::{gateway, proof};
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -107,8 +107,8 @@ fn payment_gateway_retry_journal_test() {
     let control_proof = Arc::new(gateway::GatewayRetryProof::new(false));
     obzenflow_infra::application::FlowApplication::builder()
         .with_cli_args(["payment_gateway_retry_journal_test"])
-        .run_blocking(flow::build_flow_for_profile(
-            Some(flow::RetryProofProfile::Control),
+        .run_blocking(proof::build_flow_for_profile(
+            proof::RetryProofProfile::Control,
             Some(control_proof.clone()),
             control_root.path().to_path_buf(),
         ))
@@ -133,8 +133,8 @@ fn payment_gateway_retry_journal_test() {
     let treatment_proof = Arc::new(gateway::GatewayRetryProof::new(false));
     obzenflow_infra::application::FlowApplication::builder()
         .with_cli_args(["payment_gateway_retry_journal_test"])
-        .run_blocking(flow::build_flow_for_profile(
-            Some(flow::RetryProofProfile::Treatment),
+        .run_blocking(proof::build_flow_for_profile(
+            proof::RetryProofProfile::Treatment,
             Some(treatment_proof.clone()),
             treatment_root.path().to_path_buf(),
         ))
@@ -175,8 +175,8 @@ fn payment_gateway_retry_journal_test() {
                 .expect("treatment path should be UTF-8"),
             "--verify",
         ])
-        .run_blocking(flow::build_flow_for_profile(
-            Some(flow::RetryProofProfile::Treatment),
+        .run_blocking(proof::build_flow_for_profile(
+            proof::RetryProofProfile::Treatment,
             Some(replay_proof.clone()),
             replay_root.path().to_path_buf(),
         ))
