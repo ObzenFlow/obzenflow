@@ -12,6 +12,7 @@
 //! • Top‑level enum uses `observability_type` (mirrors `content_type` in ChainEvent).
 //! • Sub‑enums use `stage_state`, `metrics_event`, `middleware_event`, and `action`.
 
+use crate::event::payloads::effect_payload::EffectCursor;
 use crate::id::StageId;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -152,6 +153,25 @@ pub enum CircuitBreakerEvent {
     HalfOpen {
         test_request_count: u32,
     },
+    RetryScheduled {
+        cursor: EffectCursor,
+        next_attempt: u32,
+        delay_ms: u64,
+    },
+    RetrySucceeded {
+        cursor: EffectCursor,
+        total_attempts: u32,
+        terminal_classification: CircuitBreakerHealthClassification,
+    },
+    RetryExhausted {
+        cursor: EffectCursor,
+        total_attempts: u32,
+        reason: CircuitBreakerRetryStopReason,
+    },
+    RetryStoppedNonRetryable {
+        cursor: EffectCursor,
+        total_attempts: u32,
+    },
     Summary {
         window_duration_s: u64,
         requests_processed: u64,
@@ -177,6 +197,24 @@ pub enum CircuitBreakerEvent {
         #[serde(default)]
         time_in_half_open_seconds: f64,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CircuitBreakerHealthClassification {
+    Success,
+    TransientFailure,
+    PermanentFailure,
+    RateLimited,
+    PartialSuccess,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CircuitBreakerRetryStopReason {
+    AttemptLimit,
+    AttemptStartWindow,
+    CircuitNoLongerClosed,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]

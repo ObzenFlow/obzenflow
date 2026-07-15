@@ -1,0 +1,9 @@
+error[E0499]: cannot borrow `operation` as mutable more than once at a time
+  --> tests/ui/effect_recovery/concurrent_effect_operation.rs:9:18
+   |
+ 8 |     let first = operation.execute();
+   |                 --------- first mutable borrow occurs here
+ 9 |     let second = operation.execute();
+   |                  ^^^^^^^^^ second mutable borrow occurs here
+10 |     drop((first, second));
+   |           ----- first borrow later used here

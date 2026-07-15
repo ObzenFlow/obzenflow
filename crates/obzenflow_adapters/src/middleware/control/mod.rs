@@ -9,8 +9,8 @@ pub mod rate_limiter;
 
 // Re-export key types for convenience
 pub use circuit_breaker::{
-    ai_circuit_breaker, circuit_breaker, CircuitBreakerBuilder, CircuitBreakerFactory,
-    CircuitBreakerMiddleware, HalfOpenPolicy, OpenPolicy,
+    ai_circuit_breaker, circuit_breaker, failure_rate, CircuitBreaker, CircuitBreakerBuilder,
+    CircuitBreakerFactory, CircuitBreakerMiddleware, OpenPolicy, Retry,
 };
 pub use provider::ControlMiddlewareAggregator;
 pub use rate_limiter::{

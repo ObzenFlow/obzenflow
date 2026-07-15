@@ -5,13 +5,98 @@
 use super::ChainEventFactory;
 use crate::event::chain_event::{ChainEvent, CircuitBreakerSummaryEventParams};
 use crate::event::context::causality_context::CausalityContext;
+use crate::event::payloads::effect_payload::EffectCursor;
 use crate::event::payloads::observability_payload::{
-    CircuitBreakerEvent, MiddlewareLifecycle, ObservabilityPayload, RetryEvent,
+    CircuitBreakerEvent, CircuitBreakerHealthClassification, CircuitBreakerRetryStopReason,
+    MiddlewareLifecycle, ObservabilityPayload, RetryEvent,
 };
 use crate::event::status::processing_status::ErrorKind;
 use crate::event::types::{EventId, WriterId};
 
 impl ChainEventFactory {
+    fn circuit_breaker_retry_event(
+        writer_id: WriterId,
+        event: CircuitBreakerEvent,
+        cause: EventId,
+    ) -> ChainEvent {
+        let mut event = Self::observability_event(
+            writer_id,
+            ObservabilityPayload::Middleware(MiddlewareLifecycle::CircuitBreaker(event)),
+        );
+        event.causality = CausalityContext::with_parent(cause);
+        event
+    }
+
+    pub fn circuit_breaker_retry_scheduled(
+        writer_id: WriterId,
+        cursor: EffectCursor,
+        next_attempt: u32,
+        delay_ms: u64,
+        cause: EventId,
+    ) -> ChainEvent {
+        Self::circuit_breaker_retry_event(
+            writer_id,
+            CircuitBreakerEvent::RetryScheduled {
+                cursor,
+                next_attempt,
+                delay_ms,
+            },
+            cause,
+        )
+    }
+
+    pub fn circuit_breaker_retry_succeeded(
+        writer_id: WriterId,
+        cursor: EffectCursor,
+        total_attempts: u32,
+        terminal_classification: CircuitBreakerHealthClassification,
+        cause: EventId,
+    ) -> ChainEvent {
+        Self::circuit_breaker_retry_event(
+            writer_id,
+            CircuitBreakerEvent::RetrySucceeded {
+                cursor,
+                total_attempts,
+                terminal_classification,
+            },
+            cause,
+        )
+    }
+
+    pub fn circuit_breaker_retry_exhausted(
+        writer_id: WriterId,
+        cursor: EffectCursor,
+        total_attempts: u32,
+        reason: CircuitBreakerRetryStopReason,
+        cause: EventId,
+    ) -> ChainEvent {
+        Self::circuit_breaker_retry_event(
+            writer_id,
+            CircuitBreakerEvent::RetryExhausted {
+                cursor,
+                total_attempts,
+                reason,
+            },
+            cause,
+        )
+    }
+
+    pub fn circuit_breaker_retry_stopped_non_retryable(
+        writer_id: WriterId,
+        cursor: EffectCursor,
+        total_attempts: u32,
+        cause: EventId,
+    ) -> ChainEvent {
+        Self::circuit_breaker_retry_event(
+            writer_id,
+            CircuitBreakerEvent::RetryStoppedNonRetryable {
+                cursor,
+                total_attempts,
+            },
+            cause,
+        )
+    }
+
     /// Create a circuit breaker opened event
     pub fn circuit_breaker_opened(
         writer_id: WriterId,

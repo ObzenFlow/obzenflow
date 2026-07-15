@@ -1,0 +1,16 @@
+error[E0382]: use of moved value: `operation`
+  --> tests/compile_fail/single_use_effect_operation_reject_after_execute.rs:10:19
+   |
+ 7 | fn reject_after_execute(operation: SingleUseEffectOperation) {
+   |                         --------- move occurs because `operation` has type `SingleUseEffectOperation`, which does not implement the `Copy` trait
+ 8 |     let in_flight = operation.execute();
+   |                               --------- `operation` moved due to this method call
+ 9 |     drop(in_flight);
+10 |     let _report = operation.reject_fallback(None, Vec::new());
+   |                   ^^^^^^^^^ value used here after move
+   |
+note: `SingleUseEffectOperation::execute` takes ownership of the receiver `self`, which moves `operation`
+  --> src/effects/boundary.rs
+   |
+   |     pub async fn execute(self) -> SingleUseEffectExecution {
+   |                          ^^^^

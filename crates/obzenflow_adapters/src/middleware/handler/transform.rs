@@ -752,7 +752,9 @@ mod tests {
         ChainEventFactory, EffectFailureCode, EffectFailureSource, RetryDisposition,
     };
     use obzenflow_core::StageId;
-    use obzenflow_runtime::effects::{EffectBoundaryOutcome, EffectExecution, EffectIdentity};
+    use obzenflow_runtime::effects::{
+        EffectBoundaryOutcome, EffectIdentity, RepeatableEffectOperation,
+    };
     use serde_json::json;
     use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -1231,9 +1233,12 @@ mod tests {
         let event = ChainEventFactory::data_event(writer_id, "test.input", json!({}));
         let output = ChainEventFactory::data_event(writer_id, "test.output", json!({}));
 
-        let execute: EffectExecution = Box::pin(async move { Ok(vec![output]) });
+        let execute = RepeatableEffectOperation::new(move || {
+            let output = output.clone();
+            async move { Ok(vec![output]) }
+        });
         let report = boundary
-            .around_effect(&test_effect_identity(), &event, execute)
+            .around_repeatable_effect(&test_effect_identity(), &event, execute)
             .await;
 
         assert!(matches!(
@@ -1259,13 +1264,16 @@ mod tests {
 
         let polled = Arc::new(AtomicBool::new(false));
         let polled_probe = polled.clone();
-        let execute: EffectExecution = Box::pin(async move {
-            polled_probe.store(true, Ordering::SeqCst);
-            Ok(Vec::new())
+        let execute = RepeatableEffectOperation::new(move || {
+            let polled_probe = polled_probe.clone();
+            async move {
+                polled_probe.store(true, Ordering::SeqCst);
+                Ok(Vec::new())
+            }
         });
 
         let report = boundary
-            .around_effect(&test_effect_identity(), &event, execute)
+            .around_repeatable_effect(&test_effect_identity(), &event, execute)
             .await;
 
         match report.outcome {
@@ -1288,49 +1296,16 @@ mod tests {
         );
     }
 
-    #[derive(Clone, Debug)]
-    struct FlakyAsyncTransform {
-        calls: Arc<AtomicUsize>,
-        fail_times: usize,
-    }
-
-    #[async_trait]
-    impl AsyncTransformHandler for FlakyAsyncTransform {
-        async fn process(&self, event: ChainEvent) -> Result<Vec<ChainEvent>, HandlerError> {
-            let n = self.calls.fetch_add(1, Ordering::SeqCst);
-            if n < self.fail_times {
-                Err(HandlerError::Remote("transient".to_string()))
-            } else {
-                Ok(vec![event])
-            }
-        }
-
-        async fn drain(&mut self) -> Result<(), HandlerError> {
-            Ok(())
-        }
-    }
-
-    #[tokio::test]
-    async fn async_middleware_transform_retry_config_is_ignored() {
-        // FLOWIP-115b: production retry is removed (warn-and-ignore). A breaker
-        // built with a retry policy binds and runs, but the transform is invoked
-        // exactly once; a handler error surfaces immediately with no retry
-        // lifecycle events. FLOWIP-115h reintroduces boundary-owned retry.
-        use crate::middleware::control::{CircuitBreakerBuilder, ControlMiddlewareAggregator};
+    #[test]
+    fn retrying_breaker_cannot_materialize_on_the_legacy_handler_surface() {
+        use crate::middleware::control::{CircuitBreaker, ControlMiddlewareAggregator, Retry};
         use crate::middleware::MiddlewareFactory;
         use obzenflow_core::StageId;
         use obzenflow_runtime::pipeline::config::StageConfig;
 
-        let calls = Arc::new(AtomicUsize::new(0));
-        let handler = FlakyAsyncTransform {
-            calls: calls.clone(),
-            fail_times: 2,
-        };
-
-        let factory = CircuitBreakerBuilder::new(5)
-            .with_retry_fixed(StdDuration::from_millis(1), 3)
+        let factory = CircuitBreaker::opens_after(5)
+            .retry(Retry::fixed(StdDuration::from_millis(1)).attempts(3))
             .build();
-
         let config = StageConfig {
             stage_id: StageId::new(),
             name: "test".to_string(),
@@ -1340,89 +1315,14 @@ mod tests {
             resolved_policies: Default::default(),
         };
         let control = Arc::new(ControlMiddlewareAggregator::new());
-        let cb = factory
-            .create(&config, control)
-            .expect("circuit breaker should materialize for async transform test");
-
-        let wrapped = handler.middleware().with(cb).build();
-
-        let event = ChainEventFactory::data_event(
-            obzenflow_core::WriterId::from(StageId::new()),
-            "test",
-            json!({}),
-        );
-
-        let results = wrapped
-            .process(event, None, MiddlewareExecutionScope::LiveHandler)
-            .await
-            .expect("a handler error surfaces as an error event, not a process error");
-
-        // No retry: the transform is invoked once and the first failure surfaces.
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
-
-        let error_events = results
-            .iter()
-            .filter(|e| matches!(e.processing_info.status, ProcessingStatus::Error { .. }))
-            .count();
-        let control_events = results.iter().filter(|e| e.is_lifecycle()).count();
-        assert_eq!(error_events, 1);
-        assert_eq!(control_events, 0);
-    }
-
-    #[tokio::test]
-    async fn async_middleware_transform_permanent_failure_returns_error_event_without_retry() {
-        use crate::middleware::control::{CircuitBreakerBuilder, ControlMiddlewareAggregator};
-        use crate::middleware::MiddlewareFactory;
-        use obzenflow_core::StageId;
-        use obzenflow_runtime::pipeline::config::StageConfig;
-
-        let calls = Arc::new(AtomicUsize::new(0));
-        let handler = FlakyAsyncTransform {
-            calls: calls.clone(),
-            fail_times: usize::MAX,
+        let error = match factory.create(&config, control) {
+            Ok(_) => panic!("retrying breaker must not materialize on a handler"),
+            Err(error) => error.to_string(),
         };
-
-        let factory = CircuitBreakerBuilder::new(5)
-            .with_retry_fixed(StdDuration::from_millis(1), 3)
-            .build();
-
-        let config = StageConfig {
-            stage_id: StageId::new(),
-            name: "test".to_string(),
-            flow_name: "test".to_string(),
-            cycle_guard: None,
-            lineage: obzenflow_core::config::LineagePolicy::default(),
-            resolved_policies: Default::default(),
-        };
-        let control = Arc::new(ControlMiddlewareAggregator::new());
-        let cb = factory
-            .create(&config, control)
-            .expect("circuit breaker should materialize for async transform exhaustion test");
-
-        let wrapped = handler.middleware().with(cb).build();
-
-        let event = ChainEventFactory::data_event(
-            obzenflow_core::WriterId::from(StageId::new()),
-            "test",
-            json!({}),
+        assert!(
+            error.contains("supported only on declared effects"),
+            "{error}"
         );
-
-        let results = wrapped
-            .process(event, None, MiddlewareExecutionScope::LiveHandler)
-            .await
-            .expect("handler errors should be converted into error events");
-
-        // No retry: the transform is invoked once; the permanent failure
-        // surfaces immediately as a single error event with no retry events.
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
-
-        let error_events = results
-            .iter()
-            .filter(|e| matches!(e.processing_info.status, ProcessingStatus::Error { .. }))
-            .count();
-        let control_events = results.iter().filter(|e| e.is_lifecycle()).count();
-        assert_eq!(error_events, 1);
-        assert_eq!(control_events, 0);
     }
 
     /// FLOWIP-114q transitional hook: middleware that returned `Continue`

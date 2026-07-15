@@ -51,21 +51,20 @@ use super::fixtures;
 use super::gateway::{self, AuthorizePayment, GatewayTransform};
 use super::validation;
 use obzenflow::typed::sources as typed_sources;
-use obzenflow_adapters::middleware::circuit_breaker::{HalfOpenPolicy, OpenPolicy};
 use obzenflow_adapters::middleware::observability::{indicator, log, IndicatorKind};
-use obzenflow_adapters::middleware::{CircuitBreakerBuilder, RateLimiterBuilder};
+use obzenflow_adapters::middleware::{failure_rate, CircuitBreaker, RateLimiterBuilder, Retry};
 use obzenflow_dsl::{effectful_transform, flow, sink, source};
 use obzenflow_infra::journal::disk_journals;
-use std::num::NonZeroU32;
+use std::time::Duration;
 
 const SOURCE_RATE_LIMIT_EVENTS_PER_SECOND: f64 = 20.0;
 const SOURCE_RATE_LIMIT_BURST: f64 = 1.0;
+const GATEWAY_CALLS_PER_SECOND: f64 = 1.0;
 
-/// Build the demo flow.
-///
-/// Gentle source and gateway-effect rate limits keep logs and metrics readable,
-/// so you can watch source-boundary and effect-boundary policy metrics change
-/// over time.
+/// Where the demo binary journals its runs. The acceptance rig in `proof.rs`
+/// shares it so `--replay-from` paths printed by one entry point work for both.
+pub(super) const DEMO_JOURNAL_ROOT: &str = "target/payment-gateway-logs";
+
 /// Optional per-source pacing jitter (FLOWIP-095d demo knob).
 ///
 /// `PAYMENT_DEMO_SOURCE_JITTER_MS=<max>` delays each order by a deterministic
@@ -93,48 +92,71 @@ fn demo_jitter(channel: &str, index: usize) {
     std::thread::sleep(std::time::Duration::from_millis(hash % (max_ms + 1)));
 }
 
+/// Build the tutorial flow: the scripted three-phase order channels, the real
+/// gateway transform, and the breaker with no retry section.
+///
+/// Gentle source and gateway-effect rate limits keep logs and metrics readable,
+/// so you can watch source-boundary and effect-boundary policy metrics change
+/// over time.
 pub fn build_flow() -> obzenflow_dsl::FlowDefinition {
-    let scripted_web_orders = fixtures::scripted_web_orders();
-    let scripted_store_orders = fixtures::scripted_store_orders();
+    assemble_flow(
+        fixtures::scripted_web_orders(),
+        fixtures::scripted_store_orders(),
+        GatewayTransform::default(),
+        None,
+        GATEWAY_CALLS_PER_SECOND,
+        std::path::PathBuf::from(DEMO_JOURNAL_ROOT),
+    )
+}
 
+/// Assemble the flow from its variable ingredients. The tutorial calls it with
+/// the defaults above; the acceptance rig in `proof.rs` swaps in its scripted
+/// order, instrumented gateway, and retry section without touching the
+/// topology.
+pub(super) fn assemble_flow(
+    scripted_web_orders: Vec<CustomerOrderPlaced>,
+    scripted_store_orders: Vec<CustomerOrderPlaced>,
+    gateway_transform: GatewayTransform,
+    gateway_retry: Option<Retry>,
+    gateway_calls_per_second: f64,
+    journal_root: std::path::PathBuf,
+) -> obzenflow_dsl::FlowDefinition {
     // The gateway breaker attaches inline to the effect it guards
     // (FLOWIP-120c H7, `AuthorizePayment with [gateway_breaker]`): one
     // policy instance per protected dependency. Hoisted to a named binding
     // so the `effects:` entry reads as a declaration.
-    let gateway_breaker = CircuitBreakerBuilder::new(3)
-        .cooldown(std::time::Duration::from_secs(5))
-        .rate_based_over_last_n_calls(5, 0.6)
-        .slow_call(std::time::Duration::from_millis(250), 0.5)
-        .with_fallback_fact::<ValidatedOrder, GatewayPaymentFallback, _>(|order| {
-            GatewayPaymentFallback {
-                order_id: order.order_id.clone(),
-                customer_id: order.customer_id.clone(),
-                amount_cents: order.amount_cents,
-                phase: order.phase.clone(),
-                reason: "circuit breaker open".to_string(),
-            }
+    let gateway_breaker = CircuitBreaker::opens_when(
+        failure_rate(0.6)
+            .over_last_calls(5)
+            .or_slow_calls_over(Duration::from_millis(250), 0.5),
+    )
+    .cooldown(Duration::from_secs(5))
+    .with_failure_classification(gateway::classify_simulated_gateway_unavailability);
+    let gateway_breaker = match gateway_retry {
+        Some(retry) => gateway_breaker.retry(retry),
+        None => gateway_breaker,
+    };
+    let gateway_breaker = gateway_breaker
+        .fallback_fact(|order: &ValidatedOrder| GatewayPaymentFallback {
+            order_id: order.order_id.clone(),
+            customer_id: order.customer_id.clone(),
+            amount_cents: order.amount_cents,
+            phase: order.phase.clone(),
+            reason: "circuit breaker open".to_string(),
         })
-        .with_rejection_fact::<ValidatedOrder, GatewayPaymentRejected, _>(|order, reason| {
-            GatewayPaymentRejected {
-                order_id: order.order_id.clone(),
-                customer_id: order.customer_id.clone(),
-                amount_cents: order.amount_cents,
-                phase: order.phase.clone(),
-                reason: format!("{reason:?}"),
-            }
+        .rejection_fact(|order: &ValidatedOrder, reason| GatewayPaymentRejected {
+            order_id: order.order_id.clone(),
+            customer_id: order.customer_id.clone(),
+            amount_cents: order.amount_cents,
+            phase: order.phase.clone(),
+            reason: format!("{reason:?}"),
         })
-        .with_failure_classifier(gateway::simulated_gateway_unavailability_counts_as_failure)
-        .open_policy(OpenPolicy::EmitFallback)
-        .half_open_policy(HalfOpenPolicy::new(
-            NonZeroU32::new(1).expect("permitted_probes must be non-zero"),
-            OpenPolicy::EmitFallback,
-        ))
-        .build_typed::<GatewayPaymentFallback, GatewayPaymentRejected>();
-    let gateway_limiter = RateLimiterBuilder::new(1.0).build();
+        .build();
+    let gateway_limiter = RateLimiterBuilder::new(gateway_calls_per_second).build();
 
     flow! {
         name: "payment_gateway_resilience_demo",
-        journals: disk_journals(std::path::PathBuf::from("target/payment-gateway-logs")),
+        journals: disk_journals(journal_root),
         middleware: [],
 
         stages: {
@@ -221,7 +243,7 @@ pub fn build_flow() -> obzenflow_dsl::FlowDefinition {
                     GatewayPaymentRejected,
                     OrderCancelled,
                     PaymentAuthorizationUnavailable
-                } => GatewayTransform,
+                } => gateway_transform,
                 effects: [AuthorizePayment with [gateway_breaker, gateway_limiter]],
                 // Record a per-execution service-level-indicator sample for the
                 // authorization operation: the raw wall-clock latency of the live

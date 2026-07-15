@@ -260,12 +260,20 @@ struct TestPipelineStageHandle {
     name: String,
     stage_type: StageType,
     start_gate: Option<StartGate>,
+    shutdown_probe: Option<ShutdownProbe>,
 }
 
 struct StartGate {
     entered: Mutex<Option<oneshot::Sender<()>>>,
     release: tokio::sync::Mutex<Option<oneshot::Receiver<()>>>,
     count: Arc<AtomicUsize>,
+}
+
+#[derive(Clone, Default)]
+struct ShutdownProbe {
+    force_shutdown_count: Arc<AtomicUsize>,
+    wait_for_completion_count: Arc<AtomicUsize>,
+    abort_and_join_count: Arc<AtomicUsize>,
 }
 
 impl TestPipelineStageHandle {
@@ -275,6 +283,7 @@ impl TestPipelineStageHandle {
             name: name.into(),
             stage_type,
             start_gate: None,
+            shutdown_probe: None,
         })
     }
 
@@ -295,6 +304,22 @@ impl TestPipelineStageHandle {
                 release: tokio::sync::Mutex::new(Some(release)),
                 count,
             }),
+            shutdown_probe: None,
+        })
+    }
+
+    fn with_stalled_completion(
+        id: StageId,
+        name: impl Into<String>,
+        stage_type: StageType,
+        shutdown_probe: ShutdownProbe,
+    ) -> BoxedStageHandle {
+        Box::new(Self {
+            id,
+            name: name.into(),
+            stage_type,
+            start_gate: None,
+            shutdown_probe: Some(shutdown_probe),
         })
     }
 }
@@ -356,10 +381,26 @@ impl StageHandle for TestPipelineStageHandle {
     }
 
     async fn force_shutdown(&self) -> Result<(), StageError> {
+        if let Some(probe) = &self.shutdown_probe {
+            probe.force_shutdown_count.fetch_add(1, Ordering::Relaxed);
+        }
         Ok(())
     }
 
     async fn wait_for_completion(&self) -> Result<(), StageError> {
+        if let Some(probe) = &self.shutdown_probe {
+            probe
+                .wait_for_completion_count
+                .fetch_add(1, Ordering::Relaxed);
+            std::future::pending::<()>().await;
+        }
+        Ok(())
+    }
+
+    async fn abort_and_join(&self) -> Result<(), StageError> {
+        if let Some(probe) = &self.shutdown_probe {
+            probe.abort_and_join_count.fetch_add(1, Ordering::Relaxed);
+        }
         Ok(())
     }
 }
@@ -429,6 +470,82 @@ async fn stop_and_join(
         .expect("supervisor should stop")
         .expect("supervisor task should join")
         .expect("supervisor should return ok");
+}
+
+#[tokio::test]
+async fn expired_graceful_stop_aborts_and_joins_stalled_stage_without_fresh_cleanup_budget() {
+    let _lock = bootstrap_test_lock_async().await;
+    let _guard = install_bootstrap_config(BootstrapConfig {
+        // A timeout escalation must not fall back to this much longer budget.
+        shutdown_timeout: std::time::Duration::from_secs(5),
+        ..BootstrapConfig::default()
+    });
+
+    let system_id = SystemId::new();
+    let system_journal = Arc::new(MemoryJournal::with_owner(JournalOwner::system(system_id)));
+    let (topology, sink_stage_id) = source_sink_topology();
+    let subscription = empty_system_subscription(&system_journal).await;
+    let mut context = test_context(
+        topology,
+        system_id,
+        system_journal.clone(),
+        Some(subscription),
+    );
+    let shutdown_probe = ShutdownProbe::default();
+    context.stage_supervisors.insert(
+        sink_stage_id,
+        TestPipelineStageHandle::with_stalled_completion(
+            sink_stage_id,
+            "stalled_sink",
+            StageType::Sink,
+            shutdown_probe.clone(),
+        ),
+    );
+    context.stop_intent.apply_request(
+        FlowStopMode::Graceful {
+            timeout: std::time::Duration::from_millis(20),
+        },
+        Some("test_graceful_stop".to_string()),
+    );
+
+    let (_sender, receiver, watcher) =
+        ChannelBuilder::<PipelineEvent, PipelineState>::new().build(PipelineState::Draining);
+    let started = std::time::Instant::now();
+    let task = spawn_supervisor_loop(
+        PipelineState::Draining,
+        test_supervisor(system_id, system_journal),
+        context,
+        receiver,
+        watcher,
+    );
+
+    tokio::time::timeout(std::time::Duration::from_millis(500), task)
+        .await
+        .expect("expired graceful stop must not start the five-second cleanup budget")
+        .expect("pipeline supervisor task should join")
+        .expect("timeout cleanup should complete without an action error");
+
+    assert!(
+        started.elapsed() < std::time::Duration::from_millis(500),
+        "cleanup must remain bounded by the original graceful-stop deadline"
+    );
+    assert_eq!(
+        shutdown_probe.force_shutdown_count.load(Ordering::Relaxed),
+        0,
+        "an overdue supervisor should bypass cooperative force-shutdown"
+    );
+    assert_eq!(
+        shutdown_probe
+            .wait_for_completion_count
+            .load(Ordering::Relaxed),
+        0,
+        "an overdue supervisor should not receive a fresh completion wait"
+    );
+    assert_eq!(
+        shutdown_probe.abort_and_join_count.load(Ordering::Relaxed),
+        1,
+        "the overdue supervisor must be aborted and joined exactly once"
+    );
 }
 
 #[test]

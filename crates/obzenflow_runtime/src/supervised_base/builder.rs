@@ -174,6 +174,9 @@ pub trait SupervisorHandle: Send + Sync {
     ///
     /// This consumes the handle and waits for the supervisor task to finish
     async fn wait_for_completion(self) -> Result<(), Self::Error>;
+
+    /// Abort the supervisor task and join it before returning.
+    async fn abort_and_wait(&self) -> Result<(), Self::Error>;
 }
 
 /// Common error types for handle operations

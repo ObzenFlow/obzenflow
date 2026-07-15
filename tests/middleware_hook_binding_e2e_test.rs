@@ -590,6 +590,7 @@ fn hook_proof_factory_validates_surface_and_protected_unit_identity() {
     let surface = MiddlewareSurface::Effect(EffectSurface {
         stage_id: config.stage_id,
         effect_type: EffectTypeKey::from("expected"),
+        safety: obzenflow_runtime::effects::EffectSafety::Idempotent,
     });
     let mismatched_unit = ProtectedUnitId {
         stage_id: config.stage_id,

@@ -21,6 +21,7 @@ use super::domain::{
 };
 use async_trait::async_trait;
 use obzenflow_adapters::effects::{CircuitBreakerOutcome, GuardedEffectExt};
+use obzenflow_adapters::middleware::circuit_breaker::FailureClassification;
 use obzenflow_core::{event::chain_event::ChainEvent, EffectOutcomeFacts, TypedPayload};
 use obzenflow_runtime::effects::{
     Effect, EffectContext, EffectError, EffectSafety, Effects, IdempotencyKey,
@@ -28,6 +29,8 @@ use obzenflow_runtime::effects::{
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::EffectfulTransformHandler;
 use serde_json::json;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 /// The gateway authorization command, expressed as an effect.
 ///
@@ -39,6 +42,39 @@ use serde_json::json;
 #[derive(Debug, Clone)]
 pub struct AuthorizePayment {
     pub order: ValidatedOrder,
+    retry_proof: Option<Arc<GatewayRetryProof>>,
+}
+
+/// Shared deterministic backend script used by the circuit-breaker retry
+/// acceptance profile. Effect clones share this counter, so physical calls
+/// observe the sequence timeout, timeout, success under one logical effect
+/// cursor.
+#[derive(Debug, Default)]
+pub struct GatewayRetryProof {
+    calls: AtomicUsize,
+    panic_on_call: bool,
+}
+
+impl GatewayRetryProof {
+    pub fn new(panic_on_call: bool) -> Self {
+        Self {
+            calls: AtomicUsize::new(0),
+            panic_on_call,
+        }
+    }
+
+    #[cfg(test)]
+    pub fn calls(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+
+    fn record_call(&self) -> usize {
+        assert!(
+            !self.panic_on_call,
+            "strict replay attempted a live payment gateway call"
+        );
+        self.calls.fetch_add(1, Ordering::SeqCst) + 1
+    }
 }
 
 /// Closed set of successful gateway authorization outcomes (FLOWIP-120m).
@@ -78,26 +114,35 @@ impl Effect for AuthorizePayment {
     }
 
     async fn execute(&self, ctx: &mut EffectContext) -> Result<Self::Outcome, EffectError> {
-        // Latency comes from the deterministic, seeded RNG on the effect context
-        // rather than a wall clock, so a replay reconstructs the same timing.
-        let latency_ms: u64 = ctx.rng("gateway_latency").u64(50..=200);
-        ctx.sleep(std::time::Duration::from_millis(latency_ms))
-            .await;
-
-        if matches!(self.order.phase, TrafficPhase::Outage) {
-            // A degraded gateway hangs before timing out, so the authorization
-            // latency sample for an outage attempt is large (and the outcome is a
-            // failure). The hang is drawn from the same seeded RNG as the base
-            // latency, so a replay reconstructs the identical slow sample. The
-            // latency indicator records this raw `value_ms`; whether it counts as
-            // "slow" against an objective is a read-side question (FLOWIP-115l),
-            // not baked into the wide event.
-            let timeout_ms: u64 = ctx.rng("gateway_outage_hang").u64(2_000..=3_000);
-            ctx.sleep(std::time::Duration::from_millis(timeout_ms))
+        if let Some(proof) = &self.retry_proof {
+            let call = proof.record_call();
+            if call <= 2 {
+                return Err(EffectError::Timeout(
+                    "gateway_timeout_simulated".to_string(),
+                ));
+            }
+        } else {
+            // Latency comes from the deterministic, seeded RNG on the effect context
+            // rather than a wall clock, so a replay reconstructs the same timing.
+            let latency_ms: u64 = ctx.rng("gateway_latency").u64(50..=200);
+            ctx.sleep(std::time::Duration::from_millis(latency_ms))
                 .await;
-            return Err(EffectError::Execution(
-                "gateway_timeout_simulated".to_string(),
-            ));
+
+            if matches!(self.order.phase, TrafficPhase::Outage) {
+                // A degraded gateway hangs before timing out, so the authorization
+                // latency sample for an outage attempt is large (and the outcome is a
+                // failure). The hang is drawn from the same seeded RNG as the base
+                // latency, so a replay reconstructs the identical slow sample. The
+                // latency indicator records this raw `value_ms`; whether it counts as
+                // "slow" against an objective is a read-side question (FLOWIP-115l),
+                // not baked into the wide event.
+                let timeout_ms: u64 = ctx.rng("gateway_outage_hang").u64(2_000..=3_000);
+                ctx.sleep(std::time::Duration::from_millis(timeout_ms))
+                    .await;
+                return Err(EffectError::Timeout(
+                    "gateway_timeout_simulated".to_string(),
+                ));
+            }
         }
 
         let order = &self.order;
@@ -129,7 +174,7 @@ impl Effect for AuthorizePayment {
                     reason: PaymentDeclineReason::AddressMismatch,
                 }))
             }
-            PaymentMethodState::InvalidNumber => Err(EffectError::Execution(
+            PaymentMethodState::InvalidNumber => Err(EffectError::Validation(
                 "invalid_payment_method_reached_gateway".to_string(),
             )),
         }
@@ -151,8 +196,18 @@ impl Effect for AuthorizePayment {
 /// returns the transient carrier, so the handler never re-emits them. The
 /// handler emits only derived consequences (`OrderCancelled`) and the
 /// non-performance fact (`PaymentAuthorizationUnavailable`).
-#[derive(Debug, Clone)]
-pub struct GatewayTransform;
+#[derive(Debug, Clone, Default)]
+pub struct GatewayTransform {
+    retry_proof: Option<Arc<GatewayRetryProof>>,
+}
+
+impl GatewayTransform {
+    pub fn with_retry_proof(retry_proof: Arc<GatewayRetryProof>) -> Self {
+        Self {
+            retry_proof: Some(retry_proof),
+        }
+    }
+}
 
 #[async_trait]
 impl EffectfulTransformHandler for GatewayTransform {
@@ -177,6 +232,7 @@ impl EffectfulTransformHandler for GatewayTransform {
             .perform(
                 AuthorizePayment {
                     order: order.clone(),
+                    retry_proof: self.retry_proof.clone(),
                 }
                 .guarded::<GatewayPaymentFallback, GatewayPaymentRejected>(),
             )
@@ -248,12 +304,14 @@ fn authorization_unavailable_reason(err: EffectError) -> String {
 /// Error-marked outputs cover genuine gateway failures; the input-phase check
 /// covers the scripted outage. Breaker-synthesized fallback facts never reach
 /// `post_handle` (the boundary short-circuits), so degraded outputs do not
-/// re-count as failures.
-pub fn simulated_gateway_unavailability_counts_as_failure(
+/// re-count as failures. The classification is health authority plus recovery
+/// veto only: returning `TransientFailure` cannot make an
+/// ineligible raw failure retry.
+pub fn classify_simulated_gateway_unavailability(
     event: &ChainEvent,
     outputs: &[ChainEvent],
-) -> bool {
-    outputs.iter().any(|output| {
+) -> FailureClassification {
+    let failed = outputs.iter().any(|output| {
         matches!(
             output.processing_info.status,
             obzenflow_core::event::status::processing_status::ProcessingStatus::Error { .. }
@@ -261,7 +319,12 @@ pub fn simulated_gateway_unavailability_counts_as_failure(
     }) || matches!(
         ValidatedOrder::from_event(event).map(|order| order.phase),
         Some(TrafficPhase::Outage)
-    )
+    );
+    if failed {
+        FailureClassification::TransientFailure
+    } else {
+        FailureClassification::Success
+    }
 }
 
 /// Deliberately no cancellation here: unavailability means no payment decision
@@ -286,7 +349,7 @@ async fn emit_authorization_unavailable(
 
 #[cfg(test)]
 mod tests {
-    use super::{authorization_unavailable_reason, EffectError};
+    use super::{authorization_unavailable_reason, EffectError, GatewayRetryProof};
     use obzenflow_runtime::effects::RetryDisposition;
 
     /// FLOWIP-120i: the recorded payload carries the semantic reason, never
@@ -294,11 +357,11 @@ mod tests {
     /// domain reason with no normalisation in example code.
     #[test]
     fn replayed_execution_failure_preserves_live_domain_reason() {
-        let live = EffectError::Execution("gateway_timeout_simulated".to_string());
+        let live = EffectError::Timeout("gateway_timeout_simulated".to_string());
         let live_reason = authorization_unavailable_reason(live);
 
         let replay_reason = authorization_unavailable_reason(EffectError::RecordedFailure {
-            error_type: "execution".into(),
+            error_type: "timeout".into(),
             error_message: "gateway_timeout_simulated".to_string(),
             retry: RetryDisposition::Retryable,
             cause: None,
@@ -306,5 +369,19 @@ mod tests {
 
         assert_eq!(live_reason, "gateway_timeout_simulated");
         assert_eq!(replay_reason, live_reason);
+    }
+
+    #[test]
+    fn retry_proof_counts_physical_calls() {
+        let proof = GatewayRetryProof::new(false);
+        assert_eq!(proof.record_call(), 1);
+        assert_eq!(proof.record_call(), 2);
+        assert_eq!(proof.calls(), 2);
+    }
+
+    #[test]
+    #[should_panic(expected = "strict replay attempted a live payment gateway call")]
+    fn retry_proof_panics_on_replay_call() {
+        GatewayRetryProof::new(true).record_call();
     }
 }

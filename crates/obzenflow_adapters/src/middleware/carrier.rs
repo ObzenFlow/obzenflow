@@ -21,6 +21,7 @@ use super::control::ControlMiddlewareAggregator;
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::ingress::{IngressBoundaryMiddleware, IngressKey};
 use obzenflow_core::{StageId, StageKey};
+use obzenflow_runtime::effects::EffectSafety;
 use obzenflow_runtime::pipeline::config::StageConfig;
 use obzenflow_runtime::stages::observer::{
     EffectObserver, HandlerObserver, JoinObserver, OutputCommitObserver, SinkDeliveryObserver,
@@ -95,6 +96,7 @@ pub struct SourcePollSurface {
 pub struct EffectSurface {
     pub stage_id: StageId,
     pub effect_type: EffectTypeKey,
+    pub safety: EffectSafety,
 }
 
 /// The sink-delivery call site for one sink stage, optionally refined by a
@@ -1080,6 +1082,7 @@ mod tests {
         let effect_surface = MiddlewareSurface::Effect(EffectSurface {
             stage_id,
             effect_type: EffectTypeKey::from("http"),
+            safety: EffectSafety::Idempotent,
         });
         let effect_unit = ProtectedUnitId {
             stage_id,

@@ -57,8 +57,8 @@ impl ControlMiddlewareAggregator {
         stage_id: StageId,
         metrics_fn: Arc<CircuitBreakerSnapshotter>,
         state_view: Arc<dyn CircuitBreakerStateView>,
-    ) {
-        self.register_circuit_breaker_keyed(stage_id, None, metrics_fn, state_view);
+    ) -> Result<(), String> {
+        self.register_circuit_breaker_keyed(stage_id, None, metrics_fn, state_view)
     }
 
     /// Register a per-effect circuit breaker instance (FLOWIP-120c).
@@ -68,8 +68,8 @@ impl ControlMiddlewareAggregator {
         effect_type: EffectTypeKey,
         metrics_fn: Arc<CircuitBreakerSnapshotter>,
         state_view: Arc<dyn CircuitBreakerStateView>,
-    ) {
-        self.register_circuit_breaker_keyed(stage_id, Some(effect_type), metrics_fn, state_view);
+    ) -> Result<(), String> {
+        self.register_circuit_breaker_keyed(stage_id, Some(effect_type), metrics_fn, state_view)
     }
 
     fn register_circuit_breaker_keyed(
@@ -78,16 +78,25 @@ impl ControlMiddlewareAggregator {
         effect_type: Option<EffectTypeKey>,
         metrics_fn: Arc<CircuitBreakerSnapshotter>,
         state_view: Arc<dyn CircuitBreakerStateView>,
-    ) {
+    ) -> Result<(), String> {
         let registration = CircuitBreakerRegistration {
             metrics_fn,
             state_view,
         };
 
-        self.circuit_breakers
+        let mut registrations = self
+            .circuit_breakers
             .write()
-            .expect("ControlMiddlewareAggregator: circuit_breakers poisoned write lock")
-            .insert((stage_id, effect_type), registration);
+            .expect("ControlMiddlewareAggregator: circuit_breakers poisoned write lock");
+        let key = (stage_id, effect_type);
+        if registrations.contains_key(&key) {
+            return Err(format!(
+                "a circuit breaker is already registered for stage {stage_id} and effect {:?}",
+                key.1.as_ref().map(EffectTypeKey::as_str)
+            ));
+        }
+        registrations.insert(key, registration);
+        Ok(())
     }
 
     pub fn register_rate_limiter(

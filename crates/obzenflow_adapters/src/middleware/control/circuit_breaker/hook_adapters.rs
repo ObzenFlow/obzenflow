@@ -3,12 +3,11 @@
 // https://obzenflow.dev
 
 use super::classifier::FailureClassification;
-use super::retry::RetryState;
 use super::state::CircuitState;
 use super::CircuitBreakerMiddleware;
 use crate::middleware::context_keys::{
-    CircuitBreakerAttempt, CircuitBreakerIsProbe, CircuitBreakerProbeGeneration,
-    CircuitBreakerProbeSlot, CircuitBreakerProbeSlotGuard,
+    CircuitBreakerIsProbe, CircuitBreakerProbeGeneration, CircuitBreakerProbeSlot,
+    CircuitBreakerProbeSlotGuard,
 };
 use crate::middleware::{
     EventAwareEffectPolicy, SinkAdmission, SinkAdmissionGuard, SinkDeliveryPolicyOutcome,
@@ -19,7 +18,6 @@ use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::event::payloads::observability_payload::{
     CircuitBreakerEvent, CircuitBreakerRejectionReason, MiddlewareLifecycle, ObservabilityPayload,
 };
-use obzenflow_core::event::status::processing_status::ErrorKind;
 use obzenflow_core::event::ChainEventFactory;
 use obzenflow_runtime::control_plane::CircuitBreakerStateView;
 use obzenflow_runtime::stages::source::strategies::{
@@ -264,15 +262,23 @@ impl Middleware for CircuitBreakerMiddleware {
 
         match self.current_state() {
             CircuitState::Closed => {
-                // Normal operation
-                MiddlewareAction::Continue
+                // Linearise Closed admission with transitions into Open and
+                // capture the epoch that owns any later effect recovery.
+                if self.effect_recovery_open_epoch_at_admission(ctx) {
+                    MiddlewareAction::Continue
+                } else {
+                    self.pre_handle(event, ctx)
+                }
             }
 
             CircuitState::Open => {
                 // Check if we should transition to half-open
                 if self.should_attempt_reset() {
                     {
-                        let _probe_gate = self.probe_gate.lock().ok();
+                        let _probe_gate = self
+                            .probe_gate
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner());
                         let transitioned = self.transition_to(CircuitState::HalfOpen, ctx);
                         if transitioned {
                             // Start a new half-open epoch. Do not reset
@@ -321,7 +327,22 @@ impl Middleware for CircuitBreakerMiddleware {
 
             CircuitState::HalfOpen => {
                 // Allow up to `permitted_probes` concurrent probe requests.
-                let _probe_gate = self.probe_gate.lock().ok();
+                #[cfg(test)]
+                if let Some(hook) = &self.half_open_race_test_hook {
+                    hook.waiter_observed_half_open.wait();
+                }
+                let _probe_gate = self
+                    .probe_gate
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                // The state read that selected this branch can become stale
+                // while waiting for a settling probe. Never reserve from that
+                // stale observation: release the gate and re-enter the current
+                // state path instead.
+                if !matches!(self.current_state(), CircuitState::HalfOpen) {
+                    drop(_probe_gate);
+                    return self.pre_handle(event, ctx);
+                }
                 let probe_generation = self.probe_generation.load(Ordering::SeqCst);
                 let permitted = self.half_open_policy.permitted_probes.get();
                 let mut current = self.probe_in_flight.load(Ordering::SeqCst);
@@ -381,9 +402,22 @@ impl Middleware for CircuitBreakerMiddleware {
             return;
         }
 
-        let now = Instant::now();
+        let (classification, _error_kind, _error_message) = self.classify_call(event, outputs, ctx);
+        self.settle_classified_call(&classification, ctx);
+    }
+}
 
-        let attempt = ctx.get::<CircuitBreakerAttempt>().copied().unwrap_or(0);
+impl CircuitBreakerMiddleware {
+    /// Settle breaker health from an already final classification. Recovery
+    /// uses this path so a stateful custom classifier is invoked exactly once
+    /// per physical result and that same value drives retry, health, and
+    /// terminal evidence.
+    pub(super) fn settle_classified_call(
+        &self,
+        classification: &FailureClassification,
+        ctx: &mut MiddlewareContext,
+    ) {
+        let now = Instant::now();
         let is_probe = ctx.get::<CircuitBreakerIsProbe>().copied().unwrap_or(false);
 
         // Track allowed calls (i.e. calls that reached the wrapped handler), regardless of
@@ -392,101 +426,9 @@ impl Middleware for CircuitBreakerMiddleware {
             stats.requests_processed += 1;
         }
 
-        let (classification, error_kind, error_message) = self.classify_call(event, outputs, ctx);
         let is_success = matches!(classification, FailureClassification::Success);
-        let retry_enabled = self.retry_policy.is_some();
 
-        if retry_enabled {
-            self.maybe_cleanup_retry_state(now);
-        }
-
-        /// Hard cap on `retry_state` entries to prevent unbounded growth
-        /// during sustained failure spikes. Existing entries (retries in
-        /// progress) are always updated; only brand-new entries are refused.
-        const MAX_RETRY_STATE_ENTRIES: usize = 10_000;
-
-        if retry_enabled && !is_success {
-            if let Ok(mut states) = self.retry_state.lock() {
-                // Refuse brand-new entries when at capacity to prevent
-                // unbounded growth during sustained failure spikes.
-                // Existing entries (retries in progress) are always updated.
-                let at_capacity =
-                    states.len() >= MAX_RETRY_STATE_ENTRIES && !states.contains_key(&event.id);
-
-                if at_capacity {
-                    tracing::warn!(
-                        "retry_state at capacity ({}), dropping new entry for event {:?}",
-                        MAX_RETRY_STATE_ENTRIES,
-                        event.id,
-                    );
-                } else {
-                    let entry = states.entry(event.id).or_insert_with(|| RetryState {
-                        attempts: 0,
-                        first_attempt: now,
-                        last_attempt: now,
-                        last_error: None,
-                        last_kind: None,
-                        classification: FailureClassification::TransientFailure,
-                    });
-
-                    entry.attempts = attempt.saturating_add(1);
-                    entry.last_attempt = now;
-                    if let Some(msg) = error_message.as_ref() {
-                        entry.last_error = Some(msg.clone());
-                    }
-                    if error_kind.is_some() {
-                        entry.last_kind = error_kind.clone();
-                    }
-                    entry.classification = classification.clone();
-                }
-            }
-        }
-
-        // Final outcome: clear retry state and emit a final retry lifecycle event if needed.
-        let mut retry_state = if retry_enabled {
-            match self.retry_state.lock() {
-                Ok(mut states) => states.remove(&event.id),
-                Err(_) => None,
-            }
-        } else {
-            None
-        };
-
-        if let Some(state) = retry_state.as_mut() {
-            if is_success {
-                state.attempts = attempt.saturating_add(1);
-                state.last_attempt = now;
-                state.classification = FailureClassification::Success;
-            }
-
-            if state.attempts > 1 {
-                let total_duration_ms = now.duration_since(state.first_attempt).as_millis() as u64;
-                if is_success {
-                    self.retry_successes_total.fetch_add(1, Ordering::Relaxed);
-                    ctx.write_control_event(ChainEventFactory::retry_succeeded_after_retry(
-                        self.writer_id,
-                        state.attempts,
-                        total_duration_ms,
-                        Some(event.id),
-                    ));
-                } else {
-                    self.retry_exhaustions_total.fetch_add(1, Ordering::Relaxed);
-                    let last_error = state
-                        .last_error
-                        .clone()
-                        .unwrap_or_else(|| "retry_exhausted".to_string());
-                    ctx.write_control_event(ChainEventFactory::retry_exhausted(
-                        self.writer_id,
-                        state.attempts,
-                        last_error,
-                        total_duration_ms,
-                        Some(event.id),
-                    ));
-                }
-            }
-        }
-
-        let counted_as_failure = self.counts_as_failure(&classification);
+        let counted_as_failure = self.counts_as_failure(classification);
         if counted_as_failure {
             self.failures_total.fetch_add(1, Ordering::Relaxed);
         } else {
@@ -504,7 +446,15 @@ impl Middleware for CircuitBreakerMiddleware {
 
         if is_probe {
             let probe_generation = ctx.get::<CircuitBreakerProbeGeneration>().copied();
-            let _probe_gate = self.probe_gate.lock().ok();
+            let _probe_gate = self
+                .probe_gate
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            #[cfg(test)]
+            if let Some(hook) = &self.half_open_race_test_hook {
+                hook.settlement_holds_probe_gate.wait();
+                hook.release_settlement.wait();
+            }
             drop(ctx.remove::<CircuitBreakerProbeSlot>());
 
             if probe_generation == Some(self.probe_generation.load(Ordering::SeqCst))
@@ -597,9 +547,7 @@ impl EventAwareEffectPolicy for CircuitBreakerMiddleware {
                 self.post_handle(event, outputs, ctx);
             }
             crate::middleware::EffectAttemptOutcome::Executed(Err(err)) => {
-                let error_event = event
-                    .clone()
-                    .mark_as_error(err.to_string(), ErrorKind::Remote);
+                let error_event = super::classifier::effect_error_event(event, err);
                 self.post_handle(event, std::slice::from_ref(&error_event), ctx);
             }
             crate::middleware::EffectAttemptOutcome::SkippedBy(_)

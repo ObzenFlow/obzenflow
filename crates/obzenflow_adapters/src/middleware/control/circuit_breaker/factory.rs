@@ -5,18 +5,20 @@
 use super::config::{
     CircuitBreakerFailureMode, CircuitBreakerThresholdError, HalfOpenPolicy, OpenPolicy,
 };
+use super::criteria::RateCriteria;
 use super::fallback::{
     build_outcome_fallback_events, build_typed_fallback_event, build_typed_rejection_event,
 };
 use super::hook_adapters::{
     CircuitBreakerCompletionGate, CircuitBreakerSinkPolicy, CircuitBreakerSourcePolicy,
 };
+use super::retry::Retry;
 use super::state::CircuitBreakerStateViewImpl;
 use super::window::{FailureWindow, FailureWindowState};
 use super::{
     CircuitBreakerFamily, CircuitBreakerMiddleware, CircuitBreakerRetryPolicy,
     FailureClassification, FailureClassificationClassifier, FailureClassificationPolicy,
-    FailureClassifier, FallbackFn, RetryLimits, TypedOutcomeConfig, UnknownErrorKindPolicy,
+    FallbackFn, RetryLimits, TypedOutcomeConfig, UnknownErrorKindPolicy,
 };
 use crate::middleware::control::ControlMiddlewareAggregator;
 use crate::middleware::{
@@ -29,12 +31,12 @@ use crate::middleware::{
 };
 use obzenflow_core::event::chain_event::ChainEvent;
 use obzenflow_core::event::payloads::observability_payload::CircuitBreakerRejectionReason;
-use obzenflow_core::event::schema::TypedFactType;
 use obzenflow_core::TypedPayload;
 use obzenflow_runtime::control_plane::{
     CircuitBreakerMetrics, CircuitBreakerSnapshotter, CircuitBreakerState, CircuitBreakerStateView,
     ControlPlaneProvider,
 };
+use obzenflow_runtime::effects::EffectSafety;
 use obzenflow_runtime::pipeline::config::StageConfig;
 use obzenflow_runtime::stages::common::control_strategies::BackoffStrategy;
 use obzenflow_runtime::stages::source::strategies::CompletionGate;
@@ -46,94 +48,193 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-/// Builder for circuit breaker middleware
-///
-/// Captured configuration of an outcome-shaped fallback (FLOWIP-120m): which
-/// effect the closure targets and the carrier fact types it may synthesize.
-struct OutcomeFallbackConfig {
-    effect_type: &'static str,
-    fact_types: Vec<TypedFactType>,
+/// Typestate markers for the breaker builder's fallback shape. Users never
+/// name these; they appear only in intermediate builder types.
+pub mod shape {
+    use super::super::{FallbackFn, TypedOutcomeConfig};
+    use obzenflow_core::event::schema::TypedFactType;
+    use std::marker::PhantomData;
+
+    /// No fallback shape configured; `build()` yields a plain factory.
+    pub struct Plain;
+
+    /// A branch fallback producer is configured; a rejection producer for the
+    /// same input type completes the branch shape.
+    pub struct BranchFallback<In, Fb> {
+        pub(super) fallback: FallbackFn,
+        pub(super) marker: PhantomData<fn(&In) -> Fb>,
+    }
+
+    /// A branch rejection producer is configured; a fallback producer for the
+    /// same input type completes the branch shape.
+    pub struct BranchRejection<In, R> {
+        pub(super) typed_outcome: TypedOutcomeConfig,
+        pub(super) marker: PhantomData<fn(&In) -> R>,
+    }
+
+    /// Both branch producers are configured; `build()` yields the typed
+    /// branch carrier validated against the stage contract.
+    pub struct Branch<Fb, R> {
+        pub(super) fallback: FallbackFn,
+        pub(super) typed_outcome: TypedOutcomeConfig,
+        pub(super) marker: PhantomData<fn() -> (Fb, R)>,
+    }
+
+    /// An outcome-shaped fallback is configured; `build()` yields the outcome
+    /// carrier validated against the effect's fact set.
+    pub struct Outcome {
+        pub(super) fallback: FallbackFn,
+        pub(super) effect_type: &'static str,
+        pub(super) fact_types: Vec<TypedFactType>,
+    }
 }
 
-/// TODO(G4/051c): `CircuitBreakerBuilder` and `CircuitBreakerFactory` share ~300 lines of
-/// nearly identical builder methods and field definitions.  Extract a shared
-/// `CircuitBreakerConfig` struct that owns the policy fields and provide `impl From<Config>`
-/// conversions for both Builder and Factory.  This removes the current maintenance burden of
-/// keeping both sets of setters in sync and eliminates a class of copy-paste bugs.
-pub struct CircuitBreakerBuilder {
-    threshold: usize,
-    cooldown: Duration,
-    fallback: Option<FallbackFn>,
-    fallback_fact_type: Option<TypedFactType>,
-    typed_outcome: Option<TypedOutcomeConfig>,
-    rejection_fact_type: Option<TypedFactType>,
-    outcome_fallback: Option<OutcomeFallbackConfig>,
-    failure_classifier: Option<FailureClassifier>,
-    failure_classification_classifier: Option<FailureClassificationClassifier>,
-    pub(super) failure_mode: Option<CircuitBreakerFailureMode>,
-    pub(super) open_policy: Option<OpenPolicy>,
-    pub(super) half_open_policy: Option<HalfOpenPolicy>,
-    unknown_error_kind_policy: UnknownErrorKindPolicy,
-    retry_policy: Option<CircuitBreakerRetryPolicy>,
-    retry_limits: RetryLimits,
-    failure_classification_policy: FailureClassificationPolicy,
-}
+/// Entry points for building a circuit breaker. Each returns the typestate
+/// builder in its plain state; fallback-shaping methods transition the state,
+/// and one `build()` per terminal state makes a mismatched build impossible
+/// to compile rather than a deferred flow-build error.
+pub struct CircuitBreaker;
 
-impl CircuitBreakerBuilder {
-    /// Create a new circuit breaker builder with the given threshold
-    pub fn new(threshold: usize) -> Self {
-        Self {
-            threshold,
-            cooldown: Duration::from_secs(60),
-            fallback: None,
-            fallback_fact_type: None,
-            typed_outcome: None,
-            rejection_fact_type: None,
-            outcome_fallback: None,
-            failure_classifier: None,
-            failure_classification_classifier: None,
-            failure_mode: None,
-            open_policy: None,
-            half_open_policy: None,
-            unknown_error_kind_policy: UnknownErrorKindPolicy::TreatAsInfraFailure,
-            retry_policy: None,
-            retry_limits: RetryLimits::default(),
-            failure_classification_policy: FailureClassificationPolicy::default(),
+impl CircuitBreaker {
+    /// Open after `failures` consecutive failures. The FLOWIP-010 key
+    /// `effects.circuit_breaker.threshold` may override the count at build
+    /// time.
+    pub fn opens_after(failures: u32) -> CircuitBreakerBuilder<shape::Plain> {
+        assert!(
+            failures > 0,
+            "circuit-breaker opens_after requires at least one failure"
+        );
+        CircuitBreakerBuilder {
+            core: BuilderCore::new(failures as usize, None),
+            shape: shape::Plain,
         }
     }
 
-    /// Set the cooldown duration before attempting to close the circuit
+    /// Open on rate-based criteria; see [`failure_rate`](super::failure_rate).
+    pub fn opens_when(criteria: RateCriteria) -> CircuitBreakerBuilder<shape::Plain> {
+        let threshold = criteria.reporting_threshold();
+        CircuitBreakerBuilder {
+            core: BuilderCore::new(threshold, Some(criteria.into_failure_mode())),
+            shape: shape::Plain,
+        }
+    }
+}
+
+/// Shared configuration behind every builder state.
+struct BuilderCore {
+    threshold: usize,
+    cooldown: Duration,
+    failure_mode: Option<CircuitBreakerFailureMode>,
+    open_policy: Option<OpenPolicy>,
+    probes: Option<NonZeroU32>,
+    on_probe_rejected: Option<OpenPolicy>,
+    failure_classification_classifier: Option<FailureClassificationClassifier>,
+    unknown_error_kind_policy: UnknownErrorKindPolicy,
+    retry: Option<Retry>,
+    failure_classification_policy: FailureClassificationPolicy,
+    transitional_fallback: Option<FallbackFn>,
+}
+
+impl BuilderCore {
+    fn new(threshold: usize, failure_mode: Option<CircuitBreakerFailureMode>) -> Self {
+        Self {
+            threshold,
+            cooldown: Duration::from_secs(60),
+            failure_mode,
+            open_policy: None,
+            probes: None,
+            on_probe_rejected: None,
+            failure_classification_classifier: None,
+            unknown_error_kind_policy: UnknownErrorKindPolicy::TreatAsInfraFailure,
+            retry: None,
+            failure_classification_policy: FailureClassificationPolicy::default(),
+            transitional_fallback: None,
+        }
+    }
+
+    fn into_factory(
+        self,
+        fallback: Option<FallbackFn>,
+        typed_outcome: Option<TypedOutcomeConfig>,
+    ) -> Box<dyn MiddlewareFactory> {
+        let half_open_policy = match (self.probes, self.on_probe_rejected) {
+            (None, None) => None,
+            (probes, on_rejected) => {
+                let default = HalfOpenPolicy::default();
+                Some(HalfOpenPolicy::new(
+                    probes.unwrap_or(default.permitted_probes),
+                    on_rejected.unwrap_or(default.on_rejected),
+                ))
+            }
+        };
+        let (retry_policy, retry_limits) = match self.retry {
+            Some(retry) => (Some(retry.policy), retry.limits),
+            None => (None, RetryLimits::default()),
+        };
+        Box::new(CircuitBreakerFactory {
+            threshold: self.threshold,
+            cooldown: self.cooldown,
+            fallback,
+            typed_outcome,
+            failure_classification_classifier: self.failure_classification_classifier,
+            failure_mode: self.failure_mode,
+            open_policy: self.open_policy,
+            half_open_policy,
+            unknown_error_kind_policy: self.unknown_error_kind_policy,
+            retry_policy,
+            retry_limits,
+            failure_classification_policy: self.failure_classification_policy,
+        })
+    }
+}
+
+/// The circuit-breaker builder, typestate over its fallback shape.
+pub struct CircuitBreakerBuilder<Shape> {
+    core: BuilderCore,
+    shape: Shape,
+}
+
+impl<Shape> CircuitBreakerBuilder<Shape> {
+    /// Set the cooldown duration before attempting to close the circuit.
     pub fn cooldown(mut self, duration: Duration) -> Self {
-        self.cooldown = duration;
+        self.core.cooldown = duration;
         self
     }
 
-    /// Enable integrated retry with a fixed backoff delay.
-    pub fn with_retry_fixed(mut self, delay: Duration, max_attempts: u32) -> Self {
-        self.retry_policy = Some(CircuitBreakerRetryPolicy {
-            max_attempts,
-            backoff: BackoffStrategy::Fixed { delay },
-        });
+    /// Maximum concurrent probe calls while half-open. Zero is invalid; the
+    /// default is one probe.
+    pub fn probes(mut self, probes: u32) -> Self {
+        self.core.probes = Some(
+            NonZeroU32::new(probes).expect("circuit-breaker probes must be greater than zero"),
+        );
         self
     }
 
-    /// Enable integrated retry with exponential backoff.
-    pub fn with_retry_exponential(mut self, max_attempts: u32) -> Self {
-        self.retry_policy = Some(CircuitBreakerRetryPolicy {
-            max_attempts,
-            backoff: BackoffStrategy::Exponential {
-                initial: Duration::from_millis(250),
-                max: Duration::from_secs(4),
-                factor: 2.0,
-                jitter: true,
-            },
-        });
+    /// Behaviour while the circuit is open. Defaults to
+    /// [`OpenPolicy::EmitFallback`].
+    pub fn when_open(mut self, policy: OpenPolicy) -> Self {
+        self.core.open_policy = Some(policy);
         self
     }
 
-    /// Configure hard caps for integrated retry (max single delay and max total wall time).
-    pub fn with_retry_limits(mut self, limits: RetryLimits) -> Self {
-        self.retry_limits = limits;
+    /// Behaviour for non-probe calls arriving while half-open probe slots are
+    /// in use. Defaults to [`OpenPolicy::EmitFallback`].
+    pub fn when_probe_rejected(mut self, policy: OpenPolicy) -> Self {
+        self.core.on_probe_rejected = Some(policy);
+        self
+    }
+
+    /// Configure the failure classification callback.
+    ///
+    /// The classification is final for breaker health. For effect recovery it
+    /// may veto a retry that the raw typed failure permits, but it cannot
+    /// promote an ineligible raw failure or cause a successful physical call
+    /// to be executed again.
+    pub fn with_failure_classification<F>(mut self, f: F) -> Self
+    where
+        F: Fn(&ChainEvent, &[ChainEvent]) -> FailureClassification + Send + Sync + 'static,
+    {
+        self.core.failure_classification_classifier = Some(Arc::new(f));
         self
     }
 
@@ -142,74 +243,56 @@ impl CircuitBreakerBuilder {
         mut self,
         policy: FailureClassificationPolicy,
     ) -> Self {
-        self.failure_classification_policy = policy;
+        self.core.failure_classification_policy = policy;
         self
     }
 
-    /// Configure a fallback factory used when the circuit is open.
-    ///
-    /// The closure receives the original input event and is expected to
-    /// produce a set of synthetic result events that represent a degraded
-    /// but well-defined outcome (e.g., cached response, sentinel value).
-    ///
-    /// This keeps circuit breaker concerns encapsulated in configuration so
-    /// handler implementations remain oblivious to failure policy.
-    pub fn with_fallback<F>(mut self, f: F) -> Self
-    where
-        F: Fn(&ChainEvent) -> Vec<ChainEvent> + Send + Sync + 'static,
-    {
-        // Raw fallbacks build their own events; only the typed builders
-        // consume the build-resolved lineage policy.
-        self.fallback = Some(Arc::new(
-            move |event: &ChainEvent, _lineage: obzenflow_core::config::LineagePolicy| f(event),
-        ));
+    /// Configure effect-bound recovery; see [`Retry`]. Eligibility stays
+    /// gated by effect safety and the typed failure allowlist (FLOWIP-115h).
+    pub fn retry(mut self, retry: Retry) -> Self {
+        self.core.retry = Some(retry);
         self
     }
+}
 
-    /// Configure how this breaker should behave while Open.
-    pub fn open_policy(mut self, policy: OpenPolicy) -> Self {
-        self.open_policy = Some(policy);
-        self
-    }
-
-    /// Configure how this breaker should behave while HalfOpen.
-    pub fn half_open_policy(mut self, policy: HalfOpenPolicy) -> Self {
-        self.half_open_policy = Some(policy);
-        self
-    }
-
-    /// Configure the branch-shaped fallback fact (FLOWIP-120h, renamed by
-    /// FLOWIP-120m from `with_typed_fallback`).
-    ///
-    /// This adapter lets flows express degraded responses purely in terms of
-    /// domain types (`In` -> `Out`) while the circuit breaker handles all
-    /// `ChainEvent` plumbing (serde and metadata copying). `In` is the
-    /// protected input payload, never an output contract member; `Out` is the
-    /// distinct branch fact the carrier decodes as the `Fallback` branch.
-    pub fn with_fallback_fact<In, Out, F>(mut self, f: F) -> Self
+impl CircuitBreakerBuilder<shape::Plain> {
+    /// Configure the branch-shaped fallback fact (FLOWIP-120h/120m): while
+    /// the breaker prevents the call, synthesize this distinct branch fact
+    /// from the protected input payload. Completing the branch shape requires
+    /// a rejection producer for the same input type.
+    pub fn fallback_fact<In, Fb, F>(
+        self,
+        f: F,
+    ) -> CircuitBreakerBuilder<shape::BranchFallback<In, Fb>>
     where
         In: TypedPayload + DeserializeOwned,
-        Out: TypedPayload + Serialize + 'static,
-        F: Fn(&In) -> Out + Send + Sync + 'static,
+        Fb: TypedPayload + Serialize + 'static,
+        F: Fn(&In) -> Fb + Send + Sync + 'static,
     {
         let adapter = move |event: &ChainEvent,
                             lineage: obzenflow_core::config::LineagePolicy|
               -> Vec<ChainEvent> {
-            build_typed_fallback_event::<In, Out, F>(&f, event, lineage)
+            build_typed_fallback_event::<In, Fb, F>(&f, event, lineage)
         };
-
-        self.fallback = Some(Arc::new(adapter));
-        self.fallback_fact_type = Some(TypedFactType::of::<Out>());
-        self
+        CircuitBreakerBuilder {
+            core: self.core,
+            shape: shape::BranchFallback {
+                fallback: Arc::new(adapter),
+                marker: std::marker::PhantomData,
+            },
+        }
     }
 
-    /// Configure the branch-shaped rejection fact (FLOWIP-120h, renamed by
-    /// FLOWIP-120m from `typed_outcome_with`). When the breaker rejects
-    /// without fallback data at the effect boundary in typed-outcome mode,
-    /// this closure synthesizes the author-named rejection fact from the
-    /// guarded input and the rejection reason. The reason must end up in the
-    /// fact payload; strict replay reconstructs branches from facts alone.
-    pub fn with_rejection_fact<In, R, F>(mut self, f: F) -> Self
+    /// Configure the branch-shaped rejection fact (FLOWIP-120h/120m): when
+    /// the breaker rejects without fallback data, synthesize this fact from
+    /// the guarded input and the rejection reason. The reason must end up in
+    /// the fact payload; strict replay reconstructs branches from facts
+    /// alone. Completing the branch shape requires a fallback producer for
+    /// the same input type.
+    pub fn rejection_fact<In, R, F>(
+        self,
+        f: F,
+    ) -> CircuitBreakerBuilder<shape::BranchRejection<In, R>>
     where
         In: TypedPayload + DeserializeOwned,
         R: TypedPayload + Serialize + 'static,
@@ -221,27 +304,25 @@ impl CircuitBreakerBuilder {
               -> Vec<ChainEvent> {
             build_typed_rejection_event::<In, R, F>(&f, event, reason, lineage)
         };
-
-        self.typed_outcome = Some(TypedOutcomeConfig {
-            build_rejection: Arc::new(adapter),
-        });
-        self.rejection_fact_type = Some(TypedFactType::of::<R>());
-        self
+        CircuitBreakerBuilder {
+            core: self.core,
+            shape: shape::BranchRejection {
+                typed_outcome: TypedOutcomeConfig {
+                    build_rejection: Arc::new(adapter),
+                },
+                marker: std::marker::PhantomData,
+            },
+        }
     }
 
     /// Configure the outcome-shaped fallback (FLOWIP-120m): while the breaker
     /// prevents the call, synthesize the protected effect's own outcome
-    /// carrier instead of a distinct branch fact. The closure returns
-    /// `E::Outcome`; the carrier lowers through `into_facts`, so multi-fact
-    /// product outcomes commit as ordinary recorded groups. The handler
-    /// performs the plain effect, with no `Guarded` wrapper: every branch
-    /// resumes `fx.perform` with an outcome value.
-    ///
-    /// This is for fallbacks that are genuine alternative outcomes (a cached
-    /// decision, a stubbed authorization in a test profile). A fallback that
-    /// records non-performance must stay branch-shaped and never manufacture
-    /// an outcome value.
-    pub fn with_outcome_fallback<E, In, F>(mut self, f: F) -> Self
+    /// carrier instead of a distinct branch fact. This is for fallbacks that
+    /// are genuine alternative outcomes (a cached decision, a stubbed
+    /// authorization in a test profile); a fallback that records
+    /// non-performance must stay branch-shaped. Spelled
+    /// `.outcome_fallback::<TheEffect, _, _>(...)`.
+    pub fn outcome_fallback<E, In, F>(self, f: F) -> CircuitBreakerBuilder<shape::Outcome>
     where
         E: obzenflow_runtime::effects::Effect,
         In: TypedPayload + DeserializeOwned,
@@ -252,318 +333,144 @@ impl CircuitBreakerBuilder {
               -> Vec<ChainEvent> {
             build_outcome_fallback_events::<E, In, F>(&f, event, lineage)
         };
+        CircuitBreakerBuilder {
+            core: self.core,
+            shape: shape::Outcome {
+                fallback: Arc::new(adapter),
+                effect_type: E::EFFECT_TYPE,
+                fact_types: <E::Outcome as obzenflow_core::event::schema::TypedFactSet>::fact_types(
+                ),
+            },
+        }
+    }
 
-        self.fallback = Some(Arc::new(adapter));
-        self.outcome_fallback = Some(OutcomeFallbackConfig {
-            effect_type: E::EFFECT_TYPE,
-            fact_types: <E::Outcome as obzenflow_core::event::schema::TypedFactSet>::fact_types(),
-        });
+    /// Transitional-lane fallback for the single-effect `middleware:` route
+    /// that FLOWIP-115g retires: the typed fallback producer without a branch
+    /// registration, so the builder stays plain. The `effects:` lane requires
+    /// the full branch pair via [`fallback_fact`](Self::fallback_fact).
+    pub fn transitional_fallback_fact<In, Fb, F>(mut self, f: F) -> Self
+    where
+        In: TypedPayload + DeserializeOwned,
+        Fb: TypedPayload + Serialize + 'static,
+        F: Fn(&In) -> Fb + Send + Sync + 'static,
+    {
+        let adapter = move |event: &ChainEvent,
+                            lineage: obzenflow_core::config::LineagePolicy|
+              -> Vec<ChainEvent> {
+            build_typed_fallback_event::<In, Fb, F>(&f, event, lineage)
+        };
+        self.core.transitional_fallback = Some(Arc::new(adapter));
         self
     }
 
-    /// Build for the `output_middleware:` macro lane (FLOWIP-120h), naming
-    /// the fallback and rejection branch fact types. Both branches must have
-    /// producers: `with_fallback_fact` for `F` and `with_rejection_fact` for
-    /// `R`, with matching fact types. A mismatch is reported as a flow build
-    /// error rather than a silent misconfiguration.
-    pub fn build_typed<F, R>(self) -> crate::middleware::TypeShapingMiddleware<F, R>
-    where
-        F: TypedPayload + 'static,
-        R: TypedPayload + 'static,
-    {
-        let expected_fallback = TypedFactType::of::<F>();
-        let expected_rejection = TypedFactType::of::<R>();
-
-        let config_error = match (&self.fallback_fact_type, &self.rejection_fact_type) {
-            _ if self.outcome_fallback.is_some() => Some(
-                "a breaker declares one fallback shape: with_outcome_fallback requires \
-                 build_outcome, not build_typed"
-                    .to_string(),
-            ),
-            (None, _) => Some(
-                "build_typed requires with_fallback_fact so the Fallback branch has a producer"
-                    .to_string(),
-            ),
-            (_, None) => Some(
-                "build_typed requires with_rejection_fact so the Rejected branch has a producer"
-                    .to_string(),
-            ),
-            (Some(fallback), _) if fallback.event_type != expected_fallback.event_type => {
-                Some(format!(
-                    "with_fallback_fact produces '{}' but build_typed names fallback '{}'",
-                    fallback.event_type, expected_fallback.event_type,
-                ))
-            }
-            (_, Some(rejection)) if rejection.event_type != expected_rejection.event_type => {
-                Some(format!(
-                    "with_rejection_fact produces '{}' but build_typed names rejection '{}'",
-                    rejection.event_type, expected_rejection.event_type,
-                ))
-            }
-            _ => None,
-        };
-
-        let factory = self.build();
-        crate::middleware::TypeShapingMiddleware::new(factory, "circuit_breaker", config_error)
+    /// Build a plain breaker factory: health-only, or carrying a
+    /// transitional-lane fallback.
+    pub fn build(mut self) -> Box<dyn MiddlewareFactory> {
+        let fallback = self.core.transitional_fallback.take();
+        self.core.into_factory(fallback, None)
     }
+}
 
-    /// Build for the `output_middleware:` macro lane as an outcome-shaped
-    /// registration (FLOWIP-120m). The breaker may synthesize the protected
-    /// effect's own outcome facts; the handler performs the plain effect.
-    /// Branch-shaped producers cannot combine with this shape on one breaker.
-    pub fn build_outcome<E>(self) -> crate::middleware::OutcomeShapingMiddleware
+impl<In, Fb> CircuitBreakerBuilder<shape::BranchFallback<In, Fb>> {
+    /// Complete the branch shape with the rejection producer; see
+    /// [`CircuitBreakerBuilder::rejection_fact`].
+    pub fn rejection_fact<R, F>(self, f: F) -> CircuitBreakerBuilder<shape::Branch<Fb, R>>
     where
-        E: obzenflow_runtime::effects::Effect,
+        In: TypedPayload + DeserializeOwned,
+        R: TypedPayload + Serialize + 'static,
+        F: Fn(&In, CircuitBreakerRejectionReason) -> R + Send + Sync + 'static,
     {
-        let config_error = match &self.outcome_fallback {
-            None => Some(
-                "build_outcome requires with_outcome_fallback so the synthesized outcome has \
-                 a producer"
-                    .to_string(),
-            ),
-            Some(config) if config.effect_type != E::EFFECT_TYPE => Some(format!(
-                "with_outcome_fallback targets effect '{}' but build_outcome names '{}'",
-                config.effect_type,
-                E::EFFECT_TYPE,
-            )),
-            Some(_)
-                if self.fallback_fact_type.is_some()
-                    || self.rejection_fact_type.is_some()
-                    || self.typed_outcome.is_some() =>
-            {
-                Some(
-                    "a breaker declares one fallback shape: with_outcome_fallback cannot \
-                     combine with branch-shaped producers (with_fallback_fact / \
-                     with_rejection_fact)"
-                        .to_string(),
-                )
-            }
-            Some(_) => None,
+        let adapter = move |event: &ChainEvent,
+                            reason: CircuitBreakerRejectionReason,
+                            lineage: obzenflow_core::config::LineagePolicy|
+              -> Vec<ChainEvent> {
+            build_typed_rejection_event::<In, R, F>(&f, event, reason, lineage)
         };
+        CircuitBreakerBuilder {
+            core: self.core,
+            shape: shape::Branch {
+                fallback: self.shape.fallback,
+                typed_outcome: TypedOutcomeConfig {
+                    build_rejection: Arc::new(adapter),
+                },
+                marker: std::marker::PhantomData,
+            },
+        }
+    }
+}
 
+impl<In, R> CircuitBreakerBuilder<shape::BranchRejection<In, R>> {
+    /// Complete the branch shape with the fallback producer; see
+    /// [`CircuitBreakerBuilder::fallback_fact`].
+    pub fn fallback_fact<Fb, F>(self, f: F) -> CircuitBreakerBuilder<shape::Branch<Fb, R>>
+    where
+        In: TypedPayload + DeserializeOwned,
+        Fb: TypedPayload + Serialize + 'static,
+        F: Fn(&In) -> Fb + Send + Sync + 'static,
+    {
+        let adapter = move |event: &ChainEvent,
+                            lineage: obzenflow_core::config::LineagePolicy|
+              -> Vec<ChainEvent> {
+            build_typed_fallback_event::<In, Fb, F>(&f, event, lineage)
+        };
+        CircuitBreakerBuilder {
+            core: self.core,
+            shape: shape::Branch {
+                fallback: Arc::new(adapter),
+                typed_outcome: self.shape.typed_outcome,
+                marker: std::marker::PhantomData,
+            },
+        }
+    }
+}
+
+impl<Fb, R> CircuitBreakerBuilder<shape::Branch<Fb, R>>
+where
+    Fb: TypedPayload + 'static,
+    R: TypedPayload + 'static,
+{
+    /// Build the branch-shaped carrier for the `effects:` lane. The fact
+    /// types were captured by the producers, so there is nothing to restate;
+    /// contract membership is validated at flow build (FLOWIP-120h).
+    pub fn build(self) -> crate::middleware::TypeShapingMiddleware<Fb, R> {
+        let shape::Branch {
+            fallback,
+            typed_outcome,
+            ..
+        } = self.shape;
+        let factory = self.core.into_factory(Some(fallback), Some(typed_outcome));
+        crate::middleware::TypeShapingMiddleware::new(factory, "circuit_breaker", None)
+    }
+}
+
+impl CircuitBreakerBuilder<shape::Outcome> {
+    /// Build the outcome-shaped carrier for the `effects:` lane; the effect's
+    /// fact set was captured by the producer.
+    pub fn build(self) -> crate::middleware::OutcomeShapingMiddleware {
+        let shape::Outcome {
+            fallback,
+            effect_type,
+            fact_types,
+        } = self.shape;
         let registration = obzenflow_runtime::effects::SynthesizedOutcomeRegistration {
-            effect_type: Some(E::EFFECT_TYPE.to_string()),
-            fact_types: self
-                .outcome_fallback
-                .as_ref()
-                .map(|config| config.fact_types.clone())
-                .unwrap_or_default(),
+            effect_type: Some(effect_type.to_string()),
+            fact_types,
             source_label: "circuit_breaker".to_string(),
             kind: obzenflow_runtime::effects::SynthesizedOutcomeKind::OutcomeShaped,
         };
-        let factory = self.build();
-        crate::middleware::OutcomeShapingMiddleware::new(factory, registration, config_error)
-    }
-
-    /// Configure a custom failure classifier used to decide whether a given
-    /// call should be treated as a breaker failure based on the input event
-    /// and the outputs produced by the handler.
-    pub fn with_failure_classifier<F>(mut self, f: F) -> Self
-    where
-        F: Fn(&ChainEvent, &[ChainEvent]) -> bool + Send + Sync + 'static,
-    {
-        self.failure_classifier = Some(Arc::new(f));
-        self
-    }
-
-    /// Configure a custom classifier that can return a rich `FailureClassification`.
-    ///
-    /// When set, this overrides the default classification derived from output
-    /// `ProcessingStatus` values.
-    pub fn with_failure_classification_classifier<F>(mut self, f: F) -> Self
-    where
-        F: Fn(&ChainEvent, &[ChainEvent]) -> FailureClassification + Send + Sync + 'static,
-    {
-        self.failure_classification_classifier = Some(Arc::new(f));
-        self
-    }
-
-    /// Configure the failure mode explicitly. If not set, the breaker uses
-    /// a simple consecutive-failure threshold equal to `threshold`.
-    pub fn failure_mode_consecutive(mut self, max_failures: u32) -> Self {
-        let nz = NonZeroU32::new(max_failures)
-            .expect("CircuitBreaker consecutive max_failures must be greater than zero");
-        self.failure_mode = Some(CircuitBreakerFailureMode::Consecutive { max_failures: nz });
-        self
-    }
-
-    /// Internal helper to configure rate-based failure detection over a sliding window.
-    /// User-facing APIs should use the `rate_based_over_*` helpers instead of this
-    /// lower-level variant that takes a `FailureWindow` directly.
-    pub(crate) fn failure_mode_rate_based_internal(
-        mut self,
-        window: FailureWindow,
-        failure_rate_threshold: f32,
-        minimum_calls: u32,
-    ) -> Self {
-        let minimum_calls = NonZeroU32::new(minimum_calls)
-            .expect("CircuitBreaker rate-based minimum_calls must be greater than zero");
-        self.failure_mode = Some(CircuitBreakerFailureMode::RateBased {
-            window,
-            failure_rate_threshold,
-            slow_call_rate_threshold: None,
-            slow_call_duration_threshold: None,
-            minimum_calls,
-        });
-        self
-    }
-
-    /// Configure rate-based failure mode using a sliding window over the last N calls.
-    /// The circuit opens when the failure rate within this window is greater than or
-    /// equal to `failure_rate_threshold` (0.0 < threshold <= 1.0). By default the
-    /// breaker waits for at least `window_size` calls before evaluating the threshold.
-    pub fn rate_based_over_last_n_calls(
-        self,
-        window_size: u32,
-        failure_rate_threshold: f32,
-    ) -> Self {
-        assert!(
-            window_size > 0,
-            "CircuitBreaker rate_based_over_last_n_calls: window_size must be > 0"
-        );
-        assert!(
-            (0.0..=1.0).contains(&failure_rate_threshold) && failure_rate_threshold > 0.0,
-            "CircuitBreaker rate_based_over_last_n_calls: failure_rate_threshold must be in (0.0, 1.0], got {failure_rate_threshold}"
-        );
-
-        self.failure_mode_rate_based_internal(
-            FailureWindow::Count { size: window_size },
-            failure_rate_threshold,
-            window_size,
-        )
-    }
-
-    /// Configure rate-based failure mode using a sliding time window. The circuit opens
-    /// when the failure rate within `window_duration` is greater than or equal to
-    /// `failure_rate_threshold` (0.0 < threshold <= 1.0). By default the breaker waits
-    /// for at least 10 calls before evaluating the threshold; flows can override this
-    /// via `minimum_calls(..)`.
-    pub fn rate_based_over_duration(
-        self,
-        window_duration: Duration,
-        failure_rate_threshold: f32,
-    ) -> Self {
-        assert!(
-            !window_duration.is_zero(),
-            "CircuitBreaker rate_based_over_duration: window_duration must be > 0"
-        );
-        assert!(
-            (0.0..=1.0).contains(&failure_rate_threshold) && failure_rate_threshold > 0.0,
-            "CircuitBreaker rate_based_over_duration: failure_rate_threshold must be in (0.0, 1.0], got {failure_rate_threshold}"
-        );
-
-        // Default minimum_calls for time windows; can be overridden via `minimum_calls`.
-        const DEFAULT_MIN_CALLS: u32 = 10;
-
-        self.failure_mode_rate_based_internal(
-            FailureWindow::Time {
-                duration: window_duration,
-            },
-            failure_rate_threshold,
-            DEFAULT_MIN_CALLS,
-        )
-    }
-
-    /// Override the minimum number of calls before a rate-based breaker
-    /// considers opening. No-op for consecutive mode.
-    pub fn minimum_calls(mut self, min_calls: u32) -> Self {
-        if let Some(CircuitBreakerFailureMode::RateBased {
-            ref mut minimum_calls,
-            ..
-        }) = self.failure_mode
-        {
-            if let Some(nz) = NonZeroU32::new(min_calls) {
-                *minimum_calls = nz;
-            }
-        }
-        self
-    }
-
-    /// Configure slow-call contribution for rate-based failure detection.
-    ///
-    /// This requires a rate-based failure mode (configured via one of the
-    /// `rate_based_over_*` helpers). The breaker will treat calls whose
-    /// processing time is greater than or equal to `duration` as "slow",
-    /// and will open when the fraction of slow calls in the window is
-    /// greater than or equal to `rate_threshold`.
-    pub fn slow_call(mut self, duration: Duration, rate_threshold: f32) -> Self {
-        assert!(
-            !duration.is_zero(),
-            "CircuitBreaker slow_call: duration must be > 0"
-        );
-        assert!(
-            (0.0..=1.0).contains(&rate_threshold) && rate_threshold > 0.0,
-            "CircuitBreaker slow_call: rate_threshold must be in (0.0, 1.0], got {rate_threshold}"
-        );
-
-        match &mut self.failure_mode {
-            Some(CircuitBreakerFailureMode::RateBased {
-                slow_call_rate_threshold,
-                slow_call_duration_threshold,
-                ..
-            }) => {
-                *slow_call_rate_threshold = Some(rate_threshold);
-                *slow_call_duration_threshold = Some(duration);
-            }
-            _ => {
-                panic!(
-                    "CircuitBreaker slow_call requires a rate-based failure mode; \
-                     call rate_based_over_last_n_calls or rate_based_over_duration first"
-                );
-            }
-        }
-
-        self
-    }
-
-    /// Build the circuit breaker middleware factory
-    pub fn build(self) -> Box<dyn MiddlewareFactory> {
-        // FLOWIP-115b: production retry is removed. A configured retry policy
-        // binds successfully but is ignored with a one-time compatibility
-        // warning; FLOWIP-115h reintroduces retry as boundary-owned recovery, so
-        // the breaker never receives a retry policy on the production path.
-        if self.retry_policy.is_some() {
-            warn_circuit_breaker_retry_ignored();
-        }
-        Box::new(CircuitBreakerFactory {
-            threshold: self.threshold,
-            cooldown: self.cooldown,
-            fallback: self.fallback,
-            typed_outcome: self.typed_outcome,
-            failure_classifier: self.failure_classifier,
-            failure_classification_classifier: self.failure_classification_classifier,
-            failure_mode: self.failure_mode,
-            open_policy: self.open_policy,
-            half_open_policy: self.half_open_policy,
-            unknown_error_kind_policy: self.unknown_error_kind_policy,
-            retry_policy: None,
-            retry_limits: self.retry_limits,
-            failure_classification_policy: self.failure_classification_policy,
-        })
+        let factory = self.core.into_factory(Some(fallback), None);
+        crate::middleware::OutcomeShapingMiddleware::new(factory, registration, None)
     }
 }
 
-/// FLOWIP-115b: production circuit-breaker retry is removed; FLOWIP-115h
-/// reintroduces it as boundary-owned recovery. A retry policy on a built factory
-/// is ignored with this one-time, process-wide compatibility warning.
-fn warn_circuit_breaker_retry_ignored() {
-    static WARNED: std::sync::Once = std::sync::Once::new();
-    WARNED.call_once(|| {
-        tracing::warn!(
-            "Circuit breaker retry configuration is ignored: FLOWIP-115b removed \
-             production retry and FLOWIP-115h reintroduces it as boundary-owned \
-             recovery. Remove the retry policy to silence this warning."
-        );
-    });
-}
-
-/// Factory for creating circuit breaker middleware
+/// Factory for creating circuit breaker middleware. Constructed only through
+/// [`CircuitBreakerBuilder`]; the former duplicated setter surface (TODO
+/// G4/051c) is gone.
 pub struct CircuitBreakerFactory {
     threshold: usize,
     cooldown: Duration,
     fallback: Option<FallbackFn>,
     typed_outcome: Option<TypedOutcomeConfig>,
-    failure_classifier: Option<FailureClassifier>,
     failure_classification_classifier: Option<FailureClassificationClassifier>,
     failure_mode: Option<CircuitBreakerFailureMode>,
     open_policy: Option<OpenPolicy>,
@@ -572,208 +479,6 @@ pub struct CircuitBreakerFactory {
     retry_policy: Option<CircuitBreakerRetryPolicy>,
     retry_limits: RetryLimits,
     failure_classification_policy: FailureClassificationPolicy,
-}
-
-impl CircuitBreakerFactory {
-    /// Create a new circuit breaker factory with the given threshold
-    pub fn new(threshold: usize) -> Self {
-        Self {
-            threshold,
-            cooldown: Duration::from_secs(60),
-            fallback: None,
-            typed_outcome: None,
-            failure_classifier: None,
-            failure_classification_classifier: None,
-            failure_mode: None,
-            open_policy: None,
-            half_open_policy: None,
-            unknown_error_kind_policy: UnknownErrorKindPolicy::TreatAsInfraFailure,
-            retry_policy: None,
-            retry_limits: RetryLimits::default(),
-            failure_classification_policy: FailureClassificationPolicy::default(),
-        }
-    }
-
-    /// Set the cooldown duration before attempting to close the circuit
-    pub fn with_cooldown(mut self, duration: Duration) -> Self {
-        self.cooldown = duration;
-        self
-    }
-
-    /// Configure the fallback factory for this circuit breaker.
-    pub fn with_fallback<F>(mut self, f: F) -> Self
-    where
-        F: Fn(&ChainEvent) -> Vec<ChainEvent> + Send + Sync + 'static,
-    {
-        // Raw fallbacks build their own events; only the typed builders
-        // consume the build-resolved lineage policy.
-        self.fallback = Some(Arc::new(
-            move |event: &ChainEvent, _lineage: obzenflow_core::config::LineagePolicy| f(event),
-        ));
-        self
-    }
-
-    /// Configure a custom failure classifier used to decide whether a given
-    /// call should be treated as a breaker failure based on the input event
-    /// and the outputs produced by the handler.
-    pub fn with_failure_classifier<F>(mut self, f: F) -> Self
-    where
-        F: Fn(&ChainEvent, &[ChainEvent]) -> bool + Send + Sync + 'static,
-    {
-        self.failure_classifier = Some(Arc::new(f));
-        self
-    }
-
-    /// Configure a custom classifier that can return a rich `FailureClassification`.
-    ///
-    /// When set, this overrides the default classification derived from output
-    /// `ProcessingStatus` values.
-    pub fn with_failure_classification_classifier<F>(mut self, f: F) -> Self
-    where
-        F: Fn(&ChainEvent, &[ChainEvent]) -> FailureClassification + Send + Sync + 'static,
-    {
-        self.failure_classification_classifier = Some(Arc::new(f));
-        self
-    }
-
-    /// Configure how this breaker should behave while Open.
-    pub fn open_policy(mut self, policy: OpenPolicy) -> Self {
-        self.open_policy = Some(policy);
-        self
-    }
-
-    /// Configure how this breaker should behave while HalfOpen.
-    pub fn half_open_policy(mut self, policy: HalfOpenPolicy) -> Self {
-        self.half_open_policy = Some(policy);
-        self
-    }
-
-    /// Configure the failure mode explicitly. If not set, the breaker uses
-    /// a simple consecutive-failure threshold equal to `threshold`.
-    pub fn failure_mode_consecutive(mut self, max_failures: u32) -> Self {
-        let nz = NonZeroU32::new(max_failures)
-            .expect("CircuitBreaker consecutive max_failures must be greater than zero");
-        self.failure_mode = Some(CircuitBreakerFailureMode::Consecutive { max_failures: nz });
-        self
-    }
-
-    /// Configure rate-based failure detection over a sliding window.
-    pub(crate) fn failure_mode_rate_based_internal(
-        mut self,
-        window: FailureWindow,
-        failure_rate_threshold: f32,
-        minimum_calls: u32,
-    ) -> Self {
-        self.failure_mode = Some(CircuitBreakerFailureMode::RateBased {
-            window,
-            failure_rate_threshold,
-            slow_call_rate_threshold: None,
-            slow_call_duration_threshold: None,
-            minimum_calls: NonZeroU32::new(minimum_calls)
-                .expect("CircuitBreaker rate-based minimum_calls must be greater than zero"),
-        });
-        self
-    }
-
-    /// Override the minimum number of calls before a rate-based breaker
-    /// considers opening. No-op for consecutive mode.
-    pub fn minimum_calls(mut self, min_calls: u32) -> Self {
-        if let Some(CircuitBreakerFailureMode::RateBased {
-            ref mut minimum_calls,
-            ..
-        }) = self.failure_mode
-        {
-            if let Some(nz) = NonZeroU32::new(min_calls) {
-                *minimum_calls = nz;
-            }
-        }
-        self
-    }
-
-    /// Configure rate-based failure mode using a sliding window over the last N calls.
-    pub fn rate_based_over_last_n_calls(
-        self,
-        window_size: u32,
-        failure_rate_threshold: f32,
-    ) -> Self {
-        assert!(
-            window_size > 0,
-            "CircuitBreaker rate_based_over_last_n_calls: window_size must be > 0"
-        );
-        assert!(
-            (0.0..=1.0).contains(&failure_rate_threshold) && failure_rate_threshold > 0.0,
-            "CircuitBreaker rate_based_over_last_n_calls: failure_rate_threshold must be in (0.0, 1.0], got {failure_rate_threshold}"
-        );
-
-        self.failure_mode_rate_based_internal(
-            FailureWindow::Count { size: window_size },
-            failure_rate_threshold,
-            window_size,
-        )
-    }
-
-    /// Configure rate-based failure mode using a sliding time window.
-    pub fn rate_based_over_duration(
-        self,
-        window_duration: Duration,
-        failure_rate_threshold: f32,
-    ) -> Self {
-        assert!(
-            !window_duration.is_zero(),
-            "CircuitBreaker rate_based_over_duration: window_duration must be > 0"
-        );
-        assert!(
-            (0.0..=1.0).contains(&failure_rate_threshold) && failure_rate_threshold > 0.0,
-            "CircuitBreaker rate_based_over_duration: failure_rate_threshold must be in (0.0, 1.0], got {failure_rate_threshold}"
-        );
-
-        const DEFAULT_MIN_CALLS: u32 = 10;
-
-        self.failure_mode_rate_based_internal(
-            FailureWindow::Time {
-                duration: window_duration,
-            },
-            failure_rate_threshold,
-            DEFAULT_MIN_CALLS,
-        )
-    }
-
-    /// Configure slow-call contribution for rate-based failure detection.
-    ///
-    /// This requires a rate-based failure mode (configured via one of the
-    /// `rate_based_over_*` helpers). The breaker will treat calls whose
-    /// processing time is greater than or equal to `duration` as "slow",
-    /// and will open when the fraction of slow calls in the window is
-    /// greater than or equal to `rate_threshold`.
-    pub fn slow_call(mut self, duration: Duration, rate_threshold: f32) -> Self {
-        assert!(
-            !duration.is_zero(),
-            "CircuitBreaker slow_call: duration must be > 0"
-        );
-        assert!(
-            (0.0..=1.0).contains(&rate_threshold) && rate_threshold > 0.0,
-            "CircuitBreaker slow_call: rate_threshold must be in (0.0, 1.0], got {rate_threshold}"
-        );
-
-        match &mut self.failure_mode {
-            Some(CircuitBreakerFailureMode::RateBased {
-                slow_call_rate_threshold,
-                slow_call_duration_threshold,
-                ..
-            }) => {
-                *slow_call_rate_threshold = Some(rate_threshold);
-                *slow_call_duration_threshold = Some(duration);
-            }
-            _ => {
-                panic!(
-                    "CircuitBreaker slow_call requires a rate-based failure mode; \
-                     call rate_based_over_last_n_calls or rate_based_over_duration first"
-                );
-            }
-        }
-
-        self
-    }
 }
 
 impl CircuitBreakerFactory {
@@ -839,7 +544,6 @@ impl CircuitBreakerFactory {
             effective_threshold,
             self.cooldown,
             self.fallback.clone(),
-            self.failure_classifier.clone(),
             Some(config.stage_id),
             None,
         );
@@ -913,7 +617,7 @@ impl CircuitBreakerFactory {
             }
         });
 
-        match effect_type {
+        let registration = match effect_type {
             Some(effect_type) => control_middleware.register_circuit_breaker_for_effect(
                 config.stage_id,
                 effect_type,
@@ -925,7 +629,14 @@ impl CircuitBreakerFactory {
                 snapshotter,
                 cb_state_view,
             ),
-        }
+        };
+        registration.map_err(|message| {
+            MiddlewareFactoryError::invalid_configuration(
+                self.label(),
+                &config.name,
+                std::io::Error::other(message),
+            )
+        })?;
 
         Ok(middleware)
     }
@@ -979,6 +690,15 @@ impl MiddlewareFactory for CircuitBreakerFactory {
         config: &StageConfig,
         control_middleware: std::sync::Arc<ControlMiddlewareAggregator>,
     ) -> crate::middleware::MiddlewareFactoryResult<Box<dyn Middleware>> {
+        if self.retry_policy.is_some() {
+            return Err(MiddlewareFactoryError::invalid_configuration(
+                self.label(),
+                &config.name,
+                std::io::Error::other(
+                    "circuit-breaker retry is supported only on declared effects",
+                ),
+            ));
+        }
         self.create_keyed(config, control_middleware, None)
     }
 
@@ -1043,6 +763,36 @@ impl MiddlewareFactory for CircuitBreakerFactory {
                 )
             })?;
 
+        if self.retry_policy.is_some() {
+            match request.surface {
+                MiddlewareSurface::Effect(surface)
+                    if matches!(
+                        surface.safety,
+                        EffectSafety::Idempotent | EffectSafety::NonIdempotentRequiresKey
+                    ) => {}
+                MiddlewareSurface::Effect(surface) => {
+                    return Err(MiddlewareFactoryError::invalid_configuration(
+                        self.label(),
+                        &context.config.name,
+                        std::io::Error::other(format!(
+                            "circuit-breaker retry is not eligible for effect '{}' with safety {:?}",
+                            surface.effect_type.as_str(),
+                            surface.safety
+                        )),
+                    ));
+                }
+                _ => {
+                    return Err(MiddlewareFactoryError::invalid_configuration(
+                        self.label(),
+                        &context.config.name,
+                        std::io::Error::other(
+                            "circuit-breaker retry is supported only on declared effects",
+                        ),
+                    ));
+                }
+            }
+        }
+
         match request.surface {
             MiddlewareSurface::SourcePoll(_) => {
                 // Build one breaker (registering its state view and snapshotter),
@@ -1081,7 +831,9 @@ impl MiddlewareFactory for CircuitBreakerFactory {
                     Some(effect_surface.effect_type.clone()),
                 )?;
                 Ok(MiddlewareSurfaceAttachment::Effect(
-                    crate::middleware::EffectPolicyAttachment::event_aware(Arc::new(middleware)),
+                    crate::middleware::EffectPolicyAttachment::circuit_breaker(Arc::new(
+                        middleware,
+                    )),
                 ))
             }
             MiddlewareSurface::SinkDelivery(_) => {
@@ -1183,7 +935,7 @@ impl MiddlewareFactory for CircuitBreakerFactory {
                 "max_attempts": policy.max_attempts,
                 "backoff": backoff,
                 "max_single_delay_ms": self.retry_limits.max_single_delay.as_millis() as u64,
-                "max_total_wall_ms": self.retry_limits.max_total_wall_time.as_millis() as u64,
+                "max_attempt_start_window_ms": self.retry_limits.max_attempt_start_window.as_millis() as u64,
             })
         });
 
@@ -1199,13 +951,202 @@ impl MiddlewareFactory for CircuitBreakerFactory {
 
 /// Create a circuit breaker factory with default settings
 pub fn circuit_breaker(threshold: usize) -> Box<dyn MiddlewareFactory> {
-    Box::new(CircuitBreakerFactory::new(threshold))
+    let failures = u32::try_from(threshold).expect("circuit-breaker threshold must fit in u32");
+    CircuitBreaker::opens_after(failures).build()
 }
 
 /// Create a circuit breaker factory with defaults tuned for AI provider calls.
 pub fn ai_circuit_breaker() -> Box<dyn MiddlewareFactory> {
-    CircuitBreakerBuilder::new(5)
-        .with_retry_exponential(3)
-        .with_retry_limits(RetryLimits::default())
-        .build()
+    CircuitBreaker::opens_after(5).build()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::middleware::control::ControlMiddlewareAggregator;
+    use crate::middleware::{
+        EffectPolicyAttachment, EffectSurface, EffectUnitId, MiddlewareAttachmentRequest,
+        MiddlewareDeclarationIndex, MiddlewareKind, MiddlewareOrigin, ProtectedUnit,
+        ProtectedUnitId,
+    };
+    use obzenflow_core::event::context::StageType;
+    use obzenflow_core::StageId;
+    use obzenflow_runtime::effects::EffectSafety;
+
+    fn test_stage_config() -> StageConfig {
+        StageConfig {
+            stage_id: StageId::new(),
+            name: "breaker_factory_test".to_string(),
+            flow_name: "breaker_factory_test_flow".to_string(),
+            cycle_guard: None,
+            lineage: obzenflow_core::config::LineagePolicy::default(),
+            resolved_policies: Default::default(),
+        }
+    }
+
+    fn materialize_effect_attachment(
+        factory: &dyn MiddlewareFactory,
+        config: &StageConfig,
+        control: &Arc<ControlMiddlewareAggregator>,
+        declaration_index: usize,
+        safety: EffectSafety,
+    ) -> Result<EffectPolicyAttachment, String> {
+        let surface = MiddlewareSurface::Effect(EffectSurface {
+            stage_id: config.stage_id,
+            effect_type: EffectTypeKey::from("effect.retry"),
+            safety,
+        });
+        let protected_unit = ProtectedUnitId {
+            stage_id: config.stage_id,
+            unit: ProtectedUnit::Effect(EffectUnitId {
+                effect_type: EffectTypeKey::from("effect.retry"),
+            }),
+        };
+        let origin = MiddlewareOrigin::Stage;
+        let request = MiddlewareAttachmentRequest {
+            surface: &surface,
+            protected_unit: &protected_unit,
+            origin: &origin,
+            declaration_index: MiddlewareDeclarationIndex::effect_policy(declaration_index),
+        };
+        let context = MiddlewareMaterializationContext {
+            config,
+            control_middleware: control,
+            stage_type: StageType::Transform,
+        };
+        match factory
+            .materialize(request, &context)
+            .map_err(|error| error.to_string())?
+        {
+            MiddlewareSurfaceAttachment::Effect(attachment) => Ok(attachment),
+            _ => panic!("circuit breaker should materialize an effect attachment"),
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "max_attempts must be greater than zero")]
+    fn zero_attempt_configuration_is_rejected() {
+        let _ = Retry::fixed(Duration::ZERO).attempts(0);
+    }
+
+    #[test]
+    fn retry_materialization_is_limited_to_safe_declared_effects() {
+        let config = test_stage_config();
+        let control = Arc::new(ControlMiddlewareAggregator::new());
+        let factory = CircuitBreaker::opens_after(3)
+            .retry(Retry::fixed(Duration::ZERO).attempts(2))
+            .build();
+        let error = match materialize_effect_attachment(
+            factory.as_ref(),
+            &config,
+            &control,
+            0,
+            EffectSafety::Transactional,
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("unsafe recovery attachment must fail"),
+        };
+        assert!(error.contains("retry is not eligible"), "{error}");
+
+        let config = test_stage_config();
+        let control = Arc::new(ControlMiddlewareAggregator::new());
+        let factory = CircuitBreaker::opens_after(3)
+            .retry(Retry::fixed(Duration::ZERO).attempts(2))
+            .build();
+        materialize_effect_attachment(
+            factory.as_ref(),
+            &config,
+            &control,
+            0,
+            EffectSafety::NonIdempotentRequiresKey,
+        )
+        .expect("a keyed non-idempotent effect is recovery-eligible");
+    }
+
+    #[test]
+    fn a_second_retrying_breaker_for_one_effect_fails_materialization() {
+        let config = test_stage_config();
+        let control = Arc::new(ControlMiddlewareAggregator::new());
+        let first = CircuitBreaker::opens_after(3)
+            .retry(Retry::fixed(Duration::ZERO).attempts(2))
+            .build();
+        let second = CircuitBreaker::opens_after(3)
+            .retry(Retry::fixed(Duration::ZERO).attempts(2))
+            .build();
+
+        materialize_effect_attachment(
+            first.as_ref(),
+            &config,
+            &control,
+            0,
+            EffectSafety::Idempotent,
+        )
+        .expect("first breaker should materialize");
+        let error = match materialize_effect_attachment(
+            second.as_ref(),
+            &config,
+            &control,
+            1,
+            EffectSafety::Idempotent,
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("duplicate breaker must be rejected, not replace the first"),
+        };
+        assert!(error.contains("already registered"), "{error}");
+    }
+
+    #[test]
+    fn ai_breaker_helper_is_health_only() {
+        let snapshot = ai_circuit_breaker()
+            .config_snapshot()
+            .expect("AI breaker should expose its configuration");
+        assert!(snapshot["retry"].is_null());
+    }
+
+    /// FLOWIP-120c H2 kind agreement: a factory and the instance it creates
+    /// must report the same middleware kind, because build-time guards read
+    /// the factory while chain runners enforce on the instance.
+    #[test]
+    fn factory_and_instance_kinds_agree() {
+        use crate::middleware::control::rate_limiter::RateLimiterBuilder;
+
+        let config = test_stage_config();
+
+        let factories: Vec<(Box<dyn MiddlewareFactory>, MiddlewareKind, bool)> = vec![
+            (circuit_breaker(3), MiddlewareKind::Policy, true),
+            (
+                RateLimiterBuilder::new(5.0).build(),
+                MiddlewareKind::Policy,
+                false,
+            ),
+        ];
+
+        for (factory, expected, supports_generic_create) in factories {
+            assert_eq!(
+                factory.kind(),
+                expected,
+                "factory '{}' kind mismatch",
+                factory.label()
+            );
+            if !supports_generic_create {
+                assert!(
+                    factory
+                        .create(&config, Arc::new(ControlMiddlewareAggregator::new()))
+                        .is_err(),
+                    "factory '{}' should fail closed on generic create",
+                    factory.label()
+                );
+                continue;
+            }
+            let instance = factory
+                .create(&config, Arc::new(ControlMiddlewareAggregator::new()))
+                .expect("factory should materialize");
+            assert_eq!(
+                instance.kind(),
+                factory.kind(),
+                "instance kind for '{}' must agree with its factory",
+                factory.label()
+            );
+        }
+    }
 }

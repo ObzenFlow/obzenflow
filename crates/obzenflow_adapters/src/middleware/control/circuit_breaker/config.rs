@@ -63,8 +63,9 @@ impl Default for HalfOpenPolicy {
 
 impl HalfOpenPolicy {
     /// Create a new HalfOpenPolicy with the given probe limit and
-    /// behaviour for non-probe calls.
-    pub fn new(permitted_probes: NonZeroU32, on_rejected: OpenPolicy) -> Self {
+    /// behaviour for non-probe calls. Flows configure this through the
+    /// builder's `probes` and `when_probe_rejected` methods.
+    pub(crate) fn new(permitted_probes: NonZeroU32, on_rejected: OpenPolicy) -> Self {
         Self {
             permitted_probes,
             on_rejected,

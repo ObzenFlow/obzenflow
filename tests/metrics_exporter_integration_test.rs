@@ -12,7 +12,7 @@
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use obzenflow_adapters::middleware::{
-    circuit_breaker, rate_limit_with_burst, CircuitBreakerBuilder,
+    circuit_breaker, failure_rate, rate_limit_with_burst, CircuitBreaker,
 };
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
 use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
@@ -606,7 +606,7 @@ async fn metrics_circuit_breaker_cumulative_are_exported_and_trippable() -> Resu
             // 1001 events ensures the 1000-threshold summary is emitted before the run completes.
             // First poll succeeds, second poll fails (Timeout), opening the breaker.
             src = source!(MetricEvent => ErrorAfterFirstSource::new(), [
-                CircuitBreakerBuilder::new(1)
+                CircuitBreaker::opens_after(1)
                     .cooldown(Duration::from_millis(0))
                     .build()
             ]);
@@ -732,9 +732,8 @@ async fn metrics_source_rate_based_circuit_breaker_opens_and_exports_lifecycle()
 
         stages: {
             src = source!(MetricEvent => ErrorAfterFirstSource::new(), [
-                CircuitBreakerBuilder::new(10)
+                CircuitBreaker::opens_when(failure_rate(0.5).over_last_calls(2))
                     .cooldown(Duration::from_millis(0))
-                    .rate_based_over_last_n_calls(2, 0.5)
                     .build()
             ]);
             trans = transform!(MetricEvent -> MetricEvent => DropTransform);

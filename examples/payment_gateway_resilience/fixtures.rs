@@ -27,6 +27,17 @@ pub fn scripted_store_orders() -> Vec<CustomerOrderPlaced> {
     split_channel(OrderChannel::Store)
 }
 
+pub fn retry_proof_order() -> CustomerOrderPlaced {
+    CustomerOrderPlaced {
+        order_id: "retry-proof-order".to_string(),
+        customer_id: "retry-proof-customer".to_string(),
+        channel: OrderChannel::Web,
+        amount_cents: 10_00,
+        payment_method_state: PaymentMethodState::Valid,
+        phase: TrafficPhase::Warmup,
+    }
+}
+
 fn split_channel(channel: OrderChannel) -> Vec<CustomerOrderPlaced> {
     scripted_orders()
         .into_iter()
