@@ -119,8 +119,8 @@ fn invalid_reason_for(order: &CustomerOrderPlaced) -> Option<InvalidOrderReason>
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::domain::{OrderChannel, TrafficPhase};
+    use super::*;
 
     fn order(payment_method_state: PaymentMethodState, amount_cents: u64) -> CustomerOrderPlaced {
         CustomerOrderPlaced {

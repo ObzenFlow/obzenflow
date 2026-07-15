@@ -1267,3 +1267,194 @@ pub fn circuit_breaker(threshold: usize) -> Box<dyn MiddlewareFactory> {
 pub fn ai_circuit_breaker() -> Box<dyn MiddlewareFactory> {
     CircuitBreakerBuilder::new(5).build()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::middleware::control::ControlMiddlewareAggregator;
+    use crate::middleware::{
+        EffectPolicyAttachment, EffectSurface, EffectUnitId, MiddlewareAttachmentRequest,
+        MiddlewareDeclarationIndex, MiddlewareKind, MiddlewareOrigin, ProtectedUnit,
+        ProtectedUnitId,
+    };
+    use obzenflow_core::event::context::StageType;
+    use obzenflow_core::StageId;
+    use obzenflow_runtime::effects::EffectSafety;
+
+    fn test_stage_config() -> StageConfig {
+        StageConfig {
+            stage_id: StageId::new(),
+            name: "breaker_factory_test".to_string(),
+            flow_name: "breaker_factory_test_flow".to_string(),
+            cycle_guard: None,
+            lineage: obzenflow_core::config::LineagePolicy::default(),
+            resolved_policies: Default::default(),
+        }
+    }
+
+    fn materialize_effect_attachment(
+        factory: &dyn MiddlewareFactory,
+        config: &StageConfig,
+        control: &Arc<ControlMiddlewareAggregator>,
+        declaration_index: usize,
+        safety: EffectSafety,
+    ) -> Result<EffectPolicyAttachment, String> {
+        let surface = MiddlewareSurface::Effect(EffectSurface {
+            stage_id: config.stage_id,
+            effect_type: EffectTypeKey::from("effect.retry"),
+            safety,
+        });
+        let protected_unit = ProtectedUnitId {
+            stage_id: config.stage_id,
+            unit: ProtectedUnit::Effect(EffectUnitId {
+                effect_type: EffectTypeKey::from("effect.retry"),
+            }),
+        };
+        let origin = MiddlewareOrigin::Stage;
+        let request = MiddlewareAttachmentRequest {
+            surface: &surface,
+            protected_unit: &protected_unit,
+            origin: &origin,
+            declaration_index: MiddlewareDeclarationIndex::effect_policy(declaration_index),
+        };
+        let context = MiddlewareMaterializationContext {
+            config,
+            control_middleware: control,
+            stage_type: StageType::Transform,
+        };
+        match factory
+            .materialize(request, &context)
+            .map_err(|error| error.to_string())?
+        {
+            MiddlewareSurfaceAttachment::Effect(attachment) => Ok(attachment),
+            _ => panic!("circuit breaker should materialize an effect attachment"),
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "max_attempts must be greater than zero")]
+    fn zero_attempt_configuration_is_rejected() {
+        let _ = CircuitBreakerBuilder::new(3).with_retry_fixed(Duration::ZERO, 0);
+    }
+
+    #[test]
+    fn retry_materialization_is_limited_to_safe_declared_effects() {
+        let config = test_stage_config();
+        let control = Arc::new(ControlMiddlewareAggregator::new());
+        let factory = CircuitBreakerBuilder::new(3)
+            .with_retry_fixed(Duration::ZERO, 2)
+            .build();
+        let error = match materialize_effect_attachment(
+            factory.as_ref(),
+            &config,
+            &control,
+            0,
+            EffectSafety::Transactional,
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("unsafe recovery attachment must fail"),
+        };
+        assert!(error.contains("retry is not eligible"), "{error}");
+
+        let config = test_stage_config();
+        let control = Arc::new(ControlMiddlewareAggregator::new());
+        let factory = CircuitBreakerBuilder::new(3)
+            .with_retry_fixed(Duration::ZERO, 2)
+            .build();
+        materialize_effect_attachment(
+            factory.as_ref(),
+            &config,
+            &control,
+            0,
+            EffectSafety::NonIdempotentRequiresKey,
+        )
+        .expect("a keyed non-idempotent effect is recovery-eligible");
+    }
+
+    #[test]
+    fn a_second_retrying_breaker_for_one_effect_fails_materialization() {
+        let config = test_stage_config();
+        let control = Arc::new(ControlMiddlewareAggregator::new());
+        let first = CircuitBreakerBuilder::new(3)
+            .with_retry_fixed(Duration::ZERO, 2)
+            .build();
+        let second = CircuitBreakerBuilder::new(3)
+            .with_retry_fixed(Duration::ZERO, 2)
+            .build();
+
+        materialize_effect_attachment(
+            first.as_ref(),
+            &config,
+            &control,
+            0,
+            EffectSafety::Idempotent,
+        )
+        .expect("first breaker should materialize");
+        let error = match materialize_effect_attachment(
+            second.as_ref(),
+            &config,
+            &control,
+            1,
+            EffectSafety::Idempotent,
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("duplicate breaker must be rejected, not replace the first"),
+        };
+        assert!(error.contains("already registered"), "{error}");
+    }
+
+    #[test]
+    fn ai_breaker_helper_is_health_only() {
+        let snapshot = ai_circuit_breaker()
+            .config_snapshot()
+            .expect("AI breaker should expose its configuration");
+        assert!(snapshot["retry"].is_null());
+    }
+
+    /// FLOWIP-120c H2 kind agreement: a factory and the instance it creates
+    /// must report the same middleware kind, because build-time guards read
+    /// the factory while chain runners enforce on the instance.
+    #[test]
+    fn factory_and_instance_kinds_agree() {
+        use crate::middleware::control::rate_limiter::RateLimiterBuilder;
+
+        let config = test_stage_config();
+
+        let factories: Vec<(Box<dyn MiddlewareFactory>, MiddlewareKind, bool)> = vec![
+            (circuit_breaker(3), MiddlewareKind::Policy, true),
+            (
+                RateLimiterBuilder::new(5.0).build(),
+                MiddlewareKind::Policy,
+                false,
+            ),
+        ];
+
+        for (factory, expected, supports_generic_create) in factories {
+            assert_eq!(
+                factory.kind(),
+                expected,
+                "factory '{}' kind mismatch",
+                factory.label()
+            );
+            if !supports_generic_create {
+                assert!(
+                    factory
+                        .create(&config, Arc::new(ControlMiddlewareAggregator::new()))
+                        .is_err(),
+                    "factory '{}' should fail closed on generic create",
+                    factory.label()
+                );
+                continue;
+            }
+            let instance = factory
+                .create(&config, Arc::new(ControlMiddlewareAggregator::new()))
+                .expect("factory should materialize");
+            assert_eq!(
+                instance.kind(),
+                factory.kind(),
+                "instance kind for '{}' must agree with its factory",
+                factory.label()
+            );
+        }
+    }
+}

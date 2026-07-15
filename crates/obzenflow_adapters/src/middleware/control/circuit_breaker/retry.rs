@@ -207,9 +207,9 @@ impl<'a> EffectRecoverySession<'a> {
         self.attempts = self.attempts.saturating_add(1);
         prepare_classification_context(result, ctx);
         self.last_observation = effect_observation(event, result);
-        let (classification, _, _) =
-            self.breaker
-                .classify_call(event, &self.last_observation, ctx);
+        let (classification, _, _) = self
+            .breaker
+            .classify_call(event, &self.last_observation, ctx);
         self.last_classification = classification;
         self.last_result_ok = result.is_ok();
 
@@ -295,10 +295,8 @@ impl<'a> EffectRecoverySession<'a> {
             return true;
         };
         self.write_exhausted(reason, ctx);
-        self.circuit_open_stop = matches!(
-            reason,
-            CircuitBreakerRetryStopReason::CircuitNoLongerClosed
-        );
+        self.circuit_open_stop =
+            matches!(reason, CircuitBreakerRetryStopReason::CircuitNoLongerClosed);
         false
     }
 

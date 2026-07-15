@@ -37,8 +37,7 @@ fn trybuild_binaries_carry_the_compile_fail_name() {
                 .file_stem()
                 .and_then(|stem| stem.to_str())
                 .unwrap_or_default();
-            let source =
-                std::fs::read_to_string(&path).expect("test source should be readable");
+            let source = std::fs::read_to_string(&path).expect("test source should be readable");
             if source.contains(&needle) && !stem.contains("compile_fail") {
                 offenders.push(path);
             }

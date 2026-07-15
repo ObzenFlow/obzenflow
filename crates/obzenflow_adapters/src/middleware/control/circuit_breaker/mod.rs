@@ -39,13 +39,13 @@ mod retry;
 mod state;
 mod window;
 
+pub(crate) use classifier::effect_error_event;
 pub use classifier::{FailureClassification, FailureClassificationPolicy, UnknownErrorKindPolicy};
 pub use config::{HalfOpenPolicy, OpenPolicy};
 pub use factory::{
     ai_circuit_breaker, circuit_breaker, CircuitBreakerBuilder, CircuitBreakerFactory,
 };
 pub use retry::RetryLimits;
-pub(crate) use classifier::effect_error_event;
 pub(crate) use retry::{EffectRecoverySession, RecoveryDirective};
 
 use classifier::{FailureClassificationClassifier, FailureClassifier};

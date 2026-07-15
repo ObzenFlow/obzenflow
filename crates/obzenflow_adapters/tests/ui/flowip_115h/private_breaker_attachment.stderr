@@ -4,7 +4,7 @@ error[E0624]: associated function `circuit_breaker` is private
 10 |     let _ = EffectPolicyAttachment::circuit_breaker(policy);
    |                                     ^^^^^^^^^^^^^^^ private associated function
    |
-  ::: src/middleware/control/policy/effect.rs
+  ::: src/middleware/control/policy/effect/attachment.rs
    |
    |     pub(crate) fn circuit_breaker(policy: Arc<CircuitBreakerMiddleware>) -> Self {
    |     ---------------------------------------------------------------------------- private associated function defined here
