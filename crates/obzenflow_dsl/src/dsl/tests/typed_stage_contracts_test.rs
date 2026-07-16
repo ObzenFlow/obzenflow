@@ -549,14 +549,11 @@ mod tests {
     fn transform_macros_accept_explicit_output_contract_members() {
         let transform = crate::transform!(
             name: "transform",
-            InputEvent -> ExactTransformOutput,
+            InputEvent -> OutputEvent,
             outputs: [OutputEvent, AlternateEvent] => TypedExactTransform
         );
         let transform_meta = transform.typing_metadata().unwrap();
-        assert_eq!(
-            transform_meta.output_type,
-            TypeHint::exact::<ExactTransformOutput>()
-        );
+        assert_eq!(transform_meta.output_type, exact::<OutputEvent>());
         assert_output_contract(
             transform_meta,
             vec![exact::<OutputEvent>(), exact::<AlternateEvent>()],

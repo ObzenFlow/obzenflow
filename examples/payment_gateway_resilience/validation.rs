@@ -8,9 +8,10 @@
 //! order by a single stage with a multi-type output contract:
 //!
 //! ```text
-//! CustomerOrderPlaced -> ValidationOutcome
-//! ValidationOutcome::Members = { ValidatedOrder, InvalidOrder, OrderCancelled }
+//! CustomerOrderPlaced -> { ValidatedOrder, InvalidOrder, OrderCancelled }
 //! ```
+//! `ValidationOutcome` is the handler-side carrier proven leaf-equal to that
+//! flat fact set; it is not a topology payload.
 //!
 //! A valid order becomes `ValidatedOrder` and proceeds to payment
 //! authorization. An invalid order records two facts: `InvalidOrder` (the

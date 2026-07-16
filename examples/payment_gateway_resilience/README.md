@@ -45,13 +45,14 @@ store_orders --+--> validate_order -- ValidatedOrder --> authorize_payment -- Pa
                       \-- OrderCancelled -----------------+-- OrderCancelled --> cancelled_orders
 ```
 
-`validate_order` classifies each order exactly once with the typed signature
-`CustomerOrderPlaced -> ValidationOutcome`. The carrier declares the flat
-output set `{ ValidatedOrder, InvalidOrder, OrderCancelled }` and is never
-journalled. `InvalidOrder` and `PaymentDeclined` are journal-recorded provenance
-facts with no sink of their own; their lifecycle consequence, `OrderCancelled`,
-converges from both producers on one cancelled-orders delivery. The journal is
-the record, sinks are external deliveries.
+`validate_order` classifies each order exactly once and declares
+`CustomerOrderPlaced -> { ValidatedOrder, InvalidOrder, OrderCancelled }`. The
+handler-side `ValidationOutcome` carrier is proven leaf-equal to that flat fact
+set and is never journalled. `InvalidOrder` and `PaymentDeclined` are
+journal-recorded provenance facts with no sink of their own; their lifecycle
+consequence, `OrderCancelled`, converges from both producers on one
+cancelled-orders delivery. The journal is the record, sinks are external
+deliveries.
 
 The sources script three phases so you can correlate behaviour with logs and
 metrics: a healthy **warmup**, an **outage** where every gateway call fails, and

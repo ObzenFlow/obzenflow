@@ -1511,6 +1511,9 @@ macro_rules! __obzenflow_transform_typed {
         $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
     }};
     // -- exact input, real handler, explicit output contract --
+    // FLOWIP-120b Option B keeps the flat output contract in the arrow's
+    // type-signature position; the handler-side carrier is never named in the
+    // flow.
     (input = exact($in:ty), output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = $handler:expr, middleware = [$($mw:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
         let __handler = $handler;
         fn __obzenflow_assert_handler_output_declares_every_arrow_member<
@@ -1522,7 +1525,6 @@ macro_rules! __obzenflow_transform_typed {
         where
             __Handler: ::obzenflow_runtime::stages::common::handlers::TypedTransformHandler<
                 Input = $in,
-                Output = $out,
             >,
             <::obzenflow_core::stage_fact_set![$($member),+] as ::obzenflow_core::StageFactSet>::Members:
                 ::obzenflow_core::SubsetOf<
@@ -1540,7 +1542,6 @@ macro_rules! __obzenflow_transform_typed {
         where
             __Handler: ::obzenflow_runtime::stages::common::handlers::TypedTransformHandler<
                 Input = $in,
-                Output = $out,
             >,
             <<__Handler as ::obzenflow_runtime::stages::common::handlers::TypedTransformHandler>::Output as ::obzenflow_core::StageFactSet>::Members:
                 ::obzenflow_core::SubsetOf<
@@ -1558,14 +1559,13 @@ macro_rules! __obzenflow_transform_typed {
             ::obzenflow_runtime::stages::common::handlers::TypedTransformHandlerAdapter::new(
                 __handler,
             );
-        ::obzenflow_runtime::typing::assert_transform_contract::<_, $in, $out>(&__handler);
         let __metadata = $crate::dsl::typing::StageTypingMetadata::transform(
             $crate::dsl::typing::TypeHint::exact_payload::<$in>(),
-            $crate::dsl::typing::TypeHint::exact::<$out>(),
+            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
             false,
             None,
         )
-        .with_output_contract($crate::__obzenflow_output_contract_members!($($member),+));
+        .with_additional_output_contract($crate::__obzenflow_output_contract_members!($($member),+));
         let __descriptor = $crate::__obzenflow_transform_untyped!(name = $name, handler = __handler, middleware = [$($mw),*] $(, backpressure = [$($bp)?])?);
         $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
     }};

@@ -38,8 +38,5 @@ impl TypedTransformHandler for Handler {
 }
 
 fn main() {
-    let _ = obzenflow_dsl::transform!(
-        Input -> Output,
-        outputs: [First, Missing] => Handler
-    );
+    let _ = obzenflow_dsl::transform!(Input -> { First, Missing } => Handler);
 }
