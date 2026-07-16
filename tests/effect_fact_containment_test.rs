@@ -15,10 +15,14 @@ use obzenflow_core::{
     id::StageId,
     TypedPayload, WriterId,
 };
+use obzenflow_dsl::dsl::stage_descriptor::{EffectfulTransformDescriptor, StageDescriptor};
+use obzenflow_dsl::dsl::typing::{wrap_typed_descriptor, StageTypingMetadata, TypeHint};
 use obzenflow_dsl::{effectful_transform, flow, sink, source, FlowDefinition};
 use obzenflow_infra::application::FlowApplication;
 use obzenflow_infra::journal::disk_journals;
-use obzenflow_runtime::effects::{Effect, EffectContext, EffectError, EffectSafety, Effects};
+use obzenflow_runtime::effects::{
+    Effect, EffectContext, EffectDeclaration, EffectError, EffectSafety, Effects,
+};
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{
     EffectfulTransformHandler, FiniteSourceHandler, SinkHandler,
@@ -118,8 +122,14 @@ struct PerformTransform;
 #[async_trait]
 impl EffectfulTransformHandler for PerformTransform {
     type Input = ContainmentInput;
+    type Output = obzenflow_core::stage_fact_set![ContainmentOutput, ContainmentEffectValue];
+    type AllowedEffects = obzenflow_runtime::effect_set![ValueEffect];
 
-    async fn process(&self, input: ContainmentInput, fx: &mut Effects) -> Result<(), HandlerError> {
+    async fn process(
+        &self,
+        input: ContainmentInput,
+        fx: &mut Effects<Self::Output, Self::AllowedEffects>,
+    ) -> Result<obzenflow_runtime::effects::StageCompletion<Self::Output>, HandlerError> {
         let effect_value = fx
             .perform(ValueEffect { value: input.value })
             .await
@@ -129,7 +139,7 @@ impl EffectfulTransformHandler for PerformTransform {
         })
         .await
         .map_err(|e| HandlerError::Other(e.to_string()))?;
-        Ok(())
+        Ok(fx.complete()?)
     }
 
     fn stage_logic_version(&self) -> &str {
@@ -143,12 +153,18 @@ struct EmitOnlyTransform;
 #[async_trait]
 impl EffectfulTransformHandler for EmitOnlyTransform {
     type Input = ContainmentInput;
+    type Output = ContainmentOutput;
+    type AllowedEffects = obzenflow_runtime::effect_set![];
 
-    async fn process(&self, input: ContainmentInput, fx: &mut Effects) -> Result<(), HandlerError> {
+    async fn process(
+        &self,
+        input: ContainmentInput,
+        fx: &mut Effects<Self::Output, Self::AllowedEffects>,
+    ) -> Result<obzenflow_runtime::effects::StageCompletion<Self::Output>, HandlerError> {
         fx.emit(ContainmentOutput { value: input.value })
             .await
             .map_err(|e| HandlerError::Other(e.to_string()))?;
-        Ok(())
+        Ok(fx.complete()?)
     }
 
     fn stage_logic_version(&self) -> &str {
@@ -169,6 +185,46 @@ impl SinkHandler for DropSink {
     }
 }
 
+fn erased_effectful_descriptor<H>(
+    name: &str,
+    handler: H,
+    effects: Vec<EffectDeclaration>,
+    output_type: TypeHint,
+    output_contract: Vec<TypeHint>,
+) -> Box<dyn StageDescriptor>
+where
+    H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
+{
+    let descriptor: Box<dyn StageDescriptor> = Box::new(EffectfulTransformDescriptor {
+        name: name.to_string(),
+        handler,
+        effects,
+        middleware: Vec::new(),
+        effect_policies: Vec::new(),
+        synthesized_outcomes: Vec::new(),
+        type_shaping_errors: Vec::new(),
+        backpressure: None,
+    });
+    let metadata = StageTypingMetadata::transform(
+        TypeHint::exact_payload::<ContainmentInput>(),
+        output_type,
+        false,
+        None,
+    )
+    .with_output_contract(output_contract);
+    wrap_typed_descriptor(descriptor, metadata)
+}
+
+fn missing_effect_fact_descriptor() -> Box<dyn StageDescriptor> {
+    erased_effectful_descriptor(
+        "effectful",
+        PerformTransform,
+        vec![EffectDeclaration::of::<ValueEffect>()],
+        TypeHint::exact_payload::<ContainmentOutput>(),
+        vec![TypeHint::exact_payload::<ContainmentOutput>()],
+    )
+}
+
 /// The effect's `ContainmentEffectValue` outcome fact is missing from the
 /// arrow, and no `output_middleware:` lane is configured.
 fn undeclared_effect_fact_flow(journal_base: PathBuf) -> FlowDefinition {
@@ -179,10 +235,7 @@ fn undeclared_effect_fact_flow(journal_base: PathBuf) -> FlowDefinition {
 
         stages: {
             inputs = source!(ContainmentInput => OneShotSource::new());
-            effectful = effectful_transform!(
-                ContainmentInput -> { ContainmentOutput } => PerformTransform,
-                effects: [ValueEffect],
-                middleware: []);
+            effectful = missing_effect_fact_descriptor();
             drops = sink!(ContainmentOutput => DropSink);
         },
 
@@ -239,9 +292,11 @@ async fn undeclared_effect_fact_fails_build_without_output_middleware_lane() {
     );
 }
 
-/// Two distinct member types colliding on `EVENT_TYPE`: a macro compares
-/// tokens, not `EVENT_TYPE` values, so this is the flow build's half of the
-/// FLOWIP-120m ambiguity rejection.
+/// Two distinct member types colliding on `EVENT_TYPE`: the derive's const
+/// member guard rejects this shape at compile time (FLOWIP-120z), so the
+/// carrier is hand-written to model an erased or buggy marshalling path,
+/// and this remains the flow build's half of the FLOWIP-120m ambiguity
+/// rejection.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct ColliderA {
     value: u64,
@@ -260,10 +315,47 @@ impl TypedPayload for ColliderB {
     const EVENT_TYPE: &'static str = "containment.collide";
 }
 
-#[derive(Clone, Debug, obzenflow_core::EffectOutcomeFacts)]
-enum CollidingOutcome {
-    A(ColliderA),
-    B(ColliderB),
+#[derive(Clone, Debug)]
+struct CollidingOutcome {
+    primary: ColliderA,
+}
+
+impl obzenflow_core::TypedFactSet for CollidingOutcome {
+    fn fact_types() -> Vec<obzenflow_core::TypedFactType> {
+        // The buggy shape under test: the value-level metadata declares two
+        // distinct member types that collide on `EVENT_TYPE`.
+        vec![
+            obzenflow_core::TypedFactType::of::<ColliderA>(),
+            obzenflow_core::TypedFactType::of::<ColliderB>(),
+        ]
+    }
+
+    fn into_facts(
+        self,
+    ) -> Result<Vec<obzenflow_core::TypedFact>, obzenflow_core::TypedFactSetError> {
+        Ok(vec![obzenflow_core::TypedFact::from_payload(self.primary)?])
+    }
+
+    fn try_from_facts(
+        _facts: &[obzenflow_core::TypedFact],
+    ) -> Result<Self, obzenflow_core::TypedFactSetError> {
+        // Reconstruction is ambiguous by construction; the flow-build
+        // rejection this fixture exercises exists so this is never reached.
+        Err(obzenflow_core::TypedFactSetError::SerializationFailed(
+            "colliding carrier reconstruction is ambiguous by construction".to_string(),
+        ))
+    }
+}
+
+impl obzenflow_core::StageFactSet for CollidingOutcome {
+    type Members = obzenflow_core::event::schema::WithMember<
+        ColliderA,
+        obzenflow_core::event::schema::EmptySet,
+    >;
+
+    fn member_fact_types() -> Vec<obzenflow_core::TypedFactType> {
+        <Self as obzenflow_core::TypedFactSet>::fact_types()
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -286,7 +378,9 @@ impl Effect for CollidingEffect {
     }
 
     async fn execute(&self, _ctx: &mut EffectContext) -> Result<Self::Outcome, EffectError> {
-        Ok(CollidingOutcome::A(ColliderA { value: 1 }))
+        Ok(CollidingOutcome {
+            primary: ColliderA { value: 1 },
+        })
     }
 }
 
@@ -296,22 +390,37 @@ struct CollidingTransform;
 #[async_trait]
 impl EffectfulTransformHandler for CollidingTransform {
     type Input = ContainmentInput;
+    type Output = ColliderA;
+    type AllowedEffects = obzenflow_runtime::effect_set![CollidingEffect];
 
     async fn process(
         &self,
         _input: ContainmentInput,
-        fx: &mut Effects,
-    ) -> Result<(), HandlerError> {
+        fx: &mut Effects<Self::Output, Self::AllowedEffects>,
+    ) -> Result<obzenflow_runtime::effects::StageCompletion<Self::Output>, HandlerError> {
         let _ = fx
             .perform(CollidingEffect)
             .await
             .map_err(|e| HandlerError::Other(e.to_string()))?;
-        Ok(())
+        Ok(fx.complete()?)
     }
 
     fn stage_logic_version(&self) -> &str {
         "containment-collide-v1"
     }
+}
+
+fn colliding_effect_descriptor() -> Box<dyn StageDescriptor> {
+    erased_effectful_descriptor(
+        "effectful",
+        CollidingTransform,
+        vec![EffectDeclaration::of::<CollidingEffect>()],
+        TypeHint::exact_payload::<ColliderA>(),
+        vec![
+            TypeHint::exact_payload::<ColliderA>(),
+            TypeHint::exact_payload::<ColliderB>(),
+        ],
+    )
 }
 
 fn colliding_event_type_flow(journal_base: PathBuf) -> FlowDefinition {
@@ -322,10 +431,7 @@ fn colliding_event_type_flow(journal_base: PathBuf) -> FlowDefinition {
 
         stages: {
             inputs = source!(ContainmentInput => OneShotSource::new());
-            effectful = effectful_transform!(
-                ContainmentInput -> { ColliderA, ColliderB } => CollidingTransform,
-                effects: [CollidingEffect],
-                middleware: []);
+            effectful = colliding_effect_descriptor();
             drops = sink!(ColliderA => DropSink);
         },
 

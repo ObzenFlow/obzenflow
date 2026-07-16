@@ -18,6 +18,11 @@ use obzenflow_runtime::feed_plan::StageOutputContract;
 use obzenflow_runtime::messaging::upstream_subscription::StageInputPosition;
 use serde_json::{json, Value};
 
+use obzenflow_runtime::stages::common::handler_error::HandlerError;
+use obzenflow_runtime::stages::common::handlers::{
+    EffectfulTransformHandler, EffectfulTransformHandlerAdapter, UnifiedTransformHandler,
+};
+
 struct AppendOnlyJournal {
     id: JournalId,
     owner: JournalOwner,
@@ -98,6 +103,13 @@ struct TransactionProbeOutput {
     value: u64,
 }
 
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+struct TransactionProbeInput;
+
+impl TypedPayload for TransactionProbeInput {
+    const EVENT_TYPE: &'static str = "test.transaction_probe_input";
+}
+
 impl TypedPayload for TransactionProbeOutput {
     const EVENT_TYPE: &'static str = "test.transaction_probe_output";
 }
@@ -147,16 +159,20 @@ impl TransactionalEffectPort<TransactionProbe> for TransactionProbePort {
     }
 }
 
-fn effects_with_boundary(
+fn effect_context_with_boundary(
     stage_id: StageId,
     boundary: PerEffectPolicyBoundary,
     calls: Arc<AtomicUsize>,
     trace: Arc<Mutex<Vec<String>>>,
-) -> Effects {
+) -> EffectInvocationContext {
     let writer_id = WriterId::from(stage_id);
     let parent = EventEnvelope::new(
         JournalWriterId::new(),
-        ChainEventFactory::data_event(writer_id, "test.input", json!({})),
+        ChainEventFactory::data_event(
+            writer_id,
+            TransactionProbeInput::versioned_event_type(),
+            json!(TransactionProbeInput),
+        ),
     );
     let mut effect_ports = EffectPortRegistry::new();
     effect_ports.insert::<dyn TransactionalEffectPort<TransactionProbe>>(
@@ -164,7 +180,7 @@ fn effects_with_boundary(
         Arc::new(TransactionProbePort { calls, trace }),
     );
 
-    Effects::new(EffectInvocationContext {
+    EffectInvocationContext {
         flow_id: FlowId::new(),
         stage_id,
         stage_key: "single_use_effect_boundary".to_string(),
@@ -191,7 +207,64 @@ fn effects_with_boundary(
         emit_enabled: false,
         effect_boundary: Some(Arc::new(boundary)),
         boundary_control_events: Arc::new(Mutex::new(Vec::new())),
-    })
+    }
+}
+
+#[derive(Clone, Debug)]
+struct TransactionProbeHandler {
+    terminal_error: Arc<Mutex<Option<EffectError>>>,
+}
+
+#[async_trait]
+impl EffectfulTransformHandler for TransactionProbeHandler {
+    type Input = TransactionProbeInput;
+    type Output = TransactionProbeOutput;
+    type AllowedEffects = obzenflow_runtime::effect_set![TransactionProbe];
+
+    async fn process(
+        &self,
+        _input: Self::Input,
+        fx: &mut Effects<Self::Output, Self::AllowedEffects>,
+    ) -> Result<obzenflow_runtime::effects::StageCompletion<Self::Output>, HandlerError> {
+        match fx.perform(TransactionProbe).await {
+            Ok(_) => Ok(fx.complete()?),
+            Err(error) => {
+                *self.terminal_error.lock().unwrap() = Some(error);
+                Err(HandlerError::Other(
+                    "transaction probe reached its expected terminal error".to_string(),
+                ))
+            }
+        }
+    }
+}
+
+async fn invoke_with_boundary(
+    stage_id: StageId,
+    boundary: PerEffectPolicyBoundary,
+    calls: Arc<AtomicUsize>,
+    trace: Arc<Mutex<Vec<String>>>,
+) -> EffectError {
+    let context = effect_context_with_boundary(stage_id, boundary, calls, trace);
+    let input = context.parent.event.clone();
+    let terminal_error = Arc::new(Mutex::new(None));
+    let adapter = EffectfulTransformHandlerAdapter(TransactionProbeHandler {
+        terminal_error: terminal_error.clone(),
+    });
+
+    let result = UnifiedTransformHandler::process(
+        &adapter,
+        input,
+        Some(context),
+        obzenflow_core::MiddlewareExecutionScope::LiveEffectBoundary,
+    )
+    .await;
+    assert!(result.is_err(), "the transaction probe must fail");
+    let terminal_error = terminal_error
+        .lock()
+        .unwrap()
+        .take()
+        .expect("handler must retain the terminal effect error");
+    terminal_error
 }
 
 struct TracingPolicy {
@@ -275,10 +348,9 @@ async fn single_use_operation_bypasses_recovery_and_observes_once_in_reverse_ord
     let boundary = boundary_with_chain(vec![outer, breaker, inner]);
 
     let calls = Arc::new(AtomicUsize::new(0));
-    let mut effects = effects_with_boundary(stage_id, boundary, calls.clone(), trace.clone());
-    let error = effects.perform(TransactionProbe).await;
+    let error = invoke_with_boundary(stage_id, boundary, calls.clone(), trace.clone()).await;
     assert!(
-        matches!(error, Err(EffectError::RecordedFailure { .. })),
+        matches!(error, EffectError::RecordedFailure { .. }),
         "the committed transactional failure must remain the terminal result, got {error:?}"
     );
 
@@ -312,10 +384,9 @@ async fn single_use_rejection_runs_no_effect_and_finalizes_admitted_policies() {
     let boundary = boundary_with_chain(vec![admitted, rejecting]);
 
     let calls = Arc::new(AtomicUsize::new(0));
-    let mut effects = effects_with_boundary(StageId::new(), boundary, calls.clone(), trace.clone());
-    let error = effects.perform(TransactionProbe).await;
+    let error = invoke_with_boundary(StageId::new(), boundary, calls.clone(), trace.clone()).await;
     assert!(
-        matches!(error, Err(EffectError::BoundaryRejected { .. })),
+        matches!(error, EffectError::BoundaryRejected { .. }),
         "the rejecting policy must remain the terminal result, got {error:?}"
     );
 

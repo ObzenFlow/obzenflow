@@ -13,7 +13,12 @@ type ExecutedOutcomeSlot<O> = Arc<Mutex<Option<(O, Vec<TypedFact>)>>>;
 type TransactionalSettleSlot<O> =
     Arc<Mutex<Option<(Result<(), EffectError>, Option<CommittedEffectOutcome<O>>)>>>;
 
-pub struct Effects {
+/// The erased effectful authoring core: every runtime declaration, output
+/// contract, replay, and commit check lives here, unchanged by the typed
+/// facade (FLOWIP-120z). `pub(crate)` deliberately: the unit tests exercise
+/// these defence-in-depth checks through this seam, and no untyped public
+/// escape exists.
+pub(crate) struct EffectsCore {
     ctx: EffectInvocationContext,
     next_effect_ordinal: EffectOrdinal,
     next_output_ordinal: EffectOutputOrdinal,
@@ -21,8 +26,8 @@ pub struct Effects {
     committed_facts: Vec<ChainEvent>,
 }
 
-impl Effects {
-    pub fn new(ctx: EffectInvocationContext) -> Self {
+impl EffectsCore {
+    pub(crate) fn new(ctx: EffectInvocationContext) -> Self {
         Self {
             ctx,
             next_effect_ordinal: EffectOrdinal::new(0),
@@ -32,7 +37,27 @@ impl Effects {
         }
     }
 
-    pub fn is_replaying(&self) -> bool {
+    /// Evidence of every user fact committed by this invocation, in commit
+    /// order: direct emissions, effect-outcome facts, transactional commits,
+    /// and middleware-synthesized fallback facts. Captures never appear (no
+    /// `Data` fact). Read by `StageCompletion` construction (FLOWIP-120z).
+    pub(crate) fn committed_fact_evidence(
+        &self,
+    ) -> (usize, Vec<obzenflow_core::event::types::EventType>) {
+        let types = self
+            .committed_facts
+            .iter()
+            .map(|event| obzenflow_core::event::types::EventType::from(event.event_type()))
+            .collect();
+        (self.committed_facts.len(), types)
+    }
+
+    /// The stage key for completion diagnostics (FLOWIP-120z).
+    pub(crate) fn stage_key(&self) -> &str {
+        &self.ctx.stage_key
+    }
+
+    pub(crate) fn is_replaying(&self) -> bool {
         self.ctx
             .runtime_execution
             .is_reconstructing(crate::execution::ExecutionPosition {
@@ -44,7 +69,7 @@ impl Effects {
             })
     }
 
-    pub fn drain_committed_facts(&mut self) -> Vec<ChainEvent> {
+    pub(crate) fn drain_committed_facts(&mut self) -> Vec<ChainEvent> {
         std::mem::take(&mut self.committed_facts)
     }
 
@@ -192,7 +217,7 @@ impl Effects {
             .count()
     }
 
-    pub async fn emit<T>(&mut self, fact: T) -> Result<(), EffectError>
+    pub(crate) async fn emit<T>(&mut self, fact: T) -> Result<(), EffectError>
     where
         T: TypedPayload,
     {
@@ -263,7 +288,7 @@ impl Effects {
         Ok(())
     }
 
-    pub async fn perform<E>(&mut self, effect: E) -> Result<E::Outcome, EffectError>
+    pub(crate) async fn perform<E>(&mut self, effect: E) -> Result<E::Outcome, EffectError>
     where
         E: Effect,
     {
@@ -744,7 +769,11 @@ impl Effects {
         }
     }
 
-    pub async fn capture<T>(&mut self, label: &'static str, value: T) -> Result<T, EffectError>
+    pub(crate) async fn capture<T>(
+        &mut self,
+        label: &'static str,
+        value: T,
+    ) -> Result<T, EffectError>
     where
         T: Clone + Serialize + DeserializeOwned + Send + Sync + 'static,
     {

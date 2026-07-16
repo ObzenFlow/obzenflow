@@ -12,7 +12,9 @@ mod tests {
     use async_trait::async_trait;
     use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
     use obzenflow_core::{ChainEvent, TypedPayload};
-    use obzenflow_runtime::effects::{Effect, EffectContext, EffectError, EffectSafety, Effects};
+    use obzenflow_runtime::effects::{
+        Effect, EffectContext, EffectError, EffectSafety, EffectSet, Effects, StageCompletion,
+    };
     use obzenflow_runtime::stages::common::handler_error::HandlerError;
     use obzenflow_runtime::stages::common::handlers::source::SourceError;
     use obzenflow_runtime::stages::common::handlers::{
@@ -120,12 +122,37 @@ mod tests {
     #[async_trait]
     impl EffectfulTransformHandler for FxTr {
         type Input = In;
+        type Output = Out;
+        type AllowedEffects = obzenflow_runtime::effect_set![];
 
-        async fn process(&self, _input: In, fx: &mut Effects) -> Result<(), HandlerError> {
+        async fn process(
+            &self,
+            _input: In,
+            fx: &mut Effects<Self::Output, Self::AllowedEffects>,
+        ) -> Result<StageCompletion<Self::Output>, HandlerError> {
             fx.emit(Out)
                 .await
                 .map_err(|e| HandlerError::Other(e.to_string()))?;
-            Ok(())
+            Ok(fx.complete()?)
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    struct TxFxTr;
+
+    #[async_trait]
+    impl EffectfulTransformHandler for TxFxTr {
+        type Input = In;
+        type Output = Out;
+        type AllowedEffects = obzenflow_runtime::effect_set![TxEffect];
+
+        async fn process(
+            &self,
+            _input: In,
+            fx: &mut Effects<Self::Output, Self::AllowedEffects>,
+        ) -> Result<StageCompletion<Self::Output>, HandlerError> {
+            fx.emit(Out).await?;
+            Ok(fx.complete()?)
         }
     }
 
@@ -151,7 +178,8 @@ mod tests {
     impl EffectfulStatefulHandler for FxSt {
         type State = ();
         type Input = In;
-        type Fact = Out;
+        type Output = Out;
+        type AllowedEffects = obzenflow_runtime::effect_set![];
 
         fn initial_state(&self) -> Self::State {}
 
@@ -159,15 +187,15 @@ mod tests {
             &mut self,
             _state: &Self::State,
             _input: &In,
-            _fx: &mut Effects,
-        ) -> Result<(), HandlerError> {
-            Ok(())
+            fx: &mut Effects<Self::Output, Self::AllowedEffects>,
+        ) -> Result<StageCompletion<Self::Output>, HandlerError> {
+            Ok(fx.complete_empty()?)
         }
 
         fn apply(
             &mut self,
             _state: &mut Self::State,
-            _fact: Self::Fact,
+            _fact: Self::Output,
         ) -> Result<(), HandlerError> {
             Ok(())
         }
@@ -339,7 +367,7 @@ mod tests {
     #[test]
     fn effectful_transform_transactional_effect_clause_declares_executor() {
         let descriptor = crate::effectful_transform!(
-            In -> Out => FxTr,
+            In -> Out => TxFxTr,
             effects: [transactional(TxEffect, "tx")],
             middleware: []
         );
@@ -349,6 +377,62 @@ mod tests {
         assert_eq!(declarations[0].effect_type, TxEffect::EFFECT_TYPE);
         assert_eq!(declarations[0].safety, EffectSafety::Transactional);
         assert_eq!(declarations[0].transactional_executor, Some("tx"));
+    }
+
+    #[test]
+    fn effect_manifest_type_muncher_matches_every_declaration_spelling() {
+        type Plain = crate::__obzenflow_effect_manifest_types!(TxEffect);
+        let mut plain = Vec::new();
+        let _plain_attachments: Vec<crate::dsl::stage_descriptor::EffectPolicyAttachment> =
+            Vec::new();
+        crate::__obzenflow_effect_entries!(@entry plain, _plain_attachments, [], TxEffect);
+        assert_eq!(
+            <Plain as EffectSet>::effect_types(),
+            plain
+                .iter()
+                .map(|entry| entry.effect_type)
+                .collect::<Vec<_>>()
+        );
+
+        type WithPolicy = crate::__obzenflow_effect_manifest_types!(
+            TxEffect with [obzenflow_adapters::middleware::circuit_breaker(2)]
+        );
+        let mut with_policy = Vec::new();
+        let mut with_policy_attachments = Vec::new();
+        crate::__obzenflow_effect_entries!(
+            @entry with_policy,
+            with_policy_attachments,
+            [],
+            TxEffect with [obzenflow_adapters::middleware::circuit_breaker(2)]
+        );
+        assert_eq!(
+            <WithPolicy as EffectSet>::effect_types(),
+            with_policy
+                .iter()
+                .map(|entry| entry.effect_type)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(with_policy_attachments.len(), 1);
+
+        type Transactional =
+            crate::__obzenflow_effect_manifest_types!(transactional(TxEffect, "tx"));
+        let mut transactional = Vec::new();
+        let transactional_attachments: Vec<crate::dsl::stage_descriptor::EffectPolicyAttachment> =
+            Vec::new();
+        crate::__obzenflow_effect_entries!(
+            @entry transactional,
+            transactional_attachments,
+            [],
+            transactional(TxEffect, "tx")
+        );
+        assert_eq!(
+            <Transactional as EffectSet>::effect_types(),
+            transactional
+                .iter()
+                .map(|entry| entry.effect_type)
+                .collect::<Vec<_>>()
+        );
+        assert!(transactional_attachments.is_empty());
     }
 
     // ── stateful! ───────────────────────────────────────────────────────────

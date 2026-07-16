@@ -309,17 +309,23 @@ impl<T: StatefulHandler + Send + Sync> UnifiedStatefulHandler for T {
 /// Mealy-split effectful stateful surface (FLOWIP-120b): `decide` performs
 /// effects and emits facts, `apply` folds each committed fact into state.
 ///
-/// `Fact` is the stage's per-fact enum, one variant per committed fact type;
+/// `Output` is the stage's per-fact enum, one variant per committed fact type;
 /// deriving `EffectOutcomeFacts` on it generates exactly this shape. An effect
 /// outcome carrier never reaches `apply` (FLOWIP-120m): the carrier is
 /// transient `fx.perform` machinery, and a multi-fact product outcome folds
 /// as its individual member facts, one `apply` call per fact in ordinal
 /// (field) order.
+///
+/// This surface is input-driven only (FLOWIP-120z): `decide` is the sole
+/// fact-authoring position. There is no periodic-emission or drain-emission
+/// hook; a wall-clock trigger is not a function of the journal, and a
+/// mutable-state emission position would evolve state without a fact.
 #[async_trait]
 pub trait EffectfulStatefulHandler: Send + Sync {
     type State: Clone + Send + Sync;
     type Input: TypedPayload + Send + Sync + 'static;
-    type Fact: TypedFactSet + Send + Sync + 'static;
+    type Output: obzenflow_core::OneFactStageOutput + Send + Sync + 'static;
+    type AllowedEffects: crate::effects::EffectSet;
 
     fn initial_state(&self) -> Self::State;
 
@@ -327,35 +333,16 @@ pub trait EffectfulStatefulHandler: Send + Sync {
         &mut self,
         state: &Self::State,
         input: &Self::Input,
-        fx: &mut Effects,
-    ) -> std::result::Result<(), HandlerError>;
+        fx: &mut Effects<Self::Output, Self::AllowedEffects>,
+    ) -> std::result::Result<crate::effects::StageCompletion<Self::Output>, HandlerError>;
 
     /// Fold one committed fact into state. Called once per committed `Data`
     /// fact in commit order; carriers never appear here.
     fn apply(
         &mut self,
         state: &mut Self::State,
-        fact: Self::Fact,
+        fact: Self::Output,
     ) -> std::result::Result<(), HandlerError>;
-
-    fn emit_interval_hint(&self) -> Option<Duration> {
-        None
-    }
-
-    fn should_emit(&self, _state: &mut Self::State) -> bool {
-        false
-    }
-
-    fn emit(&self, _state: &mut Self::State) -> std::result::Result<Vec<Self::Fact>, HandlerError> {
-        Ok(Vec::new())
-    }
-
-    async fn drain(
-        &self,
-        _state: &Self::State,
-    ) -> std::result::Result<Vec<Self::Fact>, HandlerError> {
-        Ok(Vec::new())
-    }
 
     fn stage_logic_version(&self) -> &str {
         "1"
@@ -387,11 +374,11 @@ where
                 "effectful stateful handler invoked without effect context".to_string(),
             )
         })?;
-        let mut fx = Effects::new(effect_context);
-        self.0.decide(state, &input, &mut fx).await?;
+        let mut fx = Effects::<H::Output, H::AllowedEffects>::new(effect_context);
+        let _completion = self.0.decide(state, &input, &mut fx).await?;
         let mut draft = state.clone();
         for fact_event in fx.drain_committed_facts() {
-            let fact = decode_effectful_stateful_fact::<H::Fact>(&fact_event)?;
+            let fact = decode_effectful_stateful_fact::<H::Output>(&fact_event)?;
             self.0.apply(&mut draft, fact)?;
         }
         *state = draft;
@@ -409,12 +396,15 @@ where
         Ok(Vec::new())
     }
 
+    // The effectful surface is input-driven only (FLOWIP-120z): no emission
+    // interval and no should-emit signal, so the supervisor's emitting
+    // transition is unreachable for effectful stateful stages.
     fn emit_interval_hint(&self) -> Option<Duration> {
-        self.0.emit_interval_hint()
+        None
     }
 
-    fn should_emit(&self, state: &mut Self::State) -> bool {
-        self.0.should_emit(state)
+    fn should_emit(&self, _state: &mut Self::State) -> bool {
+        false
     }
 
     fn emit(&self, state: &mut Self::State) -> std::result::Result<Vec<ChainEvent>, HandlerError> {
@@ -452,14 +442,14 @@ where
     }
 }
 
-fn decode_effectful_stateful_fact<Fact>(event: &ChainEvent) -> Result<Fact, HandlerError>
+fn decode_effectful_stateful_fact<Output>(event: &ChainEvent) -> Result<Output, HandlerError>
 where
-    Fact: TypedFactSet,
+    Output: TypedFactSet,
 {
     let fact = TypedFact::from_event(event).ok_or_else(|| {
         HandlerError::Other("effectful stateful committed fact was not a Data event".to_string())
     })?;
-    Fact::try_from_facts(&[fact]).map_err(effectful_stateful_fact_set_error)
+    Output::try_from_facts(&[fact]).map_err(effectful_stateful_fact_set_error)
 }
 
 fn effectful_stateful_fact_set_error(error: TypedFactSetError) -> HandlerError {
@@ -469,13 +459,13 @@ fn effectful_stateful_fact_set_error(error: TypedFactSetError) -> HandlerError {
             HandlerError::Deserialization(format!("{event_type}: {error}"))
         }
         TypedFactSetError::MissingFact { event_type } => HandlerError::Other(format!(
-            "effectful stateful fact type `{event_type}` is not handled by the stage Fact type"
+            "effectful stateful fact type `{event_type}` is not handled by the stage Output type"
         )),
         TypedFactSetError::DuplicateFact { event_type } => HandlerError::Other(format!(
             "effectful stateful fact type `{event_type}` appeared more than once"
         )),
         TypedFactSetError::UnexpectedFact { event_type } => HandlerError::Other(format!(
-            "effectful stateful fact type `{event_type}` is not handled by the stage Fact type"
+            "effectful stateful fact type `{event_type}` is not handled by the stage Output type"
         )),
     }
 }
@@ -511,5 +501,52 @@ mod tests {
             &event.content,
             ChainEventContent::Data { event_type, .. } if event_type == "stateful.first.v1"
         ));
+    }
+
+    #[derive(Clone, Debug)]
+    struct DecideOnly;
+
+    #[async_trait]
+    impl EffectfulStatefulHandler for DecideOnly {
+        type State = u32;
+        type Input = FirstOutput;
+        type Output = FirstOutput;
+        type AllowedEffects = crate::effect_set![];
+
+        fn initial_state(&self) -> Self::State {
+            0
+        }
+
+        async fn decide(
+            &mut self,
+            _state: &Self::State,
+            _input: &Self::Input,
+            fx: &mut Effects<Self::Output, Self::AllowedEffects>,
+        ) -> std::result::Result<crate::effects::StageCompletion<Self::Output>, HandlerError>
+        {
+            Ok(fx.complete_empty()?)
+        }
+
+        fn apply(
+            &mut self,
+            state: &mut Self::State,
+            _fact: Self::Output,
+        ) -> std::result::Result<(), HandlerError> {
+            *state += 1;
+            Ok(())
+        }
+    }
+
+    /// FLOWIP-120z: the effectful surface is input-driven only. The adapter
+    /// reports no emission interval and never signals should-emit, so the
+    /// stateful supervisor's emitting transition is unreachable for
+    /// effectful stages.
+    #[test]
+    fn effectful_stateful_adapter_reports_no_emission_surface() {
+        let adapter = EffectfulStatefulHandlerAdapter(DecideOnly);
+        let mut state = adapter.initial_state();
+
+        assert_eq!(UnifiedStatefulHandler::emit_interval_hint(&adapter), None);
+        assert!(!UnifiedStatefulHandler::should_emit(&adapter, &mut state));
     }
 }

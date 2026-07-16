@@ -5,8 +5,12 @@
 //! Derive macros for ObzenFlow.
 //!
 //! Provides `#[derive(EffectOutcomeFacts)]` for effect outcome carriers
-//! (FLOWIP-120m). Use it through `obzenflow_core`, which re-exports the
-//! derive next to the trait, the same way serde re-exports its derives.
+//! (FLOWIP-120m) and `#[derive(StageOutputFacts)]` for pure stage output
+//! carriers (FLOWIP-120z). Use them through `obzenflow_core`, which
+//! re-exports each derive next to its trait, the same way serde re-exports
+//! its derives.
+
+mod stage_output;
 
 use proc_macro::TokenStream;
 use quote::quote;
@@ -20,6 +24,9 @@ use syn::{parse_macro_input, Data, DeriveInput, Fields, Ident, Type};
 /// (exactly one `TypedPayload` fact per field, recorded together). The
 /// derive generates the `TypedFactSet` implementation, which the blanket
 /// lift makes an `EffectOutcomeFacts` carrier usable as `Effect::Outcome`.
+/// It also generates the `StageFactSet` member projection so the outcome's
+/// leaf facts participate in FLOWIP-120z subset proofs, and, for sum
+/// carriers, `OneFactStageOutput`.
 ///
 /// Reconstruction is exact and fail-closed: a recorded group containing a
 /// fact outside the carrier's declared set fails with
@@ -57,19 +64,57 @@ pub fn derive_effect_outcome_facts(input: TokenStream) -> TokenStream {
         .into()
 }
 
+/// Derive a pure stage output carrier (FLOWIP-120z).
+///
+/// Apply to an enum whose variants are single facts
+/// (`Validated(ValidatedOrder)`), named-field products of facts
+/// (`Invalid { invalid: InvalidOrder, cancelled: OrderCancelled }`, field
+/// order is commit order), or explicitly empty filter arms
+/// (`#[stage_output(empty)] Skipped`); or to a named-field struct for a
+/// bare product. The derive generates `TypedFactSet` (only the selected
+/// variant's leaf facts are emitted; the carrier itself is never persisted),
+/// `StageFactSet` (the leaf-member projection, deduplicated across
+/// variants), and, when every variant is a single fact, `OneFactStageOutput`.
+///
+/// Reconstruction dispatch is by leaf set, so two variants with an
+/// identical leaf-type set are a compile error, as is a repeated leaf
+/// within one variant or a unit variant without the explicit
+/// `#[stage_output(empty)]` attribute. A carrier must not also implement
+/// `TypedPayload`: the blanket implementations conflict, deliberately.
+///
+/// The `#[stage_output(crate = <path>)]` attribute mirrors
+/// `#[effect_outcome(crate = <path>)]` for crates that reach
+/// `obzenflow_core` through a re-export.
+#[proc_macro_derive(StageOutputFacts, attributes(stage_output))]
+pub fn derive_stage_output_facts(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    stage_output::expand(&input)
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
 /// The path the generated code resolves `obzenflow_core` through: the
 /// caller's extern-prelude name by default, or the path named by
 /// `#[effect_outcome(crate = <path>)]` when core is reached via a re-export.
 fn core_path(input: &DeriveInput) -> Result<proc_macro2::TokenStream, syn::Error> {
+    attr_core_path(input, "effect_outcome", "FLOWIP-120m")
+}
+
+/// Shared `#[<attr>(crate = <path>)]` parser for both carrier derives.
+fn attr_core_path(
+    input: &DeriveInput,
+    attr_name: &str,
+    flowip: &str,
+) -> Result<proc_macro2::TokenStream, syn::Error> {
     let mut override_path: Option<syn::Path> = None;
     for attr in &input.attrs {
-        if !attr.path().is_ident("effect_outcome") {
+        if !attr.path().is_ident(attr_name) {
             continue;
         }
         if override_path.is_some() {
             return Err(syn::Error::new_spanned(
                 attr,
-                "duplicate #[effect_outcome(...)] attribute (FLOWIP-120m)",
+                format!("duplicate #[{attr_name}(...)] attribute ({flowip})"),
             ));
         }
         let path = attr
@@ -85,7 +130,7 @@ fn core_path(input: &DeriveInput) -> Result<proc_macro2::TokenStream, syn::Error
             .map_err(|err| {
                 syn::Error::new(
                     err.span(),
-                    format!("expected #[effect_outcome(crate = <path>)]: {err}"),
+                    format!("expected #[{attr_name}(crate = <path>)]: {err}"),
                 )
             })?;
         override_path = Some(path);
@@ -94,6 +139,45 @@ fn core_path(input: &DeriveInput) -> Result<proc_macro2::TokenStream, syn::Error
         Some(path) => quote!(#path),
         None => quote!(::obzenflow_core),
     })
+}
+
+/// Build the nested type-level member list for a carrier's `Members`
+/// projection (FLOWIP-120z).
+fn members_list_type(
+    core: &proc_macro2::TokenStream,
+    members: &[&Type],
+) -> proc_macro2::TokenStream {
+    let mut list = quote!(#core::event::schema::EmptySet);
+    for member in members.iter().rev() {
+        list = quote!(#core::event::schema::WithMember<#member, #list>);
+    }
+    list
+}
+
+/// Generate the `StageFactSet` implementation shared by both carrier
+/// derives (FLOWIP-120z): the type-level `Members` projection, the
+/// value-level member metadata, and the const duplicate guard over
+/// `EVENT_TYPE`s.
+fn stage_fact_set_impl(
+    core: &proc_macro2::TokenStream,
+    name: &Ident,
+    members: &[&Type],
+) -> proc_macro2::TokenStream {
+    let list = members_list_type(core, members);
+    quote! {
+        impl #core::event::schema::StageFactSet for #name {
+            type Members = #list;
+
+            fn member_fact_types() -> ::std::vec::Vec<#core::event::schema::TypedFactType> {
+                ::std::vec![
+                    #( #core::event::schema::TypedFactType::of::<#members>() ),*
+                ]
+            }
+
+            const MEMBERS_DISTINCT: () =
+                <#list as #core::event::schema::FactList>::DISTINCT_EVENT_TYPES;
+        }
+    }
 }
 
 fn expand(input: &DeriveInput) -> Result<proc_macro2::TokenStream, syn::Error> {
@@ -171,6 +255,7 @@ fn expand_enum(
     }
     reject_duplicate_members(&members)?;
 
+    let stage_fact_set = stage_fact_set_impl(core, name, &members);
     Ok(quote! {
         impl #core::event::schema::TypedFactSet for #name {
             fn fact_types() -> ::std::vec::Vec<#core::event::schema::TypedFactType> {
@@ -239,6 +324,12 @@ fn expand_enum(
                 }
             }
         }
+
+        #stage_fact_set
+
+        // A sum carrier lowers to exactly one fact per value, so it also
+        // qualifies as an effectful stateful `Output` (FLOWIP-120z).
+        impl #core::event::schema::OneFactStageOutput for #name {}
     })
 }
 
@@ -262,6 +353,7 @@ fn expand_struct(
     }
     reject_duplicate_members(&members)?;
 
+    let stage_fact_set = stage_fact_set_impl(core, name, &members);
     Ok(quote! {
         impl #core::event::schema::TypedFactSet for #name {
             fn fact_types() -> ::std::vec::Vec<#core::event::schema::TypedFactType> {
@@ -310,5 +402,7 @@ fn expand_struct(
                 })
             }
         }
+
+        #stage_fact_set
     })
 }

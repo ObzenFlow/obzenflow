@@ -155,8 +155,14 @@ struct EffectfulMerge {
 #[async_trait]
 impl EffectfulTransformHandler for EffectfulMerge {
     type Input = EnvelopeInput;
+    type Output = obzenflow_core::stage_fact_set![EnvelopeOutput, EnvelopeEffectValue];
+    type AllowedEffects = obzenflow_runtime::effect_set![CountingEffect];
 
-    async fn process(&self, input: EnvelopeInput, fx: &mut Effects) -> Result<(), HandlerError> {
+    async fn process(
+        &self,
+        input: EnvelopeInput,
+        fx: &mut Effects<Self::Output, Self::AllowedEffects>,
+    ) -> Result<obzenflow_runtime::effects::StageCompletion<Self::Output>, HandlerError> {
         let effect_value = fx
             .perform(CountingEffect {
                 channel: input.channel.clone(),
@@ -172,7 +178,7 @@ impl EffectfulTransformHandler for EffectfulMerge {
         })
         .await
         .map_err(|e| HandlerError::Other(e.to_string()))?;
-        Ok(())
+        Ok(fx.complete()?)
     }
 
     fn stage_logic_version(&self) -> &str {

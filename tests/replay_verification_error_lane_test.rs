@@ -90,8 +90,14 @@ struct RejectOdd;
 #[async_trait]
 impl EffectfulTransformHandler for RejectOdd {
     type Input = Input;
+    type Output = Accepted;
+    type AllowedEffects = obzenflow_runtime::effect_set![];
 
-    async fn process(&self, input: Input, fx: &mut Effects) -> Result<(), HandlerError> {
+    async fn process(
+        &self,
+        input: Input,
+        fx: &mut Effects<Self::Output, Self::AllowedEffects>,
+    ) -> Result<obzenflow_runtime::effects::StageCompletion<Self::Output>, HandlerError> {
         if input.id % 2 == 1 {
             return Err(HandlerError::Other(format!(
                 "odd id rejected: {}",
@@ -101,7 +107,7 @@ impl EffectfulTransformHandler for RejectOdd {
         fx.emit(Accepted { id: input.id })
             .await
             .map_err(|e| HandlerError::Other(e.to_string()))?;
-        Ok(())
+        Ok(fx.complete()?)
     }
 
     fn stage_logic_version(&self) -> &str {

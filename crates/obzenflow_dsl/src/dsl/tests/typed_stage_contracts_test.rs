@@ -8,8 +8,8 @@
 mod tests {
     use async_trait::async_trait;
     use obzenflow_core::event::payloads::delivery_payload::{DeliveryMethod, DeliveryPayload};
-    use obzenflow_core::{ChainEvent, StageId, TypedPayload, WriterId};
-    use obzenflow_runtime::effects::Effects;
+    use obzenflow_core::{ChainEvent, StageId, StageOutputFacts, TypedPayload, WriterId};
+    use obzenflow_runtime::effects::{Effects, StageCompletion};
     use obzenflow_runtime::feed_plan::{FactVisibility, FeedRole};
     use obzenflow_runtime::id_conversions::StageIdExt;
     use obzenflow_runtime::stages::common::handler_error::HandlerError;
@@ -17,7 +17,7 @@ mod tests {
     use obzenflow_runtime::stages::common::handlers::{
         AsyncFiniteSourceHandler, AsyncInfiniteSourceHandler, AsyncTransformHandler,
         EffectfulTransformHandler, FiniteSourceHandler, InfiniteSourceHandler, JoinHandler,
-        SinkHandler, StatefulHandler, TransformHandler,
+        SinkHandler, StatefulHandler, TransformHandler, TypedTransformHandler,
     };
     use obzenflow_runtime::typing::{
         JoinTyping, SinkTyping, SourceTyping, StatefulTyping, TransformTyping,
@@ -179,18 +179,44 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Debug, StageOutputFacts)]
+    enum ExactTransformOutput {
+        Output(OutputEvent),
+        Alternate(AlternateEvent),
+    }
+
+    #[derive(Clone, Debug)]
+    struct TypedExactTransform;
+
+    impl TypedTransformHandler for TypedExactTransform {
+        type Input = InputEvent;
+        type Output = ExactTransformOutput;
+
+        fn process(&self, input: InputEvent) -> Result<Self::Output, HandlerError> {
+            Ok(ExactTransformOutput::Output(OutputEvent {
+                value: input.value,
+            }))
+        }
+    }
+
     #[derive(Clone, Debug)]
     struct EffectfulExactTransform;
 
     #[async_trait]
     impl EffectfulTransformHandler for EffectfulExactTransform {
         type Input = OutputEvent;
+        type Output = OutputEvent;
+        type AllowedEffects = obzenflow_runtime::effect_set![];
 
-        async fn process(&self, input: OutputEvent, fx: &mut Effects) -> Result<(), HandlerError> {
+        async fn process(
+            &self,
+            input: OutputEvent,
+            fx: &mut Effects<Self::Output, Self::AllowedEffects>,
+        ) -> Result<StageCompletion<Self::Output>, HandlerError> {
             fx.emit(input)
                 .await
                 .map_err(|e| HandlerError::Other(e.to_string()))?;
-            Ok(())
+            Ok(fx.complete()?)
         }
     }
 
@@ -200,8 +226,14 @@ mod tests {
     #[async_trait]
     impl EffectfulTransformHandler for EffectfulMultiOutputTransform {
         type Input = OutputEvent;
+        type Output = obzenflow_core::stage_fact_set![OutputEvent, AlternateEvent];
+        type AllowedEffects = obzenflow_runtime::effect_set![];
 
-        async fn process(&self, input: OutputEvent, fx: &mut Effects) -> Result<(), HandlerError> {
+        async fn process(
+            &self,
+            input: OutputEvent,
+            fx: &mut Effects<Self::Output, Self::AllowedEffects>,
+        ) -> Result<StageCompletion<Self::Output>, HandlerError> {
             fx.emit(input)
                 .await
                 .map_err(|e| HandlerError::Other(e.to_string()))?;
@@ -210,7 +242,7 @@ mod tests {
             })
             .await
             .map_err(|e| HandlerError::Other(e.to_string()))?;
-            Ok(())
+            Ok(fx.complete()?)
         }
     }
 
@@ -285,13 +317,20 @@ mod tests {
     #[derive(Clone, Debug)]
     struct EffectfulProductStateful;
 
+    #[derive(Clone, Debug, obzenflow_core::EffectOutcomeFacts)]
+    enum EffectfulStatefulOutput {
+        Output(OutputEvent),
+        Alternate(AlternateEvent),
+    }
+
     #[async_trait]
     impl obzenflow_runtime::stages::common::handlers::EffectfulStatefulHandler
         for EffectfulProductStateful
     {
         type State = ();
         type Input = InputEvent;
-        type Fact = OutputEvent;
+        type Output = EffectfulStatefulOutput;
+        type AllowedEffects = obzenflow_runtime::effect_set![];
 
         fn initial_state(&self) -> Self::State {}
 
@@ -299,15 +338,47 @@ mod tests {
             &mut self,
             _state: &Self::State,
             _input: &Self::Input,
-            _fx: &mut Effects,
-        ) -> Result<(), HandlerError> {
-            Ok(())
+            fx: &mut Effects<Self::Output, Self::AllowedEffects>,
+        ) -> Result<StageCompletion<Self::Output>, HandlerError> {
+            Ok(fx.complete_empty()?)
         }
 
         fn apply(
             &mut self,
             _state: &mut Self::State,
-            _fact: Self::Fact,
+            _fact: Self::Output,
+        ) -> Result<(), HandlerError> {
+            Ok(())
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    struct EffectfulExactStateful;
+
+    #[async_trait]
+    impl obzenflow_runtime::stages::common::handlers::EffectfulStatefulHandler
+        for EffectfulExactStateful
+    {
+        type State = ();
+        type Input = InputEvent;
+        type Output = OutputEvent;
+        type AllowedEffects = obzenflow_runtime::effect_set![];
+
+        fn initial_state(&self) -> Self::State {}
+
+        async fn decide(
+            &mut self,
+            _state: &Self::State,
+            _input: &Self::Input,
+            fx: &mut Effects<Self::Output, Self::AllowedEffects>,
+        ) -> Result<StageCompletion<Self::Output>, HandlerError> {
+            Ok(fx.complete_empty()?)
+        }
+
+        fn apply(
+            &mut self,
+            _state: &mut Self::State,
+            _fact: Self::Output,
         ) -> Result<(), HandlerError> {
             Ok(())
         }
@@ -478,7 +549,7 @@ mod tests {
     fn transform_macros_accept_explicit_output_contract_members() {
         let transform = crate::transform!(
             name: "transform",
-            InputEvent -> OutputEvent, outputs: [OutputEvent, AlternateEvent] => ExactTransform
+            InputEvent -> OutputEvent, outputs: [OutputEvent, AlternateEvent] => TypedExactTransform
         );
         let transform_meta = transform.typing_metadata().unwrap();
         assert_eq!(transform_meta.output_type, exact::<OutputEvent>());
@@ -500,7 +571,7 @@ mod tests {
 
         let effectful_transform = crate::effectful_transform!(
             name: "effectful_transform",
-            OutputEvent -> OutputEvent, outputs: [OutputEvent, AlternateEvent] => EffectfulExactTransform,
+            OutputEvent -> OutputEvent, outputs: [OutputEvent, AlternateEvent] => EffectfulMultiOutputTransform,
             effects: [],
             middleware: []
         );
@@ -583,7 +654,7 @@ mod tests {
     fn output_set_syntax_lowers_to_stage_output_contract() {
         let transform = crate::transform!(
             name: "multi_output_transform",
-            InputEvent -> { OutputEvent, AlternateEvent } => ExactTransform
+            InputEvent -> { OutputEvent, AlternateEvent } => TypedExactTransform
         );
         let transform_meta = transform.typing_metadata().unwrap();
         assert_eq!(transform_meta.output_type, exact::<OutputEvent>());
@@ -618,7 +689,6 @@ mod tests {
         let effectful_stateful = crate::effectful_stateful!(
             name: "multi_output_effectful_stateful",
             InputEvent -> { OutputEvent, AlternateEvent } => EffectfulProductStateful,
-            emit_interval = Duration::from_secs(1),
             effects: [],
             middleware: []
         );
@@ -646,7 +716,7 @@ mod tests {
     fn effectful_stateful_scalar_output_contract_has_one_member() {
         let effectful_stateful = crate::effectful_stateful!(
             name: "effectful_stateful",
-            InputEvent -> OutputEvent => EffectfulProductStateful,
+            InputEvent -> OutputEvent => EffectfulExactStateful,
             effects: [],
             middleware: []
         );

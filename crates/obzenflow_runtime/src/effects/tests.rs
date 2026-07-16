@@ -532,6 +532,23 @@ impl TypedFactSet for LiftedProbeOutcome {
     }
 }
 
+impl obzenflow_core::StageFactSet for LiftedProbeOutcome {
+    type Members = obzenflow_core::event::schema::WithMember<
+        CountingOutput,
+        obzenflow_core::event::schema::WithMember<
+            FirstOutput,
+            obzenflow_core::event::schema::EmptySet,
+        >,
+    >;
+
+    fn member_fact_types() -> Vec<TypedFactType> {
+        Self::fact_types()
+    }
+
+    const MEMBERS_DISTINCT: () =
+        <Self::Members as obzenflow_core::event::schema::FactList>::DISTINCT_EVENT_TYPES;
+}
+
 #[derive(Clone, Debug)]
 struct LiftedProbeEffect;
 
@@ -632,7 +649,7 @@ fn invocation_context_with_mode(
 async fn emit_rejects_contexts_without_output_emission_support() {
     let stage_id = StageId::new();
     let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
-    let mut effects = Effects::new(invocation_context(
+    let mut effects = EffectsCore::new(invocation_context(
         journal.clone(),
         parent_envelope(WriterId::from(stage_id)),
         None,
@@ -661,7 +678,7 @@ async fn emit_rejects_fact_type_outside_stage_output_contract() {
     );
     ctx.emit_enabled = true;
     ctx.output_contract = output_contract_for::<FirstOutput>();
-    let mut effects = Effects::new(ctx);
+    let mut effects = EffectsCore::new(ctx);
 
     let err = effects
         .emit(SecondOutput {
@@ -691,7 +708,7 @@ async fn emit_commits_declared_fact_type_immediately() {
     );
     ctx.emit_enabled = true;
     ctx.output_contract = output_contract_for::<FirstOutput>();
-    let mut effects = Effects::new(ctx);
+    let mut effects = EffectsCore::new(ctx);
 
     effects
         .emit(FirstOutput { value: 7 })
@@ -707,6 +724,126 @@ async fn emit_commits_declared_fact_type_immediately() {
     ));
 }
 
+#[test]
+fn typed_completion_requires_explicit_empty_success() {
+    let stage_id = StageId::new();
+    let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
+    let ctx = invocation_context(journal, parent_envelope(WriterId::from(stage_id)), None);
+    let effects = Effects::<FirstOutput, crate::effect_set![]>::new(ctx);
+
+    assert!(matches!(
+        effects.complete(),
+        Err(EffectError::CompletedWithoutOutput { stage_key })
+            if stage_key == "effect_stage"
+    ));
+
+    let receipt = effects
+        .complete_empty()
+        .expect("an explicitly empty invocation completes");
+    assert_eq!(receipt.committed_fact_count(), 0);
+    assert!(receipt.committed_fact_types().is_empty());
+}
+
+#[tokio::test]
+async fn typed_completion_reports_direct_facts_in_commit_order() {
+    let stage_id = StageId::new();
+    let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
+    let mut ctx = invocation_context(journal, parent_envelope(WriterId::from(stage_id)), None);
+    ctx.emit_enabled = true;
+    ctx.output_contract = output_contract_for_many(vec![
+        output_descriptor_for::<FirstOutput>(),
+        output_descriptor_for::<SecondOutput>(),
+    ]);
+    let mut effects = Effects::<
+        obzenflow_core::stage_fact_set![FirstOutput, SecondOutput],
+        crate::effect_set![],
+    >::new(ctx);
+
+    effects.emit(FirstOutput { value: 1 }).await.unwrap();
+    effects
+        .emit(SecondOutput {
+            value: "second".to_string(),
+        })
+        .await
+        .unwrap();
+
+    assert!(matches!(
+        effects.complete_empty(),
+        Err(EffectError::CompletedEmptyWithOutput {
+            stage_key,
+            committed: 2,
+        }) if stage_key == "effect_stage"
+    ));
+    let receipt = effects
+        .complete()
+        .expect("committed facts complete normally");
+    assert_eq!(receipt.committed_fact_count(), 2);
+    assert_eq!(
+        receipt
+            .committed_fact_types()
+            .iter()
+            .map(obzenflow_core::EventType::as_str)
+            .collect::<Vec<_>>(),
+        vec![
+            FirstOutput::versioned_event_type(),
+            SecondOutput::versioned_event_type(),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn typed_completion_counts_effect_outcome_facts() {
+    let stage_id = StageId::new();
+    let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
+    let mut ctx = invocation_context(journal, parent_envelope(WriterId::from(stage_id)), None);
+    ctx.output_contract = output_contract_for::<CountingOutput>();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut effects = Effects::<CountingOutput, crate::effect_set![CountingEffect]>::new(ctx);
+
+    effects
+        .perform(CountingEffect {
+            value: 7,
+            label: "completion",
+            calls: calls.clone(),
+        })
+        .await
+        .expect("effect succeeds");
+
+    let receipt = effects.complete().expect("effect fact counts as output");
+    assert_eq!(receipt.committed_fact_count(), 1);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        receipt.committed_fact_types()[0].as_str(),
+        CountingOutput::versioned_event_type()
+    );
+}
+
+/// Completion is a receipt, not a transaction: an authoring error after this
+/// immediate emit cannot roll the fact back.
+#[tokio::test]
+async fn typed_emit_remains_durable_when_handler_later_errors() {
+    let stage_id = StageId::new();
+    let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
+    let mut ctx = invocation_context(
+        journal.clone(),
+        parent_envelope(WriterId::from(stage_id)),
+        None,
+    );
+    ctx.emit_enabled = true;
+    ctx.output_contract = output_contract_for::<FirstOutput>();
+    let mut effects = Effects::<FirstOutput, crate::effect_set![]>::new(ctx);
+
+    effects.emit(FirstOutput { value: 9 }).await.unwrap();
+    let handler_result: Result<(), crate::stages::common::handler_error::HandlerError> =
+        Err(crate::stages::common::handler_error::HandlerError::Domain(
+            "failure after emit".to_string(),
+        ));
+    assert!(handler_result.is_err());
+    drop(effects);
+
+    assert_eq!(journal.events().len(), 1, "the emitted fact stays durable");
+}
+
 #[tokio::test]
 async fn direct_emit_tracks_honest_over_window_physical_debt() {
     let (registry, stage_id, downstream) = effect_backpressure_fixture(1);
@@ -720,7 +857,7 @@ async fn direct_emit_tracks_honest_over_window_physical_debt() {
     ctx.writer_id = WriterId::from(stage_id);
     ctx.backpressure_writer = registry.writer(stage_id);
     ctx.emit_enabled = true;
-    let mut effects = Effects::new(ctx);
+    let mut effects = EffectsCore::new(ctx);
 
     for value in 0..3 {
         effects
@@ -761,7 +898,7 @@ async fn failed_direct_append_releases_tracked_position_without_writer_advance()
     ctx.writer_id = WriterId::from(stage_id);
     ctx.backpressure_writer = registry.writer(stage_id);
     ctx.emit_enabled = true;
-    let mut effects = Effects::new(ctx);
+    let mut effects = EffectsCore::new(ctx);
 
     let error = effects
         .emit(FirstOutput { value: 7 })
@@ -789,7 +926,7 @@ async fn emit_rejects_routed_fanout_beyond_contract_member_bound() {
     );
     ctx.emit_enabled = true;
     ctx.output_contract = output_contract_for::<FirstOutput>();
-    let mut effects = Effects::new(ctx);
+    let mut effects = EffectsCore::new(ctx);
 
     effects
         .emit(FirstOutput { value: 1 })
@@ -880,7 +1017,7 @@ async fn live_perform_records_effect_data_fact() {
     let stage_id = StageId::new();
     let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
     let calls = Arc::new(AtomicUsize::new(0));
-    let mut effects = Effects::new(invocation_context(
+    let mut effects = EffectsCore::new(invocation_context(
         journal.clone(),
         parent_envelope(WriterId::from(stage_id)),
         None,
@@ -928,7 +1065,7 @@ async fn effect_and_capture_rows_reconstruct_identical_debt_without_waiting() {
     live_ctx.writer_id = WriterId::from(live_stage);
     live_ctx.backpressure_writer = live_registry.writer(live_stage);
     let live_flow_id = live_ctx.flow_id.to_string();
-    let mut live = Effects::new(live_ctx);
+    let mut live = EffectsCore::new(live_ctx);
 
     live.perform(CountingEffect {
         value: 41,
@@ -974,7 +1111,7 @@ async fn effect_and_capture_rows_reconstruct_identical_debt_without_waiting() {
         ctx.stage_id = stage_id;
         ctx.writer_id = WriterId::from(stage_id);
         ctx.backpressure_writer = registry.writer(stage_id);
-        let mut reconstructed = Effects::new(ctx);
+        let mut reconstructed = EffectsCore::new(ctx);
 
         reconstructed
             .perform(CountingEffect {
@@ -1016,7 +1153,7 @@ async fn perform_records_and_replays_multi_fact_effect_outcome_group() {
         output_descriptor_for::<SecondOutput>(),
     ]);
     let live_flow_id = live_ctx.flow_id.to_string();
-    let mut live_effects = Effects::new(live_ctx);
+    let mut live_effects = EffectsCore::new(live_ctx);
 
     let live_output = live_effects
         .perform(MultiFactEffect {
@@ -1093,7 +1230,7 @@ async fn perform_records_and_replays_multi_fact_effect_outcome_group() {
         output_descriptor_for::<FirstOutput>(),
         output_descriptor_for::<SecondOutput>(),
     ]);
-    let mut replay_effects = Effects::new(replay_ctx);
+    let mut replay_effects = EffectsCore::new(replay_ctx);
 
     let replay_output = replay_effects
         .perform(MultiFactEffect {
@@ -1131,7 +1268,7 @@ async fn replay_success_effect_fact_advances_output_ordinals_before_emit() {
         output_descriptor_for::<SecondOutput>(),
     ]);
     let live_flow_id = live_ctx.flow_id.to_string();
-    let mut live_effects = Effects::new(live_ctx);
+    let mut live_effects = EffectsCore::new(live_ctx);
 
     let live_output = live_effects
         .perform(CountingEffect {
@@ -1172,7 +1309,7 @@ async fn replay_success_effect_fact_advances_output_ordinals_before_emit() {
         output_descriptor_for::<CountingOutput>(),
         output_descriptor_for::<SecondOutput>(),
     ]);
-    let mut replay_effects = Effects::new(replay_ctx);
+    let mut replay_effects = EffectsCore::new(replay_ctx);
 
     let replay_output = replay_effects
         .perform(CountingEffect {
@@ -1218,7 +1355,7 @@ async fn replay_success_effect_fact_advances_output_ordinals_before_emit() {
         output_descriptor_for::<CountingOutput>(),
         output_descriptor_for::<SecondOutput>(),
     ]);
-    let mut replay_of_replay_effects = Effects::new(replay_of_replay_ctx);
+    let mut replay_of_replay_effects = EffectsCore::new(replay_of_replay_ctx);
 
     let replay_of_replay_output = replay_of_replay_effects
         .perform(CountingEffect {
@@ -1396,7 +1533,7 @@ async fn perform_rejects_undeclared_effect_before_execution() {
         None,
     );
     ctx.effect_declarations.clear();
-    let mut effects = Effects::new(ctx);
+    let mut effects = EffectsCore::new(ctx);
 
     let err = effects
         .perform(CountingEffect {
@@ -1427,7 +1564,7 @@ async fn strict_replay_rejects_undeclared_effect_before_history_lookup() {
     let live_journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
     let live_calls = Arc::new(AtomicUsize::new(0));
     let live_parent = parent_envelope(WriterId::from(stage_id));
-    let mut live = Effects::new(invocation_context(live_journal.clone(), live_parent, None));
+    let mut live = EffectsCore::new(invocation_context(live_journal.clone(), live_parent, None));
     live.perform(CountingEffect {
         value: 41,
         label: "same",
@@ -1453,7 +1590,7 @@ async fn strict_replay_rejects_undeclared_effect_before_history_lookup() {
     );
     ctx.stage_logic_version = "test-v2".to_string();
     ctx.effect_declarations.clear();
-    let mut replay = Effects::new(ctx);
+    let mut replay = EffectsCore::new(ctx);
 
     let err = replay
         .perform(CountingEffect {
@@ -1488,7 +1625,7 @@ async fn capture_is_exempt_from_declared_effect_list() {
         None,
     );
     ctx.effect_declarations.clear();
-    let mut effects = Effects::new(ctx);
+    let mut effects = EffectsCore::new(ctx);
 
     let captured: u64 = effects
         .capture("side_value", 7)
@@ -1511,7 +1648,7 @@ async fn replay_perform_uses_recorded_output_without_execute() {
     let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
     let live_calls = Arc::new(AtomicUsize::new(0));
     let live_parent = parent_envelope(WriterId::from(stage_id));
-    let mut live = Effects::new(invocation_context(journal.clone(), live_parent, None));
+    let mut live = EffectsCore::new(invocation_context(journal.clone(), live_parent, None));
     let output = live
         .perform(CountingEffect {
             value: 9,
@@ -1528,7 +1665,7 @@ async fn replay_perform_uses_recorded_output_without_execute() {
             .expect("history should index"),
     );
     let replay_calls = Arc::new(AtomicUsize::new(0));
-    let mut replay = Effects::new(invocation_context(
+    let mut replay = EffectsCore::new(invocation_context(
         Arc::new(MemoryJournal::new(JournalOwner::stage(StageId::new()))),
         parent_envelope(WriterId::from(stage_id)),
         Some(history),
@@ -1556,7 +1693,7 @@ async fn strict_replay_missing_effect_record_fails_without_execute() {
             .expect("empty history should index"),
     );
     let calls = Arc::new(AtomicUsize::new(0));
-    let mut effects = Effects::new(invocation_context_with_mode(
+    let mut effects = EffectsCore::new(invocation_context_with_mode(
         journal.clone(),
         parent_envelope(WriterId::from(stage_id)),
         Some(history),
@@ -1583,7 +1720,7 @@ async fn failed_effect_records_are_replayed_into_replay_history() {
     let stage_id = StageId::new();
     let live_journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
     let live_calls = Arc::new(AtomicUsize::new(0));
-    let mut live = Effects::new(invocation_context(
+    let mut live = EffectsCore::new(invocation_context(
         live_journal.clone(),
         parent_envelope(WriterId::from(stage_id)),
         None,
@@ -1621,7 +1758,7 @@ async fn failed_effect_records_are_replayed_into_replay_history() {
     assert_eq!(replay_history.recorded_flow_id(), &root_recorded_flow_id);
     let replay_journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
     let replay_calls = Arc::new(AtomicUsize::new(0));
-    let mut replay = Effects::new(invocation_context(
+    let mut replay = EffectsCore::new(invocation_context(
         replay_journal.clone(),
         parent_envelope(WriterId::from(stage_id)),
         Some(replay_history),
@@ -1653,7 +1790,7 @@ async fn failed_effect_records_are_replayed_into_replay_history() {
     );
     let replay_of_replay_journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
     let replay_of_replay_calls = Arc::new(AtomicUsize::new(0));
-    let mut replay_of_replay = Effects::new(invocation_context(
+    let mut replay_of_replay = EffectsCore::new(invocation_context(
         replay_of_replay_journal.clone(),
         parent_envelope(WriterId::from(stage_id)),
         Some(replay_of_replay_history),
@@ -1687,7 +1824,7 @@ async fn resume_incomplete_missing_effect_executes_with_recorded_cursor() {
             .expect("empty history should index"),
     );
     let calls = Arc::new(AtomicUsize::new(0));
-    let mut effects = Effects::new(invocation_context_with_mode(
+    let mut effects = EffectsCore::new(invocation_context_with_mode(
         journal.clone(),
         parent_envelope(WriterId::from(stage_id)),
         Some(history),
@@ -1719,7 +1856,7 @@ async fn resume_incomplete_recorded_effect_suppresses_execution() {
     let stage_id = StageId::new();
     let live_journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
     let live_calls = Arc::new(AtomicUsize::new(0));
-    let mut live = Effects::new(invocation_context(
+    let mut live = EffectsCore::new(invocation_context(
         live_journal.clone(),
         parent_envelope(WriterId::from(stage_id)),
         None,
@@ -1737,7 +1874,7 @@ async fn resume_incomplete_recorded_effect_suppresses_execution() {
             .expect("history should index"),
     );
     let replay_calls = Arc::new(AtomicUsize::new(0));
-    let mut resume = Effects::new(invocation_context_with_mode(
+    let mut resume = EffectsCore::new(invocation_context_with_mode(
         Arc::new(MemoryJournal::new(JournalOwner::stage(StageId::new()))),
         parent_envelope(WriterId::from(stage_id)),
         Some(history),
@@ -1772,7 +1909,7 @@ async fn transactional_effect_uses_registered_port_and_commits_once() {
             commit: true,
         }),
     );
-    let mut effects = Effects::new(invocation_context_with_mode(
+    let mut effects = EffectsCore::new(invocation_context_with_mode(
         journal.clone(),
         parent_envelope(WriterId::from(stage_id)),
         None,
@@ -1809,7 +1946,7 @@ async fn transactional_effect_live_return_comes_from_committed_record_not_port_r
             calls: port_calls.clone(),
         }),
     );
-    let mut live = Effects::new(invocation_context_with_mode(
+    let mut live = EffectsCore::new(invocation_context_with_mode(
         journal.clone(),
         parent_envelope(WriterId::from(stage_id)),
         None,
@@ -1837,7 +1974,7 @@ async fn transactional_effect_live_return_comes_from_committed_record_not_port_r
         EffectHistory::from_records(records[0].cursor.recorded_flow_id.clone(), records)
             .expect("history should index"),
     );
-    let mut replay = Effects::new(invocation_context_with_mode(
+    let mut replay = EffectsCore::new(invocation_context_with_mode(
         Arc::new(MemoryJournal::new(JournalOwner::stage(StageId::new()))),
         parent_envelope(WriterId::from(stage_id)),
         Some(history),
@@ -1878,7 +2015,7 @@ async fn transactional_effect_replay_does_not_require_port_or_execute() {
             commit: true,
         }),
     );
-    let mut live = Effects::new(invocation_context_with_mode(
+    let mut live = EffectsCore::new(invocation_context_with_mode(
         journal.clone(),
         parent_envelope(WriterId::from(stage_id)),
         None,
@@ -1897,7 +2034,7 @@ async fn transactional_effect_replay_does_not_require_port_or_execute() {
         EffectHistory::from_records(records[0].cursor.recorded_flow_id.clone(), records)
             .expect("history should index"),
     );
-    let mut replay = Effects::new(invocation_context_with_mode(
+    let mut replay = EffectsCore::new(invocation_context_with_mode(
         Arc::new(MemoryJournal::new(JournalOwner::stage(StageId::new()))),
         parent_envelope(WriterId::from(stage_id)),
         Some(history),
@@ -1931,7 +2068,7 @@ async fn transactional_effect_missing_commit_fails() {
             commit: false,
         }),
     );
-    let mut effects = Effects::new(invocation_context_with_mode(
+    let mut effects = EffectsCore::new(invocation_context_with_mode(
         journal.clone(),
         parent_envelope(WriterId::from(stage_id)),
         None,
@@ -1961,7 +2098,7 @@ async fn transactional_effect_missing_port_fails_before_execute() {
     let stage_id = StageId::new();
     let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
     let normal_calls = Arc::new(AtomicUsize::new(0));
-    let mut effects = Effects::new(invocation_context(
+    let mut effects = EffectsCore::new(invocation_context(
         journal,
         parent_envelope(WriterId::from(stage_id)),
         None,
@@ -1984,7 +2121,7 @@ async fn replay_fails_on_descriptor_hash_mismatch() {
     let stage_id = StageId::new();
     let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
     let calls = Arc::new(AtomicUsize::new(0));
-    let mut live = Effects::new(invocation_context(
+    let mut live = EffectsCore::new(invocation_context(
         journal.clone(),
         parent_envelope(WriterId::from(stage_id)),
         None,
@@ -2001,7 +2138,7 @@ async fn replay_fails_on_descriptor_hash_mismatch() {
         EffectHistory::from_records(records[0].cursor.recorded_flow_id.clone(), records)
             .expect("history should index"),
     );
-    let mut replay = Effects::new(invocation_context(
+    let mut replay = EffectsCore::new(invocation_context(
         Arc::new(MemoryJournal::new(JournalOwner::stage(StageId::new()))),
         parent_envelope(WriterId::from(stage_id)),
         Some(history),
@@ -2023,7 +2160,7 @@ async fn replay_fails_on_descriptor_hash_mismatch() {
 async fn effect_history_fails_loud_on_duplicate_scalar_cursor_record() {
     let stage_id = StageId::new();
     let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
-    let mut live = Effects::new(invocation_context(
+    let mut live = EffectsCore::new(invocation_context(
         journal.clone(),
         parent_envelope(WriterId::from(stage_id)),
         None,
@@ -2049,7 +2186,7 @@ async fn effect_history_fails_loud_on_duplicate_scalar_cursor_record() {
 async fn effect_record_decode_rejects_payload_provenance_cursor_mismatch() {
     let stage_id = StageId::new();
     let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
-    let mut live = Effects::new(invocation_context(
+    let mut live = EffectsCore::new(invocation_context(
         journal.clone(),
         parent_envelope(WriterId::from(stage_id)),
         None,
@@ -2115,7 +2252,7 @@ fn effect_record_decode_rejects_reserved_event_without_provenance() {
 async fn effect_record_from_event_reads_back_provenance_origin() {
     let stage_id = StageId::new();
     let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
-    let mut live = Effects::new(invocation_context(
+    let mut live = EffectsCore::new(invocation_context(
         journal.clone(),
         parent_envelope(WriterId::from(stage_id)),
         None,
@@ -2157,7 +2294,7 @@ async fn effect_record_from_event_reads_back_provenance_origin() {
 async fn replayed_group_prefers_recorded_origin_over_derivation() {
     let stage_id = StageId::new();
     let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
-    let mut live = Effects::new(invocation_context(
+    let mut live = EffectsCore::new(invocation_context(
         journal.clone(),
         parent_envelope(WriterId::from(stage_id)),
         None,
@@ -2187,7 +2324,7 @@ async fn replayed_group_prefers_recorded_origin_over_derivation() {
             .expect("history should index"),
     );
     let replay_journal = Arc::new(MemoryJournal::new(JournalOwner::stage(StageId::new())));
-    let mut replay = Effects::new(invocation_context(
+    let mut replay = EffectsCore::new(invocation_context(
         replay_journal.clone(),
         parent_envelope(WriterId::from(stage_id)),
         Some(history),
@@ -2221,7 +2358,7 @@ async fn replayed_group_prefers_recorded_origin_over_derivation() {
 async fn replayed_group_without_recorded_origin_falls_back_to_derivation() {
     let stage_id = StageId::new();
     let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
-    let mut live = Effects::new(invocation_context(
+    let mut live = EffectsCore::new(invocation_context(
         journal.clone(),
         parent_envelope(WriterId::from(stage_id)),
         None,
@@ -2247,7 +2384,7 @@ async fn replayed_group_without_recorded_origin_falls_back_to_derivation() {
             .expect("history should index"),
     );
     let replay_journal = Arc::new(MemoryJournal::new(JournalOwner::stage(StageId::new())));
-    let mut replay = Effects::new(invocation_context(
+    let mut replay = EffectsCore::new(invocation_context(
         replay_journal.clone(),
         parent_envelope(WriterId::from(stage_id)),
         Some(history),
@@ -2279,7 +2416,7 @@ async fn replayed_group_without_recorded_origin_falls_back_to_derivation() {
 async fn mixed_origin_group_is_rejected_as_provenance_mismatch() {
     let stage_id = StageId::new();
     let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
-    let mut live = Effects::new(invocation_context(
+    let mut live = EffectsCore::new(invocation_context(
         journal.clone(),
         parent_envelope(WriterId::from(stage_id)),
         None,
@@ -2341,7 +2478,7 @@ fn effect_context_resolves_typed_trait_object_ports() {
 async fn capture_replays_recorded_value_without_using_live_value() {
     let stage_id = StageId::new();
     let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
-    let mut live = Effects::new(invocation_context(
+    let mut live = EffectsCore::new(invocation_context(
         journal.clone(),
         parent_envelope(WriterId::from(stage_id)),
         None,
@@ -2362,7 +2499,7 @@ async fn capture_replays_recorded_value_without_using_live_value() {
             .expect("history should index"),
     );
     let replay_journal = Arc::new(MemoryJournal::new(JournalOwner::stage(StageId::new())));
-    let mut replay = Effects::new(invocation_context(
+    let mut replay = EffectsCore::new(invocation_context(
         replay_journal.clone(),
         parent_envelope(WriterId::from(stage_id)),
         Some(history),
@@ -2386,7 +2523,7 @@ async fn capture_replays_recorded_value_without_using_live_value() {
     );
     let replay_of_replay_journal =
         Arc::new(MemoryJournal::new(JournalOwner::stage(StageId::new())));
-    let mut replay_of_replay = Effects::new(invocation_context(
+    let mut replay_of_replay = EffectsCore::new(invocation_context(
         replay_of_replay_journal.clone(),
         parent_envelope(WriterId::from(stage_id)),
         Some(replay_of_replay_history),
@@ -2488,7 +2625,7 @@ async fn boundary_abort_records_failure_with_cause_and_replays_deterministically
         None,
     );
     live_ctx.effect_boundary = Some(Arc::new(AbortingBoundary));
-    let mut live = Effects::new(live_ctx);
+    let mut live = EffectsCore::new(live_ctx);
 
     let live_err = live
         .perform(CountingEffect {
@@ -2540,7 +2677,7 @@ async fn boundary_abort_records_failure_with_cause_and_replays_deterministically
     );
     let replay_journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
     let replay_calls = Arc::new(AtomicUsize::new(0));
-    let mut replay = Effects::new(invocation_context(
+    let mut replay = EffectsCore::new(invocation_context(
         replay_journal.clone(),
         parent_envelope(WriterId::from(stage_id)),
         Some(replay_history),
@@ -2585,7 +2722,7 @@ async fn perform_rejects_unguarded_effect_on_typed_outcome_stage() {
         source_label: "circuit_breaker".to_string(),
         kind: SynthesizedOutcomeKind::BranchShaped,
     }];
-    let mut effects = Effects::new(ctx);
+    let mut effects = EffectsCore::new(ctx);
 
     let err = effects
         .perform(CountingEffect {
@@ -2623,7 +2760,7 @@ async fn plain_perform_is_allowed_on_outcome_shaped_registration() {
         source_label: "circuit_breaker".to_string(),
         kind: SynthesizedOutcomeKind::OutcomeShaped,
     }];
-    let mut effects = Effects::new(ctx);
+    let mut effects = EffectsCore::new(ctx);
 
     let output = effects
         .perform(CountingEffect {
@@ -2655,7 +2792,7 @@ async fn guarded_perform_is_rejected_on_outcome_shaped_registration() {
         source_label: "circuit_breaker".to_string(),
         kind: SynthesizedOutcomeKind::OutcomeShaped,
     }];
-    let mut effects = Effects::new(ctx);
+    let mut effects = EffectsCore::new(ctx);
 
     let err = effects
         .perform(LiftedProbeEffect)
@@ -2685,7 +2822,7 @@ async fn transactional_perform_is_rejected_on_outcome_shaped_registration() {
         source_label: "circuit_breaker".to_string(),
         kind: SynthesizedOutcomeKind::OutcomeShaped,
     }];
-    let mut effects = Effects::new(ctx);
+    let mut effects = EffectsCore::new(ctx);
 
     let err = effects
         .perform(TransactionalCountingEffect {
@@ -2714,7 +2851,7 @@ async fn boundary_empty_skip_records_failure_instead_of_unrecorded_error() {
         None,
     );
     live_ctx.effect_boundary = Some(Arc::new(EmptySkipBoundary));
-    let mut live = Effects::new(live_ctx);
+    let mut live = EffectsCore::new(live_ctx);
 
     let live_err = live
         .perform(CountingEffect {
@@ -2750,7 +2887,7 @@ async fn boundary_empty_skip_records_failure_instead_of_unrecorded_error() {
             .expect("history from live records"),
     );
     let replay_calls = Arc::new(AtomicUsize::new(0));
-    let mut replay = Effects::new(invocation_context(
+    let mut replay = EffectsCore::new(invocation_context(
         Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id))),
         parent_envelope(WriterId::from(stage_id)),
         Some(replay_history),
@@ -3027,7 +3164,7 @@ async fn runtime_enters_the_boundary_once_and_commits_only_the_terminal_call() {
     ctx.effect_boundary = Some(Arc::new(ThreeCallBoundary {
         consults: consults.clone(),
     }));
-    let mut effects = Effects::new(ctx);
+    let mut effects = EffectsCore::new(ctx);
 
     let outcome = effects
         .perform(CountingEffect {
@@ -3058,7 +3195,7 @@ async fn repeated_physical_calls_preserve_the_invocations_idempotency_key() {
     ctx.effect_boundary = Some(Arc::new(KeyCheckingThreeCallBoundary {
         expected_key: key.clone(),
     }));
-    let mut effects = Effects::new(ctx);
+    let mut effects = EffectsCore::new(ctx);
 
     effects
         .perform(KeyedEffect {
@@ -3088,7 +3225,7 @@ async fn missing_idempotency_key_is_unrecorded_and_unadmitted() {
     ctx.effect_boundary = Some(Arc::new(CountingBoundary {
         consults: consults.clone(),
     }));
-    let mut effects = Effects::new(ctx);
+    let mut effects = EffectsCore::new(ctx);
 
     let err = effects
         .perform(KeylessEffect {
@@ -3119,7 +3256,7 @@ async fn missing_idempotency_key_replays_as_same_error() {
             .expect("empty history should index"),
     );
     let calls = Arc::new(AtomicUsize::new(0));
-    let mut effects = Effects::new(invocation_context_with_mode(
+    let mut effects = EffectsCore::new(invocation_context_with_mode(
         journal.clone(),
         parent_envelope(WriterId::from(stage_id)),
         Some(history),
@@ -3169,7 +3306,7 @@ async fn stale_recorded_effect_fails_loud_when_key_dropped() {
             .expect("history should index"),
     );
     let calls = Arc::new(AtomicUsize::new(0));
-    let mut effects = Effects::new(invocation_context_with_mode(
+    let mut effects = EffectsCore::new(invocation_context_with_mode(
         journal.clone(),
         parent_envelope(WriterId::from(stage_id)),
         Some(history),
@@ -3257,7 +3394,7 @@ async fn transactional_boundary_executes_and_commits_the_single_use_operation_on
     ctx.effect_boundary = Some(Arc::new(CountingBoundary {
         consults: boundary_consults.clone(),
     }));
-    let mut effects = Effects::new(ctx);
+    let mut effects = EffectsCore::new(ctx);
 
     let output = effects
         .perform(TransactionalCountingEffect {
@@ -3303,7 +3440,7 @@ async fn transactional_boundary_committed_failure_overrides_port_return_and_repl
     live_ctx.effect_boundary = Some(Arc::new(CountingBoundary {
         consults: live_boundary_consults.clone(),
     }));
-    let mut live = Effects::new(live_ctx);
+    let mut live = EffectsCore::new(live_ctx);
 
     let live_err = live
         .perform(TransactionalCountingEffect {
@@ -3342,7 +3479,7 @@ async fn transactional_boundary_committed_failure_overrides_port_return_and_repl
     replay_ctx.effect_boundary = Some(Arc::new(CountingBoundary {
         consults: replay_boundary_consults.clone(),
     }));
-    let mut replay = Effects::new(replay_ctx);
+    let mut replay = EffectsCore::new(replay_ctx);
 
     let replay_err = replay
         .perform(TransactionalCountingEffect {
@@ -3380,7 +3517,7 @@ async fn transactional_boundary_foreign_abort_cannot_reclassify_a_committed_oper
     );
     ctx.effect_boundary = Some(Arc::new(ExecutedThenForeignAbortBoundary));
     let boundary_control_events = ctx.boundary_control_events.clone();
-    let mut effects = Effects::new(ctx);
+    let mut effects = EffectsCore::new(ctx);
 
     let output = effects
         .perform(TransactionalCountingEffect {
@@ -3431,7 +3568,7 @@ async fn transactional_boundary_foreign_execution_fails_closed_and_replays() {
         foreign_calls: foreign_calls.clone(),
     }));
     let boundary_control_events = live_ctx.boundary_control_events.clone();
-    let mut live = Effects::new(live_ctx);
+    let mut live = EffectsCore::new(live_ctx);
 
     let live_err = live
         .perform(TransactionalCountingEffect {
@@ -3473,7 +3610,7 @@ async fn transactional_boundary_foreign_execution_fails_closed_and_replays() {
             commit: true,
         }),
     );
-    let mut replay = Effects::new(invocation_context_with_mode(
+    let mut replay = EffectsCore::new(invocation_context_with_mode(
         replay_journal,
         parent_envelope(WriterId::from(stage_id)),
         Some(history),
@@ -3515,7 +3652,7 @@ async fn transactional_boundary_abort_records_failure_and_replays() {
         ports,
     );
     live_ctx.effect_boundary = Some(Arc::new(AbortingBoundary));
-    let mut live = Effects::new(live_ctx);
+    let mut live = EffectsCore::new(live_ctx);
 
     let live_err = live
         .perform(TransactionalCountingEffect {
@@ -3558,7 +3695,7 @@ async fn transactional_boundary_abort_records_failure_and_replays() {
             commit: true,
         }),
     );
-    let mut replay = Effects::new(invocation_context_with_mode(
+    let mut replay = EffectsCore::new(invocation_context_with_mode(
         replay_journal.clone(),
         parent_envelope(WriterId::from(stage_id)),
         Some(history),
@@ -3637,7 +3774,7 @@ async fn transactional_boundary_abort_restores_output_ordinal() {
             commit: true,
         }),
     );
-    let mut effects_a = Effects::new(make_ctx(
+    let mut effects_a = EffectsCore::new(make_ctx(
         journal_a.clone(),
         Some(Arc::new(TransactionalOnlyAbortBoundary)),
         ports_a,
@@ -3660,7 +3797,8 @@ async fn transactional_boundary_abort_restores_output_ordinal() {
 
     // Run B: only the counting effect, same identity coordinates.
     let journal_b = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
-    let mut effects_b = Effects::new(make_ctx(journal_b.clone(), None, EffectPortRegistry::new()));
+    let mut effects_b =
+        EffectsCore::new(make_ctx(journal_b.clone(), None, EffectPortRegistry::new()));
     effects_b
         .perform(CountingEffect {
             value: 41,

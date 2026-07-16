@@ -182,12 +182,14 @@ impl<T: AsyncTransformHandler + Send + Sync> UnifiedTransformHandler
 #[async_trait]
 pub trait EffectfulTransformHandler: Send + Sync {
     type Input: TypedPayload + Send + Sync + 'static;
+    type Output: obzenflow_core::StageFactSet;
+    type AllowedEffects: crate::effects::EffectSet;
 
     async fn process(
         &self,
         input: Self::Input,
-        fx: &mut Effects,
-    ) -> std::result::Result<(), HandlerError>;
+        fx: &mut Effects<Self::Output, Self::AllowedEffects>,
+    ) -> std::result::Result<crate::effects::StageCompletion<Self::Output>, HandlerError>;
 
     async fn drain(&mut self) -> std::result::Result<(), HandlerError> {
         Ok(())
@@ -207,7 +209,7 @@ where
     H: EffectfulTransformHandler,
 {
     type Input = H::Input;
-    type Output = ();
+    type Output = H::Output;
 }
 
 #[async_trait]
@@ -226,8 +228,8 @@ where
         let effect_context = effect_context.ok_or_else(|| {
             HandlerError::Other("effectful transform invoked without effect context".to_string())
         })?;
-        let mut fx = Effects::new(effect_context);
-        self.0.process(input, &mut fx).await?;
+        let mut fx = Effects::<H::Output, H::AllowedEffects>::new(effect_context);
+        let _completion = self.0.process(input, &mut fx).await?;
         Ok(Vec::new())
     }
 

@@ -89,6 +89,12 @@ impl fmt::Display for HandlerError {
 
 impl std::error::Error for HandlerError {}
 
+impl From<crate::effects::EffectError> for HandlerError {
+    fn from(error: crate::effects::EffectError) -> Self {
+        Self::Other(error.to_string())
+    }
+}
+
 impl From<HandlerError> for StageError {
     fn from(err: HandlerError) -> Self {
         StageError::handler_failure(err)

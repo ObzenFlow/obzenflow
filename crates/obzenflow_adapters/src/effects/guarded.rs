@@ -14,7 +14,8 @@
 
 use async_trait::async_trait;
 use obzenflow_core::event::schema::{
-    TypedFact, TypedFactSet, TypedFactSetError, TypedFactType, TypedPayload,
+    EmptySet, FactList, MemberList, StageFactSet, TypedFact, TypedFactSet, TypedFactSetError,
+    TypedFactType, TypedPayload, WithMember,
 };
 use obzenflow_runtime::effects::{
     Effect, EffectContext, EffectError, EffectPortRequirement, EffectSafety, IdempotencyKey,
@@ -38,6 +39,46 @@ pub enum CircuitBreakerOutcome<P, F, R> {
     Fallback(F),
     /// The breaker prevented the call and synthesized the rejection fact.
     Rejected(R),
+}
+
+/// Type-list append used only to project the lifted carrier's complete fact
+/// membership set while the guarded compatibility wrapper remains.
+#[doc(hidden)]
+pub trait AppendGuardedMembers<Tail> {
+    type Output: MemberList;
+}
+
+impl<Tail: MemberList> AppendGuardedMembers<Tail> for EmptySet {
+    type Output = Tail;
+}
+
+impl<Head: 'static, Rest, Tail> AppendGuardedMembers<Tail> for WithMember<Head, Rest>
+where
+    Rest: MemberList + AppendGuardedMembers<Tail>,
+    Tail: MemberList,
+{
+    type Output = WithMember<Head, <Rest as AppendGuardedMembers<Tail>>::Output>;
+}
+
+impl<P, F, R> StageFactSet for CircuitBreakerOutcome<P, F, R>
+where
+    P: StageFactSet,
+    F: TypedPayload + Send + Sync + 'static,
+    R: TypedPayload + Send + Sync + 'static,
+    P::Members: AppendGuardedMembers<WithMember<F, WithMember<R, EmptySet>>>,
+    <P::Members as AppendGuardedMembers<WithMember<F, WithMember<R, EmptySet>>>>::Output: FactList,
+{
+    type Members =
+        <P::Members as AppendGuardedMembers<WithMember<F, WithMember<R, EmptySet>>>>::Output;
+
+    fn member_fact_types() -> Vec<TypedFactType> {
+        let mut types = P::member_fact_types();
+        types.push(TypedFactType::of::<F>());
+        types.push(TypedFactType::of::<R>());
+        types
+    }
+
+    const MEMBERS_DISTINCT: () = <Self::Members as FactList>::DISTINCT_EVENT_TYPES;
 }
 
 impl<P, F, R> TypedFactSet for CircuitBreakerOutcome<P, F, R>
@@ -137,6 +178,11 @@ where
     E: Effect,
     F: TypedPayload + Clone + Send + Sync + 'static,
     R: TypedPayload + Clone + Send + Sync + 'static,
+    <E::Outcome as StageFactSet>::Members:
+        AppendGuardedMembers<WithMember<F, WithMember<R, EmptySet>>>,
+    <<E::Outcome as StageFactSet>::Members as AppendGuardedMembers<
+        WithMember<F, WithMember<R, EmptySet>>,
+    >>::Output: FactList,
 {
     const EFFECT_TYPE: &'static str = E::EFFECT_TYPE;
     const SCHEMA_VERSION: u32 = E::SCHEMA_VERSION;

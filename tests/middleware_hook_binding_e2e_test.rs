@@ -360,8 +360,14 @@ struct HookTransform {
 #[async_trait]
 impl EffectfulTransformHandler for HookTransform {
     type Input = HookInput;
+    type Output = obzenflow_core::stage_fact_set![HookOutput, HookEffectValue];
+    type AllowedEffects = obzenflow_runtime::effect_set![HookEffect];
 
-    async fn process(&self, input: HookInput, fx: &mut Effects) -> Result<(), HandlerError> {
+    async fn process(
+        &self,
+        input: HookInput,
+        fx: &mut Effects<Self::Output, Self::AllowedEffects>,
+    ) -> Result<obzenflow_runtime::effects::StageCompletion<Self::Output>, HandlerError> {
         let result = fx
             .perform(HookEffect {
                 value: input.value,
@@ -380,7 +386,7 @@ impl EffectfulTransformHandler for HookTransform {
         })
         .await
         .map_err(|err| HandlerError::Other(err.to_string()))?;
-        Ok(())
+        Ok(fx.complete()?)
     }
 
     fn stage_logic_version(&self) -> &str {

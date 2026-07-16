@@ -182,42 +182,6 @@ impl TypedPayload for OrderCancelled {
     const SCHEMA_VERSION: u32 = 1;
 }
 
-/// Breaker-synthesized fallback branch (FLOWIP-120h): the circuit was open,
-/// the gateway was never called, and this fact records the degraded outcome
-/// under the effect cursor. The branch is its own named fact, so replay
-/// reconstructs it by event type and downstream consumers could subscribe to
-/// breaker activity directly.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
-pub struct GatewayPaymentFallback {
-    pub order_id: String,
-    pub customer_id: String,
-    pub amount_cents: u64,
-    pub phase: TrafficPhase,
-    pub reason: String,
-}
-
-impl TypedPayload for GatewayPaymentFallback {
-    const EVENT_TYPE: &'static str = "payment.gateway_fallback";
-    const SCHEMA_VERSION: u32 = 1;
-}
-
-/// Breaker-synthesized rejection branch (FLOWIP-120h): the circuit rejected
-/// the call and no fallback value exists. The rejection reason lives in the
-/// payload because strict replay reconstructs branches from facts alone.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
-pub struct GatewayPaymentRejected {
-    pub order_id: String,
-    pub customer_id: String,
-    pub amount_cents: u64,
-    pub phase: TrafficPhase,
-    pub reason: String,
-}
-
-impl TypedPayload for GatewayPaymentRejected {
-    const EVENT_TYPE: &'static str = "payment.gateway_rejected";
-    const SCHEMA_VERSION: u32 = 1;
-}
-
 /// Material business reason the gateway declined payment.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub enum PaymentDeclineReason {

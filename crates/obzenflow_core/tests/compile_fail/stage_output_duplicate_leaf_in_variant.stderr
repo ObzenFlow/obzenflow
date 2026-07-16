@@ -1,0 +1,5 @@
+error: duplicate leaf type `FirstFact` within one stage output variant; each fact type appears once per variant (FLOWIP-120z)
+  --> tests/compile_fail/stage_output_duplicate_leaf_in_variant.rs:23:20
+   |
+23 |         duplicate: FirstFact,
+   |                    ^^^^^^^^^

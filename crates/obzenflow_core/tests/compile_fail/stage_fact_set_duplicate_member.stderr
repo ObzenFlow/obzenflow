@@ -1,0 +1,27 @@
+error[E0080]: evaluation panicked: duplicate member in a declared stage fact set: two members share an event type; each fact type appears exactly once (FLOWIP-120z)
+ --> src/event/schema/member_set.rs
+  |
+  | /         assert!(
+  | |             !const_str_eq(X::EVENT_TYPE, Head::EVENT_TYPE),
+  | |             "duplicate member in a declared stage fact set: two members share an event \
+  | |              type; each fact type appears exactly once (FLOWIP-120z)"
+  | |         );
+  | |_________^ evaluation of `<obzenflow_core::event::schema::WithMember<FirstFact, obzenflow_core::event::schema::EmptySet> as obzenflow_core::event::schema::FactNameDisjoint<FirstFact>>::OK` failed here
+
+note: erroneous constant encountered
+ --> src/event/schema/member_set.rs
+  |
+  |         <Rest as FactNameDisjoint<Head>>::OK,
+  |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+note: erroneous constant encountered
+ --> src/event/schema/stage_fact_set.rs
+  |
+  |     const MEMBERS_DISTINCT: () = L::DISTINCT_EVENT_TYPES;
+  |                                  ^^^^^^^^^^^^^^^^^^^^^^^
+
+note: erroneous constant encountered
+ --> src/event/schema/stage_fact_set.rs
+  |
+  |     S::MEMBERS_DISTINCT
+  |     ^^^^^^^^^^^^^^^^^^^

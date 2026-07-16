@@ -1,0 +1,5 @@
+error: stage output carriers cannot be generic; declare a concrete carrier per stage (FLOWIP-120z)
+  --> tests/compile_fail/stage_output_generic_carrier.rs:11:20
+   |
+11 | enum GenericOutcome<T> {
+   |                    ^

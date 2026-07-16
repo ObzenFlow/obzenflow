@@ -35,10 +35,12 @@ pub use journal::Journal;
 // resolve inside this crate too (the serde-style self-alias trick).
 extern crate self as obzenflow_core;
 
-// Re-export schema types (FLOWIP-082a; EffectOutcomeFacts FLOWIP-120m)
+// Re-export schema types (FLOWIP-082a; EffectOutcomeFacts FLOWIP-120m;
+// stage fact sets and membership proofs FLOWIP-120z)
 pub use event::schema::{
-    EffectOutcomeFacts, MiddlewareContextKey, TypedFact, TypedFactSet, TypedFactSetError,
-    TypedFactType, TypedMiddlewareEvent, TypedPayload,
+    assert_distinct_stage_fact_set, DeclaredStageFactSet, EffectOutcomeFacts, Member,
+    MiddlewareContextKey, OneFactStageOutput, StageFactSet, StageOutputFacts, SubsetOf, TypedFact,
+    TypedFactSet, TypedFactSetError, TypedFactType, TypedMiddlewareEvent, TypedPayload,
 };
 
 // Re-export typed IDs

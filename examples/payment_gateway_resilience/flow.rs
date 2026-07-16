@@ -36,24 +36,24 @@
 //!
 //! The circuit breaker on the authorize_payment stage is the second,
 //! independent layer: it watches the live effect boundary and, once the
-//! dependency looks unhealthy, short-circuits to a typed unavailable outcome
-//! instead of hammering it. Unavailability deliberately does not cancel; no
-//! decision was reached, so those orders go to manual review. See `README.md`.
+//! dependency looks unhealthy, fails fast with a recorded rejection instead
+//! of hammering it. Unavailability deliberately does not cancel; no decision
+//! was reached, so those orders go to manual review. See `README.md`.
 
 use super::console;
 use super::deliveries::ShippingHandoff;
 use super::domain::{
-    CustomerOrderPlaced, GatewayPaymentFallback, GatewayPaymentRejected, InvalidOrder,
-    OrderCancelled, PaymentAuthorizationUnavailable, PaymentAuthorized, PaymentDeclined,
-    ValidatedOrder,
+    CustomerOrderPlaced, InvalidOrder, OrderCancelled, PaymentAuthorizationUnavailable,
+    PaymentAuthorized, PaymentDeclined, ValidatedOrder,
 };
 use super::fixtures;
 use super::gateway::{self, AuthorizePayment, GatewayTransform};
 use super::validation;
 use obzenflow::typed::sources as typed_sources;
+use obzenflow_adapters::middleware::circuit_breaker::OpenPolicy;
 use obzenflow_adapters::middleware::observability::{indicator, log, IndicatorKind};
 use obzenflow_adapters::middleware::{failure_rate, CircuitBreaker, RateLimiterBuilder, Retry};
-use obzenflow_dsl::{effectful_transform, flow, sink, source};
+use obzenflow_dsl::{effectful_transform, flow, sink, source, transform};
 use obzenflow_infra::journal::disk_journals;
 use std::time::Duration;
 
@@ -113,7 +113,7 @@ pub fn build_flow() -> obzenflow_dsl::FlowDefinition {
 /// the defaults above; the acceptance rig in `proof.rs` swaps in its scripted
 /// order, instrumented gateway, and retry section without touching the
 /// topology.
-pub(super) fn assemble_flow(
+pub fn assemble_flow(
     scripted_web_orders: Vec<CustomerOrderPlaced>,
     scripted_store_orders: Vec<CustomerOrderPlaced>,
     gateway_transform: GatewayTransform,
@@ -131,27 +131,14 @@ pub(super) fn assemble_flow(
             .or_slow_calls_over(Duration::from_millis(250), 0.5),
     )
     .cooldown(Duration::from_secs(5))
+    .when_open(OpenPolicy::FailFast)
+    .when_probe_rejected(OpenPolicy::FailFast)
     .with_failure_classification(gateway::classify_simulated_gateway_unavailability);
     let gateway_breaker = match gateway_retry {
         Some(retry) => gateway_breaker.retry(retry),
         None => gateway_breaker,
     };
-    let gateway_breaker = gateway_breaker
-        .fallback_fact(|order: &ValidatedOrder| GatewayPaymentFallback {
-            order_id: order.order_id.clone(),
-            customer_id: order.customer_id.clone(),
-            amount_cents: order.amount_cents,
-            phase: order.phase.clone(),
-            reason: "circuit breaker open".to_string(),
-        })
-        .rejection_fact(|order: &ValidatedOrder, reason| GatewayPaymentRejected {
-            order_id: order.order_id.clone(),
-            customer_id: order.customer_id.clone(),
-            amount_cents: order.amount_cents,
-            phase: order.phase.clone(),
-            reason: format!("{reason:?}"),
-        })
-        .build();
+    let gateway_breaker = gateway_breaker.build();
     let gateway_limiter = RateLimiterBuilder::new(gateway_calls_per_second).build();
 
     flow! {
@@ -201,17 +188,14 @@ pub(super) fn assemble_flow(
             // business classification, not exception handling: a valid order
             // becomes `ValidatedOrder`, an invalid order records the
             // `InvalidOrder` fact and its derived `OrderCancelled` consequence.
-            // The empty `effects:` list is explicit: this stage performs no
-            // external I/O; the effectful macro surface is what provides
-            // multi-type emission today.
-            validate_order = effectful_transform!(
+            // Its typed carrier lowers directly to the declared flat facts;
+            // no effect cursor or effect provenance is involved.
+            validate_order = transform!(
                 CustomerOrderPlaced -> {
                     ValidatedOrder,
                     InvalidOrder,
                     OrderCancelled
-                } => validation::ValidateOrder,
-                effects: [],
-                middleware: []
+                } => validation::ValidateOrder
             );
 
             // Payment authorization: the only stage that touches the outside
@@ -223,24 +207,21 @@ pub(super) fn assemble_flow(
             // The circuit breaker is the live-run safety layer on top:
             //   - opens when >= 60% of the last 5 gateway calls fail,
             //   - also counts calls slower than 250ms toward opening,
-            //   - while open, synthesizes the named `GatewayPaymentFallback`
-            //     branch fact instead of calling the gateway (EmitFallback),
-            //     with a single half-open probe.
+            //   - while open, fails fast: the prevented call surfaces as a
+            //     recorded rejection error, never a synthesized fact, with a
+            //     single half-open probe.
             // The breaker attaches inline to the effect it guards
             // (FLOWIP-120c H7): one policy instance per protected
-            // dependency. Its branch fact types are validated as arrow
-            // members at build time (FLOWIP-120h), and the handler performs
-            // the guarded wrapper so the branch is explicit in the type.
-            // Branch facts ride the effect cursor as recorded outcomes, so
-            // contracts stay strict with no breaker-aware compensation:
-            // every admitted input has a journaled outcome whether the
-            // gateway ran or the breaker synthesized it.
+            // dependency. A prevented call is recorded under the effect
+            // cursor like any other failure, so contracts stay strict with
+            // no breaker-aware compensation: every admitted input has a
+            // journaled outcome whether the gateway ran or the breaker
+            // refused the call, and the handler routes the refusal to
+            // manual review.
             authorize_payment = effectful_transform!(
                 ValidatedOrder -> {
                     PaymentAuthorized,
                     PaymentDeclined,
-                    GatewayPaymentFallback,
-                    GatewayPaymentRejected,
                     OrderCancelled,
                     PaymentAuthorizationUnavailable
                 } => gateway_transform,
@@ -284,7 +265,7 @@ pub(super) fn assemble_flow(
             );
 
             // Unavailable-authorization sink, tier 2 with middleware: failed
-            // gateway call or breaker fallback. No payment decision was
+            // gateway call or breaker refusal. No payment decision was
             // reached, so the order is not cancelled; it goes to retry or
             // manual review.
             manual_review = sink!(

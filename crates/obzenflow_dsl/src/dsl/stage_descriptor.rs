@@ -2382,10 +2382,12 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Stage
 }
 
 /// Descriptor for replay-safe effectful stateful stages.
+///
+/// Input-driven only (FLOWIP-120z): there is no emission interval, because
+/// the effectful surface has no periodic-emission position.
 pub struct EffectfulStatefulDescriptor<H: EffectfulStatefulHandler + 'static> {
     pub name: String,
     pub handler: H,
-    pub emit_interval: Option<Duration>,
     pub effects: Vec<EffectDeclaration>,
     pub middleware: Vec<Box<dyn MiddlewareFactory>>,
     pub backpressure: Option<BackpressureClause>,
@@ -2398,16 +2400,10 @@ impl<H: EffectfulStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
         Self {
             name: name.into(),
             handler,
-            emit_interval: None,
             effects: Vec::new(),
             middleware: Vec::new(),
             backpressure: None,
         }
-    }
-
-    pub fn with_emit_interval(mut self, emit_interval: Duration) -> Self {
-        self.emit_interval = Some(emit_interval);
-        self
     }
 
     pub fn with_middleware<M: MiddlewareFactory + 'static>(mut self, mw: M) -> Self {
@@ -2562,7 +2558,9 @@ impl<H: EffectfulStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
             stage_name: config.name.clone(),
             flow_name: config.flow_name.clone(),
             observers: observers.build(),
-            emit_interval: self.emit_interval,
+            // Input-driven only (FLOWIP-120z): the effectful surface never
+            // arms the supervisor's emission timer.
+            emit_interval: None,
             control_strategy: Some(control_strategy),
             upstream_stages: resources.upstream_stages.clone(),
         };

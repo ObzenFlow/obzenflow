@@ -90,8 +90,14 @@ struct Stamp {
 #[async_trait]
 impl EffectfulTransformHandler for Stamp {
     type Input = Input;
+    type Output = Stamped;
+    type AllowedEffects = obzenflow_runtime::effect_set![];
 
-    async fn process(&self, input: Input, fx: &mut Effects) -> Result<(), HandlerError> {
+    async fn process(
+        &self,
+        input: Input,
+        fx: &mut Effects<Self::Output, Self::AllowedEffects>,
+    ) -> Result<obzenflow_runtime::effects::StageCompletion<Self::Output>, HandlerError> {
         let stamp = if self.nondeterministic {
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -106,7 +112,7 @@ impl EffectfulTransformHandler for Stamp {
         })
         .await
         .map_err(|e| HandlerError::Other(e.to_string()))?;
-        Ok(())
+        Ok(fx.complete()?)
     }
 
     fn stage_logic_version(&self) -> &str {
@@ -122,15 +128,21 @@ struct StampV2;
 #[async_trait]
 impl EffectfulTransformHandler for StampV2 {
     type Input = Input;
+    type Output = Stamped;
+    type AllowedEffects = obzenflow_runtime::effect_set![];
 
-    async fn process(&self, input: Input, fx: &mut Effects) -> Result<(), HandlerError> {
+    async fn process(
+        &self,
+        input: Input,
+        fx: &mut Effects<Self::Output, Self::AllowedEffects>,
+    ) -> Result<obzenflow_runtime::effects::StageCompletion<Self::Output>, HandlerError> {
         fx.emit(Stamped {
             id: input.id,
             stamp: u128::from(input.id) * 1000,
         })
         .await
         .map_err(|e| HandlerError::Other(e.to_string()))?;
-        Ok(())
+        Ok(fx.complete()?)
     }
 
     fn stage_logic_version(&self) -> &str {

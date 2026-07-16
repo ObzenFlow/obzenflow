@@ -1,0 +1,52 @@
+error[E0277]: `_` is not a declared member of this stage's set
+  --> tests/compile_fail/effects_perform_undeclared_effect.rs:32:16
+   |
+32 |     fx.perform(UndeclaredEffect).await.unwrap();
+   |        ------- ^^^^^^^^^^^^^^^^ `_` is missing from the declared set
+   |        |
+   |        required by a bound introduced by this call
+   |
+   = help: the trait `Member<_, _>` is not implemented for `EmptySet`
+   = note: `emit` requires the fact type in the handler's `Output` set and `perform` requires the effect type in its `AllowedEffects` set; add the member to the handler declaration and the matching DSL clause, or remove this call (FLOWIP-120z)
+note: required by a bound in `Effects::<Output, AllowedEffects>::perform`
+  --> src/effects/typed.rs
+   |
+   |     pub async fn perform<E, EffectAt, OutcomeProof>(
+   |                  ------- required by a bound in this associated function
+...
+   |         AllowedEffects::Members: Member<E, EffectAt>,
+   |                                  ^^^^^^^^^^^^^^^^^^^ required by this bound in `Effects::<Output, AllowedEffects>::perform`
+
+error[E0277]: `UndeclaredEffect` is not a declared member of this stage's set
+  --> tests/compile_fail/effects_perform_undeclared_effect.rs:32:5
+   |
+32 |     fx.perform(UndeclaredEffect).await.unwrap();
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `UndeclaredEffect` is missing from the declared set
+   |
+   = help: the trait `Member<UndeclaredEffect, _>` is not implemented for `EmptySet`
+   = note: `emit` requires the fact type in the handler's `Output` set and `perform` requires the effect type in its `AllowedEffects` set; add the member to the handler declaration and the matching DSL clause, or remove this call (FLOWIP-120z)
+note: required by a bound in `Effects::<Output, AllowedEffects>::perform`
+  --> src/effects/typed.rs
+   |
+   |     pub async fn perform<E, EffectAt, OutcomeProof>(
+   |                  ------- required by a bound in this associated function
+...
+   |         AllowedEffects::Members: Member<E, EffectAt>,
+   |                                  ^^^^^^^^^^^^^^^^^^^ required by this bound in `Effects::<Output, AllowedEffects>::perform`
+
+error[E0277]: `UndeclaredEffect` is not a declared member of this stage's set
+  --> tests/compile_fail/effects_perform_undeclared_effect.rs:32:34
+   |
+32 |     fx.perform(UndeclaredEffect).await.unwrap();
+   |                                  ^^^^^ `UndeclaredEffect` is missing from the declared set
+   |
+   = help: the trait `Member<UndeclaredEffect, _>` is not implemented for `EmptySet`
+   = note: `emit` requires the fact type in the handler's `Output` set and `perform` requires the effect type in its `AllowedEffects` set; add the member to the handler declaration and the matching DSL clause, or remove this call (FLOWIP-120z)
+note: required by a bound in `Effects::<Output, AllowedEffects>::perform`
+  --> src/effects/typed.rs
+   |
+   |     pub async fn perform<E, EffectAt, OutcomeProof>(
+   |                  ------- required by a bound in this associated function
+...
+   |         AllowedEffects::Members: Member<E, EffectAt>,
+   |                                  ^^^^^^^^^^^^^^^^^^^ required by this bound in `Effects::<Output, AllowedEffects>::perform`

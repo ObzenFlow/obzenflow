@@ -1,0 +1,17 @@
+error[E0277]: not every member of this fact set is declared by the enclosing set
+  --> tests/compile_fail/transform_brace_arrow_missing_leaf.rs:41:13
+   |
+41 |     let _ = obzenflow_dsl::transform!(Input -> { First, Missing } => Handler);
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unsatisfied trait bound
+   |
+   = help: the trait `SubsetOf<WithMember<First, EmptySet>, SubsetProofStep<MemberFound, SubsetProofStep<MemberAfter<_>, SubsetProofEnd>>>` is not implemented for `WithMember<First, WithMember<Missing, EmptySet>>`
+   = note: every fact an allowed effect may author must be a member of the handler's `Output` set, and a stage arrow must equal the handler's declared set in both directions (FLOWIP-120z)
+note: required by a bound in `__obzenflow_assert_handler_output_declares_every_arrow_member`
+  --> tests/compile_fail/transform_brace_arrow_missing_leaf.rs:41:13
+   |
+41 |     let _ = obzenflow_dsl::transform!(Input -> { First, Missing } => Handler);
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |             |
+   |             required by a bound in this function
+   |             required by this bound in `__obzenflow_assert_handler_output_declares_every_arrow_member`
+   = note: this error originates in the macro `$crate::__obzenflow_transform_typed` which comes from the expansion of the macro `obzenflow_dsl::transform` (in Nightly builds, run with -Z macro-backtrace for more info)

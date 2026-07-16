@@ -80,6 +80,14 @@ pub enum EffectError {
     #[error("effectful stage '{stage_key}' cannot emit output facts from this handler context")]
     EmitUnsupported { stage_key: String },
 
+    #[error("effectful stage '{stage_key}' completed without authoring an output fact")]
+    CompletedWithoutOutput { stage_key: String },
+
+    #[error(
+        "effectful stage '{stage_key}' used complete_empty after committing {committed} output facts"
+    )]
+    CompletedEmptyWithOutput { stage_key: String, committed: usize },
+
     #[error("effect port '{name}' for type '{type_name}' is not registered")]
     MissingEffectPort {
         type_name: &'static str,
@@ -144,6 +152,8 @@ impl EffectError {
             | EffectError::UndeclaredEffect { .. }
             | EffectError::UndeclaredOutput { .. }
             | EffectError::EmitUnsupported { .. }
+            | EffectError::CompletedWithoutOutput { .. }
+            | EffectError::CompletedEmptyWithOutput { .. }
             | EffectError::MissingEffectPort { .. }
             | EffectError::TypedOutcomeCoordination { .. }
             | EffectError::TransactionalCommitMissing { .. } => false,
@@ -179,6 +189,8 @@ impl EffectError {
             EffectError::UndeclaredEffect { .. } => "undeclared_effect",
             EffectError::UndeclaredOutput { .. } => "undeclared_output",
             EffectError::EmitUnsupported { .. } => "emit_unsupported",
+            EffectError::CompletedWithoutOutput { .. } => "completed_without_output",
+            EffectError::CompletedEmptyWithOutput { .. } => "completed_empty_with_output",
             EffectError::MissingEffectPort { .. } => "missing_effect_port",
             EffectError::TypedOutcomeCoordination { .. } => "typed_outcome_coordination",
             EffectError::TransactionalCommitMissing { .. } => "transactional_commit_missing",
@@ -231,6 +243,8 @@ impl EffectError {
             | EffectError::UndeclaredEffect { .. }
             | EffectError::UndeclaredOutput { .. }
             | EffectError::EmitUnsupported { .. }
+            | EffectError::CompletedWithoutOutput { .. }
+            | EffectError::CompletedEmptyWithOutput { .. }
             | EffectError::MissingEffectPort { .. }
             | EffectError::TransactionalCommitMissing { .. } => {
                 std::borrow::Cow::Owned(self.to_string())
