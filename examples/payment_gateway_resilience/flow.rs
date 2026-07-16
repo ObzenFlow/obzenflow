@@ -22,8 +22,9 @@
 //! `cancelled_orders` sink fan-in stays availability-driven, since it is
 //! delivery-only with no effectful descendant.
 //!
-//! Validation lives in `validation.rs` as one multi-type stage
-//! (`CustomerOrderPlaced -> { ValidatedOrder, InvalidOrder, OrderCancelled }`);
+//! Validation lives in `validation.rs` as one typed classifier
+//! (`CustomerOrderPlaced -> ValidationOutcome`) whose flat output contract is
+//! `{ ValidatedOrder, InvalidOrder, OrderCancelled }`;
 //! the authorize_payment stage performs the `AuthorizePayment` effect (see
 //! `gateway.rs`). On a live run the effect executes once and the runtime
 //! journals its result; on a replay the runtime returns that recorded gateway
@@ -191,11 +192,12 @@ pub fn assemble_flow(
             // Its typed carrier lowers directly to the declared flat facts;
             // no effect cursor or effect provenance is involved.
             validate_order = transform!(
-                CustomerOrderPlaced -> {
+                CustomerOrderPlaced -> validation::ValidationOutcome,
+                outputs: [
                     ValidatedOrder,
                     InvalidOrder,
                     OrderCancelled
-                } => validation::ValidateOrder
+                ] => validation::ValidateOrder
             );
 
             // Payment authorization: the only stage that touches the outside

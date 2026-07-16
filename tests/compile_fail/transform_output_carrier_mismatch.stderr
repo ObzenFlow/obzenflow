@@ -1,0 +1,86 @@
+error[E0271]: type mismatch resolving `<Handler as TypedTransformHandler>::Output == DeclaredOutput`
+  --> tests/compile_fail/transform_output_carrier_mismatch.rs:48:13
+   |
+48 |       let _ = obzenflow_dsl::transform!(
+   |  _____________^
+49 | |         Input -> DeclaredOutput,
+50 | |         outputs: [First, Second] => Handler
+51 | |     );
+   | |     ^
+   | |     |
+   | |_____type mismatch resolving `<Handler as TypedTransformHandler>::Output == DeclaredOutput`
+   |       required by a bound introduced by this call
+   |
+note: expected this to be `DeclaredOutput`
+  --> tests/compile_fail/transform_output_carrier_mismatch.rs:40:19
+   |
+40 |     type Output = HandlerOutput;
+   |                   ^^^^^^^^^^^^^
+note: required by a bound in `__obzenflow_assert_handler_output_declares_every_arrow_member`
+  --> tests/compile_fail/transform_output_carrier_mismatch.rs:48:13
+   |
+48 |       let _ = obzenflow_dsl::transform!(
+   |  _____________^
+49 | |         Input -> DeclaredOutput,
+50 | |         outputs: [First, Second] => Handler
+51 | |     );
+   | |     ^
+   | |     |
+   | |_____required by a bound in this function
+   |       required by this bound in `__obzenflow_assert_handler_output_declares_every_arrow_member`
+   = note: this error originates in the macro `$crate::__obzenflow_transform_typed` which comes from the expansion of the macro `obzenflow_dsl::transform` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0271]: type mismatch resolving `<Handler as TypedTransformHandler>::Output == DeclaredOutput`
+  --> tests/compile_fail/transform_output_carrier_mismatch.rs:48:13
+   |
+48 |       let _ = obzenflow_dsl::transform!(
+   |  _____________^
+49 | |         Input -> DeclaredOutput,
+50 | |         outputs: [First, Second] => Handler
+51 | |     );
+   | |     ^
+   | |     |
+   | |_____type mismatch resolving `<Handler as TypedTransformHandler>::Output == DeclaredOutput`
+   |       required by a bound introduced by this call
+   |
+note: expected this to be `DeclaredOutput`
+  --> tests/compile_fail/transform_output_carrier_mismatch.rs:40:19
+   |
+40 |     type Output = HandlerOutput;
+   |                   ^^^^^^^^^^^^^
+note: required by a bound in `__obzenflow_assert_arrow_declares_every_handler_output_member`
+  --> tests/compile_fail/transform_output_carrier_mismatch.rs:48:13
+   |
+48 |       let _ = obzenflow_dsl::transform!(
+   |  _____________^
+49 | |         Input -> DeclaredOutput,
+50 | |         outputs: [First, Second] => Handler
+51 | |     );
+   | |     ^
+   | |     |
+   | |_____required by a bound in this function
+   |       required by this bound in `__obzenflow_assert_arrow_declares_every_handler_output_member`
+   = note: this error originates in the macro `$crate::__obzenflow_transform_typed` which comes from the expansion of the macro `obzenflow_dsl::transform` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0271]: type mismatch resolving `<TypedTransformHandlerAdapter<Handler> as TransformTyping>::Output == DeclaredOutput`
+  --> tests/compile_fail/transform_output_carrier_mismatch.rs:48:13
+   |
+48 |       let _ = obzenflow_dsl::transform!(
+   |  _____________^
+49 | |         Input -> DeclaredOutput,
+50 | |         outputs: [First, Second] => Handler
+51 | |     );
+   | |     ^
+   | |     |
+   | |_____expected `DeclaredOutput`, found `HandlerOutput`
+   |       required by a bound introduced by this call
+   |
+note: required by a bound in `assert_transform_contract`
+  --> crates/obzenflow_runtime/src/typing.rs
+   |
+   | pub fn assert_transform_contract<H, In, Out>(_: &H)
+   |        ------------------------- required by a bound in this function
+   | where
+   |     H: TransformTyping<Input = In, Output = Out>,
+   |                                    ^^^^^^^^^^^^ required by this bound in `assert_transform_contract`
+   = note: this error originates in the macro `$crate::__obzenflow_transform_typed` which comes from the expansion of the macro `obzenflow_dsl::transform` (in Nightly builds, run with -Z macro-backtrace for more info)

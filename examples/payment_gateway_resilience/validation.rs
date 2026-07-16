@@ -8,7 +8,8 @@
 //! order by a single stage with a multi-type output contract:
 //!
 //! ```text
-//! CustomerOrderPlaced -> { ValidatedOrder, InvalidOrder, OrderCancelled }
+//! CustomerOrderPlaced -> ValidationOutcome
+//! ValidationOutcome::Members = { ValidatedOrder, InvalidOrder, OrderCancelled }
 //! ```
 //!
 //! A valid order becomes `ValidatedOrder` and proceeds to payment

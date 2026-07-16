@@ -43,5 +43,8 @@ impl TransformHandler for RawHandler {
 }
 
 fn main() {
-    let _ = obzenflow_dsl::transform!(Input -> { First, Second } => RawHandler);
+    let _ = obzenflow_dsl::transform!(
+        Input -> First,
+        outputs: [First, Second] => RawHandler
+    );
 }

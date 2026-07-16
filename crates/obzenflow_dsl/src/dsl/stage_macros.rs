@@ -1522,6 +1522,7 @@ macro_rules! __obzenflow_transform_typed {
         where
             __Handler: ::obzenflow_runtime::stages::common::handlers::TypedTransformHandler<
                 Input = $in,
+                Output = $out,
             >,
             <::obzenflow_core::stage_fact_set![$($member),+] as ::obzenflow_core::StageFactSet>::Members:
                 ::obzenflow_core::SubsetOf<
@@ -1539,6 +1540,7 @@ macro_rules! __obzenflow_transform_typed {
         where
             __Handler: ::obzenflow_runtime::stages::common::handlers::TypedTransformHandler<
                 Input = $in,
+                Output = $out,
             >,
             <<__Handler as ::obzenflow_runtime::stages::common::handlers::TypedTransformHandler>::Output as ::obzenflow_core::StageFactSet>::Members:
                 ::obzenflow_core::SubsetOf<
@@ -1556,13 +1558,14 @@ macro_rules! __obzenflow_transform_typed {
             ::obzenflow_runtime::stages::common::handlers::TypedTransformHandlerAdapter::new(
                 __handler,
             );
+        ::obzenflow_runtime::typing::assert_transform_contract::<_, $in, $out>(&__handler);
         let __metadata = $crate::dsl::typing::StageTypingMetadata::transform(
             $crate::dsl::typing::TypeHint::exact_payload::<$in>(),
-            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
+            $crate::dsl::typing::TypeHint::exact::<$out>(),
             false,
             None,
         )
-        .with_additional_output_contract($crate::__obzenflow_output_contract_members!($($member),+));
+        .with_output_contract($crate::__obzenflow_output_contract_members!($($member),+));
         let __descriptor = $crate::__obzenflow_transform_untyped!(name = $name, handler = __handler, middleware = [$($mw),*] $(, backpressure = [$($bp)?])?);
         $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
     }};

@@ -6,40 +6,47 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Input;
 impl TypedPayload for Input {
-    const EVENT_TYPE: &'static str = "compile_fail.transform.missing.input";
+    const EVENT_TYPE: &'static str = "compile_fail.transform.carrier_mismatch.input";
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct First;
 impl TypedPayload for First {
-    const EVENT_TYPE: &'static str = "compile_fail.transform.missing.first";
+    const EVENT_TYPE: &'static str = "compile_fail.transform.carrier_mismatch.first";
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-struct Missing;
-impl TypedPayload for Missing {
-    const EVENT_TYPE: &'static str = "compile_fail.transform.missing.second";
+struct Second;
+impl TypedPayload for Second {
+    const EVENT_TYPE: &'static str = "compile_fail.transform.carrier_mismatch.second";
 }
 
 #[derive(Clone, Debug, StageOutputFacts)]
-enum Output {
+enum DeclaredOutput {
     First(First),
+    Second(Second),
+}
+
+#[derive(Clone, Debug, StageOutputFacts)]
+enum HandlerOutput {
+    First(First),
+    Second(Second),
 }
 
 #[derive(Clone, Debug)]
 struct Handler;
 impl TypedTransformHandler for Handler {
     type Input = Input;
-    type Output = Output;
+    type Output = HandlerOutput;
 
     fn process(&self, _input: Input) -> Result<Self::Output, HandlerError> {
-        Ok(Output::First(First))
+        Ok(HandlerOutput::First(First))
     }
 }
 
 fn main() {
     let _ = obzenflow_dsl::transform!(
-        Input -> Output,
-        outputs: [First, Missing] => Handler
+        Input -> DeclaredOutput,
+        outputs: [First, Second] => Handler
     );
 }
