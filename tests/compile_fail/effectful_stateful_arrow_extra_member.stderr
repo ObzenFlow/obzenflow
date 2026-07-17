@@ -1,9 +1,9 @@
 error[E0277]: the handler's `Output` declares a fact missing from the stage arrow
-  --> tests/compile_fail/effectful_arrow_extra_member.rs:6:13
+  --> tests/compile_fail/effectful_stateful_arrow_extra_member.rs:6:13
    |
- 6 |       let _ = obzenflow_dsl::effectful_transform!(
+ 6 |       let _ = obzenflow_dsl::effectful_stateful!(
    |  _____________^
- 7 | |         Input -> { First } => FirstAndSecond,
+ 7 | |         Input -> { First } => StatefulFirstAndSecond,
  8 | |         effects: [],
  9 | |         middleware: []
 10 | |     );
@@ -11,17 +11,17 @@ error[E0277]: the handler's `Output` declares a fact missing from the stage arro
    |
    = help: the trait `HandlerOutputsAreDeclaredByArrow<WithMember<support::First, EmptySet>, SubsetProofStep<MemberFound, SubsetProofStep<MemberAfter<_>, SubsetProofEnd>>>` is not implemented for `WithMember<support::First, WithMember<support::Second, EmptySet>>`
    = note: the stage arrow is canonical: remove the extra fact from `Output`, or add it to the arrow first when it belongs in the stage contract and then update the handler's carrier or witness; use `stage_fact_set![...]` only for an effectful-transform witness, and a `StageOutputFacts` carrier where values are returned or applied (FLOWIP-120z B9)
-note: required by a bound in `__obzenflow_assert_effectful_transform_contract`
-  --> tests/compile_fail/effectful_arrow_extra_member.rs:6:13
+note: required by a bound in `__obzenflow_assert_effectful_stateful_contract`
+  --> tests/compile_fail/effectful_stateful_arrow_extra_member.rs:6:13
    |
- 6 |       let _ = obzenflow_dsl::effectful_transform!(
+ 6 |       let _ = obzenflow_dsl::effectful_stateful!(
    |  _____________^
- 7 | |         Input -> { First } => FirstAndSecond,
+ 7 | |         Input -> { First } => StatefulFirstAndSecond,
  8 | |         effects: [],
  9 | |         middleware: []
 10 | |     );
    | |     ^
    | |     |
    | |_____required by a bound in this function
-   |       required by this bound in `__obzenflow_assert_effectful_transform_contract`
-   = note: this error originates in the macro `$crate::__obzenflow_assert_effectful_transform_contract` which comes from the expansion of the macro `obzenflow_dsl::effectful_transform` (in Nightly builds, run with -Z macro-backtrace for more info)
+   |       required by this bound in `__obzenflow_assert_effectful_stateful_contract`
+   = note: this error originates in the macro `$crate::__obzenflow_assert_effectful_stateful_contract` which comes from the expansion of the macro `obzenflow_dsl::effectful_stateful` (in Nightly builds, run with -Z macro-backtrace for more info)

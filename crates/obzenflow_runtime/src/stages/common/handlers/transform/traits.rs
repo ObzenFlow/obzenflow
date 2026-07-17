@@ -179,6 +179,63 @@ impl<T: AsyncTransformHandler + Send + Sync> UnifiedTransformHandler
 }
 
 /// Async transform surface for replay-safe effects.
+///
+/// The stage arrow and `effects:` clause are the canonical operator-facing
+/// contract. `Output` and `AllowedEffects` mirror those declarations so Rust
+/// can reject an undeclared [`Effects::emit`] or [`Effects::perform`] inside
+/// this handler before the handler is erased for execution. They carry no
+/// runtime metadata and are never journalled.
+///
+/// A single output fact may be named directly. For a multi-fact arrow, use
+/// [`obzenflow_core::stage_fact_set!`]. Always mirror effect types with
+/// [`crate::effect_set!`]; middleware and policy values remain only in the
+/// stage's `effects:` clause.
+///
+/// ```ignore
+/// # use async_trait::async_trait;
+/// # use obzenflow_runtime::stages::common::handlers::EffectfulTransformHandler;
+/// # struct GatewayTransform;
+/// # struct ValidatedOrder;
+/// # struct PaymentAuthorized;
+/// # struct PaymentDeclined;
+/// # struct OrderCancelled;
+/// # struct PaymentAuthorizationUnavailable;
+/// # struct AuthorizePayment;
+/// #[async_trait]
+/// impl EffectfulTransformHandler for GatewayTransform {
+///     type Input = ValidatedOrder;
+///     type Output = obzenflow_core::stage_fact_set![
+///         PaymentAuthorized,
+///         PaymentDeclined,
+///         OrderCancelled,
+///         PaymentAuthorizationUnavailable,
+///     ];
+///     type AllowedEffects = obzenflow_runtime::effect_set![AuthorizePayment];
+///
+///     // `process` mirrors this contract through
+///     // `Effects<Self::Output, Self::AllowedEffects>`.
+///     # async fn process(
+///     #     &self,
+///     #     _input: Self::Input,
+///     #     _fx: &mut obzenflow_runtime::effects::Effects<
+///     #         Self::Output,
+///     #         Self::AllowedEffects,
+///     #     >,
+///     # ) -> Result<
+///     #     obzenflow_runtime::effects::StageCompletion<Self::Output>,
+///     #     obzenflow_runtime::stages::common::handler_error::HandlerError,
+///     # > {
+///     #     unimplemented!()
+///     # }
+/// }
+/// ```
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` does not satisfy `EffectfulTransformHandler` for this stage",
+    label = "this handler does not match the effectful transform contract",
+    note = "implement `EffectfulTransformHandler` with `Input`, `Output`, `AllowedEffects`, \
+            and `process`; `Input` must match the arrow input, while `Output` and \
+            `AllowedEffects` mirror the canonical arrow and `effects:` clause (FLOWIP-120z B9)"
+)]
 #[async_trait]
 pub trait EffectfulTransformHandler: Send + Sync {
     type Input: TypedPayload + Send + Sync + 'static;

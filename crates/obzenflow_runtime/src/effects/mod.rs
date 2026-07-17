@@ -89,7 +89,12 @@ pub use identity::{
 };
 pub use ports::{EffectPortKey, EffectPortRegistry, EffectPortRequirement};
 pub(crate) use runtime::EffectsCore;
+// FLOWIP-120z/B9: the proof facades are doc-hidden public bounds so rustc can
+// report failures in handler vocabulary without weakening the underlying set
+// membership and containment proofs.
 pub use typed::Effects;
+#[doc(hidden)]
+pub use typed::{AllowedEffectsAllowEffect, EffectOutcomeFitsOutput, OutputAllowsFact};
 
 use commit::{
     append_domain_effect_success_facts, append_effect_record, CommittedEffectOutcome,

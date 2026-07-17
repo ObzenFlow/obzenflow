@@ -1,0 +1,8 @@
+error[E0046]: not all trait items implemented, missing: `Output`, `AllowedEffects`
+  --> tests/compile_fail/effectful_stateful_missing_contract_types.rs:14:1
+   |
+14 | impl EffectfulStatefulHandler for MissingContractTypes {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ missing `Output`, `AllowedEffects` in implementation
+   |
+   = help: implement the missing item: `type Output = /* Type */;`
+   = help: implement the missing item: `type AllowedEffects = /* Type */;`

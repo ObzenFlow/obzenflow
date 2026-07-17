@@ -4,7 +4,9 @@ use obzenflow_runtime::effects::{
     Effect, EffectContext, EffectError, EffectSafety, Effects, StageCompletion,
 };
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
-use obzenflow_runtime::stages::common::handlers::EffectfulTransformHandler;
+use obzenflow_runtime::stages::common::handlers::{
+    EffectfulStatefulHandler, EffectfulTransformHandler,
+};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -102,5 +104,101 @@ impl EffectfulTransformHandler for AllowsFirstEffect {
     ) -> Result<StageCompletion<Self::Output>, HandlerError> {
         fx.emit(First).await?;
         Ok(fx.complete()?)
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct StatefulFirstOnly;
+
+#[async_trait]
+impl EffectfulStatefulHandler for StatefulFirstOnly {
+    type State = ();
+    type Input = Input;
+    type Output = First;
+    type AllowedEffects = obzenflow_runtime::effect_set![];
+
+    fn initial_state(&self) -> Self::State {}
+
+    async fn decide(
+        &mut self,
+        _state: &Self::State,
+        _input: &Self::Input,
+        fx: &mut Effects<Self::Output, Self::AllowedEffects>,
+    ) -> Result<StageCompletion<Self::Output>, HandlerError> {
+        Ok(fx.complete_empty()?)
+    }
+
+    fn apply(
+        &mut self,
+        _state: &mut Self::State,
+        _fact: Self::Output,
+    ) -> Result<(), HandlerError> {
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, obzenflow_core::StageOutputFacts)]
+pub enum StatefulFirstAndSecondOutput {
+    First(First),
+    Second(Second),
+}
+
+#[derive(Clone, Debug)]
+pub struct StatefulFirstAndSecond;
+
+#[async_trait]
+impl EffectfulStatefulHandler for StatefulFirstAndSecond {
+    type State = ();
+    type Input = Input;
+    type Output = StatefulFirstAndSecondOutput;
+    type AllowedEffects = obzenflow_runtime::effect_set![];
+
+    fn initial_state(&self) -> Self::State {}
+
+    async fn decide(
+        &mut self,
+        _state: &Self::State,
+        _input: &Self::Input,
+        fx: &mut Effects<Self::Output, Self::AllowedEffects>,
+    ) -> Result<StageCompletion<Self::Output>, HandlerError> {
+        Ok(fx.complete_empty()?)
+    }
+
+    fn apply(
+        &mut self,
+        _state: &mut Self::State,
+        _fact: Self::Output,
+    ) -> Result<(), HandlerError> {
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct StatefulAllowsFirstEffect;
+
+#[async_trait]
+impl EffectfulStatefulHandler for StatefulAllowsFirstEffect {
+    type State = ();
+    type Input = Input;
+    type Output = First;
+    type AllowedEffects = obzenflow_runtime::effect_set![FirstEffect];
+
+    fn initial_state(&self) -> Self::State {}
+
+    async fn decide(
+        &mut self,
+        _state: &Self::State,
+        _input: &Self::Input,
+        fx: &mut Effects<Self::Output, Self::AllowedEffects>,
+    ) -> Result<StageCompletion<Self::Output>, HandlerError> {
+        Ok(fx.complete_empty()?)
+    }
+
+    fn apply(
+        &mut self,
+        _state: &mut Self::State,
+        _fact: Self::Output,
+    ) -> Result<(), HandlerError> {
+        Ok(())
     }
 }

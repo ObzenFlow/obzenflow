@@ -1,0 +1,103 @@
+error[E0277]: `RawTransform` does not satisfy `EffectfulTransformHandler` for this stage
+  --> tests/compile_fail/effectful_transform_raw_handler.rs:42:13
+   |
+42 |       let _ = obzenflow_dsl::effectful_transform!(
+   |  _____________^
+43 | |         Input -> First => RawTransform,
+44 | |         effects: [],
+45 | |         middleware: []
+46 | |     );
+   | |_____^ this handler does not match the effectful transform contract
+   |
+help: the trait `EffectfulTransformHandler` is not implemented for `RawTransform`
+  --> tests/compile_fail/effectful_transform_raw_handler.rs:23:1
+   |
+23 | struct RawTransform;
+   | ^^^^^^^^^^^^^^^^^^^
+   = note: implement `EffectfulTransformHandler` with `Input`, `Output`, `AllowedEffects`, and `process`; `Input` must match the arrow input, while `Output` and `AllowedEffects` mirror the canonical arrow and `effects:` clause (FLOWIP-120z B9)
+note: required by a bound in `__obzenflow_assert_effectful_transform_contract`
+  --> tests/compile_fail/effectful_transform_raw_handler.rs:42:13
+   |
+42 |       let _ = obzenflow_dsl::effectful_transform!(
+   |  _____________^
+43 | |         Input -> First => RawTransform,
+44 | |         effects: [],
+45 | |         middleware: []
+46 | |     );
+   | |     ^
+   | |     |
+   | |_____required by a bound in this function
+   |       required by this bound in `__obzenflow_assert_effectful_transform_contract`
+   = note: this error originates in the macro `$crate::__obzenflow_assert_effectful_transform_contract` which comes from the expansion of the macro `obzenflow_dsl::effectful_transform` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: `RawTransform` does not satisfy `EffectfulTransformHandler` for this stage
+  --> tests/compile_fail/effectful_transform_raw_handler.rs:42:13
+   |
+42 |       let _ = obzenflow_dsl::effectful_transform!(
+   |  _____________^
+43 | |         Input -> First => RawTransform,
+44 | |         effects: [],
+45 | |         middleware: []
+46 | |     );
+   | |_____^ this handler does not match the effectful transform contract
+   |
+help: the trait `EffectfulTransformHandler` is not implemented for `RawTransform`
+  --> tests/compile_fail/effectful_transform_raw_handler.rs:23:1
+   |
+23 | struct RawTransform;
+   | ^^^^^^^^^^^^^^^^^^^
+   = note: implement `EffectfulTransformHandler` with `Input`, `Output`, `AllowedEffects`, and `process`; `Input` must match the arrow input, while `Output` and `AllowedEffects` mirror the canonical arrow and `effects:` clause (FLOWIP-120z B9)
+note: required by a bound in `EffectfulTransformDescriptor`
+  --> crates/obzenflow_dsl/src/dsl/stage_descriptor.rs
+   |
+   | pub struct EffectfulTransformDescriptor<H: EffectfulTransformHandler + 'static> {
+   |                                            ^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `EffectfulTransformDescriptor`
+   = note: this error originates in the macro `$crate::__obzenflow_effectful_transform_typed` which comes from the expansion of the macro `obzenflow_dsl::effectful_transform` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: `RawTransform` does not satisfy `EffectfulTransformHandler` for this stage
+  --> tests/compile_fail/effectful_transform_raw_handler.rs:42:13
+   |
+42 |       let _ = obzenflow_dsl::effectful_transform!(
+   |  _____________^
+43 | |         Input -> First => RawTransform,
+44 | |         effects: [],
+45 | |         middleware: []
+46 | |     );
+   | |_____^ this handler does not match the effectful transform contract
+   |
+help: the trait `EffectfulTransformHandler` is not implemented for `RawTransform`
+  --> tests/compile_fail/effectful_transform_raw_handler.rs:23:1
+   |
+23 | struct RawTransform;
+   | ^^^^^^^^^^^^^^^^^^^
+   = note: implement `EffectfulTransformHandler` with `Input`, `Output`, `AllowedEffects`, and `process`; `Input` must match the arrow input, while `Output` and `AllowedEffects` mirror the canonical arrow and `effects:` clause (FLOWIP-120z B9)
+note: required by a bound in `EffectfulTransformDescriptor`
+  --> crates/obzenflow_dsl/src/dsl/stage_descriptor.rs
+   |
+   | pub struct EffectfulTransformDescriptor<H: EffectfulTransformHandler + 'static> {
+   |                                            ^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `EffectfulTransformDescriptor`
+   = note: this error originates in the macro `$crate::__obzenflow_effectful_transform_untyped` which comes from the expansion of the macro `obzenflow_dsl::effectful_transform` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: `RawTransform` does not satisfy `EffectfulTransformHandler` for this stage
+  --> tests/compile_fail/effectful_transform_raw_handler.rs:42:13
+   |
+42 |       let _ = obzenflow_dsl::effectful_transform!(
+   |  _____________^
+43 | |         Input -> First => RawTransform,
+44 | |         effects: [],
+45 | |         middleware: []
+46 | |     );
+   | |_____^ this handler does not match the effectful transform contract
+   |
+help: the trait `EffectfulTransformHandler` is not implemented for `RawTransform`
+  --> tests/compile_fail/effectful_transform_raw_handler.rs:23:1
+   |
+23 | struct RawTransform;
+   | ^^^^^^^^^^^^^^^^^^^
+   = note: implement `EffectfulTransformHandler` with `Input`, `Output`, `AllowedEffects`, and `process`; `Input` must match the arrow input, while `Output` and `AllowedEffects` mirror the canonical arrow and `effects:` clause (FLOWIP-120z B9)
+note: required by a bound in `EffectfulTransformDescriptor`
+  --> crates/obzenflow_dsl/src/dsl/stage_descriptor.rs
+   |
+   | pub struct EffectfulTransformDescriptor<H: EffectfulTransformHandler + 'static> {
+   |                                            ^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `EffectfulTransformDescriptor`
+   = note: this error originates in the macro `$crate::__obzenflow_effectful_transform_untyped` which comes from the expansion of the macro `obzenflow_dsl::effectful_transform` (in Nightly builds, run with -Z macro-backtrace for more info)

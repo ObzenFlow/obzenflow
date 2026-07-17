@@ -320,6 +320,79 @@ impl<T: StatefulHandler + Send + Sync> UnifiedStatefulHandler for T {
 /// fact-authoring position. There is no periodic-emission or drain-emission
 /// hook; a wall-clock trigger is not a function of the journal, and a
 /// mutable-state emission position would evolve state without a fact.
+///
+/// The stage arrow and `effects:` clause are the canonical operator-facing
+/// contract. `Output` and `AllowedEffects` mirror those declarations so Rust
+/// can check `decide` before the handler is erased. They carry no runtime
+/// metadata and are never journalled.
+///
+/// Unlike an effectful transform's zero-sized fact-set witness, stateful
+/// `Output` is inhabited because [`EffectfulStatefulHandler::apply`] receives
+/// each committed fact. A one-fact stage can use its [`TypedPayload`] type
+/// directly:
+///
+/// ```ignore
+/// type Output = PaymentAuthorized;
+/// type AllowedEffects = obzenflow_runtime::effect_set![AuthorizePayment];
+/// ```
+///
+/// For a multi-fact arrow, derive [`obzenflow_core::StageOutputFacts`] on a
+/// per-fact sum. Each variant must contain exactly one fact so the carrier
+/// implements [`obzenflow_core::OneFactStageOutput`]:
+///
+/// ```ignore
+/// #[derive(Clone, Debug, obzenflow_core::StageOutputFacts)]
+/// enum PaymentStateFact {
+///     Authorized(PaymentAuthorized),
+///     Declined(PaymentDeclined),
+///     Cancelled(OrderCancelled),
+/// }
+///
+/// #[async_trait::async_trait]
+/// impl obzenflow_runtime::stages::common::handlers::EffectfulStatefulHandler
+///     for PaymentStatefulHandler
+/// {
+///     type State = PaymentState;
+///     type Input = ValidatedOrder;
+///     type Output = PaymentStateFact;
+///     type AllowedEffects = obzenflow_runtime::effect_set![AuthorizePayment];
+///
+///     // `initial_state`, `decide`, and `apply` follow.
+///     # fn initial_state(&self) -> Self::State { unimplemented!() }
+///     # async fn decide(
+///     #     &mut self,
+///     #     _state: &Self::State,
+///     #     _input: &Self::Input,
+///     #     _fx: &mut obzenflow_runtime::effects::Effects<
+///     #         Self::Output,
+///     #         Self::AllowedEffects,
+///     #     >,
+///     # ) -> Result<
+///     #     obzenflow_runtime::effects::StageCompletion<Self::Output>,
+///     #     obzenflow_runtime::stages::common::handler_error::HandlerError,
+///     # > {
+///     #     unimplemented!()
+///     # }
+///     # fn apply(
+///     #     &mut self,
+///     #     _state: &mut Self::State,
+///     #     _fact: Self::Output,
+///     # ) -> Result<(), obzenflow_runtime::stages::common::handler_error::HandlerError> {
+///     #     unimplemented!()
+///     # }
+/// }
+/// ```
+///
+/// Middleware and policy values stay solely in the stage's `effects:` clause;
+/// `AllowedEffects` mirrors effect types only.
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` does not satisfy `EffectfulStatefulHandler` for this stage",
+    label = "this handler does not match the effectful stateful contract",
+    note = "implement `EffectfulStatefulHandler` with `State`, `Input`, `Output`, \
+            `AllowedEffects`, `initial_state`, `decide`, and `apply`; `Input` must match the \
+            arrow input, while `Output` and `AllowedEffects` mirror the canonical arrow and \
+            `effects:` clause (FLOWIP-120z B9)"
+)]
 #[async_trait]
 pub trait EffectfulStatefulHandler: Send + Sync {
     type State: Clone + Send + Sync;

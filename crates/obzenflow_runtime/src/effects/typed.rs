@@ -14,6 +14,80 @@ use obzenflow_core::{
 use serde::{de::DeserializeOwned, Serialize};
 use std::marker::PhantomData;
 
+/// Diagnostic facade proving that one emitted fact belongs to the handler's
+/// declared output set.
+///
+/// The blanket implementation deliberately delegates to the neutral
+/// [`Member`] proof. User code should name only `Output`; this trait exists so
+/// a failed `emit` reports the authoring relationship rather than the
+/// type-level list machinery.
+#[doc(hidden)]
+#[diagnostic::on_unimplemented(
+    message = "fact `{Self}` is not declared in this handler's `Output` set",
+    label = "`{Self}` cannot be emitted by this handler",
+    note = "add `{Self}` to the canonical stage arrow, then mirror the arrow's flat fact set in \
+            the handler's `Output`, or remove this `emit` call (FLOWIP-120z)"
+)]
+pub trait OutputAllowsFact<Output, At> {}
+
+#[diagnostic::do_not_recommend]
+impl<T, Output, At> OutputAllowsFact<Output, At> for T
+where
+    T: TypedPayload,
+    Output: StageFactSet,
+    Output::Members: Member<T, At>,
+{
+}
+
+/// Diagnostic facade proving that one performed effect belongs to the
+/// handler's declared capability set.
+///
+/// Its blanket implementation preserves the existing [`Member`] proof while
+/// keeping effect permission errors in the vocabulary of `effects:` and
+/// `AllowedEffects`.
+#[doc(hidden)]
+#[diagnostic::on_unimplemented(
+    message = "effect `{Self}` is not declared in this handler's `AllowedEffects` set",
+    label = "`{Self}` cannot be performed by this handler",
+    note = "add `{Self}` to the canonical stage `effects:` clause (using `transactional(...)` or \
+            `with [...]` when required), then mirror its effect type in the handler's \
+            `AllowedEffects`, or remove this `perform` call (FLOWIP-120z)"
+)]
+pub trait AllowedEffectsAllowEffect<AllowedEffects, At> {}
+
+#[diagnostic::do_not_recommend]
+impl<E, AllowedEffects, At> AllowedEffectsAllowEffect<AllowedEffects, At> for E
+where
+    E: Effect,
+    AllowedEffects: EffectSet,
+    AllowedEffects::Members: Member<E, At>,
+{
+}
+
+/// Diagnostic facade proving that every fact in an effect outcome belongs to
+/// the handler's declared output set.
+///
+/// The underlying bidirectional stage-contract checks remain elsewhere; this
+/// facade names the one-way containment rule enforced at `perform`.
+#[doc(hidden)]
+#[diagnostic::on_unimplemented(
+    message = "effect `{Self}` has outcome facts outside this handler's `Output` set",
+    label = "this effect's outcome does not fit the handler's declared output contract",
+    note = "add the intended outcome facts to the canonical stage arrow, then mirror the \
+            arrow's flat fact set in the handler's `Output`, or perform an effect whose outcome \
+            already fits (FLOWIP-120z)"
+)]
+pub trait EffectOutcomeFitsOutput<Output, Proof> {}
+
+#[diagnostic::do_not_recommend]
+impl<E, Output, Proof> EffectOutcomeFitsOutput<Output, Proof> for E
+where
+    E: Effect,
+    Output: StageFactSet,
+    <<E as Effect>::Outcome as StageFactSet>::Members: SubsetOf<Output::Members, Proof>,
+{
+}
+
 /// Replay-safe effect context restricted to one handler's declared output
 /// facts and effect capabilities.
 pub struct Effects<Output: StageFactSet, AllowedEffects: EffectSet> {
@@ -44,8 +118,7 @@ where
     /// Author one flat output fact declared by `Output`.
     pub async fn emit<T, At>(&mut self, fact: T) -> Result<(), EffectError>
     where
-        T: TypedPayload,
-        Output::Members: Member<T, At>,
+        T: TypedPayload + OutputAllowsFact<Output, At>,
     {
         self.core.emit(fact).await
     }
@@ -57,9 +130,9 @@ where
         effect: E,
     ) -> Result<E::Outcome, EffectError>
     where
-        E: Effect,
-        AllowedEffects::Members: Member<E, EffectAt>,
-        <E::Outcome as StageFactSet>::Members: SubsetOf<Output::Members, OutcomeProof>,
+        E: Effect
+            + AllowedEffectsAllowEffect<AllowedEffects, EffectAt>
+            + EffectOutcomeFitsOutput<Output, OutcomeProof>,
     {
         self.core.perform(effect).await
     }

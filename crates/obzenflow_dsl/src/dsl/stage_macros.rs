@@ -1516,25 +1516,9 @@ macro_rules! __obzenflow_transform_typed {
     // flow.
     (input = exact($in:ty), output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = $handler:expr, middleware = [$($mw:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
         let __handler = $handler;
-        fn __obzenflow_assert_handler_output_declares_every_arrow_member<
+        fn __obzenflow_assert_output_contract_equality<
             __Handler,
             __ArrowToHandlerProof,
-        >(
-            _handler: &__Handler,
-        )
-        where
-            __Handler: ::obzenflow_runtime::stages::common::handlers::TypedTransformHandler<
-                Input = $in,
-            >,
-            <::obzenflow_core::stage_fact_set![$($member),+] as ::obzenflow_core::StageFactSet>::Members:
-                ::obzenflow_core::SubsetOf<
-                    <<__Handler as ::obzenflow_runtime::stages::common::handlers::TypedTransformHandler>::Output as ::obzenflow_core::StageFactSet>::Members,
-                    __ArrowToHandlerProof,
-                >,
-        {
-        }
-        fn __obzenflow_assert_arrow_declares_every_handler_output_member<
-            __Handler,
             __HandlerToArrowProof,
         >(
             _handler: &__Handler,
@@ -1543,15 +1527,19 @@ macro_rules! __obzenflow_transform_typed {
             __Handler: ::obzenflow_runtime::stages::common::handlers::TypedTransformHandler<
                 Input = $in,
             >,
+            <::obzenflow_core::stage_fact_set![$($member),+] as ::obzenflow_core::StageFactSet>::Members:
+                $crate::dsl::typing::ArrowOutputsAreDeclaredByHandler<
+                    <<__Handler as ::obzenflow_runtime::stages::common::handlers::TypedTransformHandler>::Output as ::obzenflow_core::StageFactSet>::Members,
+                    __ArrowToHandlerProof,
+                >,
             <<__Handler as ::obzenflow_runtime::stages::common::handlers::TypedTransformHandler>::Output as ::obzenflow_core::StageFactSet>::Members:
-                ::obzenflow_core::SubsetOf<
+                $crate::dsl::typing::HandlerOutputsAreDeclaredByArrow<
                     <::obzenflow_core::stage_fact_set![$($member),+] as ::obzenflow_core::StageFactSet>::Members,
                     __HandlerToArrowProof,
                 >,
         {
         }
-        __obzenflow_assert_handler_output_declares_every_arrow_member::<_, _>(&__handler);
-        __obzenflow_assert_arrow_declares_every_handler_output_member::<_, _>(&__handler);
+        __obzenflow_assert_output_contract_equality::<_, _, _>(&__handler);
         const _: () = ::obzenflow_core::assert_distinct_stage_fact_set::<
             ::obzenflow_core::stage_fact_set![$($member),+],
         >();
@@ -2360,47 +2348,40 @@ macro_rules! __obzenflow_effect_manifest_types {
 #[macro_export]
 macro_rules! __obzenflow_assert_effectful_transform_contract {
     ($handler:ident, $in:ty, [$($member:ty),+], [$($effects:tt)*]) => {{
-        fn __obzenflow_assert_handler_output_declares_every_arrow_member<H, Proof>(_: &H)
+        fn __obzenflow_assert_effectful_transform_contract<
+            H,
+            ArrowToHandlerProof,
+            HandlerToArrowProof,
+            ManifestToHandlerProof,
+            HandlerToManifestProof,
+        >(_: &H)
         where
-            H: ::obzenflow_runtime::stages::EffectfulTransformHandler<Input = $in>,
+            H: ::obzenflow_runtime::stages::EffectfulTransformHandler,
+            <H as ::obzenflow_runtime::stages::EffectfulTransformHandler>::Input:
+                $crate::dsl::typing::EffectfulTransformInputMatchesArrow<$in>,
             <::obzenflow_core::stage_fact_set![$($member),+] as ::obzenflow_core::StageFactSet>::Members:
-                ::obzenflow_core::SubsetOf<
+                $crate::dsl::typing::ArrowOutputsAreDeclaredByHandler<
                     <<H as ::obzenflow_runtime::stages::EffectfulTransformHandler>::Output as ::obzenflow_core::StageFactSet>::Members,
-                    Proof,
+                    ArrowToHandlerProof,
                 >,
-        {}
-        fn __obzenflow_assert_arrow_declares_every_handler_output_member<H, Proof>(_: &H)
-        where
-            H: ::obzenflow_runtime::stages::EffectfulTransformHandler<Input = $in>,
             <<H as ::obzenflow_runtime::stages::EffectfulTransformHandler>::Output as ::obzenflow_core::StageFactSet>::Members:
-                ::obzenflow_core::SubsetOf<
+                $crate::dsl::typing::HandlerOutputsAreDeclaredByArrow<
                     <::obzenflow_core::stage_fact_set![$($member),+] as ::obzenflow_core::StageFactSet>::Members,
-                    Proof,
+                    HandlerToArrowProof,
                 >,
-        {}
-        fn __obzenflow_assert_handler_allows_every_manifest_effect<H, Proof>(_: &H)
-        where
-            H: ::obzenflow_runtime::stages::EffectfulTransformHandler<Input = $in>,
             <$crate::__obzenflow_effect_manifest_types!($($effects)*) as ::obzenflow_runtime::effects::EffectSet>::Members:
-                ::obzenflow_core::SubsetOf<
+                $crate::dsl::typing::ManifestEffectsAreAllowedByHandler<
                     <<H as ::obzenflow_runtime::stages::EffectfulTransformHandler>::AllowedEffects as ::obzenflow_runtime::effects::EffectSet>::Members,
-                    Proof,
+                    ManifestToHandlerProof,
                 >,
-        {}
-        fn __obzenflow_assert_manifest_declares_every_handler_allowed_effect<H, Proof>(_: &H)
-        where
-            H: ::obzenflow_runtime::stages::EffectfulTransformHandler<Input = $in>,
             <<H as ::obzenflow_runtime::stages::EffectfulTransformHandler>::AllowedEffects as ::obzenflow_runtime::effects::EffectSet>::Members:
-                ::obzenflow_core::SubsetOf<
+                $crate::dsl::typing::HandlerEffectsAreDeclaredByManifest<
                     <$crate::__obzenflow_effect_manifest_types!($($effects)*) as ::obzenflow_runtime::effects::EffectSet>::Members,
-                    Proof,
+                    HandlerToManifestProof,
                 >,
         {}
 
-        __obzenflow_assert_handler_output_declares_every_arrow_member::<_, _>(&$handler);
-        __obzenflow_assert_arrow_declares_every_handler_output_member::<_, _>(&$handler);
-        __obzenflow_assert_handler_allows_every_manifest_effect::<_, _>(&$handler);
-        __obzenflow_assert_manifest_declares_every_handler_allowed_effect::<_, _>(&$handler);
+        __obzenflow_assert_effectful_transform_contract::<_, _, _, _, _>(&$handler);
         const _: () = ::obzenflow_core::assert_distinct_stage_fact_set::<
             ::obzenflow_core::stage_fact_set![$($member),+],
         >();
@@ -2414,47 +2395,40 @@ macro_rules! __obzenflow_assert_effectful_transform_contract {
 #[macro_export]
 macro_rules! __obzenflow_assert_effectful_stateful_contract {
     ($handler:ident, $in:ty, [$($member:ty),+], [$($effects:tt)*]) => {{
-        fn __obzenflow_assert_handler_output_declares_every_arrow_member<H, Proof>(_: &H)
+        fn __obzenflow_assert_effectful_stateful_contract<
+            H,
+            ArrowToHandlerProof,
+            HandlerToArrowProof,
+            ManifestToHandlerProof,
+            HandlerToManifestProof,
+        >(_: &H)
         where
-            H: ::obzenflow_runtime::stages::EffectfulStatefulHandler<Input = $in>,
+            H: ::obzenflow_runtime::stages::EffectfulStatefulHandler,
+            <H as ::obzenflow_runtime::stages::EffectfulStatefulHandler>::Input:
+                $crate::dsl::typing::EffectfulStatefulInputMatchesArrow<$in>,
             <::obzenflow_core::stage_fact_set![$($member),+] as ::obzenflow_core::StageFactSet>::Members:
-                ::obzenflow_core::SubsetOf<
+                $crate::dsl::typing::ArrowOutputsAreDeclaredByHandler<
                     <<H as ::obzenflow_runtime::stages::EffectfulStatefulHandler>::Output as ::obzenflow_core::StageFactSet>::Members,
-                    Proof,
+                    ArrowToHandlerProof,
                 >,
-        {}
-        fn __obzenflow_assert_arrow_declares_every_handler_output_member<H, Proof>(_: &H)
-        where
-            H: ::obzenflow_runtime::stages::EffectfulStatefulHandler<Input = $in>,
             <<H as ::obzenflow_runtime::stages::EffectfulStatefulHandler>::Output as ::obzenflow_core::StageFactSet>::Members:
-                ::obzenflow_core::SubsetOf<
+                $crate::dsl::typing::HandlerOutputsAreDeclaredByArrow<
                     <::obzenflow_core::stage_fact_set![$($member),+] as ::obzenflow_core::StageFactSet>::Members,
-                    Proof,
+                    HandlerToArrowProof,
                 >,
-        {}
-        fn __obzenflow_assert_handler_allows_every_manifest_effect<H, Proof>(_: &H)
-        where
-            H: ::obzenflow_runtime::stages::EffectfulStatefulHandler<Input = $in>,
             <$crate::__obzenflow_effect_manifest_types!($($effects)*) as ::obzenflow_runtime::effects::EffectSet>::Members:
-                ::obzenflow_core::SubsetOf<
+                $crate::dsl::typing::ManifestEffectsAreAllowedByHandler<
                     <<H as ::obzenflow_runtime::stages::EffectfulStatefulHandler>::AllowedEffects as ::obzenflow_runtime::effects::EffectSet>::Members,
-                    Proof,
+                    ManifestToHandlerProof,
                 >,
-        {}
-        fn __obzenflow_assert_manifest_declares_every_handler_allowed_effect<H, Proof>(_: &H)
-        where
-            H: ::obzenflow_runtime::stages::EffectfulStatefulHandler<Input = $in>,
             <<H as ::obzenflow_runtime::stages::EffectfulStatefulHandler>::AllowedEffects as ::obzenflow_runtime::effects::EffectSet>::Members:
-                ::obzenflow_core::SubsetOf<
+                $crate::dsl::typing::HandlerEffectsAreDeclaredByManifest<
                     <$crate::__obzenflow_effect_manifest_types!($($effects)*) as ::obzenflow_runtime::effects::EffectSet>::Members,
-                    Proof,
+                    HandlerToManifestProof,
                 >,
         {}
 
-        __obzenflow_assert_handler_output_declares_every_arrow_member::<_, _>(&$handler);
-        __obzenflow_assert_arrow_declares_every_handler_output_member::<_, _>(&$handler);
-        __obzenflow_assert_handler_allows_every_manifest_effect::<_, _>(&$handler);
-        __obzenflow_assert_manifest_declares_every_handler_allowed_effect::<_, _>(&$handler);
+        __obzenflow_assert_effectful_stateful_contract::<_, _, _, _, _>(&$handler);
         const _: () = ::obzenflow_core::assert_distinct_stage_fact_set::<
             ::obzenflow_core::stage_fact_set![$($member),+],
         >();
