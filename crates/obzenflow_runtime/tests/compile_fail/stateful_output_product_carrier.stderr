@@ -1,13 +1,13 @@
 error[E0277]: `Product` cannot be an effectful stateful `Output`: it does not commit exactly one fact per value
-  --> tests/compile_fail/stateful_output_product_carrier.rs:39:19
+  --> tests/compile_fail/stateful_output_product_carrier.rs:43:19
    |
-39 |     type Output = Product;
+43 |     type Output = Product;
    |                   ^^^^^^^ unsatisfied trait bound
    |
 help: the trait `TypedPayload` is not implemented for `Product`
-  --> tests/compile_fail/stateful_output_product_carrier.rs:27:1
+  --> tests/compile_fail/stateful_output_product_carrier.rs:31:1
    |
-27 | struct Product {
+31 | struct Product {
    | ^^^^^^^^^^^^^^
    = note: `apply` folds one committed fact per call, so the stateful `Output` must be a per-fact sum (an enum with one fact per variant) or a single `TypedPayload`; a product carrier commits several facts at once and cannot fold one at a time (FLOWIP-120z)
    = help: the following other types implement trait `TypedPayload`:

@@ -1,18 +1,18 @@
 error[E0277]: the trait bound `RawHandler: TypedTransformHandler` is not satisfied
-  --> tests/compile_fail/transform_brace_arrow_raw_handler.rs:46:13
+  --> tests/compile_fail/transform_brace_arrow_raw_handler.rs:50:13
    |
-46 |     let _ = obzenflow_dsl::transform!(Input -> { First, Second } => RawHandler);
+50 |     let _ = obzenflow_dsl::transform!(Input -> { First, Second } => RawHandler);
    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unsatisfied trait bound
    |
 help: the trait `TypedTransformHandler` is not implemented for `RawHandler`
-  --> tests/compile_fail/transform_brace_arrow_raw_handler.rs:27:1
+  --> tests/compile_fail/transform_brace_arrow_raw_handler.rs:31:1
    |
-27 | struct RawHandler;
+31 | struct RawHandler;
    | ^^^^^^^^^^^^^^^^^
 note: required by a bound in `__obzenflow_assert_output_contract_equality`
-  --> tests/compile_fail/transform_brace_arrow_raw_handler.rs:46:13
+  --> tests/compile_fail/transform_brace_arrow_raw_handler.rs:50:13
    |
-46 |     let _ = obzenflow_dsl::transform!(Input -> { First, Second } => RawHandler);
+50 |     let _ = obzenflow_dsl::transform!(Input -> { First, Second } => RawHandler);
    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    |             |
    |             required by a bound in this function
@@ -20,15 +20,15 @@ note: required by a bound in `__obzenflow_assert_output_contract_equality`
    = note: this error originates in the macro `$crate::__obzenflow_transform_typed` which comes from the expansion of the macro `obzenflow_dsl::transform` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error[E0277]: the trait bound `RawHandler: TypedTransformHandler` is not satisfied
-  --> tests/compile_fail/transform_brace_arrow_raw_handler.rs:46:13
+  --> tests/compile_fail/transform_brace_arrow_raw_handler.rs:50:13
    |
-46 |     let _ = obzenflow_dsl::transform!(Input -> { First, Second } => RawHandler);
+50 |     let _ = obzenflow_dsl::transform!(Input -> { First, Second } => RawHandler);
    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unsatisfied trait bound
    |
 help: the trait `TypedTransformHandler` is not implemented for `RawHandler`
-  --> tests/compile_fail/transform_brace_arrow_raw_handler.rs:27:1
+  --> tests/compile_fail/transform_brace_arrow_raw_handler.rs:31:1
    |
-27 | struct RawHandler;
+31 | struct RawHandler;
    | ^^^^^^^^^^^^^^^^^
 help: the trait `TransformHandler` is implemented for `TypedTransformHandlerAdapter<H>`
   --> crates/obzenflow_runtime/src/stages/common/handlers/transform/typed.rs
@@ -46,15 +46,15 @@ note: required by a bound in `TransformDescriptor`
    = note: this error originates in the macro `$crate::__obzenflow_transform_typed` which comes from the expansion of the macro `obzenflow_dsl::transform` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error[E0277]: the trait bound `RawHandler: TypedTransformHandler` is not satisfied
-  --> tests/compile_fail/transform_brace_arrow_raw_handler.rs:46:13
+  --> tests/compile_fail/transform_brace_arrow_raw_handler.rs:50:13
    |
-46 |     let _ = obzenflow_dsl::transform!(Input -> { First, Second } => RawHandler);
+50 |     let _ = obzenflow_dsl::transform!(Input -> { First, Second } => RawHandler);
    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unsatisfied trait bound
    |
 help: the trait `TypedTransformHandler` is not implemented for `RawHandler`
-  --> tests/compile_fail/transform_brace_arrow_raw_handler.rs:27:1
+  --> tests/compile_fail/transform_brace_arrow_raw_handler.rs:31:1
    |
-27 | struct RawHandler;
+31 | struct RawHandler;
    | ^^^^^^^^^^^^^^^^^
 help: the trait `TransformHandler` is implemented for `TypedTransformHandlerAdapter<H>`
   --> crates/obzenflow_runtime/src/stages/common/handlers/transform/typed.rs
@@ -72,15 +72,15 @@ note: required by a bound in `TransformDescriptor`
    = note: this error originates in the macro `$crate::__obzenflow_transform_untyped` which comes from the expansion of the macro `obzenflow_dsl::transform` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error[E0277]: the trait bound `RawHandler: TypedTransformHandler` is not satisfied
-  --> tests/compile_fail/transform_brace_arrow_raw_handler.rs:46:13
+  --> tests/compile_fail/transform_brace_arrow_raw_handler.rs:50:13
    |
-46 |     let _ = obzenflow_dsl::transform!(Input -> { First, Second } => RawHandler);
+50 |     let _ = obzenflow_dsl::transform!(Input -> { First, Second } => RawHandler);
    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unsatisfied trait bound
    |
 help: the trait `TypedTransformHandler` is not implemented for `RawHandler`
-  --> tests/compile_fail/transform_brace_arrow_raw_handler.rs:27:1
+  --> tests/compile_fail/transform_brace_arrow_raw_handler.rs:31:1
    |
-27 | struct RawHandler;
+31 | struct RawHandler;
    | ^^^^^^^^^^^^^^^^^
 help: the trait `TransformHandler` is implemented for `TypedTransformHandlerAdapter<H>`
   --> crates/obzenflow_runtime/src/stages/common/handlers/transform/typed.rs

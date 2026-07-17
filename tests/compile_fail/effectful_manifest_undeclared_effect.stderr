@@ -1,25 +1,25 @@
 error[E0277]: the stage `effects:` clause declares an effect missing from the handler's `AllowedEffects`
-  --> tests/compile_fail/effectful_manifest_undeclared_effect.rs:6:13
+  --> tests/compile_fail/effectful_manifest_undeclared_effect.rs:10:13
    |
- 6 |       let _ = obzenflow_dsl::effectful_transform!(
+10 |       let _ = obzenflow_dsl::effectful_transform!(
    |  _____________^
- 7 | |         Input -> { First } => FirstOnly,
- 8 | |         effects: [FirstEffect],
- 9 | |         middleware: []
-10 | |     );
+11 | |         Input -> { First } => FirstOnly,
+12 | |         effects: [FirstEffect],
+13 | |         middleware: []
+14 | |     );
    | |_____^ this effect manifest is not contained in the handler's `AllowedEffects` set
    |
    = help: the trait `ManifestEffectsAreAllowedByHandler<EmptySet, SubsetProofStep<_, SubsetProofEnd>>` is not implemented for `WithMember<FirstEffect, EmptySet>`
    = note: the stage `effects:` clause is canonical: mirror its effects in `type AllowedEffects = obzenflow_runtime::effect_set![...]`, or change `effects:` first if the stage capability contract is wrong (FLOWIP-120z B9)
 note: required by a bound in `__obzenflow_assert_effectful_transform_contract`
-  --> tests/compile_fail/effectful_manifest_undeclared_effect.rs:6:13
+  --> tests/compile_fail/effectful_manifest_undeclared_effect.rs:10:13
    |
- 6 |       let _ = obzenflow_dsl::effectful_transform!(
+10 |       let _ = obzenflow_dsl::effectful_transform!(
    |  _____________^
- 7 | |         Input -> { First } => FirstOnly,
- 8 | |         effects: [FirstEffect],
- 9 | |         middleware: []
-10 | |     );
+11 | |         Input -> { First } => FirstOnly,
+12 | |         effects: [FirstEffect],
+13 | |         middleware: []
+14 | |     );
    | |     ^
    | |     |
    | |_____required by a bound in this function

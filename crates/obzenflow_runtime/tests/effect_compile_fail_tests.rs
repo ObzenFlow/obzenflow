@@ -22,11 +22,17 @@ fn effect_set_rejects_duplicate_members() {
 }
 
 #[test]
-fn typed_effect_capability_contracts_are_enforced() {
+fn typed_effect_operations_enforce_output_and_capability_contracts() {
     let t = trybuild::TestCases::new();
     t.compile_fail("tests/compile_fail/effects_emit_outside_output.rs");
     t.compile_fail("tests/compile_fail/effects_perform_undeclared_effect.rs");
     t.compile_fail("tests/compile_fail/effects_outcome_not_output_subset.rs");
+}
+
+/// FLOWIP-120z: an effectful stateful output commits exactly one fact per value.
+#[test]
+fn effectful_stateful_output_rejects_product_carriers() {
+    let t = trybuild::TestCases::new();
     t.compile_fail("tests/compile_fail/stateful_output_product_carrier.rs");
 }
 

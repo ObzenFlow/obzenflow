@@ -1,25 +1,25 @@
 error[E0277]: the stage arrow declares an output fact missing from the handler's `Output`
-  --> tests/compile_fail/effectful_handler_reused_incompatible_arrow.rs:12:13
+  --> tests/compile_fail/effectful_handler_reused_incompatible_arrow.rs:16:13
    |
-12 |       let _ = obzenflow_dsl::effectful_transform!(
+16 |       let _ = obzenflow_dsl::effectful_transform!(
    |  _____________^
-13 | |         Input -> { First, Second } => handler,
-14 | |         effects: [],
-15 | |         middleware: []
-16 | |     );
+17 | |         Input -> { First, Second } => handler,
+18 | |         effects: [],
+19 | |         middleware: []
+20 | |     );
    | |_____^ this arrow output contract is not contained in the handler's `Output` set
    |
    = help: the trait `ArrowOutputsAreDeclaredByHandler<WithMember<support::First, EmptySet>, SubsetProofStep<MemberFound, SubsetProofStep<MemberAfter<_>, SubsetProofEnd>>>` is not implemented for `WithMember<support::First, WithMember<support::Second, EmptySet>>`
    = note: the stage arrow is canonical: make the handler's `Output` carrier or witness expose the same complete flat fact set, or change the arrow first if the stage contract is wrong; use `stage_fact_set![...]` only for an effectful-transform witness, and a `StageOutputFacts` carrier where values are returned or applied (FLOWIP-120z B9)
 note: required by a bound in `main::__obzenflow_assert_effectful_transform_contract`
-  --> tests/compile_fail/effectful_handler_reused_incompatible_arrow.rs:12:13
+  --> tests/compile_fail/effectful_handler_reused_incompatible_arrow.rs:16:13
    |
-12 |       let _ = obzenflow_dsl::effectful_transform!(
+16 |       let _ = obzenflow_dsl::effectful_transform!(
    |  _____________^
-13 | |         Input -> { First, Second } => handler,
-14 | |         effects: [],
-15 | |         middleware: []
-16 | |     );
+17 | |         Input -> { First, Second } => handler,
+18 | |         effects: [],
+19 | |         middleware: []
+20 | |     );
    | |     ^
    | |     |
    | |_____required by a bound in this function

@@ -21,7 +21,9 @@ fn effectful_handlers_require_complete_exact_contract_witnesses() {
     t.compile_fail("tests/compile_fail/effectful_stateful_raw_handler.rs");
     t.compile_fail("tests/compile_fail/effectful_transform_input_mismatch.rs");
     t.compile_fail("tests/compile_fail/effectful_stateful_input_mismatch.rs");
-    t.compile_fail("tests/compile_fail/effectful_arrow_missing_member.rs");
+    // Reusing `FirstOnly` beneath a wider arrow also pins the arrow-to-handler
+    // missing-member direction without a duplicate fixture.
+    t.compile_fail("tests/compile_fail/effectful_handler_reused_incompatible_arrow.rs");
     t.compile_fail("tests/compile_fail/effectful_arrow_extra_member.rs");
     t.compile_fail("tests/compile_fail/effectful_manifest_undeclared_effect.rs");
     t.compile_fail("tests/compile_fail/effectful_handler_effect_missing_from_manifest.rs");
@@ -29,5 +31,4 @@ fn effectful_handlers_require_complete_exact_contract_witnesses() {
     t.compile_fail("tests/compile_fail/effectful_stateful_arrow_extra_member.rs");
     t.compile_fail("tests/compile_fail/effectful_stateful_manifest_undeclared_effect.rs");
     t.compile_fail("tests/compile_fail/effectful_stateful_handler_effect_missing_from_manifest.rs");
-    t.compile_fail("tests/compile_fail/effectful_handler_reused_incompatible_arrow.rs");
 }

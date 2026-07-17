@@ -1,13 +1,13 @@
 error[E0277]: effect `AllowedEffect` has outcome facts outside this handler's `Output` set
-  --> tests/compile_fail/effects_outcome_not_output_subset.rs:38:16
+  --> tests/compile_fail/effects_outcome_not_output_subset.rs:42:16
    |
-38 |     fx.perform(AllowedEffect).await.unwrap();
+42 |     fx.perform(AllowedEffect).await.unwrap();
    |                ^^^^^^^^^^^^^ this effect's outcome does not fit the handler's declared output contract
    |
 help: the trait `EffectOutcomeFitsOutput<StageOutput, SubsetProofStep<MemberAfter<_>, SubsetProofEnd>>` is not implemented for `AllowedEffect`
-  --> tests/compile_fail/effects_outcome_not_output_subset.rs:19:1
+  --> tests/compile_fail/effects_outcome_not_output_subset.rs:23:1
    |
-19 | struct AllowedEffect;
+23 | struct AllowedEffect;
    | ^^^^^^^^^^^^^^^^^^^^
    = note: add the intended outcome facts to the canonical stage arrow, then mirror the arrow's flat fact set in the handler's `Output`, or perform an effect whose outcome already fits (FLOWIP-120z)
 note: required by a bound in `Effects::<Output, AllowedEffects>::perform`
@@ -20,15 +20,15 @@ note: required by a bound in `Effects::<Output, AllowedEffects>::perform`
    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `Effects::<Output, AllowedEffects>::perform`
 
 error[E0277]: effect `AllowedEffect` has outcome facts outside this handler's `Output` set
-  --> tests/compile_fail/effects_outcome_not_output_subset.rs:38:5
+  --> tests/compile_fail/effects_outcome_not_output_subset.rs:42:5
    |
-38 |     fx.perform(AllowedEffect).await.unwrap();
+42 |     fx.perform(AllowedEffect).await.unwrap();
    |     ^^^^^^^^^^^^^^^^^^^^^^^^^ this effect's outcome does not fit the handler's declared output contract
    |
 help: the trait `EffectOutcomeFitsOutput<StageOutput, SubsetProofStep<MemberAfter<_>, SubsetProofEnd>>` is not implemented for `AllowedEffect`
-  --> tests/compile_fail/effects_outcome_not_output_subset.rs:19:1
+  --> tests/compile_fail/effects_outcome_not_output_subset.rs:23:1
    |
-19 | struct AllowedEffect;
+23 | struct AllowedEffect;
    | ^^^^^^^^^^^^^^^^^^^^
    = note: add the intended outcome facts to the canonical stage arrow, then mirror the arrow's flat fact set in the handler's `Output`, or perform an effect whose outcome already fits (FLOWIP-120z)
 note: required by a bound in `Effects::<Output, AllowedEffects>::perform`
@@ -41,15 +41,15 @@ note: required by a bound in `Effects::<Output, AllowedEffects>::perform`
    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `Effects::<Output, AllowedEffects>::perform`
 
 error[E0277]: effect `AllowedEffect` has outcome facts outside this handler's `Output` set
-  --> tests/compile_fail/effects_outcome_not_output_subset.rs:38:31
+  --> tests/compile_fail/effects_outcome_not_output_subset.rs:42:31
    |
-38 |     fx.perform(AllowedEffect).await.unwrap();
+42 |     fx.perform(AllowedEffect).await.unwrap();
    |                               ^^^^^ this effect's outcome does not fit the handler's declared output contract
    |
 help: the trait `EffectOutcomeFitsOutput<StageOutput, SubsetProofStep<MemberAfter<_>, SubsetProofEnd>>` is not implemented for `AllowedEffect`
-  --> tests/compile_fail/effects_outcome_not_output_subset.rs:19:1
+  --> tests/compile_fail/effects_outcome_not_output_subset.rs:23:1
    |
-19 | struct AllowedEffect;
+23 | struct AllowedEffect;
    | ^^^^^^^^^^^^^^^^^^^^
    = note: add the intended outcome facts to the canonical stage arrow, then mirror the arrow's flat fact set in the handler's `Output`, or perform an effect whose outcome already fits (FLOWIP-120z)
 note: required by a bound in `Effects::<Output, AllowedEffects>::perform`

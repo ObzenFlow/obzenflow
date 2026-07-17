@@ -1,25 +1,25 @@
 error[E0277]: the handler's `AllowedEffects` permits an effect missing from the stage `effects:` clause
-  --> tests/compile_fail/effectful_stateful_handler_effect_missing_from_manifest.rs:6:13
+  --> tests/compile_fail/effectful_stateful_handler_effect_missing_from_manifest.rs:10:13
    |
- 6 |       let _ = obzenflow_dsl::effectful_stateful!(
+10 |       let _ = obzenflow_dsl::effectful_stateful!(
    |  _____________^
- 7 | |         Input -> { First } => StatefulAllowsFirstEffect,
- 8 | |         effects: [],
- 9 | |         middleware: []
-10 | |     );
+11 | |         Input -> { First } => StatefulAllowsFirstEffect,
+12 | |         effects: [],
+13 | |         middleware: []
+14 | |     );
    | |_____^ the handler's `AllowedEffects` set is not contained in this effect manifest
    |
    = help: the trait `HandlerEffectsAreDeclaredByManifest<EmptySet, SubsetProofStep<_, SubsetProofEnd>>` is not implemented for `WithMember<FirstEffect, EmptySet>`
    = note: the stage `effects:` clause is canonical: remove the extra effect from `AllowedEffects`, or add it to `effects:` first when the stage needs the capability and then mirror the clause in `type AllowedEffects = obzenflow_runtime::effect_set![...]` (FLOWIP-120z B9)
 note: required by a bound in `__obzenflow_assert_effectful_stateful_contract`
-  --> tests/compile_fail/effectful_stateful_handler_effect_missing_from_manifest.rs:6:13
+  --> tests/compile_fail/effectful_stateful_handler_effect_missing_from_manifest.rs:10:13
    |
- 6 |       let _ = obzenflow_dsl::effectful_stateful!(
+10 |       let _ = obzenflow_dsl::effectful_stateful!(
    |  _____________^
- 7 | |         Input -> { First } => StatefulAllowsFirstEffect,
- 8 | |         effects: [],
- 9 | |         middleware: []
-10 | |     );
+11 | |         Input -> { First } => StatefulAllowsFirstEffect,
+12 | |         effects: [],
+13 | |         middleware: []
+14 | |     );
    | |     ^
    | |     |
    | |_____required by a bound in this function
