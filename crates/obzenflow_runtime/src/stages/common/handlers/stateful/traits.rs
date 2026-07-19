@@ -327,7 +327,10 @@ impl<T: StatefulHandler + Send + Sync> UnifiedStatefulHandler for T {
 /// commit order through [`EffectfulStatefulHandler::apply`] and installs the
 /// completed draft. Returning an error never rolls a committed fact back. If
 /// decoding or folding a committed fact fails, the adapter leaves the prior
-/// state installed and returns that failure instead of the `decide` result.
+/// state installed and returns a stage-fatal [`HandlerError::ContractViolation`]
+/// instead of the `decide` result. The committed fact remains durable, but the
+/// stage cannot acknowledge the input, process later input, or complete drain
+/// because its state no longer represents a fold of its durable history.
 ///
 /// The stage arrow and `effects:` clause are the canonical operator-facing
 /// contract. `Output` and `AllowedEffects` mirror those declarations so Rust
@@ -419,6 +422,14 @@ pub trait EffectfulStatefulHandler: Send + Sync {
 
     /// Fold one committed fact into state. Called once per committed `Data`
     /// fact in commit order; carriers never appear here.
+    ///
+    /// The fact is already durable when this method is called. Returning an
+    /// error therefore contradicts the state-fold contract: the adapter keeps
+    /// the previously installed state, wraps the error as
+    /// [`HandlerError::ContractViolation`], and the effectful stateful
+    /// supervisor fails the stage. It does not acknowledge the input or skip
+    /// the fact and continue. Implementations must not rely on retry because
+    /// they receive mutable access to both the handler and the draft state.
     fn apply(
         &mut self,
         state: &mut Self::State,
@@ -460,7 +471,14 @@ where
         let mut draft = state.clone();
         for fact_event in fx.drain_committed_facts() {
             let fact = decode_effectful_stateful_fact::<H::Output>(&fact_event)?;
-            self.0.apply(&mut draft, fact)?;
+            self.0.apply(&mut draft, fact).map_err(|source| {
+                HandlerError::ContractViolation(format!(
+                    "effectful_stateful_apply: `apply` rejected committed event `{}` of type \
+                     `{}`: {source}",
+                    fact_event.id,
+                    fact_event.event_type(),
+                ))
+            })?;
         }
         *state = draft;
         decide_result.map(|_| ())

@@ -39,7 +39,8 @@ pub enum HandlerError {
     ///
     /// A call site enforcing a trusted runtime contract may promote this to a
     /// stage-fatal FSM error. The effectful stateful supervisor does so for
-    /// `OneFactStageOutput` contradictions.
+    /// `OneFactStageOutput` contradictions and rejection of already-committed
+    /// facts by the state fold.
     ContractViolation(String),
     /// Generic or unclassified error.
     Other(String),
@@ -61,7 +62,7 @@ impl HandlerError {
             HandlerError::Deserialization(_) => ErrorKind::Deserialization,
             HandlerError::Validation(_) => ErrorKind::Validation,
             HandlerError::Domain(_) => ErrorKind::Domain,
-            // The effectful stateful supervisor intercepts its one-fact
+            // The effectful stateful supervisor intercepts its durable-state
             // contract violations before per-record error routing. `Unknown`
             // is retained for exhaustive callers that still inspect `kind()`.
             HandlerError::ContractViolation(_) => ErrorKind::Unknown,

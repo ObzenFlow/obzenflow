@@ -456,6 +456,54 @@ impl crate::stages::common::handlers::EffectfulStatefulHandler for SingleFactErr
 }
 
 #[derive(Clone, Debug)]
+struct SecondFactApplyErrorStateful;
+
+#[async_trait]
+impl crate::stages::common::handlers::EffectfulStatefulHandler for SecondFactApplyErrorStateful {
+    type State = Vec<String>;
+    type Input = FirstOutput;
+    type Output = OrderedStatefulOutput;
+    type AllowedEffects = crate::effect_set![];
+
+    fn initial_state(&self) -> Self::State {
+        Vec::new()
+    }
+
+    async fn decide(
+        &mut self,
+        _state: &Self::State,
+        input: &Self::Input,
+        fx: &mut Effects<Self::Output, Self::AllowedEffects>,
+    ) -> Result<StageCompletion<Self::Output>, crate::stages::common::handler_error::HandlerError>
+    {
+        fx.emit(FirstOutput { value: input.value }).await?;
+        fx.emit(SecondOutput {
+            value: format!("second-{}", input.value),
+        })
+        .await?;
+        Ok(fx.complete()?)
+    }
+
+    fn apply(
+        &mut self,
+        state: &mut Self::State,
+        fact: Self::Output,
+    ) -> Result<(), crate::stages::common::handler_error::HandlerError> {
+        match fact {
+            OrderedStatefulOutput::First(first) => {
+                state.push(format!("first:{}", first.value));
+                Ok(())
+            }
+            OrderedStatefulOutput::Second(_) => Err(
+                crate::stages::common::handler_error::HandlerError::Validation(
+                    "second apply failed".to_string(),
+                ),
+            ),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
 struct MultiFactEffect {
     calls: Arc<AtomicUsize>,
 }
@@ -1127,13 +1175,80 @@ async fn effectful_stateful_apply_error_takes_precedence_and_discards_draft() {
         .await
         .expect_err("the apply error must supersede the pending decide error");
 
+    let events = journal.events();
+    assert_eq!(events.len(), 1, "the fact remains durable");
+    let committed_fact = &events[0].event;
     assert!(matches!(
         error,
-        crate::stages::common::handler_error::HandlerError::Validation(ref message)
-            if message == "apply failed"
+        crate::stages::common::handler_error::HandlerError::ContractViolation(ref message)
+            if message.contains("effectful_stateful_apply")
+                && message.contains(&committed_fact.id.to_string())
+                && message.contains(&FirstOutput::versioned_event_type())
+                && message.contains("Validation error: apply failed")
     ));
     assert_eq!(state, vec![7], "the failed draft must not be installed");
-    assert_eq!(journal.events().len(), 1, "the fact remains durable");
+}
+
+#[tokio::test]
+async fn effectful_stateful_second_apply_error_discards_the_whole_ordered_draft() {
+    use crate::stages::common::handlers::{
+        EffectfulStatefulHandlerAdapter, UnifiedStatefulHandler,
+    };
+
+    let stage_id = StageId::new();
+    let writer_id = WriterId::from(stage_id);
+    let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
+    let input = ChainEventFactory::data_event(
+        writer_id,
+        FirstOutput::versioned_event_type(),
+        json!({ "value": 9 }),
+    );
+    let parent = EventEnvelope::new(JournalWriterId::new(), input.clone());
+    let mut effect_context = invocation_context(journal.clone(), parent, None);
+    effect_context.emit_enabled = true;
+    effect_context.output_contract = output_contract_for_many(vec![
+        output_descriptor_for::<FirstOutput>(),
+        output_descriptor_for::<SecondOutput>(),
+    ]);
+
+    let mut adapter = EffectfulStatefulHandlerAdapter(SecondFactApplyErrorStateful);
+    let mut state = vec!["installed".to_string()];
+
+    let error = adapter
+        .accumulate(
+            &mut state,
+            input,
+            Some(effect_context),
+            obzenflow_core::MiddlewareExecutionScope::LiveHandler,
+        )
+        .await
+        .expect_err("the second apply error must be a contract violation");
+
+    let events = journal.events();
+    assert_eq!(events.len(), 2, "both facts remain durable");
+    assert_eq!(
+        events[0].event.event_type(),
+        FirstOutput::versioned_event_type(),
+        "facts remain in commit order"
+    );
+    assert_eq!(
+        events[1].event.event_type(),
+        SecondOutput::versioned_event_type(),
+        "facts remain in commit order"
+    );
+    assert!(matches!(
+        error,
+        crate::stages::common::handler_error::HandlerError::ContractViolation(ref message)
+            if message.contains("effectful_stateful_apply")
+                && message.contains(&events[1].event.id.to_string())
+                && message.contains(&SecondOutput::versioned_event_type())
+                && message.contains("Validation error: second apply failed")
+    ));
+    assert_eq!(
+        state,
+        vec!["installed"],
+        "the successful first fold must remain confined to the discarded draft"
+    );
 }
 
 #[tokio::test]
