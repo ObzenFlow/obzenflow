@@ -478,6 +478,81 @@ impl EffectfulStatefulHandler for ReplayStateful {
     }
 }
 
+#[derive(Clone, Debug, Default)]
+struct ErrorAfterCommitState {
+    applied: Vec<String>,
+}
+
+#[derive(Clone, Debug)]
+struct ErrorAfterCommitStateful {
+    calls: Arc<AtomicUsize>,
+    observed_fact_counts: Arc<Mutex<Vec<usize>>>,
+    applied: Arc<Mutex<Vec<String>>>,
+}
+
+#[async_trait]
+impl EffectfulStatefulHandler for ErrorAfterCommitStateful {
+    type State = ErrorAfterCommitState;
+    type Input = ReplayInput;
+    type Output = ReplayStatefulFact;
+    type AllowedEffects = obzenflow_runtime::effect_set![CountingEffect];
+
+    fn initial_state(&self) -> Self::State {
+        ErrorAfterCommitState::default()
+    }
+
+    async fn decide(
+        &mut self,
+        state: &Self::State,
+        input: &ReplayInput,
+        fx: &mut Effects<Self::Output, Self::AllowedEffects>,
+    ) -> Result<obzenflow_runtime::effects::StageCompletion<Self::Output>, HandlerError> {
+        self.observed_fact_counts
+            .lock()
+            .expect("observed fact counts lock poisoned")
+            .push(state.applied.len());
+
+        let effect = fx
+            .perform(CountingEffect {
+                value: input.value,
+                calls: self.calls.clone(),
+            })
+            .await?;
+        fx.emit(ReplayOutput {
+            value: input.value,
+            effect_value: effect.effect_value,
+        })
+        .await?;
+
+        if input.value == 1 {
+            return Err(HandlerError::Domain(
+                "deterministic failure after completed commits".to_string(),
+            ));
+        }
+
+        Ok(fx.complete()?)
+    }
+
+    fn apply(&mut self, state: &mut Self::State, fact: Self::Output) -> Result<(), HandlerError> {
+        let entry = match fact {
+            ReplayStatefulFact::EffectValue(value) => {
+                format!("effect:{}", value.effect_value)
+            }
+            ReplayStatefulFact::Output(output) => format!("output:{}", output.value),
+        };
+        state.applied.push(entry.clone());
+        self.applied
+            .lock()
+            .expect("applied lock poisoned")
+            .push(entry);
+        Ok(())
+    }
+
+    fn stage_logic_version(&self) -> &str {
+        "effect-replay-error-after-commit-stateful-v1"
+    }
+}
+
 // ---------------------------------------------------------------------------
 // FLOWIP-120m: product carriers fold per fact on the stateful surface
 // ---------------------------------------------------------------------------
@@ -1105,6 +1180,39 @@ fn build_stateful_flow(
             inputs = source!(ReplayInput => ReplaySource::new());
             effectful = effectful_stateful!(
                 ReplayInput -> { ReplayOutput, ReplayEffectValue } => ReplayStateful { calls },
+                effects: [CountingEffect],
+                middleware: []
+            );
+            collector = sink!(ReplayOutput => CollectSink { outputs });
+        },
+
+        topology: {
+            inputs |> effectful;
+            effectful |> collector;
+        }
+    }
+}
+
+fn build_error_after_commit_stateful_flow(
+    journal_base: PathBuf,
+    calls: Arc<AtomicUsize>,
+    observed_fact_counts: Arc<Mutex<Vec<usize>>>,
+    applied: Arc<Mutex<Vec<String>>>,
+    outputs: Arc<Mutex<Vec<ReplayOutput>>>,
+) -> FlowDefinition {
+    flow! {
+        name: "effect_replay_error_after_commit_stateful",
+        journals: disk_journals(journal_base),
+        middleware: [],
+
+        stages: {
+            inputs = source!(ReplayInput => ReplaySource::new());
+            effectful = effectful_stateful!(
+                ReplayInput -> { ReplayOutput, ReplayEffectValue } => ErrorAfterCommitStateful {
+                    calls,
+                    observed_fact_counts,
+                    applied
+                },
                 effects: [CountingEffect],
                 middleware: []
             );
@@ -2373,6 +2481,122 @@ async fn strict_effectful_stateful_replay_suppresses_effect_execution() {
             .expect("outputs lock poisoned")
             .clone(),
         live_domain_outputs
+    );
+}
+
+#[tokio::test]
+async fn effectful_stateful_reconciles_completed_facts_before_decide_error_live_and_replay() {
+    let _guard = effect_replay_test_guard().await;
+    let temp = tempfile::tempdir().expect("tempdir");
+    let journal_base = temp.path().join("journals");
+
+    let live_calls = Arc::new(AtomicUsize::new(0));
+    let live_observed = Arc::new(Mutex::new(Vec::new()));
+    let live_applied = Arc::new(Mutex::new(Vec::new()));
+    let live_outputs = Arc::new(Mutex::new(Vec::new()));
+    FlowApplication::builder()
+        .with_cli_args(["obzenflow"])
+        .run_async(build_error_after_commit_stateful_flow(
+            journal_base.clone(),
+            live_calls.clone(),
+            live_observed.clone(),
+            live_applied.clone(),
+            live_outputs.clone(),
+        ))
+        .await
+        .expect("live error-after-commit stateful flow should complete");
+
+    assert_eq!(live_calls.load(Ordering::SeqCst), 3);
+    assert_eq!(
+        live_observed
+            .lock()
+            .expect("live observed lock poisoned")
+            .as_slice(),
+        &[0, 2, 4],
+        "the next input must observe both facts committed before the prior decide error"
+    );
+    let expected_applied = vec![
+        "effect:101".to_string(),
+        "output:1".to_string(),
+        "effect:102".to_string(),
+        "output:2".to_string(),
+        "effect:103".to_string(),
+        "output:3".to_string(),
+    ];
+    let live_applied_entries = live_applied
+        .lock()
+        .expect("live applied lock poisoned")
+        .clone();
+    assert_eq!(live_applied_entries, expected_applied);
+    let live_domain_outputs = live_outputs
+        .lock()
+        .expect("live outputs lock poisoned")
+        .clone();
+    assert_eq!(
+        live_domain_outputs,
+        vec![
+            ReplayOutput {
+                value: 1,
+                effect_value: 101,
+            },
+            ReplayOutput {
+                value: 2,
+                effect_value: 102,
+            },
+            ReplayOutput {
+                value: 3,
+                effect_value: 103,
+            },
+        ],
+        "the direct fact committed before the first decide error must remain visible"
+    );
+
+    let archive_dir = latest_run_dir(&journal_base);
+    let replay_calls = Arc::new(AtomicUsize::new(0));
+    let replay_observed = Arc::new(Mutex::new(Vec::new()));
+    let replay_applied = Arc::new(Mutex::new(Vec::new()));
+    let replay_outputs = Arc::new(Mutex::new(Vec::new()));
+    FlowApplication::builder()
+        .with_cli_args(vec![
+            OsString::from("obzenflow"),
+            OsString::from("--replay-from"),
+            archive_dir.as_os_str().to_os_string(),
+        ])
+        .run_async(build_error_after_commit_stateful_flow(
+            journal_base,
+            replay_calls.clone(),
+            replay_observed.clone(),
+            replay_applied.clone(),
+            replay_outputs.clone(),
+        ))
+        .await
+        .expect("replay error-after-commit stateful flow should complete");
+
+    assert_eq!(
+        replay_calls.load(Ordering::SeqCst),
+        0,
+        "strict replay must use the recorded effect outcome"
+    );
+    assert_eq!(
+        replay_observed
+            .lock()
+            .expect("replay observed lock poisoned")
+            .as_slice(),
+        &[0, 2, 4]
+    );
+    assert_eq!(
+        replay_applied
+            .lock()
+            .expect("replay applied lock poisoned")
+            .as_slice(),
+        live_applied_entries.as_slice()
+    );
+    assert_eq!(
+        replay_outputs
+            .lock()
+            .expect("replay outputs lock poisoned")
+            .as_slice(),
+        live_domain_outputs.as_slice()
     );
 }
 

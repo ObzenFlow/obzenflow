@@ -312,6 +312,149 @@ struct MultiFactOutcome {
     second: SecondOutput,
 }
 
+#[derive(Clone, Debug, obzenflow_core::StageOutputFacts)]
+enum OrderedStatefulOutput {
+    First(FirstOutput),
+    Second(SecondOutput),
+}
+
+// `OneFactStageOutput` is an open, law-bearing marker. This deliberately false
+// implementation proves the fatal runtime backstop for a trusted manual claim.
+impl obzenflow_core::OneFactStageOutput for MultiFactOutcome {}
+
+#[derive(Clone, Debug)]
+struct DishonestProductStateful {
+    apply_calls: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl crate::stages::common::handlers::EffectfulStatefulHandler for DishonestProductStateful {
+    type State = u64;
+    type Input = FirstOutput;
+    type Output = MultiFactOutcome;
+    type AllowedEffects = crate::effect_set![];
+
+    fn initial_state(&self) -> Self::State {
+        0
+    }
+
+    async fn decide(
+        &mut self,
+        _state: &Self::State,
+        input: &Self::Input,
+        fx: &mut Effects<Self::Output, Self::AllowedEffects>,
+    ) -> Result<StageCompletion<Self::Output>, crate::stages::common::handler_error::HandlerError>
+    {
+        fx.emit(FirstOutput { value: input.value }).await?;
+        Err(crate::stages::common::handler_error::HandlerError::Domain(
+            "failure after dishonest emit".to_string(),
+        ))
+    }
+
+    fn apply(
+        &mut self,
+        state: &mut Self::State,
+        _fact: Self::Output,
+    ) -> Result<(), crate::stages::common::handler_error::HandlerError> {
+        self.apply_calls.fetch_add(1, Ordering::SeqCst);
+        *state += 1;
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug)]
+struct EmitThenErrorStateful;
+
+#[async_trait]
+impl crate::stages::common::handlers::EffectfulStatefulHandler for EmitThenErrorStateful {
+    type State = Vec<String>;
+    type Input = FirstOutput;
+    type Output = OrderedStatefulOutput;
+    type AllowedEffects = crate::effect_set![];
+
+    fn initial_state(&self) -> Self::State {
+        Vec::new()
+    }
+
+    async fn decide(
+        &mut self,
+        _state: &Self::State,
+        input: &Self::Input,
+        fx: &mut Effects<Self::Output, Self::AllowedEffects>,
+    ) -> Result<StageCompletion<Self::Output>, crate::stages::common::handler_error::HandlerError>
+    {
+        fx.emit(FirstOutput { value: input.value }).await?;
+        fx.emit(SecondOutput {
+            value: format!("second-{}", input.value),
+        })
+        .await?;
+        Err(crate::stages::common::handler_error::HandlerError::Domain(
+            "failure after committed facts".to_string(),
+        ))
+    }
+
+    fn apply(
+        &mut self,
+        state: &mut Self::State,
+        fact: Self::Output,
+    ) -> Result<(), crate::stages::common::handler_error::HandlerError> {
+        match fact {
+            OrderedStatefulOutput::First(first) => state.push(format!("first:{}", first.value)),
+            OrderedStatefulOutput::Second(second) => state.push(second.value),
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug)]
+struct SingleFactErrorStateful {
+    emit: bool,
+    fail_apply: bool,
+}
+
+#[async_trait]
+impl crate::stages::common::handlers::EffectfulStatefulHandler for SingleFactErrorStateful {
+    type State = Vec<u64>;
+    type Input = FirstOutput;
+    type Output = FirstOutput;
+    type AllowedEffects = crate::effect_set![];
+
+    fn initial_state(&self) -> Self::State {
+        Vec::new()
+    }
+
+    async fn decide(
+        &mut self,
+        _state: &Self::State,
+        input: &Self::Input,
+        fx: &mut Effects<Self::Output, Self::AllowedEffects>,
+    ) -> Result<StageCompletion<Self::Output>, crate::stages::common::handler_error::HandlerError>
+    {
+        if self.emit {
+            fx.emit(FirstOutput { value: input.value }).await?;
+        }
+        Err(crate::stages::common::handler_error::HandlerError::Domain(
+            "decide failed".to_string(),
+        ))
+    }
+
+    fn apply(
+        &mut self,
+        state: &mut Self::State,
+        fact: Self::Output,
+    ) -> Result<(), crate::stages::common::handler_error::HandlerError> {
+        if self.fail_apply {
+            return Err(
+                crate::stages::common::handler_error::HandlerError::Validation(
+                    "apply failed".to_string(),
+                ),
+            );
+        }
+        state.push(fact.value);
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug)]
 struct MultiFactEffect {
     calls: Arc<AtomicUsize>,
@@ -842,6 +985,207 @@ async fn typed_emit_remains_durable_when_handler_later_errors() {
     drop(effects);
 
     assert_eq!(journal.events().len(), 1, "the emitted fact stays durable");
+}
+
+#[tokio::test]
+async fn effectful_stateful_folds_committed_facts_before_returning_decide_error() {
+    use crate::stages::common::handlers::{
+        EffectfulStatefulHandlerAdapter, UnifiedStatefulHandler,
+    };
+
+    let stage_id = StageId::new();
+    let writer_id = WriterId::from(stage_id);
+    let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
+    let input = ChainEventFactory::data_event(
+        writer_id,
+        FirstOutput::versioned_event_type(),
+        json!({ "value": 9 }),
+    );
+    let parent = EventEnvelope::new(JournalWriterId::new(), input.clone());
+    let mut effect_context = invocation_context(journal.clone(), parent, None);
+    effect_context.emit_enabled = true;
+    effect_context.output_contract = output_contract_for_many(vec![
+        output_descriptor_for::<FirstOutput>(),
+        output_descriptor_for::<SecondOutput>(),
+    ]);
+
+    let mut adapter = EffectfulStatefulHandlerAdapter(EmitThenErrorStateful);
+    let mut state = Vec::new();
+
+    let error = adapter
+        .accumulate(
+            &mut state,
+            input,
+            Some(effect_context),
+            obzenflow_core::MiddlewareExecutionScope::LiveHandler,
+        )
+        .await
+        .expect_err("the original decide error must still propagate");
+
+    assert!(
+        matches!(
+            &error,
+            crate::stages::common::handler_error::HandlerError::Domain(message)
+                if message == "failure after committed facts"
+        ),
+        "unexpected adapter error: {error:?}"
+    );
+    assert_eq!(
+        state,
+        vec!["first:9".to_string(), "second-9".to_string()],
+        "committed facts must fold in order"
+    );
+
+    let events = journal.events();
+    assert_eq!(events.len(), 2);
+    assert_eq!(
+        events[0].event.event_type(),
+        FirstOutput::versioned_event_type().as_str()
+    );
+    assert_eq!(
+        events[1].event.event_type(),
+        SecondOutput::versioned_event_type().as_str()
+    );
+}
+
+#[tokio::test]
+async fn effectful_stateful_decide_error_without_commit_leaves_state_unchanged() {
+    use crate::stages::common::handlers::{
+        EffectfulStatefulHandlerAdapter, UnifiedStatefulHandler,
+    };
+
+    let stage_id = StageId::new();
+    let writer_id = WriterId::from(stage_id);
+    let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
+    let input = ChainEventFactory::data_event(
+        writer_id,
+        FirstOutput::versioned_event_type(),
+        json!({ "value": 9 }),
+    );
+    let parent = EventEnvelope::new(JournalWriterId::new(), input.clone());
+    let mut effect_context = invocation_context(journal.clone(), parent, None);
+    effect_context.emit_enabled = true;
+    effect_context.output_contract = output_contract_for::<FirstOutput>();
+
+    let mut adapter = EffectfulStatefulHandlerAdapter(SingleFactErrorStateful {
+        emit: false,
+        fail_apply: false,
+    });
+    let mut state = vec![7];
+
+    let error = adapter
+        .accumulate(
+            &mut state,
+            input,
+            Some(effect_context),
+            obzenflow_core::MiddlewareExecutionScope::LiveHandler,
+        )
+        .await
+        .expect_err("the decide error must propagate");
+
+    assert!(matches!(
+        error,
+        crate::stages::common::handler_error::HandlerError::Domain(ref message)
+            if message == "decide failed"
+    ));
+    assert_eq!(state, vec![7]);
+    assert!(journal.events().is_empty());
+}
+
+#[tokio::test]
+async fn effectful_stateful_apply_error_takes_precedence_and_discards_draft() {
+    use crate::stages::common::handlers::{
+        EffectfulStatefulHandlerAdapter, UnifiedStatefulHandler,
+    };
+
+    let stage_id = StageId::new();
+    let writer_id = WriterId::from(stage_id);
+    let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
+    let input = ChainEventFactory::data_event(
+        writer_id,
+        FirstOutput::versioned_event_type(),
+        json!({ "value": 9 }),
+    );
+    let parent = EventEnvelope::new(JournalWriterId::new(), input.clone());
+    let mut effect_context = invocation_context(journal.clone(), parent, None);
+    effect_context.emit_enabled = true;
+    effect_context.output_contract = output_contract_for::<FirstOutput>();
+
+    let mut adapter = EffectfulStatefulHandlerAdapter(SingleFactErrorStateful {
+        emit: true,
+        fail_apply: true,
+    });
+    let mut state = vec![7];
+
+    let error = adapter
+        .accumulate(
+            &mut state,
+            input,
+            Some(effect_context),
+            obzenflow_core::MiddlewareExecutionScope::LiveHandler,
+        )
+        .await
+        .expect_err("the apply error must supersede the pending decide error");
+
+    assert!(matches!(
+        error,
+        crate::stages::common::handler_error::HandlerError::Validation(ref message)
+            if message == "apply failed"
+    ));
+    assert_eq!(state, vec![7], "the failed draft must not be installed");
+    assert_eq!(journal.events().len(), 1, "the fact remains durable");
+}
+
+#[tokio::test]
+async fn false_one_fact_assertion_takes_precedence_over_decide_error() {
+    use crate::stages::common::handlers::{
+        EffectfulStatefulHandlerAdapter, UnifiedStatefulHandler,
+    };
+
+    let stage_id = StageId::new();
+    let writer_id = WriterId::from(stage_id);
+    let journal = Arc::new(MemoryJournal::new(JournalOwner::stage(stage_id)));
+    let input = ChainEventFactory::data_event(
+        writer_id,
+        FirstOutput::versioned_event_type(),
+        json!({ "value": 9 }),
+    );
+    let parent = EventEnvelope::new(JournalWriterId::new(), input.clone());
+    let mut effect_context = invocation_context(journal.clone(), parent, None);
+    effect_context.emit_enabled = true;
+    effect_context.output_contract = output_contract_for_many(vec![
+        output_descriptor_for::<FirstOutput>(),
+        output_descriptor_for::<SecondOutput>(),
+    ]);
+
+    let apply_calls = Arc::new(AtomicUsize::new(0));
+    let mut adapter = EffectfulStatefulHandlerAdapter(DishonestProductStateful {
+        apply_calls: apply_calls.clone(),
+    });
+    let mut state = 0;
+
+    let error = adapter
+        .accumulate(
+            &mut state,
+            input,
+            Some(effect_context),
+            obzenflow_core::MiddlewareExecutionScope::LiveHandler,
+        )
+        .await
+        .expect_err("false one-fact assertion must fail after singleton decoding");
+
+    assert!(error.is_contract_violation());
+    assert!(error.to_string().contains("one_fact_stage_output"));
+    assert_eq!(state, 0, "the draft state must not be installed");
+    assert_eq!(apply_calls.load(Ordering::SeqCst), 0);
+
+    let events = journal.events();
+    assert_eq!(events.len(), 1, "the emitted fact was already durable");
+    assert!(matches!(
+        &events[0].event.content,
+        obzenflow_core::event::ChainEventContent::Data { event_type, .. }
+            if event_type == FirstOutput::versioned_event_type().as_str()
+    ));
 }
 
 #[tokio::test]

@@ -10,8 +10,8 @@ use crate::effects::{EffectInvocationContext, Effects};
 use crate::messaging::upstream_subscription::StageInputPosition;
 use crate::stages::common::handler_error::HandlerError;
 use async_trait::async_trait;
-use obzenflow_core::event::schema::{TypedFact, TypedFactSet, TypedFactSetError, TypedPayload};
-use obzenflow_core::{ChainEvent, EventEnvelope, WriterId};
+use obzenflow_core::event::schema::{TypedFact, TypedPayload};
+use obzenflow_core::{ChainEvent, EventEnvelope, OneFactStageOutput, WriterId};
 use std::time::Duration;
 
 #[derive(Clone, Copy)]
@@ -321,6 +321,14 @@ impl<T: StatefulHandler + Send + Sync> UnifiedStatefulHandler for T {
 /// hook; a wall-clock trigger is not a function of the journal, and a
 /// mutable-state emission position would evolve state without a fact.
 ///
+/// A `decide` invocation is not transactional. Every fact whose commit
+/// completes through `fx` remains durable even if `decide` later returns an
+/// error. Before propagating that result, the adapter folds all such facts in
+/// commit order through [`EffectfulStatefulHandler::apply`] and installs the
+/// completed draft. Returning an error never rolls a committed fact back. If
+/// decoding or folding a committed fact fails, the adapter leaves the prior
+/// state installed and returns that failure instead of the `decide` result.
+///
 /// The stage arrow and `effects:` clause are the canonical operator-facing
 /// contract. `Output` and `AllowedEffects` mirror those declarations so Rust
 /// can check `decide` before the handler is erased. They carry no runtime
@@ -448,14 +456,14 @@ where
             )
         })?;
         let mut fx = Effects::<H::Output, H::AllowedEffects>::new(effect_context);
-        let _completion = self.0.decide(state, &input, &mut fx).await?;
+        let decide_result = self.0.decide(state, &input, &mut fx).await;
         let mut draft = state.clone();
         for fact_event in fx.drain_committed_facts() {
             let fact = decode_effectful_stateful_fact::<H::Output>(&fact_event)?;
             self.0.apply(&mut draft, fact)?;
         }
         *state = draft;
-        Ok(())
+        decide_result.map(|_| ())
     }
 
     fn initial_state(&self) -> Self::State {
@@ -517,30 +525,23 @@ where
 
 fn decode_effectful_stateful_fact<Output>(event: &ChainEvent) -> Result<Output, HandlerError>
 where
-    Output: TypedFactSet,
+    Output: OneFactStageOutput,
 {
     let fact = TypedFact::from_event(event).ok_or_else(|| {
-        HandlerError::Other("effectful stateful committed fact was not a Data event".to_string())
+        HandlerError::ContractViolation(format!(
+            "one_fact_stage_output: committed event `{}` was not a Data event",
+            event.id
+        ))
     })?;
-    Output::try_from_facts(&[fact]).map_err(effectful_stateful_fact_set_error)
-}
-
-fn effectful_stateful_fact_set_error(error: TypedFactSetError) -> HandlerError {
-    match error {
-        TypedFactSetError::SerializationFailed(message) => HandlerError::Other(message),
-        TypedFactSetError::DeserializationFailed { event_type, error } => {
-            HandlerError::Deserialization(format!("{event_type}: {error}"))
-        }
-        TypedFactSetError::MissingFact { event_type } => HandlerError::Other(format!(
-            "effectful stateful fact type `{event_type}` is not handled by the stage Output type"
-        )),
-        TypedFactSetError::DuplicateFact { event_type } => HandlerError::Other(format!(
-            "effectful stateful fact type `{event_type}` appeared more than once"
-        )),
-        TypedFactSetError::UnexpectedFact { event_type } => HandlerError::Other(format!(
-            "effectful stateful fact type `{event_type}` is not handled by the stage Output type"
-        )),
-    }
+    let event_type = fact.event_type.clone();
+    Output::try_from_facts(&[fact]).map_err(|error| {
+        HandlerError::ContractViolation(format!(
+            "one_fact_stage_output: committed event `{}` of type `{event_type}` could not be \
+             reconstructed as `{}` from one fact: {error}",
+            event.id,
+            std::any::type_name::<Output>(),
+        ))
+    })
 }
 
 #[cfg(test)]
@@ -558,6 +559,25 @@ mod tests {
         const EVENT_TYPE: &'static str = "stateful.first";
     }
 
+    #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+    struct SecondOutput {
+        value: u32,
+    }
+
+    impl TypedPayload for SecondOutput {
+        const EVENT_TYPE: &'static str = "stateful.second";
+    }
+
+    #[derive(Clone, Debug, obzenflow_core::StageOutputFacts)]
+    struct DishonestProductOutput {
+        first: FirstOutput,
+        second: SecondOutput,
+    }
+
+    // Manual implementations are trusted semantic assertions. This fixture
+    // deliberately violates the trait law to prove the runtime safety net.
+    impl OneFactStageOutput for DishonestProductOutput {}
+
     #[test]
     fn effectful_stateful_fact_decoder_accepts_scalar_fact() {
         let event = obzenflow_core::event::ChainEventFactory::data_event(
@@ -574,6 +594,24 @@ mod tests {
             &event.content,
             ChainEventContent::Data { event_type, .. } if event_type == "stateful.first.v1"
         ));
+    }
+
+    #[test]
+    fn effectful_stateful_fact_decoder_rejects_false_one_fact_assertion() {
+        let event = obzenflow_core::event::ChainEventFactory::data_event(
+            WriterId::from(obzenflow_core::StageId::new()),
+            FirstOutput::versioned_event_type(),
+            serde_json::json!({ "value": 1 }),
+        );
+
+        let error = decode_effectful_stateful_fact::<DishonestProductOutput>(&event)
+            .expect_err("a two-field product cannot reconstruct from one committed fact");
+
+        assert!(error.is_contract_violation());
+        let message = error.to_string();
+        assert!(message.contains("one_fact_stage_output"));
+        assert!(message.contains("stateful.first.v1"));
+        assert!(message.contains("stateful.second.v1"));
     }
 
     #[derive(Clone, Debug)]

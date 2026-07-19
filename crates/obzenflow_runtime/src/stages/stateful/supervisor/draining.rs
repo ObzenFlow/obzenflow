@@ -4,6 +4,7 @@
 
 //! Draining state event loop for the stateful supervisor
 
+use crate::backpressure::BackpressureReader;
 use crate::effects::EffectInvocationContext;
 use crate::metrics::instrumentation::process_with_instrumentation_no_count;
 use crate::stages::common::handlers::{StatefulOutputContext, UnifiedStatefulHandler};
@@ -24,7 +25,9 @@ use crate::supervised_base::EventLoopDirective;
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::event::payloads::flow_control_payload::EofKind;
 use obzenflow_core::event::vector_clock::CausalOrderingService;
+use obzenflow_core::StageId;
 use obzenflow_fsm::StateVariant;
+use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
@@ -32,6 +35,15 @@ use crate::messaging::PollResult;
 
 use super::super::fsm::{PendingTransition, StatefulContext, StatefulEvent, StatefulState};
 use super::StatefulSupervisor;
+
+fn acknowledge_consumed_drain_input(
+    readers: &HashMap<StageId, BackpressureReader>,
+    upstream: Option<StageId>,
+) {
+    if let Some(reader) = upstream.and_then(|stage_id| readers.get(&stage_id)) {
+        reader.ack_consumed(1);
+    }
+}
 
 pub(super) async fn dispatch_draining<
     H: UnifiedStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static,
@@ -254,6 +266,28 @@ pub(super) async fn dispatch_draining<
                         })?;
                     }
 
+                    if let Err(err) = &accumulate_result {
+                        if let Some(directive) = super::contract_violation_directive::<H>(
+                            err,
+                            "draining",
+                            &event,
+                            &ctx.stage_name,
+                        ) {
+                            let duration = start.elapsed();
+                            ctx.instrumentation
+                                .in_flight_count
+                                .fetch_sub(1, Ordering::Relaxed);
+                            ctx.instrumentation.record_processing_time(duration);
+                            if ctx.instrumentation.check_anomaly(duration) {
+                                ctx.instrumentation
+                                    .anomalies_total
+                                    .fetch_add(1, Ordering::Relaxed);
+                            }
+                            ctx.instrumentation.record_error(err.kind());
+                            return Ok(directive);
+                        }
+                    }
+
                     if let Some(state) = &heartbeat_state {
                         state.record_last_consumed(event_id);
                     }
@@ -297,6 +331,13 @@ pub(super) async fn dispatch_draining<
                                     format!("Failed to write stateful drain error: {e}")
                                 })?;
                         }
+
+                        // Match the running loop: once ordinary handler-error evidence is
+                        // durable, the input has been consumed even though accumulation failed.
+                        // Contract violations return through the stage-fatal branch above and
+                        // deliberately do not acknowledge here.
+                        acknowledge_consumed_drain_input(&ctx.backpressure_readers, upstream_stage);
+
                         return Ok(EventLoopDirective::Continue);
                     }
 
@@ -706,5 +747,43 @@ pub(super) async fn dispatch_draining<
                 format!("Drain error: {e}"),
             )))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::backpressure::{BackpressurePlan, BackpressureRegistry};
+    use crate::id_conversions::StageIdExt;
+    use obzenflow_topology::TopologyBuilder;
+    use std::num::NonZeroU64;
+
+    #[test]
+    fn ordinary_accumulate_error_acknowledges_one_consumed_drain_input() {
+        let mut builder = TopologyBuilder::new();
+        let upstream_topology_id = builder.add_stage(Some("upstream".to_string()));
+        let stateful_topology_id = builder.add_stage(Some("stateful".to_string()));
+        let topology = builder.build_unchecked().expect("topology");
+        let upstream = StageId::from_topology_id(upstream_topology_id);
+        let stateful = StageId::from_topology_id(stateful_topology_id);
+        let plan = BackpressurePlan::disabled().with_stage_enforced(
+            upstream,
+            NonZeroU64::new(1).expect("window"),
+            std::time::Duration::from_secs(30),
+        );
+        let registry = BackpressureRegistry::new(&topology, &plan);
+        registry
+            .writer(upstream)
+            .reserve(1)
+            .expect("one input reservation")
+            .commit(1);
+
+        let readers = HashMap::from([(upstream, registry.reader(upstream, stateful))]);
+        acknowledge_consumed_drain_input(&readers, Some(upstream));
+
+        let snapshot = registry.metrics_snapshot();
+        assert_eq!(snapshot.stage_writer_seq.get(&upstream), Some(&1));
+        assert_eq!(snapshot.stage_min_reader_seq.get(&upstream), Some(&1));
+        assert_eq!(snapshot.edge_in_flight.get(&(upstream, stateful)), Some(&0));
     }
 }

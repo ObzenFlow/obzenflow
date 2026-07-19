@@ -43,6 +43,17 @@ impl<T: TypedFactSet + StageFactSet> StageOutputFacts for T {}
 /// `try_from_facts` at runtime. Deliberately not a blanket over all fact
 /// sets; the derive implements it for per-fact sums, and scalars qualify
 /// through this blanket.
+///
+/// # Contract
+///
+/// Every value must lower to exactly one fact. Conversely, every well-formed
+/// fact type advertised by [`StageFactSet::Members`] must reconstruct when
+/// passed alone to [`TypedFactSet::try_from_facts`]. Lowering and single-fact
+/// reconstruction must preserve the corresponding output value that `apply`
+/// folds. Supported derives implement this trait only for structurally valid
+/// per-fact sums. A manual implementation is a trusted semantic assertion; if
+/// committed-fact decoding contradicts it, the runtime treats the
+/// contradiction as a fatal stage-contract violation.
 #[diagnostic::on_unimplemented(
     message = "`{Self}` cannot be an effectful stateful `Output`: it does not commit \
                exactly one fact per value",
