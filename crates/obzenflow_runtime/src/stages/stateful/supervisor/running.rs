@@ -444,6 +444,28 @@ pub(super) async fn dispatch_accumulating<
                         })?;
                     }
 
+                    if let Err(err) = &accumulate_result {
+                        if let Some(directive) = super::contract_violation_directive::<H>(
+                            err,
+                            "processing",
+                            &event,
+                            &ctx.stage_name,
+                        ) {
+                            let duration = start.elapsed();
+                            ctx.instrumentation
+                                .in_flight_count
+                                .fetch_sub(1, Ordering::Relaxed);
+                            ctx.instrumentation.record_processing_time(duration);
+                            if ctx.instrumentation.check_anomaly(duration) {
+                                ctx.instrumentation
+                                    .anomalies_total
+                                    .fetch_add(1, Ordering::Relaxed);
+                            }
+                            ctx.instrumentation.record_error(err.kind());
+                            return Ok(directive);
+                        }
+                    }
+
                     if let Some(state) = &heartbeat_state {
                         state.record_last_consumed(event_id);
                     }

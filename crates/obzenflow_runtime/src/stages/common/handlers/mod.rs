@@ -30,5 +30,5 @@ pub use stateful::{
 };
 pub use transform::{
     AsyncTransformHandler, EffectfulTransformHandler, EffectfulTransformHandlerAdapter,
-    TransformHandler, UnifiedTransformHandler,
+    TransformHandler, TypedTransformHandler, TypedTransformHandlerAdapter, UnifiedTransformHandler,
 };

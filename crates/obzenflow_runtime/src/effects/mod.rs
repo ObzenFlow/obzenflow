@@ -42,14 +42,17 @@ use crate::stages::common::supervision::output_committer::{CommitOptions, Output
 
 mod boundary;
 mod commit;
+mod completion;
 mod context;
 mod declaration;
+mod effect_set;
 mod error;
 mod history;
 mod identity;
 mod ports;
 mod replay;
 mod runtime;
+mod typed;
 
 #[cfg(test)]
 mod tests;
@@ -61,6 +64,7 @@ pub use boundary::{
     SingleUseEffectOperation,
 };
 pub use commit::EffectCommitHandle;
+pub use completion::StageCompletion;
 pub use context::{
     EffectContext, EffectInvocationContext, SynthesizedOutcomeKind, SynthesizedOutcomeRegistration,
 };
@@ -71,6 +75,11 @@ pub use declaration::{
     Effect, EffectDeclaration, EffectSafety, IdempotencyKey, IdempotencyKeyPolicy,
     SinkDeliverySafety, TransactionalEffectPort,
 };
+// FLOWIP-120z effect capability sets; the list traits are doc(hidden)
+// plumbing that must stay reachable for the public `DeclaredEffectSet` impl.
+pub use effect_set::{
+    assert_distinct_effect_set, DeclaredEffectSet, EffectList, EffectSet, EffectTypeDisjoint,
+};
 pub use error::EffectError;
 pub use history::{EffectHistory, EffectHistoryReader, EffectHistoryStore};
 pub use identity::{
@@ -79,7 +88,13 @@ pub use identity::{
     EffectOutputOrdinal,
 };
 pub use ports::{EffectPortKey, EffectPortRegistry, EffectPortRequirement};
-pub use runtime::Effects;
+pub(crate) use runtime::EffectsCore;
+// FLOWIP-120z/B9: the proof facades are doc-hidden public bounds so rustc can
+// report failures in handler vocabulary without weakening the underlying set
+// membership and containment proofs.
+pub use typed::Effects;
+#[doc(hidden)]
+pub use typed::{AllowedEffectsAllowEffect, EffectOutcomeFitsOutput, OutputAllowsFact};
 
 use commit::{
     append_domain_effect_success_facts, append_effect_record, CommittedEffectOutcome,

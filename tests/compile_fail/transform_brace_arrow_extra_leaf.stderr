@@ -1,0 +1,17 @@
+error[E0277]: the handler's `Output` declares a fact missing from the stage arrow
+  --> tests/compile_fail/transform_brace_arrow_extra_leaf.rs:46:13
+   |
+46 |     let _ = obzenflow_dsl::transform!(Input -> { First } => Handler);
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the handler's `Output` set is not contained in this arrow output contract
+   |
+   = help: the trait `HandlerOutputsAreDeclaredByArrow<WithMember<First, EmptySet>, SubsetProofStep<MemberFound, SubsetProofStep<MemberAfter<_>, SubsetProofEnd>>>` is not implemented for `WithMember<First, WithMember<Extra, EmptySet>>`
+   = note: the stage arrow is canonical: remove the extra fact from `Output`, or add it to the arrow first when it belongs in the stage contract and then update the handler's carrier or witness; use `stage_fact_set![...]` only for an effectful-transform witness, and a `StageOutputFacts` carrier where values are returned or applied (FLOWIP-120z B9)
+note: required by a bound in `__obzenflow_assert_output_contract_equality`
+  --> tests/compile_fail/transform_brace_arrow_extra_leaf.rs:46:13
+   |
+46 |     let _ = obzenflow_dsl::transform!(Input -> { First } => Handler);
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |             |
+   |             required by a bound in this function
+   |             required by this bound in `__obzenflow_assert_output_contract_equality`
+   = note: this error originates in the macro `$crate::__obzenflow_transform_typed` which comes from the expansion of the macro `obzenflow_dsl::transform` (in Nightly builds, run with -Z macro-backtrace for more info)

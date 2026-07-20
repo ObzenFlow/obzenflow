@@ -35,6 +35,13 @@ pub enum HandlerError {
     Validation(String),
     /// Broader domain logic failure.
     Domain(String),
+    /// A trusted framework or handler contract was contradicted at runtime.
+    ///
+    /// A call site enforcing a trusted runtime contract may promote this to a
+    /// stage-fatal FSM error. The effectful stateful supervisor does so for
+    /// `OneFactStageOutput` contradictions and rejection of already-committed
+    /// facts by the state fold.
+    ContractViolation(String),
     /// Generic or unclassified error.
     Other(String),
 }
@@ -55,8 +62,18 @@ impl HandlerError {
             HandlerError::Deserialization(_) => ErrorKind::Deserialization,
             HandlerError::Validation(_) => ErrorKind::Validation,
             HandlerError::Domain(_) => ErrorKind::Domain,
+            // The effectful stateful supervisor intercepts its durable-state
+            // contract violations before per-record error routing. `Unknown`
+            // is retained for exhaustive callers that still inspect `kind()`.
+            HandlerError::ContractViolation(_) => ErrorKind::Unknown,
             HandlerError::Other(_) => ErrorKind::Unknown,
         }
+    }
+
+    /// Whether the failure contradicts a trusted contract, allowing the
+    /// enforcing call site to promote it above ordinary per-record routing.
+    pub fn is_contract_violation(&self) -> bool {
+        matches!(self, Self::ContractViolation(_))
     }
 }
 
@@ -82,6 +99,9 @@ impl fmt::Display for HandlerError {
             }
             HandlerError::Validation(msg) => write!(f, "Validation error: {msg}"),
             HandlerError::Domain(msg) => write!(f, "Domain error: {msg}"),
+            HandlerError::ContractViolation(msg) => {
+                write!(f, "Contract violation: {msg}")
+            }
             HandlerError::Other(msg) => write!(f, "Handler error: {msg}"),
         }
     }
@@ -89,8 +109,33 @@ impl fmt::Display for HandlerError {
 
 impl std::error::Error for HandlerError {}
 
+impl From<crate::effects::EffectError> for HandlerError {
+    fn from(error: crate::effects::EffectError) -> Self {
+        Self::Other(error.to_string())
+    }
+}
+
 impl From<HandlerError> for StageError {
     fn from(err: HandlerError) -> Self {
         StageError::handler_failure(err)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn contract_violation_is_distinct_from_record_errors() {
+        let error = HandlerError::ContractViolation(
+            "one_fact_stage_output: singleton reconstruction failed".to_string(),
+        );
+
+        assert!(error.is_contract_violation());
+        assert_eq!(error.kind(), ErrorKind::Unknown);
+        assert_eq!(
+            error.to_string(),
+            "Contract violation: one_fact_stage_output: singleton reconstruction failed"
+        );
     }
 }

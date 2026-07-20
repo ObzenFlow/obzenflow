@@ -1555,6 +1555,9 @@ impl HandlerErrorExt for HandlerError {
             }
             HandlerError::Validation(msg) => HandlerError::Validation(format!("{prefix}: {msg}")),
             HandlerError::Domain(msg) => HandlerError::Domain(format!("{prefix}: {msg}")),
+            HandlerError::ContractViolation(msg) => {
+                HandlerError::ContractViolation(format!("{prefix}: {msg}"))
+            }
             HandlerError::Other(msg) => HandlerError::Other(format!("{prefix}: {msg}")),
         }
     }

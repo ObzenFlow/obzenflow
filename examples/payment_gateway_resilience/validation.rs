@@ -10,6 +10,8 @@
 //! ```text
 //! CustomerOrderPlaced -> { ValidatedOrder, InvalidOrder, OrderCancelled }
 //! ```
+//! `ValidationOutcome` is the handler-side carrier proven leaf-equal to that
+//! flat fact set; it is not a topology payload.
 //!
 //! A valid order becomes `ValidatedOrder` and proceeds to payment
 //! authorization. An invalid order records two facts: `InvalidOrder` (the
@@ -18,55 +20,49 @@
 //! cancelled-orders subscriber consumes regardless of where cancellation
 //! originated).
 //!
-//! The stage performs no external I/O, so its `effects:` list is empty; the
-//! effectful macro surface is what provides multi-type emission today.
+//! The stage performs no external I/O, so it returns a typed, deterministic
+//! classifier outcome rather than using the effectful surface.
 
 use super::domain::{
     CustomerOrderPlaced, InvalidOrder, InvalidOrderReason, OrderCancellationReason, OrderCancelled,
     PaymentMethodState, ValidatedOrder,
 };
-use async_trait::async_trait;
-use obzenflow_runtime::effects::Effects;
+use obzenflow_core::StageOutputFacts;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
-use obzenflow_runtime::stages::common::handlers::EffectfulTransformHandler;
+use obzenflow_runtime::stages::common::handlers::TypedTransformHandler;
+
+/// In-memory carrier for the flat facts authored by local validation.
+///
+/// The carrier itself is never journalled. Its selected variant is lowered to
+/// one `ValidatedOrder`, or to `InvalidOrder` followed by `OrderCancelled`.
+#[derive(Debug, Clone, StageOutputFacts)]
+pub enum ValidationOutcome {
+    Validated(ValidatedOrder),
+    Invalid {
+        invalid: InvalidOrder,
+        cancelled: OrderCancelled,
+    },
+}
 
 /// The validation stage handler. Classifies each order exactly once.
 #[derive(Debug, Clone)]
 pub struct ValidateOrder;
 
-#[async_trait]
-impl EffectfulTransformHandler for ValidateOrder {
+impl TypedTransformHandler for ValidateOrder {
     type Input = CustomerOrderPlaced;
+    type Output = ValidationOutcome;
 
-    async fn process(
-        &self,
-        order: CustomerOrderPlaced,
-        fx: &mut Effects,
-    ) -> Result<(), HandlerError> {
+    fn process(&self, order: CustomerOrderPlaced) -> Result<Self::Output, HandlerError> {
         match invalid_reason_for(&order) {
-            None => fx
-                .emit(validated_order(order))
-                .await
-                .map_err(|e| HandlerError::Other(e.to_string())),
+            None => Ok(ValidationOutcome::Validated(validated_order(order))),
             Some(reason) => {
                 // Fact first, consequence second: the validation outcome is the
                 // provenance, the cancellation is the derived lifecycle fact.
-                fx.emit(invalid_order(&order, reason.clone()))
-                    .await
-                    .map_err(|e| HandlerError::Other(e.to_string()))?;
-                fx.emit(cancellation_for_invalid(&order, reason))
-                    .await
-                    .map_err(|e| HandlerError::Other(e.to_string()))
+                let invalid = invalid_order(&order, reason.clone());
+                let cancelled = cancellation_for_invalid(&order, reason);
+                Ok(ValidationOutcome::Invalid { invalid, cancelled })
             }
         }
-    }
-
-    async fn drain(&mut self) -> Result<(), HandlerError> {
-        Ok(())
-    }
-
-    fn stage_logic_version(&self) -> &str {
-        "order-validation-v1"
     }
 }
 

@@ -182,7 +182,9 @@ fn raw_recovery_eligibility(error: &EffectError) -> RawRecoveryEligibility {
         | EffectError::Permanent(_)
         | EffectError::Validation(_)
         | EffectError::Domain(_)
-        | EffectError::ReplayArchive(_) => RawRecoveryEligibility::Ineligible,
+        | EffectError::ReplayArchive(_)
+        | EffectError::CompletedWithoutOutput { .. }
+        | EffectError::CompletedEmptyWithOutput { .. } => RawRecoveryEligibility::Ineligible,
     }
 }
 

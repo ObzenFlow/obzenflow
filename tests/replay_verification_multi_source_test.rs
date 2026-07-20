@@ -169,15 +169,21 @@ struct ChargeOrders {
 #[async_trait]
 impl EffectfulTransformHandler for ChargeOrders {
     type Input = OrderPlaced;
+    type Output = Charged;
+    type AllowedEffects = obzenflow_runtime::effect_set![ChargeEffect];
 
-    async fn process(&self, order: OrderPlaced, fx: &mut Effects) -> Result<(), HandlerError> {
+    async fn process(
+        &self,
+        order: OrderPlaced,
+        fx: &mut Effects<Self::Output, Self::AllowedEffects>,
+    ) -> Result<obzenflow_runtime::effects::StageCompletion<Self::Output>, HandlerError> {
         fx.perform(ChargeEffect {
             order_id: order.order_id,
             calls: self.calls.clone(),
         })
         .await
         .map_err(|e| HandlerError::Other(e.to_string()))?;
-        Ok(())
+        Ok(fx.complete()?)
     }
 
     fn stage_logic_version(&self) -> &str {

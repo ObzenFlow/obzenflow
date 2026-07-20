@@ -8,3 +8,25 @@ error[E0119]: conflicting implementations of trait `TypedFactSet` for type `Wrap
            - impl<T> TypedFactSet for T
              where T: TypedPayload, T: Send, T: Sync, T: 'static;
    = note: this error originates in the derive macro `EffectOutcomeFacts` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0119]: conflicting implementations of trait `StageFactSet` for type `WrapperAttempt`
+  --> tests/compile_fail/effect_outcome_carrier_cannot_be_typed_payload.rs:19:48
+   |
+19 | #[derive(Debug, Clone, Serialize, Deserialize, EffectOutcomeFacts)]
+   |                                                ^^^^^^^^^^^^^^^^^^
+   |
+   = note: conflicting implementation in crate `obzenflow_core`:
+           - impl<T> StageFactSet for T
+             where T: TypedPayload, T: Send, T: Sync, T: 'static;
+   = note: this error originates in the derive macro `EffectOutcomeFacts` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0119]: conflicting implementations of trait `OneFactStageOutput` for type `WrapperAttempt`
+  --> tests/compile_fail/effect_outcome_carrier_cannot_be_typed_payload.rs:19:48
+   |
+19 | #[derive(Debug, Clone, Serialize, Deserialize, EffectOutcomeFacts)]
+   |                                                ^^^^^^^^^^^^^^^^^^
+   |
+   = note: conflicting implementation in crate `obzenflow_core`:
+           - impl<T> OneFactStageOutput for T
+             where T: TypedPayload, T: Send, T: Sync, T: 'static;
+   = note: this error originates in the derive macro `EffectOutcomeFacts` (in Nightly builds, run with -Z macro-backtrace for more info)

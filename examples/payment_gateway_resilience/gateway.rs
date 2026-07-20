@@ -15,12 +15,10 @@
 //! its own copy of this logic and only swaps the source and the flow wiring.
 
 use super::domain::{
-    GatewayPaymentFallback, GatewayPaymentRejected, OrderCancellationReason, OrderCancelled,
-    PaymentAuthorizationUnavailable, PaymentAuthorized, PaymentDeclineReason, PaymentDeclined,
-    PaymentMethodState, TrafficPhase, ValidatedOrder,
+    OrderCancellationReason, OrderCancelled, PaymentAuthorizationUnavailable, PaymentAuthorized,
+    PaymentDeclineReason, PaymentDeclined, PaymentMethodState, TrafficPhase, ValidatedOrder,
 };
 use async_trait::async_trait;
-use obzenflow_adapters::effects::{CircuitBreakerOutcome, GuardedEffectExt};
 use obzenflow_adapters::middleware::circuit_breaker::FailureClassification;
 use obzenflow_core::{event::chain_event::ChainEvent, EffectOutcomeFacts, TypedPayload};
 use obzenflow_runtime::effects::{
@@ -201,6 +199,14 @@ pub struct GatewayTransform {
     retry_proof: Option<Arc<GatewayRetryProof>>,
 }
 
+type GatewayOutput = obzenflow_core::stage_fact_set![
+    PaymentAuthorized,
+    PaymentDeclined,
+    OrderCancelled,
+    PaymentAuthorizationUnavailable
+];
+type GatewayAllowedEffects = obzenflow_runtime::effect_set![AuthorizePayment];
+
 impl GatewayTransform {
     pub fn with_retry_proof(retry_proof: Arc<GatewayRetryProof>) -> Self {
         Self {
@@ -212,8 +218,14 @@ impl GatewayTransform {
 #[async_trait]
 impl EffectfulTransformHandler for GatewayTransform {
     type Input = ValidatedOrder;
+    type Output = GatewayOutput;
+    type AllowedEffects = GatewayAllowedEffects;
 
-    async fn process(&self, order: ValidatedOrder, fx: &mut Effects) -> Result<(), HandlerError> {
+    async fn process(
+        &self,
+        order: ValidatedOrder,
+        fx: &mut Effects<Self::Output, Self::AllowedEffects>,
+    ) -> Result<obzenflow_runtime::effects::StageCompletion<Self::Output>, HandlerError> {
         if matches!(
             order.payment_method_state,
             PaymentMethodState::InvalidNumber
@@ -223,27 +235,23 @@ impl EffectfulTransformHandler for GatewayTransform {
             ));
         }
 
-        // The guarded wrapper (FLOWIP-120h) lifts the effect outcome into an
-        // explicit branch type: the breaker's fallback and rejection are
-        // distinct named facts the carrier reconstructs by event type, live
-        // and replay alike, rather than a variant of the gateway's own
-        // decision distinguished by a reason string.
+        // Plain fail-fast breaker path (FLOWIP-115n direction): when the
+        // breaker prevents the call, `perform` returns a recorded
+        // `BoundaryRejected` error; the breaker never synthesizes a fact to
+        // represent non-execution.
         let outcome = fx
-            .perform(
-                AuthorizePayment {
-                    order: order.clone(),
-                    retry_proof: self.retry_proof.clone(),
-                }
-                .guarded::<GatewayPaymentFallback, GatewayPaymentRejected>(),
-            )
+            .perform(AuthorizePayment {
+                order: order.clone(),
+                retry_proof: self.retry_proof.clone(),
+            })
             .await;
 
         match outcome {
-            Ok(CircuitBreakerOutcome::Primary(AuthorizePaymentOutcome::Authorized(_))) => {
+            Ok(AuthorizePaymentOutcome::Authorized(_)) => {
                 // The PaymentAuthorized outcome fact is already recorded by
                 // fx.perform; authorization has no derived consequence here.
             }
-            Ok(CircuitBreakerOutcome::Primary(AuthorizePaymentOutcome::Declined(declined))) => {
+            Ok(AuthorizePaymentOutcome::Declined(declined)) => {
                 // Fact first, consequence second: the recorded PaymentDeclined
                 // outcome fact is the gateway's decision, and the derived
                 // lifecycle consequence is that the order is cancelled.
@@ -259,24 +267,16 @@ impl EffectfulTransformHandler for GatewayTransform {
                 .await
                 .map_err(|e| HandlerError::Other(e.to_string()))?;
             }
-            Ok(CircuitBreakerOutcome::Fallback(fallback)) => {
-                // Breaker-synthesized: the gateway was never called, so no
-                // payment decision exists and the order goes to manual review.
-                emit_authorization_unavailable(order, fallback.reason, fx).await?;
-            }
-            Ok(CircuitBreakerOutcome::Rejected(rejected)) => {
-                emit_authorization_unavailable(order, rejected.reason, fx).await?;
-            }
             Err(err) => {
-                // Genuine gateway failure (e.g. the scripted outage before the
-                // breaker opens): recorded under the effect cursor, so replay
-                // reproduces the same failure; the operational consequence is
-                // manual review, never a manufactured order fate.
+                // Gateway failure or breaker prevention: recorded under the
+                // effect cursor either way, so replay reproduces it; no payment
+                // decision exists and the order goes to manual review, never a
+                // manufactured order fate.
                 emit_authorization_unavailable(order, authorization_unavailable_reason(err), fx)
                     .await?;
             }
         }
-        Ok(())
+        Ok(fx.complete()?)
     }
 
     async fn drain(&mut self) -> Result<(), HandlerError> {
@@ -302,11 +302,11 @@ fn authorization_unavailable_reason(err: EffectError) -> String {
 /// Tell the circuit breaker which scripted inputs represent dependency failure.
 ///
 /// Error-marked outputs cover genuine gateway failures; the input-phase check
-/// covers the scripted outage. Breaker-synthesized fallback facts never reach
-/// `post_handle` (the boundary short-circuits), so degraded outputs do not
-/// re-count as failures. The classification is health authority plus recovery
-/// veto only: returning `TransientFailure` cannot make an
-/// ineligible raw failure retry.
+/// covers the scripted outage. Breaker-refused calls never reach
+/// `post_handle` (the boundary short-circuits), so refusals do not re-count
+/// as failures. The classification is health authority plus recovery veto
+/// only: returning `TransientFailure` cannot make an ineligible raw failure
+/// retry.
 pub fn classify_simulated_gateway_unavailability(
     event: &ChainEvent,
     outputs: &[ChainEvent],
@@ -334,7 +334,7 @@ pub fn classify_simulated_gateway_unavailability(
 async fn emit_authorization_unavailable(
     order: ValidatedOrder,
     reason: String,
-    fx: &mut Effects,
+    fx: &mut Effects<GatewayOutput, GatewayAllowedEffects>,
 ) -> Result<(), HandlerError> {
     fx.emit(PaymentAuthorizationUnavailable {
         order_id: order.order_id,

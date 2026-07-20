@@ -239,8 +239,14 @@ struct EffectfulTail {
 #[async_trait]
 impl EffectfulTransformHandler for EffectfulTail {
     type Input = Merged;
+    type Output = obzenflow_core::stage_fact_set![MixedOutput, EffectValue];
+    type AllowedEffects = obzenflow_runtime::effect_set![CountingEffect];
 
-    async fn process(&self, input: Merged, fx: &mut Effects) -> Result<(), HandlerError> {
+    async fn process(
+        &self,
+        input: Merged,
+        fx: &mut Effects<Self::Output, Self::AllowedEffects>,
+    ) -> Result<obzenflow_runtime::effects::StageCompletion<Self::Output>, HandlerError> {
         let effect_value = fx
             .perform(CountingEffect {
                 value: input.value,
@@ -255,7 +261,7 @@ impl EffectfulTransformHandler for EffectfulTail {
         })
         .await
         .map_err(|e| HandlerError::Other(e.to_string()))?;
-        Ok(())
+        Ok(fx.complete()?)
     }
 
     fn stage_logic_version(&self) -> &str {

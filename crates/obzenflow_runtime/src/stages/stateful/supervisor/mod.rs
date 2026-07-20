@@ -12,6 +12,7 @@ mod draining;
 mod running;
 
 use crate::messaging::UpstreamSubscription;
+use crate::stages::common::handler_error::HandlerError;
 use crate::stages::common::handlers::UnifiedStatefulHandler;
 use crate::stages::common::supervision::flow_context_factory::make_flow_context;
 use crate::stages::common::supervision::forward_control_event::forward_control_event as forward_control_event_helper;
@@ -24,6 +25,21 @@ use obzenflow_core::{ChainEvent, EventEnvelope, StageId};
 use obzenflow_fsm::{fsm, EventVariant, StateVariant, Transition};
 
 use super::fsm::{StatefulAction, StatefulContext, StatefulEvent, StatefulState};
+
+fn contract_violation_directive<H>(
+    error: &HandlerError,
+    phase: &str,
+    input: &ChainEvent,
+    stage_name: &str,
+) -> Option<EventLoopDirective<StatefulEvent<H>>> {
+    error.is_contract_violation().then(|| {
+        EventLoopDirective::Transition(StatefulEvent::Error(format!(
+            "Stateful stage contract violation while {phase} input `{}` in stage \
+             `{stage_name}`: {error}",
+            input.id,
+        )))
+    })
+}
 
 /// Supervisor for stateful stages
 pub(crate) struct StatefulSupervisor<
@@ -501,5 +517,53 @@ impl<H: UnifiedStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static
         ctx.events_since_last_heartbeat = 0;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use obzenflow_core::event::ChainEventFactory;
+    use obzenflow_core::WriterId;
+
+    #[test]
+    fn contract_violation_uses_stage_fatal_error_transition() {
+        let input = ChainEventFactory::data_event(
+            WriterId::from(StageId::new()),
+            "test.input.v1",
+            serde_json::json!({}),
+        );
+        let error = HandlerError::ContractViolation(
+            "one_fact_stage_output: singleton reconstruction failed".to_string(),
+        );
+
+        let directive = contract_violation_directive::<()>(&error, "processing", &input, "fold")
+            .expect("contract violations are stage-fatal");
+
+        match directive {
+            EventLoopDirective::Transition(StatefulEvent::Error(message)) => {
+                assert!(message.contains("Stateful stage contract violation"));
+                assert!(message.contains("one_fact_stage_output"));
+                assert!(message.contains("fold"));
+            }
+            _ => panic!("expected a transition through the stateful Error event"),
+        }
+    }
+
+    #[test]
+    fn ordinary_handler_error_is_not_promoted_to_stage_fatal() {
+        let input = ChainEventFactory::data_event(
+            WriterId::from(StageId::new()),
+            "test.input.v1",
+            serde_json::json!({}),
+        );
+
+        assert!(contract_violation_directive::<()>(
+            &HandlerError::Domain("rejected".to_string()),
+            "processing",
+            &input,
+            "fold",
+        )
+        .is_none());
     }
 }

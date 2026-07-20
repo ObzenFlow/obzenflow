@@ -45,12 +45,14 @@ store_orders --+--> validate_order -- ValidatedOrder --> authorize_payment -- Pa
                       \-- OrderCancelled -----------------+-- OrderCancelled --> cancelled_orders
 ```
 
-`validate_order` classifies each order exactly once and declares a multi-type
-output contract: `CustomerOrderPlaced -> { ValidatedOrder, InvalidOrder,
-OrderCancelled }`. `InvalidOrder` and `PaymentDeclined` are journal-recorded
-provenance facts with no sink of their own; their lifecycle consequence,
-`OrderCancelled`, converges from both producers on one cancelled-orders
-delivery. The journal is the record, sinks are external deliveries.
+`validate_order` classifies each order exactly once and declares
+`CustomerOrderPlaced -> { ValidatedOrder, InvalidOrder, OrderCancelled }`. The
+handler-side `ValidationOutcome` carrier is proven leaf-equal to that flat fact
+set and is never journalled. `InvalidOrder` and `PaymentDeclined` are
+journal-recorded provenance facts with no sink of their own; their lifecycle
+consequence, `OrderCancelled`, converges from both producers on one
+cancelled-orders delivery. The journal is the record, sinks are external
+deliveries.
 
 The sources script three phases so you can correlate behaviour with logs and
 metrics: a healthy **warmup**, an **outage** where every gateway call fails, and
@@ -137,35 +139,28 @@ impl Effect for AuthorizePayment {
 }
 ```
 
-The stage performs the effect through the guarded wrapper (FLOWIP-120h), so the
-circuit breaker's branches are explicit in the type rather than smuggled as a
-variant of the gateway's own outcome. The recorded outcome group is the named
+The stage performs the plain effect. The recorded outcome group is the named
 fact itself, reconstructed by event type on replay, so the handler never
-re-emits the outcome facts; it emits only derived consequences:
+re-emits the outcome facts; it emits only derived consequences. When the
+circuit breaker prevents a call, `perform` returns a recorded rejection error
+rather than a synthesized fact, and the handler routes it like any other
+gateway failure:
 
 ```rust
-let outcome = fx
-    .perform(AuthorizePayment { order }.guarded::<GatewayPaymentFallback, GatewayPaymentRejected>())
-    .await;
+let outcome = fx.perform(AuthorizePayment { order }).await;
 
 match outcome {
-    Ok(CircuitBreakerOutcome::Primary(AuthorizePaymentOutcome::Authorized(_))) => {
+    Ok(AuthorizePaymentOutcome::Authorized(_)) => {
         // The PaymentAuthorized outcome fact is already recorded by fx.perform.
     }
-    Ok(CircuitBreakerOutcome::Primary(AuthorizePaymentOutcome::Declined(declined))) => {
+    Ok(AuthorizePaymentOutcome::Declined(declined)) => {
         // Fact first, consequence second: the recorded decline is the
         // provenance, the derived cancellation is the order's fate.
         fx.emit(OrderCancelled { ... }).await?
     }
-    Ok(CircuitBreakerOutcome::Fallback(fallback)) => {
-        // Breaker open: the gateway was never called, no decision exists.
-        fx.emit(PaymentAuthorizationUnavailable { ... }).await?
-    }
-    Ok(CircuitBreakerOutcome::Rejected(rejected)) => {
-        fx.emit(PaymentAuthorizationUnavailable { ... }).await?
-    }
     Err(err) => {
-        // Genuine gateway failure, recorded under the effect cursor.
+        // Gateway failure or breaker refusal, recorded under the effect
+        // cursor either way; no payment decision exists.
         fx.emit(PaymentAuthorizationUnavailable { ... }).await?
     }
 }
@@ -204,7 +199,7 @@ its reason, while the specific facts stay in the journal for anyone asking why.
 Infrastructure unavailability is neither an invalid order nor a gateway
 decline, and it deliberately does not cancel: no payment decision was reached,
 so manufacturing an order fate out of a gateway outage would record a fake
-outcome. Gateway timeouts and breaker-open fallbacks become
+outcome. Gateway timeouts and breaker refusals become
 `PaymentAuthorizationUnavailable` and go to manual review, while the circuit
 breaker still classifies those unavailable outcomes as dependency failures:
 
@@ -245,8 +240,8 @@ cargo run -p obzenflow --example payment_gateway_resilience -- --replay-from "$R
 On replay the source is **not polled** and the gateway effect is **not
 executed**. The runtime returns the recorded upstream events from the source
 journal and reconstructs the recorded outcome facts (`payment.authorized.v1`,
-`payment.declined.v1`, and the breaker's branch facts) from the effect
-history, then the handler re-emits the same derived cancellations. Downstream
+`payment.declined.v1`) and recorded failures from the effect history, then
+the handler re-emits the same derived cancellations. Downstream
 paid, cancelled, and unavailable deliveries are reconstructed with the same
 outcomes. That is the durable-execution property: a recorded run replays
 exactly, without re-pulling inputs or re-firing side effects.
@@ -274,15 +269,14 @@ skipping it.
 ## 5. Resilience as the Second Layer
 
 While the live run is in progress, the gateway stage also carries a circuit
-breaker, declared in the `output_middleware:` lane (`flow.rs`) so its branch
-fact types are validated as arrow members at build time. During the scripted
-outage the breaker observes the failing effect boundary and opens. While open
-it synthesizes the named `GatewayPaymentFallback` branch fact instead of
-calling the gateway, with a single half-open probe to test recovery. The
-handler maps that branch to `PaymentAuthorizationUnavailable` for manual
-review, and the journal records the group with a `middleware_synthesized`
-origin marker, so breaker activity is auditable without reason-string
-inspection.
+breaker, attached inline to the effect it guards (`flow.rs`). During the
+scripted outage the breaker observes the failing effect boundary and opens.
+While open it fails fast: the prevented call surfaces as a recorded rejection
+error instead of a gateway call, with a single half-open probe to test
+recovery. The handler maps that rejection to
+`PaymentAuthorizationUnavailable` for manual review, and the refusal is
+recorded under the effect cursor like any other failure, so breaker activity
+is auditable from the journal.
 
 What to watch as it runs:
 
@@ -294,7 +288,7 @@ What to watch as it runs:
 - `obzenflow_circuit_breaker_*{stage="authorize_payment"}` shows the breaker
   opening during the outage. The `manual_review` sink receives
   authorization-unavailable events for failed gateway calls and breaker
-  fallbacks; those orders are not cancelled, because no decision was reached.
+  refusals; those orders are not cancelled, because no decision was reached.
 
 On replay, none of this resilience machinery runs: replay performs no live
 effect, so the breaker and the rate limiter stay quiet and only the recorded
@@ -352,7 +346,7 @@ has its own published tutorial.
 
 | File | What it holds |
 |------|---------------|
-| `domain.rs`   | The payment events, breaker branch facts, cancellation lifecycle facts, and scripted `TrafficPhase`. |
+| `domain.rs`   | The payment events, cancellation lifecycle facts, and scripted `TrafficPhase`. |
 | `validation.rs` | One multi-type validation stage that classifies each order exactly once. |
 | `gateway.rs`  | Gateway authorization as a replay-suppressed effect, deriving cancellations from declines. |
 | `fixtures.rs` | The scripted upstream order-event sequence. |

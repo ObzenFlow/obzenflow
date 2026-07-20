@@ -39,6 +39,135 @@ use std::marker::PhantomData;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+/// Diagnostic facade for equality between an effectful transform handler's
+/// authoritative input and the stage-arrow input projection.
+///
+/// Public only for exported macro expansion; it is not user-implemented API.
+#[doc(hidden)]
+#[diagnostic::on_unimplemented(
+    message = "the effectful transform handler's `Input` does not match the stage arrow input",
+    label = "this handler cannot consume the fact type declared before `->`",
+    note = "the handler's `type Input` is authoritative: use that fact type before `->`, or \
+            attach a handler whose `Input` matches the arrow (FLOWIP-120z B9)"
+)]
+pub trait EffectfulTransformInputMatchesArrow<ArrowInput> {}
+
+#[diagnostic::do_not_recommend]
+impl<Input> EffectfulTransformInputMatchesArrow<Input> for Input {}
+
+/// Diagnostic facade for equality between an effectful stateful handler's
+/// authoritative input and the stage-arrow input projection.
+///
+/// Public only for exported macro expansion; it is not user-implemented API.
+#[doc(hidden)]
+#[diagnostic::on_unimplemented(
+    message = "the effectful stateful handler's `Input` does not match the stage arrow input",
+    label = "this handler cannot consume the fact type declared before `->`",
+    note = "the handler's `type Input` is authoritative: use that fact type before `->`, or \
+            attach a handler whose `Input` matches the arrow (FLOWIP-120z B9)"
+)]
+pub trait EffectfulStatefulInputMatchesArrow<ArrowInput> {}
+
+#[diagnostic::do_not_recommend]
+impl<Input> EffectfulStatefulInputMatchesArrow<Input> for Input {}
+
+/// Diagnostic facade for the arrow-to-handler half of an output contract
+/// equality proof.
+///
+/// Public only because exported stage macros must be able to name it. User
+/// code should declare the arrow and the handler's `Output`; the DSL supplies
+/// and infers this proof.
+#[doc(hidden)]
+#[diagnostic::on_unimplemented(
+    message = "the stage arrow declares an output fact missing from the handler's `Output`",
+    label = "this arrow output contract is not contained in the handler's `Output` set",
+    note = "the stage arrow is canonical: make the handler's `Output` carrier or witness \
+            expose the same complete flat fact set, or change the arrow first if the stage \
+            contract is wrong; use `stage_fact_set![...]` only for an effectful-transform \
+            witness, and a `StageOutputFacts` carrier where values are returned or applied \
+            (FLOWIP-120z B9)"
+)]
+pub trait ArrowOutputsAreDeclaredByHandler<HandlerMembers, Proof> {}
+
+#[diagnostic::do_not_recommend]
+impl<ArrowMembers, HandlerMembers, Proof> ArrowOutputsAreDeclaredByHandler<HandlerMembers, Proof>
+    for ArrowMembers
+where
+    ArrowMembers: obzenflow_core::SubsetOf<HandlerMembers, Proof>,
+{
+}
+
+/// Diagnostic facade for the handler-to-arrow half of an output contract
+/// equality proof.
+///
+/// Public only for exported macro expansion; it is not user-implemented API.
+#[doc(hidden)]
+#[diagnostic::on_unimplemented(
+    message = "the handler's `Output` declares a fact missing from the stage arrow",
+    label = "the handler's `Output` set is not contained in this arrow output contract",
+    note = "the stage arrow is canonical: remove the extra fact from `Output`, or add it to \
+            the arrow first when it belongs in the stage contract and then update the \
+            handler's carrier or witness; use `stage_fact_set![...]` only for an \
+            effectful-transform witness, and a `StageOutputFacts` carrier where values are \
+            returned or applied (FLOWIP-120z B9)"
+)]
+pub trait HandlerOutputsAreDeclaredByArrow<ArrowMembers, Proof> {}
+
+#[diagnostic::do_not_recommend]
+impl<HandlerMembers, ArrowMembers, Proof> HandlerOutputsAreDeclaredByArrow<ArrowMembers, Proof>
+    for HandlerMembers
+where
+    HandlerMembers: obzenflow_core::SubsetOf<ArrowMembers, Proof>,
+{
+}
+
+/// Diagnostic facade for the manifest-to-handler half of an effect capability
+/// equality proof.
+///
+/// Public only for exported macro expansion; it is not user-implemented API.
+#[doc(hidden)]
+#[diagnostic::on_unimplemented(
+    message = "the stage `effects:` clause declares an effect missing from the handler's \
+               `AllowedEffects`",
+    label = "this effect manifest is not contained in the handler's `AllowedEffects` set",
+    note = "the stage `effects:` clause is canonical: mirror its effects in `type \
+            AllowedEffects = obzenflow_runtime::effect_set![...]`, or change `effects:` \
+            first if the stage capability contract is wrong (FLOWIP-120z B9)"
+)]
+pub trait ManifestEffectsAreAllowedByHandler<HandlerMembers, Proof> {}
+
+#[diagnostic::do_not_recommend]
+impl<ManifestMembers, HandlerMembers, Proof>
+    ManifestEffectsAreAllowedByHandler<HandlerMembers, Proof> for ManifestMembers
+where
+    ManifestMembers: obzenflow_core::SubsetOf<HandlerMembers, Proof>,
+{
+}
+
+/// Diagnostic facade for the handler-to-manifest half of an effect capability
+/// equality proof.
+///
+/// Public only for exported macro expansion; it is not user-implemented API.
+#[doc(hidden)]
+#[diagnostic::on_unimplemented(
+    message = "the handler's `AllowedEffects` permits an effect missing from the stage \
+               `effects:` clause",
+    label = "the handler's `AllowedEffects` set is not contained in this effect manifest",
+    note = "the stage `effects:` clause is canonical: remove the extra effect from \
+            `AllowedEffects`, or add it to `effects:` first when the stage needs the \
+            capability and then mirror the clause in `type AllowedEffects = \
+            obzenflow_runtime::effect_set![...]` (FLOWIP-120z B9)"
+)]
+pub trait HandlerEffectsAreDeclaredByManifest<ManifestMembers, Proof> {}
+
+#[diagnostic::do_not_recommend]
+impl<HandlerMembers, ManifestMembers, Proof>
+    HandlerEffectsAreDeclaredByManifest<ManifestMembers, Proof> for HandlerMembers
+where
+    HandlerMembers: obzenflow_core::SubsetOf<ManifestMembers, Proof>,
+{
+}
+
 /// Two-way model for declared type positions.
 ///
 /// `Exact` carries a runtime fingerprint of the Rust type (`type_id`) plus a

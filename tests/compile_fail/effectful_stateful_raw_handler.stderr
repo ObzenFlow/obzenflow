@@ -1,0 +1,110 @@
+error[E0277]: `RawStateful` does not satisfy `EffectfulStatefulHandler` for this stage
+  --> tests/compile_fail/effectful_stateful_raw_handler.rs:48:13
+   |
+48 |       let _ = obzenflow_dsl::effectful_stateful!(
+   |  _____________^
+49 | |         Input -> First => RawStateful,
+50 | |         effects: [],
+51 | |         middleware: []
+52 | |     );
+   | |_____^ this handler does not match the effectful stateful contract
+   |
+help: the trait `EffectfulStatefulHandler` is not implemented for `RawStateful`
+  --> tests/compile_fail/effectful_stateful_raw_handler.rs:27:1
+   |
+27 | struct RawStateful;
+   | ^^^^^^^^^^^^^^^^^^
+   = note: implement `EffectfulStatefulHandler` with `State`, `Input`, `Output`, `AllowedEffects`, `initial_state`, `decide`, and `apply`; `Input` must match the arrow input, while `Output` and `AllowedEffects` mirror the canonical arrow and `effects:` clause (FLOWIP-120z B9)
+note: required by a bound in `__obzenflow_assert_effectful_stateful_contract`
+  --> tests/compile_fail/effectful_stateful_raw_handler.rs:48:13
+   |
+48 |       let _ = obzenflow_dsl::effectful_stateful!(
+   |  _____________^
+49 | |         Input -> First => RawStateful,
+50 | |         effects: [],
+51 | |         middleware: []
+52 | |     );
+   | |     ^
+   | |     |
+   | |_____required by a bound in this function
+   |       required by this bound in `__obzenflow_assert_effectful_stateful_contract`
+   = note: this error originates in the macro `$crate::__obzenflow_assert_effectful_stateful_contract` which comes from the expansion of the macro `obzenflow_dsl::effectful_stateful` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: `RawStateful` does not satisfy `EffectfulStatefulHandler` for this stage
+  --> tests/compile_fail/effectful_stateful_raw_handler.rs:48:13
+   |
+48 |       let _ = obzenflow_dsl::effectful_stateful!(
+   |  _____________^
+49 | |         Input -> First => RawStateful,
+50 | |         effects: [],
+51 | |         middleware: []
+52 | |     );
+   | |     ^
+   | |     |
+   | |_____this handler does not match the effectful stateful contract
+   |       required by a bound introduced by this call
+   |
+help: the trait `EffectfulStatefulHandler` is not implemented for `RawStateful`
+  --> tests/compile_fail/effectful_stateful_raw_handler.rs:27:1
+   |
+27 | struct RawStateful;
+   | ^^^^^^^^^^^^^^^^^^
+   = note: implement `EffectfulStatefulHandler` with `State`, `Input`, `Output`, `AllowedEffects`, `initial_state`, `decide`, and `apply`; `Input` must match the arrow input, while `Output` and `AllowedEffects` mirror the canonical arrow and `effects:` clause (FLOWIP-120z B9)
+note: required by a bound in `EffectfulStatefulDescriptor::<H>::new`
+  --> crates/obzenflow_dsl/src/dsl/stage_descriptor.rs
+   |
+   | impl<H: EffectfulStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `EffectfulStatefulDescriptor::<H>::new`
+...
+   |     pub fn new(name: impl Into<String>, handler: H) -> Self {
+   |            --- required by a bound in this associated function
+   = note: this error originates in the macro `$crate::__obzenflow_effectful_stateful_typed` which comes from the expansion of the macro `obzenflow_dsl::effectful_stateful` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0599]: the method `with_effect_declarations` exists for struct `EffectfulStatefulDescriptor<RawStateful>`, but its trait bounds were not satisfied
+  --> tests/compile_fail/effectful_stateful_raw_handler.rs:48:13
+   |
+27 |   struct RawStateful;
+   |   ------------------ doesn't satisfy `RawStateful: EffectfulStatefulHandler`
+...
+48 |       let _ = obzenflow_dsl::effectful_stateful!(
+   |  _____________^
+49 | |         Input -> First => RawStateful,
+50 | |         effects: [],
+51 | |         middleware: []
+52 | |     );
+   | |     ^
+   | |_____|
+   |       method cannot be called on `EffectfulStatefulDescriptor<RawStateful>` due to unsatisfied trait bounds
+   |
+   = note: the following trait bounds were not satisfied:
+           `RawStateful: EffectfulStatefulHandler`
+note: the trait `EffectfulStatefulHandler` must be implemented
+  --> crates/obzenflow_runtime/src/stages/common/handlers/stateful/traits.rs
+   |
+   | pub trait EffectfulStatefulHandler: Send + Sync {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   = note: this error originates in the macro `$crate::__obzenflow_effectful_stateful_untyped` which comes from the expansion of the macro `obzenflow_dsl::effectful_stateful` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: `RawStateful` does not satisfy `EffectfulStatefulHandler` for this stage
+  --> tests/compile_fail/effectful_stateful_raw_handler.rs:48:13
+   |
+48 |       let _ = obzenflow_dsl::effectful_stateful!(
+   |  _____________^
+49 | |         Input -> First => RawStateful,
+50 | |         effects: [],
+51 | |         middleware: []
+52 | |     );
+   | |_____^ this handler does not match the effectful stateful contract
+   |
+help: the trait `EffectfulStatefulHandler` is not implemented for `RawStateful`
+  --> tests/compile_fail/effectful_stateful_raw_handler.rs:27:1
+   |
+27 | struct RawStateful;
+   | ^^^^^^^^^^^^^^^^^^
+   = note: implement `EffectfulStatefulHandler` with `State`, `Input`, `Output`, `AllowedEffects`, `initial_state`, `decide`, and `apply`; `Input` must match the arrow input, while `Output` and `AllowedEffects` mirror the canonical arrow and `effects:` clause (FLOWIP-120z B9)
+note: required by a bound in `EffectfulStatefulDescriptor`
+  --> crates/obzenflow_dsl/src/dsl/stage_descriptor.rs
+   |
+   | pub struct EffectfulStatefulDescriptor<H: EffectfulStatefulHandler + 'static> {
+   |                                           ^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `EffectfulStatefulDescriptor`
+   = note: this error originates in the macro `$crate::__obzenflow_effectful_stateful_untyped` which comes from the expansion of the macro `obzenflow_dsl::effectful_stateful` (in Nightly builds, run with -Z macro-backtrace for more info)

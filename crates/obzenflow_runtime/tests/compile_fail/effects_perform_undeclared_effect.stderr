@@ -1,0 +1,62 @@
+error[E0277]: effect `UndeclaredEffect` is not declared in this handler's `AllowedEffects` set
+  --> tests/compile_fail/effects_perform_undeclared_effect.rs:36:16
+   |
+36 |     fx.perform(UndeclaredEffect).await.unwrap();
+   |                ^^^^^^^^^^^^^^^^ `UndeclaredEffect` cannot be performed by this handler
+   |
+help: the trait `AllowedEffectsAllowEffect<DeclaredEffectSet<EmptySet>, _>` is not implemented for `UndeclaredEffect`
+  --> tests/compile_fail/effects_perform_undeclared_effect.rs:17:1
+   |
+17 | struct UndeclaredEffect;
+   | ^^^^^^^^^^^^^^^^^^^^^^^
+   = note: add `UndeclaredEffect` to the canonical stage `effects:` clause (using `transactional(...)` or `with [...]` when required), then mirror its effect type in the handler's `AllowedEffects`, or remove this `perform` call (FLOWIP-120z)
+note: required by a bound in `Effects::<Output, AllowedEffects>::perform`
+  --> src/effects/typed.rs
+   |
+   |     pub async fn perform<E, EffectAt, OutcomeProof>(
+   |                  ------- required by a bound in this associated function
+...
+   |             + AllowedEffectsAllowEffect<AllowedEffects, EffectAt>
+   |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `Effects::<Output, AllowedEffects>::perform`
+
+error[E0277]: effect `UndeclaredEffect` is not declared in this handler's `AllowedEffects` set
+  --> tests/compile_fail/effects_perform_undeclared_effect.rs:36:5
+   |
+36 |     fx.perform(UndeclaredEffect).await.unwrap();
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `UndeclaredEffect` cannot be performed by this handler
+   |
+help: the trait `AllowedEffectsAllowEffect<DeclaredEffectSet<EmptySet>, _>` is not implemented for `UndeclaredEffect`
+  --> tests/compile_fail/effects_perform_undeclared_effect.rs:17:1
+   |
+17 | struct UndeclaredEffect;
+   | ^^^^^^^^^^^^^^^^^^^^^^^
+   = note: add `UndeclaredEffect` to the canonical stage `effects:` clause (using `transactional(...)` or `with [...]` when required), then mirror its effect type in the handler's `AllowedEffects`, or remove this `perform` call (FLOWIP-120z)
+note: required by a bound in `Effects::<Output, AllowedEffects>::perform`
+  --> src/effects/typed.rs
+   |
+   |     pub async fn perform<E, EffectAt, OutcomeProof>(
+   |                  ------- required by a bound in this associated function
+...
+   |             + AllowedEffectsAllowEffect<AllowedEffects, EffectAt>
+   |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `Effects::<Output, AllowedEffects>::perform`
+
+error[E0277]: effect `UndeclaredEffect` is not declared in this handler's `AllowedEffects` set
+  --> tests/compile_fail/effects_perform_undeclared_effect.rs:36:34
+   |
+36 |     fx.perform(UndeclaredEffect).await.unwrap();
+   |                                  ^^^^^ `UndeclaredEffect` cannot be performed by this handler
+   |
+help: the trait `AllowedEffectsAllowEffect<DeclaredEffectSet<EmptySet>, _>` is not implemented for `UndeclaredEffect`
+  --> tests/compile_fail/effects_perform_undeclared_effect.rs:17:1
+   |
+17 | struct UndeclaredEffect;
+   | ^^^^^^^^^^^^^^^^^^^^^^^
+   = note: add `UndeclaredEffect` to the canonical stage `effects:` clause (using `transactional(...)` or `with [...]` when required), then mirror its effect type in the handler's `AllowedEffects`, or remove this `perform` call (FLOWIP-120z)
+note: required by a bound in `Effects::<Output, AllowedEffects>::perform`
+  --> src/effects/typed.rs
+   |
+   |     pub async fn perform<E, EffectAt, OutcomeProof>(
+   |                  ------- required by a bound in this associated function
+...
+   |             + AllowedEffectsAllowEffect<AllowedEffects, EffectAt>
+   |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `Effects::<Output, AllowedEffects>::perform`

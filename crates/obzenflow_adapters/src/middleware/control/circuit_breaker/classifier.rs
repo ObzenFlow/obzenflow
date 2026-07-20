@@ -73,7 +73,9 @@ fn effect_error_kind(error: &EffectError) -> ErrorKind {
         | EffectError::TransactionalCommitMissing { .. }
         | EffectError::Execution(_)
         | EffectError::Permanent(_)
-        | EffectError::ReplayArchive(_) => ErrorKind::PermanentFailure,
+        | EffectError::ReplayArchive(_)
+        | EffectError::CompletedWithoutOutput { .. }
+        | EffectError::CompletedEmptyWithOutput { .. } => ErrorKind::PermanentFailure,
     }
 }
 

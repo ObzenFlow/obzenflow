@@ -3,7 +3,6 @@
 // https://obzenflow.dev
 
 use async_trait::async_trait;
-use obzenflow_adapters::effects::{CircuitBreakerOutcome, GuardedEffectExt};
 use obzenflow_adapters::middleware::control::circuit_breaker::{CircuitBreaker, OpenPolicy, Retry};
 use obzenflow_adapters::middleware::RateLimiterBuilder;
 use obzenflow_core::{
@@ -13,7 +12,7 @@ use obzenflow_core::{
     event::payloads::observability_payload::{
         CircuitBreakerEvent, MiddlewareLifecycle, ObservabilityPayload,
     },
-    event::{ChainEventContent, SystemEvent, SystemEventType},
+    event::{ChainEventContent, StageLifecycleEvent, SystemEvent, SystemEventType},
     id::{StageId, SystemId},
     journal::{journal_owner::JournalOwner, Journal},
     TypedPayload, WriterId,
@@ -304,8 +303,14 @@ struct ReplayTransform {
 #[async_trait]
 impl EffectfulTransformHandler for ReplayTransform {
     type Input = ReplayInput;
+    type Output = obzenflow_core::stage_fact_set![ReplayOutput, ReplayEffectValue];
+    type AllowedEffects = obzenflow_runtime::effect_set![CountingEffect];
 
-    async fn process(&self, input: ReplayInput, fx: &mut Effects) -> Result<(), HandlerError> {
+    async fn process(
+        &self,
+        input: ReplayInput,
+        fx: &mut Effects<Self::Output, Self::AllowedEffects>,
+    ) -> Result<obzenflow_runtime::effects::StageCompletion<Self::Output>, HandlerError> {
         let effect_value = fx
             .perform(CountingEffect {
                 value: input.value,
@@ -320,7 +325,7 @@ impl EffectfulTransformHandler for ReplayTransform {
         })
         .await
         .map_err(|e| HandlerError::Other(e.to_string()))?;
-        Ok(())
+        Ok(fx.complete()?)
     }
 
     fn stage_logic_version(&self) -> &str {
@@ -339,8 +344,14 @@ struct BlockingTransform {
 #[async_trait]
 impl EffectfulTransformHandler for BlockingTransform {
     type Input = ReplayInput;
+    type Output = obzenflow_core::stage_fact_set![ReplayOutput, ReplayEffectValue];
+    type AllowedEffects = obzenflow_runtime::effect_set![BlockingEffect];
 
-    async fn process(&self, input: ReplayInput, fx: &mut Effects) -> Result<(), HandlerError> {
+    async fn process(
+        &self,
+        input: ReplayInput,
+        fx: &mut Effects<Self::Output, Self::AllowedEffects>,
+    ) -> Result<obzenflow_runtime::effects::StageCompletion<Self::Output>, HandlerError> {
         let effect_value = fx
             .perform(BlockingEffect {
                 value: input.value,
@@ -358,7 +369,7 @@ impl EffectfulTransformHandler for BlockingTransform {
         })
         .await
         .map_err(|e| HandlerError::Other(e.to_string()))?;
-        Ok(())
+        Ok(fx.complete()?)
     }
 
     fn stage_logic_version(&self) -> &str {
@@ -413,7 +424,7 @@ struct ReplayStateful {
     calls: Arc<AtomicUsize>,
 }
 
-/// Stateful `Fact` enum derived per FLOWIP-120m: the same sum shape an
+/// Stateful `Output` enum derived per FLOWIP-120m: the same sum shape an
 /// effect outcome carrier uses also serves the per-fact Mealy fold, decoding
 /// each committed fact into its matching variant.
 #[derive(Clone, Debug, obzenflow_core::EffectOutcomeFacts)]
@@ -426,7 +437,8 @@ enum ReplayStatefulFact {
 impl EffectfulStatefulHandler for ReplayStateful {
     type State = ReplayStatefulState;
     type Input = ReplayInput;
-    type Fact = ReplayStatefulFact;
+    type Output = ReplayStatefulFact;
+    type AllowedEffects = obzenflow_runtime::effect_set![CountingEffect];
 
     fn initial_state(&self) -> Self::State {
         ReplayStatefulState::default()
@@ -436,8 +448,8 @@ impl EffectfulStatefulHandler for ReplayStateful {
         &mut self,
         _state: &Self::State,
         input: &ReplayInput,
-        fx: &mut Effects,
-    ) -> Result<(), HandlerError> {
+        fx: &mut Effects<Self::Output, Self::AllowedEffects>,
+    ) -> Result<obzenflow_runtime::effects::StageCompletion<Self::Output>, HandlerError> {
         let effect = fx
             .perform(CountingEffect {
                 value: input.value,
@@ -451,10 +463,10 @@ impl EffectfulStatefulHandler for ReplayStateful {
         })
         .await
         .map_err(|e| HandlerError::Other(e.to_string()))?;
-        Ok(())
+        Ok(fx.complete()?)
     }
 
-    fn apply(&mut self, state: &mut Self::State, fact: Self::Fact) -> Result<(), HandlerError> {
+    fn apply(&mut self, state: &mut Self::State, fact: Self::Output) -> Result<(), HandlerError> {
         if let ReplayStatefulFact::Output(output) = fact {
             state.outputs.push(output);
         }
@@ -463,6 +475,230 @@ impl EffectfulStatefulHandler for ReplayStateful {
 
     fn stage_logic_version(&self) -> &str {
         "effect-replay-stateful-v1"
+    }
+}
+
+/// B1 regression carrier: the product shape cannot reconstruct from one fact,
+/// but the open marker permits a trusted manual assertion. The integration
+/// test below proves that a false assertion fails the stage after the authored
+/// facts become durable.
+#[derive(Clone, Debug, obzenflow_core::StageOutputFacts)]
+struct DishonestReplayStatefulOutput {
+    effect_value: ReplayEffectValue,
+    output: ReplayOutput,
+}
+
+impl obzenflow_core::OneFactStageOutput for DishonestReplayStatefulOutput {}
+
+#[derive(Clone, Debug)]
+struct DishonestOneFactStateful {
+    calls: Arc<AtomicUsize>,
+    decide_inputs: Arc<Mutex<Vec<u64>>>,
+    apply_calls: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl EffectfulStatefulHandler for DishonestOneFactStateful {
+    type State = ReplayStatefulState;
+    type Input = ReplayInput;
+    type Output = DishonestReplayStatefulOutput;
+    type AllowedEffects = obzenflow_runtime::effect_set![CountingEffect];
+
+    fn initial_state(&self) -> Self::State {
+        ReplayStatefulState::default()
+    }
+
+    async fn decide(
+        &mut self,
+        _state: &Self::State,
+        input: &Self::Input,
+        fx: &mut Effects<Self::Output, Self::AllowedEffects>,
+    ) -> Result<obzenflow_runtime::effects::StageCompletion<Self::Output>, HandlerError> {
+        self.decide_inputs
+            .lock()
+            .expect("decide inputs lock poisoned")
+            .push(input.value);
+
+        let effect = fx
+            .perform(CountingEffect {
+                value: input.value,
+                calls: self.calls.clone(),
+            })
+            .await?;
+        fx.emit(ReplayOutput {
+            value: input.value,
+            effect_value: effect.effect_value,
+        })
+        .await?;
+        Ok(fx.complete()?)
+    }
+
+    fn apply(&mut self, state: &mut Self::State, fact: Self::Output) -> Result<(), HandlerError> {
+        self.apply_calls.fetch_add(1, Ordering::SeqCst);
+        state.outputs.push(fact.output);
+        Ok(())
+    }
+
+    fn stage_logic_version(&self) -> &str {
+        // The sealed fixture and dishonest replay have identical durable
+        // behaviour. Only the non-durable Rust carrier differs.
+        "effect-replay-stateful-v1"
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+struct ErrorAfterCommitState {
+    applied: Vec<String>,
+}
+
+#[derive(Clone, Debug)]
+struct ErrorAfterCommitStateful {
+    calls: Arc<AtomicUsize>,
+    observed_fact_counts: Arc<Mutex<Vec<usize>>>,
+    applied: Arc<Mutex<Vec<String>>>,
+}
+
+#[async_trait]
+impl EffectfulStatefulHandler for ErrorAfterCommitStateful {
+    type State = ErrorAfterCommitState;
+    type Input = ReplayInput;
+    type Output = ReplayStatefulFact;
+    type AllowedEffects = obzenflow_runtime::effect_set![CountingEffect];
+
+    fn initial_state(&self) -> Self::State {
+        ErrorAfterCommitState::default()
+    }
+
+    async fn decide(
+        &mut self,
+        state: &Self::State,
+        input: &ReplayInput,
+        fx: &mut Effects<Self::Output, Self::AllowedEffects>,
+    ) -> Result<obzenflow_runtime::effects::StageCompletion<Self::Output>, HandlerError> {
+        self.observed_fact_counts
+            .lock()
+            .expect("observed fact counts lock poisoned")
+            .push(state.applied.len());
+
+        let effect = fx
+            .perform(CountingEffect {
+                value: input.value,
+                calls: self.calls.clone(),
+            })
+            .await?;
+        fx.emit(ReplayOutput {
+            value: input.value,
+            effect_value: effect.effect_value,
+        })
+        .await?;
+
+        if input.value == 1 {
+            return Err(HandlerError::Domain(
+                "deterministic failure after completed commits".to_string(),
+            ));
+        }
+
+        Ok(fx.complete()?)
+    }
+
+    fn apply(&mut self, state: &mut Self::State, fact: Self::Output) -> Result<(), HandlerError> {
+        let entry = match fact {
+            ReplayStatefulFact::EffectValue(value) => {
+                format!("effect:{}", value.effect_value)
+            }
+            ReplayStatefulFact::Output(output) => format!("output:{}", output.value),
+        };
+        state.applied.push(entry.clone());
+        self.applied
+            .lock()
+            .expect("applied lock poisoned")
+            .push(entry);
+        Ok(())
+    }
+
+    fn stage_logic_version(&self) -> &str {
+        "effect-replay-error-after-commit-stateful-v1"
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+struct ApplyRejectionState {
+    applied: Vec<String>,
+}
+
+/// B2 proof handler. The live failure and strict replay use the same handler
+/// surface and logic version; the completed replay fixture disables only the
+/// deliberate `apply` rejection so it can provide a sealed effect history.
+#[derive(Clone, Debug)]
+struct ApplyRejectingStateful {
+    calls: Arc<AtomicUsize>,
+    decide_inputs: Arc<Mutex<Vec<u64>>>,
+    apply_attempts: Arc<Mutex<Vec<String>>>,
+    reject_apply: bool,
+}
+
+#[async_trait]
+impl EffectfulStatefulHandler for ApplyRejectingStateful {
+    type State = ApplyRejectionState;
+    type Input = ReplayInput;
+    type Output = ReplayStatefulFact;
+    type AllowedEffects = obzenflow_runtime::effect_set![CountingEffect];
+
+    fn initial_state(&self) -> Self::State {
+        ApplyRejectionState::default()
+    }
+
+    async fn decide(
+        &mut self,
+        _state: &Self::State,
+        input: &Self::Input,
+        fx: &mut Effects<Self::Output, Self::AllowedEffects>,
+    ) -> Result<obzenflow_runtime::effects::StageCompletion<Self::Output>, HandlerError> {
+        self.decide_inputs
+            .lock()
+            .expect("decide inputs lock poisoned")
+            .push(input.value);
+
+        let effect = fx
+            .perform(CountingEffect {
+                value: input.value,
+                calls: self.calls.clone(),
+            })
+            .await?;
+        fx.emit(ReplayOutput {
+            value: input.value,
+            effect_value: effect.effect_value,
+        })
+        .await?;
+        Ok(fx.complete()?)
+    }
+
+    fn apply(&mut self, state: &mut Self::State, fact: Self::Output) -> Result<(), HandlerError> {
+        let (entry, reject) = match fact {
+            ReplayStatefulFact::EffectValue(value) => {
+                (format!("effect:{}", value.effect_value), false)
+            }
+            ReplayStatefulFact::Output(output) => {
+                (format!("output:{}", output.value), self.reject_apply)
+            }
+        };
+        self.apply_attempts
+            .lock()
+            .expect("apply attempts lock poisoned")
+            .push(entry.clone());
+
+        if reject {
+            return Err(HandlerError::Domain(
+                "simulated rejection of an already-committed output fact".to_string(),
+            ));
+        }
+
+        state.applied.push(entry);
+        Ok(())
+    }
+
+    fn stage_logic_version(&self) -> &str {
+        "effect-replay-apply-rejection-v1"
     }
 }
 
@@ -531,7 +767,7 @@ impl Effect for ProductEffect {
     }
 }
 
-/// The stage's per-fact `Fact` enum: the carrier never reaches `apply`;
+/// The stage's per-fact `Output` enum: the carrier never reaches `apply`;
 /// each committed member fact folds individually, in ordinal order.
 #[derive(Clone, Debug, obzenflow_core::EffectOutcomeFacts)]
 enum ProductStatefulFact {
@@ -553,7 +789,8 @@ struct ProductStateful {
 impl EffectfulStatefulHandler for ProductStateful {
     type State = ProductStatefulState;
     type Input = ReplayInput;
-    type Fact = ProductStatefulFact;
+    type Output = ProductStatefulFact;
+    type AllowedEffects = obzenflow_runtime::effect_set![ProductEffect];
 
     fn initial_state(&self) -> Self::State {
         ProductStatefulState
@@ -563,8 +800,8 @@ impl EffectfulStatefulHandler for ProductStateful {
         &mut self,
         _state: &Self::State,
         input: &ReplayInput,
-        fx: &mut Effects,
-    ) -> Result<(), HandlerError> {
+        fx: &mut Effects<Self::Output, Self::AllowedEffects>,
+    ) -> Result<obzenflow_runtime::effects::StageCompletion<Self::Output>, HandlerError> {
         let outcome = fx
             .perform(ProductEffect {
                 value: input.value,
@@ -578,10 +815,10 @@ impl EffectfulStatefulHandler for ProductStateful {
         })
         .await
         .map_err(|e| HandlerError::Other(e.to_string()))?;
-        Ok(())
+        Ok(fx.complete()?)
     }
 
-    fn apply(&mut self, _state: &mut Self::State, fact: Self::Fact) -> Result<(), HandlerError> {
+    fn apply(&mut self, _state: &mut Self::State, fact: Self::Output) -> Result<(), HandlerError> {
         let entry = match &fact {
             ProductStatefulFact::First(first) => format!("first:{}", first.value),
             ProductStatefulFact::Second(second) => format!("second:{}", second.value),
@@ -647,8 +884,14 @@ struct OutcomeFallbackTransform {
 #[async_trait]
 impl EffectfulTransformHandler for OutcomeFallbackTransform {
     type Input = ReplayInput;
+    type Output = obzenflow_core::stage_fact_set![ReplayOutput, ProductFirst, ProductSecond];
+    type AllowedEffects = obzenflow_runtime::effect_set![FailingProductEffect];
 
-    async fn process(&self, input: ReplayInput, fx: &mut Effects) -> Result<(), HandlerError> {
+    async fn process(
+        &self,
+        input: ReplayInput,
+        fx: &mut Effects<Self::Output, Self::AllowedEffects>,
+    ) -> Result<obzenflow_runtime::effects::StageCompletion<Self::Output>, HandlerError> {
         let outcome = fx
             .perform(FailingProductEffect {
                 value: input.value,
@@ -663,14 +906,14 @@ impl EffectfulTransformHandler for OutcomeFallbackTransform {
             },
             Err(_) => ReplayOutput {
                 value: input.value,
-                effect_value: GUARDED_FAILED_MARKER,
+                effect_value: EFFECT_FAILED_MARKER,
             },
         };
 
         fx.emit(output)
             .await
             .map_err(|e| HandlerError::Other(e.to_string()))?;
-        Ok(())
+        Ok(fx.complete()?)
     }
 
     fn stage_logic_version(&self) -> &str {
@@ -727,8 +970,14 @@ struct EitherFallbackTransform {
 #[async_trait]
 impl EffectfulTransformHandler for EitherFallbackTransform {
     type Input = ReplayInput;
+    type Output = obzenflow_core::stage_fact_set![ReplayOutput, ProductFirst, ProductSecond];
+    type AllowedEffects = obzenflow_runtime::effect_set![FailingEitherEffect];
 
-    async fn process(&self, input: ReplayInput, fx: &mut Effects) -> Result<(), HandlerError> {
+    async fn process(
+        &self,
+        input: ReplayInput,
+        fx: &mut Effects<Self::Output, Self::AllowedEffects>,
+    ) -> Result<obzenflow_runtime::effects::StageCompletion<Self::Output>, HandlerError> {
         let outcome = fx
             .perform(FailingEitherEffect {
                 value: input.value,
@@ -747,14 +996,14 @@ impl EffectfulTransformHandler for EitherFallbackTransform {
             },
             Err(_) => ReplayOutput {
                 value: input.value,
-                effect_value: GUARDED_FAILED_MARKER,
+                effect_value: EFFECT_FAILED_MARKER,
             },
         };
 
         fx.emit(output)
             .await
             .map_err(|e| HandlerError::Other(e.to_string()))?;
-        Ok(())
+        Ok(fx.complete()?)
     }
 
     fn stage_logic_version(&self) -> &str {
@@ -765,8 +1014,14 @@ impl EffectfulTransformHandler for EitherFallbackTransform {
 #[async_trait]
 impl EffectfulTransformHandler for FallbackTransform {
     type Input = ReplayInput;
+    type Output = obzenflow_core::stage_fact_set![ReplayOutput, ReplayEffectValue];
+    type AllowedEffects = obzenflow_runtime::effect_set![AlwaysFailingEffect];
 
-    async fn process(&self, input: ReplayInput, fx: &mut Effects) -> Result<(), HandlerError> {
+    async fn process(
+        &self,
+        input: ReplayInput,
+        fx: &mut Effects<Self::Output, Self::AllowedEffects>,
+    ) -> Result<obzenflow_runtime::effects::StageCompletion<Self::Output>, HandlerError> {
         let effect_value = fx
             .perform(AlwaysFailingEffect {
                 value: input.value,
@@ -781,7 +1036,7 @@ impl EffectfulTransformHandler for FallbackTransform {
         })
         .await
         .map_err(|e| HandlerError::Other(e.to_string()))?;
-        Ok(())
+        Ok(fx.complete()?)
     }
 
     fn stage_logic_version(&self) -> &str {
@@ -1087,6 +1342,110 @@ fn build_stateful_flow(
     }
 }
 
+/// Match `build_stateful_flow` at every durable replay boundary while
+/// replacing only the handler-side output carrier with a deliberately false
+/// `OneFactStageOutput` implementation.
+fn build_dishonest_one_fact_stateful_flow(
+    journal_base: PathBuf,
+    calls: Arc<AtomicUsize>,
+    decide_inputs: Arc<Mutex<Vec<u64>>>,
+    apply_calls: Arc<AtomicUsize>,
+    outputs: Arc<Mutex<Vec<ReplayOutput>>>,
+) -> FlowDefinition {
+    flow! {
+        name: "effect_replay_stateful",
+        journals: disk_journals(journal_base),
+        middleware: [],
+
+        stages: {
+            inputs = source!(ReplayInput => ReplaySource::new());
+            effectful = effectful_stateful!(
+                ReplayInput -> { ReplayOutput, ReplayEffectValue } => DishonestOneFactStateful {
+                    calls,
+                    decide_inputs,
+                    apply_calls
+                },
+                effects: [CountingEffect],
+                middleware: []
+            );
+            collector = sink!(ReplayOutput => CollectSink { outputs });
+        },
+
+        topology: {
+            inputs |> effectful;
+            effectful |> collector;
+        }
+    }
+}
+
+fn build_error_after_commit_stateful_flow(
+    journal_base: PathBuf,
+    calls: Arc<AtomicUsize>,
+    observed_fact_counts: Arc<Mutex<Vec<usize>>>,
+    applied: Arc<Mutex<Vec<String>>>,
+    outputs: Arc<Mutex<Vec<ReplayOutput>>>,
+) -> FlowDefinition {
+    flow! {
+        name: "effect_replay_error_after_commit_stateful",
+        journals: disk_journals(journal_base),
+        middleware: [],
+
+        stages: {
+            inputs = source!(ReplayInput => ReplaySource::new());
+            effectful = effectful_stateful!(
+                ReplayInput -> { ReplayOutput, ReplayEffectValue } => ErrorAfterCommitStateful {
+                    calls,
+                    observed_fact_counts,
+                    applied
+                },
+                effects: [CountingEffect],
+                middleware: []
+            );
+            collector = sink!(ReplayOutput => CollectSink { outputs });
+        },
+
+        topology: {
+            inputs |> effectful;
+            effectful |> collector;
+        }
+    }
+}
+
+fn build_apply_rejection_stateful_flow(
+    journal_base: PathBuf,
+    calls: Arc<AtomicUsize>,
+    decide_inputs: Arc<Mutex<Vec<u64>>>,
+    apply_attempts: Arc<Mutex<Vec<String>>>,
+    reject_apply: bool,
+    outputs: Arc<Mutex<Vec<ReplayOutput>>>,
+) -> FlowDefinition {
+    flow! {
+        name: "effect_replay_apply_rejection_stateful",
+        journals: disk_journals(journal_base),
+        middleware: [],
+
+        stages: {
+            inputs = source!(ReplayInput => ReplaySource::new());
+            effectful = effectful_stateful!(
+                ReplayInput -> { ReplayOutput, ReplayEffectValue } => ApplyRejectingStateful {
+                    calls,
+                    decide_inputs,
+                    apply_attempts,
+                    reject_apply
+                },
+                effects: [CountingEffect],
+                middleware: []
+            );
+            collector = sink!(ReplayOutput => CollectSink { outputs });
+        },
+
+        topology: {
+            inputs |> effectful;
+            effectful |> collector;
+        }
+    }
+}
+
 fn build_product_stateful_flow(
     journal_base: PathBuf,
     calls: Arc<AtomicUsize>,
@@ -1297,46 +1656,6 @@ async fn product_outcome_rows(run_dir: &Path, stage_key: &str) -> Vec<(String, u
         .collect()
 }
 
-/// Project a stage journal's effect-provenance origins (FLOWIP-120m):
-/// one `(event_type, origin)` pair per data row carrying provenance, in
-/// causal order. Reads through the run manifest, the same convention as the
-/// shared replay testkit, locally so this suite stays free of the
-/// `test-support` feature gate.
-async fn effect_fact_origins(
-    run_dir: &Path,
-    stage_key: &str,
-) -> Vec<(String, Option<obzenflow_runtime::effects::EffectFactOrigin>)> {
-    let manifest: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(run_dir.join("run_manifest.json"))
-            .expect("run_manifest.json should be readable"),
-    )
-    .expect("run_manifest.json should parse");
-    let stage_journal = manifest["stages"][stage_key]["data_journal_file"]
-        .as_str()
-        .unwrap_or_else(|| panic!("manifest should contain data journal for '{stage_key}'"));
-    let journal: obzenflow_infra::journal::DiskJournal<ChainEvent> =
-        obzenflow_infra::journal::DiskJournal::with_owner(
-            run_dir.join(stage_journal),
-            JournalOwner::stage(StageId::new()),
-        )
-        .expect("stage journal should open");
-
-    journal
-        .read_causally_ordered()
-        .await
-        .expect("stage journal should read")
-        .iter()
-        .filter_map(|envelope| {
-            envelope.event.effect_provenance.as_ref().map(|provenance| {
-                (
-                    envelope.event.event_type().to_string(),
-                    provenance.origin.clone(),
-                )
-            })
-        })
-        .collect()
-}
-
 fn archive_manifest(run_dir: &Path) -> serde_json::Value {
     let manifest_path = run_dir.join("run_manifest.json");
     serde_json::from_str(
@@ -1402,6 +1721,167 @@ async fn read_stage_events(run_dir: &Path, stage_key: &str) -> Vec<ChainEvent> {
         .into_iter()
         .map(|envelope| envelope.event)
         .collect()
+}
+
+async fn read_stage_error_events(run_dir: &Path, stage_key: &str) -> Vec<ChainEvent> {
+    let manifest = archive_manifest(run_dir);
+    let stage_journal = manifest["stages"][stage_key]["error_journal_file"]
+        .as_str()
+        .expect("manifest should contain stage error journal file");
+    let journal: obzenflow_infra::journal::DiskJournal<ChainEvent> =
+        obzenflow_infra::journal::DiskJournal::with_owner(
+            run_dir.join(stage_journal),
+            JournalOwner::stage(StageId::new()),
+        )
+        .expect("stage error journal should open");
+
+    journal
+        .read_causally_ordered()
+        .await
+        .expect("stage error journal should read")
+        .into_iter()
+        .map(|envelope| envelope.event)
+        .collect()
+}
+
+async fn read_system_events(run_dir: &Path) -> Vec<SystemEvent> {
+    let manifest = archive_manifest(run_dir);
+    let system_journal = manifest["system_journal_file"]
+        .as_str()
+        .expect("manifest should contain system journal file");
+    let journal: obzenflow_infra::journal::DiskJournal<SystemEvent> =
+        obzenflow_infra::journal::DiskJournal::with_owner(
+            run_dir.join(system_journal),
+            JournalOwner::system(SystemId::new()),
+        )
+        .expect("system journal should open");
+
+    journal
+        .read_causally_ordered()
+        .await
+        .expect("system journal should read")
+        .into_iter()
+        .map(|envelope| envelope.event)
+        .collect()
+}
+
+fn stage_id_from_manifest(run_dir: &Path, stage_key: &str) -> StageId {
+    archive_manifest(run_dir)["stages"][stage_key]["stage_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("manifest should contain stage id for '{stage_key}'"))
+        .parse()
+        .unwrap_or_else(|error| panic!("stage id for '{stage_key}' should parse: {error}"))
+}
+
+fn replay_stateful_fact_identities(events: &[ChainEvent]) -> Vec<(String, String)> {
+    let effect_type = ReplayEffectValue::versioned_event_type();
+    let output_type = ReplayOutput::versioned_event_type();
+    events
+        .iter()
+        .filter(|event| {
+            let event_type = event.event_type();
+            event_type == effect_type || event_type == output_type
+        })
+        .map(|event| (event.id.to_string(), event.event_type().to_string()))
+        .collect()
+}
+
+/// Assert the externally visible fail-stop boundary for a stateful contract
+/// violation. The committed fact rows remain on the Data lane, but the
+/// offending input is neither converted into an ordinary error-lane row nor
+/// followed by EOF or a successful stage lifecycle.
+async fn assert_replay_stateful_contract_failure_archive(
+    run_dir: &Path,
+    offending_fact_index: usize,
+    expected_error_fragments: &[&str],
+) -> Vec<(String, String)> {
+    let stage_events = read_stage_events(run_dir, "effectful").await;
+    assert!(
+        !stage_events.iter().any(|event| matches!(
+            event.content,
+            ChainEventContent::FlowControl(FlowControlPayload::Eof { .. })
+        )),
+        "a stateful contract violation must prevent the effectful stage from committing EOF"
+    );
+
+    let fact_identities = replay_stateful_fact_identities(&stage_events);
+    assert_eq!(
+        fact_identities
+            .iter()
+            .map(|(_, event_type)| event_type.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            ReplayEffectValue::versioned_event_type(),
+            ReplayOutput::versioned_event_type(),
+        ],
+        "both first-input facts must remain durable in their authored order"
+    );
+
+    assert!(
+        read_stage_error_events(run_dir, "effectful")
+            .await
+            .is_empty(),
+        "a committed-fact contract violation must not be downgraded to an ordinary error row"
+    );
+
+    let stage_id = stage_id_from_manifest(run_dir, "effectful");
+    let system_events = read_system_events(run_dir).await;
+    let mut failure_count = 0;
+    for system_event in system_events {
+        let SystemEventType::StageLifecycle {
+            stage_id: lifecycle_stage_id,
+            event,
+        } = system_event.event
+        else {
+            continue;
+        };
+        if lifecycle_stage_id != stage_id {
+            continue;
+        }
+
+        match event {
+            StageLifecycleEvent::Failed { error, metrics, .. } => {
+                failure_count += 1;
+                let (offending_fact_id, offending_fact_type) = fact_identities
+                    .get(offending_fact_index)
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "offending fact index {offending_fact_index} must exist in {fact_identities:?}"
+                        )
+                    });
+                assert!(
+                    error.contains(offending_fact_id.as_str())
+                        && error.contains(offending_fact_type.as_str())
+                        && expected_error_fragments
+                            .iter()
+                            .all(|fragment| error.contains(*fragment)),
+                    "fatal lifecycle evidence must retain the fact identity, contract boundary, and cause: {error}"
+                );
+                if let Some(metrics) = metrics {
+                    assert_eq!(
+                        metrics.events_processed_total, 0,
+                        "the failed input must not be counted as successfully processed"
+                    );
+                    assert_eq!(
+                        metrics.events_accumulated_total, 0,
+                        "the failed input must not be counted as accumulated"
+                    );
+                }
+            }
+            StageLifecycleEvent::Completed { .. } | StageLifecycleEvent::Drained => {
+                panic!("a stateful contract violation must not reach a successful terminal state")
+            }
+            StageLifecycleEvent::Running
+            | StageLifecycleEvent::Draining { .. }
+            | StageLifecycleEvent::Cancelled { .. } => {}
+        }
+    }
+    assert_eq!(
+        failure_count, 1,
+        "the effectful stage must publish exactly one fatal lifecycle event"
+    );
+
+    fact_identities
 }
 
 /// True when an event is a framework-owned effect fact. Successful typed effect
@@ -1725,6 +2205,16 @@ async fn fan_out_sibling_effects_use_distinct_cursors_and_replay_suppresses_exec
     assert_eq!(effect_cursors[1].input_seq, 2);
     assert_eq!(effect_cursors[1].effect_ordinal, 0);
     assert_ne!(effect_cursors[0], effect_cursors[1]);
+    let replay_output_count = effectful_events
+        .iter()
+        .filter(|event| event.event_type() == ReplayOutput::versioned_event_type())
+        .count();
+    let effect_value_count = effectful_events
+        .iter()
+        .filter(|event| event.event_type() == ReplayEffectValue::versioned_event_type())
+        .count();
+    assert_eq!(replay_output_count, 2);
+    assert_eq!(effect_value_count, 2);
 
     let replay_calls = Arc::new(AtomicUsize::new(0));
     let replay_outputs = Arc::new(Mutex::new(Vec::new()));
@@ -2375,6 +2865,489 @@ async fn strict_effectful_stateful_replay_suppresses_effect_execution() {
     );
 }
 
+#[tokio::test]
+async fn effectful_stateful_reconciles_completed_facts_before_decide_error_live_and_replay() {
+    let _guard = effect_replay_test_guard().await;
+    let temp = tempfile::tempdir().expect("tempdir");
+    let journal_base = temp.path().join("journals");
+
+    let live_calls = Arc::new(AtomicUsize::new(0));
+    let live_observed = Arc::new(Mutex::new(Vec::new()));
+    let live_applied = Arc::new(Mutex::new(Vec::new()));
+    let live_outputs = Arc::new(Mutex::new(Vec::new()));
+    FlowApplication::builder()
+        .with_cli_args(["obzenflow"])
+        .run_async(build_error_after_commit_stateful_flow(
+            journal_base.clone(),
+            live_calls.clone(),
+            live_observed.clone(),
+            live_applied.clone(),
+            live_outputs.clone(),
+        ))
+        .await
+        .expect("live error-after-commit stateful flow should complete");
+
+    assert_eq!(live_calls.load(Ordering::SeqCst), 3);
+    assert_eq!(
+        live_observed
+            .lock()
+            .expect("live observed lock poisoned")
+            .as_slice(),
+        &[0, 2, 4],
+        "the next input must observe both facts committed before the prior decide error"
+    );
+    let expected_applied = vec![
+        "effect:101".to_string(),
+        "output:1".to_string(),
+        "effect:102".to_string(),
+        "output:2".to_string(),
+        "effect:103".to_string(),
+        "output:3".to_string(),
+    ];
+    let live_applied_entries = live_applied
+        .lock()
+        .expect("live applied lock poisoned")
+        .clone();
+    assert_eq!(live_applied_entries, expected_applied);
+    let live_domain_outputs = live_outputs
+        .lock()
+        .expect("live outputs lock poisoned")
+        .clone();
+    assert_eq!(
+        live_domain_outputs,
+        vec![
+            ReplayOutput {
+                value: 1,
+                effect_value: 101,
+            },
+            ReplayOutput {
+                value: 2,
+                effect_value: 102,
+            },
+            ReplayOutput {
+                value: 3,
+                effect_value: 103,
+            },
+        ],
+        "the direct fact committed before the first decide error must remain visible"
+    );
+
+    let archive_dir = latest_run_dir(&journal_base);
+    let replay_calls = Arc::new(AtomicUsize::new(0));
+    let replay_observed = Arc::new(Mutex::new(Vec::new()));
+    let replay_applied = Arc::new(Mutex::new(Vec::new()));
+    let replay_outputs = Arc::new(Mutex::new(Vec::new()));
+    FlowApplication::builder()
+        .with_cli_args(vec![
+            OsString::from("obzenflow"),
+            OsString::from("--replay-from"),
+            archive_dir.as_os_str().to_os_string(),
+        ])
+        .run_async(build_error_after_commit_stateful_flow(
+            journal_base,
+            replay_calls.clone(),
+            replay_observed.clone(),
+            replay_applied.clone(),
+            replay_outputs.clone(),
+        ))
+        .await
+        .expect("replay error-after-commit stateful flow should complete");
+
+    assert_eq!(
+        replay_calls.load(Ordering::SeqCst),
+        0,
+        "strict replay must use the recorded effect outcome"
+    );
+    assert_eq!(
+        replay_observed
+            .lock()
+            .expect("replay observed lock poisoned")
+            .as_slice(),
+        &[0, 2, 4]
+    );
+    assert_eq!(
+        replay_applied
+            .lock()
+            .expect("replay applied lock poisoned")
+            .as_slice(),
+        live_applied_entries.as_slice()
+    );
+    assert_eq!(
+        replay_outputs
+            .lock()
+            .expect("replay outputs lock poisoned")
+            .as_slice(),
+        live_domain_outputs.as_slice()
+    );
+}
+
+/// FLOWIP-120z B1: a manual `OneFactStageOutput` implementation is a trusted
+/// law, not a structural proof. A dishonest product keeps its already-authored
+/// facts durable, then fails the stage when the adapter cannot reconstruct the
+/// first fact as the product. Strict replay uses a lawful completed fixture
+/// with the same durable contract and must reach the same boundary without
+/// executing the effect again.
+#[tokio::test]
+async fn effectful_stateful_false_one_fact_marker_is_fatal_live_and_under_strict_replay() {
+    let _guard = effect_replay_test_guard().await;
+    let temp = tempfile::tempdir().expect("tempdir");
+
+    let falsely_marked_facts =
+        obzenflow_core::TypedFactSet::into_facts(DishonestReplayStatefulOutput {
+            effect_value: ReplayEffectValue { effect_value: 100 },
+            output: ReplayOutput {
+                value: 0,
+                effect_value: 100,
+            },
+        })
+        .expect("the dishonest product should lower as an ordinary two-fact carrier");
+    assert_eq!(
+        falsely_marked_facts
+            .iter()
+            .map(|fact| fact.event_type.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            ReplayEffectValue::versioned_event_type(),
+            ReplayOutput::versioned_event_type(),
+        ],
+        "the manual marker must be demonstrably false before exercising its runtime backstop"
+    );
+    let missing_output_type = ReplayOutput::versioned_event_type();
+
+    let live_journal_base = temp.path().join("live_failure_journals");
+    let live_calls = Arc::new(AtomicUsize::new(0));
+    let live_decide_inputs = Arc::new(Mutex::new(Vec::new()));
+    let live_apply_calls = Arc::new(AtomicUsize::new(0));
+    let live_outputs = Arc::new(Mutex::new(Vec::new()));
+    let live_result = tokio::time::timeout(
+        Duration::from_secs(15),
+        FlowApplication::builder()
+            .with_cli_args(["obzenflow"])
+            .run_async(build_dishonest_one_fact_stateful_flow(
+                live_journal_base.clone(),
+                live_calls.clone(),
+                live_decide_inputs.clone(),
+                live_apply_calls.clone(),
+                live_outputs,
+            )),
+    )
+    .await
+    .expect("live false one-fact assertion should terminate the flow promptly");
+    live_result.expect_err("a false one-fact assertion must fail the live flow");
+    assert_eq!(
+        live_calls.load(Ordering::SeqCst),
+        1,
+        "only the offending input may execute its effect"
+    );
+    assert_eq!(
+        live_decide_inputs
+            .lock()
+            .expect("live decide inputs lock poisoned")
+            .as_slice(),
+        &[1],
+        "the stage must not decide a later input after the carrier contradiction"
+    );
+    assert_eq!(
+        live_apply_calls.load(Ordering::SeqCst),
+        0,
+        "singleton reconstruction must fail before apply"
+    );
+
+    let live_run = latest_run_dir(&live_journal_base);
+    let live_fact_identities = assert_replay_stateful_contract_failure_archive(
+        &live_run,
+        0,
+        &[
+            "one_fact_stage_output",
+            "could not be reconstructed",
+            "missing typed fact",
+            missing_output_type.as_str(),
+        ],
+    )
+    .await;
+
+    // A failed archive is not a strict replay source. Use the lawful unary
+    // carrier to seal the same flat arrow, effect manifest, topology, and
+    // stage logic version, then replay that history through the dishonest
+    // handler-side carrier.
+    let replay_journal_base = temp.path().join("strict_replay_journals");
+    let fixture_calls = Arc::new(AtomicUsize::new(0));
+    let fixture_outputs = Arc::new(Mutex::new(Vec::new()));
+    FlowApplication::builder()
+        .with_cli_args(["obzenflow"])
+        .run_async(build_stateful_flow(
+            replay_journal_base.clone(),
+            fixture_calls.clone(),
+            fixture_outputs,
+        ))
+        .await
+        .expect("lawful fixture flow should seal the strict replay archive");
+    assert_eq!(
+        fixture_calls.load(Ordering::SeqCst),
+        3,
+        "the lawful fixture must execute one effect for each source input"
+    );
+
+    let replay_source = latest_run_dir(&replay_journal_base);
+    let replay_source_facts =
+        replay_stateful_fact_identities(&read_stage_events(&replay_source, "effectful").await);
+    assert_eq!(
+        replay_source_facts.len(),
+        6,
+        "the completed fixture should contain two ordered facts for each input"
+    );
+
+    let replay_calls = Arc::new(AtomicUsize::new(0));
+    let replay_decide_inputs = Arc::new(Mutex::new(Vec::new()));
+    let replay_apply_calls = Arc::new(AtomicUsize::new(0));
+    let replay_outputs = Arc::new(Mutex::new(Vec::new()));
+    let replay_result = tokio::time::timeout(
+        Duration::from_secs(15),
+        FlowApplication::builder()
+            .with_cli_args(vec![
+                OsString::from("obzenflow"),
+                OsString::from("--replay-from"),
+                replay_source.as_os_str().to_os_string(),
+            ])
+            .run_async(build_dishonest_one_fact_stateful_flow(
+                replay_journal_base.clone(),
+                replay_calls.clone(),
+                replay_decide_inputs.clone(),
+                replay_apply_calls.clone(),
+                replay_outputs,
+            )),
+    )
+    .await
+    .expect("strict replay false one-fact assertion should terminate the flow promptly");
+    replay_result.expect_err("strict replay must reach the false one-fact assertion");
+    assert_eq!(
+        replay_calls.load(Ordering::SeqCst),
+        0,
+        "strict replay must reconstruct the committed effect outcome without live I/O"
+    );
+    assert_eq!(
+        replay_decide_inputs
+            .lock()
+            .expect("replay decide inputs lock poisoned")
+            .as_slice(),
+        &[1],
+        "strict replay must stop before the next archived input"
+    );
+    assert_eq!(
+        replay_apply_calls.load(Ordering::SeqCst),
+        0,
+        "strict replay must reproduce the singleton reconstruction failure before apply"
+    );
+
+    let replay_run = latest_run_dir(&replay_journal_base);
+    assert_ne!(
+        replay_run, replay_source,
+        "the failed replay must produce its own evidence archive"
+    );
+    let replay_fact_identities = assert_replay_stateful_contract_failure_archive(
+        &replay_run,
+        0,
+        &[
+            "one_fact_stage_output",
+            "could not be reconstructed",
+            "missing typed fact",
+            missing_output_type.as_str(),
+        ],
+    )
+    .await;
+    assert_eq!(
+        replay_fact_identities,
+        replay_source_facts[..2],
+        "strict replay must preserve the exact first-input fact identities and order"
+    );
+    assert_eq!(
+        live_fact_identities
+            .iter()
+            .map(|(_, event_type)| event_type)
+            .collect::<Vec<_>>(),
+        replay_fact_identities
+            .iter()
+            .map(|(_, event_type)| event_type)
+            .collect::<Vec<_>>(),
+        "live and replay must stop after the same ordered fact types"
+    );
+}
+
+/// FLOWIP-120z B2: a stateful fold cannot skip an already-durable fact. An
+/// `apply` rejection keeps the facts durable, but publishes stage-fatal
+/// lifecycle evidence before later input or successful EOF/drain. A completed
+/// fixture archive lets the second half exercise true
+/// strict replay while the rejecting handler proves the same fail-stop boundary
+/// with zero live effect calls and the exact recorded fact identities.
+#[tokio::test]
+async fn effectful_stateful_apply_rejection_is_fatal_live_and_under_strict_replay() {
+    let _guard = effect_replay_test_guard().await;
+    let temp = tempfile::tempdir().expect("tempdir");
+
+    let live_journal_base = temp.path().join("live_failure_journals");
+    let live_calls = Arc::new(AtomicUsize::new(0));
+    let live_decide_inputs = Arc::new(Mutex::new(Vec::new()));
+    let live_apply_attempts = Arc::new(Mutex::new(Vec::new()));
+    let live_outputs = Arc::new(Mutex::new(Vec::new()));
+    let live_result = tokio::time::timeout(
+        Duration::from_secs(15),
+        FlowApplication::builder()
+            .with_cli_args(["obzenflow"])
+            .run_async(build_apply_rejection_stateful_flow(
+                live_journal_base.clone(),
+                live_calls.clone(),
+                live_decide_inputs.clone(),
+                live_apply_attempts.clone(),
+                true,
+                live_outputs,
+            )),
+    )
+    .await
+    .expect("live apply rejection should terminate the flow promptly");
+    live_result.expect_err("live apply rejection must fail the flow");
+    assert_eq!(
+        live_calls.load(Ordering::SeqCst),
+        1,
+        "only the offending input may execute its effect"
+    );
+    assert_eq!(
+        live_decide_inputs
+            .lock()
+            .expect("live decide inputs lock poisoned")
+            .as_slice(),
+        &[1],
+        "the stage must not process input after the rejected fold"
+    );
+    assert_eq!(
+        live_apply_attempts
+            .lock()
+            .expect("live apply attempts lock poisoned")
+            .as_slice(),
+        &["effect:101", "output:1"],
+        "the first fact folds before the second committed fact is rejected"
+    );
+    let live_run = latest_run_dir(&live_journal_base);
+    let live_fact_identities = assert_replay_stateful_contract_failure_archive(
+        &live_run,
+        1,
+        &[
+            "effectful_stateful_apply",
+            "simulated rejection of an already-committed output fact",
+        ],
+    )
+    .await;
+
+    // A failed archive cannot be a strict replay source. Record the identical
+    // handler/effect contract with its test-only rejection switch disabled to
+    // obtain a sealed history, then replay that history through the rejecting
+    // fold. This avoids `--allow-incomplete-archive` and its lenient effect-miss
+    // semantics.
+    let replay_journal_base = temp.path().join("strict_replay_journals");
+    let fixture_calls = Arc::new(AtomicUsize::new(0));
+    let fixture_decide_inputs = Arc::new(Mutex::new(Vec::new()));
+    let fixture_apply_attempts = Arc::new(Mutex::new(Vec::new()));
+    let fixture_outputs = Arc::new(Mutex::new(Vec::new()));
+    FlowApplication::builder()
+        .with_cli_args(["obzenflow"])
+        .run_async(build_apply_rejection_stateful_flow(
+            replay_journal_base.clone(),
+            fixture_calls.clone(),
+            fixture_decide_inputs,
+            fixture_apply_attempts,
+            false,
+            fixture_outputs,
+        ))
+        .await
+        .expect("completed fixture flow should seal the strict replay archive");
+    assert_eq!(fixture_calls.load(Ordering::SeqCst), 3);
+
+    let replay_source = latest_run_dir(&replay_journal_base);
+    let replay_source_facts =
+        replay_stateful_fact_identities(&read_stage_events(&replay_source, "effectful").await);
+    assert_eq!(
+        replay_source_facts.len(),
+        6,
+        "the completed fixture should contain two ordered facts for each input"
+    );
+
+    let replay_calls = Arc::new(AtomicUsize::new(0));
+    let replay_decide_inputs = Arc::new(Mutex::new(Vec::new()));
+    let replay_apply_attempts = Arc::new(Mutex::new(Vec::new()));
+    let replay_outputs = Arc::new(Mutex::new(Vec::new()));
+    let replay_result = tokio::time::timeout(
+        Duration::from_secs(15),
+        FlowApplication::builder()
+            .with_cli_args(vec![
+                OsString::from("obzenflow"),
+                OsString::from("--replay-from"),
+                replay_source.as_os_str().to_os_string(),
+            ])
+            .run_async(build_apply_rejection_stateful_flow(
+                replay_journal_base.clone(),
+                replay_calls.clone(),
+                replay_decide_inputs.clone(),
+                replay_apply_attempts.clone(),
+                true,
+                replay_outputs,
+            )),
+    )
+    .await
+    .expect("strict replay apply rejection should terminate the flow promptly");
+    replay_result.expect_err("strict replay must reach the same fatal apply rejection");
+    assert_eq!(
+        replay_calls.load(Ordering::SeqCst),
+        0,
+        "strict replay must reconstruct the committed effect outcome without live I/O"
+    );
+    assert_eq!(
+        replay_decide_inputs
+            .lock()
+            .expect("replay decide inputs lock poisoned")
+            .as_slice(),
+        &[1],
+        "strict replay must stop before later archived input"
+    );
+    assert_eq!(
+        replay_apply_attempts
+            .lock()
+            .expect("replay apply attempts lock poisoned")
+            .as_slice(),
+        &["effect:101", "output:1"],
+        "strict replay must reproduce the same fold boundary"
+    );
+
+    let replay_run = latest_run_dir(&replay_journal_base);
+    assert_ne!(
+        replay_run, replay_source,
+        "the failed replay must produce its own evidence archive"
+    );
+    let replay_fact_identities = assert_replay_stateful_contract_failure_archive(
+        &replay_run,
+        1,
+        &[
+            "effectful_stateful_apply",
+            "simulated rejection of an already-committed output fact",
+        ],
+    )
+    .await;
+    assert_eq!(
+        replay_fact_identities,
+        replay_source_facts[..2],
+        "strict replay must preserve the exact first-input fact identities and order"
+    );
+    assert_eq!(
+        live_fact_identities
+            .iter()
+            .map(|(_, event_type)| event_type)
+            .collect::<Vec<_>>(),
+        replay_fact_identities
+            .iter()
+            .map(|(_, event_type)| event_type)
+            .collect::<Vec<_>>(),
+        "live and replay must stop after the same ordered fact types"
+    );
+}
+
 /// FLOWIP-120m stateful doctrine: a product carrier is `perform`-return
 /// machinery only. The committed member facts fold individually through
 /// `apply`, in ordinal (field) order, live and replay alike.
@@ -2483,7 +3456,7 @@ async fn outcome_shaped_fallback_synthesizes_multi_fact_group_and_replays_strict
         vec![
             ReplayOutput {
                 value: 1,
-                effect_value: GUARDED_FAILED_MARKER
+                effect_value: EFFECT_FAILED_MARKER
             },
             ReplayOutput {
                 value: 2,
@@ -2594,7 +3567,7 @@ async fn outcome_shaped_fallback_with_sum_carrier_resumes_handler_with_variant()
         vec![
             ReplayOutput {
                 value: 1,
-                effect_value: GUARDED_FAILED_MARKER
+                effect_value: EFFECT_FAILED_MARKER
             },
             ReplayOutput {
                 value: 2,
@@ -2940,8 +3913,14 @@ struct PortedTransform {
 #[async_trait]
 impl EffectfulTransformHandler for PortedTransform {
     type Input = ReplayInput;
+    type Output = obzenflow_core::stage_fact_set![ReplayOutput, ReplayEffectValue];
+    type AllowedEffects = obzenflow_runtime::effect_set![PortedEffect];
 
-    async fn process(&self, input: ReplayInput, fx: &mut Effects) -> Result<(), HandlerError> {
+    async fn process(
+        &self,
+        input: ReplayInput,
+        fx: &mut Effects<Self::Output, Self::AllowedEffects>,
+    ) -> Result<obzenflow_runtime::effects::StageCompletion<Self::Output>, HandlerError> {
         let effect_value = fx
             .perform(PortedEffect {
                 value: input.value,
@@ -2956,7 +3935,7 @@ impl EffectfulTransformHandler for PortedTransform {
         })
         .await
         .map_err(|e| HandlerError::Other(e.to_string()))?;
-        Ok(())
+        Ok(fx.complete()?)
     }
 
     fn stage_logic_version(&self) -> &str {
@@ -3133,8 +4112,14 @@ struct LedgerTransform;
 #[async_trait]
 impl EffectfulTransformHandler for LedgerTransform {
     type Input = ReplayInput;
+    type Output = obzenflow_core::stage_fact_set![ReplayOutput, ReplayEffectValue];
+    type AllowedEffects = obzenflow_runtime::effect_set![LedgerEffect];
 
-    async fn process(&self, input: ReplayInput, fx: &mut Effects) -> Result<(), HandlerError> {
+    async fn process(
+        &self,
+        input: ReplayInput,
+        fx: &mut Effects<Self::Output, Self::AllowedEffects>,
+    ) -> Result<obzenflow_runtime::effects::StageCompletion<Self::Output>, HandlerError> {
         let committed = fx
             .perform(LedgerEffect { value: input.value })
             .await
@@ -3146,7 +4131,7 @@ impl EffectfulTransformHandler for LedgerTransform {
         })
         .await
         .map_err(|e| HandlerError::Other(e.to_string()))?;
-        Ok(())
+        Ok(fx.complete()?)
     }
 
     fn stage_logic_version(&self) -> &str {
@@ -3225,107 +4210,140 @@ async fn flow_supplied_registry_dispatches_transactional_effect_through_port() {
 }
 
 // ---------------------------------------------------------------------------
-// FLOWIP-120h: typed circuit-breaker outcomes through the guarded wrapper
+// Plain fail-fast circuit-breaker rejections: a prevented call surfaces as a
+// recorded rejection error, never a synthesized fact (FLOWIP-120z step 1).
 // ---------------------------------------------------------------------------
 
-/// Marker outputs so sink-level equality proves which branch each input took,
+/// Marker outputs so sink-level equality proves how each input ended,
 /// live and replay alike.
-const GUARDED_REJECTED_MARKER: u64 = 7_777;
-const GUARDED_FAILED_MARKER: u64 = 9_999;
+const BREAKER_REJECTED_MARKER: u64 = 7_777;
+const EFFECT_FAILED_MARKER: u64 = 9_999;
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-struct ReplayFallback {
-    effect_value: u64,
-}
-
-impl TypedPayload for ReplayFallback {
-    const EVENT_TYPE: &'static str = "effect_replay.fallback";
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-struct ReplayRejected {
-    value: u64,
-    reason: String,
-}
-
-impl TypedPayload for ReplayRejected {
-    const EVENT_TYPE: &'static str = "effect_replay.rejected";
+/// Live `BoundaryRejected` and the `RecordedFailure` it rehydrates to on
+/// replay project to the same semantic reason (FLOWIP-120i), so one
+/// predicate distinguishes breaker refusal from genuine effect failure in
+/// both runs.
+fn is_breaker_rejection(err: &EffectError) -> bool {
+    err.semantic_reason()
+        .starts_with("circuit breaker rejected effect execution")
 }
 
 #[derive(Clone, Debug)]
-struct GuardedTransform {
+struct FailFastTransform {
     calls: Arc<AtomicUsize>,
 }
 
 #[async_trait]
-impl EffectfulTransformHandler for GuardedTransform {
+impl EffectfulTransformHandler for FailFastTransform {
     type Input = ReplayInput;
+    type Output = obzenflow_core::stage_fact_set![ReplayOutput, ReplayEffectValue];
+    type AllowedEffects = obzenflow_runtime::effect_set![AlwaysFailingEffect];
 
-    async fn process(&self, input: ReplayInput, fx: &mut Effects) -> Result<(), HandlerError> {
+    async fn process(
+        &self,
+        input: ReplayInput,
+        fx: &mut Effects<Self::Output, Self::AllowedEffects>,
+    ) -> Result<obzenflow_runtime::effects::StageCompletion<Self::Output>, HandlerError> {
         let outcome = fx
-            .perform(
-                AlwaysFailingEffect {
-                    value: input.value,
-                    calls: self.calls.clone(),
-                }
-                .guarded::<ReplayFallback, ReplayRejected>(),
-            )
+            .perform(AlwaysFailingEffect {
+                value: input.value,
+                calls: self.calls.clone(),
+            })
             .await;
 
         let output = match outcome {
-            Ok(CircuitBreakerOutcome::Primary(value)) => ReplayOutput {
+            Ok(value) => ReplayOutput {
                 value: input.value,
                 effect_value: value.effect_value,
             },
-            Ok(CircuitBreakerOutcome::Fallback(fallback)) => ReplayOutput {
+            Err(err) if is_breaker_rejection(&err) => ReplayOutput {
                 value: input.value,
-                effect_value: fallback.effect_value,
-            },
-            Ok(CircuitBreakerOutcome::Rejected(rejected)) => ReplayOutput {
-                value: rejected.value,
-                effect_value: GUARDED_REJECTED_MARKER,
+                effect_value: BREAKER_REJECTED_MARKER,
             },
             Err(_) => ReplayOutput {
                 value: input.value,
-                effect_value: GUARDED_FAILED_MARKER,
+                effect_value: EFFECT_FAILED_MARKER,
             },
         };
 
         fx.emit(output)
             .await
             .map_err(|e| HandlerError::Other(e.to_string()))?;
-        Ok(())
+        Ok(fx.complete()?)
     }
 
     fn stage_logic_version(&self) -> &str {
-        "effect-replay-guarded-v1"
+        "effect-replay-fail-fast-v1"
     }
 }
 
-fn build_typed_rejection_flow(
+/// Same authoring behaviour with the wider manifest used by the
+/// per-effect-policy binding test. A distinct handler type keeps the static
+/// capability set honest for each stage declaration.
+#[derive(Clone, Debug)]
+struct MultiEffectFailFastTransform {
+    calls: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl EffectfulTransformHandler for MultiEffectFailFastTransform {
+    type Input = ReplayInput;
+    type Output = obzenflow_core::stage_fact_set![ReplayOutput, ReplayEffectValue];
+    type AllowedEffects = obzenflow_runtime::effect_set![AlwaysFailingEffect, CountingEffect];
+
+    async fn process(
+        &self,
+        input: ReplayInput,
+        fx: &mut Effects<Self::Output, Self::AllowedEffects>,
+    ) -> Result<obzenflow_runtime::effects::StageCompletion<Self::Output>, HandlerError> {
+        let outcome = fx
+            .perform(AlwaysFailingEffect {
+                value: input.value,
+                calls: self.calls.clone(),
+            })
+            .await;
+
+        let output = match outcome {
+            Ok(value) => ReplayOutput {
+                value: input.value,
+                effect_value: value.effect_value,
+            },
+            Err(err) if is_breaker_rejection(&err) => ReplayOutput {
+                value: input.value,
+                effect_value: BREAKER_REJECTED_MARKER,
+            },
+            Err(_) => ReplayOutput {
+                value: input.value,
+                effect_value: EFFECT_FAILED_MARKER,
+            },
+        };
+
+        fx.emit(output).await?;
+        Ok(fx.complete()?)
+    }
+
+    fn stage_logic_version(&self) -> &str {
+        "effect-replay-fail-fast-v1"
+    }
+}
+
+fn build_fail_fast_rejection_flow(
     journal_base: PathBuf,
     calls: Arc<AtomicUsize>,
     outputs: Arc<Mutex<Vec<ReplayOutput>>>,
 ) -> FlowDefinition {
     flow! {
-        name: "effect_replay_typed_rejection",
+        name: "effect_replay_fail_fast_rejection",
         journals: disk_journals(journal_base),
         middleware: [],
 
         stages: {
             inputs = source!(ReplayInput => ReplaySource::new());
             effectful = effectful_transform!(
-                ReplayInput -> { ReplayOutput, ReplayEffectValue, ReplayFallback, ReplayRejected } => GuardedTransform { calls },
+                ReplayInput -> { ReplayOutput, ReplayEffectValue } => FailFastTransform { calls },
                 effects: [AlwaysFailingEffect with [
                 CircuitBreaker::opens_after(1)
                     .when_open(OpenPolicy::FailFast)
-                    .fallback_fact(|input: &ReplayInput| ReplayFallback {
-                        effect_value: input.value + 900,
-                    })
-                    .rejection_fact(|input, reason| ReplayRejected {
-                        value: input.value,
-                        reason: format!("{reason:?}"),
-                    })
                     .build()
             ]],
                 middleware: []);
@@ -3339,30 +4357,23 @@ fn build_typed_rejection_flow(
     }
 }
 
-fn build_multi_effect_typed_outcome_flow(
+fn build_multi_effect_per_effect_breaker_flow(
     journal_base: PathBuf,
     calls: Arc<AtomicUsize>,
     outputs: Arc<Mutex<Vec<ReplayOutput>>>,
 ) -> FlowDefinition {
     flow! {
-        name: "effect_replay_multi_effect_typed",
+        name: "effect_replay_multi_effect_breaker",
         journals: disk_journals(journal_base),
         middleware: [],
 
         stages: {
             inputs = source!(ReplayInput => ReplaySource::new());
             effectful = effectful_transform!(
-                ReplayInput -> { ReplayOutput, ReplayEffectValue, ReplayFallback, ReplayRejected } => GuardedTransform { calls },
+                ReplayInput -> { ReplayOutput, ReplayEffectValue } => MultiEffectFailFastTransform { calls },
                 effects: [AlwaysFailingEffect with [
                 CircuitBreaker::opens_after(1)
                     .when_open(OpenPolicy::FailFast)
-                    .fallback_fact(|input: &ReplayInput| ReplayFallback {
-                        effect_value: input.value + 900,
-                    })
-                    .rejection_fact(|input, reason| ReplayRejected {
-                        value: input.value,
-                        reason: format!("{reason:?}"),
-                    })
                     .build()
             ], CountingEffect],
                 middleware: []);
@@ -3376,14 +4387,15 @@ fn build_multi_effect_typed_outcome_flow(
     }
 }
 
-/// FLOWIP-120h two-regime rule, typed side: with a typed-outcome breaker, a
-/// FailFast rejection synthesizes the author-named rejection fact, the guarded
-/// carrier decodes it as `Ok(Rejected)`, the input completes, and strict
-/// replay reconstructs the same branch per input with zero effect executions.
-/// The first input's genuine effect failure stays an `Err` recorded under the
-/// cursor, replayed deterministically.
+/// Plain fail-fast rejection: the breaker prevents the call, `perform`
+/// returns a recorded rejection error, the input still completes, and strict
+/// replay reconstructs the same rejection per input with zero effect
+/// executions. The first input's genuine effect failure stays an `Err`
+/// recorded under the cursor, replayed deterministically; the marker outputs
+/// prove the handler distinguished the two failure kinds identically in both
+/// runs.
 #[tokio::test]
-async fn typed_rejection_branch_completes_inputs_and_replays_without_execution() {
+async fn fail_fast_rejection_completes_inputs_and_replays_without_execution() {
     let _guard = effect_replay_test_guard().await;
     let temp = tempfile::tempdir().expect("tempdir");
     let journal_base = temp.path().join("journals");
@@ -3392,7 +4404,7 @@ async fn typed_rejection_branch_completes_inputs_and_replays_without_execution()
     let live_outputs = Arc::new(Mutex::new(Vec::new()));
     FlowApplication::builder()
         .with_cli_args(["obzenflow"])
-        .run_async(build_typed_rejection_flow(
+        .run_async(build_fail_fast_rejection_flow(
             journal_base.clone(),
             live_calls.clone(),
             live_outputs.clone(),
@@ -3411,18 +4423,18 @@ async fn typed_rejection_branch_completes_inputs_and_replays_without_execution()
         vec![
             ReplayOutput {
                 value: 1,
-                effect_value: GUARDED_FAILED_MARKER
+                effect_value: EFFECT_FAILED_MARKER
             },
             ReplayOutput {
                 value: 2,
-                effect_value: GUARDED_REJECTED_MARKER
+                effect_value: BREAKER_REJECTED_MARKER
             },
             ReplayOutput {
                 value: 3,
-                effect_value: GUARDED_REJECTED_MARKER
+                effect_value: BREAKER_REJECTED_MARKER
             },
         ],
-        "rejected inputs must complete through the typed Rejected branch"
+        "rejected inputs must complete through the recorded rejection error"
     );
 
     let archive_dir = latest_run_dir(&journal_base);
@@ -3434,7 +4446,7 @@ async fn typed_rejection_branch_completes_inputs_and_replays_without_execution()
             OsString::from("--replay-from"),
             archive_dir.as_os_str().to_os_string(),
         ])
-        .run_async(build_typed_rejection_flow(
+        .run_async(build_fail_fast_rejection_flow(
             journal_base.clone(),
             replay_calls.clone(),
             replay_outputs.clone(),
@@ -3453,29 +4465,15 @@ async fn typed_rejection_branch_completes_inputs_and_replays_without_execution()
             .expect("outputs lock poisoned")
             .clone(),
         live_domain_outputs,
-        "strict replay must reconstruct the same branch for every input"
-    );
-
-    // FLOWIP-120m: branch origin reconstructs from the recorded provenance,
-    // row for row, never from registration fact-type membership.
-    let replay_run = latest_run_dir(&journal_base);
-    let live_origins = effect_fact_origins(&archive_dir, "effectful").await;
-    let replay_origins = effect_fact_origins(&replay_run, "effectful").await;
-    assert!(
-        !live_origins.is_empty(),
-        "the typed-rejection run should record origin-stamped effect facts"
-    );
-    assert_eq!(
-        live_origins, replay_origins,
-        "strict replay must reconstruct the same per-row fact origin"
+        "strict replay must reconstruct the same rejection for every input"
     );
 }
 
-/// FLOWIP-120c H7 lifted the single-effect restriction: a typed-outcome
-/// policy attaches inline to the effect it guards (`Effect with [...]`), so
-/// a multi-effect stage builds and the breaker guards only its own effect.
+/// FLOWIP-120c H7 lifted the single-effect restriction: a breaker policy
+/// attaches inline to the effect it guards (`Effect with [...]`), so a
+/// multi-effect stage builds and the breaker guards only its own effect.
 #[tokio::test]
-async fn typed_outcome_middleware_builds_on_multi_effect_stages() {
+async fn per_effect_breaker_builds_on_multi_effect_stages() {
     let _guard = effect_replay_test_guard().await;
     let temp = tempfile::tempdir().expect("tempdir");
     let journal_base = temp.path().join("journals");
@@ -3485,17 +4483,17 @@ async fn typed_outcome_middleware_builds_on_multi_effect_stages() {
 
     FlowApplication::builder()
         .with_cli_args(["obzenflow"])
-        .run_async(build_multi_effect_typed_outcome_flow(
+        .run_async(build_multi_effect_per_effect_breaker_flow(
             journal_base.clone(),
             calls.clone(),
             outputs,
         ))
         .await
-        .expect("a multi-effect stage with a per-effect typed policy must build and run");
+        .expect("a multi-effect stage with a per-effect breaker policy must build and run");
 
     // FailFast with threshold 1: the first input executes (and fails), the
-    // breaker opens, and later inputs complete through the typed rejection
-    // branch without executing.
+    // breaker opens, and later inputs complete through the recorded
+    // rejection error without executing.
     assert_eq!(
         calls.load(Ordering::SeqCst),
         1,
@@ -3503,8 +4501,8 @@ async fn typed_outcome_middleware_builds_on_multi_effect_stages() {
     );
 
     // The per-effect instance snapshots under its effect type (FLOWIP-120c
-    // G9): the breaker that opened belongs to the guarded effect, keyed by
-    // its declared type, never conflated across the stage's other effects.
+    // G9): the breaker that opened belongs to the effect it protects, keyed
+    // by its declared type, never conflated across the stage's other effects.
     let run_dir = latest_run_dir(&journal_base);
     let effect_breakers: Vec<(String, u64)> = read_stage_events(&run_dir, "effectful")
         .await
@@ -3529,12 +4527,12 @@ async fn typed_outcome_middleware_builds_on_multi_effect_stages() {
         .unwrap_or(0);
     assert!(
         opened_for_failing > 0,
-        "the guarded effect's breaker must open under its own effect key, got {effect_breakers:?}"
+        "the protected effect's breaker must open under its own effect key, got {effect_breakers:?}"
     );
     assert!(
         !effect_breakers
             .iter()
             .any(|(effect, _)| effect == CountingEffect::EFFECT_TYPE),
-        "the unguarded effect must carry no breaker instance, got {effect_breakers:?}"
+        "the unprotected effect must carry no breaker instance, got {effect_breakers:?}"
     );
 }

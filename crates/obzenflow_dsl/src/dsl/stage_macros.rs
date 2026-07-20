@@ -1511,11 +1511,42 @@ macro_rules! __obzenflow_transform_typed {
         $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
     }};
     // -- exact input, real handler, explicit output contract --
+    // FLOWIP-120b Option B keeps the flat output contract in the arrow's
+    // type-signature position; the handler-side carrier is never named in the
+    // flow.
     (input = exact($in:ty), output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = $handler:expr, middleware = [$($mw:expr),*] $(, backpressure = [$($bp:expr)?])?) => {{
         let __handler = $handler;
+        fn __obzenflow_assert_output_contract_equality<
+            __Handler,
+            __ArrowToHandlerProof,
+            __HandlerToArrowProof,
+        >(
+            _handler: &__Handler,
+        )
+        where
+            __Handler: ::obzenflow_runtime::stages::common::handlers::TypedTransformHandler<
+                Input = $in,
+            >,
+            <::obzenflow_core::stage_fact_set![$($member),+] as ::obzenflow_core::StageFactSet>::Members:
+                $crate::dsl::typing::ArrowOutputsAreDeclaredByHandler<
+                    <<__Handler as ::obzenflow_runtime::stages::common::handlers::TypedTransformHandler>::Output as ::obzenflow_core::StageFactSet>::Members,
+                    __ArrowToHandlerProof,
+                >,
+            <<__Handler as ::obzenflow_runtime::stages::common::handlers::TypedTransformHandler>::Output as ::obzenflow_core::StageFactSet>::Members:
+                $crate::dsl::typing::HandlerOutputsAreDeclaredByArrow<
+                    <::obzenflow_core::stage_fact_set![$($member),+] as ::obzenflow_core::StageFactSet>::Members,
+                    __HandlerToArrowProof,
+                >,
+        {
+        }
+        __obzenflow_assert_output_contract_equality::<_, _, _>(&__handler);
+        const _: () = ::obzenflow_core::assert_distinct_stage_fact_set::<
+            ::obzenflow_core::stage_fact_set![$($member),+],
+        >();
         let __handler =
-            $crate::dsl::typing::BoundTransform::<$in, $out, _>::new(__handler);
-        ::obzenflow_runtime::typing::assert_transform_contract::<_, $in, $out>(&__handler);
+            ::obzenflow_runtime::stages::common::handlers::TypedTransformHandlerAdapter::new(
+                __handler,
+            );
         let __metadata = $crate::dsl::typing::StageTypingMetadata::transform(
             $crate::dsl::typing::TypeHint::exact_payload::<$in>(),
             $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
@@ -2270,6 +2301,143 @@ macro_rules! __obzenflow_effect_entries {
     }};
 }
 
+/// Type-only mirror of [`__obzenflow_effect_entries!`]. Policy expressions
+/// and transactional executors are deliberately ignored; only concrete
+/// effect request types enter the handler capability proof.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __obzenflow_effect_manifest_types {
+    (@entry [$($types:ty,)*], [],) => {
+        ::obzenflow_runtime::effect_set![$($types),*]
+    };
+    (@entry [$($types:ty,)*], [$($acc:tt)+],) => {
+        ::obzenflow_runtime::effect_set![$($types,)* $($acc)+]
+    };
+
+    (@entry [$($types:ty,)*], [], transactional($effect:ty, $executor:expr) with [$($policy:expr),* $(,)?], $($rest:tt)*) => {
+        $crate::__obzenflow_effect_manifest_types!(@entry [$($types,)* $effect,], [], $($rest)*)
+    };
+    (@entry [$($types:ty,)*], [], transactional($effect:ty, $executor:expr) with [$($policy:expr),* $(,)?]) => {
+        ::obzenflow_runtime::effect_set![$($types,)* $effect]
+    };
+    (@entry [$($types:ty,)*], [], transactional($effect:ty, $executor:expr), $($rest:tt)*) => {
+        $crate::__obzenflow_effect_manifest_types!(@entry [$($types,)* $effect,], [], $($rest)*)
+    };
+    (@entry [$($types:ty,)*], [], transactional($effect:ty, $executor:expr)) => {
+        ::obzenflow_runtime::effect_set![$($types,)* $effect]
+    };
+
+    (@entry [$($types:ty,)*], [$($acc:tt)+], with [$($policy:expr),* $(,)?], $($rest:tt)*) => {
+        $crate::__obzenflow_effect_manifest_types!(@entry [$($types,)* $($acc)+,], [], $($rest)*)
+    };
+    (@entry [$($types:ty,)*], [$($acc:tt)+], with [$($policy:expr),* $(,)?]) => {
+        ::obzenflow_runtime::effect_set![$($types,)* $($acc)+]
+    };
+    (@entry [$($types:ty,)*], [$($acc:tt)+], , $($rest:tt)*) => {
+        $crate::__obzenflow_effect_manifest_types!(@entry [$($types,)* $($acc)+,], [], $($rest)*)
+    };
+    (@entry [$($types:ty,)*], [$($acc:tt)*], $next:tt $($rest:tt)*) => {
+        $crate::__obzenflow_effect_manifest_types!(@entry [$($types,)*], [$($acc)* $next], $($rest)*)
+    };
+    ($($entries:tt)*) => {
+        $crate::__obzenflow_effect_manifest_types!(@entry [], [], $($entries)*)
+    };
+}
+
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __obzenflow_assert_effectful_transform_contract {
+    ($handler:ident, $in:ty, [$($member:ty),+], [$($effects:tt)*]) => {{
+        fn __obzenflow_assert_effectful_transform_contract<
+            H,
+            ArrowToHandlerProof,
+            HandlerToArrowProof,
+            ManifestToHandlerProof,
+            HandlerToManifestProof,
+        >(_: &H)
+        where
+            H: ::obzenflow_runtime::stages::EffectfulTransformHandler,
+            <H as ::obzenflow_runtime::stages::EffectfulTransformHandler>::Input:
+                $crate::dsl::typing::EffectfulTransformInputMatchesArrow<$in>,
+            <::obzenflow_core::stage_fact_set![$($member),+] as ::obzenflow_core::StageFactSet>::Members:
+                $crate::dsl::typing::ArrowOutputsAreDeclaredByHandler<
+                    <<H as ::obzenflow_runtime::stages::EffectfulTransformHandler>::Output as ::obzenflow_core::StageFactSet>::Members,
+                    ArrowToHandlerProof,
+                >,
+            <<H as ::obzenflow_runtime::stages::EffectfulTransformHandler>::Output as ::obzenflow_core::StageFactSet>::Members:
+                $crate::dsl::typing::HandlerOutputsAreDeclaredByArrow<
+                    <::obzenflow_core::stage_fact_set![$($member),+] as ::obzenflow_core::StageFactSet>::Members,
+                    HandlerToArrowProof,
+                >,
+            <$crate::__obzenflow_effect_manifest_types!($($effects)*) as ::obzenflow_runtime::effects::EffectSet>::Members:
+                $crate::dsl::typing::ManifestEffectsAreAllowedByHandler<
+                    <<H as ::obzenflow_runtime::stages::EffectfulTransformHandler>::AllowedEffects as ::obzenflow_runtime::effects::EffectSet>::Members,
+                    ManifestToHandlerProof,
+                >,
+            <<H as ::obzenflow_runtime::stages::EffectfulTransformHandler>::AllowedEffects as ::obzenflow_runtime::effects::EffectSet>::Members:
+                $crate::dsl::typing::HandlerEffectsAreDeclaredByManifest<
+                    <$crate::__obzenflow_effect_manifest_types!($($effects)*) as ::obzenflow_runtime::effects::EffectSet>::Members,
+                    HandlerToManifestProof,
+                >,
+        {}
+
+        __obzenflow_assert_effectful_transform_contract::<_, _, _, _, _>(&$handler);
+        const _: () = ::obzenflow_core::assert_distinct_stage_fact_set::<
+            ::obzenflow_core::stage_fact_set![$($member),+],
+        >();
+        const _: () = ::obzenflow_runtime::effects::assert_distinct_effect_set::<
+            $crate::__obzenflow_effect_manifest_types!($($effects)*),
+        >();
+    }};
+}
+
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __obzenflow_assert_effectful_stateful_contract {
+    ($handler:ident, $in:ty, [$($member:ty),+], [$($effects:tt)*]) => {{
+        fn __obzenflow_assert_effectful_stateful_contract<
+            H,
+            ArrowToHandlerProof,
+            HandlerToArrowProof,
+            ManifestToHandlerProof,
+            HandlerToManifestProof,
+        >(_: &H)
+        where
+            H: ::obzenflow_runtime::stages::EffectfulStatefulHandler,
+            <H as ::obzenflow_runtime::stages::EffectfulStatefulHandler>::Input:
+                $crate::dsl::typing::EffectfulStatefulInputMatchesArrow<$in>,
+            <::obzenflow_core::stage_fact_set![$($member),+] as ::obzenflow_core::StageFactSet>::Members:
+                $crate::dsl::typing::ArrowOutputsAreDeclaredByHandler<
+                    <<H as ::obzenflow_runtime::stages::EffectfulStatefulHandler>::Output as ::obzenflow_core::StageFactSet>::Members,
+                    ArrowToHandlerProof,
+                >,
+            <<H as ::obzenflow_runtime::stages::EffectfulStatefulHandler>::Output as ::obzenflow_core::StageFactSet>::Members:
+                $crate::dsl::typing::HandlerOutputsAreDeclaredByArrow<
+                    <::obzenflow_core::stage_fact_set![$($member),+] as ::obzenflow_core::StageFactSet>::Members,
+                    HandlerToArrowProof,
+                >,
+            <$crate::__obzenflow_effect_manifest_types!($($effects)*) as ::obzenflow_runtime::effects::EffectSet>::Members:
+                $crate::dsl::typing::ManifestEffectsAreAllowedByHandler<
+                    <<H as ::obzenflow_runtime::stages::EffectfulStatefulHandler>::AllowedEffects as ::obzenflow_runtime::effects::EffectSet>::Members,
+                    ManifestToHandlerProof,
+                >,
+            <<H as ::obzenflow_runtime::stages::EffectfulStatefulHandler>::AllowedEffects as ::obzenflow_runtime::effects::EffectSet>::Members:
+                $crate::dsl::typing::HandlerEffectsAreDeclaredByManifest<
+                    <$crate::__obzenflow_effect_manifest_types!($($effects)*) as ::obzenflow_runtime::effects::EffectSet>::Members,
+                    HandlerToManifestProof,
+                >,
+        {}
+
+        __obzenflow_assert_effectful_stateful_contract::<_, _, _, _, _>(&$handler);
+        const _: () = ::obzenflow_core::assert_distinct_stage_fact_set::<
+            ::obzenflow_core::stage_fact_set![$($member),+],
+        >();
+        const _: () = ::obzenflow_runtime::effects::assert_distinct_effect_set::<
+            $crate::__obzenflow_effect_manifest_types!($($effects)*),
+        >();
+    }};
+}
+
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __obzenflow_effectful_transform_untyped {
@@ -2308,11 +2476,9 @@ macro_rules! __obzenflow_effectful_transform_untyped {
 macro_rules! __obzenflow_effectful_transform_typed {
     (input = exact($in:ty), output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = $handler:expr, effects = [$($effects:tt)*], middleware = [$($mw:expr),* $(,)?] $(, backpressure = [$($bp:expr)?])?) => {{
         let __handler = $handler;
-        fn __assert_effectful_contract<H>(_handler: &H)
-        where
-            H: ::obzenflow_runtime::stages::EffectfulTransformHandler<Input = $in>,
-        {}
-        __assert_effectful_contract(&__handler);
+        $crate::__obzenflow_assert_effectful_transform_contract!(
+            __handler, $in, [$($member),+], [$($effects)*]
+        );
         let __metadata = $crate::dsl::typing::StageTypingMetadata::transform(
             $crate::dsl::typing::TypeHint::exact_payload::<$in>(),
             $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
@@ -2331,11 +2497,9 @@ macro_rules! __obzenflow_effectful_transform_typed {
     }};
     (input = exact($in:ty), output = $out:ty, name = $name:literal, handler = $handler:expr, effects = [$($effects:tt)*], middleware = [$($mw:expr),* $(,)?] $(, backpressure = [$($bp:expr)?])?) => {{
         let __handler = $handler;
-        fn __assert_effectful_contract<H>(_handler: &H)
-        where
-            H: ::obzenflow_runtime::stages::EffectfulTransformHandler<Input = $in>,
-        {}
-        __assert_effectful_contract(&__handler);
+        $crate::__obzenflow_assert_effectful_transform_contract!(
+            __handler, $in, [$out], [$($effects)*]
+        );
         let __metadata = $crate::dsl::typing::StageTypingMetadata::transform(
             $crate::dsl::typing::TypeHint::exact_payload::<$in>(),
             $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
@@ -3333,23 +3497,9 @@ macro_rules! stateful {
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __obzenflow_effectful_stateful_untyped {
-    (name = $name:literal, handler = $handler:expr, emit = none, effects = [$($effects:tt)*], middleware = [$($mw:expr),* $(,)?] $(, backpressure = [$($bp:expr)?])?) => {{
+    (name = $name:literal, handler = $handler:expr, effects = [$($effects:tt)*], middleware = [$($mw:expr),* $(,)?] $(, backpressure = [$($bp:expr)?])?) => {{
         use $crate::dsl::stage_descriptor::EffectfulStatefulDescriptor;
         let mut __desc = EffectfulStatefulDescriptor::new($name, $handler)
-            .with_effect_declarations($crate::__obzenflow_effect_declarations_vec!($($effects)*))
-            $(.with_middleware($mw))*;
-        {
-            #[allow(unused_mut)]
-            let mut __bp: Option<$crate::dsl::backpressure_clause::BackpressureClause> = None;
-            $($( __bp = Some($bp); )?)?
-            __desc.backpressure = __bp;
-        }
-        __desc.build()
-    }};
-    (name = $name:literal, handler = $handler:expr, emit = some($emit_interval:expr), effects = [$($effects:tt)*], middleware = [$($mw:expr),* $(,)?] $(, backpressure = [$($bp:expr)?])?) => {{
-        use $crate::dsl::stage_descriptor::EffectfulStatefulDescriptor;
-        let mut __desc = EffectfulStatefulDescriptor::new($name, $handler)
-            .with_emit_interval($emit_interval)
             .with_effect_declarations($crate::__obzenflow_effect_declarations_vec!($($effects)*))
             $(.with_middleware($mw))*;
         {
@@ -3365,13 +3515,11 @@ macro_rules! __obzenflow_effectful_stateful_untyped {
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __obzenflow_effectful_stateful_typed {
-    (input = exact($in:ty), output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = $handler:expr, emit = none, effects = [$($effects:tt)*], middleware = [$($mw:expr),* $(,)?] $(, backpressure = [$($bp:expr)?])?) => {{
+    (input = exact($in:ty), output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = $handler:expr, effects = [$($effects:tt)*], middleware = [$($mw:expr),* $(,)?] $(, backpressure = [$($bp:expr)?])?) => {{
         let __handler = $handler;
-        fn __assert_effectful_stateful_contract<H>(_handler: &H)
-        where
-            H: ::obzenflow_runtime::stages::EffectfulStatefulHandler<Input = $in>,
-        {}
-        __assert_effectful_stateful_contract(&__handler);
+        $crate::__obzenflow_assert_effectful_stateful_contract!(
+            __handler, $in, [$($member),+], [$($effects)*]
+        );
         let __metadata = $crate::dsl::typing::StageTypingMetadata::stateful(
             $crate::dsl::typing::TypeHint::exact_payload::<$in>(),
             $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
@@ -3382,44 +3530,17 @@ macro_rules! __obzenflow_effectful_stateful_typed {
         let __descriptor = $crate::__obzenflow_effectful_stateful_untyped!(
             name = $name,
             handler = __handler,
-            emit = none,
             effects = [$($effects)*],
             middleware = [$($mw),*]
             $(, backpressure = [$($bp)?])?
         );
         $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
     }};
-    (input = exact($in:ty), output = $out:ty, output_contract = [$($member:ty),+ $(,)?], name = $name:literal, handler = $handler:expr, emit = some($emit_interval:expr), effects = [$($effects:tt)*], middleware = [$($mw:expr),* $(,)?] $(, backpressure = [$($bp:expr)?])?) => {{
+    (input = exact($in:ty), output = $out:ty, name = $name:literal, handler = $handler:expr, effects = [$($effects:tt)*], middleware = [$($mw:expr),* $(,)?] $(, backpressure = [$($bp:expr)?])?) => {{
         let __handler = $handler;
-        fn __assert_effectful_stateful_contract<H>(_handler: &H)
-        where
-            H: ::obzenflow_runtime::stages::EffectfulStatefulHandler<Input = $in>,
-        {}
-        __assert_effectful_stateful_contract(&__handler);
-        let __metadata = $crate::dsl::typing::StageTypingMetadata::stateful(
-            $crate::dsl::typing::TypeHint::exact_payload::<$in>(),
-            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
-            false,
-            None,
-        )
-        .with_additional_output_contract($crate::__obzenflow_output_contract_members!($($member),+));
-        let __descriptor = $crate::__obzenflow_effectful_stateful_untyped!(
-            name = $name,
-            handler = __handler,
-            emit = some($emit_interval),
-            effects = [$($effects)*],
-            middleware = [$($mw),*]
-            $(, backpressure = [$($bp)?])?
+        $crate::__obzenflow_assert_effectful_stateful_contract!(
+            __handler, $in, [$out], [$($effects)*]
         );
-        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
-    }};
-    (input = exact($in:ty), output = $out:ty, name = $name:literal, handler = $handler:expr, emit = none, effects = [$($effects:tt)*], middleware = [$($mw:expr),* $(,)?] $(, backpressure = [$($bp:expr)?])?) => {{
-        let __handler = $handler;
-        fn __assert_effectful_stateful_contract<H>(_handler: &H)
-        where
-            H: ::obzenflow_runtime::stages::EffectfulStatefulHandler<Input = $in>,
-        {}
-        __assert_effectful_stateful_contract(&__handler);
         let __metadata = $crate::dsl::typing::StageTypingMetadata::stateful(
             $crate::dsl::typing::TypeHint::exact_payload::<$in>(),
             $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
@@ -3429,30 +3550,6 @@ macro_rules! __obzenflow_effectful_stateful_typed {
         let __descriptor = $crate::__obzenflow_effectful_stateful_untyped!(
             name = $name,
             handler = __handler,
-            emit = none,
-            effects = [$($effects)*],
-            middleware = [$($mw),*]
-            $(, backpressure = [$($bp)?])?
-        );
-        $crate::dsl::typing::wrap_typed_descriptor(__descriptor, __metadata)
-    }};
-    (input = exact($in:ty), output = $out:ty, name = $name:literal, handler = $handler:expr, emit = some($emit_interval:expr), effects = [$($effects:tt)*], middleware = [$($mw:expr),* $(,)?] $(, backpressure = [$($bp:expr)?])?) => {{
-        let __handler = $handler;
-        fn __assert_effectful_stateful_contract<H>(_handler: &H)
-        where
-            H: ::obzenflow_runtime::stages::EffectfulStatefulHandler<Input = $in>,
-        {}
-        __assert_effectful_stateful_contract(&__handler);
-        let __metadata = $crate::dsl::typing::StageTypingMetadata::stateful(
-            $crate::dsl::typing::TypeHint::exact_payload::<$in>(),
-            $crate::dsl::typing::TypeHint::exact_payload::<$out>(),
-            false,
-            None,
-        );
-        let __descriptor = $crate::__obzenflow_effectful_stateful_untyped!(
-            name = $name,
-            handler = __handler,
-            emit = some($emit_interval),
             effects = [$($effects)*],
             middleware = [$($mw),*]
             $(, backpressure = [$($bp)?])?
@@ -3474,20 +3571,6 @@ macro_rules! __obzenflow_effectful_stateful_exact_contract {
             output_contract = [$first $(, $member)*],
             name = $name,
             handler = $handler,
-            emit = none,
-            effects = [$($effects)*],
-            middleware = [$($mw),*]
-            $(, backpressure = [$bp])?
-        )
-    };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> { $first:ty $(, $member:ty)* $(,)? } => $handler:expr, emit_interval = $emit_interval:expr, effects: [$($effects:tt)*], middleware: [$($mw:expr),* $(,)?] $(, backpressure: $bp:expr)? $(,)?) => {
-        $crate::__obzenflow_effectful_stateful_typed!(
-            input = exact($($in)+),
-            output = $first,
-            output_contract = [$first $(, $member)*],
-            name = $name,
-            handler = $handler,
-            emit = some($emit_interval),
             effects = [$($effects)*],
             middleware = [$($mw),*]
             $(, backpressure = [$bp])?
@@ -3499,19 +3582,6 @@ macro_rules! __obzenflow_effectful_stateful_exact_contract {
             output = $out,
             name = $name,
             handler = $handler,
-            emit = none,
-            effects = [$($effects)*],
-            middleware = [$($mw),*]
-            $(, backpressure = [$bp])?
-        )
-    };
-    (@collect name = $name:literal, in = ($($in:tt)+), -> $out:ty => $handler:expr, emit_interval = $emit_interval:expr, effects: [$($effects:tt)*], middleware: [$($mw:expr),* $(,)?] $(, backpressure: $bp:expr)? $(,)?) => {
-        $crate::__obzenflow_effectful_stateful_typed!(
-            input = exact($($in)+),
-            output = $out,
-            name = $name,
-            handler = $handler,
-            emit = some($emit_interval),
             effects = [$($effects)*],
             middleware = [$($mw),*]
             $(, backpressure = [$bp])?

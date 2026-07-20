@@ -12,13 +12,16 @@
 //! control-flow machinery only; it is never a persisted wrapper event and
 //! never the stage output contract.
 
+use super::stage_fact_set::StageFactSet;
 use super::typed_fact_set::TypedFactSet;
 
 /// Public name for an effect outcome carrier.
 ///
-/// This is a supertrait alias over [`TypedFactSet`]: every fact set is an
-/// outcome carrier, and the conversion methods (`fact_types`, `into_facts`,
-/// `try_from_facts`, `synthesized_fact_types`) live on [`TypedFactSet`].
+/// This is a supertrait alias over [`TypedFactSet`] and [`StageFactSet`]: every
+/// fact set is an outcome carrier, its conversion methods (`fact_types`,
+/// `into_facts`, `try_from_facts`, `synthesized_fact_types`) live on
+/// [`TypedFactSet`], and its declared member contract lives on
+/// [`StageFactSet`].
 /// The `Effect::Outcome` bound and user-facing docs name this trait;
 /// [`TypedFactSet`] remains the low-level marshalling bridge for non-effect
 /// uses such as scalar stateful outputs.
@@ -64,9 +67,9 @@ use super::typed_fact_set::TypedFactSet;
             #[derive(EffectOutcomeFacts)] so each variant or field lowers to its persisted \
             fact (FLOWIP-120m)"
 )]
-pub trait EffectOutcomeFacts: TypedFactSet {}
+pub trait EffectOutcomeFacts: TypedFactSet + StageFactSet {}
 
-impl<T: TypedFactSet> EffectOutcomeFacts for T {}
+impl<T: TypedFactSet + StageFactSet> EffectOutcomeFacts for T {}
 
 #[cfg(test)]
 mod tests {

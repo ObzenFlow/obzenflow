@@ -155,8 +155,14 @@ struct ValidateOrder;
 #[async_trait]
 impl EffectfulTransformHandler for ValidateOrder {
     type Input = OrderPlaced;
+    type Output = obzenflow_core::stage_fact_set![ValidatedOrder, OrderCancelled];
+    type AllowedEffects = obzenflow_runtime::effect_set![];
 
-    async fn process(&self, order: OrderPlaced, fx: &mut Effects) -> Result<(), HandlerError> {
+    async fn process(
+        &self,
+        order: OrderPlaced,
+        fx: &mut Effects<Self::Output, Self::AllowedEffects>,
+    ) -> Result<obzenflow_runtime::effects::StageCompletion<Self::Output>, HandlerError> {
         if order.order_id.is_multiple_of(3) {
             fx.emit(OrderCancelled {
                 order_id: order.order_id,
@@ -164,7 +170,7 @@ impl EffectfulTransformHandler for ValidateOrder {
             })
             .await
             .map_err(|e| HandlerError::Other(e.to_string()))?;
-            return Ok(());
+            return Ok(fx.complete()?);
         }
         fx.emit(ValidatedOrder {
             order_id: order.order_id,
@@ -172,7 +178,7 @@ impl EffectfulTransformHandler for ValidateOrder {
         })
         .await
         .map_err(|e| HandlerError::Other(e.to_string()))?;
-        Ok(())
+        Ok(fx.complete()?)
     }
 
     fn stage_logic_version(&self) -> &str {
@@ -233,8 +239,19 @@ struct AuthorizePayment {
 #[async_trait]
 impl EffectfulTransformHandler for AuthorizePayment {
     type Input = ValidatedOrder;
+    type Output = obzenflow_core::stage_fact_set![
+        OrderAuthorized,
+        AuthorizationUnavailable,
+        OrderCancelled,
+        AuthGrant
+    ];
+    type AllowedEffects = obzenflow_runtime::effect_set![AuthorizeEffect];
 
-    async fn process(&self, order: ValidatedOrder, fx: &mut Effects) -> Result<(), HandlerError> {
+    async fn process(
+        &self,
+        order: ValidatedOrder,
+        fx: &mut Effects<Self::Output, Self::AllowedEffects>,
+    ) -> Result<obzenflow_runtime::effects::StageCompletion<Self::Output>, HandlerError> {
         let outcome = fx
             .perform(AuthorizeEffect {
                 order_id: order.order_id,
@@ -273,7 +290,7 @@ impl EffectfulTransformHandler for AuthorizePayment {
                 .map_err(|e| HandlerError::Other(e.to_string()))?;
             }
         }
-        Ok(())
+        Ok(fx.complete()?)
     }
 
     fn stage_logic_version(&self) -> &str {

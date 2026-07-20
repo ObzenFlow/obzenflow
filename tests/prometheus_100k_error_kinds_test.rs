@@ -19,7 +19,11 @@ use obzenflow_core::{
     id::StageId,
     TypedPayload, WriterId,
 };
-use obzenflow_dsl::{flow, sink, source, transform};
+use obzenflow_dsl::dsl::stage_descriptor::{StageDescriptor, TransformDescriptor};
+use obzenflow_dsl::dsl::typing::{
+    wrap_typed_descriptor, BoundTransform, StageTypingMetadata, TypeHint,
+};
+use obzenflow_dsl::{flow, sink, source};
 use obzenflow_infra::journal::disk_journals;
 use obzenflow_runtime::stages::common::handler_error::HandlerError;
 use obzenflow_runtime::stages::common::handlers::{FiniteSourceHandler, SinkHandler};
@@ -183,6 +187,31 @@ async fn prometheus_100k_error_processor_error_kinds_are_domain_only() -> Result
     // high_volume_source -> error_processor -> completion_sink.
     let source = HighVolumeSource::new(TOTAL_EVENTS);
     let transform = error_prone_transform();
+    // This raw transform deliberately authors a processing-error event, not
+    // merely a typed fact payload. Keep it on the ordinary TransformHandler
+    // path and attach its multi-output metadata explicitly; the typed carrier
+    // adapter is for deterministic fact classification and cannot encode an
+    // ErrorKind-bearing ChainEvent.
+    let transform = BoundTransform::<DataRequest, ProcessedEvent, _>::new(transform);
+    let transform: Box<dyn StageDescriptor> = Box::new(TransformDescriptor {
+        name: "error_processor".to_string(),
+        handler: transform,
+        middleware: Vec::new(),
+        backpressure: None,
+    });
+    let transform = wrap_typed_descriptor(
+        transform,
+        StageTypingMetadata::transform(
+            TypeHint::exact_payload::<DataRequest>(),
+            TypeHint::exact_payload::<ProcessedEvent>(),
+            false,
+            None,
+        )
+        .with_output_contract(vec![
+            TypeHint::exact_payload::<ProcessedEvent>(),
+            TypeHint::exact_payload::<ErrorEvent>(),
+        ]),
+    );
     let sink = CompletionSink::new();
 
     let flow_handle = flow! {
@@ -192,7 +221,7 @@ async fn prometheus_100k_error_processor_error_kinds_are_domain_only() -> Result
 
         stages: {
             high_volume_source = source!(DataRequest => source);
-            error_processor = transform!(DataRequest -> { ProcessedEvent, ErrorEvent } => transform);
+            error_processor = transform;
             completion_sink = sink!(ProcessedEvent => sink);
         },
 

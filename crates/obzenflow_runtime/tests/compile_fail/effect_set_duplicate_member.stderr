@@ -1,0 +1,27 @@
+error[E0080]: evaluation panicked: duplicate member in a declared effect capability set: two members share an effect type; each effect appears exactly once (FLOWIP-120z)
+ --> src/effects/effect_set.rs
+  |
+  | /         assert!(
+  | |             !const_str_eq(X::EFFECT_TYPE, Head::EFFECT_TYPE),
+  | |             "duplicate member in a declared effect capability set: two members share an \
+  | |              effect type; each effect appears exactly once (FLOWIP-120z)"
+  | |         );
+  | |_________^ evaluation of `<obzenflow_core::event::schema::WithMember<PingEffect, obzenflow_core::event::schema::EmptySet> as obzenflow_runtime::effects::EffectTypeDisjoint<PingEffect>>::OK` failed here
+
+note: erroneous constant encountered
+ --> src/effects/effect_set.rs
+  |
+  |         <Rest as EffectTypeDisjoint<Head>>::OK,
+  |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+note: erroneous constant encountered
+ --> src/effects/effect_set.rs
+  |
+  |     const MEMBERS_DISTINCT: () = L::DISTINCT_EFFECT_TYPES;
+  |                                  ^^^^^^^^^^^^^^^^^^^^^^^^
+
+note: erroneous constant encountered
+ --> src/effects/effect_set.rs
+  |
+  |     S::MEMBERS_DISTINCT
+  |     ^^^^^^^^^^^^^^^^^^^

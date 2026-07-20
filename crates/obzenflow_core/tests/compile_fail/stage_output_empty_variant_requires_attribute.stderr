@@ -1,0 +1,5 @@
+error: a unit variant is a deliberate zero-fact filter arm and must carry an explicit #[stage_output(empty)] attribute so filtering cannot be accidental (FLOWIP-120z)
+  --> tests/compile_fail/stage_output_empty_variant_requires_attribute.rs:22:5
+   |
+22 |     Skipped,
+   |     ^^^^^^^

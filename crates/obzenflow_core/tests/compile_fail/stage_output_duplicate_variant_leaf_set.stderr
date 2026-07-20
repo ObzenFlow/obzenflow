@@ -1,0 +1,5 @@
+error: variants `Forward` and `Backward` share an identical leaf-type set; reconstruction dispatch is by leaf set, so every variant's set must be distinct (FLOWIP-120z)
+  --> tests/compile_fail/stage_output_duplicate_variant_leaf_set.rs:32:5
+   |
+32 |     Backward {
+   |     ^^^^^^^^

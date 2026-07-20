@@ -5,8 +5,10 @@
 //! Transform handler components
 
 pub mod traits;
+pub mod typed;
 
 pub use traits::{
     AsyncTransformHandler, EffectfulTransformHandler, EffectfulTransformHandlerAdapter,
     TransformHandler, UnifiedTransformHandler,
 };
+pub use typed::{TypedTransformHandler, TypedTransformHandlerAdapter};
