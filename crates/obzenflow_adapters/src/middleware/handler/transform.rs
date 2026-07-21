@@ -1297,31 +1297,18 @@ mod tests {
     }
 
     #[test]
-    fn retrying_breaker_cannot_materialize_on_the_legacy_handler_surface() {
-        use crate::middleware::control::{CircuitBreaker, ControlMiddlewareAggregator, Retry};
-        use crate::middleware::MiddlewareFactory;
-        use obzenflow_core::StageId;
-        use obzenflow_runtime::pipeline::config::StageConfig;
+    fn retrying_breaker_does_not_declare_the_handler_surface() {
+        use crate::middleware::control::{CircuitBreaker, Retry};
+        use crate::middleware::{MiddlewareFactory, MiddlewareSurfaceKind};
 
         let factory = CircuitBreaker::opens_after(5)
             .retry(Retry::fixed(StdDuration::from_millis(1)).attempts(3))
             .build();
-        let config = StageConfig {
-            stage_id: StageId::new(),
-            name: "test".to_string(),
-            flow_name: "test".to_string(),
-            cycle_guard: None,
-            lineage: obzenflow_core::config::LineagePolicy::default(),
-            resolved_policies: Default::default(),
-        };
-        let control = Arc::new(ControlMiddlewareAggregator::new());
-        let error = match factory.create(&config, control) {
-            Ok(_) => panic!("retrying breaker must not materialize on a handler"),
-            Err(error) => error.to_string(),
-        };
         assert!(
-            error.contains("supported only on declared effects"),
-            "{error}"
+            !factory
+                .declaration()
+                .supports(MiddlewareSurfaceKind::Handler),
+            "a retrying breaker is effect-bound and must not expose a handler shell"
         );
     }
 

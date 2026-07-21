@@ -10,20 +10,17 @@
 //! strict replay of the same archive.
 
 use async_trait::async_trait;
-use obzenflow_adapters::middleware::control::ControlMiddlewareAggregator;
 use obzenflow_adapters::middleware::{
-    validate_attachment_request, ControlMiddlewareRole, EffectPolicyAttachment, EffectSurface,
-    EffectTypeKey, EffectUnitId, EventAwareEffectPolicy, Middleware, MiddlewareAttachmentRequest,
-    MiddlewareContext, MiddlewareDeclaration, MiddlewareDeclarationIndex, MiddlewareFactory,
-    MiddlewareFactoryError, MiddlewareFactoryResult, MiddlewareKind,
-    MiddlewareMaterializationContext, MiddlewareOrigin, MiddlewareOverrideKey,
-    MiddlewarePlanContribution, MiddlewareSurface, MiddlewareSurfaceAttachment,
+    validate_attachment_request, EffectPolicyAttachment, EffectSurface, EffectTypeKey,
+    EffectUnitId, EventAwareEffectPolicy, MiddlewareAttachmentRequest, MiddlewareContext,
+    MiddlewareDeclaration, MiddlewareDeclarationIndex, MiddlewareFactory, MiddlewareFactoryError,
+    MiddlewareFactoryResult, MiddlewareMaterializationContext, MiddlewareOrigin,
+    MiddlewareOverrideKey, MiddlewareSurface, MiddlewareSurfaceAttachment,
     MiddlewareSurfaceKind::Effect, MiddlewareSurfaceKind::SinkDelivery,
     MiddlewareSurfaceKind::SourcePoll, PolicyAdmission, ProtectedUnit, ProtectedUnitId,
     SinkAdmission, SinkDeliveryPolicyOutcome, SinkDeliverySurface, SinkDeliveryTarget,
     SinkDeliveryUnitId, SinkPolicy, SinkPolicyCtx, SourceAdmission, SourcePolicy, SourcePolicyCtx,
     SourcePollAttachment, SourcePollOutcome, SourcePollSurface, SourcePollUnitId,
-    TopologyMiddlewareConfigSlot,
 };
 use obzenflow_core::event::chain_event::{ChainEvent, ChainEventFactory};
 use obzenflow_core::event::{EffectFailureCode, EffectFailureSource, RetryDisposition};
@@ -94,30 +91,6 @@ impl MiddlewareFactory for HookProofFactory {
 
     fn override_key(&self) -> MiddlewareOverrideKey {
         MiddlewareOverrideKey::of::<HookProofFamily>("hook_proof_control")
-    }
-
-    fn control_role(&self) -> ControlMiddlewareRole {
-        ControlMiddlewareRole::None
-    }
-
-    fn kind(&self) -> MiddlewareKind {
-        MiddlewareKind::Policy
-    }
-
-    fn plan_contribution(&self) -> MiddlewarePlanContribution {
-        MiddlewarePlanContribution::None
-    }
-
-    fn topology_config_slot(&self) -> Option<TopologyMiddlewareConfigSlot> {
-        None
-    }
-
-    fn create(
-        &self,
-        _config: &StageConfig,
-        _control_middleware: Arc<ControlMiddlewareAggregator>,
-    ) -> MiddlewareFactoryResult<Box<dyn Middleware>> {
-        Err(MiddlewareFactoryError::not_hook_bound(self.label()))
     }
 
     fn declaration(&self) -> MiddlewareDeclaration {
@@ -591,7 +564,9 @@ fn hook_proof_factory_validates_surface_and_protected_unit_identity() {
         flow_name: "middleware_hook_binding_e2e".to_string(),
         cycle_guard: None,
         lineage: obzenflow_core::config::LineagePolicy::default(),
-        resolved_policies: Default::default(),
+        effective_config: std::sync::Arc::new(
+            obzenflow_runtime::runtime_config::FlowEffectiveConfig::default(),
+        ),
     };
     let surface = MiddlewareSurface::Effect(EffectSurface {
         stage_id: config.stage_id,

@@ -234,13 +234,11 @@ Minimal factory shape:
 
 ```rust
 use obzenflow_adapters::middleware::{
-    ControlMiddlewareRole, Middleware, MiddlewareDeclaration, MiddlewareFactory,
-    MiddlewareFactoryError, MiddlewareFactoryResult, MiddlewareKind,
-    MiddlewareMaterializationContext, MiddlewareOverrideKey,
-    MiddlewarePlanContribution, MiddlewareSurface, MiddlewareSurfaceAttachment,
-    MiddlewareSurfaceKind, PolicyAdmission, SourceAdmission, SinkAdmission,
+    MiddlewareAttachmentRequest, MiddlewareDeclaration, MiddlewareFactory,
+    MiddlewareFactoryError, MiddlewareFactoryResult,
+    MiddlewareMaterializationContext, MiddlewareOverrideKey, MiddlewareSurface,
+    MiddlewareSurfaceAttachment, MiddlewareSurfaceKind,
 };
-use std::sync::Arc;
 
 struct MyControlFamily;
 
@@ -253,26 +251,6 @@ impl MiddlewareFactory for MyControlFactory {
 
     fn override_key(&self) -> MiddlewareOverrideKey {
         MiddlewareOverrideKey::of::<MyControlFamily>("my_control")
-    }
-
-    fn control_role(&self) -> ControlMiddlewareRole {
-        ControlMiddlewareRole::None
-    }
-
-    fn kind(&self) -> MiddlewareKind {
-        MiddlewareKind::Policy
-    }
-
-    fn plan_contribution(&self) -> MiddlewarePlanContribution {
-        MiddlewarePlanContribution::None
-    }
-
-    fn create(
-        &self,
-        _config: &obzenflow_runtime::pipeline::config::StageConfig,
-        _control: Arc<obzenflow_adapters::middleware::control::ControlMiddlewareAggregator>,
-    ) -> MiddlewareFactoryResult<Box<dyn Middleware>> {
-        Err(MiddlewareFactoryError::not_hook_bound(self.label()))
     }
 
     fn declaration(&self) -> MiddlewareDeclaration {
@@ -288,7 +266,7 @@ impl MiddlewareFactory for MyControlFactory {
 
     fn materialize(
         &self,
-        request: obzenflow_adapters::middleware::MiddlewareAttachmentRequest<'_>,
+        request: MiddlewareAttachmentRequest<'_>,
         _ctx: &MiddlewareMaterializationContext<'_>,
     ) -> MiddlewareFactoryResult<MiddlewareSurfaceAttachment> {
         match request.surface {
@@ -316,10 +294,11 @@ impl MiddlewareFactory for MyControlFactory {
 
 Control policies live under `middleware::control::policy`. They are the
 authoring contract for middleware that controls a live I/O boundary;
-legacy handler-shell compatibility middleware still implements the generic
-`Middleware` trait under `middleware::handler`. Observe-only middleware uses the
-adapter observer authoring surface and the bounded neutral ports described
-above. Built-in control middleware lives
+there is no public generic handler-shell factory fallback. Two AI map-reduce
+adapters remain on an internal, sealed FLOWIP-128g migration route, which is not
+available to third-party factories. Observe-only middleware uses the adapter
+observer authoring surface and the bounded neutral ports described above.
+Built-in control middleware lives
 beside the policy contract under `middleware::control`, so the namespace reads
 as one control subsystem rather than a loose set of root modules.
 

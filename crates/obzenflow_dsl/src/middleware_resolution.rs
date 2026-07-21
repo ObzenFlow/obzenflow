@@ -9,7 +9,7 @@
 
 use indexmap::IndexMap;
 use obzenflow_adapters::middleware::{
-    ControlMiddlewareRole, MiddlewareFactory, MiddlewareOverrideKey, TopologyMiddlewareConfigSlot,
+    MiddlewareFactory, MiddlewareOverrideKey, TopologyMiddlewareConfigSlot,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -253,35 +253,13 @@ pub fn resolve_middleware(
 #[cfg(test)]
 mod view_tests {
     use super::*;
-    use obzenflow_adapters::middleware::control::ControlMiddlewareAggregator;
     use obzenflow_adapters::middleware::{
-        ControlMiddlewareRole, Middleware, MiddlewareAction, MiddlewareContext,
-        MiddlewareFactoryResult, MiddlewareHints, MiddlewarePlanContribution, MiddlewareSafety,
-        SourceMiddlewarePhase, TopologyMiddlewareConfigSlot,
+        MiddlewareAttachmentRequest, MiddlewareDeclaration, MiddlewareFactoryError,
+        MiddlewareFactoryResult, MiddlewareHints, MiddlewareMaterializationContext,
+        MiddlewareSafety, MiddlewareSurfaceAttachment, MiddlewareSurfaceKind,
+        TopologyMiddlewareConfigSlot,
     };
     use obzenflow_core::event::context::StageType;
-    use obzenflow_core::ChainEvent;
-    use obzenflow_runtime::pipeline::config::StageConfig;
-    use std::sync::Arc;
-
-    struct DummyMiddleware;
-    impl Middleware for DummyMiddleware {
-        fn label(&self) -> &'static str {
-            "dummy"
-        }
-
-        fn source_phase(&self) -> SourceMiddlewarePhase {
-            SourceMiddlewarePhase::Ordinary
-        }
-
-        fn pre_handle(
-            &self,
-            _event: &ChainEvent,
-            _ctx: &mut MiddlewareContext,
-        ) -> MiddlewareAction {
-            MiddlewareAction::Continue
-        }
-    }
 
     struct FamilyA;
     struct FamilyB;
@@ -290,8 +268,7 @@ mod view_tests {
     struct MockFactory {
         label: &'static str,
         key: MiddlewareOverrideKey,
-        control_role: ControlMiddlewareRole,
-        plan: MiddlewarePlanContribution,
+        defaults: Vec<obzenflow_runtime::runtime_config::DslConfigDefault>,
     }
 
     impl MiddlewareFactory for MockFactory {
@@ -303,24 +280,28 @@ mod view_tests {
             self.key
         }
 
-        fn control_role(&self) -> ControlMiddlewareRole {
-            self.control_role
+        fn declaration(&self) -> MiddlewareDeclaration {
+            MiddlewareDeclaration::observer(self.label, vec![MiddlewareSurfaceKind::Handler])
         }
 
-        fn plan_contribution(&self) -> MiddlewarePlanContribution {
-            self.plan.clone()
+        fn dsl_config_defaults(&self) -> Vec<obzenflow_runtime::runtime_config::DslConfigDefault> {
+            self.defaults.clone()
         }
 
         fn topology_config_slot(&self) -> Option<TopologyMiddlewareConfigSlot> {
             None
         }
 
-        fn create(
+        fn materialize(
             &self,
-            _config: &StageConfig,
-            _control_middleware: Arc<ControlMiddlewareAggregator>,
-        ) -> MiddlewareFactoryResult<Box<dyn Middleware>> {
-            Ok(Box::new(DummyMiddleware))
+            _request: MiddlewareAttachmentRequest<'_>,
+            context: &MiddlewareMaterializationContext<'_>,
+        ) -> MiddlewareFactoryResult<MiddlewareSurfaceAttachment> {
+            Err(MiddlewareFactoryError::materialization_failed(
+                self.label,
+                &context.config.name,
+                std::io::Error::other("resolution-only test factory"),
+            ))
         }
 
         fn supported_stage_types(&self) -> &[StageType] {
@@ -347,8 +328,10 @@ mod view_tests {
         Box::new(MockFactory {
             label,
             key: MiddlewareOverrideKey::of::<BreakerFamily>("circuit_breaker"),
-            control_role: ControlMiddlewareRole::None,
-            plan: MiddlewarePlanContribution::CircuitBreaker { threshold },
+            defaults: vec![obzenflow_runtime::runtime_config::DslConfigDefault {
+                key_path: obzenflow_runtime::runtime_config::CIRCUIT_BREAKER_THRESHOLD_KEY,
+                value: obzenflow_runtime::runtime_config::ConfigValue::U64(threshold),
+            }],
         })
     }
 
@@ -358,14 +341,12 @@ mod view_tests {
             Box::new(MockFactory {
                 label: "flow.a1",
                 key: MiddlewareOverrideKey::of::<FamilyA>("a"),
-                control_role: ControlMiddlewareRole::None,
-                plan: MiddlewarePlanContribution::None,
+                defaults: Vec::new(),
             }) as Box<dyn MiddlewareFactory>,
             Box::new(MockFactory {
                 label: "flow.a2",
                 key: MiddlewareOverrideKey::of::<FamilyA>("a"),
-                control_role: ControlMiddlewareRole::None,
-                plan: MiddlewarePlanContribution::None,
+                defaults: Vec::new(),
             }) as Box<dyn MiddlewareFactory>,
         ];
 
@@ -382,14 +363,12 @@ mod view_tests {
             Box::new(MockFactory {
                 label: "stage.b1",
                 key: MiddlewareOverrideKey::of::<FamilyB>("b"),
-                control_role: ControlMiddlewareRole::None,
-                plan: MiddlewarePlanContribution::None,
+                defaults: Vec::new(),
             }) as Box<dyn MiddlewareFactory>,
             Box::new(MockFactory {
                 label: "stage.b2",
                 key: MiddlewareOverrideKey::of::<FamilyB>("b"),
-                control_role: ControlMiddlewareRole::None,
-                plan: MiddlewarePlanContribution::None,
+                defaults: Vec::new(),
             }) as Box<dyn MiddlewareFactory>,
         ];
 
@@ -404,7 +383,7 @@ mod view_tests {
     }
 
     #[test]
-    fn plan_contribution_is_extracted_from_resolved_view() {
+    fn dsl_defaults_are_extracted_from_resolved_view() {
         // Label intentionally does NOT contain the family name so this would
         // fail under string dispatch.
         let flow = vec![breaker_factory("opaque.cb", 10)];
@@ -412,9 +391,12 @@ mod view_tests {
 
         let thresholds: Vec<_> = resolved
             .iter()
-            .filter_map(|f| match f.plan_contribution() {
-                MiddlewarePlanContribution::CircuitBreaker { threshold } => Some(threshold),
-                _ => None,
+            .flat_map(|f| f.dsl_config_defaults())
+            .filter_map(|default| {
+                (default.key_path
+                    == obzenflow_runtime::runtime_config::CIRCUIT_BREAKER_THRESHOLD_KEY)
+                    .then(|| default.value.as_u64())
+                    .flatten()
             })
             .collect();
 
@@ -422,7 +404,7 @@ mod view_tests {
     }
 
     #[test]
-    fn plan_contribution_stage_override_wins_over_flow_level() {
+    fn dsl_default_stage_override_wins_over_flow_level() {
         let flow = vec![breaker_factory("flow.cb", 10)];
         let stage = vec![breaker_factory("stage.renamed", 5)];
 
@@ -430,10 +412,7 @@ mod view_tests {
         assert_eq!(resolved.len(), 1);
         assert_eq!(resolved[0].label(), "stage.renamed");
 
-        match resolved[0].plan_contribution() {
-            MiddlewarePlanContribution::CircuitBreaker { threshold } => assert_eq!(threshold, 5),
-            other => panic!("expected CircuitBreaker plan contribution, got {other:?}"),
-        }
+        assert_eq!(resolved[0].dsl_config_defaults()[0].value.as_u64(), Some(5));
     }
 
     #[test]
@@ -450,18 +429,18 @@ mod view_tests {
         // Stage A sees its override.
         assert_eq!(resolved_a.len(), 1);
         assert_eq!(resolved_a[0].label(), "stage_a.cb");
-        match resolved_a[0].plan_contribution() {
-            MiddlewarePlanContribution::CircuitBreaker { threshold } => assert_eq!(threshold, 5),
-            other => panic!("expected CircuitBreaker plan contribution, got {other:?}"),
-        }
+        assert_eq!(
+            resolved_a[0].dsl_config_defaults()[0].value.as_u64(),
+            Some(5)
+        );
 
         // Stage B is untouched: the flow-level contributor resolves independently for it.
         assert_eq!(resolved_b.len(), 1);
         assert_eq!(resolved_b[0].label(), "flow.cb");
-        match resolved_b[0].plan_contribution() {
-            MiddlewarePlanContribution::CircuitBreaker { threshold } => assert_eq!(threshold, 10),
-            other => panic!("expected CircuitBreaker plan contribution, got {other:?}"),
-        }
+        assert_eq!(
+            resolved_b[0].dsl_config_defaults()[0].value.as_u64(),
+            Some(10)
+        );
     }
 
     #[test]
@@ -469,14 +448,12 @@ mod view_tests {
         let flow = vec![Box::new(MockFactory {
             label: "flow.a",
             key: MiddlewareOverrideKey::of::<FamilyA>("flow.family"),
-            control_role: ControlMiddlewareRole::None,
-            plan: MiddlewarePlanContribution::None,
+            defaults: Vec::new(),
         }) as Box<dyn MiddlewareFactory>];
         let stage = vec![Box::new(MockFactory {
             label: "stage.a",
             key: MiddlewareOverrideKey::of::<FamilyA>("stage.family"),
-            control_role: ControlMiddlewareRole::None,
-            plan: MiddlewarePlanContribution::None,
+            defaults: Vec::new(),
         }) as Box<dyn MiddlewareFactory>];
 
         let resolved = resolve_middleware_view(&flow, &stage, "stage").expect("resolve view");
@@ -502,10 +479,9 @@ fn check_override_safety(
     let flow_label = flow_mw.label();
     let stage_label = stage_mw.label();
 
-    let role = stage_mw.control_role();
     let stage_hints = stage_mw.hints();
 
-    if role == ControlMiddlewareRole::RateLimiter || stage_hints.rate_limits {
+    if stage_hints.rate_limits {
         return Some(ConfigWarning {
             level: WarnLevel::Medium,
             message: format!(

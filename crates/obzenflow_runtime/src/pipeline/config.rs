@@ -9,6 +9,7 @@ use crate::stages::common::handlers::{
 };
 use obzenflow_core::{SccId, StageId};
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use super::MaxIterations;
 
@@ -54,17 +55,6 @@ pub enum StageHandlerType {
     // TODO: FLOWIP-080 will fix Stateful with proper type erasure for associated types
 }
 
-/// Build-resolved policy tunables for one stage (FLOWIP-010): the
-/// `effects.*` ladder winners, consumed by the breaker and limiter
-/// factories at `create`. `None` means no source supplied a value, so the
-/// factory's DSL-declared parameter stands (it lost no contest).
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
-pub struct ResolvedStagePolicies {
-    pub breaker_threshold: Option<u64>,
-    pub limiter_events_per_second: Option<f64>,
-    pub limiter_burst_capacity: Option<f64>,
-}
-
 /// Stage configuration data - metadata about the stage
 pub struct StageConfig {
     pub stage_id: StageId,
@@ -74,8 +64,9 @@ pub struct StageConfig {
     /// FLOWIP-010 §7: build-resolved lineage policy; the existing path into
     /// middleware construction (`MiddlewareFactory::create` receives this).
     pub lineage: obzenflow_core::config::LineagePolicy,
-    /// FLOWIP-010: build-resolved `effects.*` winners for this stage.
-    pub resolved_policies: ResolvedStagePolicies,
+    /// Immutable per-flow effective config. Middleware receives only an
+    /// exact-point view derived from this carrier at materialisation.
+    pub effective_config: Arc<crate::runtime_config::FlowEffectiveConfig>,
 }
 
 // TODO: Observers need redesign for FLOWIP-084

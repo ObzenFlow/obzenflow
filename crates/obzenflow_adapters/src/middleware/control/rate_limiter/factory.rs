@@ -8,8 +8,7 @@
 //! are the sole production placement authority for the hook-bound rate limiter:
 //! the binder picks the concrete live-I/O surface per call site and routes it
 //! through `materialize`, which builds the matching [`super::hook_adapters`]
-//! policy. The legacy `create`/`create_for_effect`/`register_source_policy`
-//! routes fail closed (FLOWIP-115d AC45/AC46).
+//! policy. No generic middleware-chain creation route remains.
 
 use super::config::{
     validated_rate_limiter_config, RateLimiterConfigError, ValidatedRateLimiterConfig,
@@ -20,17 +19,15 @@ use super::hook_adapters::{
     SourceRateLimitPosition,
 };
 use super::{RateLimiterFamily, RateLimiterMiddleware};
-use crate::middleware::control::ControlMiddlewareAggregator;
 use crate::middleware::{
-    validate_attachment_request, ControlMiddlewareRole, EffectPolicyAttachment, Middleware,
-    MiddlewareAttachmentRequest, MiddlewareDeclaration, MiddlewareFactory, MiddlewareFactoryError,
-    MiddlewareMaterializationContext, MiddlewareOverrideKey, MiddlewarePlanContribution,
-    MiddlewareSafety, MiddlewareSurface, MiddlewareSurfaceAttachment, MiddlewareSurfaceKind,
-    SinkPolicy, SourcePolicy, SourcePollAttachment, TopologyMiddlewareConfigSlot,
+    validate_attachment_request, EffectPolicyAttachment, MiddlewareAttachmentRequest,
+    MiddlewareDeclaration, MiddlewareFactory, MiddlewareFactoryError,
+    MiddlewareMaterializationContext, MiddlewareOverrideKey, MiddlewareSafety, MiddlewareSurface,
+    MiddlewareSurfaceAttachment, MiddlewareSurfaceKind, SinkPolicy, SourcePolicy,
+    SourcePollAttachment, TopologyMiddlewareConfigSlot,
 };
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::ingress::IngressBoundaryMiddleware;
-use obzenflow_runtime::pipeline::config::StageConfig;
 use std::sync::Arc;
 
 /// Builder for constructing rate limiter middleware factories.
@@ -145,23 +142,22 @@ impl MiddlewareFactory for RateLimiterFactory {
         MiddlewareOverrideKey::of::<RateLimiterFamily>("rate_limiter")
     }
 
-    fn control_role(&self) -> ControlMiddlewareRole {
-        // FLOWIP-115d (AC45): placement is carrier-driven; the hook-bound rate
-        // limiter no longer routes through the legacy role. Topology and
-        // instrumentation metadata use the role-independent `topology_config_slot`
-        // signal instead.
-        ControlMiddlewareRole::None
-    }
-
-    fn kind(&self) -> crate::middleware::MiddlewareKind {
-        crate::middleware::MiddlewareKind::Policy
-    }
-
-    fn plan_contribution(&self) -> MiddlewarePlanContribution {
-        MiddlewarePlanContribution::RateLimiter {
-            events_per_second: self.events_per_second,
-            burst_capacity: self.burst_capacity,
+    fn dsl_config_defaults(&self) -> Vec<obzenflow_runtime::runtime_config::DslConfigDefault> {
+        use obzenflow_runtime::runtime_config::{
+            ConfigValue, DslConfigDefault, RATE_LIMITER_BURST_CAPACITY_KEY,
+            RATE_LIMITER_EVENTS_PER_SECOND_KEY,
+        };
+        let mut defaults = vec![DslConfigDefault {
+            key_path: RATE_LIMITER_EVENTS_PER_SECOND_KEY,
+            value: ConfigValue::F64(self.events_per_second),
+        }];
+        if let Some(burst_capacity) = self.burst_capacity {
+            defaults.push(DslConfigDefault {
+                key_path: RATE_LIMITER_BURST_CAPACITY_KEY,
+                value: ConfigValue::F64(burst_capacity),
+            });
         }
+        defaults
     }
 
     fn topology_config_slot(&self) -> Option<TopologyMiddlewareConfigSlot> {
@@ -199,20 +195,31 @@ impl MiddlewareFactory for RateLimiterFactory {
                 )
             })?;
 
-        // FLOWIP-010: build-resolved `effects.rate_limiter.*` winners
-        // override the DSL-declared parameters (the ladder already ranked
-        // the sources; absence means the DSL values stand).
-        let policies = context.config.resolved_policies;
-        let validated = validated_rate_limiter_config(
-            policies
-                .limiter_events_per_second
-                .unwrap_or(self.events_per_second),
-            policies.limiter_burst_capacity.or(self.burst_capacity),
-            self.cost_per_event,
-        )
-        .map_err(|err| {
-            MiddlewareFactoryError::invalid_configuration(self.label(), &context.config.name, err)
-        })?;
+        let config_view = context.config_view(request.protected_unit);
+        let events_per_second = config_view
+            .get(obzenflow_runtime::runtime_config::RATE_LIMITER_EVENTS_PER_SECOND_KEY)
+            .and_then(|resolved| resolved.value.as_f64())
+            .ok_or_else(|| {
+                MiddlewareFactoryError::invalid_configuration(
+                    self.label(),
+                    &context.config.name,
+                    std::io::Error::other(
+                        "resolved rate-limiter events_per_second is missing at the protected unit",
+                    ),
+                )
+            })?;
+        let burst_capacity = config_view
+            .get(obzenflow_runtime::runtime_config::RATE_LIMITER_BURST_CAPACITY_KEY)
+            .and_then(|resolved| resolved.value.as_f64());
+        let validated =
+            validated_rate_limiter_config(events_per_second, burst_capacity, self.cost_per_event)
+                .map_err(|err| {
+                MiddlewareFactoryError::invalid_configuration(
+                    self.label(),
+                    &context.config.name,
+                    err,
+                )
+            })?;
 
         match request.surface {
             MiddlewareSurface::SourcePoll(_) => {
@@ -281,49 +288,6 @@ impl MiddlewareFactory for RateLimiterFactory {
         }
     }
 
-    fn create(
-        &self,
-        config: &StageConfig,
-        control_middleware: Arc<ControlMiddlewareAggregator>,
-    ) -> crate::middleware::MiddlewareFactoryResult<Box<dyn Middleware>> {
-        let _ = control_middleware;
-        Err(MiddlewareFactoryError::materialization_failed(
-            self.label(),
-            &config.name,
-            std::io::Error::other(
-                "rate limiter is hook-bound and must be placed through materialize() on \
-                 SourcePoll, Effect, SinkDelivery, or Ingress (FLOWIP-115d)",
-            ),
-        ))
-    }
-
-    fn create_for_effect(
-        &self,
-        _config: &StageConfig,
-        _control_middleware: Arc<ControlMiddlewareAggregator>,
-        _effect_type: &str,
-    ) -> crate::middleware::MiddlewareFactoryResult<Box<dyn Middleware>> {
-        // FLOWIP-115d legacy-route containment (AC46): the hook-bound rate limiter
-        // is placed on the Effect surface through `materialize`; the binder routes
-        // a control middleware that declares the Effect surface there, never here.
-        // Fail closed so a direct caller cannot construct a second, off-carrier
-        // effect limiter with its own bucket.
-        Err(MiddlewareFactoryError::not_hook_bound(self.label()))
-    }
-
-    fn register_source_policy(
-        &self,
-        _config: &StageConfig,
-        _stage_type: StageType,
-        _control_middleware: &Arc<ControlMiddlewareAggregator>,
-    ) -> crate::middleware::MiddlewareFactoryResult<()> {
-        // FLOWIP-115d legacy-route containment (AC46): source-poll rate limiting
-        // is placed through `materialize` onto the SourcePoll surface and
-        // registered as a ready `SourcePolicy`. The binder never routes the
-        // hook-bound rate limiter through this legacy factory method. Fail closed.
-        Err(MiddlewareFactoryError::not_hook_bound(self.label()))
-    }
-
     fn supported_stage_types(&self) -> &[StageType] {
         // Rate limiting makes sense for all stage types, including joins where the
         // single stage-local bucket is shared across both join inputs (FLOWIP-114m).
@@ -388,71 +352,54 @@ pub fn rate_limit_with_burst(events_per_second: f64, burst: f64) -> Box<dyn Midd
 #[cfg(test)]
 mod tests {
     use super::*;
-    use obzenflow_core::StageId;
+    use crate::middleware::control::ControlMiddlewareAggregator;
+    use obzenflow_core::{StageId, StageKey};
+    use obzenflow_runtime::pipeline::config::StageConfig;
+    use obzenflow_runtime::runtime_config::{
+        materialize_flow_config, DslCandidates, FlowResolutionContext, ResolvedRuntimeConfig,
+    };
     use serde_json::json;
+    use std::collections::BTreeSet;
 
-    fn test_stage_config(name: &str) -> StageConfig {
+    fn test_stage_config(name: &str, factory: &dyn MiddlewareFactory) -> StageConfig {
+        let stage = StageKey::from(name);
+        let mut dsl = DslCandidates::default();
+        for default in factory.dsl_config_defaults() {
+            dsl.declare(
+                default.key_path,
+                obzenflow_core::config::ConfigScope::stage(stage.clone()),
+                default.value,
+            );
+        }
+        let effective_config = materialize_flow_config(
+            &ResolvedRuntimeConfig::builtin_defaults(),
+            FlowResolutionContext {
+                flow_name: "test_flow".to_string(),
+                stages: BTreeSet::from([stage]),
+                edges: BTreeSet::new(),
+                declared_effects: Default::default(),
+                dsl,
+            },
+        )
+        .expect("rate-limiter defaults should resolve for the test stage");
+
         StageConfig {
             stage_id: StageId::new(),
             name: name.to_string(),
             flow_name: "test_flow".to_string(),
             cycle_guard: None,
             lineage: obzenflow_core::config::LineagePolicy::default(),
-            resolved_policies: Default::default(),
-        }
-    }
-
-    fn materialize_err(factory: RateLimiterFactory) -> MiddlewareFactoryError {
-        use crate::middleware::{
-            MiddlewareDeclarationIndex, MiddlewareOrigin, ProtectedUnit, ProtectedUnitId,
-            SourcePollSurface, SourcePollUnitId,
-        };
-
-        let config = test_stage_config("test_stage");
-        let control = Arc::new(ControlMiddlewareAggregator::new());
-        let surface = MiddlewareSurface::SourcePoll(SourcePollSurface {
-            stage_id: config.stage_id,
-        });
-        let unit = ProtectedUnitId {
-            stage_id: config.stage_id,
-            unit: ProtectedUnit::SourcePoll(SourcePollUnitId),
-        };
-        let origin = MiddlewareOrigin::Stage;
-        let request = MiddlewareAttachmentRequest {
-            surface: &surface,
-            protected_unit: &unit,
-            origin: &origin,
-            declaration_index: MiddlewareDeclarationIndex::resolved(0),
-        };
-        let ctx = MiddlewareMaterializationContext {
-            config: &config,
-            control_middleware: &control,
-            stage_type: StageType::InfiniteSource,
-        };
-
-        match factory.materialize(request, &ctx) {
-            Ok(_) => {
-                panic!("invalid rate limiter configuration should fail during materialisation")
-            }
-            Err(err) => err,
+            effective_config: Arc::new(effective_config),
         }
     }
 
     #[test]
-    fn rate_limiter_direct_create_fails_closed() {
+    fn rate_limiter_is_exclusively_hook_bound() {
         let factory = RateLimiterFactory::new(10.0);
-        let result = factory.create(
-            &test_stage_config("test_stage"),
-            Arc::new(ControlMiddlewareAggregator::new()),
-        );
-
-        match result {
-            Ok(_) => panic!("direct rate limiter create() should fail closed"),
-            Err(err) => assert!(
-                err.to_string().contains("hook-bound"),
-                "unexpected error: {err}"
-            ),
-        }
+        let declaration = factory.declaration();
+        assert!(declaration.is_control());
+        assert!(!declaration.surfaces.is_empty());
+        assert!(!declaration.is_flowip_128g_legacy_shell());
     }
 
     #[test]
@@ -479,15 +426,13 @@ mod tests {
     }
 
     #[test]
-    fn test_rate_limiter_does_not_register_signal_control_point() {
+    fn test_rate_limiter_declares_only_live_io_surfaces() {
         let factory = RateLimiterFactory::new(100.0).with_burst(500.0);
-
-        // FLOWIP-115c: the dead `create_control_strategy` lane is gone. A rate
-        // limiter declares no inbound-signal control point.
-        assert!(
-            !factory.control_points().signal,
-            "Rate limiter should not register a signal control point"
-        );
+        let declaration = factory.declaration();
+        assert!(declaration.is_control());
+        assert!(!declaration
+            .surfaces
+            .contains(&MiddlewareSurfaceKind::Handler));
     }
 
     #[test]
@@ -501,6 +446,26 @@ mod tests {
         assert_eq!(factory.events_per_second, 100.0);
         assert_eq!(factory.burst_capacity, Some(500.0));
         assert_eq!(factory.cost_per_event, 2.0);
+    }
+
+    #[test]
+    fn dsl_defaults_preserve_optional_burst_semantics() {
+        use obzenflow_runtime::runtime_config::{
+            RATE_LIMITER_BURST_CAPACITY_KEY, RATE_LIMITER_EVENTS_PER_SECOND_KEY,
+        };
+
+        let implicit = RateLimiterFactory::new(10.0).dsl_config_defaults();
+        assert_eq!(implicit.len(), 1);
+        assert_eq!(implicit[0].key_path, RATE_LIMITER_EVENTS_PER_SECOND_KEY);
+
+        let explicit = RateLimiterFactory::new(10.0)
+            .with_burst(25.0)
+            .dsl_config_defaults();
+        assert_eq!(explicit.len(), 2);
+        assert!(explicit.iter().any(|default| {
+            default.key_path == RATE_LIMITER_BURST_CAPACITY_KEY
+                && default.value.as_f64() == Some(25.0)
+        }));
     }
 
     #[test]
@@ -528,62 +493,48 @@ mod tests {
 
     #[test]
     fn test_rate_limiter_rejects_zero_rate() {
-        let err = materialize_err(RateLimiterFactory::new(0.0));
-        assert!(matches!(
-            err,
-            MiddlewareFactoryError::InvalidConfiguration { .. }
-        ));
+        let err = RateLimiterFactory::new(0.0).validated_config().unwrap_err();
         assert!(err.to_string().contains("events_per_second"));
     }
 
     #[test]
     fn test_rate_limiter_rejects_negative_rate() {
-        let err = materialize_err(RateLimiterFactory::new(-1.0));
-        assert!(matches!(
-            err,
-            MiddlewareFactoryError::InvalidConfiguration { .. }
-        ));
+        let err = RateLimiterFactory::new(-1.0)
+            .validated_config()
+            .unwrap_err();
         assert!(err.to_string().contains("events_per_second"));
     }
 
     #[test]
     fn test_rate_limiter_rejects_zero_cost() {
-        let err = materialize_err(RateLimiterFactory::new(10.0).with_cost_per_event(0.0));
-        assert!(matches!(
-            err,
-            MiddlewareFactoryError::InvalidConfiguration { .. }
-        ));
+        let err = RateLimiterFactory::new(10.0)
+            .with_cost_per_event(0.0)
+            .validated_config()
+            .unwrap_err();
         assert!(err.to_string().contains("cost_per_event"));
     }
 
     #[test]
     fn test_rate_limiter_rejects_non_finite_values() {
-        let inf_err = materialize_err(RateLimiterFactory::new(f64::INFINITY));
-        assert!(matches!(
-            inf_err,
-            MiddlewareFactoryError::InvalidConfiguration { .. }
-        ));
+        let inf_err = RateLimiterFactory::new(f64::INFINITY)
+            .validated_config()
+            .unwrap_err();
         assert!(inf_err.to_string().contains("events_per_second"));
 
-        let nan_err = materialize_err(RateLimiterFactory::new(10.0).with_cost_per_event(f64::NAN));
-        assert!(matches!(
-            nan_err,
-            MiddlewareFactoryError::InvalidConfiguration { .. }
-        ));
+        let nan_err = RateLimiterFactory::new(10.0)
+            .with_cost_per_event(f64::NAN)
+            .validated_config()
+            .unwrap_err();
         assert!(nan_err.to_string().contains("cost_per_event"));
     }
 
     #[test]
     fn test_rate_limiter_rejects_explicit_burst_smaller_than_cost() {
-        let err = materialize_err(
-            RateLimiterFactory::new(10.0)
-                .with_burst(2.0)
-                .with_cost_per_event(5.0),
-        );
-        assert!(matches!(
-            err,
-            MiddlewareFactoryError::InvalidConfiguration { .. }
-        ));
+        let err = RateLimiterFactory::new(10.0)
+            .with_burst(2.0)
+            .with_cost_per_event(5.0)
+            .validated_config()
+            .unwrap_err();
         assert!(err.to_string().contains("burst_capacity"));
         assert!(err.to_string().contains("cost_per_event"));
     }
@@ -627,8 +578,9 @@ mod tests {
         };
         use obzenflow_core::StageKey;
 
+        let factory = RateLimiterFactory::new(1.0);
         let control = Arc::new(ControlMiddlewareAggregator::new());
-        let config = test_stage_config("accounts");
+        let config = test_stage_config("accounts", &factory);
         let stage_key = StageKey("accounts".to_string());
         let target = HostedIngressTargetKey {
             surface: IngressKey("/api/bank/accounts".to_string()),
@@ -662,7 +614,6 @@ mod tests {
         };
 
         // Burst capacity 1 (events_per_second defaults the burst), 1 event/sec.
-        let factory = RateLimiterFactory::new(1.0);
         let boundary = match factory
             .materialize(request, &ctx)
             .expect("ingress materialize")

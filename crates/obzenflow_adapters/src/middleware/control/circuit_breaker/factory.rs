@@ -22,10 +22,9 @@ use super::{
 };
 use crate::middleware::control::ControlMiddlewareAggregator;
 use crate::middleware::{
-    validate_attachment_request, ControlMiddlewareRole, EffectTypeKey, Middleware,
-    MiddlewareAttachmentRequest, MiddlewareDeclaration, MiddlewareFactory, MiddlewareFactoryError,
-    MiddlewareHints, MiddlewareMaterializationContext, MiddlewareOverrideKey,
-    MiddlewarePlanContribution, MiddlewareSafety, MiddlewareSurface, MiddlewareSurfaceAttachment,
+    validate_attachment_request, EffectTypeKey, MiddlewareAttachmentRequest, MiddlewareDeclaration,
+    MiddlewareFactory, MiddlewareFactoryError, MiddlewareHints, MiddlewareMaterializationContext,
+    MiddlewareOverrideKey, MiddlewareSafety, MiddlewareSurface, MiddlewareSurfaceAttachment,
     MiddlewareSurfaceKind, SinkPolicy, SourcePolicy, SourcePollAttachment,
     TopologyMiddlewareConfigSlot,
 };
@@ -490,14 +489,7 @@ impl CircuitBreakerFactory {
         control_middleware: std::sync::Arc<ControlMiddlewareAggregator>,
         effect_type: Option<EffectTypeKey>,
     ) -> crate::middleware::MiddlewareFactoryResult<CircuitBreakerMiddleware> {
-        // FLOWIP-010: the build-resolved `effects.circuit_breaker.threshold`
-        // winner overrides the DSL-declared parameter (the ladder already
-        // ranked the sources; absence means the DSL value stands).
-        let effective_threshold = config
-            .resolved_policies
-            .breaker_threshold
-            .map(|t| t as usize)
-            .unwrap_or(self.threshold);
+        let effective_threshold = self.threshold;
         let validated_threshold = u32::try_from(effective_threshold)
             .ok()
             .and_then(std::num::NonZeroU32::new)
@@ -640,22 +632,6 @@ impl CircuitBreakerFactory {
 
         Ok(middleware)
     }
-
-    /// Box the breaker middleware for the per-event chain (effect and handler
-    /// paths). FLOWIP-115a sources build the same instance as an `Arc` via
-    /// [`build_middleware_keyed`] and drive it through the runtime control ports.
-    fn create_keyed(
-        &self,
-        config: &StageConfig,
-        control_middleware: std::sync::Arc<ControlMiddlewareAggregator>,
-        effect_type: Option<EffectTypeKey>,
-    ) -> crate::middleware::MiddlewareFactoryResult<Box<dyn Middleware>> {
-        Ok(Box::new(self.build_middleware_keyed(
-            config,
-            control_middleware,
-            effect_type,
-        )?))
-    }
 }
 
 impl MiddlewareFactory for CircuitBreakerFactory {
@@ -667,70 +643,15 @@ impl MiddlewareFactory for CircuitBreakerFactory {
         MiddlewareOverrideKey::of::<CircuitBreakerFamily>("circuit_breaker")
     }
 
-    fn control_role(&self) -> ControlMiddlewareRole {
-        ControlMiddlewareRole::None
-    }
-
-    fn kind(&self) -> crate::middleware::MiddlewareKind {
-        crate::middleware::MiddlewareKind::Policy
-    }
-
-    fn plan_contribution(&self) -> MiddlewarePlanContribution {
-        MiddlewarePlanContribution::CircuitBreaker {
-            threshold: self.threshold as u64,
-        }
+    fn dsl_config_defaults(&self) -> Vec<obzenflow_runtime::runtime_config::DslConfigDefault> {
+        vec![obzenflow_runtime::runtime_config::DslConfigDefault {
+            key_path: obzenflow_runtime::runtime_config::CIRCUIT_BREAKER_THRESHOLD_KEY,
+            value: obzenflow_runtime::runtime_config::ConfigValue::U64(self.threshold as u64),
+        }]
     }
 
     fn topology_config_slot(&self) -> Option<TopologyMiddlewareConfigSlot> {
         Some(TopologyMiddlewareConfigSlot::CircuitBreaker)
-    }
-
-    fn create(
-        &self,
-        config: &StageConfig,
-        control_middleware: std::sync::Arc<ControlMiddlewareAggregator>,
-    ) -> crate::middleware::MiddlewareFactoryResult<Box<dyn Middleware>> {
-        if self.retry_policy.is_some() {
-            return Err(MiddlewareFactoryError::invalid_configuration(
-                self.label(),
-                &config.name,
-                std::io::Error::other(
-                    "circuit-breaker retry is supported only on declared effects",
-                ),
-            ));
-        }
-        self.create_keyed(config, control_middleware, None)
-    }
-
-    fn create_for_effect(
-        &self,
-        _config: &StageConfig,
-        _control_middleware: std::sync::Arc<ControlMiddlewareAggregator>,
-        _effect_type: &str,
-    ) -> crate::middleware::MiddlewareFactoryResult<Box<dyn Middleware>> {
-        // FLOWIP-115b legacy-route containment: the hook-bound breaker is placed
-        // on the Effect surface through `materialize`, and the binder routes a
-        // control middleware that declares the Effect surface there, never here.
-        // Fail closed so a direct caller cannot construct a second, off-carrier
-        // effect breaker with its own state authority. `create` (the
-        // FLOWIP-128b-deprecated handler shell for non-boundary stages) stays
-        // until FLOWIP-115g retires the scaffolding.
-        Err(MiddlewareFactoryError::not_hook_bound(self.label()))
-    }
-
-    fn register_source_policy(
-        &self,
-        _config: &StageConfig,
-        _stage_type: obzenflow_core::event::context::StageType,
-        _control_middleware: &std::sync::Arc<ControlMiddlewareAggregator>,
-    ) -> crate::middleware::MiddlewareFactoryResult<()> {
-        // FLOWIP-115b legacy-route containment: the hook-bound breaker is placed
-        // on the SourcePoll surface through `materialize`, then registered with
-        // the aggregator as a ready `SourcePolicy`. The binder never routes the
-        // breaker through this legacy factory method (and AC59 already fails the
-        // source role path closed). Fail closed so a direct caller cannot build a
-        // second source breaker off the carrier; FLOWIP-115g removes the method.
-        Err(MiddlewareFactoryError::not_hook_bound(self.label()))
     }
 
     fn declaration(&self) -> MiddlewareDeclaration {
@@ -760,6 +681,20 @@ impl MiddlewareFactory for CircuitBreakerFactory {
                     self.label(),
                     &context.config.name,
                     err,
+                )
+            })?;
+
+        let config_view = context.config_view(request.protected_unit);
+        let effective_threshold = config_view
+            .get(obzenflow_runtime::runtime_config::CIRCUIT_BREAKER_THRESHOLD_KEY)
+            .and_then(|resolved| resolved.value.as_u64())
+            .ok_or_else(|| {
+                MiddlewareFactoryError::invalid_configuration(
+                    self.label(),
+                    &context.config.name,
+                    std::io::Error::other(
+                        "resolved circuit-breaker threshold is missing at the protected unit",
+                    ),
                 )
             })?;
 
@@ -793,13 +728,38 @@ impl MiddlewareFactory for CircuitBreakerFactory {
             }
         }
 
+        let effective_threshold = usize::try_from(effective_threshold).map_err(|_| {
+            MiddlewareFactoryError::invalid_configuration(
+                self.label(),
+                &context.config.name,
+                std::io::Error::other(
+                    "resolved circuit-breaker threshold exceeds this platform's range",
+                ),
+            )
+        })?;
+
+        let materialized = CircuitBreakerFactory {
+            threshold: effective_threshold,
+            cooldown: self.cooldown,
+            fallback: self.fallback.clone(),
+            typed_outcome: self.typed_outcome.clone(),
+            failure_classification_classifier: self.failure_classification_classifier.clone(),
+            failure_mode: self.failure_mode.clone(),
+            open_policy: self.open_policy.clone(),
+            half_open_policy: self.half_open_policy.clone(),
+            unknown_error_kind_policy: self.unknown_error_kind_policy,
+            retry_policy: self.retry_policy.clone(),
+            retry_limits: self.retry_limits.clone(),
+            failure_classification_policy: self.failure_classification_policy.clone(),
+        };
+
         match request.surface {
             MiddlewareSurface::SourcePoll(_) => {
                 // Build one breaker (registering its state view and snapshotter),
                 // then return its source policy plus the completion companion
                 // that reads the same view, so completion and the boundary share
                 // one state authority (FLOWIP-115b AC26).
-                let middleware = self.build_middleware_keyed(
+                let middleware = materialized.build_middleware_keyed(
                     context.config,
                     context.control_middleware.clone(),
                     None,
@@ -825,7 +785,7 @@ impl MiddlewareFactory for CircuitBreakerFactory {
                 // registering under the per-effect key for metrics. The breaker
                 // is an event-aware effect policy because breaker fallback and
                 // classification derive facts from the parent event.
-                let middleware = self.build_middleware_keyed(
+                let middleware = materialized.build_middleware_keyed(
                     context.config,
                     context.control_middleware.clone(),
                     Some(effect_surface.effect_type.clone()),
@@ -839,7 +799,7 @@ impl MiddlewareFactory for CircuitBreakerFactory {
             MiddlewareSurface::SinkDelivery(_) => {
                 // One breaker guards the sink stage's delivery unit, registered
                 // stage-level. It fails fast when open via `CircuitBreakerSinkPolicy`.
-                let middleware = self.build_middleware_keyed(
+                let middleware = materialized.build_middleware_keyed(
                     context.config,
                     context.control_middleware.clone(),
                     None,
@@ -966,21 +926,48 @@ mod tests {
     use crate::middleware::control::ControlMiddlewareAggregator;
     use crate::middleware::{
         EffectPolicyAttachment, EffectSurface, EffectUnitId, MiddlewareAttachmentRequest,
-        MiddlewareDeclarationIndex, MiddlewareKind, MiddlewareOrigin, ProtectedUnit,
-        ProtectedUnitId,
+        MiddlewareDeclarationIndex, MiddlewareOrigin, ProtectedUnit, ProtectedUnitId,
     };
     use obzenflow_core::event::context::StageType;
-    use obzenflow_core::StageId;
+    use obzenflow_core::event::EffectType;
+    use obzenflow_core::{StageId, StageKey};
     use obzenflow_runtime::effects::EffectSafety;
+    use obzenflow_runtime::runtime_config::{
+        materialize_flow_config, DslCandidates, FlowResolutionContext, ResolvedRuntimeConfig,
+    };
+    use std::collections::{BTreeMap, BTreeSet};
 
-    fn test_stage_config() -> StageConfig {
+    fn test_stage_config(factory: &dyn MiddlewareFactory) -> StageConfig {
+        let stage = StageKey::from("breaker_factory_test");
+        let effect_type = EffectType::from("effect.retry");
+        let mut dsl = DslCandidates::default();
+        for default in factory.dsl_config_defaults() {
+            dsl.declare_for_effect(
+                default.key_path,
+                stage.clone(),
+                effect_type.clone(),
+                default.value,
+            );
+        }
+        let effective_config = materialize_flow_config(
+            &ResolvedRuntimeConfig::builtin_defaults(),
+            FlowResolutionContext {
+                flow_name: "breaker_factory_test_flow".to_string(),
+                stages: BTreeSet::from([stage.clone()]),
+                edges: BTreeSet::new(),
+                declared_effects: BTreeMap::from([(stage, BTreeSet::from([effect_type]))]),
+                dsl,
+            },
+        )
+        .expect("breaker defaults should resolve for the test effect");
+
         StageConfig {
             stage_id: StageId::new(),
             name: "breaker_factory_test".to_string(),
             flow_name: "breaker_factory_test_flow".to_string(),
             cycle_guard: None,
             lineage: obzenflow_core::config::LineagePolicy::default(),
-            resolved_policies: Default::default(),
+            effective_config: Arc::new(effective_config),
         }
     }
 
@@ -1031,11 +1018,11 @@ mod tests {
 
     #[test]
     fn retry_materialization_is_limited_to_safe_declared_effects() {
-        let config = test_stage_config();
-        let control = Arc::new(ControlMiddlewareAggregator::new());
         let factory = CircuitBreaker::opens_after(3)
             .retry(Retry::fixed(Duration::ZERO).attempts(2))
             .build();
+        let config = test_stage_config(factory.as_ref());
+        let control = Arc::new(ControlMiddlewareAggregator::new());
         let error = match materialize_effect_attachment(
             factory.as_ref(),
             &config,
@@ -1048,11 +1035,11 @@ mod tests {
         };
         assert!(error.contains("retry is not eligible"), "{error}");
 
-        let config = test_stage_config();
-        let control = Arc::new(ControlMiddlewareAggregator::new());
         let factory = CircuitBreaker::opens_after(3)
             .retry(Retry::fixed(Duration::ZERO).attempts(2))
             .build();
+        let config = test_stage_config(factory.as_ref());
+        let control = Arc::new(ControlMiddlewareAggregator::new());
         materialize_effect_attachment(
             factory.as_ref(),
             &config,
@@ -1065,14 +1052,14 @@ mod tests {
 
     #[test]
     fn a_second_retrying_breaker_for_one_effect_fails_materialization() {
-        let config = test_stage_config();
-        let control = Arc::new(ControlMiddlewareAggregator::new());
         let first = CircuitBreaker::opens_after(3)
             .retry(Retry::fixed(Duration::ZERO).attempts(2))
             .build();
         let second = CircuitBreaker::opens_after(3)
             .retry(Retry::fixed(Duration::ZERO).attempts(2))
             .build();
+        let config = test_stage_config(first.as_ref());
+        let control = Arc::new(ControlMiddlewareAggregator::new());
 
         materialize_effect_attachment(
             first.as_ref(),
@@ -1103,50 +1090,18 @@ mod tests {
         assert!(snapshot["retry"].is_null());
     }
 
-    /// FLOWIP-120c H2 kind agreement: a factory and the instance it creates
-    /// must report the same middleware kind, because build-time guards read
-    /// the factory while chain runners enforce on the instance.
     #[test]
-    fn factory_and_instance_kinds_agree() {
+    fn control_factories_are_classified_by_typed_declarations() {
         use crate::middleware::control::rate_limiter::RateLimiterBuilder;
 
-        let config = test_stage_config();
+        let factories: Vec<Box<dyn MiddlewareFactory>> =
+            vec![circuit_breaker(3), RateLimiterBuilder::new(5.0).build()];
 
-        let factories: Vec<(Box<dyn MiddlewareFactory>, MiddlewareKind, bool)> = vec![
-            (circuit_breaker(3), MiddlewareKind::Policy, true),
-            (
-                RateLimiterBuilder::new(5.0).build(),
-                MiddlewareKind::Policy,
-                false,
-            ),
-        ];
-
-        for (factory, expected, supports_generic_create) in factories {
-            assert_eq!(
-                factory.kind(),
-                expected,
-                "factory '{}' kind mismatch",
-                factory.label()
-            );
-            if !supports_generic_create {
-                assert!(
-                    factory
-                        .create(&config, Arc::new(ControlMiddlewareAggregator::new()))
-                        .is_err(),
-                    "factory '{}' should fail closed on generic create",
-                    factory.label()
-                );
-                continue;
-            }
-            let instance = factory
-                .create(&config, Arc::new(ControlMiddlewareAggregator::new()))
-                .expect("factory should materialize");
-            assert_eq!(
-                instance.kind(),
-                factory.kind(),
-                "instance kind for '{}' must agree with its factory",
-                factory.label()
-            );
+        for factory in factories {
+            let declaration = factory.declaration();
+            assert!(declaration.is_control(), "{}", factory.label());
+            assert!(!declaration.surfaces.is_empty(), "{}", factory.label());
+            assert!(!declaration.is_flowip_128g_legacy_shell());
         }
     }
 }

@@ -109,7 +109,7 @@ fn latency_is_a_convenience_constructor_for_the_indicator_factory() {
 }
 
 #[test]
-fn indicator_factory_is_hook_bound_not_legacy_shell() {
+fn indicator_factory_is_hook_bound() {
     let declaration = indicator()
         .operation("op")
         .kind(IndicatorKind::Latency)
@@ -119,8 +119,8 @@ fn indicator_factory_is_hook_bound_not_legacy_shell() {
         "indicator declares an observer surface"
     );
     assert!(
-        !declaration.is_legacy_shell(),
-        "indicator must never fall back to the legacy create() shell"
+        !declaration.is_flowip_128g_legacy_shell(),
+        "indicator must not use the sealed AI migration route"
     );
 }
 

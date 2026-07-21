@@ -133,9 +133,8 @@ pub use handler::{
     ErrorAction, Middleware, MiddlewareAbortCause, MiddlewareAction, SourceMiddlewarePhase,
 };
 pub use middleware_factory::{
-    ControlMiddlewareRole, MiddlewareFactory, MiddlewareFactoryError, MiddlewareFactoryResult,
-    MiddlewareKind, MiddlewareOverrideKey, MiddlewarePlanContribution,
-    TopologyMiddlewareConfigSlot,
+    MiddlewareFactory, MiddlewareFactoryError, MiddlewareFactoryResult, MiddlewareKind,
+    MiddlewareOverrideKey, TopologyMiddlewareConfigSlot,
 };
 pub use middleware_safety::MiddlewareSafety;
 
@@ -155,14 +154,14 @@ pub use handler::{
 // Common utilities
 pub use carrier::{
     validate_attachment_request, EffectSurface, EffectTypeKey, EffectUnitId,
-    HostedIngressTargetKey, IngressEndpointKind, IngressRouteScope, IngressSurface, IngressUnitId,
-    MiddlewareAttachmentId, MiddlewareAttachmentRequest, MiddlewareAttachmentValidationError,
-    MiddlewareCapability, MiddlewareDeclaration, MiddlewareDeclarationIndex,
-    MiddlewareDeclarationScope, MiddlewareMaterializationContext, MiddlewareOrigin,
-    MiddlewareSurface, MiddlewareSurfaceAttachment, MiddlewareSurfaceKind, ProtectedUnit,
-    ProtectedUnitId, SinkConfiguredTargetKey, SinkDeliverySurface, SinkDeliveryTarget,
-    SinkDeliveryUnitId, SourcePollAttachment, SourcePollSurface, SourcePollUnitId,
-    SourceStageIngressOwner,
+    Flowip128gLegacyShellAttachment, HostedIngressTargetKey, IngressEndpointKind,
+    IngressRouteScope, IngressSurface, IngressUnitId, MiddlewareAttachmentId,
+    MiddlewareAttachmentRequest, MiddlewareAttachmentValidationError, MiddlewareCapability,
+    MiddlewareDeclaration, MiddlewareDeclarationIndex, MiddlewareDeclarationScope,
+    MiddlewareMaterializationContext, MiddlewareOrigin, MiddlewareSurface,
+    MiddlewareSurfaceAttachment, MiddlewareSurfaceKind, ProtectedUnit, ProtectedUnitId,
+    SinkConfiguredTargetKey, SinkDeliverySurface, SinkDeliveryTarget, SinkDeliveryUnitId,
+    SourcePollAttachment, SourcePollSurface, SourcePollUnitId, SourceStageIngressOwner,
 };
 pub use context::MiddlewareContext;
 pub use control::policy::{

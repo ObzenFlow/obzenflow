@@ -197,31 +197,31 @@ impl ValidationResult {
 mod tests {
     use super::*;
     use crate::middleware::{
-        Attempts, BackoffKind, BatchingHint, Middleware, MiddlewareAction, MiddlewareContext,
-        MiddlewareFactory, MiddlewareHints, RetryHint,
+        Attempts, BackoffKind, BatchingHint, MiddlewareAttachmentRequest, MiddlewareDeclaration,
+        MiddlewareFactory, MiddlewareFactoryError, MiddlewareFactoryResult, MiddlewareHints,
+        MiddlewareMaterializationContext, MiddlewareSurfaceAttachment, MiddlewareSurfaceKind,
+        RetryHint,
     };
-    use obzenflow_core::ChainEvent;
-    use obzenflow_runtime::pipeline::config::StageConfig;
     use std::time::Duration;
 
-    // Mock middleware for testing dangerous patterns
-    struct MockSkipControlMiddleware;
-    impl Middleware for MockSkipControlMiddleware {
-        fn label(&self) -> &'static str {
-            "mock.skip_control_middleware"
-        }
+    macro_rules! safety_only_factory {
+        () => {
+            fn declaration(&self) -> MiddlewareDeclaration {
+                MiddlewareDeclaration::observer(self.label(), vec![MiddlewareSurfaceKind::Handler])
+            }
 
-        fn source_phase(&self) -> crate::middleware::SourceMiddlewarePhase {
-            crate::middleware::SourceMiddlewarePhase::Ordinary
-        }
-
-        fn pre_handle(
-            &self,
-            _event: &ChainEvent,
-            _ctx: &mut MiddlewareContext,
-        ) -> MiddlewareAction {
-            MiddlewareAction::Continue
-        }
+            fn materialize(
+                &self,
+                _request: MiddlewareAttachmentRequest<'_>,
+                context: &MiddlewareMaterializationContext<'_>,
+            ) -> MiddlewareFactoryResult<MiddlewareSurfaceAttachment> {
+                Err(MiddlewareFactoryError::materialization_failed(
+                    self.label(),
+                    &context.config.name,
+                    std::io::Error::other("safety-only test factory"),
+                ))
+            }
+        };
     }
 
     struct MockSkipControlFamily;
@@ -237,27 +237,7 @@ mod tests {
             )
         }
 
-        fn control_role(&self) -> crate::middleware::ControlMiddlewareRole {
-            crate::middleware::ControlMiddlewareRole::None
-        }
-
-        fn plan_contribution(&self) -> crate::middleware::MiddlewarePlanContribution {
-            crate::middleware::MiddlewarePlanContribution::None
-        }
-
-        fn topology_config_slot(&self) -> Option<crate::middleware::TopologyMiddlewareConfigSlot> {
-            None
-        }
-
-        fn create(
-            &self,
-            _config: &StageConfig,
-            _control_middleware: std::sync::Arc<
-                crate::middleware::control::ControlMiddlewareAggregator,
-            >,
-        ) -> crate::middleware::MiddlewareFactoryResult<Box<dyn Middleware>> {
-            Ok(Box::new(MockSkipControlMiddleware))
-        }
+        safety_only_factory!();
         fn supported_stage_types(&self) -> &[StageType] {
             &[StageType::Sink, StageType::Transform]
         }
@@ -285,27 +265,7 @@ mod tests {
             )
         }
 
-        fn control_role(&self) -> crate::middleware::ControlMiddlewareRole {
-            crate::middleware::ControlMiddlewareRole::None
-        }
-
-        fn plan_contribution(&self) -> crate::middleware::MiddlewarePlanContribution {
-            crate::middleware::MiddlewarePlanContribution::None
-        }
-
-        fn topology_config_slot(&self) -> Option<crate::middleware::TopologyMiddlewareConfigSlot> {
-            None
-        }
-
-        fn create(
-            &self,
-            _config: &StageConfig,
-            _control_middleware: std::sync::Arc<
-                crate::middleware::control::ControlMiddlewareAggregator,
-            >,
-        ) -> crate::middleware::MiddlewareFactoryResult<Box<dyn Middleware>> {
-            Ok(Box::new(MockSkipControlMiddleware)) // Reuse the middleware impl
-        }
+        safety_only_factory!();
         fn supported_stage_types(&self) -> &[StageType] {
             &[StageType::FiniteSource, StageType::InfiniteSource]
         }
@@ -368,29 +328,7 @@ mod tests {
                 crate::middleware::MiddlewareOverrideKey::of::<SafeFamily>("safe_middleware")
             }
 
-            fn control_role(&self) -> crate::middleware::ControlMiddlewareRole {
-                crate::middleware::ControlMiddlewareRole::None
-            }
-
-            fn plan_contribution(&self) -> crate::middleware::MiddlewarePlanContribution {
-                crate::middleware::MiddlewarePlanContribution::None
-            }
-
-            fn topology_config_slot(
-                &self,
-            ) -> Option<crate::middleware::TopologyMiddlewareConfigSlot> {
-                None
-            }
-
-            fn create(
-                &self,
-                _: &StageConfig,
-                _control_middleware: std::sync::Arc<
-                    crate::middleware::control::ControlMiddlewareAggregator,
-                >,
-            ) -> crate::middleware::MiddlewareFactoryResult<Box<dyn Middleware>> {
-                unimplemented!()
-            }
+            safety_only_factory!();
         }
 
         let factory = SafeFactory;
@@ -414,29 +352,7 @@ mod tests {
                 crate::middleware::MiddlewareOverrideKey::of::<RateLimitFamily>("rate_limit")
             }
 
-            fn control_role(&self) -> crate::middleware::ControlMiddlewareRole {
-                crate::middleware::ControlMiddlewareRole::None
-            }
-
-            fn plan_contribution(&self) -> crate::middleware::MiddlewarePlanContribution {
-                crate::middleware::MiddlewarePlanContribution::None
-            }
-
-            fn topology_config_slot(
-                &self,
-            ) -> Option<crate::middleware::TopologyMiddlewareConfigSlot> {
-                None
-            }
-
-            fn create(
-                &self,
-                _: &StageConfig,
-                _control_middleware: std::sync::Arc<
-                    crate::middleware::control::ControlMiddlewareAggregator,
-                >,
-            ) -> crate::middleware::MiddlewareFactoryResult<Box<dyn Middleware>> {
-                unimplemented!()
-            }
+            safety_only_factory!();
 
             fn hints(&self) -> MiddlewareHints {
                 MiddlewareHints {
@@ -471,29 +387,7 @@ mod tests {
                 crate::middleware::MiddlewareOverrideKey::of::<BatchingFamily>("batching")
             }
 
-            fn control_role(&self) -> crate::middleware::ControlMiddlewareRole {
-                crate::middleware::ControlMiddlewareRole::None
-            }
-
-            fn plan_contribution(&self) -> crate::middleware::MiddlewarePlanContribution {
-                crate::middleware::MiddlewarePlanContribution::None
-            }
-
-            fn topology_config_slot(
-                &self,
-            ) -> Option<crate::middleware::TopologyMiddlewareConfigSlot> {
-                None
-            }
-
-            fn create(
-                &self,
-                _: &StageConfig,
-                _control_middleware: std::sync::Arc<
-                    crate::middleware::control::ControlMiddlewareAggregator,
-                >,
-            ) -> crate::middleware::MiddlewareFactoryResult<Box<dyn Middleware>> {
-                unimplemented!()
-            }
+            safety_only_factory!();
 
             fn hints(&self) -> MiddlewareHints {
                 MiddlewareHints {

@@ -16,7 +16,9 @@ pub mod provenance;
 pub mod secret;
 pub mod values;
 
-pub use evidence::{EffectiveConfigEvidence, ResolvedValueDoc, EVIDENCE_SCHEMA_VERSION};
-pub use provenance::{ConfigScope, ConfigSource, ConfigValueMeta};
+pub use evidence::{
+    EffectiveConfigEvidence, ResolvedForDoc, ResolvedValueDoc, EVIDENCE_SCHEMA_VERSION,
+};
+pub use provenance::{ConfigAddress, ConfigScope, ConfigSource, ConfigSubject, ConfigValueMeta};
 pub use secret::{SecretRef, SecretResolveError, SecretString};
 pub use values::{LineagePolicy, DEFAULT_MAX_LINEAGE_DEPTH};

@@ -322,20 +322,24 @@ pub(crate) async fn suspend_until(wake: &WakeOn, max_wait: Option<Duration>) -> 
 
 `AdmittedAttempt`, in the same module, is the loop-driven finalization guard reserved for output-commit/backpressure binding. It holds the observers that admitted an attempt and guarantees each is notified of the terminal outcome exactly once, on every exit path. Calling `settle(outcome).await` runs each observer's synchronous `observe` and then its durable async `settle`. If the guard is dropped without an explicit settle, `Drop` runs only the synchronous `observe` with a default `Aborted` outcome, because `Drop` cannot await durable journal work. By the event-sourcing model, an attempt ended by a drop is simply not recorded as complete and is re-attempted on restart. Live I/O attempts use boundary middleware and policy-owned guards instead.
 
-### Typed registration replaces the dead downcast lane
+### Typed declarations replace the dead downcast lane
 
-Earlier, middleware exposed signal strategies through `MiddlewareFactory::create_control_strategy`, a lane no factory overrode, so it always yielded the default, and policy capability was then recovered from an erased `dyn Middleware` by capability-downcast. 115c retires that lane for loop-level controls. A factory now declares which loop-level control points its policy binds through a typed `control_points()`:
+Earlier, middleware exposed signal strategies through
+`MiddlewareFactory::create_control_strategy`, a lane no factory overrode, so it
+always yielded the default. Policy capability was then recovered from an erased
+`dyn Middleware` by capability-downcast. FLOWIP-115n retires that lane and the
+intermediate point-registration API. A public factory now returns a
+`MiddlewareDeclaration` naming its typed observer or control surfaces, then
+materializes exactly one typed attachment for each concrete protected unit the
+binder requests.
 
-```text
-pub struct ControlPointRegistration {
-    pub signal: bool,
-    pub admission_positions: Vec<AdmissionPosition>,
-    pub completion: bool,
-    pub observation: bool,
-}
-```
-
-The declaration defaults to none, so purely structural middleware needs no override. Admission remains position-aware so future loop-level gates can be added deliberately, but 115a moves source pre-poll and finite post-poll policy into the source boundary onion, and 120c already uses the same pattern for effects. Until a binding slice installs an admission gate, the live signal gate is the default `JonestownSignalStrategy`, installed during stage materialization.
+Source poll, effect, sink delivery, and hosted ingress are the control-capable
+live-I/O surfaces. Loop joins such as handler, stateful, join, output commit, and
+stage lifecycle are observer surfaces. Generic structural declarations are
+rejected; only the two AI map-reduce adapters owned by FLOWIP-128g retain a
+sealed migration route. Until a binding slice installs a typed gate, the live
+signal gate remains the runtime-owned default `JonestownSignalStrategy`,
+installed during stage materialization.
 
 ### Where this lives relative to the supervised base
 

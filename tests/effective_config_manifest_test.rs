@@ -113,20 +113,20 @@ async fn manifest_records_file_sourced_values_with_both_provenance_axes() {
     // A file-sourced global value plus a stage-scoped override for `snk`.
     let mut candidates = CandidateSet::default();
     candidates
-        .admit(ScopedCandidate {
-            key_path: "runtime.max_lineage_depth".to_string(),
-            scope: obzenflow_core::config::ConfigScope::Global,
-            source: obzenflow_core::config::ConfigSource::File,
-            value: ConfigValue::U64(7),
-        })
+        .admit(ScopedCandidate::unqualified(
+            "runtime.max_lineage_depth",
+            obzenflow_core::config::ConfigScope::Global,
+            obzenflow_core::config::ConfigSource::File,
+            ConfigValue::U64(7),
+        ))
         .expect("global candidate admits");
     candidates
-        .admit(ScopedCandidate {
-            key_path: "runtime.max_lineage_depth".to_string(),
-            scope: obzenflow_core::config::ConfigScope::stage("snk"),
-            source: obzenflow_core::config::ConfigSource::File,
-            value: ConfigValue::U64(5),
-        })
+        .admit(ScopedCandidate::unqualified(
+            "runtime.max_lineage_depth",
+            obzenflow_core::config::ConfigScope::stage("snk"),
+            obzenflow_core::config::ConfigSource::File,
+            ConfigValue::U64(5),
+        ))
         .expect("stage candidate admits");
     let snapshot = Arc::new(ResolvedRuntimeConfig::new(candidates));
 
@@ -138,7 +138,7 @@ async fn manifest_records_file_sourced_values_with_both_provenance_axes() {
     let evidence = manifest
         .effective_config
         .expect("manifest must record effective config evidence");
-    assert_eq!(evidence.schema_version, 1);
+    assert_eq!(evidence.schema_version, 2);
 
     let lineage: Vec<_> = evidence
         .values

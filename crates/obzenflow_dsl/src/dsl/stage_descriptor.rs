@@ -16,11 +16,11 @@ use obzenflow_adapters::middleware::control::ControlMiddlewareAggregator;
 use obzenflow_adapters::middleware::StageObserverSet;
 use obzenflow_adapters::middleware::{
     validate_middleware_safety, AsyncFiniteSourceHandlerExt, AsyncInfiniteSourceHandlerExt,
-    AsyncTransformHandlerExt, ControlMiddlewareRole, FiniteSourceHandlerExt,
-    InfiniteSourceHandlerExt, JoinHandlerMiddlewareExt, Middleware, MiddlewareDeclaration,
-    MiddlewareDeclarationIndex, MiddlewareFactory, MiddlewareSurfaceAttachment,
-    MiddlewareSurfaceKind, PerSinkDeliveryPolicyBoundary, PerSourcePolicyBoundary, SinkHandlerExt,
-    SinkPolicy, StatefulHandlerMiddlewareExt, TopologyMiddlewareConfigSlot, TransformHandlerExt,
+    AsyncTransformHandlerExt, FiniteSourceHandlerExt, InfiniteSourceHandlerExt,
+    JoinHandlerMiddlewareExt, Middleware, MiddlewareDeclaration, MiddlewareDeclarationIndex,
+    MiddlewareFactory, MiddlewareSurfaceAttachment, MiddlewareSurfaceKind,
+    PerSinkDeliveryPolicyBoundary, PerSourcePolicyBoundary, SinkHandlerExt, SinkPolicy,
+    StatefulHandlerMiddlewareExt, TopologyMiddlewareConfigSlot, TransformHandlerExt,
     UnifiedMiddlewareTransform,
 };
 use obzenflow_core::event::context::StageType;
@@ -99,44 +99,6 @@ fn create_system_observers(_config: &StageConfig) -> StageObserverSet {
     // observer, and the user-facing observation middleware are `indicator()` and
     // `log()`. User-attached observers are merged onto this empty default.
     StageObserverSet::default()
-}
-
-fn create_legacy_shell(
-    factory: &dyn MiddlewareFactory,
-    config: &StageConfig,
-    control_middleware: Arc<ControlMiddlewareAggregator>,
-) -> StageCreationResult<Box<dyn Middleware>> {
-    let declaration = factory.declaration();
-    if !declaration.is_legacy_shell() {
-        return Err(format!(
-            "middleware '{}' declares hook surfaces {:?} and cannot fall back to legacy create() on stage '{}'",
-            factory.label(),
-            declaration.surfaces,
-            config.name
-        )
-        .into());
-    }
-    Ok(factory.create(config, control_middleware)?)
-}
-
-fn create_deprecated_async_policy_shell(
-    factory: &dyn MiddlewareFactory,
-    config: &StageConfig,
-    control_middleware: Arc<ControlMiddlewareAggregator>,
-) -> StageCreationResult<Box<dyn Middleware>> {
-    let declaration = factory.declaration();
-    if factory.kind() != obzenflow_adapters::middleware::MiddlewareKind::Policy
-        || declaration.is_observer()
-    {
-        return Err(format!(
-            "middleware '{}' declares hook surfaces {:?} and cannot use the deprecated async policy shell on stage '{}'",
-            factory.label(),
-            declaration.surfaces,
-            config.name
-        )
-        .into());
-    }
-    Ok(factory.create(config, control_middleware)?)
 }
 
 fn observer_surfaces_for_stage(stage_type: StageType) -> &'static [MiddlewareSurfaceKind] {
@@ -237,7 +199,6 @@ fn plan_stage_middleware(
     stage_type: StageType,
     resolved: crate::middleware_resolution::ResolvedMiddleware,
     control_middleware: &Arc<ControlMiddlewareAggregator>,
-    allow_deprecated_async_policy_shell: bool,
 ) -> StageCreationResult<MiddlewarePlacement> {
     let expects_circuit_breaker = resolved
         .middleware
@@ -284,23 +245,15 @@ fn plan_stage_middleware(
             continue;
         }
 
-        if declaration.is_legacy_shell() {
-            legacy_shell.push(create_legacy_shell(
+        if declaration.is_flowip_128g_legacy_shell() {
+            let origin = crate::dsl::binder::middleware_origin_from_source(&spec.source);
+            legacy_shell.push(crate::dsl::binder::materialize_flowip_128g_legacy_shell(
                 spec.factory.as_ref(),
                 config,
-                control_middleware.clone(),
-            )?);
-            continue;
-        }
-
-        if allow_deprecated_async_policy_shell
-            && declaration.is_control()
-            && spec.factory.kind() == obzenflow_adapters::middleware::MiddlewareKind::Policy
-        {
-            legacy_shell.push(create_deprecated_async_policy_shell(
-                spec.factory.as_ref(),
-                config,
-                control_middleware.clone(),
+                stage_type,
+                control_middleware,
+                &origin,
+                MiddlewareDeclarationIndex::resolved(middleware_index),
             )?);
             continue;
         }
@@ -402,7 +355,7 @@ fn build_source_middleware_and_register_policies(
         }
 
         // FLOWIP-115b: hook-bound control middleware that attaches to the source
-        // poll surface is placed by its declaration, not by ControlMiddlewareRole.
+        // poll surface is placed directly by its typed declaration.
         // It is materialized into a source policy registered in declared order so
         // it composes with any still-legacy source policy (the rate limiter), and
         // it supplies the completion-gate companion that shares its state view.
@@ -423,31 +376,24 @@ fn build_source_middleware_and_register_policies(
             continue;
         }
 
-        match spec.factory.control_role() {
-            ControlMiddlewareRole::RateLimiter => {
-                spec.factory
-                    .register_source_policy(config, stage_type, control_middleware)?;
-            }
-            ControlMiddlewareRole::CircuitBreaker => {
-                // FLOWIP-115b AC59: a breaker reaching the legacy source role path
-                // did not declare source hooks. Fail closed rather than silently
-                // registering it through the retired route.
-                return Err(format!(
-                    "Stage {:?}: circuit breaker reached the legacy source role path \
-                     without declaring source hooks; hook-bound control must \
-                     materialize onto the SourcePoll surface (FLOWIP-115b)",
-                    config.stage_id
-                )
-                .into());
-            }
-            ControlMiddlewareRole::None => {
-                all_middleware.push(create_legacy_shell(
-                    spec.factory.as_ref(),
-                    config,
-                    control_middleware.clone(),
-                )?);
-            }
+        if declaration.is_flowip_128g_legacy_shell() {
+            let origin = crate::dsl::binder::middleware_origin_from_source(&spec.source);
+            all_middleware.push(crate::dsl::binder::materialize_flowip_128g_legacy_shell(
+                spec.factory.as_ref(),
+                config,
+                stage_type,
+                control_middleware,
+                &origin,
+                MiddlewareDeclarationIndex::resolved(middleware_index),
+            )?);
+            continue;
         }
+
+        return Err(format!(
+            "middleware '{}' declares capability {:?} and surfaces {:?}, but source stage '{}' has no matching typed binding",
+            declaration.label, declaration.capability, declaration.surfaces, config.name
+        )
+        .into());
     }
 
     // FLOWIP-115d: fill the hosted-ingress binding slot during source-stage
@@ -600,6 +546,13 @@ pub trait StageDescriptor: Send + Sync {
     /// Default implementation returns an empty slice; concrete descriptors that
     /// carry middleware should override this to expose their factories for `config_snapshot()`.
     fn stage_middleware_factories(&self) -> &[Box<dyn MiddlewareFactory>] {
+        &[]
+    }
+
+    /// Surviving inline effect-policy attachments. Configuration collection
+    /// uses this narrow view to qualify factory defaults with the exact effect
+    /// subject; it does not build a general consumer registry.
+    fn effect_policy_attachments(&self) -> &[EffectPolicyAttachment] {
         &[]
     }
 
@@ -1387,13 +1340,8 @@ impl<H: TransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Stag
         let control_provider: Arc<dyn obzenflow_runtime::control_plane::ControlPlaneProvider> =
             control_middleware.clone();
 
-        let placement = plan_stage_middleware(
-            &config,
-            StageType::Transform,
-            resolved,
-            &control_middleware,
-            false,
-        )?;
+        let placement =
+            plan_stage_middleware(&config, StageType::Transform, resolved, &control_middleware)?;
         let all_middleware = placement.legacy_shell;
 
         instrumentation
@@ -1526,13 +1474,8 @@ impl<H: AsyncTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'static>
         let control_provider: Arc<dyn obzenflow_runtime::control_plane::ControlPlaneProvider> =
             control_middleware.clone();
 
-        let placement = plan_stage_middleware(
-            &config,
-            StageType::Transform,
-            resolved,
-            &control_middleware,
-            true,
-        )?;
+        let placement =
+            plan_stage_middleware(&config, StageType::Transform, resolved, &control_middleware)?;
         let all_middleware = placement.legacy_shell;
 
         instrumentation
@@ -1674,6 +1617,10 @@ impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
         &self.middleware
     }
 
+    fn effect_policy_attachments(&self) -> &[EffectPolicyAttachment] {
+        &self.effect_policies
+    }
+
     async fn create_handle_with_flow_middleware(
         self: Box<Self>,
         config: StageConfig,
@@ -1744,8 +1691,7 @@ impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
                 if declaration_has_stage_observer_surface(&declaration, StageType::Transform) {
                     shell_specs.push(spec);
                 }
-            } else if spec.factory.kind() == obzenflow_adapters::middleware::MiddlewareKind::Policy
-            {
+            } else if declaration.is_control() {
                 transitional_policy_specs.push((middleware_index, spec));
             } else {
                 shell_specs.push(spec);
@@ -1821,7 +1767,6 @@ impl<H: EffectfulTransformHandler + Clone + std::fmt::Debug + Send + Sync + 'sta
                 warnings: Vec::new(),
             },
             &control_middleware,
-            false,
         )?;
         let mut observers = placement.observers;
         observers.extend(effect_observers);
@@ -2022,12 +1967,22 @@ impl<H: SinkHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
                     MiddlewareDeclarationIndex::resolved(middleware_index),
                 )?;
                 sink_policies.push(policy);
-            } else {
-                all_middleware.push(create_legacy_shell(
+            } else if declaration.is_flowip_128g_legacy_shell() {
+                let origin = crate::dsl::binder::middleware_origin_from_source(&spec.source);
+                all_middleware.push(crate::dsl::binder::materialize_flowip_128g_legacy_shell(
                     spec.factory.as_ref(),
                     &config,
-                    control_middleware.clone(),
+                    StageType::Sink,
+                    &control_middleware,
+                    &origin,
+                    MiddlewareDeclarationIndex::resolved(middleware_index),
                 )?);
+            } else {
+                return Err(format!(
+                    "middleware '{}' declares capability {:?} and surfaces {:?}, but sink stage '{}' has no matching typed binding",
+                    declaration.label, declaration.capability, declaration.surfaces, config.name
+                )
+                .into());
             }
         }
         let sink_delivery_boundary: Option<Arc<dyn SinkDeliveryBoundary>> =
@@ -2321,13 +2276,8 @@ impl<H: StatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'static> Stage
         let control_provider: Arc<dyn obzenflow_runtime::control_plane::ControlPlaneProvider> =
             control_middleware.clone();
 
-        let placement = plan_stage_middleware(
-            &config,
-            StageType::Stateful,
-            resolved,
-            &control_middleware,
-            false,
-        )?;
+        let placement =
+            plan_stage_middleware(&config, StageType::Stateful, resolved, &control_middleware)?;
         let all_middleware = placement.legacy_shell;
 
         instrumentation
@@ -2538,7 +2488,6 @@ impl<H: EffectfulStatefulHandler + Clone + std::fmt::Debug + Send + Sync + 'stat
                 warnings: Vec::new(),
             },
             &control_middleware,
-            false,
         )?;
         let mut observers = placement.observers;
         observers.extend(effect_observers);
@@ -2710,13 +2659,8 @@ impl<H: JoinHandler + Clone + std::fmt::Debug + Send + Sync + 'static> StageDesc
         let control_provider: Arc<dyn obzenflow_runtime::control_plane::ControlPlaneProvider> =
             control_middleware.clone();
 
-        let placement = plan_stage_middleware(
-            &config,
-            StageType::Join,
-            resolved,
-            &control_middleware,
-            false,
-        )?;
+        let placement =
+            plan_stage_middleware(&config, StageType::Join, resolved, &control_middleware)?;
         let all_middleware = placement.legacy_shell;
 
         instrumentation
@@ -2844,7 +2788,7 @@ mod tests {
     use super::*;
     use obzenflow_adapters::middleware::control::circuit_breaker::circuit_breaker;
     use obzenflow_core::event::{JournalEvent, SystemEvent};
-    use obzenflow_core::{ChainEvent, EventEnvelope, FlowId, TypedPayload};
+    use obzenflow_core::{ChainEvent, EventEnvelope, FlowId, StageKey, TypedPayload};
     use obzenflow_runtime::control_plane::ControlPlaneProvider;
     use obzenflow_runtime::effects::{
         Effect, EffectCommitHandle, EffectContext, EffectError, TransactionalEffectPort,
@@ -2853,6 +2797,40 @@ mod tests {
     use obzenflow_runtime::stages::resources_builder::SubscriptionFactory;
     use obzenflow_runtime::stages::LivenessSnapshots;
     use serde_json::json;
+
+    fn effective_config_for_stage(
+        stage_name: &str,
+        factories: &[&dyn obzenflow_adapters::middleware::MiddlewareFactory],
+    ) -> Arc<obzenflow_runtime::runtime_config::FlowEffectiveConfig> {
+        use obzenflow_core::config::ConfigScope;
+        use obzenflow_runtime::runtime_config::{
+            materialize_flow_config, DslCandidates, FlowResolutionContext, ResolvedRuntimeConfig,
+        };
+
+        let mut dsl = DslCandidates::default();
+        for factory in factories {
+            for default in factory.dsl_config_defaults() {
+                dsl.declare(
+                    default.key_path,
+                    ConfigScope::stage(stage_name),
+                    default.value,
+                );
+            }
+        }
+        Arc::new(
+            materialize_flow_config(
+                &ResolvedRuntimeConfig::builtin_defaults(),
+                FlowResolutionContext {
+                    flow_name: "stage_descriptor_test".to_string(),
+                    stages: std::collections::BTreeSet::from([StageKey::from(stage_name)]),
+                    edges: std::collections::BTreeSet::new(),
+                    declared_effects: Default::default(),
+                    dsl,
+                },
+            )
+            .expect("factory defaults materialize"),
+        )
+    }
 
     trait DemoEffectPort: Send + Sync {}
 
@@ -3144,24 +3122,22 @@ mod tests {
         };
 
         let stage_id = StageId::new();
+        let limiter = obzenflow_adapters::middleware::control::rate_limiter::rate_limit(1.0);
         let config = StageConfig {
             stage_id,
             name: "accounts".to_string(),
             flow_name: "test_flow".to_string(),
             cycle_guard: None,
             lineage: obzenflow_core::config::LineagePolicy::default(),
-            resolved_policies: Default::default(),
+            effective_config: effective_config_for_stage("accounts", &[limiter.as_ref()]),
         };
         let control = Arc::new(ControlMiddlewareAggregator::new());
         let slot = HostedIngressBindingSlot::new("bank.accounts");
 
         // A hosted ingress source with a rate limiter as its stage middleware.
-        let resolved = crate::middleware_resolution::resolve_middleware(
-            vec![],
-            vec![obzenflow_adapters::middleware::control::rate_limiter::rate_limit(1.0)],
-            &config.name,
-        )
-        .expect("middleware resolves");
+        let resolved =
+            crate::middleware_resolution::resolve_middleware(vec![], vec![limiter], &config.name)
+                .expect("middleware resolves");
 
         build_source_middleware_and_register_policies(
             &config,
@@ -3252,36 +3228,11 @@ mod tests {
                 "allow_once_ingress",
             )
         }
-        fn control_role(&self) -> ControlMiddlewareRole {
-            ControlMiddlewareRole::None
-        }
-        fn kind(&self) -> obzenflow_adapters::middleware::MiddlewareKind {
-            obzenflow_adapters::middleware::MiddlewareKind::Policy
-        }
-        fn plan_contribution(&self) -> obzenflow_adapters::middleware::MiddlewarePlanContribution {
-            obzenflow_adapters::middleware::MiddlewarePlanContribution::None
-        }
-        fn topology_config_slot(&self) -> Option<TopologyMiddlewareConfigSlot> {
-            None
-        }
         fn declaration(&self) -> obzenflow_adapters::middleware::MiddlewareDeclaration {
             obzenflow_adapters::middleware::MiddlewareDeclaration::control_with_family(
                 self.label(),
                 "allow_once_ingress",
                 vec![MiddlewareSurfaceKind::Ingress],
-            )
-        }
-        fn create(
-            &self,
-            _config: &StageConfig,
-            _control_middleware: Arc<ControlMiddlewareAggregator>,
-        ) -> obzenflow_adapters::middleware::MiddlewareFactoryResult<Box<dyn Middleware>> {
-            // Hook-bound: this control middleware is placed through `materialize`,
-            // never the legacy handler shell.
-            Err(
-                obzenflow_adapters::middleware::MiddlewareFactoryError::not_hook_bound(
-                    self.label(),
-                ),
             )
         }
         fn materialize(
@@ -3308,7 +3259,14 @@ mod tests {
                         admitted: std::sync::atomic::AtomicBool::new(false),
                     }),
                 )),
-                _ => Err(MiddlewareFactoryError::not_hook_bound(self.label())),
+                other => Err(MiddlewareFactoryError::materialization_failed(
+                    self.label(),
+                    &context.config.name,
+                    std::io::Error::other(format!(
+                        "unsupported allow-once ingress surface {:?}",
+                        other.kind()
+                    )),
+                )),
             }
         }
     }
@@ -3327,7 +3285,9 @@ mod tests {
             flow_name: "test_flow".to_string(),
             cycle_guard: None,
             lineage: obzenflow_core::config::LineagePolicy::default(),
-            resolved_policies: Default::default(),
+            effective_config: std::sync::Arc::new(
+                obzenflow_runtime::runtime_config::FlowEffectiveConfig::default(),
+            ),
         };
         let control = Arc::new(ControlMiddlewareAggregator::new());
         let slot = HostedIngressBindingSlot::new("bank.accounts");
@@ -3381,13 +3341,14 @@ mod tests {
     #[tokio::test]
     async fn finite_source_with_circuit_breaker_uses_cb_strategy() {
         let stage_id = StageId::new();
+        let breaker = circuit_breaker(1);
         let config = StageConfig {
             stage_id,
             name: "cb_source".to_string(),
             flow_name: "test_flow".to_string(),
             cycle_guard: None,
             lineage: obzenflow_core::config::LineagePolicy::default(),
-            resolved_policies: Default::default(),
+            effective_config: effective_config_for_stage("cb_source", &[breaker.as_ref()]),
         };
 
         // Minimal StageResources: journals are never actually written in this unit test.
@@ -3553,7 +3514,7 @@ mod tests {
         let descriptor = FiniteSourceDescriptor {
             name: "cb_source".to_string(),
             handler: DummyFiniteSource,
-            middleware: vec![circuit_breaker(1)],
+            middleware: vec![breaker],
             backpressure: None,
         };
 
@@ -3586,17 +3547,15 @@ mod tests {
 // ============================================================================
 
 /// FLOWIP-115f AC 12 / AC 25: observer middleware binds through the placement
-/// planner's observer path on every stage type and never falls back to legacy
-/// `create()` / `create_for_effect()`.
+/// planner's observer path on every stage type.
 #[cfg(test)]
 mod observer_placement_negative_tests {
     use super::*;
     use obzenflow_adapters::middleware::{
-        validate_attachment_request, ControlMiddlewareRole, Middleware,
-        MiddlewareAttachmentRequest, MiddlewareDeclaration, MiddlewareFactory,
-        MiddlewareFactoryError, MiddlewareFactoryResult, MiddlewareMaterializationContext,
-        MiddlewareOverrideKey, MiddlewarePlanContribution, MiddlewareSurfaceAttachment,
-        MiddlewareSurfaceKind, TopologyMiddlewareConfigSlot,
+        validate_attachment_request, MiddlewareAttachmentRequest, MiddlewareDeclaration,
+        MiddlewareFactory, MiddlewareFactoryError, MiddlewareFactoryResult,
+        MiddlewareMaterializationContext, MiddlewareOverrideKey, MiddlewareSurfaceAttachment,
+        MiddlewareSurfaceKind,
     };
     use obzenflow_runtime::stages::observer::{
         HandlerObserver, JoinObserver, SinkDeliveryObserver, SourcePollObserver, StatefulObserver,
@@ -3631,10 +3590,7 @@ mod observer_placement_negative_tests {
         }
     }
 
-    /// An observer factory whose legacy-shell constructors panic. If the planner
-    /// ever routed it through `create()` instead of observer placement, the test
-    /// would abort, so reaching a successful placement proves the planner used
-    /// `materialize()`.
+    /// An observer factory used to prove the planner reaches typed materialization.
     struct LoudObserverFactory;
     struct LoudObserverFamily;
 
@@ -3645,35 +3601,6 @@ mod observer_placement_negative_tests {
 
         fn override_key(&self) -> MiddlewareOverrideKey {
             MiddlewareOverrideKey::of::<LoudObserverFamily>(self.label())
-        }
-
-        fn control_role(&self) -> ControlMiddlewareRole {
-            ControlMiddlewareRole::None
-        }
-
-        fn plan_contribution(&self) -> MiddlewarePlanContribution {
-            MiddlewarePlanContribution::None
-        }
-
-        fn topology_config_slot(&self) -> Option<TopologyMiddlewareConfigSlot> {
-            None
-        }
-
-        fn create(
-            &self,
-            _config: &StageConfig,
-            _control_middleware: Arc<ControlMiddlewareAggregator>,
-        ) -> MiddlewareFactoryResult<Box<dyn Middleware>> {
-            panic!("legacy create() must never be called for an observer middleware");
-        }
-
-        fn create_for_effect(
-            &self,
-            _config: &StageConfig,
-            _control_middleware: Arc<ControlMiddlewareAggregator>,
-            _effect_type: &str,
-        ) -> MiddlewareFactoryResult<Box<dyn Middleware>> {
-            panic!("legacy create_for_effect() must never be called for an observer middleware");
         }
 
         fn declaration(&self) -> MiddlewareDeclaration {
@@ -3751,7 +3678,9 @@ mod observer_placement_negative_tests {
                 flow_name: "observer_placement_negative".to_string(),
                 cycle_guard: None,
                 lineage: obzenflow_core::config::LineagePolicy::default(),
-                resolved_policies: Default::default(),
+                effective_config: std::sync::Arc::new(
+                    obzenflow_runtime::runtime_config::FlowEffectiveConfig::default(),
+                ),
             };
             let control = Arc::new(ControlMiddlewareAggregator::new());
             let resolved = crate::middleware_resolution::resolve_middleware(
@@ -3761,7 +3690,7 @@ mod observer_placement_negative_tests {
             )
             .expect("loud observer middleware resolves");
 
-            let placement = plan_stage_middleware(&config, stage_type, resolved, &control, false)
+            let placement = plan_stage_middleware(&config, stage_type, resolved, &control)
                 .unwrap_or_else(|err| {
                     panic!("observer placement must succeed for {stage_type:?}: {err}")
                 });

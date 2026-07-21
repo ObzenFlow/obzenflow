@@ -1107,7 +1107,6 @@ mod tests {
     };
     use obzenflow_core::event::status::processing_status::{ErrorKind, ProcessingStatus};
     use obzenflow_core::TypedPayload;
-    use obzenflow_runtime::control_plane::ControlPlaneProvider;
     use std::num::NonZeroU32;
     use std::time::Duration as StdDuration;
 
@@ -1321,39 +1320,19 @@ mod tests {
     // in `criteria.rs`; the builder no longer exposes internal fields.
 
     #[test]
-    fn factory_does_not_export_control_strategy() {
-        use crate::middleware::control::ControlMiddlewareAggregator;
-        use obzenflow_runtime::pipeline::config::StageConfig;
-
-        let control_middleware = Arc::new(ControlMiddlewareAggregator::new());
-
-        let stage_id = StageId::new();
-        let config = StageConfig {
-            stage_id,
-            name: "test".to_string(),
-            flow_name: "test_flow".to_string(),
-            cycle_guard: None,
-            lineage: obzenflow_core::config::LineagePolicy::default(),
-            resolved_policies: Default::default(),
-        };
+    fn factory_exposes_only_typed_control_surfaces() {
         let factory = circuit_breaker(3);
-        assert!(
-            !factory.control_points().signal,
-            "circuit breaker should not register a signal control point"
-        );
-
-        let _middleware = factory
-            .create(&config, control_middleware.clone())
-            .expect("circuit breaker middleware should materialize");
-
-        assert!(
-            !factory.control_points().signal,
-            "circuit breaker still registers no signal control point after materialization"
-        );
-
-        let _state = control_middleware
-            .circuit_breaker_state_view(&stage_id)
-            .expect("expected circuit breaker state view registration");
+        let declaration = factory.declaration();
+        assert!(declaration.is_control());
+        assert!(declaration
+            .surfaces
+            .contains(&crate::middleware::MiddlewareSurfaceKind::SourcePoll));
+        assert!(declaration
+            .surfaces
+            .contains(&crate::middleware::MiddlewareSurfaceKind::Effect));
+        assert!(!declaration
+            .surfaces
+            .contains(&crate::middleware::MiddlewareSurfaceKind::Handler));
     }
 
     #[test]

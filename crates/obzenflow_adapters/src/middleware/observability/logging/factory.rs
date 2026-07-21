@@ -12,12 +12,10 @@
 
 use super::LoggingMiddleware;
 use crate::middleware::{
-    validate_attachment_request, ControlMiddlewareRole, Middleware, MiddlewareAttachmentRequest,
-    MiddlewareDeclaration, MiddlewareFactory, MiddlewareFactoryError,
-    MiddlewareMaterializationContext, MiddlewareOverrideKey, MiddlewarePlanContribution,
-    MiddlewareSurfaceAttachment, MiddlewareSurfaceKind, TopologyMiddlewareConfigSlot,
+    validate_attachment_request, MiddlewareAttachmentRequest, MiddlewareDeclaration,
+    MiddlewareFactory, MiddlewareFactoryError, MiddlewareMaterializationContext,
+    MiddlewareOverrideKey, MiddlewareSurfaceAttachment, MiddlewareSurfaceKind,
 };
-use obzenflow_runtime::pipeline::config::StageConfig;
 use obzenflow_runtime::stages::observer::ObserverCommitError;
 use serde_json::json;
 use std::sync::Arc;
@@ -74,28 +72,6 @@ impl MiddlewareFactory for LoggingMiddlewareFactory {
 
     fn override_key(&self) -> MiddlewareOverrideKey {
         MiddlewareOverrideKey::of::<LoggingFamily>(self.label())
-    }
-
-    fn control_role(&self) -> ControlMiddlewareRole {
-        ControlMiddlewareRole::None
-    }
-
-    fn plan_contribution(&self) -> MiddlewarePlanContribution {
-        MiddlewarePlanContribution::None
-    }
-
-    fn topology_config_slot(&self) -> Option<TopologyMiddlewareConfigSlot> {
-        None
-    }
-
-    fn create(
-        &self,
-        _config: &StageConfig,
-        _control_middleware: std::sync::Arc<
-            crate::middleware::control::ControlMiddlewareAggregator,
-        >,
-    ) -> crate::middleware::MiddlewareFactoryResult<Box<dyn Middleware>> {
-        Err(MiddlewareFactoryError::not_hook_bound(self.label()))
     }
 
     fn config_snapshot(&self) -> Option<serde_json::Value> {

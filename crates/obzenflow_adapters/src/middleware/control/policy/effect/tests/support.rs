@@ -22,7 +22,7 @@ pub(super) use obzenflow_core::event::payloads::observability_payload::{
 pub(super) use obzenflow_core::event::{
     ChainEventContent, ChainEventFactory, EffectFailureCode, EffectFailureSource, RetryDisposition,
 };
-pub(super) use obzenflow_core::{ChainEvent, StageId, WriterId};
+pub(super) use obzenflow_core::{ChainEvent, StageId, StageKey, WriterId};
 pub(super) use obzenflow_runtime::control_plane::ControlPlaneProvider;
 pub(super) use obzenflow_runtime::effects::{
     EffectBoundary, EffectBoundaryOutcome, EffectBoundaryReport, EffectCursor, EffectError,
@@ -41,8 +41,13 @@ use crate::middleware::{
     ProtectedUnitId,
 };
 use obzenflow_core::event::context::StageType;
+use obzenflow_core::event::EffectType;
 use obzenflow_runtime::pipeline::config::StageConfig;
+use obzenflow_runtime::runtime_config::{
+    materialize_flow_config, DslCandidates, FlowResolutionContext, ResolvedRuntimeConfig,
+};
 use serde_json::json;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub(super) fn identity_for(effect_type: &'static str) -> EffectIdentity {
     EffectIdentity {
@@ -67,14 +72,37 @@ pub(super) fn failing_execute() -> RepeatableEffectOperation {
     })
 }
 
-pub(super) fn test_stage_config() -> StageConfig {
+pub(super) fn test_stage_config(factory: &dyn MiddlewareFactory) -> StageConfig {
+    let stage = StageKey::from("retrying_breaker_test");
+    let effect_type = EffectType::from("effect.retry");
+    let mut dsl = DslCandidates::default();
+    for default in factory.dsl_config_defaults() {
+        dsl.declare_for_effect(
+            default.key_path,
+            stage.clone(),
+            effect_type.clone(),
+            default.value,
+        );
+    }
+    let effective_config = materialize_flow_config(
+        &ResolvedRuntimeConfig::builtin_defaults(),
+        FlowResolutionContext {
+            flow_name: "retrying_breaker_test_flow".to_string(),
+            stages: BTreeSet::from([stage.clone()]),
+            edges: BTreeSet::new(),
+            declared_effects: BTreeMap::from([(stage, BTreeSet::from([effect_type]))]),
+            dsl,
+        },
+    )
+    .expect("middleware defaults should resolve for the test effect");
+
     StageConfig {
         stage_id: StageId::new(),
         name: "retrying_breaker_test".to_string(),
         flow_name: "retrying_breaker_test_flow".to_string(),
         cycle_guard: None,
         lineage: obzenflow_core::config::LineagePolicy::default(),
-        resolved_policies: Default::default(),
+        effective_config: Arc::new(effective_config),
     }
 }
 
@@ -124,7 +152,7 @@ pub(super) fn retrying_breaker_fixture(
     Arc<ControlMiddlewareAggregator>,
     StageId,
 ) {
-    let config = test_stage_config();
+    let config = test_stage_config(factory.as_ref());
     let stage_id = config.stage_id;
     let control = Arc::new(ControlMiddlewareAggregator::new());
     let attachment = materialize_effect_attachment(
@@ -150,7 +178,7 @@ pub(super) fn rate_limiter_fixture() -> (
     StageId,
 ) {
     let factory = RateLimiterBuilder::new(1_000.0).with_burst(10.0).build();
-    let config = test_stage_config();
+    let config = test_stage_config(factory.as_ref());
     let stage_id = config.stage_id;
     let control = Arc::new(ControlMiddlewareAggregator::new());
     let attachment = materialize_effect_attachment(

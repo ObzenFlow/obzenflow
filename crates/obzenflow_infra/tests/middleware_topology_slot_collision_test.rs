@@ -4,15 +4,15 @@
 
 //! Integration test for FLOWIP-114p: topology config slot collisions are errors.
 
-use obzenflow_adapters::middleware::control::ControlMiddlewareAggregator;
 use obzenflow_adapters::middleware::{
-    ControlMiddlewareRole, Middleware, MiddlewareAction, MiddlewareContext, MiddlewareFactory,
-    MiddlewareFactoryResult, MiddlewareHints, MiddlewareOverrideKey, MiddlewarePlanContribution,
-    MiddlewareSafety, SourceMiddlewarePhase, TopologyMiddlewareConfigSlot,
+    validate_attachment_request, MiddlewareAttachmentRequest, MiddlewareDeclaration,
+    MiddlewareFactory, MiddlewareFactoryError, MiddlewareFactoryResult, MiddlewareHints,
+    MiddlewareMaterializationContext, MiddlewareOverrideKey, MiddlewareSafety,
+    MiddlewareSurfaceAttachment, MiddlewareSurfaceKind, TopologyMiddlewareConfigSlot,
 };
-use obzenflow_core::{ChainEvent, TypedPayload};
+use obzenflow_core::TypedPayload;
 use obzenflow_dsl::{flow, sink, source};
-use obzenflow_runtime::pipeline::config::StageConfig;
+use obzenflow_runtime::stages::observer::StageLifecycleObserver;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::sync::Arc;
@@ -25,18 +25,10 @@ impl TypedPayload for TestEvent {
 }
 
 #[derive(Debug)]
-struct NoopMiddleware;
-impl Middleware for NoopMiddleware {
+struct NoopObserver;
+impl StageLifecycleObserver for NoopObserver {
     fn label(&self) -> &'static str {
         "noop"
-    }
-
-    fn source_phase(&self) -> SourceMiddlewarePhase {
-        SourceMiddlewarePhase::Ordinary
-    }
-
-    fn pre_handle(&self, _event: &ChainEvent, _ctx: &mut MiddlewareContext) -> MiddlewareAction {
-        MiddlewareAction::Continue
     }
 }
 
@@ -59,24 +51,32 @@ impl MiddlewareFactory for SlotFactory {
         self.key
     }
 
-    fn control_role(&self) -> ControlMiddlewareRole {
-        ControlMiddlewareRole::None
-    }
-
-    fn plan_contribution(&self) -> MiddlewarePlanContribution {
-        MiddlewarePlanContribution::None
+    fn declaration(&self) -> MiddlewareDeclaration {
+        MiddlewareDeclaration::observer(self.label, vec![MiddlewareSurfaceKind::StageLifecycle])
     }
 
     fn topology_config_slot(&self) -> Option<TopologyMiddlewareConfigSlot> {
         Some(self.slot)
     }
 
-    fn create(
+    fn materialize(
         &self,
-        _config: &StageConfig,
-        _control_middleware: Arc<ControlMiddlewareAggregator>,
-    ) -> MiddlewareFactoryResult<Box<dyn Middleware>> {
-        Ok(Box::new(NoopMiddleware))
+        request: MiddlewareAttachmentRequest<'_>,
+        context: &MiddlewareMaterializationContext<'_>,
+    ) -> MiddlewareFactoryResult<MiddlewareSurfaceAttachment> {
+        validate_attachment_request(&self.declaration(), &request).map_err(|err| {
+            MiddlewareFactoryError::materialization_failed(self.label(), &context.config.name, err)
+        })?;
+        match request.surface.kind() {
+            MiddlewareSurfaceKind::StageLifecycle => Ok(
+                MiddlewareSurfaceAttachment::StageLifecycleObserver(Arc::new(NoopObserver)),
+            ),
+            other => Err(MiddlewareFactoryError::materialization_failed(
+                self.label(),
+                &context.config.name,
+                std::io::Error::other(format!("unsupported observer surface {other:?}")),
+            )),
+        }
     }
 
     fn safety_level(&self) -> MiddlewareSafety {

@@ -11,7 +11,8 @@ use super::candidates::{CandidateSet, ConfigValue};
 use super::error::ConfigResolveError;
 use super::schema::{knob, knob_registry, KnobDefault, KnobSpec, Redaction};
 use obzenflow_core::config::{
-    ConfigScope, ConfigSource, ConfigValueMeta, ResolvedValueDoc, SecretRef,
+    ConfigScope, ConfigSource, ConfigSubject, ConfigValueMeta, ResolvedForDoc, ResolvedValueDoc,
+    SecretRef,
 };
 
 /// A resolved value with both provenance axes.
@@ -106,6 +107,7 @@ impl ResolvedRuntimeConfig {
                             meta: ConfigValueMeta {
                                 source,
                                 scope,
+                                subject: ConfigSubject::Unqualified,
                                 key_path: spec.key_path.to_string(),
                             },
                         });
@@ -119,6 +121,7 @@ impl ResolvedRuntimeConfig {
                 meta: ConfigValueMeta {
                     source: ConfigSource::Default,
                     scope: ConfigScope::Global,
+                    subject: ConfigSubject::Unqualified,
                     key_path: spec.key_path.to_string(),
                 },
             }),
@@ -180,11 +183,25 @@ pub struct AiModelsConfig {
 /// Evidence/DTO rendering with schema-driven redaction (§13: resolved
 /// secret values redact; reference names stay visible).
 pub fn doc_for(spec: &KnobSpec, resolved: &Resolved<ConfigValue>) -> ResolvedValueDoc {
+    doc_for_at(spec, resolved, None)
+}
+
+/// Evidence/DTO rendering for a concrete application point. Effect rows carry
+/// both the point and the winning subject; topology-free rows retain the
+/// version-1-compatible compact shape.
+pub fn doc_for_at(
+    spec: &KnobSpec,
+    resolved: &Resolved<ConfigValue>,
+    resolved_for: Option<ResolvedForDoc>,
+) -> ResolvedValueDoc {
     let redacted = matches!(spec.redaction, Redaction::SecretValue);
+    let winner_subject = resolved_for.as_ref().map(|_| resolved.meta.subject.clone());
     ResolvedValueDoc {
         key_path: spec.key_path.to_string(),
+        resolved_for,
         scope: resolved.meta.scope.to_string(),
         source: resolved.meta.source.to_string(),
+        winner_subject,
         value: if redacted {
             serde_json::json!("***redacted***")
         } else {
@@ -194,10 +211,13 @@ pub fn doc_for(spec: &KnobSpec, resolved: &Resolved<ConfigValue>) -> ResolvedVal
     }
 }
 
-/// One difference between two doc sets, compared per `(key_path, scope)`.
+/// One difference between two doc sets, compared per
+/// `(key_path, resolved_for, scope)`.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct ConfigDiffEntry {
     pub key_path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolved_for: Option<ResolvedForDoc>,
     pub scope: String,
     pub base: Option<serde_json::Value>,
     pub effective: Option<serde_json::Value>,
@@ -207,9 +227,21 @@ pub struct ConfigDiffEntry {
 /// slice the result is truthfully empty; asserted, not assumed (gap 12).
 pub fn diff(base: &[ResolvedValueDoc], effective: &[ResolvedValueDoc]) -> Vec<ConfigDiffEntry> {
     use std::collections::BTreeMap;
-    let index = |docs: &[ResolvedValueDoc]| -> BTreeMap<(String, String), serde_json::Value> {
+    let index = |docs: &[ResolvedValueDoc]| -> BTreeMap<
+        (String, Option<ResolvedForDoc>, String),
+        serde_json::Value,
+    > {
         docs.iter()
-            .map(|d| ((d.key_path.clone(), d.scope.clone()), d.value.clone()))
+            .map(|d| {
+                (
+                    (
+                        d.key_path.clone(),
+                        d.resolved_for.clone(),
+                        d.scope.clone(),
+                    ),
+                    d.value.clone(),
+                )
+            })
             .collect()
     };
     let base_index = index(base);
@@ -226,7 +258,8 @@ pub fn diff(base: &[ResolvedValueDoc], effective: &[ResolvedValueDoc]) -> Vec<Co
             } else {
                 Some(ConfigDiffEntry {
                     key_path: key.0.clone(),
-                    scope: key.1.clone(),
+                    resolved_for: key.1.clone(),
+                    scope: key.2.clone(),
                     base: base_value.cloned(),
                     effective: effective_value.cloned(),
                 })
@@ -263,12 +296,12 @@ mod tests {
     #[test]
     fn ai_models_typed_view_carries_provenance_and_the_visible_reference() {
         let mut set = CandidateSet::default();
-        set.admit(ScopedCandidate {
-            key_path: "ai.models.provider".to_string(),
-            scope: ConfigScope::Global,
-            source: ConfigSource::File,
-            value: ConfigValue::Text("openai".to_string()),
-        })
+        set.admit(ScopedCandidate::unqualified(
+            "ai.models.provider",
+            ConfigScope::Global,
+            ConfigSource::File,
+            ConfigValue::Text("openai".to_string()),
+        ))
         .unwrap();
         let snapshot = ResolvedRuntimeConfig::new(set);
         let ai = snapshot.ai_models();
@@ -284,7 +317,7 @@ mod tests {
             key_path: "ai.endpoints.resolved_api_key",
             file_path: None,
             value_type: KnobType::Text,
-            target: KnobTarget::Global,
+            target: KnobTarget::StageOrEffect,
             default: KnobDefault::OptionalAbsent,
             mutability: Mutability::Restartful,
             redaction: Redaction::SecretValue,
@@ -295,12 +328,41 @@ mod tests {
             meta: ConfigValueMeta {
                 source: ConfigSource::File,
                 scope: ConfigScope::Global,
+                subject: ConfigSubject::Unqualified,
                 key_path: spec.key_path.to_string(),
             },
         };
         let doc = doc_for(&spec, &resolved);
         assert!(doc.redacted);
         assert_eq!(doc.value, serde_json::json!("***redacted***"));
+
+        let effect_type = obzenflow_core::event::EffectType::from("payments.authorize");
+        let effect_resolved = Resolved {
+            value: ConfigValue::Text("still-secret".to_string()),
+            meta: ConfigValueMeta {
+                source: ConfigSource::File,
+                scope: ConfigScope::stage("authorize_payment"),
+                subject: ConfigSubject::Effect {
+                    effect_type: effect_type.clone(),
+                },
+                key_path: spec.key_path.to_string(),
+            },
+        };
+        let effect_doc = doc_for_at(
+            &spec,
+            &effect_resolved,
+            Some(ResolvedForDoc::Effect {
+                stage: "authorize_payment".to_string(),
+                effect_type: effect_type.as_str().to_string(),
+            }),
+        );
+        assert!(effect_doc.redacted);
+        assert_eq!(effect_doc.value, serde_json::json!("***redacted***"));
+        assert_eq!(
+            effect_doc.winner_subject,
+            Some(ConfigSubject::Effect { effect_type })
+        );
+        assert!(effect_doc.resolved_for.is_some());
         let _ = EdgeEndpoint::Upstream; // silence unused import in cfg(test)
     }
 
@@ -310,5 +372,31 @@ mod tests {
         assert!(snapshot.overlay().is_empty());
         let docs = snapshot.global_view();
         assert!(diff(&docs, &docs).is_empty());
+    }
+
+    #[test]
+    fn diff_identity_keeps_equal_key_and_scope_effect_points_separate() {
+        let row = |effect_type: &str, value: u64| ResolvedValueDoc {
+            key_path: "effects.resilience.breaker.minimum_calls".to_string(),
+            resolved_for: Some(ResolvedForDoc::Effect {
+                stage: "authorize_payment".to_string(),
+                effect_type: effect_type.to_string(),
+            }),
+            scope: "stage:authorize_payment".to_string(),
+            source: "file".to_string(),
+            winner_subject: Some(ConfigSubject::Unqualified),
+            value: serde_json::json!(value),
+            redacted: false,
+        };
+        let base = vec![row("payments.authorize", 8), row("payments.refund", 8)];
+        let effective = vec![row("payments.authorize", 8), row("payments.refund", 5)];
+        let changes = diff(&base, &effective);
+        assert_eq!(changes.len(), 1);
+        assert!(matches!(
+            changes[0].resolved_for.as_ref(),
+            Some(ResolvedForDoc::Effect { effect_type, .. }) if effect_type == "payments.refund"
+        ));
+        assert_eq!(changes[0].base, Some(serde_json::json!(8)));
+        assert_eq!(changes[0].effective, Some(serde_json::json!(5)));
     }
 }

@@ -55,7 +55,7 @@ fn test_flowip_054_middleware_factory_integration() {
         message_bus: Arc::new(FsmMessageBus::new()),
     };
 
-    // 3. Create supervisor (this is where factory.create(&config) is called)
+    // 3. Create supervisor (this is where the factory materializes its typed attachment)
     let _supervisor = descriptor.create_supervisor(config);
 
     // At this point middleware factories receive full stage context and can build

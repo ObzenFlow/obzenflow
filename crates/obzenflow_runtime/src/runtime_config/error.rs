@@ -5,7 +5,7 @@
 //! Resolution and admission errors, rendered in the startup `config error
 //! at <path>: ...` convention so build-side failures read like 010h's.
 
-use obzenflow_core::config::{ConfigScope, ConfigSource};
+use obzenflow_core::config::{ConfigAddress, ConfigSource};
 use std::fmt;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,23 +34,36 @@ pub enum ConfigResolveError {
         downstream: String,
         known: Vec<String>,
     },
+    /// An exact effect address names no declaration on the configured stage.
+    UnknownEffect {
+        key_path: String,
+        stage: String,
+        effect_type: String,
+        known: Vec<String>,
+    },
+    /// The effect exists, but no surviving attachment consumes this key at it.
+    UnattachedEffectSubject {
+        key_path: String,
+        stage: String,
+        effect_type: String,
+    },
     /// A candidate was admitted at a scope its knob target does not admit,
     /// or a source (CLI/env) was scoped in the first pass.
     ScopeNotAdmitted {
         key_path: String,
-        scope: ConfigScope,
+        address: ConfigAddress,
         reason: String,
     },
-    /// Two candidates with the same (knob, scope, source) and different values.
+    /// Two candidates with the same (knob, address, source) and different values.
     Conflict {
         key_path: String,
-        scope: ConfigScope,
+        address: ConfigAddress,
         source: ConfigSource,
     },
     /// A candidate value failed its knob's type or range check.
     InvalidValue {
         key_path: String,
-        scope: ConfigScope,
+        address: ConfigAddress,
         message: String,
     },
     /// A key path with no registry entry reached the resolver.
@@ -93,27 +106,47 @@ impl fmt::Display for ConfigResolveError {
                  Known edges: {}",
                 join_or_none(known)
             ),
+            Self::UnknownEffect {
+                key_path,
+                stage,
+                effect_type,
+                known,
+            } => write!(
+                f,
+                "config error at {key_path}: effect '{effect_type}' is not declared by stage \
+                 '{stage}'. Known effects: {}",
+                join_or_none(known)
+            ),
+            Self::UnattachedEffectSubject {
+                key_path,
+                stage,
+                effect_type,
+            } => write!(
+                f,
+                "config error at {key_path}: effect '{effect_type}' is declared by stage \
+                 '{stage}', but no surviving attachment consumes this key"
+            ),
             Self::ScopeNotAdmitted {
                 key_path,
-                scope,
+                address,
                 reason,
             } => write!(
                 f,
-                "config error at {key_path}: entry at {scope} scope is not admitted: {reason}"
+                "config error at {key_path}: entry at {address} is not admitted: {reason}"
             ),
             Self::Conflict {
                 key_path,
-                scope,
+                address,
                 source,
             } => write!(
                 f,
-                "config error at {key_path}: conflicting {source} candidates at {scope} scope"
+                "config error at {key_path}: conflicting {source} candidates at {address}"
             ),
             Self::InvalidValue {
                 key_path,
-                scope,
+                address,
                 message,
-            } => write!(f, "config error at {key_path} ({scope} scope): {message}"),
+            } => write!(f, "config error at {key_path} ({address}): {message}"),
             Self::UnknownKnob { key_path } => {
                 write!(f, "config error at {key_path}: unknown configuration key")
             }

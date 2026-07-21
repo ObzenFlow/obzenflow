@@ -1153,6 +1153,10 @@ impl StageDescriptor for TypedStageDescriptor {
         self.inner.stage_middleware_factories()
     }
 
+    fn effect_policy_attachments(&self) -> &[crate::dsl::stage_descriptor::EffectPolicyAttachment] {
+        self.inner.effect_policy_attachments()
+    }
+
     fn debug_info(&self) -> String {
         self.inner.debug_info()
     }
@@ -2452,6 +2456,10 @@ impl StageDescriptor for DeterministicOrdererOverride {
 
     fn stage_middleware_factories(&self) -> &[Box<dyn MiddlewareFactory>] {
         self.inner.stage_middleware_factories()
+    }
+
+    fn effect_policy_attachments(&self) -> &[crate::dsl::stage_descriptor::EffectPolicyAttachment] {
+        self.inner.effect_policy_attachments()
     }
 
     fn debug_info(&self) -> String {

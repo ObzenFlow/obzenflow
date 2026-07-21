@@ -8,13 +8,12 @@
 mod tests {
     use std::collections::HashMap;
 
-    use obzenflow_adapters::middleware::control::ControlMiddlewareAggregator;
     use obzenflow_adapters::middleware::{
-        ControlMiddlewareRole, Middleware, MiddlewareFactory, MiddlewareOverrideKey,
-        MiddlewarePlanContribution, SourceMiddlewarePhase, TopologyMiddlewareConfigSlot,
+        validate_attachment_request, MiddlewareAttachmentRequest, MiddlewareDeclaration,
+        MiddlewareFactory, MiddlewareFactoryError, MiddlewareMaterializationContext,
+        MiddlewareOverrideKey, MiddlewareSurfaceAttachment, MiddlewareSurfaceKind,
     };
     use obzenflow_core::TypedPayload;
-    use obzenflow_runtime::pipeline::config::StageConfig;
     use obzenflow_runtime::stages::common::handler_error::HandlerError;
     use obzenflow_runtime::stages::common::handlers::{AsyncTransformHandler, TransformHandler};
     use obzenflow_topology::EdgeKind;
@@ -30,15 +29,11 @@ mod tests {
         AiMapReduceChunkFailed, AiMapReducePlanningManifest, AiMapReduceTaggedPartial,
     };
 
-    struct TestMiddleware(&'static str);
+    struct TestObserver(&'static str);
 
-    impl Middleware for TestMiddleware {
+    impl obzenflow_runtime::stages::observer::HandlerObserver for TestObserver {
         fn label(&self) -> &'static str {
             self.0
-        }
-
-        fn source_phase(&self) -> SourceMiddlewarePhase {
-            SourceMiddlewarePhase::Ordinary
         }
     }
 
@@ -56,24 +51,33 @@ mod tests {
             MiddlewareOverrideKey::of::<Self>(self.0)
         }
 
-        fn control_role(&self) -> ControlMiddlewareRole {
-            ControlMiddlewareRole::None
+        fn declaration(&self) -> MiddlewareDeclaration {
+            MiddlewareDeclaration::observer(self.0, vec![MiddlewareSurfaceKind::Handler])
         }
 
-        fn plan_contribution(&self) -> MiddlewarePlanContribution {
-            MiddlewarePlanContribution::None
-        }
-
-        fn topology_config_slot(&self) -> Option<TopologyMiddlewareConfigSlot> {
-            None
-        }
-
-        fn create(
+        fn materialize(
             &self,
-            _config: &StageConfig,
-            _control_middleware: Arc<ControlMiddlewareAggregator>,
-        ) -> obzenflow_adapters::middleware::MiddlewareFactoryResult<Box<dyn Middleware>> {
-            Ok(Box::new(TestMiddleware(self.0)))
+            request: MiddlewareAttachmentRequest<'_>,
+            context: &MiddlewareMaterializationContext<'_>,
+        ) -> obzenflow_adapters::middleware::MiddlewareFactoryResult<MiddlewareSurfaceAttachment>
+        {
+            validate_attachment_request(&self.declaration(), &request).map_err(|err| {
+                MiddlewareFactoryError::materialization_failed(
+                    self.label(),
+                    &context.config.name,
+                    err,
+                )
+            })?;
+            match request.surface.kind() {
+                MiddlewareSurfaceKind::Handler => Ok(MiddlewareSurfaceAttachment::HandlerObserver(
+                    Arc::new(TestObserver(self.0)),
+                )),
+                other => Err(MiddlewareFactoryError::materialization_failed(
+                    self.label(),
+                    &context.config.name,
+                    std::io::Error::other(format!("unsupported observer surface {other:?}")),
+                )),
+            }
         }
     }
 

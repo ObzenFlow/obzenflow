@@ -11,7 +11,8 @@
 
 use super::error::ConfigResolveError;
 use super::schema::{knob, KnobTarget};
-use obzenflow_core::config::{ConfigScope, ConfigSource};
+use obzenflow_core::config::{ConfigAddress, ConfigScope, ConfigSource, ConfigSubject};
+use obzenflow_core::event::EffectType;
 use std::collections::BTreeMap;
 
 /// A type-validated configuration value.
@@ -71,12 +72,35 @@ impl ConfigValue {
     }
 }
 
-/// One candidate at one scope from one source.
+/// One candidate at one protected-unit-qualified address from one source.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ScopedCandidate {
     pub key_path: String,
-    pub scope: ConfigScope,
+    pub address: ConfigAddress,
     pub source: ConfigSource,
+    pub value: ConfigValue,
+}
+
+impl ScopedCandidate {
+    pub fn unqualified(
+        key_path: impl Into<String>,
+        scope: ConfigScope,
+        source: ConfigSource,
+        value: ConfigValue,
+    ) -> Self {
+        Self {
+            key_path: key_path.into(),
+            address: ConfigAddress::unqualified(scope),
+            source,
+            value,
+        }
+    }
+}
+
+/// One scope-free DSL default contributed by a middleware factory.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DslConfigDefault {
+    pub key_path: &'static str,
     pub value: ConfigValue,
 }
 
@@ -106,11 +130,11 @@ impl SourceSlots {
     }
 }
 
-/// The scoped candidate table: knob key path -> scope -> source slots.
+/// The candidate table: knob key path -> qualified address -> source slots.
 /// `BTreeMap` throughout for deterministic iteration and evidence ordering.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct CandidateSet {
-    by_knob: BTreeMap<String, BTreeMap<ConfigScope, SourceSlots>>,
+    by_knob: BTreeMap<String, BTreeMap<ConfigAddress, SourceSlots>>,
 }
 
 impl CandidateSet {
@@ -121,7 +145,7 @@ impl CandidateSet {
     pub fn admit(&mut self, candidate: ScopedCandidate) -> Result<(), ConfigResolveError> {
         let ScopedCandidate {
             key_path,
-            scope,
+            address,
             source,
             value,
         } = candidate;
@@ -130,22 +154,24 @@ impl CandidateSet {
             key_path: key_path.clone(),
         })?;
 
-        if !scope_admitted(spec.target, &scope) {
+        if !address_admitted(spec.target, &address) {
             return Err(ConfigResolveError::ScopeNotAdmitted {
                 key_path,
-                scope,
+                address,
                 reason: format!(
-                    "the knob's target is {:?}; entries more specific than the target are invalid",
+                    "the knob's target is {:?}; this scope/subject combination is invalid",
                     spec.target
                 ),
             });
         }
 
         // §2 first-pass lock: scoped entries ride file and DSL only.
-        if matches!(source, ConfigSource::Cli | ConfigSource::Env) && scope != ConfigScope::Global {
+        if matches!(source, ConfigSource::Cli | ConfigSource::Env)
+            && address != ConfigAddress::unqualified(ConfigScope::Global)
+        {
             return Err(ConfigResolveError::ScopeNotAdmitted {
                 key_path,
-                scope,
+                address,
                 reason: format!(
                     "{source} overrides are global-only in the first pass; use a file entry at this scope"
                 ),
@@ -155,7 +181,7 @@ impl CandidateSet {
         if let Err(message) = spec.value_type.validate(&value) {
             return Err(ConfigResolveError::InvalidValue {
                 key_path,
-                scope,
+                address,
                 message,
             });
         }
@@ -164,19 +190,19 @@ impl CandidateSet {
             .by_knob
             .entry(key_path.clone())
             .or_default()
-            .entry(scope.clone())
+            .entry(address.clone())
             .or_default();
         let Some(slot) = slots.slot_mut(&source) else {
             return Err(ConfigResolveError::ScopeNotAdmitted {
                 key_path,
-                scope,
+                address,
                 reason: format!("{source} is not an admissible candidate source"),
             });
         };
         match slot {
             Some(existing) if *existing != value => Err(ConfigResolveError::Conflict {
                 key_path,
-                scope,
+                address,
                 source,
             }),
             _ => {
@@ -187,17 +213,21 @@ impl CandidateSet {
     }
 
     pub fn get(&self, key_path: &str, scope: &ConfigScope) -> Option<&SourceSlots> {
-        self.by_knob
-            .get(key_path)
-            .and_then(|scopes| scopes.get(scope))
+        self.get_at(key_path, &ConfigAddress::unqualified(scope.clone()))
     }
 
-    /// All scopes carrying candidates for one knob (validation walks this).
-    pub fn scopes_for(&self, key_path: &str) -> impl Iterator<Item = &ConfigScope> {
+    pub fn get_at(&self, key_path: &str, address: &ConfigAddress) -> Option<&SourceSlots> {
+        self.by_knob
+            .get(key_path)
+            .and_then(|addresses| addresses.get(address))
+    }
+
+    /// All qualified addresses carrying candidates for one knob.
+    pub fn addresses_for(&self, key_path: &str) -> impl Iterator<Item = &ConfigAddress> {
         self.by_knob
             .get(key_path)
             .into_iter()
-            .flat_map(|scopes| scopes.keys())
+            .flat_map(|addresses| addresses.keys())
     }
 
     /// Knobs that carry at least one candidate.
@@ -209,7 +239,18 @@ impl CandidateSet {
 /// Whether `scope` is admissible for a knob with `target` (§4c: the target
 /// is the most specific admissible scope; coarser scopes always admit).
 pub fn scope_admitted(target: KnobTarget, scope: &ConfigScope) -> bool {
-    let specificity = match scope {
+    address_admitted(target, &ConfigAddress::unqualified(scope.clone()))
+}
+
+/// Explicit target × scope × subject compatibility matrix. Effect points are
+/// not treated as a numeric specificity rung comparable with edges.
+pub fn address_admitted(target: KnobTarget, address: &ConfigAddress) -> bool {
+    if let ConfigSubject::Effect { .. } = &address.subject {
+        return matches!(target, KnobTarget::Effect | KnobTarget::StageOrEffect)
+            && matches!(address.scope, ConfigScope::Stage { .. });
+    }
+
+    let specificity = match &address.scope {
         ConfigScope::Global => 0,
         ConfigScope::Flow => 1,
         ConfigScope::Stage { .. } => 2,
@@ -218,7 +259,7 @@ pub fn scope_admitted(target: KnobTarget, scope: &ConfigScope) -> bool {
     let max = match target {
         KnobTarget::Global => 0,
         KnobTarget::Flow => 1,
-        KnobTarget::Stage => 2,
+        KnobTarget::Stage | KnobTarget::Effect | KnobTarget::StageOrEffect => 2,
         KnobTarget::Edge { .. } => 3,
     };
     specificity <= max
@@ -233,9 +274,24 @@ pub struct DslCandidates {
 
 impl DslCandidates {
     pub fn declare(&mut self, key_path: impl Into<String>, scope: ConfigScope, value: ConfigValue) {
+        self.entries.push(ScopedCandidate::unqualified(
+            key_path,
+            scope,
+            ConfigSource::Dsl,
+            value,
+        ));
+    }
+
+    pub fn declare_for_effect(
+        &mut self,
+        key_path: impl Into<String>,
+        stage: impl Into<obzenflow_core::StageKey>,
+        effect_type: impl Into<EffectType>,
+        value: ConfigValue,
+    ) {
         self.entries.push(ScopedCandidate {
             key_path: key_path.into(),
-            scope,
+            address: ConfigAddress::effect(stage, effect_type),
             source: ConfigSource::Dsl,
             value,
         });
@@ -262,7 +318,7 @@ mod tests {
     ) -> ScopedCandidate {
         ScopedCandidate {
             key_path: key.to_string(),
-            scope,
+            address: ConfigAddress::unqualified(scope),
             source,
             value,
         }
@@ -330,6 +386,44 @@ mod tests {
         set.admit(dsl(200)).unwrap();
         let err = set.admit(dsl(300)).unwrap_err();
         assert!(matches!(err, ConfigResolveError::Conflict { .. }));
+    }
+
+    #[test]
+    fn exact_effect_subjects_are_independent_candidate_identities() {
+        let key = crate::runtime_config::RATE_LIMITER_EVENTS_PER_SECOND_KEY;
+        let exact = |effect_type: &str, value: f64| ScopedCandidate {
+            key_path: key.to_string(),
+            address: ConfigAddress::effect("payments", effect_type),
+            source: ConfigSource::File,
+            value: ConfigValue::F64(value),
+        };
+
+        let mut set = CandidateSet::default();
+        set.admit(exact("payments.authorize", 5.0)).unwrap();
+        set.admit(exact("payments.refund", 7.0)).unwrap();
+        set.admit(exact("payments.authorize", 5.0)).unwrap();
+
+        let error = set.admit(exact("payments.authorize", 9.0)).unwrap_err();
+        assert!(matches!(
+            error,
+            ConfigResolveError::Conflict { address, .. }
+                if address == ConfigAddress::effect("payments", "payments.authorize")
+        ));
+        assert_eq!(set.addresses_for(key).count(), 2);
+    }
+
+    #[test]
+    fn exact_effect_subject_is_rejected_for_non_effect_targets() {
+        let mut set = CandidateSet::default();
+        let error = set
+            .admit(ScopedCandidate {
+                key_path: "runtime.max_lineage_depth".to_string(),
+                address: ConfigAddress::effect("payments", "payments.authorize"),
+                source: ConfigSource::File,
+                value: ConfigValue::U64(5),
+            })
+            .unwrap_err();
+        assert!(matches!(error, ConfigResolveError::ScopeNotAdmitted { .. }));
     }
 
     #[test]

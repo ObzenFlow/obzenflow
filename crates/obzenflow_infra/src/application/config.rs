@@ -470,13 +470,29 @@ pub(crate) struct RawFileContractsConfig {
 pub(crate) struct RawFileEffectsConfig {
     pub(crate) circuit_breaker: RawBreakerFields,
     pub(crate) rate_limiter: RawLimiterFields,
-    pub(crate) flow: RawEffectsScopeFields,
-    pub(crate) stages: BTreeMap<String, RawEffectsScopeFields>,
+    pub(crate) flow: RawEffectsBroadcastFields,
+    pub(crate) stages: BTreeMap<String, RawEffectsStageScope>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(default, deny_unknown_fields)]
-pub(crate) struct RawEffectsScopeFields {
+pub(crate) struct RawEffectsBroadcastFields {
+    pub(crate) circuit_breaker: RawBreakerFields,
+    pub(crate) rate_limiter: RawLimiterFields,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+pub(crate) struct RawEffectsStageScope {
+    pub(crate) circuit_breaker: RawBreakerFields,
+    pub(crate) rate_limiter: RawLimiterFields,
+    /// Exact effect subjects. Dotted effect types are quoted TOML map keys.
+    pub(crate) by_type: BTreeMap<String, RawEffectsExactFields>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+pub(crate) struct RawEffectsExactFields {
     pub(crate) circuit_breaker: RawBreakerFields,
     pub(crate) rate_limiter: RawLimiterFields,
 }

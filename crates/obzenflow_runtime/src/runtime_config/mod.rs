@@ -19,15 +19,19 @@ pub mod model;
 pub mod resolve;
 pub mod schema;
 
-pub use candidates::{CandidateSet, ConfigValue, DslCandidates, ScopedCandidate};
+pub use candidates::{CandidateSet, ConfigValue, DslCandidates, DslConfigDefault, ScopedCandidate};
 pub use error::ConfigResolveError;
-pub use flow_view::{BackpressureMode, FlowEffectiveConfig, FlowResolutionContext};
+pub use flow_view::{
+    BackpressureMode, ExactConfigView, FlowEffectiveConfig, FlowResolutionContext,
+};
 pub use model::{
-    diff, doc_for, AiModelsConfig, ConfigDiffEntry, Resolved, ResolvedRuntimeConfig,
+    diff, doc_for, doc_for_at, AiModelsConfig, ConfigDiffEntry, Resolved, ResolvedRuntimeConfig,
     RuntimeConfigOverlay,
 };
 pub use resolve::{materialize_flow_config, ResolutionPoint};
 pub use schema::{
     canonical_env_name, knob, knob_registry, schema_view, EdgeEndpoint, EnvBinding, KnobDefault,
     KnobSchemaDoc, KnobSpec, KnobTarget, KnobType, Mutability, Redaction,
+    CIRCUIT_BREAKER_THRESHOLD_KEY, RATE_LIMITER_BURST_CAPACITY_KEY,
+    RATE_LIMITER_EVENTS_PER_SECOND_KEY,
 };

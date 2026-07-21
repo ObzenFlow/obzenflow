@@ -18,6 +18,7 @@
 
 use super::control::policy::{EffectPolicyAttachment, SinkPolicy, SourcePolicy};
 use super::control::ControlMiddlewareAggregator;
+use super::Middleware;
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::ingress::{IngressBoundaryMiddleware, IngressKey};
 use obzenflow_core::{StageId, StageKey};
@@ -597,20 +598,30 @@ pub struct MiddlewareDeclaration {
     /// The surfaces this factory can attach to. A control middleware may span
     /// several (the circuit breaker declares source poll, effect, and sink
     /// delivery); the binder picks the concrete surface per call site and
-    /// validates membership. An empty set marks legacy shell middleware with no
-    /// hook surface, created via `create()`.
+    /// validates membership. A declaration always names at least one surface.
     pub surfaces: Vec<MiddlewareSurfaceKind>,
+    route: MiddlewareDeclarationRoute,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MiddlewareDeclarationRoute {
+    Typed,
+    /// Sealed migration route for the two AI map-reduce shell adapters owned by
+    /// FLOWIP-128g. External factories cannot construct this declaration.
+    Flowip128gLegacyShell,
 }
 
 impl MiddlewareDeclaration {
-    /// Declaration for legacy shell middleware: no hook surface, observer
-    /// capability (the safe default matching `MiddlewareKind::Observation`).
-    pub fn legacy_shell(label: &'static str, family_label: &'static str) -> Self {
+    pub(crate) fn flowip_128g_legacy_shell(
+        label: &'static str,
+        family_label: &'static str,
+    ) -> Self {
         Self {
             label,
             family_label,
-            capability: MiddlewareCapability::Observer,
-            surfaces: Vec::new(),
+            capability: MiddlewareCapability::Structural,
+            surfaces: vec![MiddlewareSurfaceKind::Handler],
+            route: MiddlewareDeclarationRoute::Flowip128gLegacyShell,
         }
     }
 
@@ -630,6 +641,7 @@ impl MiddlewareDeclaration {
             family_label,
             capability: MiddlewareCapability::Control,
             surfaces,
+            route: MiddlewareDeclarationRoute::Typed,
         }
     }
 
@@ -649,11 +661,15 @@ impl MiddlewareDeclaration {
             family_label,
             capability: MiddlewareCapability::Observer,
             surfaces,
+            route: MiddlewareDeclarationRoute::Typed,
         }
     }
 
-    pub fn is_legacy_shell(&self) -> bool {
-        self.surfaces.is_empty()
+    /// Whether this is one of the sealed AI map-reduce shell migrations owned
+    /// by FLOWIP-128g. This is binder plumbing, not a public authoring route.
+    #[doc(hidden)]
+    pub fn is_flowip_128g_legacy_shell(&self) -> bool {
+        self.route == MiddlewareDeclarationRoute::Flowip128gLegacyShell
     }
 
     /// Whether this factory declares it can attach to `surface`.
@@ -667,7 +683,28 @@ impl MiddlewareDeclaration {
     }
 
     pub fn is_observer(&self) -> bool {
-        matches!(self.capability, MiddlewareCapability::Observer) && !self.is_legacy_shell()
+        matches!(self.capability, MiddlewareCapability::Observer)
+    }
+
+    /// Validate the declaration independently of a concrete binding request.
+    /// Factories with no surfaces fail at flow build instead of being assigned
+    /// an implicit shell meaning.
+    pub fn validate_shape(&self) -> Result<(), MiddlewareAttachmentValidationError> {
+        if self.surfaces.is_empty() {
+            return Err(MiddlewareAttachmentValidationError::EmptyDeclaration {
+                label: self.label,
+            });
+        }
+        if matches!(self.capability, MiddlewareCapability::Structural)
+            && !self.is_flowip_128g_legacy_shell()
+        {
+            return Err(
+                MiddlewareAttachmentValidationError::UnsupportedStructuralDeclaration {
+                    label: self.label,
+                },
+            );
+        }
+        Ok(())
     }
 }
 
@@ -678,11 +715,13 @@ impl MiddlewareDeclaration {
 /// A carrier-level validation failure before runtime erasure.
 #[derive(Debug, Error)]
 pub enum MiddlewareAttachmentValidationError {
+    #[error("middleware '{label}' declares no typed surfaces")]
+    EmptyDeclaration { label: &'static str },
+
     #[error(
-        "middleware '{label}' is legacy shell middleware with no hook surface; \
-         materialization requires a declared hook surface"
+        "middleware '{label}' declares structural capability outside the sealed FLOWIP-128g migration route"
     )]
-    LegacyShell { label: &'static str },
+    UnsupportedStructuralDeclaration { label: &'static str },
 
     #[error("middleware '{label}' does not declare support for surface {surface:?}")]
     UnsupportedSurface {
@@ -717,12 +756,7 @@ pub fn validate_attachment_request(
     declaration: &MiddlewareDeclaration,
     request: &MiddlewareAttachmentRequest<'_>,
 ) -> Result<MiddlewareAttachmentId, MiddlewareAttachmentValidationError> {
-    if declaration.is_legacy_shell() {
-        return Err(MiddlewareAttachmentValidationError::LegacyShell {
-            label: declaration.label,
-        });
-    }
-
+    declaration.validate_shape()?;
     let surface = request.surface.kind();
     if !declaration.supports(surface) {
         return Err(MiddlewareAttachmentValidationError::UnsupportedSurface {
@@ -740,7 +774,9 @@ pub fn validate_attachment_request(
         MiddlewareCapability::Observer => {
             crate::middleware::observer::OBSERVER_SURFACE_KINDS.contains(&surface)
         }
-        MiddlewareCapability::Structural => false,
+        MiddlewareCapability::Structural => {
+            declaration.is_flowip_128g_legacy_shell() && surface == MiddlewareSurfaceKind::Handler
+        }
     };
     if !allowed {
         return Err(MiddlewareAttachmentValidationError::UnsupportedCapability {
@@ -831,6 +867,28 @@ pub struct MiddlewareMaterializationContext<'a> {
     pub stage_type: StageType,
 }
 
+impl MiddlewareMaterializationContext<'_> {
+    /// Resolve the policy-neutral immutable config view for exactly the
+    /// protected unit being materialised. Configuration cannot create a unit;
+    /// callers can only request a view for an already validated attachment.
+    pub fn config_view(
+        &self,
+        protected_unit: &ProtectedUnitId,
+    ) -> obzenflow_runtime::runtime_config::ExactConfigView<'_> {
+        use obzenflow_core::event::EffectType;
+        use obzenflow_runtime::runtime_config::ResolutionPoint;
+
+        let point = match &protected_unit.unit {
+            ProtectedUnit::Effect(unit) => ResolutionPoint::Effect {
+                stage: StageKey::from(self.config.name.as_str()),
+                effect_type: EffectType::from(unit.effect_type.as_str()),
+            },
+            _ => ResolutionPoint::Stage(StageKey::from(self.config.name.as_str())),
+        };
+        self.config.effective_config.exact_view(point)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Surface attachment
 // ---------------------------------------------------------------------------
@@ -850,6 +908,24 @@ pub struct MiddlewareMaterializationContext<'a> {
 pub struct SourcePollAttachment {
     pub policy: Arc<dyn SourcePolicy>,
     pub completion_gate: Option<Arc<dyn CompletionGate>>,
+}
+
+/// Sealed carrier for the two structural shell adapters awaiting FLOWIP-128g.
+///
+/// Its constructor is crate-private, so custom factories cannot use this as a
+/// generic handler-shell escape hatch. The DSL consumes it only after validating
+/// the sealed declaration above.
+pub struct Flowip128gLegacyShellAttachment(Box<dyn Middleware>);
+
+impl Flowip128gLegacyShellAttachment {
+    pub(crate) fn new(middleware: Box<dyn Middleware>) -> Self {
+        Self(middleware)
+    }
+
+    #[doc(hidden)]
+    pub fn into_middleware(self) -> Box<dyn Middleware> {
+        self.0
+    }
 }
 
 /// The single typed attachment a factory materializes for one surface.
@@ -873,11 +949,24 @@ pub enum MiddlewareSurfaceAttachment {
     JoinObserver(Arc<dyn JoinObserver>),
     OutputCommitObserver(Arc<dyn OutputCommitObserver>),
     StageLifecycleObserver(Arc<dyn StageLifecycleObserver>),
+    /// Sealed migration carrier for the two AI map-reduce consumers assigned
+    /// to FLOWIP-128g. It is not constructible by external factories.
+    #[doc(hidden)]
+    Flowip128gLegacyShell(Flowip128gLegacyShellAttachment),
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn typed_declarations_reject_an_empty_surface_set() {
+        let declaration = MiddlewareDeclaration::observer("empty", Vec::new());
+        assert!(matches!(
+            declaration.validate_shape(),
+            Err(MiddlewareAttachmentValidationError::EmptyDeclaration { label: "empty" })
+        ));
+    }
 
     /// A source-owned ingress surface plus its matching protected unit
     /// (FLOWIP-115d), for the canonical piggy-bank `accounts` shape.

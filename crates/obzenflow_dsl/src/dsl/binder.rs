@@ -13,13 +13,13 @@
 use crate::middleware_resolution::MiddlewareSource;
 use obzenflow_adapters::middleware::control::ControlMiddlewareAggregator;
 use obzenflow_adapters::middleware::{
-    effect_policy_from_middleware, validate_attachment_request, EffectPolicyAttachment,
-    EffectSurface, EffectTypeKey, EffectUnitId, HostedIngressTargetKey, IngressRouteScope,
-    IngressSurface, IngressUnitId, Middleware, MiddlewareAttachmentRequest,
-    MiddlewareDeclarationIndex, MiddlewareFactory, MiddlewareMaterializationContext,
-    MiddlewareOrigin, MiddlewareSurface, MiddlewareSurfaceAttachment, MiddlewareSurfaceKind,
-    ProtectedUnit, ProtectedUnitId, SinkDeliverySurface, SinkDeliveryTarget, SinkDeliveryUnitId,
-    SinkPolicy, SourcePolicy, SourcePollSurface, SourcePollUnitId, SourceStageIngressOwner,
+    validate_attachment_request, EffectPolicyAttachment, EffectSurface, EffectTypeKey,
+    EffectUnitId, HostedIngressTargetKey, IngressRouteScope, IngressSurface, IngressUnitId,
+    Middleware, MiddlewareAttachmentRequest, MiddlewareDeclarationIndex, MiddlewareFactory,
+    MiddlewareMaterializationContext, MiddlewareOrigin, MiddlewareSurface,
+    MiddlewareSurfaceAttachment, MiddlewareSurfaceKind, ProtectedUnit, ProtectedUnitId,
+    SinkDeliverySurface, SinkDeliveryTarget, SinkDeliveryUnitId, SinkPolicy, SourcePolicy,
+    SourcePollSurface, SourcePollUnitId, SourceStageIngressOwner,
 };
 use obzenflow_core::event::context::StageType;
 use obzenflow_core::ingress::IngressBoundaryMiddleware;
@@ -105,9 +105,8 @@ pub(crate) fn materialize_source_poll(
 
 /// Build the per-effect policy for one declared effect, in declared order.
 ///
-/// A hook-bound control middleware (the circuit breaker) is materialized onto
-/// the `Effect` surface; any other middleware is adapted through the legacy
-/// chain surface so a still-legacy policy (the rate limiter) composes alongside.
+/// A hook-bound control middleware is materialized onto the `Effect` surface.
+/// There is no generic middleware-chain fallback.
 pub(crate) fn bind_effect_policy(
     factory: &dyn MiddlewareFactory,
     config: &StageConfig,
@@ -160,12 +159,76 @@ pub(crate) fn bind_effect_policy(
             )),
         }
     } else {
-        let instance: Arc<dyn Middleware> = Arc::from(
-            factory
-                .create_for_effect(config, control_middleware.clone(), effect_type)
-                .map_err(|e| e.to_string())?,
-        );
-        Ok(effect_policy_from_middleware(instance))
+        Err(format!(
+            "middleware '{}' cannot bind to effect '{}': declaration capability {:?} and surfaces {:?} do not name the typed Effect control surface",
+            factory.label(),
+            effect_type,
+            declaration.capability,
+            declaration.surfaces
+        ))
+    }
+}
+
+/// Materialize one of the two sealed AI map-reduce shell adapters awaiting
+/// FLOWIP-128g. This is the only transitional generic-shell binding route.
+pub(crate) fn materialize_flowip_128g_legacy_shell(
+    factory: &dyn MiddlewareFactory,
+    config: &StageConfig,
+    stage_type: StageType,
+    control_middleware: &Arc<ControlMiddlewareAggregator>,
+    origin: &MiddlewareOrigin,
+    declaration_index: MiddlewareDeclarationIndex,
+) -> Result<Box<dyn Middleware>, String> {
+    let declaration = factory.declaration();
+    if !declaration.is_flowip_128g_legacy_shell() {
+        return Err(format!(
+            "middleware '{}' requested the FLOWIP-128g migration route without its sealed declaration",
+            factory.label()
+        ));
+    }
+    if stage_type != StageType::Transform {
+        return Err(format!(
+            "middleware '{}' uses the sealed FLOWIP-128g AI migration route, which is restricted to transform stages; stage '{}' is {stage_type:?}",
+            factory.label(),
+            config.name
+        ));
+    }
+
+    let surface = MiddlewareSurface::Handler {
+        stage_id: config.stage_id,
+    };
+    let protected_unit = ProtectedUnitId {
+        stage_id: config.stage_id,
+        unit: ProtectedUnit::Handler,
+    };
+    let request = MiddlewareAttachmentRequest {
+        surface: &surface,
+        protected_unit: &protected_unit,
+        origin,
+        declaration_index,
+    };
+    validate_attachment_request(&declaration, &request).map_err(|e| e.to_string())?;
+    let ctx = MiddlewareMaterializationContext {
+        config,
+        control_middleware,
+        stage_type,
+    };
+
+    tracing::warn!(
+        middleware = factory.label(),
+        stage = %config.name,
+        "FLOWIP-128g transitional AI map-reduce shell is still active"
+    );
+
+    match factory
+        .materialize(request, &ctx)
+        .map_err(|e| e.to_string())?
+    {
+        MiddlewareSurfaceAttachment::Flowip128gLegacyShell(shell) => Ok(shell.into_middleware()),
+        _ => Err(format!(
+            "FLOWIP-128g migration binder expected a sealed shell attachment from middleware '{}'",
+            factory.label()
+        )),
     }
 }
 
