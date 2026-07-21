@@ -10,6 +10,7 @@ pub(super) use crate::middleware::control::policy::effect::{
     EffectAttemptOutcome, EffectPolicy, EffectPolicyAttachment, PerEffectPolicyBoundary,
     PolicyAdmission,
 };
+pub(super) use crate::middleware::control::resilience::FinalAdmissionTestGate;
 pub(super) use crate::middleware::control::ControlMiddlewareAggregator;
 pub(super) use crate::middleware::{MiddlewareAbortCause, MiddlewareContext};
 pub(super) use async_trait::async_trait;

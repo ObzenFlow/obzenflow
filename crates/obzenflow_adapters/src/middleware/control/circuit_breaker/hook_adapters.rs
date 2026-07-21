@@ -4,7 +4,7 @@
 
 use super::classifier::FailureClassification;
 use super::state::CircuitState;
-use super::CircuitBreakerMiddleware;
+use super::{CircuitBreakerMiddleware, EffectAdmissionEpoch, EffectAdmissionFence};
 use crate::middleware::context_keys::{
     CircuitBreakerIsProbe, CircuitBreakerProbeGeneration, CircuitBreakerProbeSlot,
     CircuitBreakerProbeSlotGuard,
@@ -262,9 +262,10 @@ impl Middleware for CircuitBreakerMiddleware {
 
         match self.current_state() {
             CircuitState::Closed => {
-                // Linearise Closed admission with transitions into Open and
-                // capture the epoch that owns any later effect recovery.
-                if self.effect_recovery_open_epoch_at_admission(ctx) {
+                // Linearise generic Closed admission with transitions into
+                // Open. Effect recovery uses its stronger explicit epoch
+                // fence below instead of mutable middleware context.
+                if self.effect_closed_admission_is_current() {
                     MiddlewareAction::Continue
                 } else {
                     self.pre_handle(_event, ctx)
@@ -398,35 +399,204 @@ impl Middleware for CircuitBreakerMiddleware {
     }
 }
 
+enum EffectAdmissionDecision {
+    Admit {
+        transition_event: Option<ChainEvent>,
+        probe: Option<(u64, CircuitBreakerProbeSlotGuard)>,
+    },
+    Reject {
+        transition_event: Option<ChainEvent>,
+        reason: CircuitBreakerRejectionReason,
+        cooldown_remaining: Option<Duration>,
+    },
+}
+
 impl CircuitBreakerMiddleware {
     /// Authoritative effect admission used only by `EffectResilience`.
+    ///
+    /// The probe gate is always acquired before the recovery-state gate. That
+    /// is the same order used by probe settlement, and the pair is held only
+    /// for the in-memory epoch/state/probe decision. No limiter wait or
+    /// physical I/O occurs in this critical section.
     pub(in crate::middleware::control) fn effect_admit(
         &self,
-        event: &ChainEvent,
         ctx: &mut MiddlewareContext,
+        fence: EffectAdmissionFence,
     ) -> crate::middleware::PolicyAdmission {
-        match self.pre_handle(event, ctx) {
-            MiddlewareAction::Continue => crate::middleware::PolicyAdmission::Admit,
-            MiddlewareAction::Abort { cause } | MiddlewareAction::Skip { cause, .. } => {
-                crate::middleware::PolicyAdmission::Reject(Box::new(cause.unwrap_or_else(|| {
-                    self.rejection_abort_cause(CircuitBreakerRejectionReason::CircuitOpen)
-                })))
+        let decision = {
+            let _probe_gate = self
+                .probe_gate
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let recovery_state_gate = self
+                .effect_recovery_state_gate
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let current_epoch =
+                EffectAdmissionEpoch(self.effect_recovery_open_epoch.load(Ordering::SeqCst));
+
+            if !fence.permits(current_epoch) {
+                EffectAdmissionDecision::Reject {
+                    transition_event: None,
+                    reason: CircuitBreakerRejectionReason::CircuitOpen,
+                    cooldown_remaining: self.effect_open_cooldown_remaining(),
+                }
+            } else {
+                let mut transition_event = None;
+                let state = match self.current_state() {
+                    CircuitState::Open if self.should_attempt_reset() => {
+                        let (transitioned, event) = self.transition_to_inner_locked(
+                            &recovery_state_gate,
+                            CircuitState::HalfOpen,
+                        );
+                        if transitioned {
+                            self.probe_generation.fetch_add(1, Ordering::SeqCst);
+                            self.success_count.store(0, Ordering::Relaxed);
+                            transition_event = event;
+                        }
+                        self.current_state()
+                    }
+                    state => state,
+                };
+
+                match state {
+                    CircuitState::Closed => EffectAdmissionDecision::Admit {
+                        transition_event,
+                        probe: None,
+                    },
+                    CircuitState::Open => EffectAdmissionDecision::Reject {
+                        transition_event,
+                        reason: CircuitBreakerRejectionReason::CircuitOpen,
+                        cooldown_remaining: self.effect_open_cooldown_remaining(),
+                    },
+                    CircuitState::HalfOpen => {
+                        let probe_generation = self.probe_generation.load(Ordering::SeqCst);
+                        let permitted = self.half_open_policy.permitted_probes.get();
+                        let current = self.probe_in_flight.load(Ordering::SeqCst);
+                        if current >= permitted {
+                            EffectAdmissionDecision::Reject {
+                                transition_event,
+                                reason: CircuitBreakerRejectionReason::ProbeInProgress,
+                                cooldown_remaining: None,
+                            }
+                        } else {
+                            self.probe_in_flight.fetch_add(1, Ordering::SeqCst);
+                            EffectAdmissionDecision::Admit {
+                                transition_event,
+                                probe: Some((
+                                    probe_generation,
+                                    CircuitBreakerProbeSlotGuard::new(self.probe_in_flight.clone()),
+                                )),
+                            }
+                        }
+                    }
+                }
+            }
+        };
+
+        match decision {
+            EffectAdmissionDecision::Admit {
+                transition_event,
+                probe,
+            } => {
+                if let Some(event) = transition_event {
+                    ctx.write_control_event(event);
+                }
+                if let Some((generation, guard)) = probe {
+                    ctx.insert::<CircuitBreakerIsProbe>(true);
+                    ctx.insert::<CircuitBreakerProbeGeneration>(generation);
+                    ctx.insert::<CircuitBreakerProbeSlot>(guard);
+                }
+                crate::middleware::PolicyAdmission::Admit
+            }
+            EffectAdmissionDecision::Reject {
+                transition_event,
+                reason,
+                cooldown_remaining,
+            } => {
+                if let Some(event) = transition_event {
+                    ctx.write_control_event(event);
+                }
+                crate::middleware::PolicyAdmission::Reject(self.effect_rejection_cause(
+                    ctx,
+                    reason,
+                    cooldown_remaining,
+                ))
             }
         }
     }
 
-    /// Read-only fast path used before a limiter wait. Only a circuit that is
-    /// definitely still Open rejects here. Cooldown transitions and half-open
-    /// probe ownership remain deferred to authoritative final admission.
-    pub(in crate::middleware::control) async fn effect_precheck(
+    /// Read-only snapshot used before a limiter wait. It captures the current
+    /// epoch but never transitions state or reserves a probe. An existing
+    /// recovery session must present its original write-once epoch.
+    pub(in crate::middleware::control) fn effect_precheck(
         &self,
-        event: &ChainEvent,
         ctx: &mut MiddlewareContext,
-    ) -> crate::middleware::PolicyAdmission {
-        if matches!(self.current_state(), CircuitState::Open) && !self.should_attempt_reset() {
-            self.effect_admit(event, ctx)
+        initial_epoch: Option<EffectAdmissionEpoch>,
+    ) -> Result<EffectAdmissionEpoch, Box<crate::middleware::MiddlewareAbortCause>> {
+        let observation = {
+            let _state_gate = self
+                .effect_recovery_state_gate
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let epoch =
+                EffectAdmissionEpoch(self.effect_recovery_open_epoch.load(Ordering::SeqCst));
+            if initial_epoch.is_some_and(|initial| initial != epoch) {
+                Err((CircuitBreakerRejectionReason::CircuitOpen, None))
+            } else if matches!(self.current_state(), CircuitState::Open)
+                && !self.should_attempt_reset()
+            {
+                Err((
+                    CircuitBreakerRejectionReason::CircuitOpen,
+                    self.effect_open_cooldown_remaining(),
+                ))
+            } else {
+                Ok(epoch)
+            }
+        };
+
+        observation.map_err(|(reason, cooldown)| self.effect_rejection_cause(ctx, reason, cooldown))
+    }
+
+    fn effect_open_cooldown_remaining(&self) -> Option<Duration> {
+        if !matches!(self.current_state(), CircuitState::Open) {
+            return None;
+        }
+        Some(if let Ok(opened_at_guard) = self.opened_at.lock() {
+            if let Some(opened_at) = *opened_at_guard {
+                self.cooldown.saturating_sub(opened_at.elapsed())
+            } else {
+                self.cooldown
+            }
         } else {
-            crate::middleware::PolicyAdmission::Admit
+            self.cooldown
+        })
+    }
+
+    fn effect_rejection_cause(
+        &self,
+        ctx: &mut MiddlewareContext,
+        reason: CircuitBreakerRejectionReason,
+        cooldown_remaining: Option<Duration>,
+    ) -> Box<crate::middleware::MiddlewareAbortCause> {
+        ctx.emit_ephemeral_event(ChainEventFactory::observability_event(
+            self.writer_id,
+            ObservabilityPayload::Middleware(MiddlewareLifecycle::CircuitBreaker(
+                CircuitBreakerEvent::Rejected {
+                    reason,
+                    cooldown_remaining_ms: cooldown_remaining
+                        .map(|duration| duration.as_millis() as u64),
+                    circuit_open_duration_ms: None,
+                },
+            )),
+        ));
+        match self.handle_open_like(ctx, reason) {
+            MiddlewareAction::Abort { cause } | MiddlewareAction::Skip { cause, .. } => {
+                Box::new(cause.unwrap_or_else(|| self.rejection_abort_cause(reason)))
+            }
+            MiddlewareAction::Continue => {
+                unreachable!("circuit breaker rejection must abort or skip")
+            }
         }
     }
 

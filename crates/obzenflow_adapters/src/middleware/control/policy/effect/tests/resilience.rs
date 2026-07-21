@@ -8,7 +8,7 @@
 use super::support::*;
 use crate::middleware::{EffectResilience, RateLimiter};
 use obzenflow_core::event::payloads::observability_payload::{
-    CircuitBreakerEvent, MiddlewareLifecycle, ObservabilityPayload,
+    CircuitBreakerEvent, CircuitBreakerRetryStopReason, MiddlewareLifecycle, ObservabilityPayload,
 };
 use obzenflow_core::event::ChainEventContent;
 
@@ -61,6 +61,63 @@ fn retry_delays(report: &obzenflow_runtime::effects::EffectBoundaryReport) -> Ve
         .collect()
 }
 
+fn identity_at(input_seq: u64) -> EffectIdentity {
+    let mut identity = identity_for("effect.retry");
+    identity.cursor = EffectCursor::new("test_flow", "test_stage", input_seq, 0);
+    identity
+}
+
+fn settled_attempts(report: &obzenflow_runtime::effects::EffectBoundaryReport) -> Vec<u32> {
+    report
+        .control_events
+        .iter()
+        .filter_map(|event| match &event.content {
+            ChainEventContent::Observability(ObservabilityPayload::Middleware(
+                MiddlewareLifecycle::CircuitBreaker(CircuitBreakerEvent::AttemptSettled {
+                    attempt,
+                    ..
+                }),
+            )) => Some(*attempt),
+            _ => None,
+        })
+        .collect()
+}
+
+fn scheduled_attempts(report: &obzenflow_runtime::effects::EffectBoundaryReport) -> Vec<u32> {
+    report
+        .control_events
+        .iter()
+        .filter_map(|event| match &event.content {
+            ChainEventContent::Observability(ObservabilityPayload::Middleware(
+                MiddlewareLifecycle::CircuitBreaker(CircuitBreakerEvent::RetryScheduled {
+                    next_attempt,
+                    ..
+                }),
+            )) => Some(*next_attempt),
+            _ => None,
+        })
+        .collect()
+}
+
+fn retry_exhaustions(
+    report: &obzenflow_runtime::effects::EffectBoundaryReport,
+) -> Vec<(u32, CircuitBreakerRetryStopReason)> {
+    report
+        .control_events
+        .iter()
+        .filter_map(|event| match &event.content {
+            ChainEventContent::Observability(ObservabilityPayload::Middleware(
+                MiddlewareLifecycle::CircuitBreaker(CircuitBreakerEvent::RetryExhausted {
+                    total_attempts,
+                    reason,
+                    ..
+                }),
+            )) => Some((*total_attempts, *reason)),
+            _ => None,
+        })
+        .collect()
+}
+
 #[tokio::test(start_paused = true)]
 async fn fixed_backoff_delays_each_physical_continuation() {
     let factory = EffectResilience::with_breaker(
@@ -104,6 +161,128 @@ async fn fixed_backoff_delays_each_physical_continuation() {
     assert_eq!(calls.load(Ordering::SeqCst), 3);
     assert_eq!(retry_delays(&report), [7, 7]);
     assert_eq!(started.elapsed(), Duration::from_millis(14));
+}
+
+#[tokio::test(start_paused = true)]
+async fn initial_limiter_wait_does_not_consume_attempt_start_window() {
+    let factory = EffectResilience::with_breaker(
+        CircuitBreaker::builder()
+            .consecutive_failures(3)
+            .build()
+            .expect("attempt-window breaker"),
+    )
+    .retry(
+        Retry::fixed(Duration::from_millis(1))
+            .max_attempts(2)
+            .attempt_start_window(Duration::from_millis(10)),
+    )
+    .rate_limit_each_attempt(
+        RateLimiter::per_second(1.0)
+            .unwrap()
+            .with_burst(1.0)
+            .unwrap(),
+    )
+    .build()
+    .expect("attempt-window resilience aggregate");
+    let (attachment, _, _) = materialized_resilience(factory);
+    let boundary = boundary_with_chain(vec![attachment]);
+
+    let filler = boundary
+        .around_repeatable_effect(
+            &identity_at(21),
+            &data_event(),
+            RepeatableEffectOperation::new(|| async { Ok(Vec::new()) }),
+        )
+        .await;
+    assert!(matches!(
+        filler.outcome,
+        EffectBoundaryOutcome::Executed(Ok(_))
+    ));
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let started = tokio::time::Instant::now();
+    let report = boundary
+        .around_repeatable_effect(
+            &identity_at(22),
+            &data_event(),
+            scripted_operation(calls.clone(), |_| Ok(Vec::new())),
+        )
+        .await;
+
+    assert!(matches!(
+        report.outcome,
+        EffectBoundaryOutcome::Executed(Ok(_))
+    ));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(started.elapsed(), Duration::from_secs(1));
+    assert_eq!(settled_attempts(&report), [1]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn retry_limiter_wait_crossing_deadline_refunds_and_preserves_error() {
+    let factory = EffectResilience::with_breaker(
+        CircuitBreaker::builder()
+            .consecutive_failures(4)
+            .build()
+            .expect("attempt-window breaker"),
+    )
+    .retry(
+        Retry::fixed(Duration::from_millis(1))
+            .max_attempts(2)
+            .attempt_start_window(Duration::from_millis(10)),
+    )
+    .rate_limit_each_attempt(
+        RateLimiter::per_second(1.0)
+            .unwrap()
+            .with_burst(1.0)
+            .unwrap(),
+    )
+    .build()
+    .expect("attempt-window resilience aggregate");
+    let (attachment, control, stage_id) = materialized_resilience(factory);
+    let boundary = boundary_with_chain(vec![attachment]);
+    let calls = Arc::new(AtomicUsize::new(0));
+
+    let report = boundary
+        .around_repeatable_effect(
+            &identity_at(23),
+            &data_event(),
+            scripted_operation(calls.clone(), |_| {
+                Err(EffectError::Timeout(
+                    "first attempt remains terminal".to_string(),
+                ))
+            }),
+        )
+        .await;
+
+    assert!(matches!(
+        report.outcome,
+        EffectBoundaryOutcome::Executed(Err(EffectError::Timeout(ref message)))
+            if message == "first attempt remains terminal"
+    ));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(settled_attempts(&report), [1]);
+    assert_eq!(scheduled_attempts(&report), [2]);
+    assert_eq!(
+        retry_exhaustions(&report),
+        [(1, CircuitBreakerRetryStopReason::AttemptStartWindow)]
+    );
+    assert_eq!(effect_limiter_events(control.as_ref(), stage_id), 1);
+
+    let fresh_started = tokio::time::Instant::now();
+    let fresh = boundary
+        .around_repeatable_effect(
+            &identity_at(24),
+            &data_event(),
+            RepeatableEffectOperation::new(|| async { Ok(Vec::new()) }),
+        )
+        .await;
+    assert!(matches!(
+        fresh.outcome,
+        EffectBoundaryOutcome::Executed(Ok(_))
+    ));
+    assert_eq!(fresh_started.elapsed(), Duration::ZERO);
+    assert_eq!(effect_limiter_events(control.as_ref(), stage_id), 2);
 }
 
 #[tokio::test]
@@ -212,6 +391,244 @@ async fn another_invocation_opening_the_circuit_stops_a_pending_continuation() {
         1,
         "continuation denial must preserve the last physical error without another call"
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn stale_initial_reservation_cannot_cross_open_recover_closed_cycle() {
+    let factory = EffectResilience::with_breaker(
+        CircuitBreaker::builder()
+            .consecutive_failures(1)
+            .open_for(Duration::from_millis(1))
+            .probes(1)
+            .build()
+            .expect("ABA test breaker"),
+    )
+    .rate_limit_each_attempt(
+        RateLimiter::per_second(1.0)
+            .unwrap()
+            .with_burst(1.0)
+            .unwrap(),
+    )
+    .build()
+    .expect("ABA resilience aggregate");
+    let (attachment, control, stage_id) = materialized_resilience(factory);
+    let target_identity = identity_at(2);
+    let gate = FinalAdmissionTestGate::new(target_identity.cursor.clone(), 0);
+    let resilience = attachment
+        .effect_resilience_policy()
+        .expect("aggregate attachment")
+        .clone();
+    resilience.set_final_admission_test_gate(gate.clone());
+    let boundary = Arc::new(boundary_with_chain(vec![attachment]));
+
+    let filler = boundary
+        .around_repeatable_effect(
+            &identity_at(1),
+            &data_event(),
+            RepeatableEffectOperation::new(|| async { Ok(Vec::new()) }),
+        )
+        .await;
+    assert!(matches!(
+        filler.outcome,
+        EffectBoundaryOutcome::Executed(Ok(_))
+    ));
+
+    let target_calls = Arc::new(AtomicUsize::new(0));
+    let target = {
+        let boundary = boundary.clone();
+        let target_calls = target_calls.clone();
+        tokio::spawn(async move {
+            boundary
+                .around_repeatable_effect(
+                    &target_identity,
+                    &data_event(),
+                    scripted_operation(target_calls, |_| Ok(Vec::new())),
+                )
+                .await
+        })
+    };
+    tokio::time::timeout(Duration::from_secs(2), gate.wait_until_reached())
+        .await
+        .expect("target should pause with an uncommitted limiter reservation");
+
+    let opener = boundary
+        .around_repeatable_effect(
+            &identity_at(3),
+            &data_event(),
+            RepeatableEffectOperation::new(|| async {
+                Err(EffectError::Timeout("opens intervening epoch".to_string()))
+            }),
+        )
+        .await;
+    assert!(matches!(
+        opener.outcome,
+        EffectBoundaryOutcome::Executed(Err(EffectError::Timeout(_)))
+    ));
+
+    resilience.expire_breaker_cooldown_for_test();
+    let probe = boundary
+        .around_repeatable_effect(
+            &identity_at(4),
+            &data_event(),
+            RepeatableEffectOperation::new(|| async { Ok(Vec::new()) }),
+        )
+        .await;
+    assert!(matches!(
+        probe.outcome,
+        EffectBoundaryOutcome::Executed(Ok(_))
+    ));
+
+    assert_eq!(effect_limiter_events(control.as_ref(), stage_id), 3);
+    gate.release();
+    let target = target.await.expect("target task should complete");
+    assert!(matches!(
+        target.outcome,
+        EffectBoundaryOutcome::Aborted(ref reason)
+            if reason.cause.code.as_str() == "circuit_open"
+    ));
+    assert_eq!(target_calls.load(Ordering::SeqCst), 0);
+    assert!(settled_attempts(&target).is_empty());
+    assert_eq!(effect_limiter_events(control.as_ref(), stage_id), 3);
+
+    let fresh_started = tokio::time::Instant::now();
+    let fresh = boundary
+        .around_repeatable_effect(
+            &identity_at(5),
+            &data_event(),
+            RepeatableEffectOperation::new(|| async { Ok(Vec::new()) }),
+        )
+        .await;
+    assert!(matches!(
+        fresh.outcome,
+        EffectBoundaryOutcome::Executed(Ok(_))
+    ));
+    assert_eq!(fresh_started.elapsed(), Duration::ZERO);
+    assert_eq!(effect_limiter_events(control.as_ref(), stage_id), 4);
+}
+
+#[tokio::test(start_paused = true)]
+async fn stale_retry_reservation_preserves_last_physical_error_after_recovery_cycle() {
+    let factory = EffectResilience::with_breaker(
+        CircuitBreaker::builder()
+            .consecutive_failures(2)
+            .open_for(Duration::from_millis(1))
+            .probes(1)
+            .build()
+            .expect("retry ABA test breaker"),
+    )
+    .retry(
+        Retry::fixed(Duration::from_millis(1))
+            .max_attempts(2)
+            .attempt_start_window(Duration::from_secs(10)),
+    )
+    .rate_limit_each_attempt(
+        RateLimiter::per_second(1.0)
+            .unwrap()
+            .with_burst(1.0)
+            .unwrap(),
+    )
+    .build()
+    .expect("retry ABA resilience aggregate");
+    let (attachment, control, stage_id) = materialized_resilience(factory);
+    let target_identity = identity_at(12);
+    let gate = FinalAdmissionTestGate::new(target_identity.cursor.clone(), 1);
+    let resilience = attachment
+        .effect_resilience_policy()
+        .expect("aggregate attachment")
+        .clone();
+    resilience.set_final_admission_test_gate(gate.clone());
+    let boundary = Arc::new(boundary_with_chain(vec![attachment]));
+
+    let filler = boundary
+        .around_repeatable_effect(
+            &identity_at(11),
+            &data_event(),
+            RepeatableEffectOperation::new(|| async { Ok(Vec::new()) }),
+        )
+        .await;
+    assert!(matches!(
+        filler.outcome,
+        EffectBoundaryOutcome::Executed(Ok(_))
+    ));
+
+    let target_calls = Arc::new(AtomicUsize::new(0));
+    let target = {
+        let boundary = boundary.clone();
+        let target_calls = target_calls.clone();
+        tokio::spawn(async move {
+            boundary
+                .around_repeatable_effect(
+                    &target_identity,
+                    &data_event(),
+                    scripted_operation(target_calls, |_| {
+                        Err(EffectError::Timeout("target first error".to_string()))
+                    }),
+                )
+                .await
+        })
+    };
+    tokio::time::timeout(Duration::from_secs(3), gate.wait_until_reached())
+        .await
+        .expect("target retry should pause with an uncommitted reservation");
+
+    let opener = boundary
+        .around_repeatable_effect(
+            &identity_at(13),
+            &data_event(),
+            RepeatableEffectOperation::new(|| async {
+                Err(EffectError::Timeout("opens intervening epoch".to_string()))
+            }),
+        )
+        .await;
+    assert!(matches!(
+        opener.outcome,
+        EffectBoundaryOutcome::Executed(Err(EffectError::Timeout(_)))
+    ));
+
+    resilience.expire_breaker_cooldown_for_test();
+    let probe = boundary
+        .around_repeatable_effect(
+            &identity_at(14),
+            &data_event(),
+            RepeatableEffectOperation::new(|| async { Ok(Vec::new()) }),
+        )
+        .await;
+    assert!(matches!(
+        probe.outcome,
+        EffectBoundaryOutcome::Executed(Ok(_))
+    ));
+
+    assert_eq!(effect_limiter_events(control.as_ref(), stage_id), 4);
+    gate.release();
+    let target = target.await.expect("target task should complete");
+    assert!(matches!(
+        target.outcome,
+        EffectBoundaryOutcome::Executed(Err(EffectError::Timeout(ref message)))
+            if message == "target first error"
+    ));
+    assert_eq!(target_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(settled_attempts(&target), [1]);
+    assert_eq!(scheduled_attempts(&target), [2]);
+    assert_eq!(
+        retry_exhaustions(&target),
+        [(1, CircuitBreakerRetryStopReason::CircuitNoLongerClosed)]
+    );
+    assert_eq!(effect_limiter_events(control.as_ref(), stage_id), 4);
+
+    let fresh_started = tokio::time::Instant::now();
+    let fresh = boundary
+        .around_repeatable_effect(
+            &identity_at(15),
+            &data_event(),
+            RepeatableEffectOperation::new(|| async { Ok(Vec::new()) }),
+        )
+        .await;
+    assert!(matches!(
+        fresh.outcome,
+        EffectBoundaryOutcome::Executed(Ok(_))
+    ));
+    assert_eq!(fresh_started.elapsed(), Duration::ZERO);
+    assert_eq!(effect_limiter_events(control.as_ref(), stage_id), 5);
 }
 
 #[tokio::test]

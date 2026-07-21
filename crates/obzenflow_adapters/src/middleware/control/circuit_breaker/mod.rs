@@ -9,10 +9,7 @@
 //! monitoring and SLI middleware.
 
 use crate::middleware::{
-    context_keys::{
-        CircuitBreakerIsProbe, CircuitBreakerProbeSlot, CircuitBreakerRecoveryOpenEpoch,
-        CircuitBreakerRetryAfterMs,
-    },
+    context_keys::{CircuitBreakerIsProbe, CircuitBreakerProbeSlot, CircuitBreakerRetryAfterMs},
     MiddlewareAbortCause, MiddlewareAction, MiddlewareContext,
 };
 use obzenflow_core::event::chain_event::ChainEvent;
@@ -30,7 +27,7 @@ use obzenflow_runtime::effects::EffectError;
 use serde_json::json;
 use std::num::NonZeroU32;
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 mod classifier;
@@ -58,6 +55,37 @@ pub(in crate::middleware::control) use window::FailureWindow;
 use window::{CallSample, FailureWindowState};
 
 const CIRCUIT_BREAKER_ABORT_SOURCE: &str = "circuit_breaker";
+
+/// Write-once circuit epoch captured by an effect recovery session.
+///
+/// This token deliberately lives outside `MiddlewareContext`: the recovery
+/// controller owns it and no later admission pass can overwrite it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::middleware::control) struct EffectAdmissionEpoch(u64);
+
+/// The two observations that must still name the current breaker epoch at the
+/// final, linearised admission point.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::middleware::control) struct EffectAdmissionFence {
+    initial: EffectAdmissionEpoch,
+    reservation: EffectAdmissionEpoch,
+}
+
+impl EffectAdmissionFence {
+    pub(in crate::middleware::control) fn new(
+        initial: EffectAdmissionEpoch,
+        reservation: EffectAdmissionEpoch,
+    ) -> Self {
+        Self {
+            initial,
+            reservation,
+        }
+    }
+
+    fn permits(self, current: EffectAdmissionEpoch) -> bool {
+        self.initial == current && self.reservation == current
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 enum CircuitBreakerAbortCode {
@@ -267,44 +295,45 @@ impl CircuitBreakerMiddleware {
         CircuitState::from(self.state.load(Ordering::SeqCst))
     }
 
-    fn effect_recovery_open_epoch_at_admission(&self, ctx: &mut MiddlewareContext) -> bool {
-        let _state_gate = self
-            .effect_recovery_state_gate
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if !matches!(self.current_state(), CircuitState::Closed) {
-            return false;
-        }
-        ctx.insert::<CircuitBreakerRecoveryOpenEpoch>(
-            self.effect_recovery_open_epoch.load(Ordering::SeqCst),
-        );
-        true
-    }
-
-    fn effect_recovery_epoch_is_current(&self, admitted_epoch: u64) -> bool {
+    fn effect_closed_admission_is_current(&self) -> bool {
         let _state_gate = self
             .effect_recovery_state_gate
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         matches!(self.current_state(), CircuitState::Closed)
-            && self.effect_recovery_open_epoch.load(Ordering::SeqCst) == admitted_epoch
+    }
+
+    pub(in crate::middleware::control) fn effect_recovery_epoch_is_current(
+        &self,
+        admitted_epoch: EffectAdmissionEpoch,
+    ) -> bool {
+        let _state_gate = self
+            .effect_recovery_state_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        matches!(self.current_state(), CircuitState::Closed)
+            && EffectAdmissionEpoch(self.effect_recovery_open_epoch.load(Ordering::SeqCst))
+                == admitted_epoch
     }
 
     pub(in crate::middleware::control) fn is_effect_probe(&self, ctx: &MiddlewareContext) -> bool {
         ctx.get::<CircuitBreakerIsProbe>().copied().unwrap_or(false)
     }
 
-    pub(in crate::middleware::control) fn effect_retry_may_continue(
-        &self,
-        ctx: &MiddlewareContext,
-    ) -> bool {
-        ctx.get::<CircuitBreakerRecoveryOpenEpoch>()
-            .copied()
-            .is_some_and(|epoch| self.effect_recovery_epoch_is_current(epoch))
-    }
-
     pub(in crate::middleware::control) fn evidence_writer_id(&self) -> WriterId {
         self.writer_id
+    }
+
+    #[cfg(test)]
+    pub(in crate::middleware::control) fn expire_effect_cooldown_for_test(&self) {
+        let elapsed = self.cooldown.saturating_add(Duration::from_nanos(1));
+        let opened_at = Instant::now()
+            .checked_sub(elapsed)
+            .unwrap_or_else(Instant::now);
+        *self
+            .opened_at
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(opened_at);
     }
 
     fn record_closed_outcome(
@@ -568,10 +597,21 @@ impl CircuitBreakerMiddleware {
     /// the CAS race and the transition was applied, `false` if another thread
     /// already moved the state (or old == new).
     fn transition_to_inner(&self, new_state: CircuitState) -> (bool, Option<ChainEvent>) {
-        let _recovery_state_gate = self
+        let recovery_state_gate = self
             .effect_recovery_state_gate
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.transition_to_inner_locked(&recovery_state_gate, new_state)
+    }
+
+    /// Apply a breaker transition while the caller holds the recovery state
+    /// gate. Effect final admission uses this form so epoch validation and an
+    /// Open-to-HalfOpen transition are one linearised decision.
+    fn transition_to_inner_locked(
+        &self,
+        _recovery_state_gate: &MutexGuard<'_, ()>,
+        new_state: CircuitState,
+    ) -> (bool, Option<ChainEvent>) {
         let old_state = self.current_state();
         if old_state == new_state {
             return (false, None);
@@ -1073,16 +1113,23 @@ mod tests {
     fn busy_half_open_probe_returns_a_stable_framework_rejection() {
         let breaker = CircuitBreakerMiddleware::new(1);
         breaker.state.store(cb_state::HALF_OPEN, Ordering::SeqCst);
-        let input = event();
         let mut first = MiddlewareContext::with_scope(MiddlewareExecutionScope::LiveEffectBoundary);
         let mut second =
             MiddlewareContext::with_scope(MiddlewareExecutionScope::LiveEffectBoundary);
+        let first_epoch = breaker.effect_precheck(&mut first, None).unwrap();
+        let second_epoch = breaker.effect_precheck(&mut second, None).unwrap();
 
         assert!(matches!(
-            breaker.effect_admit(&input, &mut first),
+            breaker.effect_admit(
+                &mut first,
+                EffectAdmissionFence::new(first_epoch, first_epoch)
+            ),
             crate::middleware::PolicyAdmission::Admit
         ));
-        match breaker.effect_admit(&input, &mut second) {
+        match breaker.effect_admit(
+            &mut second,
+            EffectAdmissionFence::new(second_epoch, second_epoch),
+        ) {
             crate::middleware::PolicyAdmission::Reject(cause) => {
                 assert_eq!(cause.source.as_str(), CIRCUIT_BREAKER_ABORT_SOURCE);
                 assert_eq!(cause.code.as_str(), "probe_in_progress");
@@ -1095,8 +1142,12 @@ mod tests {
         drop(first);
         let mut replacement =
             MiddlewareContext::with_scope(MiddlewareExecutionScope::LiveEffectBoundary);
+        let replacement_epoch = breaker.effect_precheck(&mut replacement, None).unwrap();
         assert!(matches!(
-            breaker.effect_admit(&input, &mut replacement),
+            breaker.effect_admit(
+                &mut replacement,
+                EffectAdmissionFence::new(replacement_epoch, replacement_epoch)
+            ),
             crate::middleware::PolicyAdmission::Admit
         ));
     }

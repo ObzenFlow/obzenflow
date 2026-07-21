@@ -45,16 +45,6 @@ impl MiddlewareContextKey for CircuitBreakerProbeGeneration {
     const LABEL: &'static str = "circuit_breaker.probe_generation";
 }
 
-/// The open-transition epoch observed when a Closed circuit admits a logical
-/// effect invocation. Recovery may continue only while this epoch remains
-/// current, even if an intervening Open transition has already recovered back
-/// to Closed before a delayed continuation wakes.
-pub(crate) struct CircuitBreakerRecoveryOpenEpoch;
-impl MiddlewareContextKey for CircuitBreakerRecoveryOpenEpoch {
-    type Value = u64;
-    const LABEL: &'static str = "circuit_breaker.recovery_open_epoch";
-}
-
 /// RAII guard for circuit-breaker half-open probe slots.
 ///
 /// When a half-open probe is admitted, the circuit breaker increments its

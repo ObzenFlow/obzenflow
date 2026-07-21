@@ -60,9 +60,9 @@ mod factory;
 mod hook_adapters;
 mod telemetry;
 
+pub(in crate::middleware::control) use admission_core::RateLimitReservation;
 use admission_core::{
-    acquire_admission, acquire_reservation, AdmissionDecision, RateLimitDelayEvent,
-    RateLimitReservation, RateLimiterCore,
+    acquire_admission, acquire_reservation, AdmissionDecision, RateLimitDelayEvent, RateLimiterCore,
 };
 use config::ValidatedRateLimiterConfig;
 use telemetry::{delayed_event, rate_limiter_event};
